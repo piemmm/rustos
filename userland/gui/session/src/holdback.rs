@@ -8,7 +8,7 @@
 //! sample supersedes the one before it — and wrong for everything else: a
 //! `Resized` the app never sees leaves it laying out at a size the
 //! compositor no longer uses, a lost `Focus`/`Minimized`/`CloseRequested`
-//! /`DesktopChanged` is a state edge with no second telling, and a lost
+//! is a state edge with no second telling, and a lost
 //! `FilePicked`/`PickCancelled` strands the window's picker for good
 //! (the engine clears its pending pick only once the conclusion is
 //! accepted). This module is what the session owes instead.
@@ -35,10 +35,9 @@
 //! needs to know rather than to how long it was away:
 //!
 //! * A **state edge** (`Focus`, `Resized`, `RedrawRequested`,
-//!   `CloseRequested`, `Minimized`, `DesktopChanged`) is a value the app
-//!   converges on, not an occurrence it must witness. A later one
-//!   overwrites the held one where it stands, so one window owes at most
-//!   one of each.
+//!   `CloseRequested`, `Minimized`) is a value the app converges on, not an
+//!   occurrence it must witness. A later one overwrites the held one where
+//!   it stands, so one window owes at most one of each.
 //! * A **position sample** (`Pointer`/`Moved`) is level-triggered: the
 //!   newest supersedes an unbroken run of its predecessors.
 //! * A **wheel delta** (`Scrolled`) is additive: a run in one direction
@@ -382,7 +381,6 @@ const fn is_state_edge(event: &WindowEvent) -> bool {
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Minimized { .. }
-            | WindowEvent::DesktopChanged { .. }
     )
 }
 

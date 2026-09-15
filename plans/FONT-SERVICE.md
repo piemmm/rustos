@@ -357,8 +357,8 @@ Load-bearing facts a future reader needs:
   baseline and box height; and always emits a reply (status-word error frame on
   failure, fail closed — an unknown family key is `NotFound`, never a
   substitution). The `Run` binary serves from a wait set carrying both
-  `FONT_ENDPOINT` and the kernel's `WaitSourceKind::MemoryPressure` source, so
-  it reacts to a band change while idle without polling either. Its manifest
+  `FONT_ENDPOINT` and the kernel's `MemoryPressure` system notice, so it
+  reacts to a band change while idle without polling either. Its manifest
   requests `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS` (the manifest scan and
   the first-use face reads through the secured VFS — `fs_open` is
   capability-gated regardless of the file's mode; `/System` is read-only so no
@@ -465,10 +465,10 @@ per-glyph traffic. That is a silent hundredfold cost, not a degraded cache, so
 the wiring is load-bearing and is defined once rather than per program:
 
 - `tairix_procinfo::pressure` is the single definition. `watch(set, token)`
-  adds the `WaitSourceKind::MemoryPressure` member **and** primes the gauge
-  with the band in force (the wake reports only *changes*, so neither half
-  works alone); `refresh()` re-reads on the wake and reports whether it moved.
-  Its `refresh_into(transport, gauge)` core is host-tested against a fixture.
+  adds the `MemoryPressure` notice member **and** primes the gauge with the
+  band in force (the wake reports only *changes*, so neither half works
+  alone); `refresh()` re-reads on the wake and reports whether it moved. Its
+  `publish_depth(depth, gauge)` core is host-tested.
 - Every `Run` binary that links `tairix-font/rt` arms it — `files`,
   `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard`, and the desktop
   `session` (which hosts the compositor's and taskbar's caches too) — and on

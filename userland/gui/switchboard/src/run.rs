@@ -79,8 +79,8 @@ mod program {
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent};
     use tairix_abi::{
-        CapabilityId, CapabilityQuery, Errno, PowerAction, ProcId, SchedPriority, Signal,
-        SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
+        CapabilityId, CapabilityQuery, Errno, NoticeTopic, PowerAction, ProcId, SchedPriority,
+        Signal, SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
     };
     use tairix_font::BitmapFont;
     use tairix_geometry::{Rect, Region, Scale};
@@ -823,28 +823,6 @@ mod program {
                 service.panel_mut().repaint_whole();
                 return;
             }
-            // The desktop switched appearance, density, or screen. The theme
-            // registry is brought into step and the client is drawn whole:
-            // every pixel is composed from the theme at the desktop's scale,
-            // so no control round could have described the change. A refused
-            // change states its reason and leaves the last good desktop
-            // standing.
-            WindowEvent::DesktopChanged { .. } => {
-                match host.desktop.apply(event) {
-                    Ok(true) => {
-                        let appearance = host.desktop.appearance();
-                        host.themes.set_appearance(appearance);
-                        // A new appearance, density, or screen re-draws every
-                        // pixel; no control round could have described it.
-                        service.panel_mut().repaint_whole();
-                    }
-                    Ok(false) => {}
-                    Err(err) => {
-                        let _ = writeln!(Stderr, "switchboard: desktop change refused: {err}");
-                    }
-                }
-                return;
-            }
             // A secondary press on Close asks to leave what the window is
             // showing; the overview has nothing to leave but itself, and a
             // primary press already closes it. The monitor declares no
@@ -1035,6 +1013,22 @@ mod program {
             return Err(fail(
                 EXIT_NO_WAIT_SOURCE,
                 "cannot arm the memory-pressure wait-set member",
+            ));
+        }
+        // Armed with no window open, because the icon bar opens this
+        // monitor's window on demand: the appearance must be current when it
+        // does, not the one the process last saw a window in.
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::Desktop.as_u32()),
+            WaitToken::Desktop.as_u64(),
+        ) != 0
+        {
+            return Err(fail(
+                EXIT_NO_WAIT_SOURCE,
+                "cannot arm the desktop-change wait-set member",
             ));
         }
         Ok(set)
@@ -1295,6 +1289,23 @@ mod program {
         Ok((commands, events))
     }
 
+    /// Adopt the desktop state the session published, answering whether the
+    /// client must be drawn whole.
+    ///
+    /// Every pixel is composed from the theme at the desktop's scale, so no
+    /// control round could have described an appearance, density, or screen
+    /// change. A refused state states its reason and the last good desktop
+    /// stands.
+    fn adopt_desktop(host: &mut RtHost) -> bool {
+        match tairix_window::app::adopt_desktop(&mut host.desktop, &mut host.themes) {
+            Ok(changed) => changed,
+            Err(err) => {
+                let _ = writeln!(Stderr, "switchboard: desktop change refused: {err}");
+                false
+            }
+        }
+    }
+
     /// Start the icon reader and arm its wake as a member of `set`.
     ///
     /// The desk comes back either way: a kernel that refuses the pipe or the
@@ -1483,6 +1494,11 @@ mod program {
                     // The band that refused a decode has moved, so the keys
                     // held back for it are offered again.
                     reads.retry_declined();
+                }
+                Some(WaitToken::Desktop) => {
+                    if adopt_desktop(&mut host) {
+                        service.panel_mut().repaint_whole();
+                    }
                 }
                 // A band that did not move needs no trim, and a token the
                 // loop never arms is a spurious wake: either way, re-sample

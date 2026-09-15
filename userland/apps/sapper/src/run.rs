@@ -56,10 +56,6 @@ mod program {
         EventError, EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents,
     };
 
-    /// The command word this bundle is installed under, which selects the
-    /// bundle-shipped defaults layer of its settings store.
-    const OWN_WORD: &str = "sapper";
-
     /// The wait-set token the best-times worker's answer wake arrives under.
     const WRITER_TOKEN: u64 = app::FIRST_APP_TOKEN;
 
@@ -157,7 +153,7 @@ mod program {
         /// Open the store and write `times` into it.
         fn write(times: BestTimes) -> Result<(), SaveError> {
             let mut host = RtHost;
-            let mut settings = Settings::open(&mut host, OWN_WORD);
+            let mut settings = Settings::open_without_defaults(&mut host);
             times.save(&mut settings)
         }
 
@@ -203,6 +199,10 @@ mod program {
         /// deadline and the source owns the park: one writes it just before
         /// the other reads it, on the one thread both run on.
         deadline_ns: &'a Cell<Option<u64>>,
+        /// Set when the park woke for a desktop change, cleared when the loop
+        /// adopts it. Shared through a cell for the same reason the deadline
+        /// is: the park writes it, the loop reads it, on one thread.
+        desktop_moved: &'a Cell<bool>,
     }
 
     impl EventDrain for RtEventSource<'_> {
@@ -234,7 +234,14 @@ mod program {
                     tairix_font::trim_glyph_cache();
                     Ok(Parked::Served)
                 }
-                _ => Ok(Parked::Served),
+                // The theme, the density, and the reduced-motion policy the
+                // board is drawn from all moved, so the wait ends and the
+                // loop re-themes before the next frame.
+                Wake::DesktopChanged => {
+                    self.desktop_moved.set(true);
+                    Ok(Parked::Interrupted)
+                }
+                Wake::Event | Wake::PressureUnchanged | Wake::App(_) => Ok(Parked::Served),
             }
         }
     }
@@ -505,8 +512,7 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
-            | WindowEvent::OpenRequested { .. }
-            | WindowEvent::DesktopChanged { .. } => Acted::Idle,
+            | WindowEvent::OpenRequested { .. } => Acted::Idle,
         }
     }
 
@@ -562,6 +568,7 @@ mod program {
         event_endpoint: u64,
         mode: &mut DisplayMode,
         deadline: &Cell<Option<u64>>,
+        desktop_moved: &Cell<bool>,
         mut events: WindowEvents<RtEventSource<'_>>,
     ) -> i32 {
         // What the icon-bar declaration on screen currently says.
@@ -583,10 +590,15 @@ mod program {
             // Every wake advances the clock and the animation, whether it was
             // the deadline that fired or an event that arrived.
             let mut acted = Acted::from_changed(round.game.tick(now, &mut damage));
+            // Adopted before the game acts, so the scale, the theme, and the
+            // reduced-motion policy everything below derives from are already
+            // current — and adopted whether or not an event came with it.
+            if desktop_moved.replace(false) {
+                acted = acted.or(adopt_desktop(round, mode, &mut damage));
+            }
 
             match waited {
                 Ok(Some(event)) => {
-                    acted = acted.or(adopt_desktop(round, &event, mode, &mut damage));
                     acted = acted.or(apply_event(round, &event, now, &mut damage));
                     if matches!(event, WindowEvent::ContentReleased { .. }) {
                         surface.window.release_frames();
@@ -679,18 +691,14 @@ mod program {
         }
     }
 
-    /// Adopt a desktop change before the game acts on the event, so the scale,
-    /// the theme, and the reduced-motion policy everything below derives from
-    /// are already current.
-    fn adopt_desktop(
-        round: &mut Round<'_>,
-        event: &WindowEvent,
-        mode: &DisplayMode,
-        damage: &mut Region,
-    ) -> Acted {
-        match round.desktop.apply(event) {
+    /// Adopt the desktop state the session published, re-laying the board at
+    /// the new scale and re-reading the reduced-motion policy with it.
+    ///
+    /// A refused state is reported and the last good desktop stands, so the
+    /// board keeps drawing correctly rather than at a nonsense density.
+    fn adopt_desktop(round: &mut Round<'_>, mode: &DisplayMode, damage: &mut Region) -> Acted {
+        match app::adopt_desktop(round.desktop, round.themes) {
             Ok(true) => {
-                round.themes.set_appearance(round.desktop.appearance());
                 let reduced = round.themes.active().motion().reduced_motion();
                 round.game.set_reduced_motion(reduced, damage);
                 round.game.relayout(
@@ -711,7 +719,7 @@ mod program {
     /// Read the best times the store holds, reporting every entry it refused.
     fn load_best_times() -> BestTimes {
         let mut host = RtHost;
-        let settings = Settings::open(&mut host, OWN_WORD);
+        let settings = Settings::open_without_defaults(&mut host);
         let (times, refused) = BestTimes::load(&settings);
         for entry in refused {
             report(&alloc::format!(
@@ -796,11 +804,13 @@ mod program {
             };
 
         let deadline = Cell::new(None);
+        let desktop_moved = Cell::new(false);
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
             writer: &writer,
             deadline_ns: &deadline,
+            desktop_moved: &desktop_moved,
         });
         let mut rng = seeded_rng();
         let mut round = Round {
@@ -817,6 +827,7 @@ mod program {
             event_endpoint,
             &mut mode,
             &deadline,
+            &desktop_moved,
             events,
         )
     }

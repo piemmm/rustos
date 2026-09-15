@@ -14,7 +14,7 @@
 //! * [`CpuStateCapture`] — the per-port handle the panic path reaches
 //!   through. It [captures](CpuStateCapture::capture) the registers, states
 //!   the port's [frame layout](CpuStateCapture::frame_layout), reports the
-//!   calling CPU's [kernel-stack bounds](CpuStateCapture::stack_bounds),
+//!   calling CPU's [rooted boot stack](CpuStateCapture::boot_stack),
 //!   and declares its honest [profile](CpuStateCapture::profile).
 //! * [`RegisterSnapshot`] / [`NamedReg`] — the architecture-neutral,
 //!   allocation-free register-file snapshot. `pc`/`sp`/`fp` are explicit
@@ -32,6 +32,8 @@
 //! * [`walk`] — the arch-neutral frame-pointer unwinder every port shares.
 //! * [`conformance`] — the conformance vertical every port runs against
 //!   its handle.
+
+use crate::context::KernelStackRegion;
 
 /// Hard cap on the number of stack frames the unwinder emits.
 ///
@@ -204,24 +206,6 @@ impl StackBounds {
         Self { low, high }
     }
 
-    /// The bounds of a known stack region `[low, high)`, but only when the
-    /// captured `sp` actually lies inside it — otherwise `None`.
-    ///
-    /// The one shared definition every port uses to turn its boot-stack
-    /// symbols into walk bounds: a port hands the region it knows and the
-    /// captured stack pointer, and gets real bounds when the CPU is on
-    /// that stack, or `None` (fail closed — degrade to registers + pc)
-    /// when it is on a stack the port cannot vouch for. Keeping this here
-    /// means the containment rule is not re-derived in each arch crate.
-    #[must_use]
-    pub const fn enclosing(sp: u64, low: u64, high: u64) -> Option<StackBounds> {
-        if low < high && sp >= low && sp < high {
-            Some(StackBounds::new(low, high))
-        } else {
-            None
-        }
-    }
-
     /// `true` if the whole 8-byte word at `addr` lies within `[low, high)`.
     #[must_use]
     pub const fn contains_word(&self, addr: u64) -> bool {
@@ -229,6 +213,15 @@ impl StackBounds {
             Some(end) => addr >= self.low && end <= self.high,
             None => false,
         }
+    }
+}
+
+/// The walk window of a rooted stack region, read back off the very pointer
+/// its reads are derived from, so the window the walk validates against and
+/// the root it dereferences cannot drift apart.
+impl From<KernelStackRegion> for StackBounds {
+    fn from(region: KernelStackRegion) -> Self {
+        Self::new(region.base_addr(), region.top_addr())
     }
 }
 
@@ -376,7 +369,7 @@ pub trait StackReader {
 /// The post-mortem CPU-state handle an architecture port exposes.
 ///
 /// The panic path reaches it read-only: [`Self::capture`] snapshots the
-/// registers, [`Self::frame_layout`] and [`Self::stack_bounds`] feed the
+/// registers, [`Self::frame_layout`] and [`Self::boot_stack`] feed the
 /// neutral [`walk`], and [`Self::profile`] is the honest declaration.
 ///
 /// Implementations must be [`Send`] + [`Sync`]: the kernel reaches the
@@ -405,17 +398,21 @@ pub trait CpuStateCapture: Send + Sync {
     /// the captured `pc` and stops (fail closed).
     fn frame_layout(&self) -> Option<FrameLayout>;
 
-    /// The calling CPU's current kernel-stack bounds, or `None` when the
-    /// port cannot vouch for them.
+    /// The calling CPU's boot stack, rooted, or `None` when the port cannot
+    /// vouch for it.
     ///
-    /// The unwinder reads memory only within these bounds, so an honest
-    /// `None` (or an empty range) degrades the dump to registers plus the
-    /// captured `pc` — it never widens the walk to memory the port cannot
-    /// guarantee is mapped. A port derives them from the stack it knows the
-    /// calling CPU is on (its boot stack, a per-CPU stack); when the
-    /// captured `sp` is on a stack it cannot identify it returns `None`
-    /// rather than guessing (fail closed).
-    fn stack_bounds(&self) -> Option<StackBounds>;
+    /// The region carries the pointer its words are read *through*, not
+    /// merely an address range: the boot stack exists because the linker
+    /// reserved it, so the port is the one layer that can mint a root for
+    /// it, and every read the unwinder makes is derived from that root.
+    ///
+    /// A port answers `Some` only when the captured `sp` is on the stack it
+    /// knows ([`KernelStackRegion::enclosing`]). `None` means the CPU is on
+    /// a stack the port cannot identify — a kthread stack, which the kernel
+    /// resolves instead — and the walk degrades to registers plus the
+    /// captured `pc` rather than reading memory nothing vouches for (fail
+    /// closed).
+    fn boot_stack(&self) -> Option<KernelStackRegion>;
 
     /// The active translation root, when the port can name it.
     ///
@@ -1147,7 +1144,7 @@ mod tests {
         fn frame_layout(&self) -> Option<FrameLayout> {
             self.layout
         }
-        fn stack_bounds(&self) -> Option<StackBounds> {
+        fn boot_stack(&self) -> Option<KernelStackRegion> {
             None
         }
     }

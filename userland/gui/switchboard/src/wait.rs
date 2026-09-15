@@ -32,6 +32,13 @@ pub enum WaitToken {
     /// for, and its wake is what turns those answers into the frame that
     /// shows them. Its readiness is a level peek, so the loop drains it.
     Artwork,
+    /// The desktop the session composites changing its screen, density, or
+    /// appearance.
+    ///
+    /// Permanent, and armed even with no window open: the monitor's window is
+    /// opened on demand by the icon bar, and it must open in the appearance in
+    /// force rather than the one the process last saw a window in.
+    Desktop,
 }
 
 impl WaitToken {
@@ -45,6 +52,7 @@ impl WaitToken {
             Self::WindowEvent => 3,
             Self::MemoryPressure => 4,
             Self::Artwork => 5,
+            Self::Desktop => 6,
         }
     }
 
@@ -62,6 +70,7 @@ impl WaitToken {
             3 => Some(Self::WindowEvent),
             4 => Some(Self::MemoryPressure),
             5 => Some(Self::Artwork),
+            6 => Some(Self::Desktop),
             _ => None,
         }
     }
@@ -69,15 +78,17 @@ impl WaitToken {
 
 /// The wait-set members the run loop must have armed for the given window
 /// state: [`WaitToken::Signal`], [`WaitToken::Command`],
-/// [`WaitToken::MemoryPressure`] and [`WaitToken::Artwork`] are permanent;
-/// [`WaitToken::WindowEvent`] is present only while `window_open`.
+/// [`WaitToken::MemoryPressure`], [`WaitToken::Artwork`] and
+/// [`WaitToken::Desktop`] are permanent; [`WaitToken::WindowEvent`] is present
+/// only while `window_open`.
 #[must_use]
 pub fn required_members(window_open: bool) -> Vec<WaitToken> {
     let mut members = alloc::vec![
         WaitToken::Signal,
         WaitToken::Command,
         WaitToken::MemoryPressure,
-        WaitToken::Artwork
+        WaitToken::Artwork,
+        WaitToken::Desktop
     ];
     if window_open {
         members.push(WaitToken::WindowEvent);
@@ -97,6 +108,7 @@ mod tests {
             WaitToken::WindowEvent,
             WaitToken::MemoryPressure,
             WaitToken::Artwork,
+            WaitToken::Desktop,
         ] {
             assert_eq!(WaitToken::from_u64(token.as_u64()), Some(token));
         }
@@ -105,22 +117,24 @@ mod tests {
     #[test]
     fn an_unknown_token_value_decodes_to_none() {
         assert_eq!(WaitToken::from_u64(0), None);
-        assert_eq!(WaitToken::from_u64(6), None);
+        assert_eq!(WaitToken::from_u64(7), None);
         assert_eq!(WaitToken::from_u64(u64::MAX), None);
     }
 
     #[test]
     fn a_closed_window_still_watches_the_pressure_band_and_its_reader() {
         // The glyph and artwork caches outlive the window, so the band must
-        // too, and a decode still in flight when the window closes has a wake
-        // to land on.
+        // too; a decode still in flight when the window closes has a wake to
+        // land on; and the desktop's appearance must be current when the icon
+        // bar next opens the window.
         assert_eq!(
             required_members(false),
             alloc::vec![
                 WaitToken::Signal,
                 WaitToken::Command,
                 WaitToken::MemoryPressure,
-                WaitToken::Artwork
+                WaitToken::Artwork,
+                WaitToken::Desktop
             ]
         );
     }
@@ -134,6 +148,7 @@ mod tests {
                 WaitToken::Command,
                 WaitToken::MemoryPressure,
                 WaitToken::Artwork,
+                WaitToken::Desktop,
                 WaitToken::WindowEvent
             ]
         );

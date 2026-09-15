@@ -15,9 +15,10 @@
 //! The record travels in two places, from one definition: an application
 //! *asks* for it with `QueryDesktop` — before it opens a window, so its
 //! very first frame is the right size, at the right density, in the right
-//! colours — and the session *pushes* a `DesktopChanged` event to each of
-//! that application's windows whenever it changes any of it. A client that
-//! ignores the event simply keeps drawing at the state it asked for.
+//! colours — and the session *publishes* it on the
+//! [`NoticeTopic::Desktop`](crate::notice::NoticeTopic::Desktop) system
+//! notice whenever it changes any of it, so an application converges on the
+//! change even with no window open.
 //!
 //! Every decode fails closed: a zero extent, a zero scale, an unknown
 //! appearance code, or a dirty reserved byte is refused rather than

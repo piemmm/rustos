@@ -2260,42 +2260,42 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   balance. When it cannot admit a value it still returns a usable one
   (`Served::Uncached`), so a caller never has to handle "caching was
   unavailable" and no path rasterises twice.
-- **Notification, not polling.** `WaitSourceKind::MemoryPressure` (wire
-  value 9; its `id` is always `0`, since the machine has one band) is an
-  edge-triggered wait-set source. The gauge's band-change hook fires
-  only on a *stored* change and only flags `waitq::PRESSURE_WAITQ`
-  lock-free: it can be reached from inside the frame allocator or a
-  demand fault, so taking a lock there could re-enter one the
-  interrupted allocator already holds. The real unpark runs at the next
-  dispatcher-context `drain_pending_wakes`, exactly like a device IRQ's
-  wake, and `has_pending_deferred_wake` includes it so a fired tick on a
-  lone-task CPU still reschedules to deliver it.
+- **Notification, not polling.** The band is the `MemoryPressure` topic of
+  the system-notice mechanism (`plans/NOTICE.md`, `abi/notice.md`),
+  observed through a `WaitSourceKind::SystemNotice` wait-set member. The
+  gauge's band-change hook fires only on a *stored* change and only
+  flags `waitq::NOTICE_WAITQ` lock-free: it can be reached from inside
+  the frame allocator or a demand fault, so taking a lock there could
+  re-enter one the interrupted allocator already holds. The real unpark
+  runs at the next dispatcher-context `drain_pending_wakes`, exactly
+  like a device IRQ's wake, and `has_pending_deferred_wake` includes it
+  so a fired tick on a lone-task CPU still reschedules to deliver it.
 
-  Readiness compares the *published* band against the band the member
-  last observed, and reporting the member advances it. A band that
-  deepens and relaxes again before the waiter runs therefore correctly
-  reports nothing to do — the waiter's view is already right. A member
-  added while the machine is already tight baselines on the band in
-  force, so it stays quiet until something actually moves. No capability
-  is required and a non-zero `id` is refused.
-- **A band-only read to drain the edge.**
-  `SysinfoQueryId::MEMORY_PRESSURE_BAND` returns the published band and
-  nothing else, taking no reading — an unprivileged caller must not be
-  able to drive a free-memory sample on demand. It is ungated and
-  unaudited: it is a coarser disclosure than the already-ungated
-  `LOAD_AVERAGE` (which reports the live task census and the logged-in
-  user count), it carries no per-task, per-user, or byte-level figure,
-  and withholding it would not protect anything — it would simply make
-  cooperative reclaim impossible and leave the process to be reclaimed
-  *against*. The privileged, audited `MEMORY_PRESSURE` view (free and
-  total bytes, every watermark, the per-band transition history) is
-  unchanged.
+  The topic's *generation* is the published band depth itself, so
+  readiness compares the published band against the band the member last
+  observed and reporting the member advances it. A band that deepens and
+  relaxes again before the waiter runs therefore correctly reports
+  nothing to do — the waiter's view is already right. A member added
+  while the machine is already tight baselines on the band in force, so
+  it stays quiet until something actually moves. No capability is
+  required, and a userland publish to this kernel-owned topic is
+  refused.
+- **The read that drains the edge is a syscall, not a service call.**
+  `notice_read(MemoryPressure)` answers the published depth and nothing
+  else, taking no reading — an unprivileged caller must not be able to
+  drive a free-memory sample on demand, and the wake lands on a loop
+  that may owe the user a frame, where an IPC round trip would be the
+  blocking I/O an interactive surface may not perform. The ungated
+  `SysinfoQueryId::MEMORY_PRESSURE_BAND` query remains what a *monitor*
+  reads to display the band; the privileged, audited `MEMORY_PRESSURE`
+  view (free and total bytes, every watermark, the per-band transition
+  history) is unchanged.
 - **The process gauge.** `tairix_rt::pressure::gauge()` is the one
   `ReportedPressure` per process, so every cache in a program shrinks
   together. The runtime deliberately does not fetch the band itself:
-  reading it needs a System Information endpoint and transport the
-  runtime has no business choosing for a program. The owning program
-  parks on the wait source, reads the band, and calls
+  what to *do* about a band is not the runtime's business. The owning
+  program arms the notice and re-reads the band through
+  `tairix_procinfo::pressure::{watch, refresh}`, which publishes it with
   `tairix_rt::pressure::report`.
 - **The desktop's caches.** The window manager's cursor cache, the
   taskbar's notification-glyph cache, and the session's pinned-artwork

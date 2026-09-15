@@ -1000,7 +1000,7 @@ mod tests {
         let shell = crate::tests::shell_for(TaskbarConfig::bottom_bar(640, 480));
         let compositor = Compositor::new(
             mode(640, 480, DisplayFormat::Rgba8888),
-            Color::rgb(0, 0, 0),
+            shell.session().active_theme().clone(),
             crate::tests::test_chrome_cache(),
             crate::tests::test_frost_cache(),
             crate::tests::test_pressure(),

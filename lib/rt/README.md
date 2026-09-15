@@ -270,7 +270,7 @@ admitting nothing rather than assuming the machine is comfortable.
 The runtime deliberately does not fetch the band itself: reading it needs a
 System Information endpoint and a transport the runtime has no business
 choosing for a program. The owning program parks on the ungated
-`WaitSourceKind::MemoryPressure` wait-set member, reads the band with the
+`MemoryPressure` system-notice wait-set member, reads the band with the
 ungated `SysinfoQueryId::MEMORY_PRESSURE_BAND` query on wake, and calls
 `pressure::report` — event-driven throughout, never polled (`AGENTS.md`
 §2.23).

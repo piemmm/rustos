@@ -625,55 +625,25 @@ fn a_session_with_no_desktop_refuses_rather_than_inventing_one() {
     assert_eq!(client.desktop(), Err(Errno::NotFound));
 }
 
+/// The desktop belongs to the seat, not to one window, so an application
+/// converges on the published state rather than being told per window: it
+/// adopts a new record once and answers `false` for a re-publish of the same
+/// one, so a session that re-states the current desktop costs no repaint.
 #[test]
-fn a_desktop_change_reaches_every_live_window() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let first = create_id(&mut client, 7, EVENTS_A, 1, "Files").expect("first window opens");
-    let second = create_id(&mut client, 8, EVENTS_A, 1, "Viewer").expect("second window opens");
-
+fn adopting_a_published_desktop_is_news_only_once() {
+    let mut desktop = Desktop::new(sample_desktop()).expect("the sample scale is in range");
     let switched = DesktopInfo::new(1024, 768, 100, Appearance::Light)
         .expect("a 1024x768 screen at 100% is in range");
-    let mut sink = QueueSink::default();
-    {
-        let inner = &mut *loopback.borrow_mut();
-        // The desktop belongs to the seat, so the session reaches every
-        // window rather than guessing which apps care.
-        assert_eq!(inner.server.window_ids(), alloc::vec![first, second]);
-        for window_id in inner.server.window_ids() {
-            inner
-                .server
-                .deliver_event(
-                    &mut sink,
-                    &WindowEvent::DesktopChanged {
-                        window_id,
-                        desktop: switched,
-                    },
-                )
-                .expect("a live window takes the event");
-        }
-    }
-    assert_eq!(sink.delivered.len(), 2);
 
-    // The app side adopts the change once and reports it as news only the
-    // first time, so a repeated announcement costs no repaint.
-    let mut desktop = Desktop::new(sample_desktop()).expect("the sample scale is in range");
-    let mut delivered = sink
-        .delivered
-        .iter()
-        .map(|(_, frame)| WindowEvent::from_bytes(frame).expect("a delivered event decodes"));
-    let first_event = delivered.next().expect("the first window was told");
-    assert_eq!(desktop.apply(&first_event), Ok(true));
+    assert_eq!(desktop.adopt(switched), Ok(true));
     assert_eq!(desktop.appearance(), Appearance::Light);
-    let second_event = delivered.next().expect("the second window was told");
-    assert_eq!(desktop.apply(&second_event), Ok(false));
+    assert_eq!(desktop.adopt(switched), Ok(false));
+    assert_eq!(desktop.appearance(), Appearance::Light);
 
-    // An unrelated event is not a desktop change and leaves it alone.
-    assert_eq!(
-        desktop.apply(&WindowEvent::CloseRequested { window_id: first }),
-        Ok(false)
-    );
-    assert_eq!(desktop.appearance(), Appearance::Light);
+    // Back again is a change in its own right: an application must be told
+    // it may return to the appearance it started in.
+    assert_eq!(desktop.adopt(sample_desktop()), Ok(true));
+    assert_eq!(desktop.appearance(), Appearance::Dark);
 }
 
 #[test]
@@ -687,13 +657,7 @@ fn a_desktop_the_client_cannot_draw_at_is_refused_and_the_last_good_one_stands()
     let absurd = DesktopInfo::new(1024, 768, 5, Appearance::Light)
         .expect("the wire accepts any non-zero percentage");
     assert_eq!(Desktop::new(absurd), Err(Errno::OutOfRange));
-    assert_eq!(
-        desktop.apply(&WindowEvent::DesktopChanged {
-            window_id: 1,
-            desktop: absurd,
-        }),
-        Err(Errno::OutOfRange)
-    );
+    assert_eq!(desktop.adopt(absurd), Err(Errno::OutOfRange));
     assert_eq!(desktop.scale(), Scale::ONE);
     assert_eq!(desktop.appearance(), Appearance::Dark);
 }

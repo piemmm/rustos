@@ -271,7 +271,7 @@ the §9/§16.6 ABI discipline (frozen on the first release).
 
 **Reuse, do not copy, the panic walker (§2.2/§2.21).** `plans/FIX-PANICS.md`
 already landed `tairix_arch_api::backtrace` with a `CpuStateCapture`
-(`capture()` + a pure `FrameLayout` / `stack_bounds()`) and a single
+(`capture()` + a pure `FrameLayout` / `boot_stack()`) and a single
 audited, bounds-checked, monotonic, depth-capped fp-walk living once in
 `kernel/core`, reading memory only through a `StackReader`, plus a fuzz
 harness. This stage **extends** that one definition to a *user* variant;

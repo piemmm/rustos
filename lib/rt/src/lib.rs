@@ -61,6 +61,7 @@ use tairix_abi::elevate::{
     elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
 };
 use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 pub use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
@@ -449,6 +450,12 @@ const NUM_CPUFREQ_BIND: u64 = SyscallNumber::CPUFREQ_BIND.as_u16() as u64;
 
 /// `cpufreq_wait` syscall number (as above).
 const NUM_CPUFREQ_WAIT: u64 = SyscallNumber::CPUFREQ_WAIT.as_u16() as u64;
+
+/// `notice_read` syscall number (as above).
+const NUM_NOTICE_READ: u64 = SyscallNumber::NOTICE_READ.as_u16() as u64;
+
+/// `notice_publish` syscall number (as above).
+const NUM_NOTICE_PUBLISH: u64 = SyscallNumber::NOTICE_PUBLISH.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -2290,6 +2297,85 @@ pub fn cpufreq_wait(handle: i64, last_seq: u64, target: &mut CpuFreqTarget) -> i
         }
     }
     ret
+}
+
+/// Read a system notice topic's current payload
+/// (`SyscallNumber::NOTICE_READ`, `plans/NOTICE.md`).
+///
+/// `buf` receives exactly the topic's own payload length; a buffer shorter
+/// than that is refused rather than answered with a truncated value, so a
+/// caller sizing to [`tairix_abi::NOTICE_PAYLOAD_MAX`] is always big enough.
+/// Unprivileged and non-blocking: a subscriber woken by the topic's edge
+/// converges without an IPC round trip on the loop that owes the user a
+/// frame.
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: a non-negative value is the byte count written, and a
+/// negative value is `-errno` (`Errno::NotFound` for a topic nothing has
+/// published yet, `Errno::OutOfRange` for an unknown topic — recover the
+/// discriminant as `-ret`).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-`-errno` encoding.
+pub fn notice_read(topic: NoticeTopic, buf: &mut [u8]) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. The pointer names `buf.len()`
+    // bytes the caller owns for the duration of the call, and the kernel
+    // writes them through its checked `copy_to_user` boundary.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_NOTICE_READ,
+            [
+                u64::from(topic.as_u32()),
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Publish a system notice topic's current value
+/// (`SyscallNumber::NOTICE_PUBLISH`, `plans/NOTICE.md`).
+///
+/// Authority is the topic's own and needs no capability: the desktop topic
+/// admits only the holder of a seat's live display lease, and a kernel-owned
+/// topic admits nobody. Publishing the value already in force moves no
+/// generation and wakes no subscriber, so a publisher may re-state the
+/// current value freely.
+///
+/// Returns `0` on success, or `-errno` (`Errno::PermissionDenied` without the
+/// topic's authority, `Errno::OutOfRange` for an unknown topic — recover the
+/// discriminant as `-ret`).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 `0`-or-`-errno` encoding.
+pub fn notice_publish(notice: &Notice) -> i64 {
+    let mut bytes = [0u8; NOTICE_PAYLOAD_MAX];
+    let len = match notice.encode(&mut bytes) {
+        Ok(len) => len,
+        // Unreachable for a well-formed notice (the buffer is the ceiling
+        // every payload fits), and reported rather than published blank.
+        Err(err) => return -i64::from(err.as_i32()),
+    };
+    // SAFETY: as `notice_read` — the pointer names this frame's own array,
+    // which outlives the call, and the kernel copies it in through its
+    // checked `copy_from_user` boundary.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_NOTICE_PUBLISH,
+            [
+                u64::from(notice.topic().as_u32()),
+                bytes.as_ptr() as u64,
+                len as u64,
+                0,
+                0,
+                0,
+            ],
+        )
+    };
+    ret as i64
 }
 
 /// Wait for a child-process event, reading back the typed status record
@@ -6727,6 +6813,62 @@ mod tests {
             },
         );
         assert_eq!(granted.into_inner(), alloc::vec![1_000, 600]);
+    }
+
+    #[test]
+    fn notice_read_marshals_the_topic_buffer_and_len() {
+        let mut buf = [0u8; tairix_abi::NOTICE_PAYLOAD_MAX];
+        let (number, args) = capture(12, || {
+            assert_eq!(notice_read(NoticeTopic::Desktop, &mut buf), 12);
+        });
+        assert_eq!(number, NUM_NOTICE_READ);
+        assert_eq!(args[0], u64::from(NoticeTopic::Desktop.as_u32()));
+        assert_ne!(args[1], 0); // a non-null out pointer
+        assert_eq!(args[2], tairix_abi::NOTICE_PAYLOAD_MAX as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn notice_read_surfaces_a_refusal_unchanged() {
+        // A topic nothing has published is `NotFound`; the wrapper hands the
+        // signed encoding back rather than reporting a zero-length read.
+        let mut buf = [0u8; tairix_abi::NOTICE_PAYLOAD_MAX];
+        let neg = refusal(Errno::NotFound);
+        let (_, _) = capture(neg, || {
+            let ret = notice_read(NoticeTopic::Desktop, &mut buf);
+            assert_eq!(Errno::from_syscall(ret), Errno::NotFound);
+        });
+    }
+
+    #[test]
+    fn notice_publish_marshals_the_topic_and_its_exact_payload_length() {
+        let info = tairix_abi::desktop::DesktopInfo::new(
+            800,
+            600,
+            100,
+            tairix_abi::desktop::Appearance::Light,
+        )
+        .expect("a valid desktop");
+        let (number, args) = capture(0, || {
+            assert_eq!(notice_publish(&Notice::Desktop(info)), 0);
+        });
+        assert_eq!(number, NUM_NOTICE_PUBLISH);
+        assert_eq!(args[0], u64::from(NoticeTopic::Desktop.as_u32()));
+        assert_ne!(args[1], 0); // a non-null payload pointer
+        assert_eq!(args[2], NoticeTopic::Desktop.payload_len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    /// A payload-less topic still marshals: zero length, and a pointer the
+    /// kernel never reads through.
+    #[test]
+    fn notice_publish_marshals_a_payload_less_topic_as_zero_length() {
+        let (number, args) = capture(0, || {
+            let _ = notice_publish(&Notice::Mounts);
+        });
+        assert_eq!(number, NUM_NOTICE_PUBLISH);
+        assert_eq!(args[0], u64::from(NoticeTopic::Mounts.as_u32()));
+        assert_eq!(args[2], 0);
     }
 
     #[test]

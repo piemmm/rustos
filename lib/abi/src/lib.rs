@@ -47,6 +47,7 @@ pub mod manifest;
 pub mod memory;
 pub mod net;
 pub mod net_ipc;
+pub mod notice;
 pub mod notify_ipc;
 pub mod origin;
 pub mod pinboard_ipc;
@@ -161,6 +162,7 @@ pub use net::{
     SOCKET_BIND_REPLY_LEN, SOCKET_DATAGRAM_MAGIC, SOCKET_MAX_DATAGRAM, SOCKET_MAX_REPLY,
     SOCKET_OPEN_REPLY_LEN, SOCKET_REQUEST_MAGIC, SOCKET_VERSION_V1,
 };
+pub use notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 pub use origin::{
     AppIdentity, CapabilitySummary, Origin, ProcId, TrustDomain, CAPABILITY_SUMMARY_LEN,
     ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,

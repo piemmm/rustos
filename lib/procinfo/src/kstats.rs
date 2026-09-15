@@ -85,11 +85,13 @@ pub fn memory_pressure(transport: &dyn Transport) -> Result<MemoryPressureStats,
 /// Query the published memory-pressure band alone
 /// ([`SysinfoQueryId::MEMORY_PRESSURE_BAND`]).
 ///
-/// Ungated: this is how a process learns it must give its own caches
-/// back. It is the drain for the edge-triggered
-/// [`WaitSourceKind::MemoryPressure`](tairix_abi::WaitSourceKind::MemoryPressure)
-/// wait source — park until the band moves, then read it here — never a
-/// polling surface.
+/// Ungated: the band carries no per-process, per-user, or byte-level figure,
+/// so reading it is a coarser disclosure than the already-ungated load
+/// average. This is the *monitor's* read — what a program displaying the band
+/// asks for. A program giving its own caches back instead converges on the
+/// [`NoticeTopic::MemoryPressure`](tairix_abi::NoticeTopic::MemoryPressure)
+/// system notice and reads the depth from the kernel directly, which costs no
+/// service hop on the loop it may owe a frame to.
 ///
 /// # Errors
 ///

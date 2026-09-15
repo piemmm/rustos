@@ -104,7 +104,7 @@ mod program {
     use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
@@ -116,8 +116,8 @@ mod program {
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{MenuOutcome, PointerAction, WindowEvent, WindowRegion};
     use tairix_abi::{
-        load_failure_reason, CapabilityId, Errno, FdWire, SpawnAttach, UnlinkFlags, WaitFlags,
-        WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
+        load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, SpawnAttach, UnlinkFlags,
+        WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
         INSTALLED_APP_STORE, STDIN, STD_STREAM_COUNT, SYSTEM_APPLICATION_STORE,
         SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
@@ -156,7 +156,7 @@ mod program {
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
-    use tairix_theme::Theme;
+    use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
         pointer_input_events, pointer_point, present_damage, Desktop, EventDrain, EventError,
@@ -201,6 +201,10 @@ mod program {
     /// back, so the answer is adopted through the park the loop is already in
     /// rather than by polling for it.
     const READS_TOKEN: u64 = CHILD_TOKEN + 1;
+
+    /// The wait-set token the mount-table notice arrives under: a volume
+    /// attached or removed, which the places rail must re-read.
+    const MOUNTS_TOKEN: u64 = READS_TOKEN + 1;
 
     /// The maximum digit count the owner/group id editor accepts — a `u32` id
     /// is at most ten decimal digits, so a longer entry cannot be a valid id.
@@ -719,10 +723,10 @@ mod program {
         };
         // The user asked this window to re-read what is there, so the rail
         // re-reads the mount table in the same gesture — and a component's
-        // slot menu, which *is* that rail, is re-declared with it. The kernel
-        // publishes no mount-change notification, so this gesture — not a poll
-        // — is how a newly attached volume appears; nothing here spins waiting
-        // for one. Read once and shared out, so the process's rail and the
+        // slot menu, which *is* that rail, is re-declared with it. An attach
+        // or a removal reaches the rail on its own through the mount notice;
+        // this is the explicit ask, for a volume whose *contents* changed
+        // under it. Read once and shared out, so the process's rail and the
         // window's can never disagree about what is mounted.
         if sidebar::is_refresh_request(
             &win.browser,
@@ -1284,6 +1288,9 @@ mod program {
         artwork: ArtworkDesk,
         probes: Probes,
         bundles: tairix_util::defer::JobDesk<(), Vec<AppAssociation>>,
+        /// The user's home components and the mounted volumes the places rail
+        /// is built from, re-read when the kernel says the mount table moved.
+        places: tairix_util::defer::JobDesk<(), (Vec<String>, Vec<Volume>)>,
         /// Set once the app is tearing down, so a parked worker leaves instead
         /// of looking for work. Its own flag rather than one desk's, so the
         /// worker's exit test does not depend on which desk happens to carry
@@ -1301,6 +1308,8 @@ mod program {
         Probe(Vec<Vec<String>>),
         /// Walk the program stores for their declared file associations.
         Bundles,
+        /// Re-read the home components and the mounted volumes.
+        Places,
     }
 
     impl Reads {
@@ -1312,6 +1321,7 @@ mod program {
                     artwork: ArtworkDesk::new(),
                     probes: Probes::new(),
                     bundles: tairix_util::defer::JobDesk::new(),
+                    places: tairix_util::defer::JobDesk::new(),
                     stopping: false,
                 }),
                 signal: tairix_rt::sync::Condvar::new(),
@@ -1367,6 +1377,10 @@ mod program {
                         let found = scan_bundles();
                         self.work.lock().bundles.deliver(found)
                     }
+                    Read::Places => {
+                        let found = places_source();
+                        self.work.lock().places.deliver(found)
+                    }
                 };
                 if owed {
                     self.wake.nudge();
@@ -1385,7 +1399,10 @@ mod program {
             if let Some(batch) = work.probes.next_batch() {
                 return Some(Read::Probe(batch));
             }
-            work.bundles.next_job().map(|()| Read::Bundles)
+            if work.bundles.next_job().is_some() {
+                return Some(Read::Bundles);
+            }
+            work.places.next_job().map(|()| Read::Places)
         }
 
         /// Answer the browser's request for `components`, recording it if this
@@ -1506,6 +1523,32 @@ mod program {
             self.work.lock().bundles.collect()
         }
 
+        /// Ask for the places to be re-read, answering with them directly when
+        /// there is no worker to read them elsewhere.
+        ///
+        /// The mount table is read through the System Information service, so
+        /// a synchronous read here would be an IPC round trip on the loop that
+        /// owes the user a frame.
+        fn want_places(&self) -> Option<(Vec<String>, Vec<Volume>)> {
+            let submitted = {
+                let mut work = self.work.lock();
+                if work.stopping {
+                    drop(work);
+                    return Some(places_source());
+                }
+                work.places.submit(())
+            };
+            if submitted.wake {
+                self.signal.notify_one();
+            }
+            None
+        }
+
+        /// Take a landed places read, if one has.
+        fn take_places(&self) -> Option<(Vec<String>, Vec<Volume>)> {
+            self.work.lock().places.collect()
+        }
+
         /// Ask the worker to leave and wake it.
         fn stop(&self) {
             let mut work = self.work.lock();
@@ -1516,6 +1559,7 @@ mod program {
             work.artwork.stop();
             work.probes.stop();
             work.bundles.stop();
+            work.places.stop();
             drop(work);
             self.signal.notify_all();
         }
@@ -1620,6 +1664,28 @@ mod program {
         answers
     }
 
+    /// Adopt the desktop the session published, if the park said it moved,
+    /// answering whether anything the windows draw from actually changed.
+    ///
+    /// A refused state is reported and the last good desktop stands, so every
+    /// window keeps drawing correctly rather than at a nonsense density.
+    fn adopt_desktop(
+        desktop: &mut Desktop,
+        themes: &mut ThemeRegistry,
+        moved: &Cell<bool>,
+    ) -> bool {
+        if !moved.replace(false) {
+            return false;
+        }
+        match app::adopt_desktop(desktop, themes) {
+            Ok(changed) => changed,
+            Err(err) => {
+                let _ = writeln!(Stderr, "files: could not adopt the desktop change: {err}");
+                false
+            }
+        }
+    }
+
     /// Walk the machine-wide program stores for the file types their bundles
     /// declare.
     fn scan_bundles() -> Vec<AppAssociation> {
@@ -1714,6 +1780,12 @@ mod program {
         /// is a level peek, so leaving it undrained would report ready for
         /// ever and turn the park into a spin.
         reads: &'a Reads,
+        /// Set when the park woke for a desktop change, cleared when the loop
+        /// adopts it.
+        desktop_moved: &'a Cell<bool>,
+        /// Places read on the calling thread because no worker was there to
+        /// read them — the loop adopts whatever lands here, from either route.
+        places_read: &'a RefCell<Option<(Vec<String>, Vec<Volume>)>>,
     }
 
     impl EventDrain for RtEventSource<'_> {
@@ -1759,6 +1831,21 @@ mod program {
                     self.icons.borrow_mut().trim();
                     self.reads.retry_declined_artwork();
                     tairix_font::trim_glyph_cache();
+                }
+                // A volume was attached, re-backed, or removed. The rail is
+                // re-read off the loop: what is mounted comes from the System
+                // Information service, and a round trip here would stall the
+                // frame this park owes.
+                Wake::App(MOUNTS_TOKEN) => {
+                    if let Some(found) = self.reads.want_places() {
+                        *self.places_read.borrow_mut() = Some(found);
+                    }
+                    return Ok(Parked::Interrupted);
+                }
+                // The theme and density every window draws from moved.
+                Wake::DesktopChanged => {
+                    self.desktop_moved.set(true);
+                    return Ok(Parked::Interrupted);
                 }
                 Wake::Event | Wake::PressureUnchanged | Wake::App(_) => {}
             }
@@ -2391,7 +2478,7 @@ mod program {
             // second present.
             //
             // A desktop change is adopted and, when anything actually moved,
-            // repainted by the event loop itself (through `desktop.apply`)
+            // repainted by the event loop itself (through `adopt_desktop`)
             // before `apply_event` is called; nothing here needs to react to
             // it a second time.
             // Both icon-bar events were resolved before this dispatch, by
@@ -2417,7 +2504,7 @@ mod program {
             // one, so it is answered where the window set is (`bar_routed`)
             // and repaints nothing here.
             | WindowEvent::OpenRequested { .. }
-            | WindowEvent::DesktopChanged { .. } => (Repaint::Nothing, false),
+            => (Repaint::Nothing, false),
         }
     }
 
@@ -5210,7 +5297,6 @@ mod program {
             Err(code) => return code,
         };
 
-        let mut theme = themes.active();
         // The places rail: the user's own shortcuts plus whatever is mounted
         // right now, read once here and re-read whenever the user refreshes.
         // This is the process's copy — the one a component's slot menu is
@@ -5273,6 +5359,20 @@ mod program {
                 return fail(app::EXIT_NO_EVENTS, "reader wake wait refused");
             }
         }
+        // The places rail is what is mounted, so it converges on the mount
+        // table rather than being re-read by a gesture: a newly attached
+        // volume appears on its own. A refused member is fatal — the rail
+        // would otherwise silently stop matching the machine.
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::Mounts.as_u32()),
+            MOUNTS_TOKEN,
+        ) != 0
+        {
+            return fail(app::EXIT_NO_EVENTS, "mount-change wake refused");
+        }
 
         let icons = {
             let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
@@ -5305,7 +5405,15 @@ mod program {
                 // left to be.
                 Err(code) => return code,
             };
-            if present_whole(&mut win, &mut client, theme, &icons, desktop.scale()).is_err() {
+            if present_whole(
+                &mut win,
+                &mut client,
+                themes.active(),
+                &icons,
+                desktop.scale(),
+            )
+            .is_err()
+            {
                 return fail(app::EXIT_CHANNEL_LOST, "first present refused");
             }
             windows.push(win);
@@ -5320,12 +5428,16 @@ mod program {
         // --- The event loop: serve input, adopt what the reader answered,
         // repaint, and park only when there is nothing of either left. A dead
         // channel ends the app fail-loud; a clean close ends it at zero.
+        let desktop_moved = Cell::new(false);
+        let places_read: RefCell<Option<(Vec<String>, Vec<Volume>)>> = RefCell::new(None);
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set,
             launcher: &launcher,
             icons: &icons,
             reads: &reads,
+            desktop_moved: &desktop_moved,
+            places_read: &places_read,
         });
         loop {
             // Report what the icon cache holds at the head of the turn: this
@@ -5356,7 +5468,7 @@ mod program {
                 if present_whole(
                     &mut windows[busy],
                     &mut client,
-                    theme,
+                    themes.active(),
                     &icons,
                     desktop.scale(),
                 )
@@ -5377,7 +5489,7 @@ mod program {
                     if present_whole(
                         &mut windows[busy],
                         &mut client,
-                        theme,
+                        themes.active(),
                         &icons,
                         desktop.scale(),
                     )
@@ -5398,23 +5510,11 @@ mod program {
                         // adopted here too: this loop re-presents the
                         // progress panel on every pass, so re-theming is
                         // all it takes for the change to reach the screen.
-                        match desktop.apply(&event) {
-                            Ok(true) => {
-                                themes.set_appearance(desktop.appearance());
-                                theme = themes.active();
-                            }
-                            Ok(false) => {}
-                            Err(err) => {
-                                let _ = writeln!(
-                                    Stderr,
-                                    "files: could not apply desktop change: {err}"
-                                );
-                            }
-                        }
+                        adopt_desktop(&mut desktop, &mut themes, &desktop_moved);
                         if event.window_id() == Some(windows[busy].pane.id()) {
                             let win = &mut windows[busy];
                             let canvas = Canvas {
-                                theme,
+                                theme: themes.active(),
                                 mode: win.pane.mode(),
                                 scale: desktop.scale(),
                                 chrome: win.chrome,
@@ -5442,7 +5542,7 @@ mod program {
                             &mut client,
                             &mut desktop,
                             &mut places,
-                            theme,
+                            themes.active(),
                             &icons,
                             &launcher,
                             &reads,
@@ -5469,6 +5569,56 @@ mod program {
             let delivered = match events.try_wait(&mut client) {
                 Ok(Some(event)) => Ok(Some(event)),
                 Ok(None) => {
+                    // The desktop the session published, adopted before
+                    // anything is drawn from it. Every window is composed
+                    // from the theme at its scale, so a change repaints them
+                    // whole.
+                    if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
+                        for win in &mut windows {
+                            if present_whole(
+                                win,
+                                &mut client,
+                                themes.active(),
+                                &icons,
+                                desktop.scale(),
+                            )
+                            .is_err()
+                            {
+                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
+                        continue;
+                    }
+                    // A mount-table change the reader has answered: the rail
+                    // is what is mounted, so it is rebuilt and every window's
+                    // copy with it.
+                    let landed = places_read
+                        .borrow_mut()
+                        .take()
+                        .or_else(|| reads.take_places());
+                    if let Some((home, volumes)) = landed {
+                        places = Places::new(&home, &volumes);
+                        for win in &mut windows {
+                            sidebar::refresh_places(&mut win.places, &home, &volumes);
+                        }
+                        if start.role == Role::Desktop {
+                            declare_app_bar(&mut client, event_endpoint, start.role, &places);
+                        }
+                        for win in &mut windows {
+                            if present_whole(
+                                win,
+                                &mut client,
+                                themes.active(),
+                                &icons,
+                                desktop.scale(),
+                            )
+                            .is_err()
+                            {
+                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
+                        continue;
+                    }
                     // A bundle scan the reader has answered opens the
                     // chooser the click asked for. Collected before the
                     // listings so the chooser appears on the very frame the
@@ -5498,8 +5648,14 @@ mod program {
                         // reading of the old state describes where anything is
                         // now.
                         for win in &mut windows {
-                            if present_whole(win, &mut client, theme, &icons, desktop.scale())
-                                .is_err()
+                            if present_whole(
+                                win,
+                                &mut client,
+                                themes.active(),
+                                &icons,
+                                desktop.scale(),
+                            )
+                            .is_err()
                             {
                                 return fail(app::EXIT_CHANNEL_LOST, "present refused");
                             }
@@ -5512,8 +5668,14 @@ mod program {
                     // trip and far dearer than one tile's decode.
                     if reads.take_artwork_landed() {
                         for win in &mut windows {
-                            if present_whole(win, &mut client, theme, &icons, desktop.scale())
-                                .is_err()
+                            if present_whole(
+                                win,
+                                &mut client,
+                                themes.active(),
+                                &icons,
+                                desktop.scale(),
+                            )
+                            .is_err()
                             {
                                 return fail(app::EXIT_CHANNEL_LOST, "present refused");
                             }
@@ -5543,20 +5705,13 @@ mod program {
 
             // The desktop belongs to the seat, not to one window, so a change
             // is adopted once and every window is repainted in it.
-            match desktop.apply(&event) {
-                Ok(true) => {
-                    themes.set_appearance(desktop.appearance());
-                    theme = themes.active();
-                    for win in &mut windows {
-                        if present_whole(win, &mut client, theme, &icons, desktop.scale()).is_err()
-                        {
-                            return fail(app::EXIT_CHANNEL_LOST, "present refused");
-                        }
+            if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
+                for win in &mut windows {
+                    if present_whole(win, &mut client, themes.active(), &icons, desktop.scale())
+                        .is_err()
+                    {
+                        return fail(app::EXIT_CHANNEL_LOST, "present refused");
                     }
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    let _ = writeln!(Stderr, "files: could not apply desktop change: {err}");
                 }
             }
 
@@ -5565,7 +5720,7 @@ mod program {
                 &mut client,
                 &mut desktop,
                 &mut places,
-                theme,
+                themes.active(),
                 &icons,
                 &launcher,
                 &reads,

@@ -1585,3 +1585,75 @@ Adding an icon is dropping the file in the bundle's own `Resources/` and naming
 it in `AppInfo.toml`; there is no list anywhere to edit (§16.5). The artwork
 pipeline itself — the resolution tiers, the sandboxed decode, the shared cache —
 is `plans/ICONS.md`, which this section does not restate.
+
+## 15. A GUI app starts in the desktop's appearance and follows it live
+
+A windowed app is **not complete until it draws in the appearance the desktop
+is actually in, and keeps doing so when the user switches.** Both halves are
+required, and neither implies the other:
+
+- **At start-up**, the app queries the desktop before it sizes or paints
+  anything (`app::bring_up_desktop`, which is one call and answers the
+  `Desktop` plus a `ThemeRegistry` already set to the reported appearance).
+  Its first frame is therefore right rather than a guess the user has to watch
+  being corrected.
+- **Live**, the app converges on the `Desktop` system notice
+  (`plans/NOTICE.md`): its wait-set carries the member — the shared app shell
+  arms it, so an app that parks through `app::park` gets it for nothing — and
+  a `Wake::DesktopChanged` is answered with `app::adopt_desktop`, which reads
+  the published state, adopts it into both the `Desktop` and the theme
+  registry, and answers whether anything actually moved. A change repaints
+  what it invalidates: an appearance or density switch restyles every pixel,
+  so the honest scope is the whole surface.
+
+**Why both.** The session cannot re-colour an app's window — those are the
+app's own pixels in the app's own frame region — so an app that ignores the
+notice sits in the appearance the user just left, on a desktop where
+everything else switched. An app that adopts the notice but not the start-up
+query opens its *first* window wrong and only becomes correct after the user
+happens to switch.
+
+**It applies with no window open too.** The notice is not per-window: an app
+closed to its icon-bar slot still holds its wait-set, so it adopts the change
+and its next window opens in the appearance in force. That is the case the
+per-window announcement this replaced could not serve at all.
+
+**A refused state is stated, never guessed.** `app::adopt_desktop` refuses a
+state this build cannot draw at (a scale outside the range `Scale` admits) and
+leaves the last good desktop standing; the app reports the refusal on `stderr`
+and carries on drawing correctly (§2.24). Before the session has published
+anything — an app started in a text-only session — the read answers
+`NotFound`, which is an ordinary state and not a failure.
+
+**Scope.** Every bundle that opens a window, and the desktop's own service
+windows. A text-only tool has no appearance to follow and arms nothing.
+
+## 16. An app's own settings: which layer needs which authority
+
+An app reaches its settings through `lib/appdata` (`plans/APPDATA.md`), whose
+read layering is, lowest precedence first: the bundle's own
+`DefaultSettings/`, the machine-wide policy under `/System/Settings/`, then the
+user's own file. **Layers 2 and 3 are the app-data service's; layer 1 is the
+client's** — nothing attested gives `confd` a bundle path, so the app reads its
+own shipped defaults itself.
+
+That split decides the manifest:
+
+- A bundle that **ships `DefaultSettings/`** opens its store with
+  `Settings::open`, and therefore MUST request `CAP_FS_ACCESS`: layer 1 is an
+  `fs_open` per candidate bundle directory, made by the app.
+- A bundle that **ships none** opens with `Settings::open_without_defaults` and
+  MUST NOT request `CAP_FS_ACCESS` for this. Asking for filesystem authority so
+  that a search for a file the bundle does not contain can fail more tidily
+  widens what the app may reach for nothing (§5.2), and issuing the doomed read
+  anyway puts an audited capability denial in the log on every store open — a
+  security record for something that is not a security event.
+
+Either way the *store* itself needs no capability: it is an ordinary
+unprivileged call to the service, gated on the bundle's kernel-attested
+identity rather than on anything the bundle asks for.
+
+The bundle composer refuses a source tree carrying a bundle entry it does not
+plant, so a `DefaultSettings/` that would silently never reach the image — and
+never reach the signed content digest — is a build failure naming the bundle,
+not a layer the app mysteriously cannot read.

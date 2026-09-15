@@ -2903,6 +2903,45 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Write the current payload of notice `topic` to the non-null `buf`
+    /// `UserPtr`, returning how many bytes it took.
+    ///
+    /// The dispatcher has already checked `buf` is non-null. The
+    /// implementation must validate the topic, refuse a `len` too small to
+    /// hold the whole payload rather than truncating it, and refuse a topic
+    /// nothing has published rather than answering a default.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn notice_read(
+        &self,
+        _caller: &CallerContext<'_>,
+        _topic: u32,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Publish the `len`-byte payload at the non-null `payload` `UserPtr` as
+    /// notice `topic`'s current value.
+    ///
+    /// The dispatcher has already checked `payload` is non-null. The
+    /// implementation must validate the topic and the exact length, apply the
+    /// topic's own authority — the desktop topic admits only the holder of a
+    /// seat's live display lease, and a kernel-owned topic admits nobody —
+    /// and decode the payload before storing it.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn notice_publish(
+        &self,
+        _caller: &CallerContext<'_>,
+        _topic: u32,
+        _payload: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -3370,6 +3409,20 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // out-pointer (dispatcher-checked).
                 self.handlers
                     .cpufreq_wait(caller, args.0[0], args.0[1], args.0[2])
+            }
+            SyscallNumber::NOTICE_READ => {
+                // args[0] the notice topic; args[1] a non-null `UserPtr`
+                // (dispatcher-checked); args[2] its capacity.
+                let topic = decode_u32(args.0[0]);
+                let len = decode_len(args.0[2])?;
+                self.handlers.notice_read(caller, topic, args.0[1], len)
+            }
+            SyscallNumber::NOTICE_PUBLISH => {
+                // args[0] the notice topic; args[1] a non-null `UserPtr`
+                // (dispatcher-checked); args[2] the payload length.
+                let topic = decode_u32(args.0[0]);
+                let len = decode_len(args.0[2])?;
+                self.handlers.notice_publish(caller, topic, args.0[1], len)
             }
             SyscallNumber::IPC_CALL => {
                 // args[0] is the call-endpoint id; args[1]/args[3] are non-null
@@ -4717,6 +4770,29 @@ mod tests {
             _out: u64,
         ) -> SyscallResult {
             self.record("cpufreq_wait");
+            Ok(0)
+        }
+        fn notice_read(
+            &self,
+            _c: &CallerContext<'_>,
+            _topic: u32,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("notice_read");
+            // Echo the buffer length back so the reachability test can assert
+            // the dispatcher decoded `(topic, buf, len)` without a real
+            // notice registry here.
+            Ok(len as u64)
+        }
+        fn notice_publish(
+            &self,
+            _c: &CallerContext<'_>,
+            _topic: u32,
+            _payload: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("notice_publish");
             Ok(0)
         }
         fn hw_tree_wait(

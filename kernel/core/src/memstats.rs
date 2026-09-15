@@ -55,7 +55,11 @@ use tairix_reclaim::{
 use tairix_sync::RwLock;
 
 /// Turns a published band change into a deferred wake of every task
-/// parked on a memory-pressure wait-set member.
+/// parked on a system-notice wait-set member.
+///
+/// The band *is* the memory-pressure topic's generation, so there is nothing
+/// to store: the wake alone is what a subscriber needs, and it then reads the
+/// depth for itself.
 ///
 /// The gauge samples itself from wherever memory is being spent, so this
 /// hook can fire inside the frame allocator, a demand fault, or a
@@ -67,7 +71,7 @@ struct PressureBandWake;
 impl BandObserver for PressureBandWake {
     fn band_changed(&self, band: PressureBand) {
         let _ = band;
-        crate::waitq::pressure_wake();
+        crate::waitq::notice_wake();
     }
 }
 

@@ -8,14 +8,13 @@ use tairix_appdata::fake::FakeService;
 
 use crate::board::Dimensions;
 
-/// The command word this bundle is installed under.
+/// The command word this bundle is installed under. The game ships no
+/// defaults layer, so nothing resolves a bundle directory from it; the fake
+/// service still needs a word to answer under.
 const OWN_WORD: &str = "sapper";
 
-/// The bundle directory the resolution order finds it at.
-const BUNDLE: &str = "/System/Applications/sapper.app";
-
 fn service() -> FakeService {
-    FakeService::for_word(OWN_WORD).with_bundle(BUNDLE)
+    FakeService::for_word(OWN_WORD)
 }
 
 fn holding(text: &str) -> FakeService {
@@ -29,7 +28,7 @@ fn custom() -> Difficulty {
 #[test]
 fn a_fresh_account_has_no_best_times() {
     let mut host = service();
-    let settings = Settings::open(&mut host, OWN_WORD);
+    let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
     assert!(times.is_empty());
     assert!(refused.is_empty());
@@ -42,13 +41,13 @@ fn a_fresh_account_has_no_best_times() {
 fn a_recorded_time_survives_a_round_trip() {
     let mut host = service();
     {
-        let mut settings = Settings::open(&mut host, OWN_WORD);
+        let mut settings = Settings::open_without_defaults(&mut host);
         let mut times = BestTimes::default();
         assert!(times.record(Difficulty::Beginner, 42));
         assert!(times.record(Difficulty::Expert, 300));
         times.save(&mut settings).expect("the fake commits");
     }
-    let settings = Settings::open(&mut host, OWN_WORD);
+    let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
     assert!(refused.is_empty());
     assert_eq!(times.best(Difficulty::Beginner), Some(42));
@@ -87,7 +86,7 @@ fn a_time_outside_the_bounds_is_not_a_record() {
 #[test]
 fn a_stored_time_past_the_bound_is_refused_and_named() {
     let mut host = holding("best.beginner = 100000\nbest.expert = 12\n");
-    let settings = Settings::open(&mut host, OWN_WORD);
+    let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
     assert_eq!(times.best(Difficulty::Beginner), None);
     assert_eq!(
@@ -107,7 +106,7 @@ fn a_stored_time_past_the_bound_is_refused_and_named() {
 #[test]
 fn a_stored_time_that_is_not_a_number_is_refused_and_named() {
     let mut host = holding("best.intermediate = fastest\n");
-    let settings = Settings::open(&mut host, OWN_WORD);
+    let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
     assert_eq!(times.best(Difficulty::Intermediate), None);
     assert_eq!(
@@ -122,7 +121,7 @@ fn a_stored_time_that_is_not_a_number_is_refused_and_named() {
 #[test]
 fn a_stored_zero_is_refused_rather_than_read_as_a_record() {
     let mut host = holding("best.beginner = 0\n");
-    let settings = Settings::open(&mut host, OWN_WORD);
+    let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
     assert_eq!(times.best(Difficulty::Beginner), None);
     assert_eq!(refused.len(), 1);
@@ -132,7 +131,7 @@ fn a_stored_zero_is_refused_rather_than_read_as_a_record() {
 fn a_save_writes_only_what_changed() {
     let mut host = service();
     {
-        let mut settings = Settings::open(&mut host, OWN_WORD);
+        let mut settings = Settings::open_without_defaults(&mut host);
         let mut times = BestTimes::default();
         times.record(Difficulty::Beginner, 30);
         times.save(&mut settings).expect("commits");
@@ -146,7 +145,7 @@ fn a_save_writes_only_what_changed() {
 fn a_save_with_nothing_to_write_leaves_the_document_alone() {
     let mut host = holding("best.beginner = 30\n");
     {
-        let mut settings = Settings::open(&mut host, OWN_WORD);
+        let mut settings = Settings::open_without_defaults(&mut host);
         let (times, _) = BestTimes::load(&settings);
         times.save(&mut settings).expect("nothing to do");
         assert!(!settings.is_dirty(), "nothing was staged");
@@ -159,14 +158,14 @@ fn a_save_with_nothing_to_write_leaves_the_document_alone() {
 fn clearing_removes_the_stored_times() {
     let mut host = holding("best.beginner = 30\nbest.expert = 200\n");
     {
-        let mut settings = Settings::open(&mut host, OWN_WORD);
+        let mut settings = Settings::open_without_defaults(&mut host);
         let (mut times, _) = BestTimes::load(&settings);
         assert!(!times.is_empty());
         times.clear();
         assert!(times.is_empty());
         times.save(&mut settings).expect("commits");
     }
-    let settings = Settings::open(&mut host, OWN_WORD);
+    let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
     assert!(times.is_empty());
     assert!(refused.is_empty());
@@ -177,7 +176,7 @@ fn clearing_removes_the_stored_times() {
 fn a_store_the_service_will_not_serve_leaves_the_game_playable() {
     let mut host = service();
     host.read_refusal().set(Some(Errno::NotFound));
-    let settings = Settings::open(&mut host, OWN_WORD);
+    let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
     assert!(times.is_empty(), "no times, and no panic");
     assert!(

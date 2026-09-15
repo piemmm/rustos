@@ -46,6 +46,7 @@ mod program {
 
     use alloc::string::String;
     use alloc::vec::Vec;
+    use core::cell::Cell;
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
@@ -66,7 +67,7 @@ mod program {
     use tairix_sandbox::imagerender::{render_wallpaper_for_screen, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
-    use tairix_theme::{TextRole, Theme};
+    use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_wallpaper::{
         catalog_categories, catalog_entries, category_path, PinboardSettings, WallpaperFit,
         WallpaperPath, MAX_WALLPAPER_BYTES, PINBOARD_PUBLISHER, WALLPAPER_STORE,
@@ -122,6 +123,10 @@ mod program {
         /// readiness is a level peek, so leaving it undrained would report
         /// ready for ever and turn the park into a spin.
         applier: &'a Applier,
+        /// Set when the park woke for a desktop change, cleared when the loop
+        /// adopts it. Shared through a cell because the park writes it and the
+        /// loop reads it, on the one thread both run on.
+        desktop_moved: &'a Cell<bool>,
     }
 
     impl EventDrain for RtEventSource<'_> {
@@ -145,7 +150,45 @@ mod program {
                     tairix_font::trim_glyph_cache();
                     Ok(Parked::Served)
                 }
-                _ => Ok(Parked::Served),
+                // The theme, the density, and the screen the true-scale
+                // preview is modelled against all moved, so the wait ends and
+                // the loop re-themes before the next frame.
+                Wake::DesktopChanged => {
+                    self.desktop_moved.set(true);
+                    Ok(Parked::Interrupted)
+                }
+                Wake::Event | Wake::PressureUnchanged | Wake::App(_) => Ok(Parked::Served),
+            }
+        }
+    }
+
+    /// Adopt the desktop state the session published, if the park said it
+    /// moved, re-laying the chooser at the new scale and screen.
+    ///
+    /// A screen-extent change makes the true-scale model box a different
+    /// size, which alone makes the held preview stale — `next_preview`
+    /// notices through the request it now wants, so nothing further needs
+    /// invalidating by hand. A refused state is reported and the last good
+    /// desktop stands.
+    fn adopt_desktop(
+        desktop: &mut Desktop,
+        themes: &mut ThemeRegistry,
+        chooser: &mut Chooser,
+        mode: &DisplayMode,
+        moved: &Cell<bool>,
+    ) -> bool {
+        if !moved.replace(false) {
+            return false;
+        }
+        match app::adopt_desktop(desktop, themes) {
+            Ok(true) => {
+                chooser.relayout(mode.width_px, mode.height_px);
+                true
+            }
+            Ok(false) => false,
+            Err(err) => {
+                report(&alloc::format!("desktop change refused: {err}"));
+                false
             }
         }
     }
@@ -609,7 +652,6 @@ mod program {
             Ok(pair) => pair,
             Err(err) => return fail_shell(err),
         };
-        let mut theme = themes.active();
 
         // --- The initial window mode: the desktop's own preferred size,
         // capped to its screen.
@@ -669,7 +711,12 @@ mod program {
         };
         chooser.relayout(mode.width_px, mode.height_px);
         if surface
-            .present(&mut chooser, theme, &desktop, DamageRect::full(&mode))
+            .present(
+                &mut chooser,
+                themes.active(),
+                &desktop,
+                DamageRect::full(&mode),
+            )
             .is_err()
         {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
@@ -682,10 +729,12 @@ mod program {
         // --- The event loop: serve input, render one outstanding picture,
         // repaint, and park only when there is nothing of either left. A dead
         // channel ends the app fail-loud; a clean close ends it at zero.
+        let desktop_moved = Cell::new(false);
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set,
             applier: &applier,
+            desktop_moved: &desktop_moved,
         });
         loop {
             // Queued input first, then one outstanding render, and a park only
@@ -698,10 +747,14 @@ mod program {
             // What the session said about the last apply, shown the moment it
             // lands rather than at whatever later input happens to arrive.
             if let Some(outcome) = applier.collect() {
-                chooser.set_apply_outcome(outcome, style_for(theme, &desktop), &mut damage);
+                chooser.set_apply_outcome(
+                    outcome,
+                    style_for(themes.active(), &desktop),
+                    &mut damage,
+                );
                 if let Some(damage) = surface.present_damage(Repaint::Reported, &damage) {
                     if surface
-                        .present(&mut chooser, theme, &desktop, damage)
+                        .present(&mut chooser, themes.active(), &desktop, damage)
                         .is_err()
                     {
                         return fail(EXIT_CHANNEL_LOST, "present refused");
@@ -712,8 +765,13 @@ mod program {
             let delivered = match events.try_wait(surface.window.client()) {
                 Ok(Some(event)) => Ok(Some(event)),
                 Ok(None) => {
-                    if resolve_one_render(&mut chooser, &mut sandbox, theme, &desktop, &mut damage)
-                    {
+                    if resolve_one_render(
+                        &mut chooser,
+                        &mut sandbox,
+                        themes.active(),
+                        &desktop,
+                        &mut damage,
+                    ) {
                         // A delivered preview or thumbnail redraws exactly the
                         // box it fills, so the gallery fills in one tile at a
                         // time rather than repainting the window once per
@@ -723,7 +781,7 @@ mod program {
                             continue;
                         };
                         if surface
-                            .present(&mut chooser, theme, &desktop, damage)
+                            .present(&mut chooser, themes.active(), &desktop, damage)
                             .is_err()
                         {
                             return fail(EXIT_CHANNEL_LOST, "present refused");
@@ -736,37 +794,45 @@ mod program {
             };
             let event = match delivered {
                 Ok(Some(event)) => event,
-                // A park the applier interrupted has no event — the collect at
-                // the head of the next turn is what shows the answer — and a
-                // malformed frame from the authenticated session is refused
-                // rather than guessed at. Either way the loop goes round.
-                Ok(None) | Err(EventError::Undecodable(_)) => continue,
+                // A park the applier or the desktop notice interrupted has no
+                // event — the collect at the head of the next turn is what
+                // shows an apply's answer — and a malformed frame from the
+                // authenticated session is refused rather than guessed at. A
+                // desktop change still owes a whole repaint.
+                Ok(None) | Err(EventError::Undecodable(_)) => {
+                    if adopt_desktop(
+                        &mut desktop,
+                        &mut themes,
+                        &mut chooser,
+                        &mode,
+                        &desktop_moved,
+                    ) && surface
+                        .present(
+                            &mut chooser,
+                            themes.active(),
+                            &desktop,
+                            DamageRect::full(&mode),
+                        )
+                        .is_err()
+                    {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    }
+                    continue;
+                }
                 Err(EventError::Mailbox(_)) => {
                     return fail(EXIT_CHANNEL_LOST, "event channel lost")
                 }
             };
 
-            // Apply the desktop change before the chooser-specific event
-            // logic, so every derived value (scale, theme, screen extent)
-            // is current for the repaint below. A screen-extent change
-            // makes the true-scale model box a different size, which
-            // alone makes the held preview stale — `next_preview` notices
-            // through the request it now wants, so nothing further needs
-            // invalidating by hand. A refused change states the reason and
-            // stands on the last good desktop.
-            let desktop_changed = match desktop.apply(&event) {
-                Ok(true) => {
-                    themes.set_appearance(desktop.appearance());
-                    theme = themes.active();
-                    chooser.relayout(mode.width_px, mode.height_px);
-                    true
-                }
-                Ok(false) => false,
-                Err(err) => {
-                    report(&alloc::format!("desktop change refused: {err}"));
-                    false
-                }
-            };
+            // Adopted before the chooser-specific event logic, so every
+            // derived value is current for the repaint below.
+            let desktop_changed = adopt_desktop(
+                &mut desktop,
+                &mut themes,
+                &mut chooser,
+                &mode,
+                &desktop_moved,
+            );
 
             // What the event means to the chooser. Every arm answers in
             // the one vocabulary the engine speaks, so the decision about
@@ -785,14 +851,14 @@ mod program {
                     for input in pointer_input_events(action, at) {
                         asked = latest(
                             asked,
-                            chooser.on_pointer(&input, style_for(theme, &desktop), &mut damage),
+                            chooser.on_pointer(&input, style_for(themes.active(), &desktop), &mut damage),
                         );
                     }
                     asked
                 }
                 WindowEvent::Scrolled { dx, dy, .. } => chooser.on_pointer(
                     &InputEvent::PointerScrolled { dx, dy },
-                    style_for(theme, &desktop),
+                    style_for(themes.active(), &desktop),
                     &mut damage,
                 ),
                 // The keyboard is the secondary path, and reaches
@@ -802,7 +868,7 @@ mod program {
                     ..
                 } => match key_input_event(pressed) {
                     InputEvent::KeyPressed { key, modifiers } => {
-                        chooser.on_key(key, modifiers, style_for(theme, &desktop), &mut damage)
+                        chooser.on_key(key, modifiers, style_for(themes.active(), &desktop), &mut damage)
                     }
                     _ => ChooserAction::None,
                 },
@@ -858,7 +924,7 @@ mod program {
                 // The chooser offers the shipped wallpapers, so it declares
                 // no file association and has no document to be handed one.
                 | WindowEvent::OpenRequested { .. }
-                | WindowEvent::DesktopChanged { .. } => ChooserAction::None,
+                => ChooserAction::None,
                 // Nobody can see the window, so the session gave its copy of
                 // the pixels back and unmapped the region. Let go of this side
                 // too — the pages go only when both do — and paint nothing
@@ -889,7 +955,11 @@ mod program {
                             ApplyOutcome::Refused(String::from("settings document out of range"))
                         }
                     };
-                    chooser.set_apply_outcome(outcome, style_for(theme, &desktop), &mut damage);
+                    chooser.set_apply_outcome(
+                        outcome,
+                        style_for(themes.active(), &desktop),
+                        &mut damage,
+                    );
                     Repaint::Reported
                 }
                 // Close the window and end cleanly; the region this app owns
@@ -912,7 +982,7 @@ mod program {
                 continue;
             };
             if surface
-                .present(&mut chooser, theme, &desktop, damage)
+                .present(&mut chooser, themes.active(), &desktop, damage)
                 .is_err()
             {
                 return fail(EXIT_CHANNEL_LOST, "present refused");

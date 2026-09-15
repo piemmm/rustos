@@ -665,3 +665,37 @@ fn the_pulse_rises_and_falls() {
     assert!(arch(128) > arch(64));
     assert!(arch(128) > arch(200));
 }
+
+/// The whole point of following the desktop's appearance: it reaches the
+/// pixels. The same board, drawn under the light and the dark theme, must not
+/// produce the same frame — otherwise an adopted light/dark switch would be
+/// bookkeeping the user cannot see.
+#[test]
+fn the_same_board_renders_differently_under_light_and_dark() {
+    let game = Board::new(beginner(), true);
+    let dark = pixels(&game, &Theme::dark());
+    let light = pixels(&game, &Theme::light());
+    assert_eq!(dark.len(), light.len(), "the same board is the same size");
+    assert_ne!(
+        dark, light,
+        "the desktop's appearance must reach the board's pixels"
+    );
+}
+
+/// And the registry is what an adopted appearance is applied to, so the theme
+/// it then hands the painter is the one the switch asked for.
+#[test]
+fn a_registry_switched_to_light_hands_the_painter_the_light_theme() {
+    let mut themes = tairix_theme::ThemeRegistry::with_builtins();
+    themes.set_appearance(Appearance::Dark);
+    let game = Board::new(beginner(), true);
+    let under_dark = pixels(&game, themes.active());
+
+    themes.set_appearance(Appearance::Light);
+    assert_eq!(themes.active().appearance(), Appearance::Light);
+    assert_ne!(
+        under_dark,
+        pixels(&game, themes.active()),
+        "the switch the app adopts is the one the painter draws with"
+    );
+}

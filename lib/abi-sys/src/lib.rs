@@ -115,6 +115,12 @@ const NUM_CPUFREQ_BIND: u64 = SyscallNumber::CPUFREQ_BIND.as_u16() as u64;
 /// `cpufreq_wait` syscall number (as above).
 const NUM_CPUFREQ_WAIT: u64 = SyscallNumber::CPUFREQ_WAIT.as_u16() as u64;
 
+/// `notice_read` syscall number (as above).
+const NUM_NOTICE_READ: u64 = SyscallNumber::NOTICE_READ.as_u16() as u64;
+
+/// `notice_publish` syscall number (as above).
+const NUM_NOTICE_PUBLISH: u64 = SyscallNumber::NOTICE_PUBLISH.as_u16() as u64;
+
 /// `console_foreground` syscall number (as above).
 const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() as u64;
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
@@ -538,6 +544,45 @@ pub extern "C" fn sys_cpufreq_wait(handle: u64, last_seq: u64, out: *mut c_void)
         ret_i32(raw_syscall(
             NUM_CPUFREQ_WAIT,
             [handle, last_seq, ptr_arg(out), 0, 0, 0],
+        ))
+    }
+}
+
+/// `notice_read`: write system notice `topic`'s current payload into `buf`
+/// (`SyscallNumber::NOTICE_READ`). Returns the byte count written.
+///
+/// `len` must be at least the topic's own
+/// `TAIRIX_NOTICE_PAYLOAD_LEN_*`; a shorter buffer is refused rather than
+/// answered with a truncated value, so sizing to `TAIRIX_NOTICE_PAYLOAD_MAX`
+/// always fits. Unprivileged and non-blocking.
+#[must_use]
+#[export_name = "tairix_sys_notice_read"]
+pub extern "C" fn sys_notice_read(topic: u32, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)` against
+    // the caller's address space before writing the payload.
+    unsafe {
+        raw_syscall(
+            NUM_NOTICE_READ,
+            [u64::from(topic), ptr_arg(buf), len as u64, 0, 0, 0],
+        )
+    }
+}
+
+/// `notice_publish`: publish the `len`-byte payload at `payload` as system
+/// notice `topic`'s current value (`SyscallNumber::NOTICE_PUBLISH`). Returns a
+/// `TAIRIX_E_*` code.
+///
+/// Authority is the topic's own: the desktop topic admits only the holder of a
+/// seat's live display lease, and every kernel-owned topic admits nobody.
+#[must_use]
+#[export_name = "tairix_sys_notice_publish"]
+pub extern "C" fn sys_notice_publish(topic: u32, payload: *mut c_void, len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(payload, len)` and
+    // decodes the payload before storing it.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_NOTICE_PUBLISH,
+            [u64::from(topic), ptr_arg(payload), len as u64, 0, 0, 0],
         ))
     }
 }
@@ -3311,6 +3356,8 @@ mod tests {
         (NUM_FS_LOCK_QUERY, "fs_lock_query", 6),
         (NUM_CPUFREQ_BIND, "cpufreq_bind", 1),
         (NUM_CPUFREQ_WAIT, "cpufreq_wait", 3),
+        (NUM_NOTICE_READ, "notice_read", 3),
+        (NUM_NOTICE_PUBLISH, "notice_publish", 3),
     ];
 
     #[test]

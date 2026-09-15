@@ -453,10 +453,13 @@ impl<T: WindowTransport> WindowClient<T> {
     /// An app calls this **before** [`Self::create`], so its first window
     /// is sized to a screen it knows and its first frame is painted at the
     /// right density in the right colours, rather than at a guess it has
-    /// to correct once the user has already seen it. The session pushes a
-    /// [`WindowEvent::DesktopChanged`] afterwards whenever any of it
-    /// changes; [`Desktop`](crate::Desktop) holds the answer and keeps it
-    /// current from those events.
+    /// to correct once the user has already seen it. Thereafter the session
+    /// publishes each new state on the desktop system notice;
+    /// [`Desktop`](crate::Desktop) holds the answer and
+    /// [`adopt`](crate::Desktop::adopt) keeps it current from those. The
+    /// query answers the value an app needs before it can size anything and
+    /// the notice carries the changes, so an app started while a session is
+    /// coming up is correct without waiting for a publish.
     ///
     /// # Errors
     ///
@@ -469,8 +472,6 @@ impl<T: WindowTransport> WindowClient<T> {
     /// declares an icon-bar presence before it owns a window — or that never
     /// opens one — needs it to authenticate the bar events it receives, and
     /// this is the only call it makes before then.
-    ///
-    /// [`WindowEvent::DesktopChanged`]: tairix_abi::window_ipc::WindowEvent::DesktopChanged
     pub fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
         let request = WindowRequest::QueryDesktop;
         let mut reply = [0u8; WINDOW_DESKTOP_REPLY_LEN];

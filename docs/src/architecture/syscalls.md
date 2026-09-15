@@ -162,9 +162,20 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 116 | `fs_realpath`  | `user_ptr` (path), `len`, `user_ptr` (out), `len`, `u32 mode` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
-`waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
-`file_unmap` — are defined in `lib/abi/src/syscall.rs`; their rows are not
-yet transcribed into this table.)
+`waitset_create`/`waitset_ctl`/`waitset_wait` — 76–77 — `file_map`/
+`file_unmap` — and 117–125 — `port_read`/`port_write`, `latency_watch`,
+`fs_lock`/`fs_lock_query`, `cpufreq_bind`/`cpufreq_wait`, and
+`notice_read`/`notice_publish` — are defined in `lib/abi/src/syscall.rs`;
+their rows are not yet transcribed into this table. The table in
+`lib/abi/src/syscalls.rs` is the source of truth either way, and
+`cargo xtask abi-check` is what enforces it.)
+
+`notice_read` (no. 124) and `notice_publish` (no. 125) are the system-notice
+pair: the unprivileged, non-blocking read of a machine-wide topic's current
+value, and the per-topic-authorised publish. Neither takes a capability — the
+desktop topic is gated on the publisher holding a seat's live display lease and
+every kernel-owned topic refuses a userland publish outright. See
+[System notices](../abi/notice.md).
 
 `fs_chdir` (no. 65) and `fs_getcwd` (no. 66) give each process a working
 directory. A path handed to any path-taking filesystem call (`fs_open`,
@@ -1049,6 +1060,24 @@ sets that contain a `PortRoom` member join the room wake queue. This is
 what lets the desktop hold an app-ward event a full mailbox refused (a
 window resize, a file-picker conclusion) and deliver it when the app
 drains, instead of dropping it or polling for capacity.
+
+It accepts a `SystemNotice` member (`plans/NOTICE.md`): `id` is a
+`NoticeTopic` — the desktop's own state, the mount table's composition, the
+memory-pressure band — and the member is ready when that topic's generation
+differs from the one it last observed, with reporting it advancing the
+observation. Nothing is owner-checked, because each topic is a machine-wide
+fact no principal owns and each was already readable through an existing
+query; *publishing* is what carries authority. An `id` outside the topic set
+refuses with the same oracle-free `NotFound`, and a wide `id` is refused
+rather than truncated into a topic it is not. One queue holds every
+subscriber, because each topic is a single value and a woken waiter re-checks
+its own topic's generation; its wake is a lock-free flag drained in
+dispatcher context, which the memory-pressure publisher requires (it fires
+from inside whatever was spending memory) and the mount publisher too (it
+holds the filesystem's locks). This is what lets an application re-theme the
+moment the session switches appearance, a file manager re-read its places
+when a volume is attached, and a process holding rasterised glyphs give them
+back as memory tightens — each woken by the edge, none polling.
 
 `self_origin` (no. 68) is the self-directed twin of `call_peer_origin` (no.
 58): where that lets a server read the kernel-attested identity of the *peer*

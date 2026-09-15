@@ -191,9 +191,9 @@ seat manager both build on it, never re-deriving the state machine.
 - **The seat's desktop record is deliberately ungated.**
   `tairix_abi::desktop::DesktopInfo` — the screen extent, the UI scale, and
   the active appearance — reaches an application over the window channel it
-  already holds: `WindowRequest::QueryDesktop` answers it, and
-  `WindowEvent::DesktopChanged` re-sends it to every live window when the
-  session changes any of it. **Do not add a capability to it.** It describes
+  already holds: `WindowRequest::QueryDesktop` answers it, and the `Desktop`
+  system notice (`plans/NOTICE.md`) carries each change the session makes to
+  it. **Do not add a capability to it.** It describes
   the caller's own seat, names no other principal's data, and authorises
   nothing; gating it would only force every application back to guessing at
   facts the user can see by looking at their monitor, which is precisely the
@@ -223,8 +223,8 @@ reference density.
 What remains: a persisted per-seat scale in the desktop's own settings, a
 control that changes it (the Switchboard capsule's quick actions are the
 natural home, beside the light/dark pair), and the runtime application —
-`DesktopShell::set_scale` followed by the existing `announce_desktop`, which
-already relays a change to every open window. No ABI change is needed: the
+`DesktopShell::set_scale` followed by the existing `publish_desktop`, which
+already relays a change to every subscriber. No ABI change is needed: the
 wire already carries the percentage and every consumer already reads it.
 
 ### Stage D1 — `lib/seat`: the arch-neutral seat model `[x]`

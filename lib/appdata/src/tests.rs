@@ -337,6 +337,38 @@ fn a_bundle_shipping_no_defaults_is_the_ordinary_case() {
     assert_eq!(settings.get("scheme"), Some("dark"));
 }
 
+/// An application that ships no `DefaultSettings/` still gets its store, and
+/// reaches for no file at all — so it needs no filesystem authority and puts
+/// no capability denial in the audit log on every open.
+#[test]
+fn opening_without_defaults_serves_the_store_and_touches_no_file() {
+    /// A host that answers the service and treats any file read as the
+    /// defect it would be: this application declared it ships none.
+    struct NoFiles(FakeService);
+
+    impl super::AppDataHost for NoFiles {
+        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            self.0.call(request, reply)
+        }
+
+        fn read_file(&mut self, path: &str, _cap: usize) -> Result<Vec<u8>, Errno> {
+            panic!("a bundle shipping no defaults must open no file, but read {path}");
+        }
+
+        fn bundle_candidates(&mut self, word: &str) -> Vec<String> {
+            self.0.bundle_candidates(word)
+        }
+    }
+
+    let mut host = NoFiles(service_with_defaults("scheme = light\n").with_store("scheme = dark\n"));
+    let settings = Settings::open_without_defaults(&mut host);
+    assert_eq!(settings.get("scheme"), Some("dark"), "the store is served");
+    assert_eq!(settings.defaults_refusal(), None);
+    // Even a bundle that *does* ship defaults is not read on this path, so
+    // the layer is empty rather than silently half-applied.
+    assert_eq!(settings.get("unset-by-the-user"), None);
+}
+
 #[test]
 fn a_broken_defaults_document_is_reported_and_leaves_the_layer_empty() {
     let oversize: String = core::iter::repeat_n('x', APPDATA_DOCUMENT_MAX + 1).collect();

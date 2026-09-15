@@ -834,9 +834,11 @@ Each stage is independently reviewable and must leave the whole-project
     concludes it once; `apply_outcome` then brings the screen up to date with
     whatever an outcome previewed and did not draw. A settle still concludes
     the drain at once — it is one event per gesture and it owes a write.
-  - **`DesktopChanged` collapsed onto `restyle_windows`**, the whole-surface
-    path a re-theme or scale change genuinely needs, removing a near-copy that
-    had also been failing to re-present an open sheet at the new scale.
+  - **The desktop change collapsed onto `restyle_windows`**, the
+    whole-surface path a re-theme or scale change genuinely needs, removing a
+    near-copy that had also been failing to re-present an open sheet at the new
+    scale. It is driven by the `Desktop` system notice
+    (`plans/NOTICE.md`).
 - Tests: the `Invalidation` suite (`profile_tests.rs`) — a transparency change
   staling only the colours, a blur too fine to see staling nothing, a visible
   blur repainting nothing here, going opaque withdrawing the blur, only a size

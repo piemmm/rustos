@@ -366,7 +366,7 @@ impl SysinfoQueryId {
     /// by `CAP_SYSINFO_KERNEL` and audited, unchanged.
     ///
     /// This is the drain for the edge-triggered
-    /// [`WaitSourceKind::MemoryPressure`](crate::WaitSourceKind::MemoryPressure)
+    /// [`NoticeTopic::MemoryPressure`](crate::NoticeTopic::MemoryPressure)
     /// wait source: a process parks until the band moves, then reads it
     /// here. It is never a polling surface.
     pub const MEMORY_PRESSURE_BAND: Self = Self(28);

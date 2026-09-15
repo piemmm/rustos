@@ -112,6 +112,7 @@ pub mod loadavg;
 pub mod memmap;
 pub mod memstats;
 pub mod memtest;
+pub mod notice;
 pub mod panic;
 pub mod pipe;
 pub mod preempt;

@@ -12,6 +12,12 @@
 //! "Most specific" is the longest mount-point [`Path`] that is a prefix of
 //! the queried path. The root mount (`/`) covers everything, so resolution
 //! always succeeds.
+//!
+//! Every mutator here ends with [`crate::notice::mounts_changed`], so a
+//! newly attached or removed volume reaches the `Mounts` system notice and a
+//! subscriber converges on it instead of polling (`plans/NOTICE.md`). A new
+//! mutator owes that call: the alternative is a file manager whose places
+//! rail silently stops matching the machine.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -220,6 +226,7 @@ impl MountTable {
             backing_subtree,
             template: None,
         });
+        crate::notice::mounts_changed();
         Ok(())
     }
 
@@ -252,6 +259,7 @@ impl MountTable {
             backing_subtree: Vec::new(),
             template: Some(template),
         });
+        crate::notice::mounts_changed();
         Ok(())
     }
 
@@ -271,6 +279,7 @@ impl MountTable {
             return Err(VfsError::AlreadyExists);
         }
         root.backing = Some(backing);
+        crate::notice::mounts_changed();
         Ok(())
     }
 
@@ -310,6 +319,7 @@ impl MountTable {
         }
         mount.backing = Some(backing);
         mount.backing_subtree = backing_subtree;
+        crate::notice::mounts_changed();
         Ok(())
     }
 
@@ -329,6 +339,7 @@ impl MountTable {
         if self.mounts.len() == before {
             return Err(VfsError::NotFound);
         }
+        crate::notice::mounts_changed();
         Ok(())
     }
 
@@ -681,5 +692,84 @@ mod tests {
         table.unmount(&p("/Storage/usb0")).expect("unmount");
         assert_eq!(table.len(), 1);
         assert!(!table.is_empty());
+    }
+
+    /// Every successful mutation reaches the `Mounts` notice, so a
+    /// subscriber's places rail cannot silently stop matching the machine —
+    /// and a *refused* mutation changed nothing, so it moves nothing.
+    ///
+    /// Monotone in the shared counter (observe, mutate, observe greater)
+    /// rather than an exact step: the counter is process-global and the test
+    /// binary runs tests concurrently.
+    #[test]
+    fn every_mutator_moves_the_mounts_notice_generation() {
+        use super::super::perm::Mode;
+        use tairix_abi::NoticeTopic;
+        use tairix_kernel_sec::{GroupId, UserId};
+        let generation = || crate::notice::generation(NoticeTopic::Mounts);
+        let backing = unclassified(0x5F00);
+        let mut table = MountTable::new(MountFlags::default());
+
+        let moved = |label: &str, before: u64| {
+            assert!(generation() > before, "{label} owes a notice");
+        };
+
+        let before = generation();
+        table
+            .mount(p("/Storage/a"), MountFlags::NODEV, None)
+            .expect("mount");
+        moved("mount", before);
+
+        let before = generation();
+        table
+            .mount_rebased(
+                p("/System/Logs"),
+                MountFlags::NOSUID,
+                Some(backing),
+                alloc::vec![String::from("System"), String::from("Logs")],
+            )
+            .expect("sub-mount");
+        moved("mount_rebased", before);
+
+        let before = generation();
+        table
+            .mount_with_template(
+                p("/Storage/b"),
+                MountFlags::NOSUID,
+                backing,
+                Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)),
+            )
+            .expect("runtime mount");
+        moved("mount_with_template", before);
+
+        let before = generation();
+        table.back_root(backing).expect("root backing");
+        moved("back_root", before);
+
+        let before = generation();
+        table
+            .set_backing(&p("/Storage/a"), backing, Vec::new())
+            .expect("backing attaches");
+        moved("set_backing", before);
+
+        let before = generation();
+        table.unmount(&p("/Storage/a")).expect("unmount");
+        moved("unmount", before);
+
+        // A refusal changed no mount, so it is not news. Asserted against
+        // the *table* rather than the counter: the counter is process-global,
+        // so "unchanged" is not a property one test can observe while
+        // another's mounts are moving. Every mutator above bumps only after
+        // its validation returns, which is what these refusals exercise.
+        let occupied = table.resolve(&p("/Storage/b")).backing();
+        let len = table.len();
+        assert_eq!(
+            table.mount(p("/Storage/b"), MountFlags::default(), None),
+            Err(VfsError::AlreadyExists)
+        );
+        assert_eq!(table.unmount(&p("/Storage/gone")), Err(VfsError::NotFound));
+        assert_eq!(table.back_root(backing), Err(VfsError::AlreadyExists));
+        assert_eq!(table.len(), len, "a refused mutation changes no mount");
+        assert_eq!(table.resolve(&p("/Storage/b")).backing(), occupied);
     }
 }

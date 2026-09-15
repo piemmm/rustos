@@ -37,6 +37,8 @@
 mod program {
     extern crate alloc;
 
+    use core::cell::Cell;
+
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
     use tairix_abi::driver::display::DamageRect;
@@ -49,10 +51,11 @@ mod program {
     use tairix_geometry::Scale;
     use tairix_input::{InputEvent, Key, NamedKey};
     use tairix_rt::io::{Stderr, Write};
+    use tairix_theme::ThemeRegistry;
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        key_input_event, pointer_point, EventDrain, EventError, EventMailbox, EventSource, Parked,
-        WindowClient, WindowEvents,
+        key_input_event, pointer_point, Desktop, EventDrain, EventError, EventMailbox, EventSource,
+        Parked, WindowClient, WindowEvents,
     };
 
     /// State a reason on `stderr`: an exit code alone is not a diagnosis, and
@@ -105,26 +108,61 @@ mod program {
     /// whose kernel-attested sender is the desktop session named by the create
     /// reply — anything else is dropped (fail closed), so no other process can
     /// feed the app forged input.
-    struct RtEventSource {
+    struct RtEventSource<'a> {
         /// The app's own event mailbox, which authenticates every frame it
         /// hands over.
         mailbox: EventMailbox,
         /// The wait-set handle the app parks on.
         set: u64,
+        /// Set when the park woke for a desktop change, cleared when the loop
+        /// adopts it. Shared through a cell because the park sets it and the
+        /// loop reads it, on the one thread both run on.
+        desktop_moved: &'a Cell<bool>,
     }
 
-    impl EventDrain for RtEventSource {
+    impl EventDrain for RtEventSource<'_> {
         fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
             self.mailbox.try_next(event)
         }
     }
 
-    impl EventSource for RtEventSource {
+    impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            if app::park(self.set)? == Wake::PressureChanged {
-                tairix_font::trim_glyph_cache();
+            match app::park(self.set)? {
+                Wake::PressureChanged => {
+                    tairix_font::trim_glyph_cache();
+                    Ok(Parked::Served)
+                }
+                // The appearance the form is drawn in moved, so the wait ends
+                // and the loop re-themes before the next frame.
+                Wake::DesktopChanged => {
+                    self.desktop_moved.set(true);
+                    Ok(Parked::Interrupted)
+                }
+                Wake::Event | Wake::PressureUnchanged | Wake::App(_) => Ok(Parked::Served),
             }
-            Ok(Parked::Served)
+        }
+    }
+
+    /// Adopt the desktop the session published, if the park said it moved,
+    /// answering whether anything the form draws from actually changed.
+    ///
+    /// A refused state is reported and the last good desktop stands, so the
+    /// window keeps drawing correctly rather than at a nonsense density.
+    fn adopt_desktop(
+        desktop: &mut Desktop,
+        themes: &mut ThemeRegistry,
+        moved: &Cell<bool>,
+    ) -> bool {
+        if !moved.replace(false) {
+            return false;
+        }
+        match app::adopt_desktop(desktop, themes) {
+            Ok(changed) => changed,
+            Err(err) => {
+                report(&alloc::format!("desktop change refused: {err}"));
+                false
+            }
         }
     }
 
@@ -241,7 +279,6 @@ mod program {
             Ok(pair) => pair,
             Err(err) => return fail_shell(err),
         };
-        let mut theme = themes.active();
 
         // --- The event mailbox the app parks on.
         let binding = match app::bind_event_mailbox() {
@@ -262,42 +299,45 @@ mod program {
             Ok(server) => server,
             Err(err) => return fail_shell(err),
         };
-        if repaint(&mut window, &editor, theme, desktop.scale()).is_err() {
+        if repaint(&mut window, &editor, themes.active(), desktop.scale()).is_err() {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
 
         // --- The event loop: park, apply, repaint. A dead channel ends the
         // app fail-loud; a clean close ends it at zero.
+        let desktop_moved = Cell::new(false);
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(binding.endpoint(), server),
             set: binding.set(),
+            desktop_moved: &desktop_moved,
         });
+        // A desktop change (scale, appearance) is adopted before the
+        // app-specific handling, so the repaint below draws in the appearance
+        // now in use. The window keeps its pixel extent: it was granted at
+        // the scale in force when it opened, and a fixed form cannot re-shape
+        // its own frame region.
         loop {
             let event = match events.wait(window.client()) {
                 Ok(Some(event)) => event,
-                // A wait that ended without an event cannot arise here (this
-                // app parks on nothing of its own), and a malformed frame from
-                // the authenticated session is refused rather than guessed at.
-                // Either way the app keeps waiting.
-                Ok(None) | Err(EventError::Undecodable(_)) => continue,
+                // A wait that ended without an event is the desktop notice
+                // (the only source this app parks on besides its mailbox); a
+                // malformed frame from the authenticated session is refused
+                // rather than guessed at. Either way there is no event to
+                // route, and the re-theme alone owes the repaint below.
+                Ok(None) | Err(EventError::Undecodable(_)) => {
+                    if adopt_desktop(&mut desktop, &mut themes, &desktop_moved)
+                        && repaint(&mut window, &editor, themes.active(), desktop.scale()).is_err()
+                    {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    }
+                    continue;
+                }
                 Err(EventError::Mailbox(_)) => {
                     return fail(EXIT_CHANNEL_LOST, "event channel lost")
                 }
             };
 
-            // A desktop change (scale, appearance) is applied before the
-            // app-specific handling, so the repaint below draws in the
-            // appearance now in use. The window keeps its pixel extent: it
-            // was granted at the scale in force when it opened, and a fixed
-            // form cannot re-shape its own frame region.
-            match desktop.apply(&event) {
-                Ok(true) => {
-                    themes.set_appearance(desktop.appearance());
-                    theme = themes.active();
-                }
-                Ok(false) => {}
-                Err(err) => report(&alloc::format!("desktop change refused: {err}")),
-            }
+            adopt_desktop(&mut desktop, &mut themes, &desktop_moved);
 
             match event {
                 WindowEvent::Pointer { x, y, .. } => {
@@ -337,7 +377,7 @@ mod program {
                 _ => {}
             }
 
-            if repaint(&mut window, &editor, theme, desktop.scale()).is_err() {
+            if repaint(&mut window, &editor, themes.active(), desktop.scale()).is_err() {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
         }

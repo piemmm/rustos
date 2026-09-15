@@ -3,10 +3,10 @@
 //! [`Desktop`] is what an application holds after asking the session
 //! ([`WindowClient::desktop`](crate::WindowClient::desktop)): the screen
 //! extent as geometry, the UI scale as a [`Scale`] rather than a bare
-//! percentage, and the active [`Appearance`]. Feeding it every delivered
-//! event keeps it current, so an application that follows a screen-mode
-//! change or a light/dark switch does not repeat the same bookkeeping in
-//! its own source.
+//! percentage, and the active [`Appearance`]. Handing it each state the
+//! desktop notice publishes keeps it current, so an application that follows
+//! a screen-mode change or a light/dark switch does not repeat the same
+//! bookkeeping in its own source.
 //!
 //! It holds only description — no capability, no handle, nothing another
 //! principal owns — and every value in it is already validated: a
@@ -14,7 +14,6 @@
 //! the range [`Scale`] admits.
 
 use tairix_abi::desktop::{Appearance, DesktopInfo};
-use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::Errno;
 use tairix_geometry::{Rect, Scale};
 
@@ -77,25 +76,25 @@ impl Desktop {
         self.info
     }
 
-    /// Adopt what `event` reports, answering whether anything changed.
+    /// Adopt `info` as the desktop's current state, answering whether
+    /// anything changed.
     ///
-    /// Any other event answers `false`, so an application can hand its
-    /// whole event stream through without first sorting it.
+    /// The record the session published, not an event: an application
+    /// converges on the desktop notice, so this is what it hands the
+    /// value to. The state it holds is a whole record, so a value equal
+    /// to the one already held answers `false` and costs nothing.
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfRange`] for a change this crate cannot represent (see
+    /// [`Errno::OutOfRange`] for a state this crate cannot represent (see
     /// [`Self::new`]). The desktop keeps the last state it accepted, so a
     /// refused change leaves the window drawing correctly rather than at a
     /// nonsense density; the application reports the refusal.
-    pub fn apply(&mut self, event: &WindowEvent) -> Result<bool, Errno> {
-        let WindowEvent::DesktopChanged { desktop, .. } = *event else {
-            return Ok(false);
-        };
-        if desktop == self.info {
+    pub fn adopt(&mut self, info: DesktopInfo) -> Result<bool, Errno> {
+        if info == self.info {
             return Ok(false);
         }
-        *self = Self::new(desktop)?;
+        *self = Self::new(info)?;
         Ok(true)
     }
 

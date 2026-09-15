@@ -53,36 +53,36 @@ use tairix_abi::{
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
     KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LinkFlags, LoadAverage,
     LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountListRequest, MountRecord,
-    NamedKeyCode, NeededLibrary, OpenFlags, PointerButtonCode, PointerInput, PortName, PowerAction,
-    ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, RealpathMode,
-    ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority, Segment, Severity, Signal,
-    SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
-    Time64, UnlinkFlags, Uptime, UserDirectoryRecord, UserDirectoryRequest, WaitFlags, WaitSetOp,
-    WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-    BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_VERSION_MAX,
-    BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT,
-    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
-    DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
-    DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
-    FS_MODE_MASK, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN,
-    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
-    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-    KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX,
-    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
-    LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
-    LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
-    MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
-    MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-    MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_INPUT_MAGIC,
-    PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
-    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RELEASE_EPOCH_SECS,
-    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
-    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
-    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT,
-    USER_DIRECTORY_NAME_MAX,
+    NamedKeyCode, NeededLibrary, NoticeTopic, OpenFlags, PointerButtonCode, PointerInput, PortName,
+    PowerAction, ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags,
+    RealpathMode, ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority, Segment,
+    Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId,
+    SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord,
+    UserDirectoryRequest, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+    BUNDLE_PURPOSE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
+    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
+    DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
+    ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, HOSTNAME_MAX,
+    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS,
+    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED,
+    KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED,
+    KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
+    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX,
+    LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
+    MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN,
+    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX,
+    PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE,
+    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
+    RELEASE_EPOCH_SECS, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
+    SEG_FLAG_READ, SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT,
+    STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN,
+    SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
+    SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
+    THREAD_STACK_DEFAULT, USER_DIRECTORY_NAME_MAX,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -2416,6 +2416,7 @@ fn generate_syscall() -> String {
     emit_signal_contract(&mut out);
     emit_power_contract(&mut out);
     emit_waitset_contract(&mut out);
+    emit_notice_contract(&mut out);
     emit_latency_contract(&mut out);
     emit_cpufreq_contract(&mut out);
 
@@ -2756,8 +2757,60 @@ const fn wait_source_macro_suffix(kind: WaitSourceKind) -> &'static str {
         WaitSourceKind::Signal => "SIGNAL",
         WaitSourceKind::File => "FILE",
         WaitSourceKind::CallReply => "CALL_REPLY",
-        WaitSourceKind::MemoryPressure => "MEMORY_PRESSURE",
+        WaitSourceKind::SystemNotice => "SYSTEM_NOTICE",
         WaitSourceKind::PortRoom => "PORT_ROOM",
+    }
+}
+
+/// Emit the system-notice contract items into `tairix_syscall.h`: the topic
+/// each `notice_read()` / `notice_publish()` names, its exact payload length,
+/// and the payload ceiling — every value read from `lib/abi` and never
+/// re-typed.
+fn emit_notice_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* System notice topics (the `topic` argument of notice_read() and\n\
+         * notice_publish(), uint32_t) and each topic's exact payload length. A topic\n\
+         * outside the set, or a length that is not the topic's own, is rejected with\n\
+         * TAIRIX_E_OUT_OF_RANGE / TAIRIX_E_LENGTH_OUT_OF_RANGE. Publishing is\n\
+         * authorised per topic: the desktop topic admits only the holder of a seat's\n\
+         * live display lease, and every kernel-owned topic admits nobody. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_NOTICE_PAYLOAD_MAX {NOTICE_PAYLOAD_MAX}u"
+    );
+    // Walked from the wire values `NoticeTopic::from_u32` accepts rather than
+    // a list kept in step by hand, exactly as the wait sources are.
+    for value in 0.. {
+        let Ok(topic) = NoticeTopic::from_u32(value) else {
+            break;
+        };
+        let suffix = notice_topic_macro_suffix(topic);
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_NOTICE_TOPIC_{suffix} {}u",
+            topic.as_u32()
+        );
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_NOTICE_PAYLOAD_LEN_{suffix} {}u",
+            topic.payload_len()
+        );
+    }
+    out.push('\n');
+}
+
+/// The C macro suffix naming `topic`, as `TAIRIX_NOTICE_TOPIC_<suffix>`.
+///
+/// Exhaustive on purpose: adding a topic to the ABI must fail to compile here
+/// until it is named, so the generated header can never fall behind the enum
+/// it is generated from.
+const fn notice_topic_macro_suffix(topic: NoticeTopic) -> &'static str {
+    match topic {
+        NoticeTopic::Desktop => "DESKTOP",
+        NoticeTopic::Mounts => "MOUNTS",
+        NoticeTopic::MemoryPressure => "MEMORY_PRESSURE",
     }
 }
 

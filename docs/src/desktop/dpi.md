@@ -77,9 +77,10 @@ an application two ways:
   no other principal's data, and grants no authority, so gating it would only
   force every application to guess (`AGENTS.md` §5.2 — the capability set stays
   small, and a descriptive fact is not a security boundary).
-- `WindowEvent::DesktopChanged` is pushed to every live window whenever the
-  session changes any of it, so a running app follows a density or appearance
-  switch instead of sitting there at the state it opened with.
+- The session publishes each new state on the `Desktop` system notice, so a
+  running app follows a density or appearance switch instead of sitting there
+  at the state it opened with — and so does one closed to its icon-bar slot,
+  whose next window then opens at the current density.
 
 `tairix_window::Desktop` is the app-side holder: it resolves the reported
 percentage into a `Scale` (refusing, never clamping, a percentage outside the

@@ -246,13 +246,18 @@ fn scanout_frame(mode: &DisplayMode) -> Option<Vec<u8>> {
 }
 
 impl Compositor {
-    /// Create a compositor for the given display `mode`, clearing the
-    /// screen to an opaque `background`.
+    /// Create a compositor for the given display `mode`, decorating windows
+    /// with `theme` and clearing the screen to that theme's desktop colour.
     ///
-    /// The background alpha is forced to opaque: the root surface has
-    /// nothing behind it, so the composited screen is always fully
-    /// opaque and its premultiplied pixels equal their straight-alpha
-    /// form on scan-out.
+    /// The theme is handed in rather than defaulted: it is what every
+    /// decorated window's furniture and the desktop background are drawn
+    /// from, so a compositor built with one theme and a session running
+    /// another would show window chrome in the appearance the user is not
+    /// in. The background is *derived* from it here for the same reason —
+    /// one value, so the two cannot disagree — and its alpha is forced to
+    /// opaque: the root surface has nothing behind it, so the composited
+    /// screen is always fully opaque and its premultiplied pixels equal
+    /// their straight-alpha form on scan-out.
     ///
     /// `chrome` and `frost` are the bounded, pressure-governed caches this
     /// output retains its decorated windows' rendered furniture and its
@@ -277,7 +282,7 @@ impl Compositor {
     #[must_use]
     pub fn new(
         mode: DisplayMode,
-        background: Color,
+        theme: Theme,
         chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
         frost: ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash>,
         pressure: &'static (dyn PressureGauge + 'static),
@@ -285,14 +290,14 @@ impl Compositor {
         let order = ChannelOrder::for_format(mode.format)?;
         let background = Color {
             a: 255,
-            ..background
+            ..Color::from(theme.palette().desktop)
         };
         let back = Surface::filled(mode.width_px, mode.height_px, background.premultiply())?;
         let frame = scanout_frame(&mode)?;
         let mut compositor = Self {
             mode,
             scale: Scale::ONE,
-            theme: Theme::dark(),
+            theme,
             theme_generation: 0,
             chrome,
             frost,
@@ -550,17 +555,23 @@ impl Compositor {
 
     /// Switch the active desktop theme, returning whether it changed.
     ///
-    /// A runtime light/dark switch is one call here: every decorated window
-    /// re-resolves its reserved furniture band (a theme may change the border,
-    /// inset, or title-bar metrics), and the whole screen is marked dirty so
-    /// the next composite repaints every window and its decorations under the
-    /// new palette. Setting the theme already in effect changes nothing and
-    /// returns `false`.
+    /// A runtime light/dark switch is one call here: the desktop background
+    /// is re-derived from the new palette (the same derivation
+    /// [`new`](Self::new) performs, so the two cannot disagree), every
+    /// decorated window re-resolves its reserved furniture band (a theme may
+    /// change the border, inset, or title-bar metrics), and the whole screen
+    /// is marked dirty so the next composite repaints every window and its
+    /// decorations under the new palette. Setting the theme already in effect
+    /// changes nothing and returns `false`.
     pub fn set_theme(&mut self, theme: Theme) -> bool {
         if theme == self.theme {
             return false;
         }
         self.theme = theme;
+        self.background = Color {
+            a: 255,
+            ..Color::from(self.theme.palette().desktop)
+        };
         self.theme_generation = self.theme_generation.saturating_add(1);
         self.refresh_frame_bands();
         self.mark(self.screen_rect());
@@ -1071,15 +1082,21 @@ impl Compositor {
         self.background
     }
 
-    /// Set the desktop background colour, returning whether it changed.
+    /// Set the desktop background colour on its own, returning whether it
+    /// changed.
     ///
-    /// A runtime theme switch is one call here: the whole screen is marked
-    /// dirty so the next composite repaints every pixel over the new
-    /// background — windows and the cursor are re-blended on top unchanged.
-    /// The alpha is forced to opaque exactly as at
+    /// The whole screen is marked dirty so the next composite repaints every
+    /// pixel over the new background — windows and the cursor are re-blended
+    /// on top unchanged. The alpha is forced to opaque exactly as at
     /// [`new`](Self::new): the root surface has nothing behind it. Setting
     /// the colour already in effect changes nothing and returns `false`, so
     /// the caller can skip a redundant present.
+    ///
+    /// A *session* never calls this: the background belongs to the active
+    /// theme, and [`set_theme`](Self::set_theme) re-derives it. This is for a
+    /// caller that wants the screen re-composited against a colour of its own
+    /// — the compositor benchmark, which must dirty every pixel per frame
+    /// without paying a theme switch's cache invalidation each time.
     pub fn set_background(&mut self, background: Color) -> bool {
         let background = Color {
             a: 255,

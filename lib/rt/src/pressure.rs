@@ -15,16 +15,13 @@
 //!
 //! # How the band gets here
 //!
-//! The runtime deliberately does **not** fetch the band itself. Reading
-//! it means talking to the System Information service, which needs an
-//! endpoint and a transport the runtime has no business choosing for a
-//! program. The owning program does that — parking on a
-//! [`WaitSourceKind::MemoryPressure`](tairix_abi::WaitSourceKind::MemoryPressure)
-//! wait-set member, reading the ungated
-//! [`SysinfoQueryId::MEMORY_PRESSURE_BAND`](tairix_abi::SysinfoQueryId::MEMORY_PRESSURE_BAND)
-//! query, and calling [`report`] — and every cache in the process then
-//! sees the new band through [`gauge`]. Event-driven throughout: no
-//! program polls for this.
+//! The runtime deliberately does **not** fetch the band itself: what to *do*
+//! about a band is not the runtime's business. The owning program does that —
+//! parking on the
+//! [`MemoryPressure`](tairix_abi::NoticeTopic::MemoryPressure) system notice,
+//! reading the published depth with `notice_read`, and calling [`report`] —
+//! and every cache in the process then sees the new band through [`gauge`].
+//! Event-driven throughout: no program polls for this.
 //!
 //! # Before the first report
 //!

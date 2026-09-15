@@ -263,7 +263,7 @@ pub(crate) fn desktop_over(
     let shell = DesktopShell::new(config, TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK);
     let compositor = Compositor::new(
         display,
-        Color::rgb(0, 0, 0),
+        shell.session().active_theme().clone(),
         chrome_cache(TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK),
         frost_cache(TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK),
         pressure,
@@ -525,12 +525,7 @@ pub(crate) fn compositor() -> Compositor {
     };
     Compositor::new(
         mode,
-        Color {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 255,
-        },
+        Theme::dark(),
         test_chrome_cache(),
         test_frost_cache(),
         test_pressure(),
@@ -2007,8 +2002,12 @@ fn a_secondary_press_on_a_window_covering_the_bar_reaches_that_window() {
     ));
 }
 
+/// The regression this exists for: the compositor draws every decorated
+/// window's furniture from the theme it holds, so a session that switched
+/// appearance without pushing the whole theme left every window framed in the
+/// appearance the user just left — and the desktop background with it.
 #[test]
-fn sync_background_relays_a_programmatic_theme_switch() {
+fn sync_theme_relays_a_programmatic_switch_to_the_compositor() {
     let mut shell = shell();
     let mode = DisplayMode {
         width_px: 1920,
@@ -2018,7 +2017,7 @@ fn sync_background_relays_a_programmatic_theme_switch() {
     };
     let mut comp = Compositor::new(
         mode,
-        shell.session().active_theme().palette().desktop.into(),
+        shell.session().active_theme().clone(),
         test_chrome_cache(),
         test_frost_cache(),
         test_pressure(),
@@ -2026,12 +2025,53 @@ fn sync_background_relays_a_programmatic_theme_switch() {
     .expect("the compositor allocates");
 
     assert!(
-        !shell.sync_background(&mut comp),
+        !shell.sync_theme(&mut comp),
         "a compositor built over the active theme is already in step"
     );
+    let before = comp.chrome_epoch();
 
     shell.session_mut().set_theme(ThemeId::LIGHT).unwrap();
-    assert!(shell.sync_background(&mut comp));
+    assert!(shell.sync_theme(&mut comp));
+    // The whole theme, not just its desktop colour: the furniture is drawn
+    // from the palette the compositor holds.
+    assert_eq!(comp.theme(), shell.session().active_theme());
+    assert_eq!(
+        comp.background(),
+        shell.session().active_theme().palette().desktop.into()
+    );
+    // Retained furniture keys on the epoch, so the switch must move it or
+    // every window would re-composite its old chrome from the cache.
+    assert_ne!(comp.chrome_epoch(), before);
+}
+
+/// An appearance switch — the taskbar's light/dark toggle — is the same
+/// relay, and it is the path that was broken: the compositor was built
+/// hard-coded dark and nothing ever told it otherwise.
+#[test]
+fn set_appearance_re_themes_the_compositor() {
+    let (mut shell, mut comp) = desktop_over(
+        TaskbarConfig::bottom_bar(1024, 768),
+        DisplayMode {
+            width_px: 1024,
+            height_px: 768,
+            stride_bytes: 1024 * 4,
+            format: DisplayFormat::Rgba8888,
+        },
+        test_pressure(),
+    );
+    assert_eq!(
+        comp.theme().appearance(),
+        shell.session().active_theme().appearance(),
+        "the compositor starts in the session's own appearance"
+    );
+
+    let switched = match comp.theme().appearance() {
+        Appearance::Dark => Appearance::Light,
+        Appearance::Light => Appearance::Dark,
+    };
+    shell.session_mut().set_appearance(switched);
+    assert!(shell.sync_theme(&mut comp));
+    assert_eq!(comp.theme().appearance(), switched);
     assert_eq!(
         comp.background(),
         shell.session().active_theme().palette().desktop.into()
@@ -3275,7 +3315,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
     };
     let mut comp = Compositor::new(
         mode,
-        Color::rgb(0, 0, 0),
+        Theme::dark(),
         test_chrome_cache(),
         test_frost_cache(),
         test_pressure(),
@@ -3541,7 +3581,7 @@ fn headless_desktop() -> (DesktopShell, Compositor) {
     };
     let compositor = Compositor::new(
         mode,
-        Color::rgb(0, 0, 0),
+        shell.session().active_theme().clone(),
         test_chrome_cache(),
         test_frost_cache(),
         test_pressure(),
@@ -5240,7 +5280,7 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
     };
     let mut comp = Compositor::new(
         mode,
-        Color::rgb(0, 0, 0),
+        Theme::dark(),
         test_chrome_cache(),
         test_frost_cache(),
         test_pressure(),

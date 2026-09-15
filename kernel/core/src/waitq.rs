@@ -942,28 +942,32 @@ pub fn irq_wake() {
 }
 
 /// The wait-queue holding every task parked on a
-/// [`WaitSourceKind::MemoryPressure`](tairix_abi::WaitSourceKind::MemoryPressure)
-/// wait-set member.
+/// [`WaitSourceKind::SystemNotice`](tairix_abi::WaitSourceKind::SystemNotice)
+/// wait-set member, whatever topic it observes
+/// (`plans/NOTICE.md`).
 ///
-/// There is one band for the whole machine, so one queue holds every
-/// watcher; each woken waiter re-checks the band against the one its own
-/// member last observed, and a waiter already up to date simply parks
-/// again.
-pub static PRESSURE_WAITQ: WaitQueue = WaitQueue::new();
+/// One queue for every topic rather than one per topic: each topic is a
+/// single machine-wide value, so a queue per topic would hold the same
+/// waiters over again, and a woken waiter re-checks its *own* topic's
+/// generation against the one its member last observed — a waiter already up
+/// to date simply parks again. One queue is also what lets the deferred wake
+/// stay a single lock-free flag, which the memory-pressure publisher requires
+/// (see [`notice_wake`]).
+pub static NOTICE_WAITQ: WaitQueue = WaitQueue::new();
 
-/// Request a wake of every memory-pressure watcher because the published
-/// band changed.
+/// Request a wake of every system-notice watcher because some topic moved.
 ///
-/// Called from the pressure gauge's band-change hook, which fires inside
-/// whatever was spending memory at the time — a cache operation, a demand
-/// fault, a direct-reclaim sweep, possibly with the frame allocator's own
-/// lock held. It is therefore **lock-free**: it only flags the queue
-/// ([`WaitQueue::request_wake`]), and the real `unpark` runs later at the
-/// next dispatcher-context [`drain_pending_wakes`], exactly like a device
-/// IRQ's wake. Taking the wait-queue lock here instead could re-enter a
-/// lock the interrupted allocator already holds.
-pub fn pressure_wake() {
-    PRESSURE_WAITQ.request_wake();
+/// **Lock-free by requirement, not by preference.** The memory-pressure topic
+/// is published from the gauge's band-change hook, which fires inside whatever
+/// was spending memory at the time — a cache operation, a demand fault, a
+/// direct-reclaim sweep, possibly with the frame allocator's own lock held —
+/// and the mount topic from a table mutation holding the filesystem's locks.
+/// So this only flags the queue ([`WaitQueue::request_wake`]) and the real
+/// `unpark` runs later at the next dispatcher-context [`drain_pending_wakes`],
+/// exactly like a device IRQ's wake. Taking the wait-queue lock here instead
+/// could re-enter a lock the interrupted publisher already holds.
+pub fn notice_wake() {
+    NOTICE_WAITQ.request_wake();
 }
 
 /// The wait-queue holding the write-back flusher kthread — the one task that
@@ -1290,7 +1294,7 @@ static ALL_QUEUES: &[GlobalQueue] = &[
         deferred: true,
     },
     GlobalQueue {
-        queue: &PRESSURE_WAITQ,
+        queue: &NOTICE_WAITQ,
         timed: false,
         deferred: true,
     },
@@ -2079,29 +2083,27 @@ mod tests {
         assert_eq!(*arch.unparked.borrow(), alloc::vec![2, 3]);
     }
 
-    /// The pressure gauge's band-change hook must be usable from inside
-    /// an allocation path, so it only *flags* the queue; the flag is what
-    /// the preemption gate sees and what the dispatcher-context drain
-    /// consumes.
+    /// Both kernel-owned notice topics publish from a context that cannot
+    /// take a lock — the pressure gauge's band-change hook fires inside an
+    /// allocation path, a mount mutation holds the filesystem's locks — so
+    /// the wake is only *flagged*; the flag is what the preemption gate sees
+    /// and what the dispatcher-context drain consumes.
     ///
     /// Every assertion here is monotone in the shared flag (set, then
     /// observe set), never "observe clear": the flag is process-global
     /// and the test binary runs concurrently, so asserting it is clear
     /// would be a race, not a test.
     #[test]
-    fn a_pressure_band_change_flags_a_deferred_wake_without_unparking() {
-        pressure_wake();
+    fn a_notice_topic_change_flags_a_deferred_wake_without_unparking() {
+        notice_wake();
 
-        assert!(
-            PRESSURE_WAITQ.wake_is_pending(),
-            "the band change owes a wake"
-        );
+        assert!(NOTICE_WAITQ.wake_is_pending(), "the change owes a wake");
         assert!(
             has_pending_deferred_wake(),
             "a lone-task CPU must still reschedule so the drain can run"
         );
         assert!(
-            PRESSURE_WAITQ.take_wake_pending(),
+            NOTICE_WAITQ.take_wake_pending(),
             "the drain consumes the owed wake"
         );
     }

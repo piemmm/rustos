@@ -28,6 +28,7 @@
 //! admit a driver. This is host-only build glue; the production image
 //! stays Rust-only.
 
+use std::path::Path;
 use std::sync::OnceLock;
 
 use tairix_abi::driver_store::SystemConfigFile;
@@ -680,6 +681,8 @@ fn build_bundle(
             .map(|res| (res.file, res.bytes)),
     )?;
 
+    verify_planted_entries(&app.crate_dir, &bundle_dir)?;
+
     let digests: Vec<BundleFileDigest<'_>> = contents
         .iter()
         .map(|(path, bytes)| BundleFileDigest { path, bytes })
@@ -745,6 +748,42 @@ fn verify_composed_appinfo(bytes: &[u8], name: &str) -> Result<(), String> {
 ///
 /// Returns an actionable build-error message when a declared icon is absent
 /// from `Resources/` or is not artwork the desktop would draw.
+/// Bundle entries a source tree may hold that the composer plants: `Help/`
+/// and `Resources/` are discovered by `tools/syshelp`, `Run` is compiled
+/// here, and `AppInfo` is composed here.
+///
+/// `DefaultSettings/` is deliberately absent. Nothing discovers it, so a
+/// bundle that shipped one would reach the image without it *and* without it
+/// in the signed content digest — a defaults layer the app would then never
+/// read. Shipping one needs discovery beside `Help/`/`Resources/` and a
+/// `CAP_FS_ACCESS` request in the manifest, because the bundle-shipped layer
+/// is the application's own read rather than the settings service's.
+const PLANTED_BUNDLE_ENTRIES: &[BundleEntry] = &[
+    BundleEntry::Run,
+    BundleEntry::AppInfo,
+    BundleEntry::Help,
+    BundleEntry::Resources,
+];
+
+/// Refuse a bundle whose source tree carries an entry the composer does not
+/// plant, rather than dropping it silently.
+fn verify_planted_entries(crate_dir: &Path, bundle_dir: &str) -> Result<(), String> {
+    for entry in BundleEntry::ALL {
+        if PLANTED_BUNDLE_ENTRIES.contains(&entry) {
+            continue;
+        }
+        if crate_dir.join(entry.as_str()).exists() {
+            return Err(format!(
+                "image: {bundle_dir} ships {}/, which the bundle composer does not plant: \
+                 it would be absent from the image and from the signed content digest. \
+                 Discover it in tools/syshelp beside Help/ and Resources/ first",
+                entry.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn verify_library_icon<'a>(
     bundle_dir: &str,
     library_icon: Option<&str>,

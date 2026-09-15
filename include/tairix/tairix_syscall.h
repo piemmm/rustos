@@ -147,6 +147,8 @@ extern "C" {
 #define TAIRIX_SYS_FS_LOCK_QUERY 121u
 #define TAIRIX_SYS_CPUFREQ_BIND 122u
 #define TAIRIX_SYS_CPUFREQ_WAIT 123u
+#define TAIRIX_SYS_NOTICE_READ 124u
+#define TAIRIX_SYS_NOTICE_PUBLISH 125u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -347,8 +349,22 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_WAIT_SOURCE_SIGNAL 6u
 #define TAIRIX_WAIT_SOURCE_FILE 7u
 #define TAIRIX_WAIT_SOURCE_CALL_REPLY 8u
-#define TAIRIX_WAIT_SOURCE_MEMORY_PRESSURE 9u
+#define TAIRIX_WAIT_SOURCE_SYSTEM_NOTICE 9u
 #define TAIRIX_WAIT_SOURCE_PORT_ROOM 10u
+
+/* System notice topics (the `topic` argument of notice_read() and
+* notice_publish(), uint32_t) and each topic's exact payload length. A topic
+* outside the set, or a length that is not the topic's own, is rejected with
+* TAIRIX_E_OUT_OF_RANGE / TAIRIX_E_LENGTH_OUT_OF_RANGE. Publishing is
+* authorised per topic: the desktop topic admits only the holder of a seat's
+* live display lease, and every kernel-owned topic admits nobody. */
+#define TAIRIX_NOTICE_PAYLOAD_MAX 16u
+#define TAIRIX_NOTICE_TOPIC_DESKTOP 0u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 12u
+#define TAIRIX_NOTICE_TOPIC_MOUNTS 1u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_MOUNTS 0u
+#define TAIRIX_NOTICE_TOPIC_MEMORY_PRESSURE 2u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_MEMORY_PRESSURE 1u
 
 /* latency_watch() — declare the calling thread's interactive frame budget in
 * nanoseconds. Returns the budget actually armed: the value clamped up to
@@ -509,6 +525,8 @@ int32_t tairix_sys_fs_lock(uint32_t a0, uint32_t a1, uint32_t a2, uint64_t a3, u
 uint64_t tairix_sys_fs_lock_query(uint32_t a0, uint32_t a1, uint64_t a2, uint64_t a3, void * a4, uintptr_t a5);
 uint64_t tairix_sys_cpufreq_bind(void * a0);
 int32_t tairix_sys_cpufreq_wait(uint64_t a0, uint64_t a1, void * a2);
+uint64_t tairix_sys_notice_read(uint32_t a0, void * a1, uintptr_t a2);
+int32_t tairix_sys_notice_publish(uint32_t a0, void * a1, uintptr_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -3077,6 +3077,55 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `irq_wait` would per interrupt; the bind above is the audited act.
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::NOTICE_READ,
+        name: "notice_read",
+        arg_count: 3,
+        args: [
+            // The notice topic, then the non-null `UserPtr` the payload is
+            // written to and that buffer's capacity.
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` register convention
+        // `hw_tree_read` / `resource_grants` use.
+        ret: AbiType::U64,
+        // Needs no capability: every topic is a machine-wide fact no
+        // principal owns — the desktop's own description, the mount table's
+        // generation, the memory-pressure band — and each is already readable
+        // through a query any process may issue. High-volume by design (one
+        // per wake), so not audited per call.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::NOTICE_PUBLISH,
+        name: "notice_publish",
+        arg_count: 3,
+        args: [
+            // The notice topic, then the non-null `UserPtr` holding the
+            // payload and its exact length.
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Authority is per topic rather than one capability: the desktop
+        // topic admits only the holder of a seat's live display lease (the
+        // kernel-attested fact that names the one principal owning the
+        // screen), and the kernel-owned topics admit nobody. A single
+        // `CAP_*` would be coarser than the thing it guards. Audited: it is
+        // a low-volume authority decision over machine-wide state.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

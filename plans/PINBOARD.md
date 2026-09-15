@@ -429,7 +429,7 @@ models as well as the surface it writes, and scales the source through
 defined in screen pixels, model correctly instead of drawing at 1:1. What
 the preview shows is therefore what the desktop will show. The screen
 extent is part of the preview request, so a preview rendered for one screen
-can never be displayed as if it were for another, and a `DesktopChanged`
+can never be displayed as if it were for another, and a published desktop
 that alters the extent re-renders it.
 
 **Outstanding — listing a user-picked directory.** Offering an image from

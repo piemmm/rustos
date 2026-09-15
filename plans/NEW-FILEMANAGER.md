@@ -1815,9 +1815,13 @@ volume with an icon matching the **real** storage medium.
   unavailable, and leaves the browser exactly where it was. The routing is
   host-visible (`userland/apps/files/src/sidebar.rs`) and host-tested rather
   than stranded in the freestanding module.
-- **Refresh `[x]`.** There is no mount-change event in the system, so the
-  rail rebuilds on a user gesture (F5 or the Refresh tool), preserving focus
-  and cursor. No timer and no polling loop was added.
+- **Refresh `[x]`.** The rail converges on the kernel's `Mounts` system
+  notice (`plans/NOTICE.md`): an attach, a re-backing, or a removal wakes the
+  manager, which re-reads the rail through its existing reader desk (the mount
+  table comes from the System Information service, so it is never read on the
+  event loop) and redraws when the answer lands. F5 and the Refresh tool
+  remain the explicit ask, for a volume whose contents changed under the
+  window. Focus and cursor survive the rebuild; no timer and no polling loop.
 - The trusted picker composes the same renderer with no rail
   (`ManagerChrome::none()`): it is a read-only one-shot over a caller-chosen
   start location, and a machine-wide device rail is neither its job nor

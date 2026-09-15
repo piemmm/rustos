@@ -39,7 +39,7 @@ The crate provides:
 - `for_each_mount` / `render_mount` / `render_options` — the paged
   mount-table walk and its `source on target type fstype (options)`
   rendering.
-- `pressure::refresh_into` — reading the published memory-pressure band and
+- `pressure::publish_depth` — publishing a reported memory-pressure band and
   publishing it to a `tairix_reclaim::ReportedPressure` gauge, the one
   definition every caching program keeps its band current through.
 - `resolve` / `ResolveInfoError` — the userspace `info:`/`state:`/`stats:`
@@ -75,7 +75,7 @@ binary lands):
   standard-error diagnostic sink the tool `Run` binaries use, written once
   here rather than pasted into each (`AGENTS.md` §2.2).
 - `pressure::watch` / `pressure::refresh` — arming the edge-triggered
-  `WaitSourceKind::MemoryPressure` wake against this process's gauge, and
+  `MemoryPressure` system-notice wake against this process's gauge, and
   draining it. `watch` also primes the gauge, because the wake reports only
   *changes* and the gauge admits nothing until it is told a band: a program
   that skips this does not cache imperfectly, it caches nothing at all and

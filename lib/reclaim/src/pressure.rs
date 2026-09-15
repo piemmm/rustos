@@ -141,6 +141,24 @@ impl PressureBand {
         }
     }
 
+    /// The band at `depth`, or `None` for a depth outside the model.
+    ///
+    /// The fallible read, for a depth that crossed a trust boundary: a value
+    /// this build does not know is refused rather than clamped to critical,
+    /// so a malformed report leaves the holder's last good band standing
+    /// instead of pinning every cache shut.
+    #[must_use]
+    pub const fn from_known_depth(depth: u8) -> Option<Self> {
+        match depth {
+            0 => Some(Self::Normal),
+            1 => Some(Self::Mild),
+            2 => Some(Self::Moderate),
+            3 => Some(Self::Severe),
+            4 => Some(Self::Critical),
+            _ => None,
+        }
+    }
+
     /// The next shallower band (normal relaxes to itself).
     const fn relaxed(self) -> Self {
         Self::from_depth(self.depth().saturating_sub(1))

@@ -17,18 +17,19 @@
 //! * the return address is at `[s0 - 8]`,
 //! * the caller's saved `s0` is at `[s0 - 16]`.
 //!
-//! # Stack bounds
+//! # The boot stack
 //!
 //! The bootstrap hart runs on the linker-reserved boot stack
 //! (`__boot_stack_bottom .. __boot_stack_top` in `boot.s`).
-//! `stack_bounds` returns those bounds when the captured `sp` lies
-//! within them and `None` otherwise, so the unwinder degrades to
-//! registers + program counter on a stack the port cannot vouch for
-//! rather than reading memory that might be unmapped (fail closed — never
-//! a fault inside the fault handler).
+//! `boot_stack` returns that region, rooted, when the captured `sp` lies
+//! within it and `None` otherwise — a kthread stack, which the kernel
+//! resolves instead — so the unwinder never reads memory the port cannot
+//! vouch for (fail closed, never a fault inside the fault handler). The
+//! region carries the pointer its words are read *through*, minted here
+//! because the linker reservation is a fact only the port holds.
 
 use tairix_arch_api::{
-    Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, RegisterSnapshot, StackBounds,
+    Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, KernelStackRegion, RegisterSnapshot,
 };
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
@@ -144,7 +145,7 @@ impl CpuStateCapture for Backtracer {
     }
 
     #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-    fn stack_bounds(&self) -> Option<StackBounds> {
+    fn boot_stack(&self) -> Option<KernelStackRegion> {
         let sp: u64;
         // SAFETY: reading `sp` into an output operand has no side effects
         // and cannot fault.
@@ -152,14 +153,19 @@ impl CpuStateCapture for Backtracer {
             core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
         }
         // SAFETY: taking the address of the extern boot-stack symbols is a
-        // link-time constant; we never dereference them.
+        // link-time constant; we never dereference them here.
         let low = core::ptr::addr_of!(__boot_stack_bottom) as u64;
         let high = core::ptr::addr_of!(__boot_stack_top) as u64;
-        StackBounds::enclosing(sp, low, high)
+        // SAFETY: `boot.s` reserves `[__boot_stack_bottom, __boot_stack_top)` as this
+        // CPU's boot stack and nothing else claims those bytes, so they are
+        // mapped and writable for the whole life of the kernel. Minting the
+        // root here is what lets the unwinder derive each read rather than
+        // rebuild a pointer per word.
+        unsafe { KernelStackRegion::enclosing(sp, low, high) }
     }
 
     #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
-    fn stack_bounds(&self) -> Option<StackBounds> {
+    fn boot_stack(&self) -> Option<KernelStackRegion> {
         None
     }
 

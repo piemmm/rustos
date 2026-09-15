@@ -1522,6 +1522,7 @@ You are not exempt from any rule above. In addition:
     | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/IMPLEMENT-OUTSTANDING-ARXFS.md` (the ordered ledger of what is left); `plans/SPARSE.md`; `plans/ARXFS-METADATA.md`; `plans/ARXFS-WRITEBACK.md`; `plans/ARXFS-MAINTENANCE.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md` |
     | Filesystem write durability: the ARXFS dirty-block set, commit batching, the commit barrier, and the device-class dirty-age policy | `plans/ARXFS-WRITEBACK.md` |
     | Autonomous filesystem health: what drives `scrub`/`trim`/`health`, the maintenance scheduler and runner, the shared background-work pacer, the cross-layer stand-down, the `arxfs` command app | `plans/ARXFS-MAINTENANCE.md` |
+    | System notices: the state-edge broadcast, its topics, and the authority to publish one | `plans/NOTICE.md` |
     | System log / audit trail | `plans/SYSLOG.md` |
     | Memory pressure, reclaimable memory, swap tiers | `plans/SMARTRAM.md`; `plans/SWAPSWAPSWAP.md`; `plans/FIX-SWAPFILE.md` (partition swap / SWAP5) |
     | Kernel-heap growth: fragmentation-immune growth, the frame-backed heap source, the heap-allocation-size vs `MAX_ORDER` decoupling | `plans/FIX-KHEAP.md` |

@@ -50,6 +50,7 @@ use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, SocketDatagram, SocketRequest,
     SocketStreamEvent,
 };
+use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest};
 use tairix_abi::power::PowerAction;
@@ -188,6 +189,30 @@ fn exercise_users_admin(bytes: &[u8]) {
 /// Drive the System Information record family on `bytes` (one arm of
 /// [`exercise`]): each accepted request/record round-trips through its
 /// encoder.
+/// Every notice topic, so a payload that crosses the publish/read boundary is
+/// fuzzed at its own exact length as well as at whatever length the corpus
+/// happened to supply.
+fn exercise_notice_payloads(bytes: &[u8]) {
+    for topic in NoticeTopic::ALL {
+        if let Ok(notice) = Notice::decode(topic, bytes) {
+            let mut out = [0u8; NOTICE_PAYLOAD_MAX];
+            let len = notice
+                .encode(&mut out)
+                .expect("an accepted payload must re-encode");
+            assert_eq!(
+                Notice::decode(topic, &out[..len]),
+                Ok(notice),
+                "round-trip of an accepted notice must succeed"
+            );
+        }
+        if let Some(head) = bytes.get(..topic.payload_len()) {
+            if let Ok(notice) = Notice::decode(topic, head) {
+                assert_eq!(notice.topic(), topic);
+            }
+        }
+    }
+}
+
 fn exercise_sysinfo_records(bytes: &[u8]) {
     if let Ok(req) = ProcessListRequest::from_bytes(bytes) {
         let redecoded = ProcessListRequest::from_bytes(&req.to_le_bytes())
@@ -234,6 +259,20 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
     }
+    exercise_sysinfo_memory_records(bytes);
+}
+
+/// Every `sysinfo-v1` record family: the inventory, the memory accounting,
+/// the per-device statistics, and the desktop frame counters.
+fn exercise_sysinfo(bytes: &[u8]) {
+    exercise_sysinfo_records(bytes);
+    exercise_device_stat_records(bytes);
+    exercise_desktop_frame_records(bytes);
+}
+
+/// The memory-accounting half of the `sysinfo-v1` record sweep: the pressure
+/// gauge, the reclaim classes, the cache ledgers, and the CPU load series.
+fn exercise_sysinfo_memory_records(bytes: &[u8]) {
     if let Ok(stats) = MemoryPressureStats::from_bytes(bytes) {
         let redecoded = MemoryPressureStats::from_bytes(&stats.to_le_bytes())
             .expect("round-trip of accepted pressure stats must succeed");
@@ -819,9 +858,8 @@ fn exercise(bytes: &[u8]) {
     exercise_service_manifest(bytes);
     exercise_service_control(bytes);
     exercise_users_admin(bytes);
-    exercise_sysinfo_records(bytes);
-    exercise_device_stat_records(bytes);
-    exercise_desktop_frame_records(bytes);
+    exercise_notice_payloads(bytes);
+    exercise_sysinfo(bytes);
     exercise_seatmgr(bytes);
     exercise_display_ipc(bytes);
     exercise_font_ipc(bytes);

@@ -239,6 +239,26 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn notice_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _topic: u32,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn notice_publish(
+        &self,
+        _c: &CallerContext<'_>,
+        _topic: u32,
+        _payload: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn stream_read(
         &self,
         _c: &CallerContext<'_>,

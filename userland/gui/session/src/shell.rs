@@ -706,23 +706,27 @@ impl DesktopShell {
     /// The active theme's desktop colour as the compositor's colour type,
     /// through the one shared theme→render edge (`From<Rgba> for Color`).
     ///
-    /// The embedder builds the compositor over this colour
-    /// ([`Compositor::new`]); after that,
-    /// [`sync_background`](Self::sync_background) keeps the two in step.
+    /// What the session's own surfaces paint their backdrop with; the
+    /// compositor derives the same colour from the theme it is given, so
+    /// neither carries a copy of the other's.
     #[must_use]
     pub fn desktop_background(&self) -> Color {
         Color::from(self.session.active_theme().palette().desktop)
     }
 
-    /// Bring the compositor's desktop background in step with the active
-    /// theme, returning whether it changed.
+    /// Bring the compositor's active theme in step with the session's,
+    /// returning whether it changed.
     ///
-    /// An embedder that switches the theme programmatically (through
+    /// The whole theme, not just its desktop colour: the compositor draws
+    /// every decorated window's furniture from it, so pushing only the
+    /// background would leave a light session's windows framed in dark
+    /// chrome. An embedder that switches appearance or theme (through
     /// [`session_mut`](Self::session_mut) and
-    /// [`set_theme`](DesktopSession::set_theme)) calls it, then
-    /// [`present`](Self::present), to relay the switch itself.
-    pub fn sync_background(&mut self, compositor: &mut Compositor) -> bool {
-        compositor.set_background(self.desktop_background())
+    /// [`set_appearance`](DesktopSession::set_appearance) /
+    /// [`set_theme`](DesktopSession::set_theme)) calls this, then
+    /// [`present`](Self::present), to relay the switch.
+    pub fn sync_theme(&mut self, compositor: &mut Compositor) -> bool {
+        compositor.set_theme(self.session.active_theme().clone())
     }
 
     /// Bring the compositor up to date with the taskbar's current model and

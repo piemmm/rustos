@@ -2464,6 +2464,42 @@ impl SyscallNumber {
     /// without the caller pacing it.
     pub const CPUFREQ_WAIT: Self = Self(123);
 
+    /// Read a system notice topic's current payload
+    /// (`plans/NOTICE.md`).
+    ///
+    /// Arguments are `(topic: u32, buf: UserPtr, len: usize)`; `topic` is a
+    /// [`crate::notice::NoticeTopic`] wire value and `buf` receives exactly
+    /// that topic's [`payload_len`](crate::notice::NoticeTopic::payload_len).
+    /// Returns the byte count written, or `-errno`:
+    /// [`Errno::OutOfRange`] for an unknown topic and
+    /// [`Errno::LengthOutOfRange`] for a buffer too small to hold the payload
+    /// — a short read is refused rather than answered with a truncated value.
+    ///
+    /// Unprivileged and non-blocking: every topic carries a machine-wide fact
+    /// no principal owns, and a woken subscriber must be able to converge
+    /// without an IPC round trip on the loop that owes the user a frame.
+    pub const NOTICE_READ: Self = Self(124);
+
+    /// Publish a system notice topic's current value
+    /// (`plans/NOTICE.md`).
+    ///
+    /// Arguments are `(topic: u32, payload: UserPtr, len: usize)`. The
+    /// payload must be exactly the topic's
+    /// [`payload_len`](crate::notice::NoticeTopic::payload_len) and must
+    /// decode, so a subscriber never reads a shape it would refuse.
+    /// Publishing the value already in force moves no generation and wakes
+    /// nobody.
+    ///
+    /// Authority is per topic and fail-closed, with no capability of its own:
+    /// [`Desktop`](crate::notice::NoticeTopic::Desktop) admits only the holder
+    /// of a seat's live display lease — the one principal that owns what is on
+    /// screen — and every kernel-owned topic refuses a userland publish
+    /// outright. Returns `Ok(0)`, or `-errno`: [`Errno::OutOfRange`] for an
+    /// unknown topic, [`Errno::LengthOutOfRange`] for a wrong-length payload,
+    /// [`Errno::PermissionDenied`] for a caller without the topic's authority,
+    /// and whatever the payload's own decode refuses.
+    pub const NOTICE_PUBLISH: Self = Self(125);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

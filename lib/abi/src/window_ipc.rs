@@ -1401,9 +1401,10 @@ pub enum WindowRequest {
     /// Read-only, and the one request that names no window: an app asks
     /// *before* it opens anything, so its first frame is already the right
     /// size, at the right density, in the right colours rather than a
-    /// guess it must correct. Thereafter the session pushes a
-    /// [`WindowEvent::DesktopChanged`] to each of the app's windows when
-    /// any of it changes.
+    /// guess it must correct. Thereafter it converges on the
+    /// [`NoticeTopic::Desktop`](crate::notice::NoticeTopic::Desktop) system
+    /// notice, which the session publishes whenever any of it changes — so an
+    /// application with no window open is told too.
     ///
     /// The reply also carries the serving session's own [`ProcId`], so an
     /// app that declares an icon-bar presence before it owns a window —
@@ -2881,8 +2882,6 @@ const EV_MINIMIZED: u16 = 8;
 const EV_RESIZED: u16 = 9;
 /// Wire event discriminant of [`WindowEvent::RedrawRequested`].
 const EV_REDRAW_REQUESTED: u16 = 10;
-/// Wire event discriminant of [`WindowEvent::DesktopChanged`].
-const EV_DESKTOP_CHANGED: u16 = 11;
 /// Wire event discriminant of [`WindowEvent::AlternateCloseRequested`].
 const EV_ALTERNATE_CLOSE_REQUESTED: u16 = 12;
 /// Wire kind of [`WindowEvent::AppBarDefault`].
@@ -3093,26 +3092,6 @@ pub enum WindowEvent {
         /// Signed vertical scroll ticks.
         dy: i32,
     },
-    /// The desktop this window is displayed on changed: a different screen
-    /// extent, a different UI scale, or a switch between the light and
-    /// dark appearance ([`WindowRequest::QueryDesktop`] is how an app
-    /// learns the state it started from).
-    ///
-    /// The app re-resolves whatever it derived from the old state — its
-    /// scale-dependent metrics, its font sizes, its theme colours — and
-    /// presents again. Ignoring the event is not broken: the window simply
-    /// keeps the appearance it opened with until the app next re-renders
-    /// for a reason of its own.
-    ///
-    /// The desktop belongs to the seat, not to one window, so the session
-    /// sends the event to every live window of every client. A client with
-    /// two windows is told twice, and both tell it the same thing.
-    DesktopChanged {
-        /// The window whose desktop is described.
-        window_id: u64,
-        /// The desktop as it now is.
-        desktop: DesktopInfo,
-    },
     /// A primary click landed on the application's icon-bar slot and the
     /// click was the application's to handle ([`AppBar::click`]).
     ///
@@ -3200,7 +3179,6 @@ impl WindowEvent {
             | Self::RedrawRequested { window_id }
             | Self::ContentReleased { window_id }
             | Self::Scrolled { window_id, .. }
-            | Self::DesktopChanged { window_id, .. }
             | Self::MenuClosed { window_id, .. }
             | Self::OpenRequested { window_id } => Some(window_id),
             Self::AppBarDefault | Self::AppBarMenu { .. } => None,
@@ -3259,10 +3237,6 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_SCROLLED);
                 put_i32(&mut out, 16, dx);
                 put_i32(&mut out, 20, dy);
-            }
-            Self::DesktopChanged { desktop, .. } => {
-                put_u16(&mut out, 6, EV_DESKTOP_CHANGED);
-                desktop.write_to_at(&mut out, 16);
             }
             Self::Minimized { .. } => {
                 put_u16(&mut out, 6, EV_MINIMIZED);
@@ -3389,11 +3363,6 @@ impl WindowEvent {
                     width_px,
                     height_px,
                 })
-            }
-            EV_DESKTOP_CHANGED => {
-                event_reserved_zero(bytes, 16 + DesktopInfo::WIRE_LEN)?;
-                let desktop = DesktopInfo::from_bytes_at(bytes, 16)?;
-                Ok(Self::DesktopChanged { window_id, desktop })
             }
             EV_MENU_CLOSED => {
                 event_reserved_zero(bytes, MENU_CLOSED_WIRE_END)?;
@@ -5272,28 +5241,6 @@ mod tests {
         let mut dirty = good;
         dirty[DESKTOP_REPLY_SERVER_OFFSET - 1] = 1;
         assert_eq!(decode_desktop_reply(&dirty), Err(Errno::BadMagic));
-    }
-
-    #[test]
-    fn a_desktop_change_event_round_trips_and_fails_closed() {
-        let event = WindowEvent::DesktopChanged {
-            window_id: 7,
-            desktop: sample_desktop(),
-        };
-        let wire = event.to_le_bytes();
-        assert_eq!(WindowEvent::from_bytes(&wire), Ok(event));
-        assert_eq!(event.window_id(), Some(7));
-
-        // The record ends well before the frame does; the tail past it
-        // must be zero.
-        let mut dirty = wire;
-        dirty[WindowEvent::WIRE_LEN - 1] = 1;
-        assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
-        // A malformed record inside a well-formed frame is refused, not
-        // clamped to something plausible.
-        let mut blank = wire;
-        blank[16..16 + DesktopInfo::WIRE_LEN].fill(0);
-        assert_eq!(WindowEvent::from_bytes(&blank), Err(Errno::OutOfRange));
     }
 
     #[test]

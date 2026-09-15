@@ -82,6 +82,7 @@ use crate::sched::{
 use tairix_abi::cpufreq::CpuFreqLimits;
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket,
@@ -3183,17 +3184,16 @@ where
             // exactly its watchers ready. The wait loop advances the observed
             // generation when it reports the member (the edge consume).
             WaitSourceKind::File => crate::fswatch::current_generation(m.file) != m.observed,
-            // The machine's memory-pressure band differs from the one
-            // this member last saw. A peek at the published band, never
-            // a fresh reading: an unprivileged waiter must not be able
-            // to drive a free-memory sample, and the band is refreshed
-            // by whoever actually spends memory. The wait loop advances
-            // the observed band when it reports the member (the edge
-            // consume), so a band that deepens and relaxes again before
-            // the waiter runs correctly reports nothing to do.
-            WaitSourceKind::MemoryPressure => {
-                u64::from(crate::memstats::MEM_STATS.published_band().depth()) != m.observed
-            }
+            // The topic's generation differs from the one this member last
+            // saw. A peek at the published value, never a fresh reading: an
+            // unprivileged waiter must not be able to drive a free-memory
+            // sample, and each topic is refreshed by whoever owns it. The
+            // wait loop advances the observed generation when it reports the
+            // member (the edge consume). A topic whose `id` no longer
+            // resolves cannot report ready, exactly as a retired descriptor
+            // cannot.
+            WaitSourceKind::SystemNotice => NoticeTopic::from_u64(m.id)
+                .is_ok_and(|topic| crate::notice::generation(topic) != m.observed),
             // A send to this port would not be refused *for want of room*.
             // A vanished port and a caller that no longer holds the send
             // authority both report ready rather than parking a sender on a
@@ -7945,6 +7945,71 @@ where
         Ok(0)
     }
 
+    fn notice_read(
+        &self,
+        caller: &CallerContext<'_>,
+        topic: u32,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked that `buf` is a non-null `UserPtr`;
+        // the topic is validated before any state is read, so an unknown one
+        // never reaches the registry.
+        let topic = NoticeTopic::from_u32(topic)?;
+        let mut bytes = [0u8; NOTICE_PAYLOAD_MAX];
+        let payload_len = topic.payload_len();
+        // The whole payload or nothing: a value is never truncated to fit an
+        // undersized buffer, because half a desktop record is not a desktop.
+        if payload_len > len {
+            return Err(Errno::LengthOutOfRange);
+        }
+        // A topic nothing has published yet has no value to converge on.
+        // `NotFound` rather than a plausible default: adopting a desktop the
+        // session never described would lay every window out to a guess.
+        let Some(written) = crate::notice::payload(topic, &mut bytes)? else {
+            return Err(Errno::NotFound);
+        };
+        self.copy_out_user(caller, buf, &bytes[..written])?;
+        Ok(written as u64)
+    }
+
+    fn notice_publish(
+        &self,
+        caller: &CallerContext<'_>,
+        topic: u32,
+        payload: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // Validate the topic and the length before touching the caller's
+        // memory or any state, then authorise, then act.
+        let topic = NoticeTopic::from_u32(topic)?;
+        if len != topic.payload_len() {
+            return Err(Errno::LengthOutOfRange);
+        }
+        // Authority is the topic's own, checked before the payload is read.
+        // The desktop is what the seat's live display lease *is*: the one
+        // principal the kernel already attests owns what is on screen, and
+        // the same fact `WaitSourceKind::SeatInput` and the seat-scoped
+        // reserved-endpoint bind are gated on. A background session that has
+        // released or lost its lease is refused and re-publishes when it
+        // re-acquires on foreground wake. Every kernel-owned topic refuses
+        // outright inside `notice::publish`.
+        if matches!(topic, NoticeTopic::Desktop)
+            && !self
+                .seat_registry
+                .holds_live_lease(SeatOwner(caller.task_id.0))
+        {
+            return Err(Errno::PermissionDenied);
+        }
+        let mut bytes = [0u8; NOTICE_PAYLOAD_MAX];
+        self.copy_in_user(caller, payload, &mut bytes[..len])?;
+        // Decoded here rather than stored raw, so a subscriber can never read
+        // a shape the publisher could not have meant.
+        let notice = Notice::decode(topic, &bytes[..len])?;
+        crate::notice::publish(&notice)?;
+        Ok(0)
+    }
+
     fn ipc_call(
         &self,
         caller: &CallerContext<'_>,
@@ -9457,15 +9522,17 @@ where
                         }
                         member_file = stat.id;
                     }
-                    // The machine has exactly one band, so there is
-                    // nothing to resolve and nothing to own: any process
-                    // may learn that memory is short, exactly as any may
-                    // read the load average. A non-zero `id` names a
-                    // source that does not exist and is refused like any
+                    // A topic is one machine-wide value nobody owns, so
+                    // there is nothing to owner-check: any process may learn
+                    // that the desktop switched appearance, that the mount
+                    // table moved, or that memory is short, exactly as any
+                    // may read the load average — *publishing* is what
+                    // carries authority. An `id` outside the topic set names
+                    // a source that does not exist and is refused like any
                     // other unresolvable member rather than silently
-                    // accepted as an alias for the one band.
-                    WaitSourceKind::MemoryPressure => {
-                        if id != 0 {
+                    // accepted as an alias for one that does.
+                    WaitSourceKind::SystemNotice => {
+                        if NoticeTopic::from_u64(id).is_err() {
                             return Err(Errno::NotFound);
                         }
                     }
@@ -9499,17 +9566,17 @@ where
                         baseline,
                     );
                 }
-                if kind == WaitSourceKind::MemoryPressure {
-                    // Baseline on the band in force at the add, so a
-                    // member added while the machine is already tight
-                    // does not immediately report an edge that has
-                    // nothing new in it. The caller reads the band once
-                    // at start-up and is then told only about moves.
-                    let baseline = u64::from(crate::memstats::MEM_STATS.published_band().depth());
+                if kind == WaitSourceKind::SystemNotice {
+                    // Baseline on the generation in force at the add, so a
+                    // member added while a topic already holds an unusual
+                    // value does not immediately report an edge that has
+                    // nothing new in it. The caller reads the topic once at
+                    // start-up and is then told only about moves.
+                    let baseline = NoticeTopic::from_u64(id).map_or(0, crate::notice::generation);
                     let _ = crate::waitset::advance_observed(
                         caller.task_id.0,
                         set,
-                        WaitSourceKind::MemoryPressure,
+                        WaitSourceKind::SystemNotice,
                         id,
                         baseline,
                     );
@@ -9597,14 +9664,15 @@ where
         // below), letting a wedged callee's timeout wake the reaper exactly
         // like a real completion, never a busy poll.
         let observes_callreply = members.iter().any(|m| m.kind == WaitSourceKind::CallReply);
-        // `PRESSURE_WAITQ` is joined only by a set holding a
-        // `MemoryPressure` member. Its wake is flagged from inside
-        // whatever was spending memory when the band moved and drained
-        // at the next dispatcher-context point, so a band change never
-        // disturbs a waiter that did not ask about it.
-        let observes_pressure = members
+        // `NOTICE_WAITQ` is joined only by a set holding a `SystemNotice`
+        // member. Its wake is flagged from inside whatever published the
+        // topic — an allocation path for the band, a mount mutation for the
+        // table, a syscall for the desktop — and drained at the next
+        // dispatcher-context point, so a topic moving never disturbs a
+        // waiter that holds no notice member at all.
+        let observes_notice = members
             .iter()
-            .any(|m| m.kind == WaitSourceKind::MemoryPressure);
+            .any(|m| m.kind == WaitSourceKind::SystemNotice);
         // `PORT_ROOM_WAITQ` is joined only by a set holding a `PortRoom`
         // member: a drained mailbox wakes the senders that port recorded,
         // and a torn-down port wakes them all, so ordinary mailbox traffic
@@ -9622,8 +9690,8 @@ where
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
-        if observes_pressure {
-            crate::waitq::PRESSURE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        if observes_notice {
+            crate::waitq::NOTICE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
         if observes_room {
             crate::waitq::PORT_ROOM_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -9769,8 +9837,8 @@ where
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
         }
-        if observes_pressure {
-            crate::waitq::PRESSURE_WAITQ.deregister(sched_task);
+        if observes_notice {
+            crate::waitq::NOTICE_WAITQ.deregister(sched_task);
         }
         if observes_callreply {
             crate::waitq::CALL_WAITQ.deregister(sched_task);
@@ -9853,22 +9921,24 @@ where
                 );
             }
         }
-        // Consume a MemoryPressure winner's edge: advance the member's
-        // observed band to the published one, so the next wait blocks
-        // until the band moves *again*. Advancing to the band as it
-        // stands now (not the one the scan saw) is deliberate: the
-        // caller reads the band for itself after this returns, so a move
-        // that raced in between is already in what it will read, and
-        // re-reporting it would be a spurious wake with nothing to do.
-        if kind == WaitSourceKind::MemoryPressure {
-            let band = u64::from(crate::memstats::MEM_STATS.published_band().depth());
-            let _ = crate::waitset::advance_observed(
-                caller.task_id.0,
-                set,
-                WaitSourceKind::MemoryPressure,
-                id,
-                band,
-            );
+        // Consume a SystemNotice winner's edge: advance the member's observed
+        // generation to the topic's current one, so the next wait blocks until
+        // the topic moves *again*. Advancing to the generation as it stands
+        // now (not the one the scan saw) is deliberate: the caller reads the
+        // topic for itself after this returns, so a move that raced in between
+        // is already in what it will read, and re-reporting it would be a
+        // spurious wake with nothing to do.
+        if kind == WaitSourceKind::SystemNotice {
+            if let Ok(topic) = NoticeTopic::from_u64(id) {
+                let generation = crate::notice::generation(topic);
+                let _ = crate::waitset::advance_observed(
+                    caller.task_id.0,
+                    set,
+                    WaitSourceKind::SystemNotice,
+                    id,
+                    generation,
+                );
+            }
         }
         // Advance the round robin past the member just reported, so the next
         // wait scans the rest of the set first. Recorded only once the token
@@ -34656,7 +34726,11 @@ mod tests {
     const WS_KIND_PORT: u32 = tairix_abi::WaitSourceKind::Port as u32;
     const WS_KIND_STREAM: u32 = tairix_abi::WaitSourceKind::Stream as u32;
     const WS_KIND_SIGNAL: u32 = tairix_abi::WaitSourceKind::Signal as u32;
-    const WS_KIND_PRESSURE: u32 = tairix_abi::WaitSourceKind::MemoryPressure as u32;
+    const WS_KIND_NOTICE: u32 = tairix_abi::WaitSourceKind::SystemNotice as u32;
+    /// The notice topics as wait-set member ids.
+    const WS_TOPIC_DESKTOP: u64 = tairix_abi::NoticeTopic::Desktop as u64;
+    const WS_TOPIC_MOUNTS: u64 = tairix_abi::NoticeTopic::Mounts as u64;
+    const WS_TOPIC_PRESSURE: u64 = tairix_abi::NoticeTopic::MemoryPressure as u64;
     const WS_KIND_PORT_ROOM: u32 = tairix_abi::WaitSourceKind::PortRoom as u32;
 
     use tairix_reclaim::PressureBand;
@@ -34885,12 +34959,12 @@ mod tests {
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
-    /// The machine has one memory-pressure band, so the only nameable
-    /// source is `0`. Any other id names nothing and is refused like
-    /// every other unresolvable member — never quietly accepted as an
-    /// alias for the one band.
+    /// The topic set is closed, so an id outside it names nothing and is
+    /// refused like every other unresolvable member — never quietly
+    /// accepted as an alias for a topic that does exist. Every real topic
+    /// is addable with no capability at all.
     #[test]
-    fn waitset_pressure_member_refuses_a_source_that_does_not_exist() {
+    fn waitset_notice_member_refuses_a_topic_that_does_not_exist() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -34912,18 +34986,34 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         let set = h.waitset_create(&ctx).expect("create");
+        let past_the_set = WS_TOPIC_PRESSURE + 1;
         assert_eq!(
-            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PRESSURE, 1, 0xAA),
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_NOTICE, past_the_set, 0xAA),
             Err(Errno::NotFound)
         );
-        // The one real source is accepted without any capability, and a
-        // duplicate of it is still refused by the registry.
-        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PRESSURE, 0, 0xAA)
-            .expect("the one band is addable by any caller");
+        // A wide id must not be truncated into the topic whose wire value
+        // sits in its low bits.
         assert_eq!(
-            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PRESSURE, 0, 0xBB),
-            Err(Errno::AlreadyExists)
+            h.waitset_ctl(
+                &ctx,
+                set,
+                WS_OP_ADD,
+                WS_KIND_NOTICE,
+                (1u64 << 32) | WS_TOPIC_DESKTOP,
+                0xAA
+            ),
+            Err(Errno::NotFound)
         );
+        // Every real topic is accepted without any capability, and a
+        // duplicate of one is still refused by the registry.
+        for topic in [WS_TOPIC_DESKTOP, WS_TOPIC_MOUNTS, WS_TOPIC_PRESSURE] {
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_NOTICE, topic, 0xAA + topic)
+                .expect("every topic is addable by any caller");
+            assert_eq!(
+                h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_NOTICE, topic, 0xBB),
+                Err(Errno::AlreadyExists)
+            );
+        }
         assert_eq!(crate::waitset::release_owned_by(0x5901), 1);
     }
 
@@ -34936,7 +35026,7 @@ mod tests {
     /// band is process-wide and the test binary runs tests concurrently,
     /// so a second steering test would race with this one.
     #[test]
-    fn waitset_pressure_member_reports_a_band_change_and_consumes_the_edge() {
+    fn waitset_notice_pressure_topic_reports_a_band_change_and_consumes_the_edge() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -34969,8 +35059,15 @@ mod tests {
         assert_eq!(gauge.sample(), PressureBand::Normal);
 
         let set = h.waitset_create(&ctx).expect("create");
-        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_PRESSURE, 0, 0x9911)
-            .expect("add pressure member");
+        h.waitset_ctl(
+            &ctx,
+            set,
+            WS_OP_ADD,
+            WS_KIND_NOTICE,
+            WS_TOPIC_PRESSURE,
+            0x9911,
+        )
+        .expect("add pressure member");
 
         // Baselined on the band in force at the add: nothing has moved,
         // so there is nothing to report.
@@ -35007,6 +35104,273 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
         assert_eq!(crate::waitset::release_owned_by(0x5902), 1);
+    }
+
+    /// The desktop notice's authority *is* the seat's live display lease —
+    /// the one principal the kernel already attests owns what is on screen.
+    /// A caller with no lease is refused with no capability to shortcut it,
+    /// a kernel-owned topic refuses even the lease holder, and a
+    /// wrong-length payload is refused before the caller's memory is read.
+    #[test]
+    fn notice_publish_admits_only_the_seats_live_lease_holder() {
+        let _registry = crate::notice::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let desktop = match tairix_abi::desktop::DesktopInfo::new(
+            800,
+            600,
+            100,
+            tairix_abi::desktop::Appearance::Light,
+        ) {
+            Ok(info) => info,
+            Err(err) => panic!("a valid desktop: {err:?}"),
+        };
+        let payload = desktop.to_le_bytes();
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &payload);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(ProcessId(0x5A01), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // No capability at all: the lease is the whole authority.
+        let caps = make_caps_record(0x5A01, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5A01),
+            caps: &caps,
+        };
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_seat_registry(seat);
+
+        let topic = tairix_abi::NoticeTopic::Desktop.as_u32();
+        // Without the lease the publish is refused, and nothing is stored.
+        assert_eq!(
+            h.notice_publish(&ctx, topic, 0x1000, payload.len()),
+            Err(Errno::PermissionDenied)
+        );
+
+        assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
+        // A wrong-length payload is refused before the caller's memory is
+        // touched, so a short or over-long publish cannot store a partial
+        // record.
+        assert_eq!(
+            h.notice_publish(&ctx, topic, 0x1000, payload.len() - 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.notice_publish(&ctx, topic, 0x1000, tairix_abi::NOTICE_PAYLOAD_MAX + 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        // An unknown topic is refused before anything else.
+        assert_eq!(
+            h.notice_publish(&ctx, 0xFFFF, 0x1000, payload.len()),
+            Err(Errno::OutOfRange)
+        );
+        // Every kernel-owned topic refuses a userland publish, lease or no
+        // lease: its value is not user space's to assert.
+        for owned in [
+            tairix_abi::NoticeTopic::Mounts,
+            tairix_abi::NoticeTopic::MemoryPressure,
+        ] {
+            assert_eq!(
+                h.notice_publish(&ctx, owned.as_u32(), 0x1000, owned.payload_len()),
+                Err(Errno::PermissionDenied),
+                "{owned:?}"
+            );
+        }
+        // With the lease held, the publish lands.
+        assert_eq!(h.notice_publish(&ctx, topic, 0x1000, payload.len()), Ok(0));
+
+        // Releasing the lease takes the authority with it: a background
+        // session cannot re-describe the screen it no longer owns.
+        assert_eq!(
+            h.display_release(&ctx, SEAT_PRIMARY, ReleaseSurface::Text),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_publish(&ctx, topic, 0x1000, payload.len()),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    /// A published desktop reads back byte-exact to any process with no
+    /// capability at all, and an undersized buffer is refused rather than
+    /// answered with half a record.
+    #[test]
+    fn notice_read_answers_the_published_value_and_refuses_a_short_buffer() {
+        let _registry = crate::notice::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(ProcessId(0x5A02), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5A02, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5A02),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let topic = tairix_abi::NoticeTopic::Desktop.as_u32();
+        let len = tairix_abi::NoticeTopic::Desktop.payload_len();
+        // Nothing published yet: there is no value to converge on, and a
+        // plausible default would have a window lay itself out to a guess.
+        assert_eq!(
+            h.notice_read(&ctx, topic, 0x2000, len),
+            Err(Errno::NotFound)
+        );
+
+        let desktop = match tairix_abi::desktop::DesktopInfo::new(
+            1280,
+            1024,
+            125,
+            tairix_abi::desktop::Appearance::Dark,
+        ) {
+            Ok(info) => info,
+            Err(err) => panic!("a valid desktop: {err:?}"),
+        };
+        crate::notice::publish(&tairix_abi::Notice::Desktop(desktop)).expect("publish");
+
+        // A buffer too small for the whole payload is refused: half a
+        // desktop record is not a desktop.
+        assert_eq!(
+            h.notice_read(&ctx, topic, 0x2000, len - 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.notice_read(&ctx, 0xFFFF, 0x2000, len),
+            Err(Errno::OutOfRange)
+        );
+
+        assert_eq!(h.notice_read(&ctx, topic, 0x2000, len), Ok(len as u64));
+        let written = read_reply_page(
+            aspaces
+                .read()
+                .resolve(ProcessId(0x5A02))
+                .expect("registered")
+                .1,
+            len,
+        );
+        assert_eq!(
+            tairix_abi::Notice::decode(tairix_abi::NoticeTopic::Desktop, &written),
+            Ok(tairix_abi::Notice::Desktop(desktop))
+        );
+    }
+
+    /// The desktop topic's edge: a member baselined at the add stays quiet,
+    /// a real publish reports its token exactly once, and the value the
+    /// woken subscriber reads is the one that was published.
+    #[test]
+    fn waitset_notice_desktop_topic_reports_a_publish_and_consumes_the_edge() {
+        let _registry = crate::notice::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(ProcessId(0x5A03), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5A03, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5A03),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let light = match tairix_abi::desktop::DesktopInfo::new(
+            640,
+            480,
+            100,
+            tairix_abi::desktop::Appearance::Light,
+        ) {
+            Ok(info) => info,
+            Err(err) => panic!("a valid desktop: {err:?}"),
+        };
+        let dark = match tairix_abi::desktop::DesktopInfo::new(
+            640,
+            480,
+            100,
+            tairix_abi::desktop::Appearance::Dark,
+        ) {
+            Ok(info) => info,
+            Err(err) => panic!("a valid desktop: {err:?}"),
+        };
+        crate::notice::publish(&tairix_abi::Notice::Desktop(light)).expect("initial publish");
+
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(
+            &ctx,
+            set,
+            WS_OP_ADD,
+            WS_KIND_NOTICE,
+            WS_TOPIC_DESKTOP,
+            0x7711,
+        )
+        .expect("add desktop member");
+
+        // Baselined on the generation in force at the add, and re-stating
+        // the same value is not news: neither reports anything.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+        assert_eq!(
+            crate::notice::publish(&tairix_abi::Notice::Desktop(light)),
+            Ok(false)
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // A real switch is one edge, reported once.
+        assert_eq!(
+            crate::notice::publish(&tairix_abi::Notice::Desktop(dark)),
+            Ok(true)
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(ProcessId(0x5A03))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x7711
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        assert_eq!(crate::waitset::release_owned_by(0x5A03), 1);
     }
 
     /// A pending request on a member endpoint makes `waitset_wait` report that

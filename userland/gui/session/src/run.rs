@@ -102,9 +102,9 @@ mod program {
         MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
-        DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
-        WaitStatus, CONSOLE_INHERIT, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT,
-        WAIT_PID_ANY,
+        DriverError, Errno, Notice, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp,
+        WaitSourceKind, WaitStatus, CONSOLE_INHERIT, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN,
+        SPAWN_UID_INHERIT, WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
     use tairix_browse::{AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk};
@@ -1589,7 +1589,7 @@ mod program {
         }
         let Some(mut compositor) = Compositor::new(
             mode,
-            shell.desktop_background(),
+            shell.session().active_theme().clone(),
             chrome,
             frost,
             tairix_rt::pressure::gauge(),
@@ -5114,25 +5114,16 @@ mod program {
                 // showing behind the menu is redrawn too, so nothing on
                 // screen is left in the appearance just left behind.
                 shell.session_mut().set_appearance(appearance);
-                shell.sync_background(compositor);
+                shell.sync_theme(compositor);
                 shell.present(compositor);
                 confirm.repaint(shell, compositor);
                 elevate.repaint(shell, compositor);
                 // Served application windows are the apps' own pixels, so
-                // the session cannot re-colour them: it tells every app
-                // instead, and each repaints itself. Without this the
-                // desktop would switch and every open window would sit
-                // there in the appearance the user just left.
-                announce_desktop(
-                    server,
-                    sink,
-                    shell,
-                    compositor,
-                    windows,
-                    picker,
-                    &mut apps.service,
-                    menu,
-                );
+                // the session cannot re-colour them: it publishes the new
+                // desktop instead, and each app repaints itself. Without
+                // this the desktop would switch and every open window would
+                // sit there in the appearance the user just left.
+                publish_desktop(compositor);
             }
             ShellOutcome::Taskbar(TaskbarResponse::LockSession) => {
                 // Secure the screen. The prompt goes down first: an
@@ -6282,30 +6273,24 @@ mod program {
         }
     }
 
-    /// Tell every live window that the desktop they share has changed.
+    /// Publish the desktop every application shares, so each converges on
+    /// the state the session is actually compositing.
     ///
     /// The screen extent, the UI scale, and the active appearance are
-    /// properties of the seat, and an application only learns them by
-    /// asking or by being told: it holds its own pixels, so nothing the
-    /// session does to its own surfaces can bring an app's window into
-    /// step. Each window is told through the ordinary delivery path, so a
-    /// client that has died is torn down here exactly as it would be for
-    /// any other event.
+    /// properties of the seat, and an application holds its own pixels — so
+    /// nothing the session does to its own surfaces can bring an app's window
+    /// into step. One publish reaches every subscriber, windowed or not: an
+    /// application closed to its icon-bar slot is told too, and opens its
+    /// next window in the appearance in force rather than the one it last
+    /// saw. Publishing the value already in force wakes nobody, so this is
+    /// safe to call from any path that *might* have moved it.
     ///
-    /// A desktop the record cannot describe is reported and nothing is
-    /// sent: an application keeps the last state it was given rather than
-    /// being handed a guess.
-    #[allow(clippy::too_many_arguments)] // The delivery path's whole mutable state, threaded explicitly.
-    fn announce_desktop<S: DirectorySource, F: FnMut() -> S>(
-        server: &mut WindowServer<RtShmMapper>,
-        sink: &mut RtEventSink,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        windows: &mut SessionWindows,
-        picker: &mut SessionPicker<S, F>,
-        apps: &mut dyn AppBarBridge,
-        menu: &mut MenuChain,
-    ) {
+    /// A desktop the record cannot describe, or a publish the kernel refuses
+    /// (this session does not hold the seat's live display lease — it is in
+    /// the background, and re-publishes when it re-acquires), is reported and
+    /// nothing is published: an application keeps the last state it was given
+    /// rather than being handed a guess.
+    fn publish_desktop(compositor: &Compositor) {
         let desktop = match desktop_info(compositor) {
             Ok(desktop) => desktop,
             Err(err) => {
@@ -6316,17 +6301,12 @@ mod program {
                 return;
             }
         };
-        for window_id in server.window_ids() {
-            deliver(
-                server,
-                sink,
-                shell,
-                compositor,
-                windows,
-                picker,
-                apps,
-                menu,
-                &WindowEvent::DesktopChanged { window_id, desktop },
+        let rc = tairix_rt::notice_publish(&Notice::Desktop(desktop));
+        if rc < 0 {
+            let _ = writeln!(
+                Stderr,
+                "desktop: could not publish the desktop to apps: {}",
+                Errno::from_syscall(rc)
             );
         }
     }

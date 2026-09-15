@@ -33,6 +33,8 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    use core::cell::Cell;
+
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
@@ -102,25 +104,38 @@ mod program {
     /// parking on the wait-set whenever it is empty, and accept only events
     /// whose kernel-attested sender is the desktop session named by the create
     /// reply — anything else is dropped (fail closed).
-    struct RtEventSource {
+    struct RtEventSource<'a> {
         /// The app's own event mailbox, which authenticates every frame it
         /// hands over.
         mailbox: EventMailbox,
         set: u64,
+        /// Set when the park woke for a desktop change, cleared when the loop
+        /// adopts it. Shared through a cell because the park sets it and the
+        /// loop reads it, on the one thread both run on.
+        desktop_moved: &'a Cell<bool>,
     }
 
-    impl EventDrain for RtEventSource {
+    impl EventDrain for RtEventSource<'_> {
         fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
             self.mailbox.try_next(event)
         }
     }
 
-    impl EventSource for RtEventSource {
+    impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            if app::park(self.set)? == Wake::PressureChanged {
-                tairix_font::trim_glyph_cache();
+            match app::park(self.set)? {
+                Wake::PressureChanged => {
+                    tairix_font::trim_glyph_cache();
+                    Ok(Parked::Served)
+                }
+                // The theme and density everything is drawn from moved, so
+                // the wait ends and the loop re-themes before the next frame.
+                Wake::DesktopChanged => {
+                    self.desktop_moved.set(true);
+                    Ok(Parked::Interrupted)
+                }
+                Wake::Event | Wake::PressureUnchanged | Wake::App(_) => Ok(Parked::Served),
             }
-            Ok(Parked::Served)
         }
     }
 
@@ -271,10 +286,7 @@ mod program {
             | WindowEvent::PickCancelled { .. }
             // The gallery shows its own controls, so it declares no file
             // association and has no document an open target could name.
-            | WindowEvent::OpenRequested { .. }
-            // The desktop change is adopted by the caller before this match,
-            // which is also where the repaint it needs is decided.
-            | WindowEvent::DesktopChanged { .. } => Acted::Idle,
+            | WindowEvent::OpenRequested { .. } => Acted::Idle,
         }
     }
 
@@ -311,8 +323,31 @@ mod program {
         acted
     }
 
+    /// Adopt the desktop the session published, if the park said it moved,
+    /// answering whether anything the gallery draws from actually changed.
+    ///
+    /// A refused state is reported and the last good desktop stands, so the
+    /// window keeps drawing correctly rather than at a nonsense density.
+    fn adopt_desktop(
+        desktop: &mut Desktop,
+        themes: &mut ThemeRegistry,
+        moved: &Cell<bool>,
+    ) -> bool {
+        if !moved.replace(false) {
+            return false;
+        }
+        match app::adopt_desktop(desktop, themes) {
+            Ok(changed) => changed,
+            Err(err) => {
+                let _ = writeln!(Stderr, "widgets: desktop change refused: {err}");
+                false
+            }
+        }
+    }
+
     /// The event loop: park, apply, repaint. A dead channel ends the app
     /// fail-loud; a clean close ends it at zero.
+    #[allow(clippy::too_many_arguments)] // The loop's whole mutable state, threaded explicitly.
     fn run_event_loop(
         surface: &mut GalleryWindow,
         desktop: &mut Desktop,
@@ -320,37 +355,42 @@ mod program {
         gallery: &mut Gallery,
         event_endpoint: u64,
         mode: &DisplayMode,
-        mut events: WindowEvents<RtEventSource>,
+        desktop_moved: &Cell<bool>,
+        mut events: WindowEvents<RtEventSource<'_>>,
     ) -> i32 {
         loop {
             let event = match events.wait(surface.window.client()) {
                 Ok(Some(event)) => event,
-                // A wait that ended without an event cannot arise here (this
-                // app parks on nothing of its own), and a malformed frame from
-                // the authenticated session is refused rather than guessed at.
-                // Either way the app keeps waiting.
-                Ok(None) | Err(EventError::Undecodable(_)) => continue,
+                // A wait that ended without an event is the desktop notice
+                // (the only source this app parks on besides its mailbox);
+                // a malformed frame from the authenticated session is
+                // refused rather than guessed at. Either way there is no
+                // event to route, so the round is the re-theme alone.
+                Ok(None) | Err(EventError::Undecodable(_)) => {
+                    if adopt_desktop(desktop, themes, desktop_moved)
+                        && surface
+                            .present(
+                                gallery,
+                                themes.active(),
+                                desktop.scale(),
+                                mode,
+                                DamageRect::full(mode),
+                            )
+                            .is_err()
+                    {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    }
+                    continue;
+                }
                 Err(EventError::Mailbox(_)) => {
                     return fail(EXIT_CHANNEL_LOST, "event channel lost")
                 }
             };
 
-            // Adopt a desktop change before the app-specific event logic, so
-            // the scale and theme everything below derives from are already
-            // current. Only a real change costs a re-theme and a repaint; a
-            // refused one states its reason and stands on the last good
-            // desktop.
-            let redraw = match desktop.apply(&event) {
-                Ok(true) => {
-                    themes.set_appearance(desktop.appearance());
-                    true
-                }
-                Ok(false) => false,
-                Err(err) => {
-                    let _ = writeln!(Stderr, "widgets: desktop change refused: {err}");
-                    false
-                }
-            };
+            // A desktop change may have arrived alongside an event, so it is
+            // adopted before the app-specific logic: the scale and theme
+            // everything below derives from are then already current.
+            let redraw = adopt_desktop(desktop, themes, desktop_moved);
 
             // One sink per round: every control the event reaches, and the
             // gallery for what it changes itself, reports into this one.
@@ -463,9 +503,11 @@ mod program {
             Err(code) => return code,
         };
 
+        let desktop_moved = Cell::new(false);
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
+            desktop_moved: &desktop_moved,
         });
         run_event_loop(
             &mut surface,
@@ -474,6 +516,7 @@ mod program {
             &mut gallery,
             event_endpoint,
             &mode,
+            &desktop_moved,
             events,
         )
     }

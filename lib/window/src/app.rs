@@ -3,9 +3,10 @@
 //! Bringing a windowed application up is the same sequence every time: one
 //! `ipc_call` transport to the reserved window endpoint, one `port_bind`-bound
 //! event mailbox parked on through a wait-set that also carries the machine's
-//! memory-pressure band, the desktop's screen/density/appearance queried
-//! before anything is sized, and one retained drawing surface behind a shared
-//! frame region that survives resizes and releases. It lives here beside the
+//! memory-pressure band and the desktop's own state, the
+//! screen/density/appearance queried before anything is sized, and one
+//! retained drawing surface behind a shared frame region that survives
+//! resizes and releases. It lives here beside the
 //! rest of the app half of the channel so there is one of each rather than one
 //! per bundle.
 //!
@@ -20,13 +21,15 @@
 //! # What stays with the application
 //!
 //! Its own wait-set members and the tokens for them ([`FIRST_APP_TOKEN`]
-//! onward), what it *does* about a pressure-band change, and what it paints.
+//! onward), what it *does* about a pressure-band change or a desktop change,
+//! and what it paints.
 //! The shell owns the frame-region and damage bookkeeping without owning a
 //! single pixel of anyone's window.
 
 use core::fmt;
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::window_ipc::{WindowEvent, WindowSizing, WINDOW_ENDPOINT};
 use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
 use tairix_display::{winframe, SERIAL};
@@ -64,11 +67,17 @@ pub const EVENT_TOKEN: u64 = 1;
 /// tightens instead of being held until something else is starved.
 pub const PRESSURE_TOKEN: u64 = 2;
 
+/// The wait-set token of the desktop-notice member: the kernel wakes the park
+/// when the session publishes a new screen extent, density, or appearance, so
+/// a window follows a light/dark switch instead of sitting in the appearance
+/// the user just left.
+pub const DESKTOP_TOKEN: u64 = 3;
+
 /// The lowest token an application may give a wait-set member of its own.
 ///
 /// The shell's own members hold every value below it, so an app numbering from
 /// here cannot collide with them however many it adds.
-pub const FIRST_APP_TOKEN: u64 = 3;
+pub const FIRST_APP_TOKEN: u64 = 4;
 
 /// A bring-up refusal: the reserved exit code, the reason to state, and the
 /// typed error a caller that must answer in [`Errno`] hands on.
@@ -140,6 +149,10 @@ pub enum Wake {
     PressureChanged,
     /// The pressure member woke but the band is unchanged: nothing is owed.
     PressureUnchanged,
+    /// The session published a new desktop state. What the application owes
+    /// is [`adopt_desktop`], which answers whether anything it draws from
+    /// actually moved — the read is the app's because the [`Desktop`] is.
+    DesktopChanged,
     /// One of the application's own members, by its token.
     App(u64),
 }
@@ -154,6 +167,7 @@ fn classify(token: u64) -> Wake {
                 Wake::PressureUnchanged
             }
         }
+        DESKTOP_TOKEN => Wake::DesktopChanged,
         other => Wake::App(other),
     }
 }
@@ -303,6 +317,20 @@ pub fn bind_event_mailbox() -> Result<Binding, ShellError> {
             Errno::NotFound,
         ));
     }
+    if tairix_rt::waitset_ctl(
+        set,
+        WaitSetOp::Add,
+        WaitSourceKind::SystemNotice,
+        u64::from(NoticeTopic::Desktop.as_u32()),
+        DESKTOP_TOKEN,
+    ) != 0
+    {
+        return Err(ShellError::new(
+            EXIT_NO_EVENTS,
+            "desktop-change wake refused",
+            Errno::NotFound,
+        ));
+    }
     Ok(Binding { endpoint, set })
 }
 
@@ -330,6 +358,47 @@ pub fn bring_up_desktop<T: WindowTransport>(
     let mut themes = ThemeRegistry::with_builtins();
     themes.set_appearance(desktop.appearance());
     Ok((desktop, themes))
+}
+
+/// Read the desktop state the session published, adopt it into `desktop`, and
+/// bring `themes` into step — answering whether anything the application
+/// draws from actually moved.
+///
+/// What a [`Wake::DesktopChanged`] owes, and the exact pair
+/// [`bring_up_desktop`] establishes at start-up, so an application follows a
+/// light/dark switch with the same one call it opened with. The read is a
+/// plain syscall rather than a call to the session, so it costs no IPC round
+/// trip on the loop that owes the user a frame; the answer is `false` when the
+/// published state equals the one already held, so a wake with nothing in it
+/// costs no repaint.
+///
+/// # Errors
+///
+/// The kernel's refusal — [`Errno::NotFound`] before the session has published
+/// anything, which is the ordinary state of an application started in a
+/// text-only session — or [`Errno::OutOfRange`] for a state this build cannot
+/// draw at. Both `desktop` and `themes` keep the state they had, so a refusal
+/// leaves the window drawing correctly and the application reports it.
+pub fn adopt_desktop(desktop: &mut Desktop, themes: &mut ThemeRegistry) -> Result<bool, Errno> {
+    let mut buf = [0u8; NOTICE_PAYLOAD_MAX];
+    let read = tairix_rt::notice_read(NoticeTopic::Desktop, &mut buf);
+    if read < 0 {
+        return Err(Errno::from_syscall(read));
+    }
+    // Narrowed rather than cast: `usize` is 32 bits on a wasm32 build, so a
+    // cast would truncate a length the kernel reported.
+    let read = usize::try_from(read).map_err(|_| Errno::OutOfRange)?;
+    let bytes = buf.get(..read).ok_or(Errno::OutOfRange)?;
+    let Notice::Desktop(info) = Notice::decode(NoticeTopic::Desktop, bytes)? else {
+        // The topic's own decode answers its own variant; anything else
+        // would be the kernel describing a different topic.
+        return Err(Errno::BadMagic);
+    };
+    if !desktop.adopt(info)? {
+        return Ok(false);
+    }
+    themes.set_appearance(desktop.appearance());
+    Ok(true)
 }
 
 /// Bytes per pixel of a [`mode_for`] surface, which an app that writes the

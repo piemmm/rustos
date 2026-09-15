@@ -393,12 +393,13 @@ menu can never ask for the appearance already in use. See
 An application's window is the application's own pixels: the session composes
 them but cannot re-colour them, so re-theming the desktop alone would leave
 every open window sitting in the appearance the user just left. The session
-therefore *tells* each one. `Appearance` is part of the seat's desktop record
-(`tairix_abi::desktop::DesktopInfo`), which an app reads before it paints its
-first frame and is sent again, as a `WindowEvent::DesktopChanged`, to every
-live window whenever the switch happens. Each app re-applies the appearance to
-its own `ThemeRegistry`, re-resolves whatever it derived from the theme, and
-presents — so the switch reaches the whole screen at once. The enum crossing
+therefore *publishes* the new state. `Appearance` is part of the seat's desktop
+record (`tairix_abi::desktop::DesktopInfo`), which an app reads before it
+paints its first frame and then converges on through the `Desktop` system
+notice, which the session publishes whenever the switch happens. Each app
+re-applies the appearance to its own `ThemeRegistry`, re-resolves whatever it
+derived from the theme, and presents — so the switch reaches the whole screen
+at once, including the apps that have no window open at the time. The enum crossing
 that wire *is* `tairix_theme::Appearance`: the theme crate re-exports the ABI's
 definition rather than restating it, so the byte on the wire and the value a
 theme carries cannot drift apart. See

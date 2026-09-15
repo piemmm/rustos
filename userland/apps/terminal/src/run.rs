@@ -1093,7 +1093,7 @@ mod program {
                     let outcome = drain_events(
                         &mut windows,
                         &mut publication,
-                        &mut desktop,
+                        &desktop,
                         themes.active(),
                         &mut events,
                         &mut client,
@@ -1155,6 +1155,40 @@ mod program {
                         Applied::Running => {}
                         Applied::Ended => return 0,
                         Applied::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
+                    }
+                }
+                Wake::DesktopChanged => {
+                    // The desktop belongs to the seat, not to one window, so
+                    // it is adopted once and every window restyled in it. A
+                    // refused state is stated and the last good one stands.
+                    let changed = match app::adopt_desktop(&mut desktop, &mut themes) {
+                        Ok(changed) => changed,
+                        Err(err) => {
+                            let _ = writeln!(Stderr, "terminal: desktop change refused: {err}");
+                            false
+                        }
+                    };
+                    if changed {
+                        match apply_outcome(
+                            EventOutcome::DesktopChanged,
+                            &mut windows,
+                            &mut client,
+                            AppContext {
+                                set,
+                                event_endpoint,
+                                server,
+                                next_slot: &mut next_slot,
+                                publication: &mut publication,
+                                themes: &mut themes,
+                                desktop: &mut desktop,
+                                publisher: &publisher,
+                                env: &env,
+                            },
+                        ) {
+                            Applied::Running => {}
+                            Applied::Ended => return 0,
+                            Applied::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
+                        }
                     }
                 }
                 Wake::PressureChanged => {
@@ -1692,9 +1726,8 @@ mod program {
             EventOutcome::DesktopChanged => {
                 // The scale and/or appearance changed, which restyles every
                 // pixel and re-sizes every face, so the whole surface is the
-                // scope. `desktop` itself was already updated inside
-                // `drain_events`.
-                ctx.themes.set_appearance(ctx.desktop.appearance());
+                // scope. The desktop and the theme registry were both already
+                // brought into step where the notice was read.
                 if restyle_windows(windows, client, &mut *ctx).is_err() {
                     return Applied::Lost("present refused");
                 }
@@ -1780,8 +1813,8 @@ mod program {
             height_px: u32,
         },
         /// The desktop changed (screen size, scale, or appearance); already
-        /// adopted by [`Desktop::apply`] before this is returned. It is a
-        /// property of the seat, so it reaches every window.
+        /// adopted, along with the theme registry, before this is raised. It
+        /// is a property of the seat, so it reaches every window.
         DesktopChanged,
         /// The mailbox itself failed: end fail-loud.
         ChannelLost,
@@ -1932,7 +1965,7 @@ mod program {
     fn drain_events(
         windows: &mut [TerminalWindow],
         publication: &mut Publication,
-        desktop: &mut Desktop,
+        desktop: &Desktop,
         theme: &Theme,
         events: &mut WindowEvents<EventMailbox>,
         client: &mut WindowClient<app::RtWindowTransport>,
@@ -1955,19 +1988,6 @@ mod program {
                 Err(EventError::Undecodable(_)) => continue,
                 Err(EventError::Mailbox(_)) => return EventOutcome::ChannelLost,
             };
-            // Every delivered event is offered to the desktop first,
-            // so a scale or appearance change is adopted whether or
-            // not this app otherwise reacts to the event that
-            // carried it. A real change ends this drain (the caller
-            // relays out and repaints); a refusal is stated and the
-            // last good desktop stands.
-            match desktop.apply(&event) {
-                Ok(true) => return EventOutcome::DesktopChanged,
-                Ok(false) => {}
-                Err(err) => {
-                    let _ = writeln!(Stderr, "terminal: could not apply desktop change: {err}");
-                }
-            }
             // An application-scoped event names the emulator rather
             // than a window: the icon bar's own click and menu
             // outcomes. The row id is this terminal's own, so an id
@@ -2198,8 +2218,7 @@ mod program {
                 | WindowEvent::OpenRequested { .. }
                 | WindowEvent::Resized { .. }
                 | WindowEvent::FilePicked { .. }
-                | WindowEvent::PickCancelled { .. }
-                | WindowEvent::DesktopChanged { .. } => {}
+                | WindowEvent::PickCancelled { .. } => {}
             }
         }
     }

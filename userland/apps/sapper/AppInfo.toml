@@ -10,8 +10,12 @@
 # spawns no process. Its best times live in the app-data store, which is
 # reached through the settings service over an ordinary unprivileged call and
 # gated on this bundle's kernel-attested identity rather than on any authority
-# the bundle asks for. The launched process receives this set intersected with
-# the launching user's grants, never more.
+# the bundle asks for. The game ships no DefaultSettings/, so it opens its
+# store without that layer and needs no CAP_FS_ACCESS for it: the bundle-
+# shipped layer is the client's own read, and asking for filesystem authority
+# to look for a file this bundle does not contain would widen what the game
+# may reach for nothing. The launched process receives this set intersected
+# with the launching user's grants, never more.
 id = "os.tairix.sapper"
 name = "sapper"
 version = "0.1.0"

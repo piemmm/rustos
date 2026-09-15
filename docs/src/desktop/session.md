@@ -668,12 +668,14 @@ disagree:
   §5.2). A compositor whose output the record cannot describe — a zero-sized
   screen, a density outside the percentage the wire carries — refuses rather
   than answering with a guess (`AGENTS.md` §5.4).
-- `announce_desktop` pushes a `WindowEvent::DesktopChanged` to every live
-  window (`WindowServer::window_ids`) when any of it changes, routed through
-  the same `deliver` path as any other event, so a client that has died is
-  torn down here exactly as it would be otherwise. The interactive light/dark
-  switch calls it: the session can re-theme its own surfaces, but an app's
-  window is the app's pixels, so without the announcement the desktop would
+- `publish_desktop` publishes the record on the `Desktop` system notice when
+  any of it changes, so one publish reaches every subscriber whether or not it
+  holds a window — an app closed to its icon-bar slot re-opens in the
+  appearance in force rather than the one it last saw. Publishing the value
+  already in force wakes nobody, so any path that *might* have moved it may
+  call it. The interactive light/dark switch does: the session can re-theme its
+  own surfaces, but an app's window is the app's pixels, so without the publish
+  the desktop would
   switch and every open window would stay in the appearance just left behind.
 
 A desktop the record cannot describe is reported on `stderr` and nothing is
@@ -991,9 +993,9 @@ conclusion is *accepted*.
   owner's windows round-robin, so one window's backlog cannot starve a
   sibling's resize.
 - **Folding by what the quantity means.** A state edge (`Focus`, `Resized`,
-  `RedrawRequested`, `CloseRequested`, `Minimized`, `DesktopChanged`) is a
-  value the app converges on, so a later one replaces the held one where it
-  stands and a window owes at most one of each. A position is
+  `RedrawRequested`, `CloseRequested`, `Minimized`) is a value the app
+  converges on, so a later one replaces the held one where it stands and a
+  window owes at most one of each. A position is
   level-triggered (newest wins) and a wheel run is additive (a reversal ends
   it) — the same rule `pump` applies live, from the one shared predicate.
   Everything else — keys, buttons, the pick conclusion — is owed in full.

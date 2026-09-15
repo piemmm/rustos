@@ -27,11 +27,12 @@ From that, uniformly:
   every `BitmapFont::for_role` and every control's layout.
 - `Desktop::appearance()` is applied to the app's `ThemeRegistry` *before*
   the first frame, so a window opened into a light desktop opens light.
-- `Desktop::apply(&event)` is fed **every** delivered event. A
-  `WindowEvent::DesktopChanged` — pushed to every live window when the
-  session changes any of it — is adopted, and only a real change costs a
-  re-theme, a re-layout and a repaint; an announcement that changed nothing
-  costs none.
+- `app::adopt_desktop` answers a `Wake::DesktopChanged`: the app holds a
+  `Desktop` system notice member (the shared shell arms it), reads the state
+  the session published, and adopts it into both its `Desktop` and its theme
+  registry. Only a real change costs a re-theme, a re-layout and a repaint; a
+  wake carrying nothing new costs none. An app with no window open is told
+  too, so its next window opens in the appearance in force.
 
 Both failure paths state their reason and neither invents a value: a refused
 query, or a density this client cannot draw at, exits fail-loud with the
@@ -934,11 +935,11 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   shared `tairix_icon::artwork_cache` constructor with the app's real seat,
   frame size, live pressure gauge, and audit sink, so it is classified and
   budgeted by the same reclaimable-memory policy the session's caches obey — no
-  hand-picked numbers. The app adds a `WaitSourceKind::MemoryPressure` member to
-  the wait-set it already parks on: it reads the band once before the first
-  present (the member reports only *changes*, and the process gauge starts at
-  the fail-closed unknown band, which admits nothing) and, on each pressure
-  wake, re-reads the band and trims the cache at the wake itself. There is no
+  hand-picked numbers. The app adds the memory-pressure system notice to the
+  wait-set it already parks on: it reads the band once before the first present
+  (the member reports only *changes*, and the process gauge starts at the
+  fail-closed unknown band, which admits nothing) and, on each pressure wake,
+  re-reads the band and trims the cache at the wake itself. There is no
   timer and no poll. Dropping the pipeline tears the cache down, overwriting the
   artwork first, so the pixels are released on every way out of the app — a
   window close and a fail-loud exit alike.
@@ -1051,11 +1052,18 @@ the browser exactly where it was, states the reason on `stderr`, and marks the
 row unavailable so it reads disabled from then on — it never wedges or blanks
 the window.
 
-**Refresh.** The kernel publishes no mount-change notification today, so the
-volume rows are re-read whenever the user asks the window to refresh (`F5`, or
-the toolbar's Refresh command) — the same gesture that re-lists the directory.
-There is no polling loop and nothing spins waiting for a mount; the keyboard
-focus and cursor survive the rebuild.
+**Attach and removal.** The volume rows converge on the kernel's mount-change
+notice: the manager holds a `Mounts` wait-set member, and an attach, a
+re-backing, or a removal wakes it. The rebuild happens off the event loop —
+what is mounted comes from the System Information service, so reading it on the
+loop would stall a frame — and the rail is redrawn when the answer lands. There
+is no polling loop and nothing spins waiting for a mount; the keyboard focus
+and cursor survive the rebuild.
+
+**Refresh.** `F5`, or the toolbar's Refresh command, re-reads the rail in the
+same gesture that re-lists the directory. It is the explicit ask for a volume
+whose *contents* changed under the window; an attach or a removal needs no
+gesture.
 
 **The trusted picker draws no rail.** `render` takes the manager chrome —
 write tools plus the optional rail — as one `ManagerChrome` value, and the

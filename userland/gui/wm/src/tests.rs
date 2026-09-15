@@ -49,13 +49,18 @@ pub(crate) fn opaque(w: u32, h: u32, color: Color) -> Surface {
 /// instead.
 pub(crate) fn new_compositor(mode: DisplayMode, background: Color) -> Option<Compositor> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    Compositor::new(
+    let mut compositor = Compositor::new(
         mode,
-        background,
+        Theme::dark(),
         test_chrome_cache(),
         test_frost_cache(),
         &NORMAL_PRESSURE,
-    )
+    )?;
+    // The theme owns the desktop colour, so a test that composites against
+    // one of its own sets it after construction rather than having a theme
+    // invented to carry it.
+    compositor.set_background(background);
+    Some(compositor)
 }
 
 /// Convert a client present at the window's *current* client size, as the
@@ -3789,6 +3794,10 @@ fn reduced_motion_renders_furniture_identically() {
 
     let (mut reduced, _) = decorated_compositor();
     assert!(reduced.set_theme(with_reduced_motion(&Theme::dark())));
+    // A theme switch re-derives the desktop colour from the new palette,
+    // and this helper composites against a colour of its own; put it back,
+    // because what this compares is the furniture, not the backdrop.
+    reduced.set_background(full.background());
     reduced.composite();
 
     assert_eq!(full.frame(), reduced.frame());
@@ -5535,12 +5544,13 @@ fn retained_furniture_never_exceeds_the_one_screenful_ceiling() {
     let ceiling = 320 * 240 * 4;
     let mut c = Compositor::new(
         mode(320, 240),
-        BLUE,
+        Theme::dark(),
         chrome_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
         test_frost_cache(),
         &NORMAL_PRESSURE,
     )
     .expect("compositor");
+    c.set_background(BLUE);
     NORMAL_PRESSURE.report(PressureBand::Normal);
 
     for index in 0..40 {
@@ -5877,12 +5887,13 @@ fn no_band_drops_the_chrome_cache_below_its_reserve() {
 
     let mut c = Compositor::new(
         mode(320, 240),
-        BLUE,
+        Theme::dark(),
         chrome_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
         frost_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
         &PRESSURE,
     )
     .expect("compositor");
+    c.set_background(BLUE);
     let id = titled_window(&mut c, 20, 20, 120, "pressed");
     c.composite();
     assert_eq!(c.chrome_cache_len(), 1);
@@ -5955,12 +5966,13 @@ fn the_composited_frame_is_identical_warm_empty_and_uncacheable() {
 
     let mut uncacheable = Compositor::new(
         mode(320, 240),
-        BLUE,
+        Theme::dark(),
         chrome_cache(TEST_SEAT, 0, &NORMAL_PRESSURE, &TEST_SINK),
         test_frost_cache(),
         &NORMAL_PRESSURE,
     )
     .expect("compositor");
+    uncacheable.set_background(BLUE);
     NORMAL_PRESSURE.report(PressureBand::Normal);
     scene(&mut uncacheable);
     uncacheable.composite();
@@ -6030,12 +6042,13 @@ fn a_hidden_window_s_furniture_is_evicted_before_a_visible_one_s() {
     let ceiling = entry * 14 / 5;
     let mut c = Compositor::new(
         mode(320, 240),
-        BLUE,
+        Theme::dark(),
         chrome_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
         test_frost_cache(),
         &NORMAL_PRESSURE,
     )
     .expect("compositor");
+    c.set_background(BLUE);
     NORMAL_PRESSURE.report(PressureBand::Normal);
 
     let minimised = titled_window(&mut c, 10, 10, 60, "minimised");
@@ -6845,12 +6858,13 @@ fn retained_frosts_never_exceed_the_one_screenful_ceiling() {
     let ceiling = 64 * 64 * 4;
     let mut c = Compositor::new(
         mode(64, 64),
-        BLUE,
+        Theme::dark(),
         test_chrome_cache(),
         frost_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
         &NORMAL_PRESSURE,
     )
     .expect("compositor");
+    c.set_background(BLUE);
     NORMAL_PRESSURE.report(PressureBand::Normal);
     c.add_window(Point::ORIGIN, opaque(64, 64, GREEN));
     for index in 0..12 {
@@ -6885,12 +6899,13 @@ fn no_band_gives_the_frost_back_and_the_frame_is_unchanged() {
 
     let mut c = Compositor::new(
         mode(40, 24),
-        BLUE,
+        Theme::dark(),
         chrome_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
         frost_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
         &PRESSURE,
     )
     .expect("compositor");
+    c.set_background(BLUE);
     c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
     let glass = c.add_window(Point::new(6, 4), clear(20, 14));
     assert!(c.set_backdrop_blur(glass, 3));
@@ -6950,14 +6965,16 @@ fn releasable_compositor(
 ) -> Compositor {
     pressure.report(PressureBand::Normal);
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    Compositor::new(
+    let mut compositor = Compositor::new(
         mode,
-        background,
+        Theme::dark(),
         test_chrome_cache(),
         frost_cache(TEST_SEAT, TEST_FB_BYTES, pressure, &TEST_SINK),
         pressure,
     )
-    .expect("compositor")
+    .expect("compositor");
+    compositor.set_background(background);
+    compositor
 }
 
 /// Whether the compositor still holds `id`'s content pixels.
@@ -8263,14 +8280,16 @@ fn veiled(w: u32, h: u32, alpha: u8) -> Surface {
 fn screenful_frost_budget(mode: DisplayMode) -> Compositor {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let bytes = usize::try_from(mode.width_px * mode.height_px * 4).expect("a screenful");
-    Compositor::new(
+    let mut compositor = Compositor::new(
         mode,
-        BLUE,
+        Theme::dark(),
         chrome_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK),
         frost_cache(TEST_SEAT, bytes, &NORMAL_PRESSURE, &TEST_SINK),
         &NORMAL_PRESSURE,
     )
-    .expect("compositor")
+    .expect("compositor");
+    compositor.set_background(BLUE);
+    compositor
 }
 
 /// A cascade of translucent, backdrop-blurred terminals at the shipped default

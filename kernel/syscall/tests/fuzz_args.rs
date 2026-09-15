@@ -238,6 +238,26 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn notice_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _topic: u32,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn notice_publish(
+        &self,
+        _c: &CallerContext<'_>,
+        _topic: u32,
+        _payload: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn stream_read(
         &self,
         _c: &CallerContext<'_>,

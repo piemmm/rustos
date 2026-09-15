@@ -36,8 +36,8 @@ the done-state summaries), and SMART5 (the desktop/UI cache: the
 reclaimable-memory model hoisted whole into the shared `lib/reclaim`
 crate so kernel and userland share one classification, one budget
 derivation, one band vocabulary and one `ReclaimCache`; the
-edge-triggered `WaitSourceKind::MemoryPressure` wait source and the
-ungated band-only `MEMORY_PRESSURE_BAND` query that drains it; the
+edge-triggered `MemoryPressure` system notice and the `notice_read` that
+drains it (`plans/NOTICE.md`); the
 desktop's cursor, notification-glyph, pinned-artwork and window-furniture
 caches and the glyph-raster caches on both sides of the font service
 rebuilt on it; and window content released by a pressure-driven policy
@@ -1009,24 +1009,27 @@ weaker policy:
   (kernel); `ReportedPressure` receives (userland) and answers
   `critical` until it is told otherwise, so an unwired process admits
   nothing rather than assuming the machine is comfortable.
-- **Event-driven delivery, never polling.**
-  `WaitSourceKind::MemoryPressure` (wire value 9, `id` always 0) is an
-  edge-triggered wait-set source that fires when the published band
-  changes; the gauge's band-change hook flags
-  `waitq::PRESSURE_WAITQ` lock-free (it can fire inside the frame
+- **Event-driven delivery, never polling.** The band is the
+  `MemoryPressure` topic of the system-notice mechanism
+  (`plans/NOTICE.md`), observed through a
+  `WaitSourceKind::SystemNotice` member that fires when the published
+  band changes; the gauge's band-change hook flags
+  `waitq::NOTICE_WAITQ` lock-free (it can fire inside the frame
   allocator) and the real unpark runs at the next dispatcher-context
-  drain. Reporting the member advances its observed band, so a band that
-  deepens and relaxes before the waiter runs correctly reports nothing.
-  Adding the member needs no capability and a non-zero `id` is refused.
+  drain. The topic's generation *is* the band depth, so reporting the
+  member advances its observed band and a band that deepens and relaxes
+  before the waiter runs correctly reports nothing. Observing the topic
+  needs no capability; publishing to it is the kernel's alone.
 - **One definition of the wiring (`tairix_procinfo::pressure`).** Arming
   the wake, reading the band, and publishing it to the process gauge are
   the same three steps in every caching program, so they are written
   once: `watch(set, token)` adds the member *and* primes the gauge with
   the band in force (the member reports only changes, so neither half
-  works alone), and `refresh()` drains the edge on the wake, reporting
-  whether the band moved. The `refresh_into(transport, gauge)` core is
-  host-tested against a fixture, so the policy is exercised with no
-  service running. This is load-bearing, not convenience: an unwired
+  works alone), and `refresh()` drains the edge on the wake by reading
+  the topic — one syscall, no service hop, because the wake lands on a
+  loop that may owe the user a frame — and reports whether the band
+  moved. The `publish_depth(depth, gauge)` core is host-tested, so the
+  policy is exercised with no kernel. This is load-bearing, not convenience: an unwired
   process admits nothing, so a cache it holds is not merely smaller but
   entirely inert, and every value it would have cached is rebuilt on
   every use — for a glyph, one IPC round trip per character drawn.

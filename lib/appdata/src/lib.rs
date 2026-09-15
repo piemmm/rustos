@@ -199,6 +199,25 @@ impl<'h> Settings<'h> {
         Self::opened(host, ConfigScope::Private, defaults, defaults_refusal)
     }
 
+    /// Open the calling application's own settings with **no bundle-shipped
+    /// layer**, for an application that ships no `DefaultSettings/`.
+    ///
+    /// Layer 1 is the client's to read, so it costs an `fs_open` per candidate
+    /// bundle directory — and therefore `CAP_FS_ACCESS`. An application that
+    /// ships no defaults has nothing to find there, so asking for that
+    /// authority would widen what it may reach for a read that cannot
+    /// succeed, and issuing the read regardless puts an audited capability
+    /// denial in the log on every open. This says so instead.
+    ///
+    /// The store layers are unaffected: they come from the service, keyed on
+    /// the kernel-attested app identity, exactly as in [`Self::open`]. A
+    /// bundle that *does* ship defaults must use [`Self::open`] and request
+    /// `CAP_FS_ACCESS`; the bundle composer refuses the mismatch, so the two
+    /// cannot drift.
+    pub fn open_without_defaults(host: &'h mut dyn AppDataHost) -> Self {
+        Self::opened(host, ConfigScope::Private, Document::new(), None)
+    }
+
     /// Open the calling application's own **published** scope — what it says
     /// about itself for other applications to read through [`read_published`].
     ///

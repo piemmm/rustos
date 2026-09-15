@@ -1,18 +1,26 @@
 //! Keeping a process's memory-pressure band current
-//! (`plans/SMARTRAM.md` SMART5).
+//! (`plans/SMARTRAM.md` SMART5, `plans/NOTICE.md`).
 //!
 //! A process that holds reclaimable memory sizes that memory against the band
 //! the kernel publishes, and has no way to measure free memory itself. It
-//! learns the band the one way a process may: the ungated
-//! [`crate::kstats::memory_pressure_band`] query, woken by the
-//! edge-triggered `WaitSourceKind::MemoryPressure` wait source.
+//! learns the band through the `MemoryPressure` system notice: the
+//! edge-triggered `WaitSourceKind::SystemNotice` member says the band moved,
+//! and `notice_read` answers with the depth it moved to.
 //!
 //! Arm the wake, read the band, publish it — the same three steps in every
 //! program that caches anything, so they live here once rather than being
 //! re-spelled per program. `lib/rt` owns the gauge itself and deliberately
-//! does not fetch it (choosing a transport is not the runtime's business);
-//! this crate already owns the System Information client, so it is where the
-//! fetch belongs.
+//! does not fetch it (choosing what to do about a band is not the runtime's
+//! business).
+//!
+//! # The read is a syscall, not a service call
+//!
+//! The band arrives from the kernel directly. It has to: the wake lands on the
+//! loop that owes the user a frame, and an IPC round trip to the System
+//! Information service there is exactly the blocking I/O an interactive
+//! surface may not perform. The gated
+//! [`crate::kstats::memory_pressure_band`] query remains what a *monitor*
+//! reads to display the band; a cache holder converges on the notice.
 //!
 //! # A gauge nobody reports to admits nothing
 //!
@@ -26,34 +34,29 @@
 
 use tairix_reclaim::{PressureBand, ReportedPressure};
 
-use crate::kstats::memory_pressure_band;
-use crate::transport::Transport;
-
-/// Read the published band over `transport` and publish it to `gauge`,
-/// returning whether the band actually moved.
+/// Publish band `depth` to `gauge`, returning whether the band actually moved.
 ///
-/// A refused or malformed read publishes nothing and reports `false`: the
+/// A depth outside the known set publishes nothing and reports `false`: the
 /// gauge keeps the band it already had rather than assuming the machine is
-/// comfortable, which costs cache hits and never correctness. A depth outside
-/// the known set is one such malformed reply — the wire decode refuses it, so
-/// an unrecognised band is never read as a guess in either direction.
+/// comfortable, which costs cache hits and never correctness. An unrecognised
+/// band is never read as a guess in either direction.
 ///
-/// The injectable form, so the policy is exercised against a fixture with no
-/// service running; `refresh` is the process-wide binding of it.
-pub fn refresh_into(transport: &dyn Transport, gauge: &ReportedPressure) -> bool {
-    let Ok(reported) = memory_pressure_band(transport) else {
+/// The injectable form, so the policy is exercised without a kernel; the
+/// `program::refresh` binding of it is what a freestanding program calls.
+#[must_use]
+pub fn publish_depth(depth: u8, gauge: &ReportedPressure) -> bool {
+    let Some(band) = PressureBand::from_known_depth(depth) else {
         return false;
     };
-    gauge.report(PressureBand::from_depth(reported.band))
+    gauge.report(band)
 }
 
-/// The production bindings: the process gauge `lib/rt` owns, read over the
-/// `sysinfo-v1` endpoint.
+/// The production bindings: the process gauge `lib/rt` owns, read from the
+/// kernel's own notice topic.
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
+    use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
     use tairix_abi::{WaitSetOp, WaitSourceKind};
-
-    use crate::client::IpcTransport;
 
     /// Re-read the band and publish it to this process's gauge, returning
     /// whether it moved.
@@ -62,9 +65,30 @@ mod program {
     /// enforces their new ceiling when this reports `true`. A caller merely
     /// priming a gauge before anything is cached has nothing to enforce and
     /// discards the answer.
+    ///
+    /// A refused or malformed read publishes nothing and reports `false`,
+    /// leaving the gauge on the band it already had.
     #[must_use]
     pub fn refresh() -> bool {
-        super::refresh_into(&IpcTransport, tairix_rt::pressure::gauge())
+        let mut buf = [0u8; NOTICE_PAYLOAD_MAX];
+        let read = tairix_rt::notice_read(NoticeTopic::MemoryPressure, &mut buf);
+        if read < 0 {
+            return false;
+        }
+        // Narrowed rather than cast: `usize` is 32 bits on a wasm32 build, so
+        // a cast would truncate a length the kernel reported.
+        let Ok(read) = usize::try_from(read) else {
+            return false;
+        };
+        let Some(bytes) = buf.get(..read) else {
+            return false;
+        };
+        let Ok(Notice::MemoryPressure { band }) =
+            Notice::decode(NoticeTopic::MemoryPressure, bytes)
+        else {
+            return false;
+        };
+        super::publish_depth(band, tairix_rt::pressure::gauge())
     }
 
     /// Add the memory-pressure wake to `set` under `token` and prime the
@@ -83,8 +107,8 @@ mod program {
         if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
-            WaitSourceKind::MemoryPressure,
-            0,
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::MemoryPressure.as_u32()),
             token,
         ) != 0
         {
@@ -100,70 +124,17 @@ pub use program::{refresh, watch};
 
 #[cfg(test)]
 mod tests {
-    use super::refresh_into;
-    use crate::transport::Transport;
-    use alloc::vec::Vec;
-    use core::cell::RefCell;
-    use tairix_abi::sysinfo::{MemoryPressureBand, SysinfoQueryId, SysinfoRequestHeader};
-    use tairix_abi::Errno;
+    use super::publish_depth;
     use tairix_reclaim::{
         CacheBudget, PressureBand, PressureGauge, ReclaimClass, ReportedPressure,
     };
 
-    /// A `sysinfod` stand-in answering the band query with one depth, or
-    /// refusing it, and recording which query it was actually asked.
-    struct Fixture {
-        answer: Result<u8, Errno>,
-        seen: RefCell<Vec<SysinfoQueryId>>,
-    }
-
-    impl Fixture {
-        fn answering(depth: u8) -> Self {
-            Self {
-                answer: Ok(depth),
-                seen: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn refusing(errno: Errno) -> Self {
-            Self {
-                answer: Err(errno),
-                seen: RefCell::new(Vec::new()),
-            }
-        }
-    }
-
-    impl Transport for Fixture {
-        fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
-            let header = SysinfoRequestHeader::from_bytes(request)?;
-            self.seen.borrow_mut().push(header.query);
-            let depth = self.answer?;
-            Ok(MemoryPressureBand {
-                band: depth,
-                ..MemoryPressureBand::default()
-            }
-            .to_le_bytes()
-            .to_vec())
-        }
-    }
-
-    #[test]
-    fn the_band_only_query_is_the_one_issued() {
-        let fixture = Fixture::answering(PressureBand::Normal.depth());
-        refresh_into(&fixture, &ReportedPressure::unknown());
-        assert_eq!(
-            fixture.seen.borrow().as_slice(),
-            &[SysinfoQueryId::MEMORY_PRESSURE_BAND]
-        );
-    }
-
     #[test]
     fn a_reported_band_reaches_the_gauge_and_is_a_change_only_once() {
         let gauge = ReportedPressure::unknown();
-        let fixture = Fixture::answering(PressureBand::Normal.depth());
-        assert!(refresh_into(&fixture, &gauge));
+        assert!(publish_depth(PressureBand::Normal.depth(), &gauge));
         assert_eq!(gauge.band(), PressureBand::Normal);
-        assert!(!refresh_into(&fixture, &gauge));
+        assert!(!publish_depth(PressureBand::Normal.depth(), &gauge));
     }
 
     #[test]
@@ -174,35 +145,15 @@ mod tests {
         let class = ReclaimClass::CleanFileData;
         let budget = CacheBudget::from_ceiling(1 << 20);
         assert!(!gauge.growth_permitted(class, budget, 1));
-        assert!(refresh_into(
-            &Fixture::answering(PressureBand::Normal.depth()),
-            &gauge
-        ));
+        assert!(publish_depth(PressureBand::Normal.depth(), &gauge));
         assert!(gauge.growth_permitted(class, budget, 1));
-    }
-
-    #[test]
-    fn a_refused_read_leaves_the_band_alone() {
-        let gauge = ReportedPressure::unknown();
-        assert!(refresh_into(
-            &Fixture::answering(PressureBand::Normal.depth()),
-            &gauge
-        ));
-        assert!(!refresh_into(&Fixture::refusing(Errno::NotFound), &gauge));
-        assert_eq!(gauge.band(), PressureBand::Normal);
     }
 
     #[test]
     fn a_tightening_band_is_reported_as_a_change_and_closes_growth() {
         let gauge = ReportedPressure::unknown();
-        assert!(refresh_into(
-            &Fixture::answering(PressureBand::Normal.depth()),
-            &gauge
-        ));
-        assert!(refresh_into(
-            &Fixture::answering(PressureBand::Severe.depth()),
-            &gauge
-        ));
+        assert!(publish_depth(PressureBand::Normal.depth(), &gauge));
+        assert!(publish_depth(PressureBand::Severe.depth(), &gauge));
         assert_eq!(gauge.band(), PressureBand::Severe);
         // Severe takes every class to zero, so nothing is admitted at all.
         for class in ReclaimClass::ALL {
@@ -216,11 +167,21 @@ mod tests {
     #[test]
     fn a_depth_this_build_does_not_know_is_refused_not_guessed() {
         let gauge = ReportedPressure::unknown();
-        assert!(refresh_into(
-            &Fixture::answering(PressureBand::Normal.depth()),
-            &gauge
-        ));
-        assert!(!refresh_into(&Fixture::answering(u8::MAX), &gauge));
+        assert!(publish_depth(PressureBand::Normal.depth(), &gauge));
+        assert!(!publish_depth(u8::MAX, &gauge));
         assert_eq!(gauge.band(), PressureBand::Normal);
+        // Not clamped to critical either: an unknown depth must not pin
+        // every cache in the process shut.
+        assert!(!publish_depth(PressureBand::Critical.depth() + 1, &gauge));
+        assert_eq!(gauge.band(), PressureBand::Normal);
+    }
+
+    #[test]
+    fn every_known_band_round_trips_through_its_depth() {
+        let gauge = ReportedPressure::unknown();
+        for band in PressureBand::ALL {
+            let _ = publish_depth(band.depth(), &gauge);
+            assert_eq!(gauge.band(), band);
+        }
     }
 }

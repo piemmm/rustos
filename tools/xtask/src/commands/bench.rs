@@ -1022,7 +1022,7 @@ fn scene(stack: Stack, runner: &'static dyn JobRunner) -> Result<CompositeWarm, 
     let frame_bytes = count_of(mode.stride_bytes).saturating_mul(count_of(mode.height_px));
     let chrome = chrome_cache(SEAT_PRIMARY, frame_bytes, &PRESSURE, &SINK);
     let frost = frost_cache(SEAT_PRIMARY, frame_bytes, &PRESSURE, &SINK);
-    let mut compositor = Compositor::new(mode, Color::rgb(18, 20, 26), chrome, frost, &PRESSURE)
+    let mut compositor = Compositor::new(mode, Theme::dark(), chrome, frost, &PRESSURE)
         .ok_or_else(|| format!("bench: no compositor for {SCREEN_W}x{SCREEN_H}"))?;
     compositor.set_job_runner(runner);
 
