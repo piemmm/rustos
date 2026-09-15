@@ -245,17 +245,20 @@ mapped.
 - **`wasm32` gets no window.** It has no MMU and no direct map, so
   `install_kernel_remap` returns `None` and the heap stays on its bootstrap
   region — the pre-existing, fail-closed behaviour.
-- **The host cannot dereference the window.** A host test has no hardware to
-  map its addresses, so `kernel/core::kheap`'s tests drive the growth
-  source's *contract* (extents, frame accounting, fail-closed paths,
-  no-allocation proof) over a non-allocating page-table double. The
-  on-the-metal half is `tests/integration/kheap_growth`, one arch-neutral
+- **The host has no page tables, so the metal keeps the other half.**
+  `kernel/core::kheap`'s tests root the window in memory the test owns
+  (`KernelWindow::from_root`), so they drive the growth source's whole
+  contract over a non-allocating page-table double — extents, frame
+  accounting, fail-closed paths, the no-allocation proof, and a region
+  written and read back through the very pointer `grow` returned — and they
+  run under the undefined-behaviour oracle with every fixture accountable to
+  its leak checker. What they cannot exercise is the port's own mapping, so
+  the on-the-metal half is `tests/integration/kheap_growth`, one arch-neutral
   exercise the three boot-completed verticals drive after `BootCompleted`:
   force a request one page past the heap's free remainder, check the capacity
   rose, marker-check **every page** of the assembled run, free it so the
-  drained region drives `shrink`, and repeat. The earlier claim that every
-  vertical proved the dereference by booting at all was wrong — no test
-  kernel published its allocator, so the source was never installed
+  drained region drives `shrink`, and repeat. Booting alone proves nothing
+  here: a test kernel that publishes no allocator never installs the source
   (`plans/OPEN-DEFECTS.md` D69).
 - **The bootstrap arena is far larger than boot needs.** The exercise reports
   the heap's live bytes at `BootCompleted`: 0.84 MiB on riscv64, 1.22 MiB on

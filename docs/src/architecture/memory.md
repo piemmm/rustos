@@ -2443,6 +2443,20 @@ into one run of a kernel **remap window**.
   of `aarch64`'s `TTBR1_EL1` regime, where one global kernel root carries it
   and no process root needs a copy — and costs no RAM until something is
   backed into it.
+- **The window is described by a pointer, not an address.** Its pages are not
+  a Rust allocation — they exist because the port wrote page tables for them —
+  so `reserve_kernel_window` mints the pointer once and every in-window
+  address is derived from it (`KernelWindow::page_ptr`). The heap and the
+  kthread stack tier each used to rebuild a pointer from the integer base in
+  its own spelling: two copies of one int-to-pointer step, each handing the
+  compiler a pointer it believes aliases nothing — licensing it to reorder or
+  elide the in-band header writes the free-list algebra depends on — and
+  leaving both paths beyond any interpreter's reach. The address a consumer
+  hands the page tables is now read back off that pointer, so the mapped run
+  and the run written through cannot drift apart, and the
+  pointer-representability check that sat in each consumer sits in the
+  constructor, refusing a window no pointer could address when it is declared
+  rather than at first use.
 - **Leaves are `RW`, never executable** (`AGENTS.md` §19.2), kernel-only,
   and their intermediate tables come from the allocator-backed page-table
   frame source, so no fixed `.bss` pool bounds how far the heap can grow.
@@ -2485,10 +2499,14 @@ into one run of a kernel **remap window**.
   deliberately fragmented pool with no four-frame contiguous block *and* a
   region larger than one `MAX_ORDER` block, a region spanning several such
   blocks, sub-page waste, fail-closed exhaustion and window exhaustion,
-  refused mismatched shrink, address-space reuse, and a counting-allocator
+  refused mismatched shrink, address-space reuse, a grown region written and
+  read back through the very pointer `grow` returned, and a counting-allocator
   proof that neither `grow` nor `shrink` performs a single global-heap
-  allocation. A host test cannot dereference a window address — nothing maps
-  it — so the on-the-metal half is the
+  allocation. The harness roots its window in memory the test owns, so those
+  run under the undefined-behaviour oracle
+  (`MIRIFLAGS=-Zmiri-strict-provenance`) with every fixture accountable to its
+  leak checker. What a host test cannot exercise is the *page-table* half, so
+  the on-the-metal proof is the
   `tests/integration/kheap_growth` exercise the three boot-completed
   verticals drive on each port after `BootCompleted`: it forces a request
   one page past the heap's free remainder (nothing already mapped can serve

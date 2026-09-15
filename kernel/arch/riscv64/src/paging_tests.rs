@@ -613,8 +613,11 @@ fn the_kernel_remap_window_is_canonical_and_clear_of_the_identity_map() {
     assert_eq!(vpn_index(base, 2), KERNEL_WINDOW_FIRST_SLOT);
     assert_eq!(base % (1 << 30), 0, "the base is gigapage-aligned");
 
-    let window =
-        KernelWindow::new(base, KERNEL_WINDOW_PAGES).expect("the window extent is representable");
+    assert!(
+        KernelWindow::is_representable(base, KERNEL_WINDOW_PAGES),
+        "the window extent is representable"
+    );
+    let window_bytes = (KERNEL_WINDOW_PAGES as u64) * PAGE_SIZE as u64;
     // The identity map stops exactly where the direct physical map begins,
     // and the map stops exactly where the window begins, so no two of the
     // three can claim the same root slot.
@@ -622,10 +625,7 @@ fn the_kernel_remap_window_is_canonical_and_clear_of_the_identity_map() {
     assert_eq!(PHYSMAP_FIRST_SLOT + PHYSMAP_SLOTS, KERNEL_WINDOW_FIRST_SLOT);
     // And the window stops one gigapage below the top of the address space,
     // so its exclusive top is representable.
-    assert_eq!(
-        vpn_index(base + window.len_bytes() - 1, 2),
-        ENTRIES_PER_TABLE - 2
-    );
+    assert_eq!(vpn_index(base + window_bytes - 1, 2), ENTRIES_PER_TABLE - 2);
 }
 
 #[test]

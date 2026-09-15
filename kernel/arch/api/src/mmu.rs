@@ -59,6 +59,8 @@
 //! on the aarch64 IPI from Stage W6), are the tracked Stage W5b-2 / W6
 //! follow-ups — not silently duplicated here.
 
+use core::ptr::NonNull;
+
 /// The architecture-neutral permission/attribute set a 4 KiB page leaf
 /// carries.
 ///
@@ -262,6 +264,8 @@ impl AccessTracking {
     }
 }
 
+use tairix_abi::PAGE_SIZE;
+
 /// A run of kernel virtual address space a port guarantees is free of any
 /// other mapping **and** reachable from every address space it builds.
 ///
@@ -275,41 +279,104 @@ impl AccessTracking {
 ///
 /// The window costs no RAM until something is mapped into it; only the
 /// shared sub-hierarchy's table frames are drawn up front.
+///
+/// # A pointer, not an address
+///
+/// The window carries a *pointer* to its first page. Its pages are not a
+/// Rust allocation — they exist because the port wrote page tables for
+/// them — so the layer that knows that fact mints the pointer once
+/// ([`Self::at_address`]) and every in-window address is derived from it
+/// ([`Self::page_ptr`]). A consumer that rebuilt a pointer from an integer
+/// base would hand the compiler one it believes aliases nothing, licensing
+/// it to reorder or elide the accesses the heap and the stack tier make
+/// through it, and no interpreter could check the result.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct KernelWindow {
-    base: u64,
+    root: NonNull<u8>,
     pages: usize,
 }
 
+// SAFETY: `root` addresses a run the port reserved in every translation
+// root it builds, so it resolves identically on whichever CPU and under
+// whichever root the holder runs. The descriptor is immutable and hands out
+// no exclusive access, so sharing one grants nothing the bare address it
+// replaced did not.
+unsafe impl Send for KernelWindow {}
+// SAFETY: as `Send` above.
+unsafe impl Sync for KernelWindow {}
+
 impl KernelWindow {
-    /// Describe the window `[base, base + pages * 4 KiB)`.
+    /// Whether `[base, base + pages * 4 KiB)` is a window this kernel can
+    /// hold: `base` non-zero and 4 KiB-aligned, `pages` non-zero, the
+    /// exclusive top representable (so no consumer reasons about wrapping
+    /// arithmetic), and every byte addressable by a pointer.
     ///
-    /// Returns `None` — never a truncated or wrapped window — unless
-    /// `base` is 4 KiB-aligned, `pages` is non-zero, and the byte span and
-    /// its exclusive top both fit the address width. A window ending
-    /// exactly at the top of the address space is therefore refused too,
-    /// so no consumer has to reason about wrapping arithmetic.
+    /// A port asserts this over its own window constants at build time, so
+    /// an extent that could only be refused at run time — silently leaving
+    /// the kernel heap on its bootstrap region — fails the build instead.
     #[must_use]
-    pub const fn new(base: u64, pages: usize) -> Option<Self> {
-        const PAGE_BYTES: u64 = 4096;
-        if base & (PAGE_BYTES - 1) != 0 || pages == 0 {
-            return None;
+    pub const fn is_representable(base: u64, pages: usize) -> bool {
+        if base == 0 || base & (PAGE_SIZE as u64 - 1) != 0 || pages == 0 {
+            return false;
         }
         // `usize as u64` is lossless on every target (`usize` is at most
         // 64 bits), so the page count widens without a checked conversion.
-        let Some(span) = (pages as u64).checked_mul(PAGE_BYTES) else {
-            return None;
+        let Some(span) = (pages as u64).checked_mul(PAGE_SIZE as u64) else {
+            return false;
         };
-        if base.checked_add(span).is_none() {
+        match base.checked_add(span) {
+            Some(top) => top - 1 <= usize::MAX as u64,
+            None => false,
+        }
+    }
+
+    /// Describe the window `[base, base + pages * 4 KiB)` a port has
+    /// reserved, minting the pointer its consumers derive from.
+    ///
+    /// Returns `None` — never a truncated or wrapped window — unless
+    /// [`Self::is_representable`] accepts the extent.
+    ///
+    /// # Safety
+    ///
+    /// The caller must have reserved `[base, base + pages * 4 KiB)` in every
+    /// translation root it builds, so the run is this kernel's own and
+    /// resolves identically under each. The pages need not be mapped yet: a
+    /// consumer backs a run before it dereferences one.
+    #[must_use]
+    pub unsafe fn at_address(base: u64, pages: usize) -> Option<Self> {
+        if !Self::is_representable(base, pages) {
             return None;
         }
-        Some(Self { base, pages })
+        let Ok(addr) = usize::try_from(base) else {
+            return None;
+        };
+        // The one int-to-pointer step in the chain, stated where the fact
+        // that these pages exist is known rather than re-derived by each
+        // consumer.
+        let root = NonNull::new(core::ptr::with_exposed_provenance_mut::<u8>(addr))?;
+        Some(Self { root, pages })
+    }
+
+    /// Describe a window over memory the caller already holds a pointer to,
+    /// so a host test can drive a window consumer with no port under it.
+    ///
+    /// # Safety
+    ///
+    /// `root` must be 4 KiB-aligned and valid for reads and writes across
+    /// `pages * 4 KiB` bytes for as long as the window is used.
+    #[cfg(any(test, feature = "host-tests"))]
+    #[must_use]
+    pub unsafe fn from_root(root: NonNull<u8>, pages: usize) -> Option<Self> {
+        if !Self::is_representable(root.addr().get() as u64, pages) {
+            return None;
+        }
+        Some(Self { root, pages })
     }
 
     /// Lowest address in the window.
     #[must_use]
-    pub const fn base(self) -> u64 {
-        self.base
+    pub fn base(self) -> u64 {
+        self.root.addr().get() as u64
     }
 
     /// Number of 4 KiB pages the window spans.
@@ -323,23 +390,42 @@ impl KernelWindow {
     #[must_use]
     pub const fn len_bytes(self) -> u64 {
         // Validated at construction, so the product cannot overflow.
-        (self.pages as u64) * 4096
+        (self.pages as u64) * PAGE_SIZE as u64
     }
 
     /// `true` if `vaddr` lies inside the window.
     #[must_use]
-    pub const fn contains(self, vaddr: u64) -> bool {
-        vaddr >= self.base && vaddr - self.base < self.len_bytes()
+    pub fn contains(self, vaddr: u64) -> bool {
+        vaddr >= self.base() && vaddr - self.base() < self.len_bytes()
     }
 
     /// The 0-based page index of `vaddr` within the window, or `None` when
     /// `vaddr` lies outside it.
     #[must_use]
-    pub const fn page_index(self, vaddr: u64) -> Option<usize> {
+    pub fn page_index(self, vaddr: u64) -> Option<usize> {
         if !self.contains(vaddr) {
             return None;
         }
-        Some(((vaddr - self.base) / 4096) as usize)
+        let offset = usize::try_from(vaddr - self.base()).ok()?;
+        Some(offset / PAGE_SIZE)
+    }
+
+    /// Pointer to window page `index`, or `None` when `index` is outside
+    /// the window.
+    ///
+    /// The one way to address a window page: derived from the root, so the
+    /// provenance the port established travels with it and the address a
+    /// consumer hands the page tables cannot drift from the pointer it
+    /// writes through.
+    #[must_use]
+    pub fn page_ptr(self, index: usize) -> Option<NonNull<u8>> {
+        if index >= self.pages {
+            return None;
+        }
+        // SAFETY: `index` is inside the window, and the root is valid across
+        // the whole `pages * 4 KiB` span by the constructor's contract, so
+        // the step lands within it.
+        Some(unsafe { self.root.byte_add(index * PAGE_SIZE) })
     }
 }
 
@@ -515,9 +601,9 @@ pub mod conformance {
     /// translate-again lifecycle does not fail closed on the torn-down
     /// page.
     pub fn run_all<A: AddressSpace + ?Sized>(space: &mut A, va: u64, pa: u64) {
-        const PAGE: u64 = 4096;
         assert!(
-            va.is_multiple_of(PAGE) && pa.is_multiple_of(PAGE),
+            va.is_multiple_of(super::PAGE_SIZE as u64)
+                && pa.is_multiple_of(super::PAGE_SIZE as u64),
             "the conformance address pair must be page-aligned"
         );
         root_table_is_non_null(space);
@@ -804,6 +890,7 @@ pub mod conformance {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
 
     #[test]
@@ -856,32 +943,143 @@ mod tests {
         assert_eq!(pending.detail(), Some("software AF fault in b1a"));
     }
 
+    /// A window over three pages of memory this test owns, so every
+    /// address it reports is a real one a derived pointer can reach.
+    fn window_over(pages: usize) -> (KernelWindow, std::vec::Vec<u8>) {
+        let mut backing = std::vec![0u8; (pages + 1) * PAGE_SIZE];
+        let offset = backing.as_ptr().align_offset(PAGE_SIZE);
+        let root = NonNull::new(backing.as_mut_ptr().wrapping_add(offset))
+            .expect("a live allocation is non-null");
+        // SAFETY: `root` is the page-aligned base of `pages` whole pages of
+        // `backing`, which outlives the returned window.
+        let window = unsafe { KernelWindow::from_root(root, pages) }.expect("valid window");
+        (window, backing)
+    }
+
     #[test]
     fn kernel_window_refuses_a_misaligned_empty_or_overflowing_extent() {
-        assert_eq!(KernelWindow::new(0x4000_0001, 4), None);
-        assert_eq!(KernelWindow::new(0x4000_0000, 0), None);
+        assert!(!KernelWindow::is_representable(0x4000_0001, 4));
+        assert!(!KernelWindow::is_representable(0x4000_0000, 0));
+        // A window at address zero would have no pointer to describe it.
+        assert!(!KernelWindow::is_representable(0, 4));
         // The exclusive top must be representable, so the very last page
         // of the address space is refused rather than wrapped.
-        assert_eq!(KernelWindow::new(u64::MAX - 0xFFF, 1), None);
-        assert!(KernelWindow::new(u64::MAX - 0x1FFF, 1).is_some());
+        assert!(!KernelWindow::is_representable(u64::MAX - 0xFFF, 1));
+        assert!(KernelWindow::is_representable(u64::MAX - 0x1FFF, 1));
+        // A span whose pages would overflow the address space, not just
+        // its top page.
+        assert!(!KernelWindow::is_representable(0x4000_0000, usize::MAX));
+    }
+
+    /// The predicate a port asserts at build time accepts exactly what the
+    /// constructor accepts, so a window that passes the assertion can never
+    /// be refused at run time.
+    #[test]
+    fn a_rooted_window_is_refused_on_exactly_the_representable_predicate() {
+        let mut backing = std::vec![0u8; 3 * PAGE_SIZE];
+        let root = NonNull::new(backing.as_mut_ptr()).expect("non-null");
+        let offset = root.as_ptr().align_offset(PAGE_SIZE);
+        // SAFETY: one page inside a three-page allocation, page-aligned.
+        let aligned = unsafe { root.byte_add(offset) };
+
+        // SAFETY: `aligned` covers one whole page of `backing`.
+        assert!(unsafe { KernelWindow::from_root(aligned, 1) }.is_some());
+        // SAFETY: zero pages is refused before the root is recorded.
+        assert!(unsafe { KernelWindow::from_root(aligned, 0) }.is_none());
+        // SAFETY: a misaligned root is refused, never rounded.
+        let misaligned = unsafe { aligned.byte_add(1) };
+        // SAFETY: refused before the root is recorded.
+        assert!(unsafe { KernelWindow::from_root(misaligned, 1) }.is_none());
     }
 
     #[test]
     fn kernel_window_locates_addresses_inside_it_only() {
-        let window = KernelWindow::new(0x80_0000_0000, 3).expect("valid window");
-        assert_eq!(window.base(), 0x80_0000_0000);
+        let (window, _backing) = window_over(3);
+        let base = window.base();
         assert_eq!(window.pages(), 3);
-        assert_eq!(window.len_bytes(), 3 * 4096);
+        assert_eq!(window.len_bytes(), 3 * PAGE_SIZE as u64);
 
-        assert!(window.contains(0x80_0000_0000));
-        assert!(window.contains(0x80_0000_2FFF));
-        assert!(!window.contains(0x80_0000_3000), "the exclusive top");
-        assert!(!window.contains(0x7F_FFFF_FFFF), "one byte below");
+        assert!(window.contains(base));
+        assert!(window.contains(base + 3 * PAGE_SIZE as u64 - 1));
+        assert!(
+            !window.contains(base + 3 * PAGE_SIZE as u64),
+            "the exclusive top"
+        );
+        assert!(!window.contains(base - 1), "one byte below");
 
-        assert_eq!(window.page_index(0x80_0000_0000), Some(0));
-        assert_eq!(window.page_index(0x80_0000_1FFF), Some(1));
-        assert_eq!(window.page_index(0x80_0000_2000), Some(2));
-        assert_eq!(window.page_index(0x80_0000_3000), None);
+        assert_eq!(window.page_index(base), Some(0));
+        assert_eq!(window.page_index(base + PAGE_SIZE as u64 + 0xFFF), Some(1));
+        assert_eq!(window.page_index(base + 2 * PAGE_SIZE as u64), Some(2));
+        assert_eq!(window.page_index(base + 3 * PAGE_SIZE as u64), None);
         assert_eq!(window.page_index(0), None);
+    }
+
+    /// Every page pointer agrees with the address the same page reports, so
+    /// the run a consumer hands the page tables is the run it writes
+    /// through, and a page outside the window has no pointer at all.
+    #[test]
+    fn a_window_page_pointer_and_its_address_are_the_same_page() {
+        let (window, _backing) = window_over(3);
+        for index in 0..window.pages() {
+            let page = window.page_ptr(index).expect("a page inside the window");
+            assert_eq!(
+                page.addr().get() as u64,
+                window.base() + index as u64 * PAGE_SIZE as u64
+            );
+            assert_eq!(window.page_index(page.addr().get() as u64), Some(index));
+        }
+        assert_eq!(window.page_ptr(window.pages()), None, "the exclusive top");
+        assert_eq!(window.page_ptr(usize::MAX), None);
+    }
+
+    /// Each derived pointer reaches its own page of the window's memory: a
+    /// distinct marker written through every page reads back through that
+    /// same page and lands in the backing the window was rooted in.
+    #[test]
+    fn a_derived_page_pointer_addresses_the_windows_own_memory() {
+        const MARKS: [u8; 3] = [0xA0, 0xB1, 0xC2];
+        let (window, backing) = window_over(MARKS.len());
+
+        for (index, mark) in MARKS.iter().enumerate() {
+            let page = window.page_ptr(index).expect("a page inside the window");
+            // SAFETY: `page` is a whole page of the live `backing`
+            // allocation `window_over` kept.
+            unsafe { page.write_bytes(*mark, PAGE_SIZE) };
+        }
+        for (index, mark) in MARKS.iter().enumerate() {
+            let page = window.page_ptr(index).expect("a page inside the window");
+            // SAFETY: as the write above — the page was just written.
+            let bytes = unsafe { core::slice::from_raw_parts(page.as_ptr(), PAGE_SIZE) };
+            assert!(
+                bytes.iter().all(|byte| byte == mark),
+                "page {index} holds only its own marker"
+            );
+            assert!(
+                backing.contains(mark),
+                "page {index} was written into the window's own backing"
+            );
+        }
+    }
+
+    /// The descriptor crosses to another CPU: it is shared by every
+    /// consumer of the window, and its root resolves under every root the
+    /// port installs, so it carries no thread affinity.
+    #[test]
+    fn a_window_descriptor_is_shared_across_threads() {
+        let (window, _backing) = window_over(3);
+        let observed = std::thread::spawn(move || {
+            (
+                window.base(),
+                window.page_ptr(1).map(|page| page.addr().get()),
+            )
+        })
+        .join()
+        .expect("the thread observed the window");
+        assert_eq!(observed.0, window.base());
+        assert_eq!(
+            observed.1,
+            window.page_ptr(1).map(|page| page.addr().get()),
+            "the same page from either thread"
+        );
     }
 }

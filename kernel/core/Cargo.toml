@@ -229,6 +229,12 @@ tairix-kernel-core = { path = ".", version = "=0.0.0", default-features = false,
 # `[dependencies]` entry above stays
 # feature-free; dev-dependency features apply only to test builds.
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
+# The kernel-heap growth source's host tests (`src/kheap.rs`) root their
+# remap window in memory the test owns, through
+# `KernelWindow::from_root`, so no window address is rebuilt from an
+# integer and the whole growth path is interpretable. The normal
+# `[dependencies]` entry above stays feature-free.
+tairix-arch-api = { path = "../arch/api", version = "=0.0.0", features = ["host-tests"] }
 # The host-only signed-bundle composer (`compose_signed_appinfo`): the
 # store-bundle spawn tests sign their fixtures through the same one
 # definition the image build uses, so the kernel verifier and the composer

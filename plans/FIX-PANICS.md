@@ -15,8 +15,11 @@ the one shared body. The per-port glue (the published arch handle, the sink,
 the backtracer, the console list, the pre-init console line) is one
 `tairix_kernel::fatal_bridge::FatalReport` impl per port, shared by the
 `#[panic_handler]` and the `extern "C"` fault shim. See
-`plans/OPEN-DEFECTS.md` D13 for why it was missing and D79 for the one port
-still only partly covered.
+`plans/OPEN-DEFECTS.md` D13 for why it was missing, D79 for the one port
+still only partly covered, and D128 for the one open defect in this path: the
+walk's reader rebuilds a pointer from each validated address instead of
+deriving it from a root the bounds carry, so the unwinder cannot be
+interpreted.
 
 **The report owns its own flush.** Stopping the world removes the very thing
 that used to drain a buffered console: `pump_console_tx` is called by the

@@ -839,7 +839,7 @@ pub const fn kernel_window_base() -> u64 {
 /// build instead.
 const _: () = {
     assert!(
-        KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES).is_some(),
+        KernelWindow::is_representable(kernel_window_base(), KERNEL_WINDOW_PAGES),
         "the kernel remap window must be a representable extent"
     );
     assert!(
@@ -861,7 +861,12 @@ const _: () = {
 /// discovered Device or RAM gigapage can claim a window slot: the window
 /// lives in a regime no board resource is mapped into.
 pub fn reserve_kernel_window(frames: &'static dyn PageTableFrames) -> Option<KernelWindow> {
-    let window = KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES)?;
+    // SAFETY: the window's L1 slots are this port's own — the compile-time
+    // assertion above pins its extent and keeps the direct map below it,
+    // and the publication below installs one shared sub-hierarchy in every
+    // root this port builds, so the run is reserved and resolves
+    // identically under each.
+    let window = unsafe { KernelWindow::at_address(kernel_window_base(), KERNEL_WINDOW_PAGES) }?;
     if WINDOW_PUBLISHED.load(Ordering::Acquire) {
         return Some(window);
     }

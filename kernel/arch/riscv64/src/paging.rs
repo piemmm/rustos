@@ -1055,7 +1055,7 @@ pub const fn kernel_window_base() -> u64 {
 /// would silently leave the kernel heap on its bootstrap region. Fail the
 /// build instead.
 const _: () = assert!(
-    KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES).is_some(),
+    KernelWindow::is_representable(kernel_window_base(), KERNEL_WINDOW_PAGES),
     "the kernel remap window must be a representable extent"
 );
 
@@ -1070,7 +1070,12 @@ const _: () = assert!(
 /// tables (fail closed — the kernel heap then stays on its bootstrap
 /// region).
 pub fn reserve_kernel_window(frames: &'static dyn PageTableFrames) -> Option<KernelWindow> {
-    let window = KernelWindow::new(kernel_window_base(), KERNEL_WINDOW_PAGES)?;
+    // SAFETY: the window's root slots are this port's own — the
+    // compile-time assertion above pins its extent, and the publication
+    // below installs one shared intermediate table per claimed slot in
+    // every root this port builds, so the run is reserved and resolves
+    // identically under each.
+    let window = unsafe { KernelWindow::at_address(kernel_window_base(), KERNEL_WINDOW_PAGES) }?;
     if KERNEL_WINDOW_ROOT[0].load(Ordering::Acquire) != 0 {
         return Some(window);
     }

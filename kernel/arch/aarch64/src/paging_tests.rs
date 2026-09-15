@@ -913,15 +913,18 @@ fn the_kernel_regime_holds_the_map_below_the_remap_window() {
     assert_eq!(MAX_PHYSMAP_GIB, PHYSMAP_SLOTS);
 
     let base = kernel_window_base();
-    let window =
-        KernelWindow::new(base, KERNEL_WINDOW_PAGES).expect("the window extent is representable");
+    assert!(
+        KernelWindow::is_representable(base, KERNEL_WINDOW_PAGES),
+        "the window extent is representable"
+    );
+    let window_bytes = (KERNEL_WINDOW_PAGES as u64) * PAGE_SIZE as u64;
     assert!(base >= KERNEL_VA_BASE, "the window is in the kernel regime");
     assert_eq!(base % (1 << 30), 0, "the base is gigapage-aligned");
     assert_eq!(table_index(base, 1), KERNEL_WINDOW_FIRST_SLOT);
     // One gigapage short of the very top, so the extent's exclusive end is
     // representable and no consumer needs wrap arithmetic.
     assert_eq!(
-        base + window.len_bytes(),
+        base + window_bytes,
         KERNEL_VA_BASE + ((ENTRIES_PER_TABLE as u64 - 1) << 30)
     );
     assert!(

@@ -118,13 +118,14 @@ impl HeapSource for FrameHeapSource {
 
         let mut slots = self.slots.lock();
         let slot = slots.allocate(pages).ok()?;
-        // The window's extent was validated when it was built, so a slot
-        // inside it always has a representable address.
-        let base = window.base() + (slot as u64) * PAGE_SIZE as u64;
-        let Ok(addr) = usize::try_from(base) else {
+        let Some(region) = window.page_ptr(slot) else {
             let _ = slots.release(slot, pages);
             return None;
         };
+        // The address the page tables take is read back off the pointer the
+        // region is handed out as, so the mapped run and the run the heap
+        // writes through cannot drift apart.
+        let base = region.addr().get() as u64;
         if !back_run(self.kvmap, self.frames, base, pages) {
             // Fail closed leaking nothing: hand back every chunk that did
             // land and release the address space.
@@ -132,7 +133,7 @@ impl HeapSource for FrameHeapSource {
             let _ = slots.release(slot, pages);
             return None;
         }
-        Some((addr as *mut u8, len))
+        Some((region.as_ptr(), len))
     }
 
     fn alloc_page(&self) -> Option<NonNull<u8>> {
@@ -144,7 +145,7 @@ impl HeapSource for FrameHeapSource {
     }
 
     fn shrink(&self, base: *mut u8, len: usize) {
-        let base_addr = base as u64;
+        let base_addr = base.addr() as u64;
         let pages = len / PAGE_SIZE;
         let Some(slot) = self.kvmap.window().page_index(base_addr) else {
             // Not an address this source ever handed out: fail closed
@@ -210,11 +211,24 @@ mod tests {
     use tairix_kernel_mem::{
         BootMemoryMap, KernelRemap, MemoryClass, MemoryRegion, PhysAddr, RegionKind, SimPhysMap,
     };
+    use tairix_sync::Once;
 
-    /// Base of the window the host tests remap into. Far from every
-    /// simulated physical window, so a confused address cannot accidentally
-    /// resolve.
-    const WINDOW_BASE: u64 = 0x4000_0000_0000;
+    /// Pages in the largest physically contiguous block the frame
+    /// allocator can draw, which the assembly tests deliberately exceed.
+    ///
+    /// Interpreted, the same assembly path is driven at a fraction of the
+    /// extent: a 32 MiB pool and a 64 MiB window per test is far beyond the
+    /// interpreter's budget, and neither the chunk loop nor the pointer a
+    /// region is handed out as varies with the chunk count. The native run
+    /// keeps the full `MAX_ORDER` extent, so the "larger than one
+    /// contiguous block" property is asserted where it is affordable.
+    const LARGE_RUN_PAGES: usize = if cfg!(miri) { 64 } else { 1 << MAX_ORDER };
+
+    /// Window pages a test asks for when it only needs room above its
+    /// request. The window is real memory here, so its slack costs the
+    /// interpreter a page each; what these tests assert is the behaviour at
+    /// the low end of the window, never its extent.
+    const ROOMY_WINDOW_PAGES: usize = if cfg!(miri) { 128 } else { 4096 };
 
     /// The host has no TLB, so a shootdown is vacuous; the discipline the
     /// remap layer applies around it is asserted in `kernel/mem`.
@@ -297,57 +311,125 @@ mod tests {
         fn flush_page(&mut self, _vaddr: u64) {}
     }
 
-    /// A frame-backed growth source and the pieces it draws from, all
-    /// leaked `'static` as they are in production.
+    /// A frame-backed growth source and the pieces it draws from.
     struct Harness {
         frames: &'static FrameAllocator,
         source: &'static FrameHeapSource,
         window: KernelWindow,
     }
 
-    /// Build a harness whose only usable RAM is `ram_pages` frames based at
-    /// `ram_base`, with an empty bootstrap heap so every allocation must
-    /// grow.
+    /// The `'static` pieces one harness borrows.
     ///
-    /// The window's addresses are *not* dereferenceable on the host (no
-    /// hardware maps them), so these tests drive the growth source's
-    /// contract — extents, frame accounting, fail-closed behaviour — and the
-    /// end-to-end dereference is proven on the metal by the QEMU verticals,
-    /// which cannot boot at all unless the window works.
-    fn harness(ram_base: u64, ram_pages: usize, window_pages: usize) -> Harness {
-        let sim: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(
-            PhysAddr::new(ram_base),
-            ram_pages * PAGE_SIZE,
-        )));
-        let mut map = BootMemoryMap::new();
-        map.push(MemoryRegion {
-            start: PhysAddr::new(ram_base),
-            length: (ram_pages * PAGE_SIZE) as u64,
-            kind: RegionKind::Usable,
-        });
-        let frames: &'static FrameAllocator =
-            Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
+    /// `FrameAllocator`, `PhysMap` and `SlotWindow` are all reached through
+    /// `&'static` in production, so a harness cannot own them on its stack.
+    /// A leaked `Box` is indistinguishable from a real leak to the
+    /// interpreter, so each piece lives in a cell instead, reachable for
+    /// the whole run and accountable. One cell per [`harness!`] expansion,
+    /// so no two concurrently-running tests share a frame pool.
+    struct HarnessCell {
+        /// Backs the remap window with memory the test owns, so the
+        /// window's root is a real pointer rather than an address no
+        /// interpreter could follow. One page of slack absorbs the
+        /// alignment offset.
+        arena: Once<Vec<u8>>,
+        sim: Once<SimPhysMap>,
+        frames: Once<FrameAllocator>,
+        xtlb: Once<NoTlb>,
+        kvmap: Once<KernelRemap<WindowPageTable>>,
+        source: Once<FrameHeapSource>,
+    }
 
-        let xtlb: &'static NoTlb = Box::leak(Box::new(NoTlb));
-        let window = KernelWindow::new(WINDOW_BASE, window_pages).expect("valid window");
-        let table = WindowPageTable::new(WINDOW_BASE, window_pages);
-        let kvmap: &'static KernelRemap<WindowPageTable> =
-            Box::leak(Box::new(KernelRemap::new(window, table, xtlb)));
+    impl HarnessCell {
+        const fn new() -> Self {
+            Self {
+                arena: Once::new(),
+                sim: Once::new(),
+                frames: Once::new(),
+                xtlb: Once::new(),
+                kvmap: Once::new(),
+                source: Once::new(),
+            }
+        }
 
-        let slots = SlotWindow::new(window_pages, frames, sim).expect("non-empty window");
-        let source: &'static FrameHeapSource = Box::leak(Box::new(FrameHeapSource {
-            frames,
-            kvmap,
-            pages: FramePages::new(frames, sim),
-            slots: SpinLock::new(slots),
-        }));
-        let harness = Harness {
-            frames,
-            source,
-            window,
-        };
-        harness.warm();
-        harness
+        /// Build the harness: `ram_pages` frames of usable RAM based at
+        /// `ram_base`, a `window_pages` remap window, and an empty
+        /// bootstrap heap so every allocation must grow.
+        ///
+        /// The window is real memory here, so a grown region is genuinely
+        /// writable and the source's whole contract — extents, frame
+        /// accounting, fail-closed behaviour, and the pointer it hands
+        /// back — is checkable on the host. On the metal the same run is
+        /// page-table-backed, which the QEMU verticals prove by booting.
+        fn build(&'static self, ram_base: u64, ram_pages: usize, window_pages: usize) -> Harness {
+            let arena = self
+                .arena
+                .call_once_infallible(|| alloc::vec![0u8; (window_pages + 1) * PAGE_SIZE])
+                .expect("a fresh cell");
+            let offset = arena.as_ptr().align_offset(PAGE_SIZE);
+            let root = NonNull::new(arena.as_ptr().wrapping_add(offset).cast_mut())
+                .expect("a live allocation is non-null");
+            // SAFETY: `root` is the page-aligned base of `window_pages`
+            // whole pages of `arena`, which this cell holds for the rest of
+            // the run.
+            let window = unsafe { KernelWindow::from_root(root, window_pages) }
+                .expect("the arena backs a representable window");
+
+            let sim = self
+                .sim
+                .call_once_infallible(|| {
+                    SimPhysMap::new(PhysAddr::new(ram_base), ram_pages * PAGE_SIZE)
+                })
+                .expect("a fresh cell");
+            let mut map = BootMemoryMap::new();
+            map.push(MemoryRegion {
+                start: PhysAddr::new(ram_base),
+                length: (ram_pages * PAGE_SIZE) as u64,
+                kind: RegionKind::Usable,
+            });
+            let frames = self
+                .frames
+                .call_once_infallible(|| FrameAllocator::new(&map).expect("allocator"))
+                .expect("a fresh cell");
+            let xtlb = self
+                .xtlb
+                .call_once_infallible(|| NoTlb)
+                .expect("a fresh cell");
+            let kvmap = self
+                .kvmap
+                .call_once_infallible(|| {
+                    let table = WindowPageTable::new(window.base(), window_pages);
+                    KernelRemap::new(window, table, xtlb)
+                })
+                .expect("a fresh cell");
+
+            let slots = SlotWindow::new(window_pages, frames, sim).expect("non-empty window");
+            let source = self
+                .source
+                .call_once_infallible(|| FrameHeapSource {
+                    frames,
+                    kvmap,
+                    pages: FramePages::new(frames, sim),
+                    slots: SpinLock::new(slots),
+                })
+                .expect("a fresh cell");
+
+            let harness = Harness {
+                frames,
+                source,
+                window: kvmap.window(),
+            };
+            harness.warm();
+            harness
+        }
+    }
+
+    /// Build a harness over a cell of this expansion's own, so each test
+    /// gets an independent frame pool and window.
+    macro_rules! harness {
+        ($ram_base:expr, $ram_pages:expr, $window_pages:expr) => {{
+            static CELL: HarnessCell = HarnessCell::new();
+            CELL.build($ram_base, $ram_pages, $window_pages)
+        }};
     }
 
     impl Harness {
@@ -381,7 +463,7 @@ mod tests {
 
     #[test]
     fn grows_from_frames_and_shrinks_back() {
-        let h = harness(0x10_0000, 512, 4096);
+        let h = harness!(0x10_0000, 512, ROOMY_WINDOW_PAGES);
         let free_before = h.frames.free_frames();
 
         // 128 KiB — the empty bootstrap cannot satisfy it — forcing a grow.
@@ -391,7 +473,7 @@ mod tests {
             .expect("grow satisfied the large request");
         assert!(len >= 128 * 1024);
         assert!(
-            h.window.page_index(base as u64).is_some(),
+            h.window.page_index(base.addr() as u64).is_some(),
             "the region lives in the remap window"
         );
         assert!(
@@ -407,13 +489,39 @@ mod tests {
         );
     }
 
+    /// The pointer `grow` hands back addresses the run it mapped: the heap
+    /// receives this region as its own memory and writes allocation headers
+    /// straight into it, so a pointer that named anything else — or that
+    /// carried no provenance for these bytes — would corrupt the free-list
+    /// algebra silently.
+    #[test]
+    fn a_grown_region_is_writable_through_the_pointer_it_was_handed() {
+        let h = harness!(0x10_0000, 512, ROOMY_WINDOW_PAGES);
+        let (base, len) = h.source.grow(4 * PAGE_SIZE).expect("grows");
+
+        // SAFETY: the source mapped `len` bytes at `base` and the region is
+        // this test's until the `shrink` below returns it.
+        let region = unsafe { core::slice::from_raw_parts_mut(base, len) };
+        region.fill(0xA5);
+        region[0] = 0x5A;
+        region[len - 1] = 0x5A;
+        assert_eq!(region[0], 0x5A);
+        assert_eq!(region[len - 1], 0x5A);
+        assert!(
+            region[1..len - 1].iter().all(|byte| *byte == 0xA5),
+            "the region's interior held the pattern written through it"
+        );
+
+        h.source.shrink(base, len);
+    }
+
     #[test]
     fn grows_across_a_fragmented_pool_with_no_large_contiguous_block() {
         // Enough RAM that the request also exceeds one `MAX_ORDER` block,
         // so this covers the headline regression: a fragmented pool *and* a
         // region larger than the largest contiguous draw.
-        let block_pages = 1usize << MAX_ORDER;
-        let h = harness(0x100_0000, block_pages + 4096, 2 * block_pages);
+        let block_pages = LARGE_RUN_PAGES;
+        let h = harness!(0x100_0000, block_pages + block_pages / 2, 2 * block_pages);
         fragment_pool(h.frames);
         let free_before = h.frames.free_frames();
         assert!(
@@ -432,7 +540,7 @@ mod tests {
         // Every page of the region is backed by a distinct frame.
         let mut seen = Vec::with_capacity(pages);
         for index in 0..pages {
-            let vaddr = base as u64 + (index * PAGE_SIZE) as u64;
+            let vaddr = base.addr() as u64 + (index * PAGE_SIZE) as u64;
             seen.push(
                 h.source
                     .kvmap
@@ -455,9 +563,9 @@ mod tests {
 
     #[test]
     fn grows_for_an_allocation_spanning_several_max_order_blocks() {
-        let block_pages = 1usize << MAX_ORDER;
+        let block_pages = LARGE_RUN_PAGES;
         let pages = 2 * block_pages + 3;
-        let h = harness(0x100_0000, pages + 512, 4 * block_pages);
+        let h = harness!(0x100_0000, pages + 512, 4 * block_pages);
         let free_before = h.frames.free_frames();
 
         let (base, len) = h
@@ -477,7 +585,7 @@ mod tests {
 
     #[test]
     fn a_grown_region_wastes_less_than_one_page() {
-        let h = harness(0x10_0000, 2048, 4096);
+        let h = harness!(0x10_0000, 2048, ROOMY_WINDOW_PAGES);
         // A request a page-exact draw serves with under a page of slack but
         // a power-of-two granule would nearly double.
         let min_len = 33 * PAGE_SIZE + 1;
@@ -493,7 +601,7 @@ mod tests {
 
     #[test]
     fn a_small_request_still_draws_the_amortised_granule() {
-        let h = harness(0x10_0000, 512, 4096);
+        let h = harness!(0x10_0000, 512, ROOMY_WINDOW_PAGES);
         let (base, len) = h.source.grow(1).expect("grows");
         assert_eq!(len, MIN_GROW_PAGES * PAGE_SIZE);
         h.source.shrink(base, len);
@@ -501,11 +609,11 @@ mod tests {
 
     #[test]
     fn true_exhaustion_fails_closed_without_leaking() {
-        let h = harness(0x10_0000, 64, 4096);
+        let h = harness!(0x10_0000, 64, ROOMY_WINDOW_PAGES);
         let free_before = h.frames.free_frames();
         // Far more pages than the pool holds: the partial fill must be
         // handed back whole.
-        assert!(h.source.grow(4096 * PAGE_SIZE).is_none());
+        assert!(h.source.grow(ROOMY_WINDOW_PAGES * PAGE_SIZE).is_none());
         assert_eq!(
             h.frames.free_frames(),
             free_before,
@@ -514,7 +622,7 @@ mod tests {
         // And the address space is available again from the start.
         let (base, len) = h.source.grow(PAGE_SIZE).expect("a small grow still fits");
         assert_eq!(
-            h.window.page_index(base as u64),
+            h.window.page_index(base.addr() as u64),
             Some(0),
             "the refused reservation was released"
         );
@@ -523,7 +631,7 @@ mod tests {
 
     #[test]
     fn a_window_too_small_for_the_granule_fails_closed() {
-        let h = harness(0x10_0000, 512, MIN_GROW_PAGES - 1);
+        let h = harness!(0x10_0000, 512, MIN_GROW_PAGES - 1);
         let free_before = h.frames.free_frames();
         assert!(h.source.grow(1).is_none());
         assert_eq!(h.frames.free_frames(), free_before);
@@ -531,15 +639,15 @@ mod tests {
 
     #[test]
     fn shrink_refuses_an_address_the_source_never_handed_out() {
-        let h = harness(0x10_0000, 512, 4096);
+        let h = harness!(0x10_0000, 512, ROOMY_WINDOW_PAGES);
         let (base, len) = h.source.grow(PAGE_SIZE).expect("grows");
         let free_after_grow = h.frames.free_frames();
 
         // Outside the window entirely.
-        h.source.shrink(0x1000_usize as *mut u8, len);
+        h.source
+            .shrink(core::ptr::without_provenance_mut(PAGE_SIZE), len);
         // Inside the window but not a run this source reserved.
-        let above = base as usize + len;
-        h.source.shrink(above as *mut u8, len);
+        h.source.shrink(base.wrapping_add(len), len);
         // The right base with the wrong extent.
         h.source.shrink(base, len + PAGE_SIZE);
         assert_eq!(
@@ -555,7 +663,7 @@ mod tests {
 
     #[test]
     fn a_drained_window_is_reused_rather_than_marched_through() {
-        let h = harness(0x10_0000, 512, 4096);
+        let h = harness!(0x10_0000, 512, ROOMY_WINDOW_PAGES);
         let (first, len) = h.source.grow(PAGE_SIZE).expect("grows");
         h.source.shrink(first, len);
         let (second, len2) = h.source.grow(PAGE_SIZE).expect("grows again");
@@ -565,7 +673,7 @@ mod tests {
 
     #[test]
     fn a_slab_page_costs_one_frame_and_no_window_space() {
-        let h = harness(0x10_0000, 512, 4096);
+        let h = harness!(0x10_0000, 512, ROOMY_WINDOW_PAGES);
         let free_before = h.frames.free_frames();
 
         let page = h.source.alloc_page().expect("a page");
@@ -575,12 +683,12 @@ mod tests {
             "a slab page costs exactly one frame"
         );
         assert_eq!(
-            page.as_ptr() as usize % PAGE_SIZE,
+            page.addr().get() % PAGE_SIZE,
             0,
             "a slab page is granule-aligned"
         );
         assert!(
-            h.window.page_index(page.as_ptr() as u64).is_none(),
+            h.window.page_index(page.addr().get() as u64).is_none(),
             "a slab page is direct-mapped, never carved out of the remap window"
         );
         // The direct map is real storage in this harness, so the page is
@@ -591,7 +699,7 @@ mod tests {
         // The window is untouched, so a region still starts at its first slot.
         let (base, len) = h.source.grow(PAGE_SIZE).expect("grows");
         assert_eq!(
-            h.window.page_index(base as u64),
+            h.window.page_index(base.addr() as u64),
             Some(0),
             "the page draw consumed no window slot"
         );
@@ -607,7 +715,7 @@ mod tests {
 
     #[test]
     fn page_exhaustion_fails_closed_without_leaking() {
-        let h = harness(0x10_0000, 8, 4096);
+        let h = harness!(0x10_0000, 8, ROOMY_WINDOW_PAGES);
         let mut pages = Vec::new();
         while let Some(page) = h.source.alloc_page() {
             pages.push(page);
@@ -633,27 +741,27 @@ mod tests {
     /// supply exactly as it binds region growth: both run under that lock.
     #[test]
     fn neither_grow_nor_shrink_allocates_from_the_global_heap() {
-        let block_pages = 1usize << MAX_ORDER;
+        // Counts this thread's allocations only, so the rest of the test
+        // binary cannot perturb the measurement.
+        static COUNTER: LiveBytes = LiveBytes::new();
+
+        let block_pages = LARGE_RUN_PAGES;
         // Large enough to force several chunks, a hole record, and more than
         // one teardown batch.
-        let h = harness(0x100_0000, block_pages + 1024, 2 * block_pages);
+        let h = harness!(0x100_0000, block_pages + 1024, 2 * block_pages);
 
-        // Count this thread's allocations only, so the rest of the test
-        // binary cannot perturb the measurement. `harness` has already
-        // warmed the record arena, so the measured window covers
-        // steady-state growth.
-        let counter: &'static LiveBytes = Box::leak(Box::new(LiveBytes::new()));
-        opt_in_current_thread(counter);
+        // The harness has already warmed the record arena, so the measured
+        // window covers steady-state growth.
+        opt_in_current_thread(&COUNTER);
         let grown = h.source.grow((block_pages + 1) * PAGE_SIZE);
-        let after_grow = counter.allocations();
-        let region = grown.map(|(base, len)| (base as usize, len));
-        if let Some((base, len)) = region {
-            h.source.shrink(base as *mut u8, len);
+        let after_grow = COUNTER.allocations();
+        if let Some((base, len)) = grown {
+            h.source.shrink(base, len);
         }
-        let after_shrink = counter.allocations();
+        let after_shrink = COUNTER.allocations();
         opt_out_current_thread();
 
-        assert!(region.is_some(), "the measured grow succeeded");
+        assert!(grown.is_some(), "the measured grow succeeded");
         assert_eq!(after_grow, 0, "grow allocated from the global heap");
         assert_eq!(after_shrink, 0, "shrink allocated from the global heap");
     }
@@ -662,16 +770,16 @@ mod tests {
     /// from inside that very lock every time a size class needs a page.
     #[test]
     fn neither_page_draw_nor_page_release_allocates_from_the_global_heap() {
-        let h = harness(0x10_0000, 512, 4096);
+        static COUNTER: LiveBytes = LiveBytes::new();
 
-        let counter: &'static LiveBytes = Box::leak(Box::new(LiveBytes::new()));
-        opt_in_current_thread(counter);
+        let h = harness!(0x10_0000, 512, ROOMY_WINDOW_PAGES);
+        opt_in_current_thread(&COUNTER);
         let page = h.source.alloc_page();
-        let after_draw = counter.allocations();
+        let after_draw = COUNTER.allocations();
         if let Some(page) = page {
             h.source.free_page(page);
         }
-        let after_release = counter.allocations();
+        let after_release = COUNTER.allocations();
         opt_out_current_thread();
 
         assert!(page.is_some(), "the measured draw succeeded");

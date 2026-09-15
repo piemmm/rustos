@@ -86,24 +86,15 @@ impl StackTier {
         let window = self.kvmap.window();
         let mut slots = self.slots.lock();
         let slot = slots.allocate(RESERVE_PAGES).ok()?;
-        // The window's extent was validated when it was built, so a slot
-        // inside it always has a representable address.
-        let guard = window.base() + ((self.base_slot + slot) as u64) * PAGE_SIZE as u64;
-        let usable = guard + PAGE_SIZE as u64;
-        // The one place the window address becomes a pointer, before
-        // anything is mapped, so an address no pointer could hold is
-        // refused while only the reservation has to be undone. These pages
-        // are not a Rust allocation — they exist because the kernel wrote
-        // page tables for them — so `with_exposed_provenance` states the
-        // int-to-pointer step deliberately where a bare cast hid it.
-        let Some(base) = usize::try_from(usable)
-            .ok()
-            .map(core::ptr::with_exposed_provenance_mut::<u8>)
-            .and_then(NonNull::new)
-        else {
+        // The usable run starts one slot above the guard, and the window
+        // derives its pointer from the root the port established, so no
+        // address here is rebuilt into a pointer.
+        let Some(base) = window.page_ptr(self.base_slot + slot + 1) else {
             let _ = slots.release(slot, RESERVE_PAGES);
             return None;
         };
+        let usable = base.addr().get() as u64;
+        let guard = usable - PAGE_SIZE as u64;
         if !back_run(self.kvmap, self.frames, usable, STACK_PAGES) {
             release_run(self.kvmap, self.frames, usable, STACK_PAGES);
             let _ = slots.release(slot, RESERVE_PAGES);

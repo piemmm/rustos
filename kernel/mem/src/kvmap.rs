@@ -364,7 +364,10 @@ mod tests {
                 publish_remote,
                 ..CountingXtlb::default()
             }));
-        let window = KernelWindow::new(WINDOW_BASE, pages).expect("valid window");
+        // SAFETY: the double stands in for a port that reserved this run;
+        // nothing here dereferences a window page, so the mint is the
+        // address arithmetic under test and nothing more.
+        let window = unsafe { KernelWindow::at_address(WINDOW_BASE, pages) }.expect("valid window");
         (KernelRemap::new(window, HostPageTable::new(), xtlb), xtlb)
     }
 

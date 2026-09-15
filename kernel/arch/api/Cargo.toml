@@ -39,6 +39,15 @@ path = "src/lib.rs"
 #   every port's callback seam uses, rather than re-deriving the
 #   provenance-discarding `usize` round trip the cell exists to remove.
 #   The layering permits the edge `kernel/arch/api -> lib/sync`.
+[features]
+# `host-tests` exposes `KernelWindow::from_root` to downstream crates'
+# tests: a window whose pages a port established can only be described by
+# minting a pointer from an address, which no interpreter can follow, so a
+# host test roots its window in memory it owns instead. The feature must
+# not be enabled in production kernel builds — a port always reserves its
+# window, never borrows one.
+host-tests = []
+
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
