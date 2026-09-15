@@ -13,6 +13,7 @@
 # address space, so a malformed face can fault only this sandbox.
 id = "os.tairix.fontd"
 name = "fontd"
+title = "Fontd"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_IPC_BIND_PRIVILEGED", "CAP_FS_ACCESS", "CAP_LOG_EMIT"]

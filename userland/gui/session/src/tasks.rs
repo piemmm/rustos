@@ -13,10 +13,13 @@
 //! it is told about and translates between the two whenever the taskbar acts on
 //! a window or the window manager moves focus.
 //!
-//! The bridge performs four operations, each total and fail-closed:
+//! The bridge's operations are each total and fail-closed:
 //!
 //! * [`open`](TaskBridge::open) adds a window to the compositor, registers it
 //!   as a running task, and focuses it (a freshly opened window takes focus).
+//!   [`open_unpresented`](TaskBridge::open_unpresented) does the first two for
+//!   a served window whose client has yet to present anything, and
+//!   [`map`](TaskBridge::map) does the third once it has.
 //! * [`close`](TaskBridge::close) removes a window from the compositor and its
 //!   task from the bar, dropping focus if the closed window held it.
 //! * [`raise`](TaskBridge::raise) shows, raises, and focuses a task's window
@@ -105,24 +108,81 @@ impl TaskBridge {
         surface: Surface,
         title: impl Into<String>,
     ) -> Option<WindowId> {
-        let task = TaskId(self.next);
-        let next = self.next.checked_add(1)?;
+        let task = self.mint()?;
         let window = compositor.add_window(origin, surface);
-        self.next = next;
-        self.tasks.push((window, task));
-        taskbar.tasks_mut().add(task, title);
+        self.attach(taskbar, window, task, title);
         focus_window(compositor, router, taskbar, window, task);
         Some(window)
+    }
+
+    /// Open a top-level window of client extent `client` at `origin` that a
+    /// client has yet to present into, and register it as a running task
+    /// titled `title` — **without** showing, raising, or focusing it.
+    ///
+    /// A served window is listed on the bar from the moment it exists, so the
+    /// task is reachable and retitleable while its application is still
+    /// getting ready; [`map`](Self::map) is what puts it on screen, once the
+    /// application has presented something to see. Returns `None`, changing
+    /// nothing, on the same exhausted-id-space refusal as
+    /// [`open`](Self::open).
+    pub fn open_unpresented(
+        &mut self,
+        compositor: &mut Compositor,
+        taskbar: &mut Taskbar,
+        origin: Point,
+        client: (u32, u32),
+        title: impl Into<String>,
+    ) -> Option<WindowId> {
+        let task = self.mint()?;
+        let window = compositor.add_unpresented_window(origin, client.0, client.1);
+        self.attach(taskbar, window, task, title);
+        Some(window)
+    }
+
+    /// Show, raise, and focus the tracked `window` and highlight its task —
+    /// what a served window's first present asks for, and exactly what
+    /// [`open`](Self::open) does for a window that opens mapped. Returns
+    /// `false`, changing nothing, for a window the bridge does not track.
+    pub fn map(
+        &self,
+        compositor: &mut Compositor,
+        router: &mut SessionInputRouter,
+        taskbar: &mut Taskbar,
+        window: WindowId,
+    ) -> bool {
+        let Some(task) = self.task_for(window) else {
+            return false;
+        };
+        focus_window(compositor, router, taskbar, window, task);
+        true
+    }
+
+    /// Mint the next task id, or `None` when the id space is exhausted.
+    fn mint(&mut self) -> Option<TaskId> {
+        let task = TaskId(self.next);
+        self.next = self.next.checked_add(1)?;
+        Some(task)
+    }
+
+    /// Record `window` as `task` and list it on the bar titled `title`.
+    fn attach(
+        &mut self,
+        taskbar: &mut Taskbar,
+        window: WindowId,
+        task: TaskId,
+        title: impl Into<String>,
+    ) {
+        self.tasks.push((window, task));
+        taskbar.tasks_mut().add(task, title);
     }
 
     /// Retitle `window`: relabel its taskbar entry and, when it wears the
     /// window-manager frame, its title bar — both from this one call, so the
     /// two can never show different names.
     ///
-    /// A tracked window that carries no title bar (the session's own
-    /// undecorated trusted surfaces) still relabels on the bar: the entry is
-    /// the task's label, not the decoration's. Returns `false`, changing
-    /// nothing, when `window` is not tracked.
+    /// A tracked window that carries no title bar still relabels on the bar:
+    /// the entry is the task's label, not the decoration's. Returns `false`,
+    /// changing nothing, when `window` is not tracked.
     pub fn retitle(
         &mut self,
         compositor: &mut Compositor,

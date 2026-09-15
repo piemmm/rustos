@@ -163,6 +163,9 @@ pub enum Refusal {
     TooLong,
     /// The picker was asked and the user chose nothing.
     Cancelled,
+    /// The session would not open a file chooser at all, so there was never
+    /// anything to choose from.
+    PickRefused(Errno),
     /// The document's pixels arrived but could not be held.
     Unholdable,
 }
@@ -174,6 +177,9 @@ impl core::fmt::Display for Refusal {
             Self::Unreadable(err) => write!(f, "the document could not be read ({err})"),
             Self::TooLong => f.write_str("the document is larger than this viewer opens"),
             Self::Cancelled => f.write_str("no document was chosen"),
+            Self::PickRefused(err) => {
+                write!(f, "the desktop offered no file chooser ({err})")
+            }
             Self::Unholdable => f.write_str("the picture could not be held in memory"),
         }
     }
@@ -239,6 +245,9 @@ pub struct View {
     drag: Option<Point>,
     /// The latest pointer position, for the context menu and hit-testing.
     pointer: Point,
+    /// Whether the document is the *user's* to choose: the viewer was
+    /// launched with none, so it asks the session's picker.
+    picks_its_own_document: bool,
 }
 
 impl View {
@@ -276,7 +285,23 @@ impl View {
             canvas: (0, 0),
             drag: None,
             pointer: Point::ORIGIN,
+            picks_its_own_document: !opening,
         }
+    }
+
+    /// Whether the viewer has nothing of its own to show yet.
+    ///
+    /// True only while a viewer launched with *no* document is waiting on the
+    /// user: it asks the session's picker, and until the choice concludes —
+    /// and then until the document decodes or is refused — the canvas is
+    /// empty. A served window is shown by its first present, so an embedder
+    /// asks this before presenting rather than putting an empty window on
+    /// screen and leaving it behind the chooser for as long as the choice
+    /// takes. Either conclusion ends it: the document, or the reason there is
+    /// none.
+    #[must_use]
+    pub const fn nothing_to_show(&self) -> bool {
+        self.picks_its_own_document && self.document.is_none() && self.refusal.is_none()
     }
 
     /// The document open, if one is.
@@ -802,15 +827,21 @@ impl View {
         true
     }
 
-    /// State that the picker was asked and the user chose nothing.
+    /// State `why` no document will arrive.
     ///
-    /// A refused optional action is an answer, not a death: the window stays
-    /// open and says so.
-    pub fn cancelled(&mut self) -> bool {
+    /// The two ways an ask for one ends without a document — the user chose
+    /// nothing ([`Refusal::Cancelled`]), and the session would not offer a
+    /// chooser at all ([`Refusal::PickRefused`]) — so the window states the
+    /// reason instead of staying empty, or never appearing at all. A refused
+    /// optional action is an answer, not a death.
+    ///
+    /// Answers `false`, changing nothing, when a document is already open: the
+    /// picture on screen is still what the user is looking at.
+    pub fn no_document(&mut self, why: Refusal) -> bool {
         if self.document.is_some() {
             return false;
         }
-        self.refusal = Some(Refusal::Cancelled);
+        self.refusal = Some(why);
         true
     }
 

@@ -8,6 +8,7 @@
 # secured VFS.
 id = "os.tairix.tee"
 name = "tee"
+title = "Tee"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]

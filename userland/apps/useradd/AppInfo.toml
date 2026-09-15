@@ -10,6 +10,7 @@
 # tool never prompts.
 id = "os.tairix.useradd"
 name = "useradd"
+title = "Useradd"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_USER_ADMIN", "CAP_FS_ACCESS"]

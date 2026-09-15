@@ -10,6 +10,7 @@
 # the inherited standard input, exactly as `cp -i` and `mv -i` request it.
 id = "os.tairix.ln"
 name = "ln"
+title = "Ln"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]

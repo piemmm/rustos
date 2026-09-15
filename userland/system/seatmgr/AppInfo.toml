@@ -9,6 +9,7 @@
 # standard stream.
 id = "os.tairix.seatmgr"
 name = "seatmgr"
+title = "Seatmgr"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_SEAT_ADMIN", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]

@@ -136,7 +136,7 @@ pub fn association_from_appinfo(bundle_path: &str, appinfo: &[u8]) -> Option<App
         mimes.push(mime_type_at(body, caps, index).ok()?.to_string());
     }
     Some(AppAssociation::new(
-        header.bundle_name(),
+        header.bundle_title(),
         bundle_path,
         mimes,
     ))

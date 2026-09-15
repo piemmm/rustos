@@ -18,7 +18,7 @@ use tairix_theme::{TextRole, Theme, ThemeRegistry};
 
 use super::{bytes, facts, percent, render_into, summary};
 use crate::view::View;
-use crate::{Answer, Layout, Request};
+use crate::{Answer, Layout, Refusal, Request};
 
 /// The window every test paints.
 const WINDOW: (u32, u32) = (800, 600);
@@ -121,7 +121,7 @@ fn a_viewer_with_nothing_open_draws_its_reason_rather_than_a_blank_canvas() {
     let mut view = View::new(false);
     let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, font(theme));
     let waiting = painted(&view, &layout, theme);
-    assert!(view.cancelled());
+    assert!(view.no_document(Refusal::Cancelled));
     let refused = painted(&view, &layout, theme);
     assert_ne!(
         waiting.pixels(),
@@ -306,7 +306,7 @@ fn the_summary_names_the_document_and_the_refusal_names_the_reason() {
     assert!(line.contains("4032 x 3024"));
 
     let mut empty = View::new(false);
-    assert!(empty.cancelled());
+    assert!(empty.no_document(Refusal::Cancelled));
     let stated = summary(&empty);
     assert!(!stated.is_empty(), "a refusal always states something");
 }

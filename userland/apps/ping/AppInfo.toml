@@ -9,6 +9,7 @@
 # standard input.
 id = "os.tairix.ping"
 name = "ping"
+title = "Ping"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET", "CAP_NET_RAW"]

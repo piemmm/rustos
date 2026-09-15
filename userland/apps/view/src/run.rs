@@ -472,6 +472,8 @@ mod program {
         /// The title the session was last told, so it is only set again when
         /// the document changes.
         title: String,
+        /// Whether any frame of this window has reached the session.
+        presented: bool,
     }
 
     impl Window {
@@ -486,6 +488,18 @@ mod program {
                 .map_or((0, 0), |mode| (mode.width_px, mode.height_px));
             self.view
                 .layout(width, height, theme, scale, face(theme, scale))
+        }
+
+        /// Whether presenting now would put an empty window on screen.
+        ///
+        /// The session shows a served window on its first present, so
+        /// withholding that present is withholding the window — which is what
+        /// a viewer waiting on a pick must do, or it sits blank behind the
+        /// chooser for as long as the choice takes. Once anything of the
+        /// window has been on screen it is never withheld again, whatever the
+        /// viewer goes on to show.
+        fn withholding(&self) -> bool {
+            !self.presented && self.view.nothing_to_show()
         }
 
         /// Paint what `repaint` owes and present it.
@@ -503,9 +517,13 @@ mod program {
             let Some(mode) = self.shell.mode().copied() else {
                 return Ok(());
             };
-            // The session gave its copy of the region back, so nothing of
-            // what was on screen survives a reported repaint.
-            let repaint = if self.shell.content_released() {
+            if self.withholding() {
+                return Ok(());
+            }
+            // Nothing of what was on screen survives where the session gave
+            // its copy of the region back, or where the window has never been
+            // on screen at all.
+            let repaint = if self.shell.content_released() || !self.presented {
                 Repaint::Whole
             } else {
                 repaint
@@ -515,7 +533,7 @@ mod program {
             };
             let layout = self.layout(theme, scale);
             let view = &self.view;
-            self.shell.present(area, |surface| {
+            let landed = self.shell.present(area, |surface| {
                 tairix_view::paint::render_into(
                     surface,
                     view,
@@ -525,7 +543,11 @@ mod program {
                     face(theme, scale),
                     &mut NoArtwork,
                 );
-            })
+            });
+            if landed.is_ok() {
+                self.presented = true;
+            }
+            landed
         }
     }
 
@@ -690,8 +712,16 @@ mod program {
         let Some(id) = window.shell.window_id() else {
             return;
         };
-        if window.shell.client().pick_file(id).is_err() {
-            report("the desktop offers no file picker; open a document from the files app");
+        // A refused ask is the one thing that leaves the window with nothing
+        // to show and nothing coming, so it is recorded as the reason there is
+        // no document: the window then appears stating it, where the stderr
+        // line alone would leave a graphical launch silent.
+        if let Err(err) = window.shell.client().pick_file(id) {
+            report(&alloc::format!(
+                "the desktop offered no file chooser ({err}); \
+                 open a document from the files app"
+            ));
+            window.view.no_document(Refusal::PickRefused(err));
         }
     }
 
@@ -733,6 +763,7 @@ mod program {
             menu: None,
             tip: None,
             title: String::from(APP_TITLE),
+            presented: false,
         };
         let (desktop, themes) = match app::bring_up_desktop(window.shell.client()) {
             Ok(pair) => pair,
@@ -792,6 +823,8 @@ mod program {
             ask_for_document(&mut window);
         }
         // The first frame is the whole window: nothing of it is on screen yet.
+        // Launched on its own, there is nothing to show until the pick
+        // concludes, so this present is withheld and the window with it.
         if window
             .present(Repaint::Whole, &damage::sink(), theme, scale)
             .is_err()
@@ -969,7 +1002,7 @@ mod program {
                 Routed::Changed(Repaint::Reported)
             }
             WindowEvent::PickCancelled { .. } => {
-                if window.view.cancelled() {
+                if window.view.no_document(Refusal::Cancelled) {
                     reported.add(layout.window());
                     return Routed::Changed(Repaint::Reported);
                 }

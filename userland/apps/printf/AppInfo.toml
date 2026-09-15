@@ -7,6 +7,7 @@
 # documents through the secured VFS.
 id = "os.tairix.printf"
 name = "printf"
+title = "Printf"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

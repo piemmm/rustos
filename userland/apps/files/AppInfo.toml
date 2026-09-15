@@ -21,6 +21,7 @@
 # launching user's grants, never more.
 id = "os.tairix.files"
 name = "files"
+title = "Files"
 version = "0.1.0"
 kind = "application"
 # The identity the desktop's icon-bar information panel states, drawn from

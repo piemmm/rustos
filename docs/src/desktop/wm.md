@@ -885,6 +885,30 @@ set against the ceiling rather than one entry against what is charged):
   the same window draws with its blur turned off, which the compositor's tests
   assert rather than assume.
 
+### Desktop chrome is served first
+
+The ceiling is spent a **tier** at a time (`FrostTier`), front to back within
+each: blurred desktop chrome, then blurred application windows, then everything
+unblurred. A tier is the only thing that can put a window ahead of the ones in
+front of it, and both tiers below the first are there because being nearer the
+front does not by itself make a frost worth more.
+
+Chrome is `!Window::is_app_presented()` — the existing, exact distinction: a
+window the embedder paints itself, which is the taskbar, a session dialog, or
+the lock screen. It is permanently on screen and its frost is a band-sized
+slice of the budget, yet it is an ordinary compositor window and deliberately
+*not* pinned topmost, so it sits at the **back** of the stack. Weighed there in
+one front-to-back sweep, a default terminal — translucent, blurred — took the
+ceiling ahead of it, and the bar kept its blur only while the applications'
+frosts happened to leave a bar-sized slice over. That is why the icon bar's
+frost came and went with how many windows were open and how big they were:
+around fourteen terminals was where the leftover stopped fitting. Its
+transparency survived throughout, because that is the window's own alpha.
+
+An unblurred window is served last whatever its depth, for the reason it always
+was: a blur decides how a window *looks*, where a radius-zero retention only
+saves recomposing the stack beneath it and changes no pixel.
+
 Depth is bounded by the one fact that matters — what can be retained — rather
 than by a window count that a large screen would waste and a small one could not
 afford. Frosts that do not overlap all fit, since together they cover no more

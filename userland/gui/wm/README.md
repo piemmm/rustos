@@ -110,7 +110,14 @@ router**:
   blurred some 4.7 M pixels. The cost is that a window buried under a pile of
   them reads as translucent rather than as frosted glass where it still shows;
   gaining or losing a frost marks the window's own damage, because the ration
-  turns on the live pressure band as well as on the scene.
+  turns on the live pressure band as well as on the scene. The ceiling is spent
+  a **tier** at a time rather than in one sweep (`FrostTier`): blurred desktop
+  chrome (`!Window::is_app_presented` — the taskbar, a session dialog, the lock
+  screen), then blurred application windows, then everything unblurred. Chrome
+  is permanently on screen and wants a band-sized slice, yet it is an ordinary
+  window deliberately not pinned topmost, so weighed among the applications it
+  lost its blur to any pile of translucent windows over it — which is why the
+  icon bar's frost came and went with the number of terminals open.
 - Damage tracking (`tairix_geometry::Region`): only changed pixels are
   recomposited, and the region's rectangles are pairwise disjoint, so no
   pixel is composited or presented twice and two far-apart updates stay two

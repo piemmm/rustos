@@ -11,6 +11,7 @@
 # every path per-inode under the caller's attested identity.
 id = "os.tairix.users"
 name = "users"
+title = "Users"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_USER_ADMIN", "CAP_FS_ACCESS"]

@@ -239,9 +239,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                     }
                 })
             }
-            KeyValue::Named(NamedKeyCode::Escape) => {
-                self.conclude(shell, compositor, PickConclusion::Cancelled)
-            }
+            KeyValue::Named(NamedKeyCode::Escape) => self.cancel(shell, compositor),
             _ => None,
         }
     }
@@ -326,6 +324,22 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             Ok(true) | Err(_) => NavOutcome::Redraw,
             Ok(false) => NavOutcome::None,
         })
+    }
+
+    /// Dismiss the showing pick without choosing, closing the picker window.
+    ///
+    /// What both dismissals mean, so they cannot diverge: the Escape key the
+    /// engine routes itself, and the title bar's close control, which the
+    /// window manager raises for the session to interpret because a window the
+    /// session paints is the session's to close.
+    ///
+    /// Returns the concluded pick, or `None` when no pick is showing.
+    pub fn cancel(
+        &mut self,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<ConcludedPick> {
+        self.conclude(shell, compositor, PickConclusion::Cancelled)
     }
 
     /// Announce [`PICKER_SHOWN`] for a pick whose picker a presented frame has
@@ -438,14 +452,15 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
         };
         let surface =
             render_surface(&browser, compositor.scale(), shell).ok_or(Errno::LengthOutOfRange)?;
+        let titled = picker_title(browser.components());
         let wm = shell
-            .open_window(
-                compositor,
-                PICKER_ORIGIN,
-                surface,
-                picker_title(browser.components()),
-            )
+            .open_window(compositor, PICKER_ORIGIN, surface, titled.clone())
             .ok_or(Errno::NoSpace)?;
+        // A dialog, so it wears the window manager's frame: the title says
+        // which UI is asking on the application's behalf, and the close
+        // control cancels the pick exactly as Escape does. Fixed-size,
+        // because the shared browser view renders at one geometry.
+        shell.decorate_window(compositor, wm, &titled, false);
         self.active = Some(ActivePick {
             for_window,
             wm,

@@ -8,6 +8,7 @@
 # CAP_CONSOLE_READ.
 id = "os.tairix.seq"
 name = "seq"
+title = "Seq"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

@@ -9,6 +9,7 @@
 # there, never in this process.
 id = "os.tairix.man"
 name = "man"
+title = "Man"
 version = "0.1.0"
 kind = "command"
 # CAP_LOG_EMIT is the sandbox seam's voice: a help-document worker that

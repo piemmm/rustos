@@ -19,8 +19,9 @@ disagree about what a store says.
 - `applib add <bundle> [--category <folder>] [--name <n>] [--icon <a>]
   [--user]` — register (or update) a bundle. Identity, display name,
   folder, and icon come from the bundle's own signed `AppInfo` manifest
-  (`AppInfoHeader::library_category` / `library_icon`); the switches
-  override it. A manifest that declares no listing needs an explicit
+  (`AppInfoHeader::bundle_title` / `library_category` / `library_icon` — the
+  *title*, so a row reads the human-readable name rather than the command
+  word); the switches override it. A manifest that declares no listing needs an explicit
   `--category` — the tool never guesses a folder.
 - `applib remove <id|bundle> [--user]` — drop a record, by entry
   identifier or by the bundle path it was registered with.

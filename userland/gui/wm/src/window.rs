@@ -51,6 +51,13 @@ impl Participation {
         input_transparent: false,
     };
 
+    /// Not composited: a minimised window, or a served one whose client has
+    /// yet to present anything into it.
+    const HIDDEN: Self = Self {
+        visible: false,
+        input_transparent: false,
+    };
+
     /// Whether a pointer inside the window's bounds resolves to it: it must
     /// be composited *and* not transparent to the pointer.
     const fn catches_pointer(self) -> bool {
@@ -172,15 +179,44 @@ impl Window {
     /// [`Compositor::set_window_cursor`]: crate::Compositor::set_window_cursor
     pub(crate) fn new(id: WindowId, origin: Point, surface: Surface) -> Self {
         Self {
-            id,
-            origin,
             client_size: (surface.width(), surface.height()),
             content: Some(surface),
+            participation: Participation::DRAWN,
+            ..Self::placed(id, origin)
+        }
+    }
+
+    /// Build a hidden, client-presented window of client extent `client` at
+    /// `origin`, holding no pixels until its client first presents into one.
+    ///
+    /// What a served window *is* between its create and its first present.
+    /// Hidden, because nothing of the application is on screen yet and the
+    /// embedder has no pixels of its own to stand in: a window shown there
+    /// shows either a fill the client never drew or the desktop straight
+    /// through it. Client-presented by construction rather than by a later
+    /// declaration, because a window holding no content that nobody can be
+    /// asked to present is blank for ever.
+    pub(crate) fn unpresented(id: WindowId, origin: Point, client: (u32, u32)) -> Self {
+        Self {
+            client_size: client,
+            app_presented: true,
+            ..Self::placed(id, origin)
+        }
+    }
+
+    /// The window every constructor above starts from: at `origin`, holding
+    /// no content, hidden, undecorated, and drawn by nobody.
+    fn placed(id: WindowId, origin: Point) -> Self {
+        Self {
+            id,
+            origin,
+            client_size: (0, 0),
+            content: None,
             opacity: 255,
             blur_radius: 0,
             frosted: false,
             corners: Corners::Square,
-            participation: Participation::DRAWN,
+            participation: Participation::HIDDEN,
             cursor: CursorKind::Arrow,
             viewport: None,
             frame: None,

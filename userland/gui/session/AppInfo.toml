@@ -36,6 +36,7 @@
 # (tairix_users::SESSION_BASELINE), so the intersection keeps it.
 id = "os.tairix.desktop"
 name = "desktop"
+title = "Desktop"
 version = "0.1.0"
 kind = "application"
 capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_FS_ACCESS", "CAP_CONSOLE_WRITE", "CAP_LOG_EMIT"]

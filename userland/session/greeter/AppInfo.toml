@@ -31,6 +31,7 @@
 # DISPLAY_ENDPOINT. Compromising it therefore yields a screen, not an account.
 id = "os.tairix.greeter"
 name = "greeter"
+title = "Greeter"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_FS_ACCESS", "CAP_SANDBOX_SPAWN", "CAP_CONSOLE_WRITE", "CAP_LOG_EMIT"]

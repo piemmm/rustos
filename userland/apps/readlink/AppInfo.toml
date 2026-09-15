@@ -9,6 +9,7 @@
 # no CAP_CONSOLE_READ.
 id = "os.tairix.readlink"
 name = "readlink"
+title = "Readlink"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

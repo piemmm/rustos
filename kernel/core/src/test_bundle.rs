@@ -457,6 +457,7 @@ pub(crate) fn composed_bundle_published_by(
     let manifest = AppManifestSource {
         id: "os.tairix.ps".to_string(),
         name: "ps".to_string(),
+        title: None,
         version: "1.0".to_string(),
         kind: ProgramKind::Command,
         capabilities: caps,

@@ -18,6 +18,7 @@
 # filesystem.
 id = "os.tairix.login"
 name = "login"
+title = "Login"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_PROC_SPAWN", "CAP_USERS_READ", "CAP_SPAWN_AS_USER", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT", "CAP_SYSINFO_KERNEL", "CAP_FS_ACCESS"]

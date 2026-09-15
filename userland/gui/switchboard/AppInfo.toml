@@ -44,6 +44,7 @@
 # session — never the kernel directly — to raise or re-launch an owner.
 id = "os.tairix.switchboard"
 name = "switchboard"
+title = "Switchboard"
 version = "0.1.0"
 kind = "service"
 # CAP_LOG_EMIT so the records it emits reach the log rather than being

@@ -89,9 +89,14 @@ pub const CONTENT_RELEASED: EventId = EventId(20_005);
 /// matches on this constant rather than on a copy of its text.
 pub const CONTENT_RELEASED_MESSAGE: &str = "window content released under memory pressure";
 
-/// The freshly opened window's fill until the app's first present lands:
-/// an opaque near-black, so an app that is slow to render shows a blank
-/// window body rather than stale or transparent pixels.
+/// The freshly opened popup's fill until its app's first present lands: an
+/// opaque near-black, so a plate whose content lands a frame later is never
+/// stale or transparent pixels.
+///
+/// A popup is placed relative to its parent's client and shown at once
+/// because the gesture that opened it is the user's own; a *top-level* served
+/// window has no such fill, because it is not shown until its application has
+/// presented something to see.
 const OPEN_FILL: Color = Color::rgb(0x20, 0x20, 0x24);
 
 /// Top-left of the first opened window, in screen pixels. Public so a
@@ -113,8 +118,15 @@ const CASCADE_WRAP: i32 = 8;
 /// them away.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum FirstFrame {
-    /// Opened, but no present has been served into it yet: the window body
-    /// is still [`OPEN_FILL`] and there is nothing of the app's to see.
+    /// Opened, and never presented into: the window is still off screen,
+    /// because there is nothing of the application's to show.
+    ///
+    /// Distinct from [`Awaited`](Self::Awaited), which is a window already on
+    /// screen whose pixels memory pressure took back: that one is minimised or
+    /// not by the user's own choice, and a present must not un-minimise it.
+    Unpresented,
+    /// Mapped, but holding no pixels of the application's: a popup before its
+    /// first present, or a window whose pixels memory pressure took back.
     Awaited,
     /// A present landed, so the next frame the display takes carries it.
     Painted,
@@ -276,14 +288,21 @@ impl SessionWindows {
     }
 
     /// Record the freshly opened window `ipc`, shown as `wm` and owned by
-    /// `parent` when it is a popup.
-    fn insert(&mut self, ipc: u64, wm: WindowId, parent: Option<WindowId>, owner: ProcId) {
+    /// `parent` when it is a popup, having got as far as `first_frame`.
+    fn insert(
+        &mut self,
+        ipc: u64,
+        wm: WindowId,
+        parent: Option<WindowId>,
+        owner: ProcId,
+        first_frame: FirstFrame,
+    ) {
         self.records.insert(
             ipc,
             WindowRecord {
                 wm,
                 parent,
-                first_frame: FirstFrame::Awaited,
+                first_frame,
                 owner,
             },
         );
@@ -347,16 +366,30 @@ pub fn placed_outer(opened: u64, outer: (u32, u32), work_area: Rect) -> Rect {
 /// `wm` is not a served window, or the command does not apply).
 ///
 /// This is the one place the four [`WindowControlKind`]s map to lifecycle,
-/// so the live serve loop and the host tests drive the same rule:
+/// so the live serve loop and the host tests drive the same rule. It has two
+/// halves, and they answer to different owners:
+///
+/// * The **window-manager-local** half — minimise, put-to-back, size
+///   toggle — is performed for *any* decorated window, a session-owned
+///   dialog's as much as a served application's. The window manager owns
+///   those, so a dialog the session paints itself must answer its own
+///   title bar rather than having three of its four controls do nothing.
+/// * The **app-ward** half is produced only for a served window, which is
+///   the only kind with a client to tell.
+///
+/// Per control:
 ///
 /// * [`Close`](WindowControlKind::Close) never destroys the window behind
 ///   the app's back — it returns a [`WindowEvent::CloseRequested`] so the
-///   app tears down cooperatively (it decides when, having saved).
+///   app tears down cooperatively (it decides when, having saved). On a
+///   session-owned window it does nothing here: what closing means is the
+///   owner's (a cancelled pick, a declined prompt), so the embedder routes
+///   it.
 /// * [`Minimize`](WindowControlKind::Minimize) hides the window and marks
-///   its taskbar entry minimised (window-manager-side), and returns a
+///   its taskbar entry minimised, and returns a
 ///   [`WindowEvent::Minimized`] so the app may pause non-essential work.
 /// * [`PutToBack`](WindowControlKind::PutToBack) restacks the window to the
-///   bottom — a window-manager-local action with no app-ward event.
+///   bottom, with no app-ward event.
 /// * [`SizeToggle`](WindowControlKind::SizeToggle) maximizes or restores
 ///   the window against `work_area` and returns a [`WindowEvent::Resized`]
 ///   carrying the new client size so the app re-lays-out; it yields `None`
@@ -374,27 +407,47 @@ pub fn window_control_event(
     compositor: &mut Compositor,
     windows: &SessionWindows,
 ) -> Option<WindowEvent> {
-    // Only a served window has a window-channel id and an owning app; a
-    // press on any other decorated surface has nothing to route.
+    let resized = apply_window_control(control, wm, work_area, shell, compositor);
+    // Only a served window has a window-channel id and an owning app.
     let window_id = windows.ipc_id(wm)?;
     match control {
         WindowControlKind::Close => Some(WindowEvent::CloseRequested { window_id }),
+        WindowControlKind::Minimize => Some(WindowEvent::Minimized { window_id }),
+        WindowControlKind::PutToBack => None,
+        WindowControlKind::SizeToggle => resized.map(|client| WindowEvent::Resized {
+            window_id,
+            width_px: client.width,
+            height_px: client.height,
+        }),
+    }
+}
+
+/// Perform the window-manager-local half of a title-bar command on the
+/// decorated window `wm`, reporting the new client rectangle where the
+/// command resized it.
+fn apply_window_control(
+    control: WindowControlKind,
+    wm: WindowId,
+    work_area: Rect,
+    shell: &mut DesktopShell,
+    compositor: &mut Compositor,
+) -> Option<Rect> {
+    match control {
+        // Closing is never the window manager's to do: a served window's
+        // client tears itself down, and a session-owned window's owner
+        // decides what its dismissal means.
+        WindowControlKind::Close => None,
         WindowControlKind::Minimize => {
             shell.minimize_window(compositor, wm);
-            Some(WindowEvent::Minimized { window_id })
+            None
         }
         WindowControlKind::PutToBack => {
             compositor.lower(wm);
             None
         }
-        WindowControlKind::SizeToggle => {
-            let (_, client) = compositor.toggle_window_size(wm, work_area)?;
-            Some(WindowEvent::Resized {
-                window_id,
-                width_px: client.width,
-                height_px: client.height,
-            })
-        }
+        WindowControlKind::SizeToggle => compositor
+            .toggle_window_size(wm, work_area)
+            .map(|(_, client)| client),
     }
 }
 
@@ -611,21 +664,16 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         title: &str,
         sizing: WindowSizing,
     ) -> Result<(), Errno> {
-        // The engine has already mapped the client's own frame region of
-        // this geometry, so the extent is representable and the only refusal
-        // left is the allocator's.
-        let Some(content) =
-            Surface::filled(surface.width_px, surface.height_px, OPEN_FILL.premultiply())
-        else {
-            return Err(Errno::OutOfMemory);
-        };
         let origin = self.windows.next_origin();
-        // The compositor takes ownership of the content surface; the
-        // session keeps only the id mapping, never a second copy.
-        let Some(wm) = self
-            .shell
-            .open_window(self.compositor, origin, content, title)
-        else {
+        // Opened off screen: the pixels are the application's, so there is
+        // nothing to show until it presents. The window is listed on the bar
+        // from here on, and `window_presented` maps it.
+        let Some(wm) = self.shell.open_unpresented_window(
+            self.compositor,
+            origin,
+            (surface.width_px, surface.height_px),
+            title,
+        ) else {
             return Err(Errno::LengthOutOfRange);
         };
         // A served application window is decorated by the window manager: the
@@ -659,14 +707,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             );
             self.compositor.move_window(wm, placed.origin);
         }
-        // A served window's pixels come from the app, which the session can
-        // ask to present them again, so the compositor may give them back
-        // under memory pressure. Windows the session paints itself (the
-        // taskbar, the picker, a confirmation prompt) never declare this
-        // and so are never released: there would be no client to ask.
-        self.compositor.set_app_presented(wm, true);
         self.windows.opened += 1;
-        self.windows.insert(window_id, wm, None, owner);
+        self.windows
+            .insert(window_id, wm, None, owner, FirstFrame::Unpresented);
         // Who owns this window is the kernel's answer, kept for the
         // identification pass that runs once this request is served.
         self.windows.opened_owners.push((wm, owner));
@@ -718,7 +761,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             return Err(Errno::NotFound);
         };
         self.compositor.set_app_presented(wm, true);
-        self.windows.insert(window_id, wm, Some(parent), owner);
+        self.windows
+            .insert(window_id, wm, Some(parent), owner, FirstFrame::Awaited);
         Ok(())
     }
 
@@ -775,12 +819,31 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             self.windows.presented.push(window_id);
         }
         // The window now holds the app's own pixels, so the next frame the
-        // display takes is the one that shows it. Only the first present
-        // moves this on; a window already on screen stays announced.
-        if let Some(record) = self.windows.records.get_mut(&window_id) {
-            if record.first_frame == FirstFrame::Awaited {
-                record.first_frame = FirstFrame::Painted;
-            }
+        // display takes is the one that shows it. Only a window awaiting its
+        // pixels moves on; one already on screen stays announced.
+        //
+        // A window that had never presented is also mapped here, before the
+        // frame is composed — so the frame that first carries it is the one
+        // that puts it on screen, and the announcement above still follows
+        // pixels the display took. A *released* window is only awaiting its
+        // pixels again and is left exactly as the user left it, minimised or
+        // not: a present must never un-minimise a window that keeps painting.
+        let map = self
+            .windows
+            .records
+            .get_mut(&window_id)
+            .is_some_and(|record| {
+                let unpresented = record.first_frame == FirstFrame::Unpresented;
+                if matches!(
+                    record.first_frame,
+                    FirstFrame::Unpresented | FirstFrame::Awaited
+                ) {
+                    record.first_frame = FirstFrame::Painted;
+                }
+                unpresented
+            });
+        if map {
+            self.shell.map_window(self.compositor, wm);
         }
         Ok(())
     }
@@ -1193,9 +1256,125 @@ mod tests {
                 .content()
                 .expect("content is retained");
             assert_eq!(content.get(2, 1), Some(want.premultiply()));
-            // Undamaged pixels keep the open fill.
-            assert_eq!(content.get(0, 0), Some(OPEN_FILL.premultiply()));
+            // The first present is what established the buffer, and an
+            // established buffer starts transparent, so an undamaged pixel is
+            // simply one the client has yet to paint. That is why the whole
+            // client area is marked on an established present.
+            assert_eq!(
+                content.get(0, 0),
+                Some(Color::rgba(0, 0, 0, 0).premultiply())
+            );
         }
+    }
+
+    /// A served window's pixels are its application's, so the session shows
+    /// the window when the application first presents into it — not when it
+    /// asks for one.
+    ///
+    /// The reported defect: `view` launched on its own opens a window, then
+    /// asks the session's trusted picker for a document. Mapped at create,
+    /// it flashed an empty near-black window and left it sitting behind the
+    /// chooser for as long as the user took to choose. Opened off screen it
+    /// appears with the picture in it. The task is listed throughout, so the
+    /// application is reachable while it gets ready.
+    #[test]
+    fn a_served_window_is_shown_by_its_clients_first_present() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(64, 48, DisplayFormat::Rgba8888);
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
+                .expect("opens");
+        }
+        let wm = windows.wm_id(7).expect("recorded");
+        let window = compositor.window(wm).expect("live");
+        assert!(!window.is_visible(), "an unpresented window is off screen");
+        assert!(
+            !window.has_content(),
+            "nothing was allocated for pixels the client has yet to send"
+        );
+        assert_ne!(
+            shell.router().focused(),
+            Some(wm),
+            "a window nobody can see must not hold the keyboard"
+        );
+        assert!(
+            shell.tasks().task_for(wm).is_some(),
+            "the task is listed while its application gets ready"
+        );
+
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
+                .expect("presents");
+        }
+        let window = compositor.window(wm).expect("live");
+        assert!(window.is_visible(), "the first present maps the window");
+        assert!(window.has_content());
+        assert_eq!(shell.router().focused(), Some(wm), "and gives it focus");
+    }
+
+    /// A present maps a window that has never been on screen, and only that
+    /// one: a window the *user* minimised stays minimised however often its
+    /// application keeps painting.
+    #[test]
+    fn a_present_never_un_minimises_a_window_the_user_minimised() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(64, 48, DisplayFormat::Rgba8888);
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            open_one_full(&mut host, 7, 64, 48, WindowSizing::default())
+        };
+        assert!(compositor.window(wm).expect("live").is_visible());
+        assert!(shell.minimize_window(&mut compositor, wm));
+
+        // A clock, a progress bar, a blinking cursor: an application carries
+        // on presenting into a minimised window.
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            host.window_presented(7, &m, &[0x40u8; 64 * 48 * 4], whole(&m))
+                .expect("presents");
+        }
+        assert!(
+            !compositor.window(wm).expect("live").is_visible(),
+            "a present un-minimised a window the user put away"
+        );
     }
 
     /// A served window is announced on screen once its first present has
@@ -1219,8 +1398,8 @@ mod tests {
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
         }
-        // Opened but never presented: the body is the session's own fill, so
-        // there is nothing of the application's to announce.
+        // Opened but never presented: the window is off screen, so there is
+        // nothing of the application's to announce.
         assert_eq!(shown(&mut windows), Vec::<u64>::new());
         {
             let mut host = ShellWindowHost {
@@ -1628,8 +1807,16 @@ mod tests {
         let mut windows = SessionWindows::new();
         let mut picker = RecordingSlot::default();
         let m = mode(8, 8, DisplayFormat::Rgba8888);
-        // Long enough for the first rows, short of the last.
-        let frame = [0xFFu8; 8 * 6 * 4];
+        let full = DamageRect {
+            x: 0,
+            y: 0,
+            width_px: 8,
+            height_px: 8,
+        };
+        // One whole frame of a known colour, then one long enough for the
+        // first rows but short of the last.
+        let landed: Vec<u8> = [0x11u8, 0x22, 0x33, 0xFF].repeat(8 * 8);
+        let short = [0xFFu8; 8 * 6 * 4];
         {
             let mut host = ShellWindowHost {
                 shell: &mut shell,
@@ -1642,18 +1829,10 @@ mod tests {
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
+            host.window_presented(1, &m, &landed, full)
+                .expect("the first present lands");
             assert_eq!(
-                host.window_presented(
-                    1,
-                    &m,
-                    &frame,
-                    DamageRect {
-                        x: 0,
-                        y: 0,
-                        width_px: 8,
-                        height_px: 8,
-                    },
-                ),
+                host.window_presented(1, &m, &short, full),
                 Err(Errno::OutOfRange)
             );
         }
@@ -1665,8 +1844,8 @@ mod tests {
             .expect("content is retained");
         assert_eq!(
             content.get(0, 0),
-            Some(OPEN_FILL.premultiply()),
-            "the refused present left the opening fill intact"
+            Some(Color::rgba(0x11, 0x22, 0x33, 0xFF).premultiply()),
+            "the refused present overwrote the frame that had landed"
         );
     }
 
@@ -1798,7 +1977,8 @@ mod tests {
         let mut windows = SessionWindows::new();
         let mut picker = RecordingSlot::default();
 
-        // Open a served, decorated window exactly as the serve loop does.
+        // Open a served, decorated window exactly as the serve loop does, and
+        // land the first present that puts it on screen.
         let wm = {
             let mut host = ShellWindowHost {
                 shell: &mut shell,
@@ -1809,15 +1989,7 @@ mod tests {
                 menu: &mut MenuChain::new(),
                 seat_held: false,
             };
-            host.window_opened(
-                window_owner(1),
-                7,
-                &mode(480, 320, DisplayFormat::Rgba8888),
-                "Files",
-                WindowSizing::default(),
-            )
-            .expect("opens");
-            host.windows.records.get(&7).expect("live").wm
+            open_one_full(&mut host, 7, 480, 320, WindowSizing::default())
         };
 
         // The screen centre of each command control, read from the same frame
@@ -1976,8 +2148,13 @@ mod tests {
         open_one_sized(host, window_id, WindowSizing::default())
     }
 
-    /// Open one served window of an explicit client size and sizing
-    /// contract.
+    /// Open one served window of an explicit client size and sizing contract,
+    /// **and land its first present**, so the window is on screen.
+    ///
+    /// A served window opens off screen and is mapped by its client's first
+    /// present, which every application sends the moment it has anything to
+    /// show; a gesture test acts on the window that present put in front of
+    /// the pointer.
     fn open_one_full(
         host: &mut ShellWindowHost<'_>,
         window_id: u64,
@@ -1985,32 +2162,32 @@ mod tests {
         height: u32,
         sizing: WindowSizing,
     ) -> WindowId {
-        host.window_opened(
-            window_owner(1),
+        let m = mode(width, height, DisplayFormat::Rgba8888);
+        host.window_opened(window_owner(1), window_id, &m, "app", sizing)
+            .expect("opens");
+        let frame = alloc::vec![0u8; (width as usize) * (height as usize) * 4];
+        host.window_presented(
             window_id,
-            &mode(width, height, DisplayFormat::Rgba8888),
-            "app",
-            sizing,
+            &m,
+            &frame,
+            DamageRect {
+                x: 0,
+                y: 0,
+                width_px: width,
+                height_px: height,
+            },
         )
-        .expect("opens");
+        .expect("presents");
         host.windows.records.get(&window_id).expect("live").wm
     }
 
-    /// Open one served window with an explicit sizing contract.
+    /// Open one shown served window with an explicit sizing contract.
     fn open_one_sized(
         host: &mut ShellWindowHost<'_>,
         window_id: u64,
         sizing: WindowSizing,
     ) -> WindowId {
-        host.window_opened(
-            window_owner(1),
-            window_id,
-            &mode(120, 80, DisplayFormat::Rgba8888),
-            "app",
-            sizing,
-        )
-        .expect("opens");
-        host.windows.records.get(&window_id).expect("live").wm
+        open_one_full(host, window_id, 120, 80, sizing)
     }
 
     /// A window big enough to overhang its cascade slot is pulled onto the
@@ -2837,6 +3014,74 @@ mod tests {
             "a window that was asked to present is not told to let go"
         );
         PRESSURE.report(PressureBand::Normal);
+    }
+
+    /// A window that has never presented holds no pixels, so memory pressure
+    /// takes nothing from it and it is *not* told its content was released.
+    ///
+    /// That matters beyond the arithmetic: a release is what puts a window
+    /// back to "awaiting its pixels", and an awaited window's next present
+    /// deliberately does not map it. A contentless window reported as
+    /// released would therefore stop being mappable and never appear at all,
+    /// so the release path's own "released nothing, say nothing" rule is what
+    /// keeps the first present in charge of showing it.
+    #[test]
+    fn an_unpresented_window_is_never_reported_released_and_still_maps() {
+        static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+        PRESSURE.report(PressureBand::Normal);
+        let (mut shell, mut compositor) = crate::tests::desktop_over(
+            TaskbarConfig::bottom_bar(640, 480),
+            mode(640, 480, DisplayFormat::Rgba8888),
+            &PRESSURE,
+        );
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(64, 48, DisplayFormat::Rgba8888);
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
+                .expect("opens");
+        }
+        let wm = windows.wm_id(7).expect("recorded");
+
+        PRESSURE.report(PressureBand::Critical);
+        assert_eq!(
+            shell.trim_caches(&mut compositor),
+            0,
+            "a window holding no pixels had some taken from it"
+        );
+        assert_eq!(
+            compositor.take_released_notices(),
+            alloc::vec![],
+            "a window with nothing to release was told it had released"
+        );
+        PRESSURE.report(PressureBand::Normal);
+
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
+                .expect("presents");
+        }
+        assert!(
+            compositor.window(wm).expect("live").is_visible(),
+            "the first present no longer maps the window"
+        );
     }
 
     #[test]

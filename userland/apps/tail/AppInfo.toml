@@ -7,6 +7,7 @@
 # bundle's Help/ documents) through the secured VFS.
 id = "os.tairix.tail"
 name = "tail"
+title = "Tail"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]

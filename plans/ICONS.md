@@ -293,6 +293,22 @@ system shipped one picture for *all* applications. Now:
   accepted only as a plain file name and resolved *inside* the bundle's own
   directory, so a hostile `library-icon` cannot aim the desktop at a file
   elsewhere. It draws its class picture instead.
+- **Artwork must read against the ground it is drawn on, and only the author
+  can decide that.** The build proves an icon decodes and draws something; it
+  says nothing about whether the result is *visible*, and `sapper`'s first
+  palette was navy throughout — its tile 1.33:1 against the dark theme's raised
+  surface, which is what the icon bar draws a slot on — so the icon vanished
+  into the bar while passing every check. It is re-authored to the weight the
+  folder artwork occupies (around 5:1 on the dark ground, near 3:1 on the
+  light), and the shipped asset's authored layer colours are pinned by a test
+  beside the build's own icon sweep, so re-darkening it is no longer a quiet
+  edit.
+
+  Deliberately **not** a build-time contrast gate. Checked against the shipped
+  art, `files.svg`'s blue is 2.55:1 against the light ground and its white
+  papers 1.15:1: any luminance-only threshold strong enough to catch `sapper`
+  rejects legitimate artwork that reads by hue. A heuristic that refuses good
+  icons to catch a bad one is worse than the author's eye (§2.3).
 
 ## 9. The pressure vertical photographs the band it asserts over — **done**
 

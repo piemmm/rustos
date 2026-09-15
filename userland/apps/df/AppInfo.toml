@@ -9,6 +9,7 @@
 # privileged capability is requested. It reads no standard input.
 id = "os.tairix.df"
 name = "df"
+title = "Df"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

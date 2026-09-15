@@ -52,8 +52,15 @@ pub const APPINFO_MAX_MIME: u16 = 32;
 /// Maximum length, in bytes, of a bundle identifier.
 pub const BUNDLE_ID_MAX: usize = 64;
 
-/// Maximum length, in bytes, of a bundle's human-readable name.
+/// Maximum length, in bytes, of a bundle's program name — the command word
+/// the shell resolves and the stem of the `<Name>.app` directory.
 pub const BUNDLE_NAME_MAX: usize = 64;
+
+/// Maximum length, in bytes, of a bundle's human-readable title.
+///
+/// The title is prose the desktop draws, so it is bounded by what reads as a
+/// label rather than by the narrower grammar a command word obeys.
+pub const BUNDLE_TITLE_MAX: usize = 64;
 
 /// Maximum length, in bytes, of a bundle version string.
 pub const BUNDLE_VERSION_MAX: usize = 32;
@@ -806,8 +813,8 @@ fn is_within(path: &str, dir: &str) -> bool {
 
 /// Fixed-size, signed prefix of an application bundle's `AppInfo` manifest.
 ///
-/// Field order and offsets are part of the frozen `abi-v1` surface;
-/// reserved fields must be zero. The declaration order **is** the wire
+/// Field order and offsets are part of the frozen `abi-v1` surface. The
+/// declaration order **is** the wire
 /// order, so the `#[repr(C)]` in-memory image and the little-endian wire
 /// image are the same bytes — which is what makes the generated C mirror an
 /// honest view of the format rather than a second, differently-ordered
@@ -862,11 +869,17 @@ pub struct AppInfoHeader {
     /// Valid byte count of the inline `author` buffer
     /// (`<= BUNDLE_AUTHOR_MAX`); zero when the bundle names none.
     pub author_len: u8,
-    /// Reserved; must be zero in `abi-v1`.
-    pub reserved0: [u8; 1],
+    /// Valid byte count of the inline `title` buffer
+    /// (`<= BUNDLE_TITLE_MAX`); zero when the bundle declares none.
+    pub title_len: u8,
     /// Bundle identifier bytes; the valid prefix is `id_len` long.
     pub id: [u8; BUNDLE_ID_MAX],
-    /// Human-readable name bytes; the valid prefix is `name_len` long.
+    /// Program-name bytes; the valid prefix is `name_len` long.
+    ///
+    /// The command word, not prose: it is the stem of the `<Name>.app`
+    /// directory and what the shell resolves, so its grammar is a plain
+    /// word. What a surface *shows* a user is
+    /// [`bundle_title`](Self::bundle_title).
     pub name: [u8; BUNDLE_NAME_MAX],
     /// Version-string bytes; the valid prefix is `version_len` long.
     pub version: [u8; BUNDLE_VERSION_MAX],
@@ -883,6 +896,10 @@ pub struct AppInfoHeader {
     /// Author-attribution bytes; the valid prefix is `author_len` long. All
     /// zero when the bundle names none.
     pub author: [u8; BUNDLE_AUTHOR_MAX],
+    /// Human-readable title bytes; the valid prefix is `title_len` long. All
+    /// zero when the bundle declares none, and the program name is then what
+    /// a surface shows.
+    pub title: [u8; BUNDLE_TITLE_MAX],
     /// SHA-256 of the kernel syscall table this bundle was linked against.
     pub syscall_table_hash: [u8; SYSCALL_TABLE_HASH_LEN],
     /// Digest binding the signature to the bundle's contents
@@ -915,15 +932,15 @@ impl AppInfoHeader {
     const OFF_LIBRARY: usize = 20;
     const OFF_PURPOSE_LEN: usize = 21;
     const OFF_AUTHOR_LEN: usize = 22;
-    const OFF_RESERVED0: usize = 23;
-    const RESERVED0_LEN: usize = 1;
+    const OFF_TITLE_LEN: usize = 23;
     const OFF_ID: usize = 24;
     const OFF_NAME: usize = Self::OFF_ID + BUNDLE_ID_MAX;
     const OFF_VERSION: usize = Self::OFF_NAME + BUNDLE_NAME_MAX;
     const OFF_LIBRARY_ICON: usize = Self::OFF_VERSION + BUNDLE_VERSION_MAX;
     const OFF_PURPOSE: usize = Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX;
     const OFF_AUTHOR: usize = Self::OFF_PURPOSE + BUNDLE_PURPOSE_MAX;
-    const OFF_SYSCALL_HASH: usize = Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX;
+    const OFF_TITLE: usize = Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX;
+    const OFF_SYSCALL_HASH: usize = Self::OFF_TITLE + BUNDLE_TITLE_MAX;
     const OFF_CONTENT_HASH: usize = Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN;
     const OFF_SIGNER: usize = Self::OFF_CONTENT_HASH + 32;
     const OFF_PUBLISHER: usize = Self::OFF_SIGNER + 32;
@@ -963,8 +980,7 @@ impl AppInfoHeader {
         out[Self::OFF_LIBRARY] = self.library;
         out[Self::OFF_PURPOSE_LEN] = self.purpose_len;
         out[Self::OFF_AUTHOR_LEN] = self.author_len;
-        out[Self::OFF_RESERVED0..Self::OFF_RESERVED0 + Self::RESERVED0_LEN]
-            .copy_from_slice(&self.reserved0);
+        out[Self::OFF_TITLE_LEN] = self.title_len;
         out[Self::OFF_ID..Self::OFF_ID + BUNDLE_ID_MAX].copy_from_slice(&self.id);
         out[Self::OFF_NAME..Self::OFF_NAME + BUNDLE_NAME_MAX].copy_from_slice(&self.name);
         out[Self::OFF_VERSION..Self::OFF_VERSION + BUNDLE_VERSION_MAX]
@@ -974,6 +990,7 @@ impl AppInfoHeader {
         out[Self::OFF_PURPOSE..Self::OFF_PURPOSE + BUNDLE_PURPOSE_MAX]
             .copy_from_slice(&self.purpose);
         out[Self::OFF_AUTHOR..Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX].copy_from_slice(&self.author);
+        out[Self::OFF_TITLE..Self::OFF_TITLE + BUNDLE_TITLE_MAX].copy_from_slice(&self.title);
         out[Self::OFF_SYSCALL_HASH..Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN]
             .copy_from_slice(&self.syscall_table_hash);
         out[Self::OFF_CONTENT_HASH..Self::OFF_CONTENT_HASH + 32]
@@ -991,9 +1008,8 @@ impl AppInfoHeader {
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the magic word does not match, if `flags`
-    ///   sets a bit outside [`APPINFO_FLAG_MASK`], or if `reserved0` is
-    ///   non-zero.
+    /// * [`Errno::BadMagic`] if the magic word does not match, or if `flags`
+    ///   sets a bit outside [`APPINFO_FLAG_MASK`].
     /// * [`Errno::AbiVersionUnsupported`] if `abi_version` is not
     ///   [`crate::ABI_VERSION_CURRENT`].
     /// * [`Errno::LengthOutOfRange`] if `capability_count`, `mime_count`, or
@@ -1039,10 +1055,7 @@ impl AppInfoHeader {
         let library = bytes[Self::OFF_LIBRARY];
         let purpose_len = bytes[Self::OFF_PURPOSE_LEN];
         let author_len = bytes[Self::OFF_AUTHOR_LEN];
-        let reserved0: [u8; Self::RESERVED0_LEN] = inline_field(bytes, Self::OFF_RESERVED0);
-        if reserved0 != [0; Self::RESERVED0_LEN] {
-            return Err(Errno::BadMagic);
-        }
+        let title_len = bytes[Self::OFF_TITLE_LEN];
         LibraryCategory::from_wire(library)?;
 
         let header = Self {
@@ -1058,13 +1071,14 @@ impl AppInfoHeader {
             library,
             purpose_len,
             author_len,
-            reserved0,
+            title_len,
             id: inline_field(bytes, Self::OFF_ID),
             name: inline_field(bytes, Self::OFF_NAME),
             version: inline_field(bytes, Self::OFF_VERSION),
             library_icon: inline_field(bytes, Self::OFF_LIBRARY_ICON),
             purpose: inline_field(bytes, Self::OFF_PURPOSE),
             author: inline_field(bytes, Self::OFF_AUTHOR),
+            title: inline_field(bytes, Self::OFF_TITLE),
             syscall_table_hash: inline_field(bytes, Self::OFF_SYSCALL_HASH),
             content_hash: inline_field(bytes, Self::OFF_CONTENT_HASH),
             signer_pubkey: inline_field(bytes, Self::OFF_SIGNER),
@@ -1083,6 +1097,7 @@ impl AppInfoHeader {
         )?;
         validate_optional_text(header.purpose_len, BUNDLE_PURPOSE_MAX, &header.purpose)?;
         validate_optional_text(header.author_len, BUNDLE_AUTHOR_MAX, &header.author)?;
+        validate_optional_text(header.title_len, BUNDLE_TITLE_MAX, &header.title)?;
         Ok(header)
     }
 
@@ -1093,10 +1108,28 @@ impl AppInfoHeader {
         inline_str(&self.id, self.id_len)
     }
 
-    /// The human-readable bundle name as text.
+    /// The bundle's program name as text: the command word the shell
+    /// resolves and the stem of the `<Name>.app` directory.
+    ///
+    /// A functional name, not a label. A surface that shows a name to a user
+    /// reads [`bundle_title`](Self::bundle_title) instead.
     #[must_use]
     pub fn bundle_name(&self) -> &str {
         inline_str(&self.name, self.name_len)
+    }
+
+    /// The bundle's human-readable title as text — what every surface that
+    /// names the application to a user draws.
+    ///
+    /// A bundle that declares none is titled by its program name, so this is
+    /// always a name worth showing: an unset title means "the command word
+    /// reads well enough", never a blank label.
+    #[must_use]
+    pub fn bundle_title(&self) -> &str {
+        if self.title_len == 0 {
+            return self.bundle_name();
+        }
+        inline_str(&self.title, self.title_len)
     }
 
     /// The bundle version as text.
@@ -1455,6 +1488,7 @@ mod tests {
         let (library_icon, library_icon_len) = inline("editor.svg");
         let (purpose, purpose_len) = inline("Edit text files");
         let (author, author_len) = inline("Example Software");
+        let (title, title_len) = inline("Example Editor");
         AppInfoHeader {
             magic: APPINFO_MAGIC,
             abi_version: ABI_VERSION_CURRENT,
@@ -1468,13 +1502,14 @@ mod tests {
             author_len,
             library_icon_len,
             library: LibraryCategory::to_wire(Some(LibraryCategory::Office)),
-            reserved0: [0; 1],
+            title_len,
             id,
             name,
             version,
             library_icon,
             purpose,
             author,
+            title,
             syscall_table_hash: [0xAB; SYSCALL_TABLE_HASH_LEN],
             content_hash: [0xCD; 32],
             signer_pubkey: [0xEF; 32],
@@ -1649,7 +1684,7 @@ mod tests {
 
     #[test]
     fn header_wire_size_is_frozen() {
-        assert_eq!(AppInfoHeader::WIRE_LEN, 664);
+        assert_eq!(AppInfoHeader::WIRE_LEN, 728);
         assert_eq!(
             AppInfoHeader::WIRE_LEN,
             core::mem::size_of::<AppInfoHeader>()
@@ -1664,6 +1699,7 @@ mod tests {
         assert_eq!(decoded, h);
         assert_eq!(decoded.bundle_id(), "com.example.editor");
         assert_eq!(decoded.bundle_name(), "Example Editor");
+        assert_eq!(decoded.bundle_title(), "Example Editor");
         assert_eq!(decoded.bundle_version(), "1.2.3");
         assert_eq!(decoded.library_category(), Some(LibraryCategory::Office));
         assert_eq!(decoded.library_icon(), Some("editor.svg"));
@@ -1767,7 +1803,7 @@ mod tests {
     }
 
     #[test]
-    fn header_rejects_bad_magic_and_version_and_reserved() {
+    fn header_rejects_bad_magic_and_version_and_a_malformed_title() {
         let mut bytes = sample().to_le_bytes();
         bytes[0] ^= 0xFF;
         assert_eq!(AppInfoHeader::from_bytes(&bytes), Err(Errno::BadMagic));
@@ -1780,11 +1816,37 @@ mod tests {
         );
 
         let mut h = sample();
-        h.reserved0 = [1];
+        h.title_len = u8::try_from(super::BUNDLE_TITLE_MAX + 1).expect("fits u8");
         assert_eq!(
             AppInfoHeader::from_bytes(&h.to_le_bytes()),
-            Err(Errno::BadMagic)
+            Err(Errno::LengthOutOfRange)
         );
+
+        let mut h = sample();
+        h.title[0] = 0xFF;
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    /// A title is prose a surface shows; a name is the command word. A bundle
+    /// that declares no title is titled by its name, so no surface can be
+    /// left drawing a blank label.
+    #[test]
+    fn a_titleless_header_is_titled_by_its_program_name() {
+        let decoded = AppInfoHeader::from_bytes(&sample().to_le_bytes()).expect("valid");
+        assert_eq!(decoded.bundle_title(), "Example Editor");
+
+        let mut h = sample();
+        h.title = [0; super::BUNDLE_TITLE_MAX];
+        h.title_len = 0;
+        let (name, name_len) = inline("editor");
+        h.name = name;
+        h.name_len = name_len;
+        let decoded = AppInfoHeader::from_bytes(&h.to_le_bytes()).expect("valid");
+        assert_eq!(decoded.bundle_name(), "editor");
+        assert_eq!(decoded.bundle_title(), "editor");
     }
 
     #[test]
@@ -2104,13 +2166,14 @@ mod tests {
             library => AppInfoHeader::OFF_LIBRARY,
             purpose_len => AppInfoHeader::OFF_PURPOSE_LEN,
             author_len => AppInfoHeader::OFF_AUTHOR_LEN,
-            reserved0 => AppInfoHeader::OFF_RESERVED0,
+            title_len => AppInfoHeader::OFF_TITLE_LEN,
             id => AppInfoHeader::OFF_ID,
             name => AppInfoHeader::OFF_NAME,
             version => AppInfoHeader::OFF_VERSION,
             library_icon => AppInfoHeader::OFF_LIBRARY_ICON,
             purpose => AppInfoHeader::OFF_PURPOSE,
             author => AppInfoHeader::OFF_AUTHOR,
+            title => AppInfoHeader::OFF_TITLE,
             syscall_table_hash => AppInfoHeader::OFF_SYSCALL_HASH,
             content_hash => AppInfoHeader::OFF_CONTENT_HASH,
             signer_pubkey => AppInfoHeader::OFF_SIGNER,

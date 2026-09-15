@@ -20,6 +20,7 @@
 # application.
 id = "os.tairix.applib"
 name = "applib"
+title = "Applib"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

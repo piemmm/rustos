@@ -14,6 +14,7 @@
 # everyone else while the ungated queries still work.
 id = "os.tairix.sysinfo"
 name = "sysinfo"
+title = "Sysinfo"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW"]

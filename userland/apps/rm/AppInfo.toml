@@ -6,6 +6,7 @@
 # with the launching user's grants, never more.
 id = "os.tairix.rm"
 name = "rm"
+title = "Rm"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]

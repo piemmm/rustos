@@ -9,6 +9,7 @@
 # authorises every path per-inode under the caller's attested identity.
 id = "os.tairix.edit"
 name = "edit"
+title = "Edit"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]

@@ -685,34 +685,6 @@ const TERMINAL_BAR_APP_NAME: &str = tairix_test_autoload_input_qemu_aarch64::TER
 const AUTOLOAD_FILES_HANDSHAKE_MARKER: &str =
     tairix_test_autoload_input_qemu_aarch64::FILES_HANDSHAKE_MARKER;
 
-/// Serial marker of one shared-frame *map* operation: the kernel
-/// syscall-trace record for `shm_map`. A window's frame region is mapped
-/// exactly once — when the window is **created** — and a *present* re-uses
-/// that mapping, so counting these tracks window creation and never the
-/// (timing-variable) number of repaints. Gating the terminal-window click
-/// on it is therefore immune to the flaky-repaint race a `CallReplied`
-/// (present-inclusive) count suffered. Rendered by the same `sc=<name>`
-/// syscall trace the input-arming gate ([`AUTOLOAD_INPUT_KEY_MARKER`])
-/// already keys on, so both gates share one serial convention.
-const AUTOLOAD_WINDOW_MAP_MARKER: &str = "sc=shm_map";
-
-/// How many [`AUTOLOAD_WINDOW_MAP_MARKER`] occurrences gate the *files*
-/// window click (`plans/APPWIN.md` AW3): the boot framebuffer scan-out map,
-/// then that window's own create map. The shared contract, so the click can
-/// never race the window's existence — which a gate on any reply over the
-/// shared window rendezvous did, firing on the Switchboard's start-up
-/// desktop query while the desktop was still bare.
-const AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES: u32 =
-    tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_FRAME_MAPS;
-
-/// How many [`AUTOLOAD_WINDOW_MAP_MARKER`] occurrences gate the
-/// terminal-window click (`plans/APPWIN.md` AW4): the two above, then the
-/// terminal window's create map — after which the terminal window exists at
-/// its cascade slot and the click focuses it, no matter how many times any
-/// window repainted.
-const AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES: u32 =
-    tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS;
-
 /// The shell command the autoload vertical types into the focused
 /// terminal at the seat keyboard — the shared contract (`sleep 3600`
 /// plus Enter): the shell resolving and spawning it is the guest's AW4
@@ -807,11 +779,17 @@ const AUTOLOAD_DESKTOP_REVEALED_MARKER: &str = tairix_desktop_session::DESKTOP_R
 /// icon-bar declaration all answer with the same four-byte status reply. Only
 /// the session can say a window is visible, so it does.
 ///
-/// The vertical counts occurrences of it, which is attributable here because
-/// the launched application is the only client that opens a window: the
-/// desktop's own surfaces are session-painted compositor windows and never
-/// call the window channel.
-const APPBAR_WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
+/// A vertical counts occurrences of it, which is attributable because the
+/// launched applications are the only clients that open windows: the desktop's
+/// own surfaces are session-painted compositor windows and never call the
+/// window channel.
+///
+/// It is also the **only** honest gate for a click *into* a served window. The
+/// session shows such a window on its client's first present, so neither the
+/// create round-trip nor the frame-region map it performs says the window is on
+/// screen yet — a click gated on either races that present and lands on
+/// whatever is behind it.
+const WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
 
 /// Serial marker the picker-delegation vertical gates its pick-click on: the
 /// session's own announcement that a frame carrying the trusted picker — with
@@ -7150,13 +7128,13 @@ static TESTS: &[QemuTest] = &[
                 assert: assert_bare_bar_dark_screendump,
             },
             ScreendumpPlan {
-                marker: APPBAR_WINDOW_SHOWN_MARKER,
+                marker: WINDOW_SHOWN_MARKER,
                 occurrences: 1,
                 suffix: APPBAR_ONE_WINDOW_DUMP,
                 assert: assert_one_window_dark_screendump,
             },
             ScreendumpPlan {
-                marker: APPBAR_WINDOW_SHOWN_MARKER,
+                marker: WINDOW_SHOWN_MARKER,
                 occurrences: 2,
                 suffix: APPBAR_TWO_WINDOWS_DUMP,
                 assert: assert_two_windows_dark_screendump,
@@ -7339,7 +7317,7 @@ static TESTS: &[QemuTest] = &[
         ],
         screendumps: &[
             ScreendumpPlan {
-                marker: APPBAR_WINDOW_SHOWN_MARKER,
+                marker: WINDOW_SHOWN_MARKER,
                 occurrences: 1,
                 suffix: MENU_WINDOW_DUMP,
                 assert: assert_menu_window_dark_screendump,
@@ -10648,15 +10626,18 @@ fn planted_home_components() -> Result<Vec<String>, String> {
 /// clicks the row the guest actually draws rather than a coordinate read off a
 /// screenshot, and a change to the picker's layout moves both together.
 ///
-/// The picker is undecorated session chrome at a fixed origin, so the
-/// window-local rectangle is offset by that origin alone — no client inset,
-/// unlike a served application window.
+/// The picker is a decorated dialog at a fixed origin, so a window-local
+/// rectangle is offset by its *client* origin: `PICKER_ORIGIN` — the outer
+/// top-left — plus the furniture band the window manager insets the client
+/// by. That band is read from the one shared frame definition the session
+/// decorates the picker with, never re-derived here.
 fn reconstruct_pick_click(
     shell: &tairix_desktop_session::DesktopShell,
 ) -> Result<tairix_geometry::Point, String> {
     use tairix_browse::{Browser, WIN_HEIGHT, WIN_WIDTH};
     use tairix_desktop_session::{PICKER_ORIGIN, PICKER_TOOLBAR};
     use tairix_geometry::{Point, Rect};
+    use tairix_wm::{WindowFrame, WindowFurnitureState};
 
     let home = planted_home_components()?;
     let doc = core::str::from_utf8(tairix_test_arxfs_image::HOME_DOC_NAME)
@@ -10692,9 +10673,24 @@ fn reconstruct_pick_click(
         .ok_or_else(|| format!("pick script: {doc}'s row is not drawn in the picker"))?,
         "picker document row",
     )?;
+    // The picker is fixed-size, so the frame offers no resize edges and the
+    // bands are the plain furniture insets.
+    let insets = WindowFrame::new(WindowFurnitureState {
+        resizable: false,
+        ..WindowFurnitureState::default()
+    })
+    .insets(scale, shell.session().active_theme());
+    let client = Point::new(
+        PICKER_ORIGIN
+            .x
+            .saturating_add(i32::try_from(insets.left).unwrap_or(i32::MAX)),
+        PICKER_ORIGIN
+            .y
+            .saturating_add(i32::try_from(insets.top).unwrap_or(i32::MAX)),
+    );
     Ok(Point::new(
-        PICKER_ORIGIN.x.saturating_add(local.x),
-        PICKER_ORIGIN.y.saturating_add(local.y),
+        client.x.saturating_add(local.x),
+        client.y.saturating_add(local.y),
     ))
 }
 
@@ -10807,7 +10803,7 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// - The desktop's own reveal witness opens the script, so nothing is
 ///   injected before there is a bar to hit.
 /// - The two slot gestures wait on the session's per-window
-///   [`APPBAR_WINDOW_SHOWN_MARKER`]: the *first* occurrence for the
+///   [`WINDOW_SHOWN_MARKER`]: the *first* occurrence for the
 ///   right-click, the *second* for the final primary click. That witness
 ///   follows a frame the session actually put on screen, so by then the
 ///   application has declared its bar (it declares before it opens a window),
@@ -10859,19 +10855,14 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     pen.click(ready, 1, MouseButton::Primary, entry_row);
     // The application's first window is on screen, so its slot is drawn and
     // carries the declaration it made before opening that window.
-    pen.click(APPBAR_WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, slot);
-    pen.click(
-        APPBAR_WINDOW_SHOWN_MARKER,
-        1,
-        MouseButton::Primary,
-        new_window,
-    );
+    pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, slot);
+    pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Primary, new_window);
     // The chosen row's window is on screen too — the frame the third dump
     // reads. The pointer is still on that row, so this walks back to the slot
     // and presses it: the declaration claims the application handles a primary
     // click, so this is its default action rather than a raise, and the window
     // it opens is the guest's last witness.
-    pen.click(APPBAR_WINDOW_SHOWN_MARKER, 2, MouseButton::Primary, slot);
+    pen.click(WINDOW_SHOWN_MARKER, 2, MouseButton::Primary, slot);
     Ok(pen.steps())
 }
 
@@ -10879,7 +10870,7 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// per primary click on its icon-bar slot until the whole screenful is open.
 ///
 /// The launch is [`reconstruct_bar_launch`]. Each further click is gated on the
-/// session's per-window [`APPBAR_WINDOW_SHOWN_MARKER`], counted: the click that
+/// session's per-window [`WINDOW_SHOWN_MARKER`], counted: the click that
 /// opens window *n* waits for window *n − 1*'s frame to have reached the
 /// screen. So the script never runs ahead of the desktop, however slowly a
 /// guest short of memory opens the next one.
@@ -10914,13 +10905,8 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     // the band has moved and one further window is served, so the tail of this
     // chain is slack the run never reaches.
     for opened in 1..WINDOW_CLICK_BOUND {
-        pen.click(
-            APPBAR_WINDOW_SHOWN_MARKER,
-            opened,
-            MouseButton::Primary,
-            slot,
-        );
-        pen.aim(APPBAR_WINDOW_SHOWN_MARKER, opened, rest);
+        pen.click(WINDOW_SHOWN_MARKER, opened, MouseButton::Primary, slot);
+        pen.aim(WINDOW_SHOWN_MARKER, opened, rest);
     }
     Ok(pen.steps())
 }
@@ -11053,7 +11039,7 @@ fn menu_plate_and_row(
 /// - The desktop's own reveal witness opens the script, so nothing is injected
 ///   before there is a bar to hit.
 /// - The right-click waits on the session's per-window
-///   [`APPBAR_WINDOW_SHOWN_MARKER`]: a frame carrying the terminal's own first
+///   [`WINDOW_SHOWN_MARKER`]: a frame carrying the terminal's own first
 ///   painted pixels has reached the display, so its client is there to press.
 ///   A create reply would say only that the window exists.
 /// - The row's click waits on [`MENU_SHOWN_MARKER`], the session's own witness
@@ -11091,7 +11077,7 @@ fn menu_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
     pen.click(ready, 1, MouseButton::Primary, entry_row);
-    pen.click(APPBAR_WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, press);
+    pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, press);
     pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, settings_row);
     Ok(pen.steps())
 }
@@ -11305,15 +11291,15 @@ fn pointer_button_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// order and the bar model updates synchronously on the press, so the
 /// Files-slot click keys on the session's `DESKTOP_REVEALED`
 /// witness alone (the runner already held it back until the first dump
-/// verified). The in-window click waits for the reserved window
-/// endpoint's first *reply* (the create round-trip completed, so the
-/// window exists in the compositor and was presented by that wake). The
-/// handshake click keys on the first click's deliveries (and is
-/// additionally held while the second dump is pending), the
-/// terminal-stage library-popup steps on the handshake's own delivery,
-/// and the terminal-window click on the third window-frame map (the
-/// terminal's create) — so each dump captures exactly the staged frame
-/// and every stage is provably established before its step fires.
+/// verified). Each click *into* a served window waits on that window's own
+/// [`WINDOW_SHOWN_MARKER`] occurrence — the session's statement that a frame
+/// carrying it reached the display — because a served window is shown by its
+/// client's first present, so nothing about the create round-trip says the
+/// window is on screen to be clicked. The handshake click keys on the first
+/// click's deliveries (and is additionally held while the second dump is
+/// pending), and the terminal-stage library-popup steps on the handshake's own
+/// delivery — so each dump captures exactly the staged frame and every stage
+/// is provably established before its step fires.
 #[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
 fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -11458,24 +11444,20 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             move_by(Point::ORIGIN, files_slot),
         ),
         step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, click),
-        // The spawned app's window frame has been mapped — its window is
-        // created and sits at the first cascade slot — so click its body;
-        // the session delivers `Focus` + `Pressed` to that window, which is
-        // the second dump's key. Gating on the map, not on a reply over the
-        // shared window rendezvous, is what keeps this click behind the
-        // window's existence: every client of that rendezvous replies on it,
-        // and the Switchboard's start-up desktop query once fired this step
-        // against a bare desktop.
-        step(
-            AUTOLOAD_WINDOW_MAP_MARKER,
-            AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
-            move_by(files_slot, window),
-        ),
-        step(
-            AUTOLOAD_WINDOW_MAP_MARKER,
-            AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
-            click,
-        ),
+        // A frame carrying the files window reached the display, so click its
+        // body; the session delivers `Focus` + `Pressed` to that window, which
+        // is the second dump's key. The session's own per-window witness is
+        // the only honest gate: it shows a served window on its client's
+        // *first present*, so the create round-trip and the frame-region map
+        // it performs both say the window exists and neither says it is on
+        // screen — a click gated on either lands on whatever is behind it.
+        // (Nor a reply over the shared window rendezvous: every client of it
+        // replies, and the Switchboard's start-up desktop query once fired
+        // this step against a bare desktop.) The first occurrence is this
+        // window's: the launched applications are the only window-channel
+        // clients in the image, and the files app is the first of them.
+        step(WINDOW_SHOWN_MARKER, 1, move_by(files_slot, window)),
+        step(WINDOW_SHOWN_MARKER, 1, click),
         // The handshake click on the still-focused window: keyed on the
         // first click's own deliveries reaching that window and
         // additionally held while the second dump is pending, so the dump
@@ -11500,26 +11482,22 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
             move_by(library_button, terminal_entry),
         ),
         step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, click),
-        // The terminal's window frame has been mapped — its window is
-        // created and sits at the second cascade slot — so click its
-        // body. This gate counts window-frame **maps** (one per window
-        // creation), never window presents, so a files-window repaint can
-        // no longer inflate the count and fire this click before the
-        // terminal window exists (the flaky-repaint deadlock this fix
-        // closes). The files window's unfocus, the terminal's focus, and
-        // the press are the deliveries the typed shell command keys on
-        // (the guest PASS gate's round-trip witness follows from the spawn
-        // the command causes).
+        // A frame carrying the terminal window reached the display, so click
+        // its body. The second occurrence of the witness is that window's:
+        // the files window's is the first, no other client opens one, and a
+        // window is announced again only after memory pressure took its
+        // pixels — which this vertical never reports. So the gate tracks the
+        // two windows' first frames and nothing else, where a repaint count
+        // once inflated and fired this click before the terminal existed. The
+        // files window's unfocus, the terminal's focus, and the press are the
+        // deliveries the typed shell command keys on (the guest PASS gate's
+        // round-trip witness follows from the spawn the command causes).
         step(
-            AUTOLOAD_WINDOW_MAP_MARKER,
-            AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
+            WINDOW_SHOWN_MARKER,
+            2,
             move_by(terminal_entry, terminal_window),
         ),
-        step(
-            AUTOLOAD_WINDOW_MAP_MARKER,
-            AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
-            click,
-        ),
+        step(WINDOW_SHOWN_MARKER, 2, click),
     ])
 }
 
@@ -11563,7 +11541,11 @@ fn reconstructed_library(fixtures: &[&str]) -> Result<tairix_proglib::Catalog, S
         let fail =
             |what: &str, e: &dyn core::fmt::Display| format!("desktop pointer script: {what}: {e}");
         let id = EntryId::new(&manifest.id).map_err(|e| fail(&manifest.id, &e))?;
-        let name = DisplayName::new(&manifest.name).map_err(|e| fail(&manifest.id, &e))?;
+        // The bundle's effective title, exactly as the guest's own catalog
+        // derivation reads it from the composed manifest: a row's label — and
+        // so the order rows sort in — must be the same on both sides, or a
+        // script computes one row's centre and clicks another's.
+        let name = DisplayName::new(manifest.title()).map_err(|e| fail(&manifest.id, &e))?;
         let bundle = BundlePath::new(&format!("{}/{}.app", manifest.kind.store(), manifest.name))
             .map_err(|e| fail(&manifest.id, &e))?;
         let icon = match &manifest.library_icon {
@@ -12816,9 +12798,9 @@ mod tests {
     }
 
     #[test]
-    fn every_served_window_click_gates_on_that_window_being_created() {
-        // Regression guard for two defects with one cause: a click fired
-        // before its target window existed.
+    fn every_served_window_click_gates_on_that_window_being_on_screen() {
+        // Regression guard for three defects with one cause: a click fired
+        // before its target window was on screen.
         //
         // D10 keyed the terminal click on the window endpoint's
         // `CallReplied` count, which counts *presents* too, so a repaint
@@ -12826,9 +12808,15 @@ mod tests {
         // click on a reply over that same endpoint, which every client of
         // the shared rendezvous produces — the Switchboard's start-up
         // desktop query fired it half a second before the files window was
-        // created. Both clicks now gate on window **creation**: exactly one
-        // shared-frame `shm_map` per window, which no query, present or
-        // reply can advance.
+        // created. Both then keyed on the window's own frame *map*, one per
+        // creation, which no query or present can advance — and which says
+        // the window **exists**, not that it is visible: the session shows a
+        // served window on its client's first present, so that gate raced
+        // the present and clicked bare desktop again.
+        //
+        // The session's own per-window "first frame on screen" witness is
+        // the one fact each click actually needs, and only the session can
+        // state it.
         let script = super::autoload_desktop_pointer_script().expect("build the pointer script");
         // Located by marker and occurrence count, never by position, since
         // the FM9-a file-manager stage appends further clicks after these
@@ -12837,15 +12825,16 @@ mod tests {
             script
                 .iter()
                 .filter(|step| {
-                    step.ready_marker == super::AUTOLOAD_WINDOW_MAP_MARKER
+                    step.ready_marker == super::WINDOW_SHOWN_MARKER
                         && step.ready_occurrences == occurrences
                 })
                 .collect()
         };
 
-        // The present-inclusive marker the fragile D10 gate used, and the
-        // shared-rendezvous reply the D31 one used, reconstructed exactly as
-        // the script builds them so this test fails if either is restored.
+        // The present-inclusive marker the fragile D10 gate used, the
+        // shared-rendezvous reply the D31 one used, and the existence-only
+        // frame map that replaced them, reconstructed exactly as the script
+        // built them so this test fails if any is restored.
         let mut endpoint_hex = [0u8; 16];
         let call_replied = format!(
             "{} endpoint={}",
@@ -12855,50 +12844,36 @@ mod tests {
                 &mut endpoint_hex,
             ),
         );
+        let frame_map = "sc=shm_map";
 
-        for (window, occurrences) in [
-            ("files", super::AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES),
-            ("terminal", super::AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES),
-        ] {
+        for (window, occurrences) in [("files", 1), ("terminal", 2)] {
             let click = click_on(occurrences);
             assert_eq!(
                 click.len(),
                 2,
-                "the {window}-window click is one move plus the click itself, both on the map \
-                 marker"
+                "the {window}-window click is one move plus the click itself, both on the \
+                 window-shown marker"
             );
-            for step in click {
-                assert_ne!(
-                    step.ready_marker, call_replied,
-                    "the {window}-window click must not gate on a reply over the shared \
-                     window rendezvous: it counts presents, and every client answers on it"
-                );
-            }
+        }
+        for step in &script {
+            assert_ne!(
+                step.ready_marker, call_replied,
+                "no step may gate on a reply over the shared window rendezvous: it counts \
+                 presents, and every client answers on it"
+            );
+            assert_ne!(
+                step.ready_marker, frame_map,
+                "no step may gate on a window's frame map: it says the window exists, and a \
+                 served window is not on screen until its client's first present"
+            );
         }
 
-        // The creation-based contract: the marker is the shared `sc=<name>`
-        // syscall trace, and each window's own frame map is a distinct
-        // position in one monotonic sequence — the boot framebuffer
-        // scan-out, then the files window, then the terminal window.
-        assert_eq!(super::AUTOLOAD_WINDOW_MAP_MARKER, "sc=shm_map");
+        // The witness is the session's own, imported from its definition, and
+        // it names one window per occurrence: the files window's first frame,
+        // then the terminal's.
         assert_eq!(
-            super::AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
-            tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_FRAME_MAPS
-        );
-        assert_eq!(
-            super::AUTOLOAD_TERMINAL_WINDOW_MAP_OCCURRENCES,
-            tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS
-        );
-        const {
-            assert!(
-                tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_FRAME_MAPS
-                    < tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS,
-                "the files window is created before the terminal window"
-            );
-        }
-        assert_eq!(
-            tairix_test_autoload_input_qemu_aarch64::TERMINAL_WINDOW_FRAME_MAPS,
-            3
+            super::WINDOW_SHOWN_MARKER,
+            tairix_desktop_session::WINDOW_SHOWN_MESSAGE
         );
     }
 

@@ -640,7 +640,7 @@ fn add(
         .category
         .or_else(|| header.library_category())
         .ok_or(AppLibError::NotListed)?;
-    let display = DisplayName::new(request.name.unwrap_or_else(|| header.bundle_name()))
+    let display = DisplayName::new(request.name.unwrap_or_else(|| header.bundle_title()))
         .map_err(AppLibError::Entry)?;
     let icon = match request.icon.or_else(|| header.library_icon()) {
         Some(asset) => Some(IconAsset::new(asset).map_err(AppLibError::Entry)?),
@@ -861,7 +861,7 @@ fn candidate(bundles: &dyn Bundles, path: &str) -> Result<Option<LibraryEntry>, 
         return Ok(None);
     };
     let id = EntryId::new(header.bundle_id()).map_err(|_| ())?;
-    let name = DisplayName::new(header.bundle_name()).map_err(|_| ())?;
+    let name = DisplayName::new(header.bundle_title()).map_err(|_| ())?;
     let bundle = BundlePath::new(path).map_err(|_| ())?;
     let icon = match header.library_icon() {
         Some(asset) => Some(IconAsset::new(asset).map_err(|_| ())?),

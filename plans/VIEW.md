@@ -365,6 +365,25 @@ own — menus via
 `open_menu` + `AppMenu` (session-owned plates — the app draws no menu pixel),
 `set_tooltip` for the toolbar, and `Scrolled { dx, dy }` for the wheel.
 
+**The window appears with something in it.** Launched on its own the viewer
+holds no document and asks the session's picker for one, and a choice takes as
+long as the user takes — so it *withholds* its present until it has either a
+document or a reason there is none (`View::nothing_to_show`, which the embedder
+pairs with "has anything of this window been on screen yet"). The session shows
+a served window on its first present, so withholding the present withholds the
+window: without it, `view` launched standalone flashed an empty window and left
+it sitting behind the chooser. The first present that is *not* withheld is
+forced whole, because nothing of the window is on screen. Every conclusion
+shows it: the document once it decodes, `Refusal::Failed` if it will not,
+`Refusal::Cancelled` if the user chose nothing, and `Refusal::PickRefused` if
+the session would not open a chooser at all (a pick already showing for
+another application, a refused listing) — a refusal states its reason rather
+than leaving a blank window. That last one is why `View::cancelled` became
+`View::no_document(why)`: a refused *ask* is the one outcome with nothing
+coming after it, so a window withheld on it would never appear, and it has to
+be recorded as the reason there is no document rather than only mentioned on
+`stderr` a graphical launch has nobody reading.
+
 Behaviour: zoom in/out/fit/actual size, drag pan with scrollbars when zoomed
 in, rotate and flip, page/frame navigation with a thumbnail sidebar, animation
 play/pause and frame step, an alpha checkerboard, ICO size selection, an info

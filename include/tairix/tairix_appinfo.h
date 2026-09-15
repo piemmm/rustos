@@ -26,8 +26,10 @@
 #define TAIRIX_APPINFO_MAX_MIME 32u
 /* Maximum length, in bytes, of a bundle identifier. */
 #define TAIRIX_BUNDLE_ID_MAX 64u
-/* Maximum length, in bytes, of a bundle's human-readable name. */
+/* Maximum length, in bytes, of a bundle's program name (its command word). */
 #define TAIRIX_BUNDLE_NAME_MAX 64u
+/* Maximum length, in bytes, of a bundle's human-readable title. */
+#define TAIRIX_BUNDLE_TITLE_MAX 64u
 /* Maximum length, in bytes, of a bundle version string. */
 #define TAIRIX_BUNDLE_VERSION_MAX 32u
 /* Maximum length, in bytes, of one declared MIME-type string. */
@@ -41,7 +43,7 @@
 /* Maximum length, in bytes, of a bundle's author attribution. */
 #define TAIRIX_BUNDLE_AUTHOR_MAX 64u
 /* Packed little-endian wire size of an AppInfo header, in bytes. */
-#define TAIRIX_APPINFO_HEADER_WIRE_LEN 664u
+#define TAIRIX_APPINFO_HEADER_WIRE_LEN 728u
 
 /* Curated, OS-provided shared-library directory (AGENTS.md sec.16.4). */
 #define TAIRIX_SYSTEM_LIBRARIES_DIR "/System/Libraries"
@@ -87,13 +89,14 @@ typedef struct tairix_appinfo_header {
     uint8_t library;
     uint8_t purpose_len;
     uint8_t author_len;
-    uint8_t reserved0[1];
+    uint8_t title_len;
     uint8_t id[TAIRIX_BUNDLE_ID_MAX];
     uint8_t name[TAIRIX_BUNDLE_NAME_MAX];
     uint8_t version[TAIRIX_BUNDLE_VERSION_MAX];
     uint8_t library_icon[TAIRIX_LIBRARY_ICON_MAX];
     uint8_t purpose[TAIRIX_BUNDLE_PURPOSE_MAX];
     uint8_t author[TAIRIX_BUNDLE_AUTHOR_MAX];
+    uint8_t title[TAIRIX_BUNDLE_TITLE_MAX];
     uint8_t syscall_table_hash[TAIRIX_SYSCALL_TABLE_HASH_LEN];
     uint8_t content_hash[32];
     uint8_t signer_pubkey[32];

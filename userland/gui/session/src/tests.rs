@@ -3845,6 +3845,96 @@ fn picker_escape_cancels_and_frees_the_slot() {
         .expect("the slot is free again");
 }
 
+/// The chooser is a dialog, not bare session chrome: it wears the window
+/// manager's frame, so the user can see whose window it is, move it by its
+/// title bar, and close it.
+///
+/// The reported defect was a chooser with no decorations at all, while
+/// `PICKER_TITLE`'s own contract said the title showed "in the window
+/// chrome". It is fixed-size, because the shared browser view renders at one
+/// geometry, so the frame offers no size toggle.
+#[test]
+fn the_chooser_wears_the_window_frame_and_is_titled_in_it() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    let wm = picker.wm_id().expect("a picker window is showing");
+
+    let frame = comp.window_frame(wm).expect("the chooser is decorated");
+    assert!(
+        frame.furniture().movable,
+        "a dialog is moved by its title bar"
+    );
+    assert!(
+        !frame.furniture().resizable,
+        "the shared browser view renders at one geometry"
+    );
+    let title = frame.title_bar().title();
+    assert!(
+        title.starts_with(crate::PICKER_TITLE),
+        "the frame is titled {title:?}, which does not name the chooser"
+    );
+    // The frame is composed *around* the browser's own geometry: the outer
+    // rectangle grew and the client kept its size, so the listing is drawn
+    // inside the frame rather than under it.
+    let client = comp.window_client_rect(wm).expect("a decorated client");
+    let bounds = comp.window(wm).expect("live").bounds();
+    let scale = comp.scale();
+    assert_eq!(bounds.origin, PICKER_ORIGIN, "the outer top-left is fixed");
+    assert_eq!(
+        (client.width, client.height),
+        (
+            scale.scale_length(tairix_browse::WIN_WIDTH),
+            scale.scale_length(tairix_browse::WIN_HEIGHT)
+        ),
+        "the furniture ate into the browser's own geometry"
+    );
+    assert!(
+        client.top() > bounds.top(),
+        "the client was not inset below the title bar"
+    );
+}
+
+/// The frame's close control cancels the pick, exactly as Escape does.
+///
+/// The window is the session's, so the shared control mapping performs no
+/// close of its own and raises no app-ward event — what dismissal *means* is
+/// the owner's, and the owner answers by concluding the pick.
+#[test]
+fn the_choosers_close_control_cancels_the_pick() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    let wm = picker.wm_id().expect("a picker window is showing");
+    let windows = SessionWindows::new();
+
+    let work_area = shell.work_area(&comp);
+    assert_eq!(
+        crate::windows::window_control_event(
+            tairix_wm::WindowControlKind::Close,
+            wm,
+            work_area,
+            &mut shell,
+            &mut comp,
+            &windows,
+        ),
+        None,
+        "a session-owned window has no client to tell"
+    );
+    assert!(
+        comp.window(wm).is_some(),
+        "the mapping closed the window behind the owner's back"
+    );
+
+    let concluded = picker
+        .cancel(&mut shell, &mut comp)
+        .expect("the owner concludes the pick");
+    assert_eq!(concluded.for_window, 7);
+    assert_eq!(concluded.conclusion, PickConclusion::Cancelled);
+    assert_eq!(picker.wm_id(), None);
+    assert!(comp.window(wm).is_none(), "the chooser window is gone");
+}
+
 /// `abort_for` takes the picker down only for its own requesting window,
 /// delivering no conclusion.
 #[test]
@@ -5230,13 +5320,14 @@ pub(crate) fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
         author_len: 0,
         library_icon_len: u8::try_from(icon.map_or(0, str::len)).unwrap(),
         library: tairix_abi::LibraryCategory::to_wire(Some(tairix_abi::LibraryCategory::Other)),
-        reserved0: [0; 1],
+        title_len: 0,
         id: [0; BUNDLE_ID_MAX],
         name: [0; BUNDLE_NAME_MAX],
         version: [0; BUNDLE_VERSION_MAX],
         library_icon: [0; LIBRARY_ICON_MAX],
         purpose: [0; tairix_abi::BUNDLE_PURPOSE_MAX],
         author: [0; tairix_abi::BUNDLE_AUTHOR_MAX],
+        title: [0; tairix_abi::BUNDLE_TITLE_MAX],
         syscall_table_hash: [0; SYSCALL_TABLE_HASH_LEN],
         content_hash: [0; 32],
         signer_pubkey: [0; 32],
@@ -9957,6 +10048,22 @@ fn open_parent_and_popup(
                 &served_mode(320, 240),
                 "Terminal",
                 resizable_sizing(),
+            ),
+            Ok(())
+        );
+        // A served window is mapped by its client's first present, which the
+        // terminal sends before it ever opens a popup.
+        assert_eq!(
+            host.window_presented(
+                1,
+                &served_mode(320, 240),
+                &vec![0u8; 320 * 240 * 4],
+                DamageRect {
+                    x: 0,
+                    y: 0,
+                    width_px: 320,
+                    height_px: 240,
+                },
             ),
             Ok(())
         );

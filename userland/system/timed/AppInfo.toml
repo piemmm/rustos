@@ -18,6 +18,7 @@
 # machine clock — which is why the packet parsing is not in it.
 id = "os.tairix.timed"
 name = "timed"
+title = "Timed"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_TIME_SET", "CAP_NET", "CAP_SANDBOX_SPAWN", "CAP_FS_ACCESS", "CAP_LOG_EMIT"]

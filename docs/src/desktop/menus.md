@@ -37,8 +37,9 @@ A menu is a **chain of session-owned plates**.
 A plate's title is derived, never a new field on the wire:
 
 - a submenu's title is its parent row's label;
-- the icon-bar menu's root title is the application's name from its **signed**
-  manifest, so a menu cannot be titled as an application it is not;
+- the icon-bar menu's root title is the application's title from its **signed**
+  manifest (`AppInfoHeader::bundle_title` — the human-readable name, not the
+  command word), so a menu cannot be titled as an application it is not;
 - a per-window menu's root title is the application's, bounded and sanitised
   exactly as its row labels are.
 

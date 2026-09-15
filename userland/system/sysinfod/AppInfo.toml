@@ -8,6 +8,7 @@
 # well-known endpoint, and CAP_LOG_EMIT for its audit records.
 id = "os.tairix.sysinfod"
 name = "sysinfod"
+title = "Sysinfod"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_SYSINFO_INTROSPECT", "CAP_SYSINFO_HW", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]

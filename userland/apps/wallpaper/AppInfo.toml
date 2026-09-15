@@ -31,6 +31,7 @@
 # user's grants, never more.
 id = "os.tairix.wallpaper"
 name = "wallpaper"
+title = "Wallpaper"
 version = "0.1.0"
 kind = "application"
 # The identity the desktop's icon-bar information panel states, drawn from

@@ -9,6 +9,7 @@
 use alloc::string::String;
 use alloc::vec;
 
+use tairix_abi::Errno;
 use tairix_controls::damage;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -193,6 +194,66 @@ fn a_viewer_launched_with_no_document_asks_for_nothing_at_all() {
     assert!(view.refusal().is_none(), "nothing has gone wrong yet");
 }
 
+/// The window is shown by its first present, so a viewer with nothing to draw
+/// says so and its embedder withholds that present.
+///
+/// The reported defect: launched on its own, the viewer opened a window and
+/// *then* asked the session's picker for a document, so an empty window sat
+/// behind the chooser for as long as the user took to choose. What ends the
+/// wait is either conclusion — the document, or the reason there is none.
+#[test]
+fn a_viewer_waiting_on_a_pick_has_nothing_to_show() {
+    let handed = View::new(true);
+    assert!(
+        !handed.nothing_to_show(),
+        "a viewer handed a document at spawn shows it, or why it could not"
+    );
+
+    let mut waiting = View::new(false);
+    assert!(waiting.nothing_to_show());
+    // The user has chosen, but the document has still to be read and decoded:
+    // there is nothing on the canvas yet either.
+    waiting.expect_document();
+    assert!(waiting.nothing_to_show());
+
+    let (registry, scale) = dressing();
+    let theme = registry.active();
+    let layout = waiting.layout(WINDOW.0, WINDOW.1, theme, scale, font(theme, scale));
+    let mut region = damage::sink();
+    assert!(
+        waiting
+            .deliver(
+                Answer::Opened {
+                    opened: Ok((still(400, 300), String::from("picture.png"), 4_096)),
+                },
+                &layout,
+                &mut region,
+            )
+            .changed
+    );
+    assert!(
+        !waiting.nothing_to_show(),
+        "the document landed, so there is a picture to show"
+    );
+
+    // And the other conclusions: the user chose nothing, or the session would
+    // not open a chooser at all. Either is a reason, which is something to
+    // show — a refused *ask* especially, because nothing is coming after it
+    // and a window withheld on it would never appear.
+    for why in [
+        Refusal::Cancelled,
+        Refusal::PickRefused(Errno::AlreadyExists),
+    ] {
+        let mut refused = View::new(false);
+        assert!(refused.nothing_to_show());
+        assert!(refused.no_document(why));
+        assert!(
+            !refused.nothing_to_show(),
+            "{why} left the window with nothing to show, so it would never appear"
+        );
+    }
+}
+
 #[test]
 fn one_render_is_outstanding_at_a_time() {
     let (mut view, _layout, _registry) = opened(still(400, 300));
@@ -333,13 +394,13 @@ fn a_refused_render_states_the_reason_and_keeps_showing_what_it_had() {
 fn a_cancelled_pick_leaves_the_window_open_and_says_so() {
     // A refused optional action is an answer, not a death.
     let mut view = View::new(false);
-    assert!(view.cancelled());
+    assert!(view.no_document(Refusal::Cancelled));
     assert!(matches!(view.refusal(), Some(Refusal::Cancelled)));
 
     // With a document already open, a cancelled pick says nothing new: the
     // picture on screen is still what the user is looking at.
     let (mut open, _layout, _registry) = drawn(still(400, 300));
-    assert!(!open.cancelled());
+    assert!(!open.no_document(Refusal::Cancelled));
     assert!(open.refusal().is_none());
 }
 

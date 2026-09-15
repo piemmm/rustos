@@ -60,7 +60,7 @@ use tairix_abi::{
     SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord,
     UserDirectoryRequest, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
     APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-    BUNDLE_PURPOSE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
@@ -1140,8 +1140,12 @@ fn generate_appinfo() -> String {
     let _ = writeln!(out, "#define TAIRIX_APPINFO_MAX_MIME {APPINFO_MAX_MIME}u");
     out.push_str("/* Maximum length, in bytes, of a bundle identifier. */\n");
     let _ = writeln!(out, "#define TAIRIX_BUNDLE_ID_MAX {BUNDLE_ID_MAX}u");
-    out.push_str("/* Maximum length, in bytes, of a bundle's human-readable name. */\n");
+    out.push_str(
+        "/* Maximum length, in bytes, of a bundle's program name (its command word). */\n",
+    );
     let _ = writeln!(out, "#define TAIRIX_BUNDLE_NAME_MAX {BUNDLE_NAME_MAX}u");
+    out.push_str("/* Maximum length, in bytes, of a bundle's human-readable title. */\n");
+    let _ = writeln!(out, "#define TAIRIX_BUNDLE_TITLE_MAX {BUNDLE_TITLE_MAX}u");
     out.push_str("/* Maximum length, in bytes, of a bundle version string. */\n");
     let _ = writeln!(
         out,
@@ -1222,10 +1226,9 @@ fn generate_appinfo() -> String {
 /// `AppInfoHeader`'s declaration order is its wire order (`lib/abi` pins that
 /// field by field), so emitting the mirror from one ordered table and
 /// checking the widths sum to [`AppInfoHeader::WIRE_LEN`] is what stops the C
-/// view drifting into a differently-shaped struct of the same name — which is
-/// exactly what it had done: it was still declaring a three-byte `reserved0`
-/// and carrying neither `purpose` nor `author`, so a third-party program
-/// filling it in would have written a manifest the loader could not read.
+/// view drifting into a differently-shaped struct of the same name — which a
+/// third-party program would fill in to write a manifest the loader cannot
+/// read.
 /// Array extents are spelled with the same macros the header defines from
 /// `lib/abi`, so an extent and its byte count cannot disagree either.
 const APPINFO_HEADER_FIELDS: &[(&str, usize)] = &[
@@ -1241,7 +1244,7 @@ const APPINFO_HEADER_FIELDS: &[(&str, usize)] = &[
     ("uint8_t library", 1),
     ("uint8_t purpose_len", 1),
     ("uint8_t author_len", 1),
-    ("uint8_t reserved0[1]", 1),
+    ("uint8_t title_len", 1),
     ("uint8_t id[TAIRIX_BUNDLE_ID_MAX]", BUNDLE_ID_MAX),
     ("uint8_t name[TAIRIX_BUNDLE_NAME_MAX]", BUNDLE_NAME_MAX),
     (
@@ -1260,6 +1263,7 @@ const APPINFO_HEADER_FIELDS: &[(&str, usize)] = &[
         "uint8_t author[TAIRIX_BUNDLE_AUTHOR_MAX]",
         BUNDLE_AUTHOR_MAX,
     ),
+    ("uint8_t title[TAIRIX_BUNDLE_TITLE_MAX]", BUNDLE_TITLE_MAX),
     (
         "uint8_t syscall_table_hash[TAIRIX_SYSCALL_TABLE_HASH_LEN]",
         SYSCALL_TABLE_HASH_LEN,
@@ -4007,7 +4011,7 @@ mod tests {
         use tairix_abi::{
             AppInfoHeader, BundleEntry, LibraryCategory, LibraryScope, APPINFO_MAGIC,
             APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-            BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+            BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
             SYSTEM_LIBRARIES_DIR,
         };
         let h = body("tairix_appinfo.h");
@@ -4024,6 +4028,7 @@ mod tests {
             format!("#define TAIRIX_APPINFO_MAX_MIME {APPINFO_MAX_MIME}u"),
             format!("#define TAIRIX_BUNDLE_ID_MAX {BUNDLE_ID_MAX}u"),
             format!("#define TAIRIX_BUNDLE_NAME_MAX {BUNDLE_NAME_MAX}u"),
+            format!("#define TAIRIX_BUNDLE_TITLE_MAX {BUNDLE_TITLE_MAX}u"),
             format!("#define TAIRIX_BUNDLE_VERSION_MAX {BUNDLE_VERSION_MAX}u"),
             format!("#define TAIRIX_MIME_TYPE_MAX {MIME_TYPE_MAX}u"),
             format!("#define TAIRIX_MIME_ENTRY_LEN {MIME_ENTRY_LEN}u"),
@@ -4694,7 +4699,7 @@ mod tests {
             ("tairix_ipc.h", "} tairix_ipc_message_header_t;", size_of::<IpcMessageHeader>(), 32, align_of::<IpcMessageHeader>(), 8),
             ("tairix_ipc.h", "} tairix_port_name_t;", size_of::<PortName>(), 32, align_of::<PortName>(), 1),
             ("tairix_manifest.h", "} tairix_manifest_header_t;", size_of::<ManifestHeader>(), 144, align_of::<ManifestHeader>(), 4),
-            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 664, align_of::<AppInfoHeader>(), 4),
+            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 728, align_of::<AppInfoHeader>(), 4),
             ("tairix_rxe.h", "} tairix_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
             ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 40, align_of::<ProcessStartHeader>(), 8),
             ("tairix_process.h", "} tairix_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),

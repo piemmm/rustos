@@ -12,6 +12,7 @@
 # uses; without `-r` no socket is opened at all. It reads no standard input.
 id = "os.tairix.ss"
 name = "ss"
+title = "Ss"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET", "CAP_SYSINFO_GLOBAL"]

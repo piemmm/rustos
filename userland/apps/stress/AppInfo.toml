@@ -17,6 +17,7 @@
 # stress respects them and reports refusals rather than asking for more.
 id = "os.tairix.stress"
 name = "stress"
+title = "Stress"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_PROC_SPAWN", "CAP_MEM_PIN"]

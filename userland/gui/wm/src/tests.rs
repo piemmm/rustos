@@ -8295,6 +8295,10 @@ fn screenful_frost_budget(mode: DisplayMode) -> Compositor {
 /// A cascade of translucent, backdrop-blurred terminals at the shipped default
 /// — 80% opacity, a half-strength blur — every one of which contributes a
 /// visible strip, so ordinary occlusion culls none of them. Front-most last.
+///
+/// Declared app-presented, as the session declares every served window, so the
+/// cascade is weighed in the application tier of the frost ration rather than
+/// among the desktop's own chrome.
 fn frosted_cascade(c: &mut Compositor, windows: i32) -> alloc::vec::Vec<WindowId> {
     (0..windows)
         .map(|n| {
@@ -8302,6 +8306,7 @@ fn frosted_cascade(c: &mut Compositor, windows: i32) -> alloc::vec::Vec<WindowId
             let id = c.add_window(Point::new(48 + step, 48 + step), veiled(560, 350, 204));
             assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
             assert!(c.set_backdrop_blur(id, 12));
+            assert!(c.set_app_presented(id, true));
             id
         })
         .collect()
@@ -8382,6 +8387,75 @@ fn frosting_is_spent_on_the_front_of_the_stack() {
     assert!(
         c.window(buried).expect("window").is_frosted(),
         "the window the user brought to the front is not frosted"
+    );
+}
+
+/// The frost budget of a 1024x768 output: one screenful of pixels.
+const SCREENFUL_FROST_BYTES: usize = 1024 * 768 * 4;
+
+#[test]
+fn desktop_chrome_is_served_its_frost_before_application_windows() {
+    // The defect: the icon bar is desktop chrome, permanently on screen, and
+    // deliberately not pinned topmost — so it sits at the *back* of the stack.
+    // Spending the ration front to back in one sweep let the applications take
+    // the ceiling first, and the bar kept its blur only while their frosts
+    // happened to leave a bar-sized slice over — which is why it came and went
+    // with how many windows were open and how big they were. Chrome is weighed
+    // in its own tier ahead of them, so the answer stops depending on that.
+    //
+    // Three full-width application windows sized so that all three fit the
+    // ceiling but leave less than the bar behind them: that is the scene the
+    // old order lost the bar's frost in.
+    let bar_bytes = 1024 * 40 * 4;
+    let app_bytes = 1024 * 250 * 4;
+    assert!(3 * app_bytes <= SCREENFUL_FROST_BYTES);
+    assert!(SCREENFUL_FROST_BYTES - 3 * app_bytes < bar_bytes);
+
+    let mut c = screenful_frost_budget(mode(1024, 768));
+    let bar = c.add_window(Point::new(0, 728), veiled(1024, 40, 204));
+    assert!(c.set_backdrop_blur(bar, 12));
+    let apps: alloc::vec::Vec<WindowId> = (0..3)
+        .map(|n| {
+            let id = c.add_window(Point::new(0, n * 80), veiled(1024, 250, 204));
+            assert!(c.set_backdrop_blur(id, 12));
+            assert!(c.set_app_presented(id, true));
+            id
+        })
+        .collect();
+    c.composite();
+
+    assert!(
+        c.window(bar).expect("window").is_frosted(),
+        "the icon bar lost its frost to the applications stacked over it"
+    );
+    assert!(c.frost_resident(bar), "the bar's backdrop was not retained");
+    let refused = apps
+        .iter()
+        .filter(|&&id| !c.window(id).expect("window").is_frosted())
+        .count();
+    assert_eq!(
+        refused, 1,
+        "the ceiling must still bind on the applications, or the tier order is untested"
+    );
+
+    // And it stays frosted however deep the pile in front of it grows: the
+    // tier bounds what the applications may take, so the answer no longer
+    // turns on how many of them there are.
+    let deeper = frosted_cascade(&mut c, 16);
+    for &id in &deeper {
+        assert!(c.raise(id));
+    }
+    c.composite();
+    assert!(
+        c.window(bar).expect("window").is_frosted(),
+        "a deeper pile of applications rationed the bar's frost away again"
+    );
+    assert!(c.frost_resident(bar));
+    assert!(
+        deeper
+            .iter()
+            .any(|&id| !c.window(id).expect("window").is_frosted()),
+        "the ceiling reached every application window, so the tier order is untested"
     );
 }
 

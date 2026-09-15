@@ -297,7 +297,8 @@ New / changed homes, all obeying the one-way `userland/gui/* → lib/*` edge:
   + fail-closed parser + render, no I/O, no authority). Consumed by the
   installer, the `applib` admin command, and the taskbar/session. (T1)
 - `lib/abi` — extend `AppInfo` with the optional `library` listing (the
-  opt-in folder byte + `library-icon` asset, and the `purpose`/`author`
+  opt-in folder byte + `library-icon` asset, the human-readable `title` every
+  naming surface draws, and the `purpose`/`author`
   fields the information panel states) so the library is *discovered* from
   bundles (T3); add the taskbar↔Switchboard **tray-signal summary** record and
   the **library-edit** / **icon-bar** / **Switchboard-control** IPC
@@ -827,11 +828,18 @@ What now stands:
   title is the manifest's (`plans/NEW-MENUS.md` M1b).
 - **The information panel is manifest-attested.** The application declares
   only that an `Info` row exists; the panel is the session's own `FactList`
-  of the bundle's **signed** `AppInfo` — name, version, and the new optional
+  of the bundle's **signed** `AppInfo` — its title, version, and the optional
   `purpose` and `author` fields (`BUNDLE_PURPOSE_MAX = 96`,
-  `BUNDLE_AUTHOR_MAX = 64`; `AppInfoHeader::WIRE_LEN` 408 → 568). An
+  `BUNDLE_AUTHOR_MAX = 64`). An
   application therefore cannot state an identity that is not its own inside
   system-drawn chrome, and an omitted field is absent rather than blank.
+- **Every surface that names an application draws the manifest's `title`, not
+  its `name`** (`plans/APPS.md` §2.0): the slot label, the application menu's
+  plate title, the information panel, and the program-library row all read
+  `AppInfoHeader::bundle_title`. `name` is the command word — the `<Name>.app`
+  directory and what the shell resolves — so it cannot be capitalised, which is
+  why the bar's menu was headed `sapper`. A bundle declaring no title is titled
+  by its command word, so nothing is ever left blank.
 - **A declaration precedes its declarer's first window.** Every declaring
   application calls `set_app_bar` before it opens a window, because a
   declared presence belongs to the process: declared first, the slot carries

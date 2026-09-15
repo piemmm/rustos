@@ -30,8 +30,9 @@
 //! where a system-wide total is not:
 //!
 //! 1. Clicking the served files window (opened by the session at desktop
-//!    reveal) delivers `Focus { focused: true }` (the window was
-//!    unfocused) …
+//!    reveal, and put on screen by that app's first present — which is what
+//!    the click waits on, since nothing earlier says the window is visible)
+//!    delivers `Focus { focused: true }` (the window was unfocused) …
 //! 2. … then the activating `Pressed`. Both landed on the files window's
 //!    own port, so the guest emits [`FILES_WINDOW_ACTIVATED_MARKER`]: the
 //!    served window demonstrably exists and is active on the composited
@@ -112,47 +113,6 @@ pub const FILES_HANDSHAKE_MARKER: &str = "AUTOLOAD files handshake delivered";
 /// Deliveries to the files window's own port that [`FILES_HANDSHAKE_MARKER`]
 /// reports: the activating click's two, then the handshake's `Pressed`.
 pub const FILES_HANDSHAKE_DELIVERIES: u32 = 3;
-
-/// Shared-frame **map** operations (`sc=shm_map`) that have occurred by the
-/// time the *files* window exists and can be clicked: the boot scan-out map,
-/// then that window's own create map.
-///
-/// This is the gate for the first in-window click, and it is attributable
-/// where a reply over the shared `WINDOW_ENDPOINT` is not — every client of
-/// that rendezvous replies on it (the Switchboard's start-up desktop query
-/// did so half a second before this window was created, which is what once
-/// clicked empty desktop), whereas only a window **create** maps a frame.
-/// See [`TERMINAL_WINDOW_FRAME_MAPS`] for why a map counts creations and
-/// never repaints.
-pub const FILES_WINDOW_FRAME_MAPS: u32 = 2;
-
-/// Shared-frame **map** operations (`sc=shm_map`) that have occurred by
-/// the time the terminal window exists and can be clicked — the robust,
-/// present-count-independent gate for the terminal-window click.
-///
-/// A window's shared frame region is mapped **exactly once, when the
-/// window is created** (`WindowServer::create` → the session's
-/// `ShmMapper`); a *present* re-uses that mapping and maps nothing. So the
-/// count of `shm_map` operations tracks window **creation**, never the
-/// (timing-variable) number of repaints — which is why gating on it is
-/// immune to the flaky-repaint race that a `CallReplied`-count gate
-/// suffered (a files-window click that happened to repaint would inflate
-/// the reply count and fire the terminal click before the terminal
-/// existed).
-///
-/// Exactly three frame maps precede the terminal-window click, in order:
-/// 1. the framebuffer display service maps the desktop's granted scan-out
-///    frame region (boot);
-/// 2. the session maps the **files** window's frame region (its create);
-/// 3. the session maps the **terminal** window's frame region (its
-///    create) — the occurrence this gate keys on.
-///
-/// After occurrence 3 the terminal window demonstrably exists in the
-/// compositor at its cascade slot, so the click focuses it. Neither the
-/// files window's repaints nor the terminal's own later presents (the
-/// shell prompt/output) add `shm_map` operations, so the gate can never
-/// race them.
-pub const TERMINAL_WINDOW_FRAME_MAPS: u32 = 3;
 
 /// Guest marker: the terminal window first becomes the focused key
 /// recipient (first app-ward delivery to the second distinct window port;

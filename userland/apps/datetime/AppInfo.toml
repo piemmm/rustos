@@ -16,6 +16,7 @@
 # refusal rather than pretending to have changed the clock.
 id = "os.tairix.datetime"
 name = "datetime"
+title = "Datetime"
 version = "0.1.0"
 kind = "application"
 # The identity the desktop's icon-bar information panel states, drawn from

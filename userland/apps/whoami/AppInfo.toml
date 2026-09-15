@@ -9,6 +9,7 @@
 # reads no input, so it requests no CAP_CONSOLE_READ and nothing else.
 id = "os.tairix.whoami"
 name = "whoami"
+title = "Whoami"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

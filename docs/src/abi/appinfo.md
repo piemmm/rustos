@@ -34,7 +34,7 @@ documentation entry.
 
 ## `AppInfo` manifest
 
-`AppInfoHeader` is the fixed-size (`WIRE_LEN` = 664), signed prefix of the
+`AppInfoHeader` is the fixed-size (`WIRE_LEN` = 728), signed prefix of the
 manifest. It is `#[repr(C)]`, allocation-free, little-endian, with
 `to_le_bytes`/`from_bytes` and a fail-closed decoder. Its declaration order
 **is** its wire order, so the in-memory image and the wire image are the same
@@ -60,15 +60,28 @@ field. It carries:
     many of itself may exist. `presents_icon_bar_slot()` and
     `runs_one_instance()` are the two readers.
 - The bundle identity: inline `id` / `name` / `version` (length byte plus a
-  fixed buffer, validated as non-empty UTF-8 on decode). `id` is additionally
-  held to `validate_bundle_id`: dot-separated segments of ASCII lowercase
-  letters, digits, `-` and `_`, each non-empty. The grammar is narrow because
-  the identifier names a directory in every user's per-app store
-  (`plans/APPDATA.md`), so nothing that could be a path traversal (`.`, `..`,
-  `/`), a hidden entry, a case-folding collision, or a control character can
-  be spelled at all — an app cannot reach outside its own scope by
-  construction rather than by a check a caller might forget. `BundleId` is the
-  validated inline form the kernel attests on an `Origin`.
+  fixed buffer, validated as non-empty UTF-8 on decode), plus the optional
+  inline `title`.
+  - `name` is the program's **command word**: the stem of the `<Name>.app`
+    directory and what the shell resolves, so it is held to a plain-word
+    grammar and is a functional name, never prose.
+  - `title` is the **human-readable name** every surface that names the
+    application to a user draws — the icon-bar slot label, the application
+    menu's plate title, the information panel, the program-library row, the
+    "Open With…" candidate list. A bundle that declares none is titled by its
+    program name (`bundle_title()` answers `bundle_name()`), so an absent
+    title means "the command word reads well enough" and never a blank label.
+    Without it the desktop drew the command word wherever it needed a name,
+    which is how the icon bar came to be titled `sapper`.
+  - `id` is additionally held to `validate_bundle_id`: dot-separated segments
+    of ASCII lowercase letters, digits, `-` and `_`, each non-empty. The
+    grammar is narrow because the identifier names a directory in every user's
+    per-app store (`plans/APPDATA.md`), so nothing that could be a path
+    traversal (`.`, `..`, `/`), a hidden entry, a case-folding collision, or a
+    control character can be spelled at all — an app cannot reach outside its
+    own scope by construction rather than by a check a caller might forget.
+    `BundleId` is the validated inline form the kernel attests on an
+    `Origin`.
 - `capability_count` and `mime_count` describing the body.
 - `syscall_table_hash` — the syscall interface the bundle was linked against
   (§9 / §19.2).

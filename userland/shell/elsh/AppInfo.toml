@@ -17,6 +17,7 @@
 # against this shell's kernel-attested effective set.
 id = "os.tairix.elsh"
 name = "elsh"
+title = "Elsh"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_FS_ACCESS", "CAP_PROC_SPAWN", "CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW"]

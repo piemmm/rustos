@@ -11,6 +11,7 @@
 # callers; it never needs to hold it.
 id = "os.tairix.netstack"
 name = "netstack"
+title = "Netstack"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_NET_RAW", "CAP_SHM", "CAP_IPC_BIND_PRIVILEGED", "CAP_LOG_EMIT"]

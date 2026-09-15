@@ -159,6 +159,7 @@ mod program {
     };
     use tairix_wm::{
         chrome_cache, frost_cache, Compositor, InputResponse, Point, Rect, Region, Surface,
+        WindowControlKind,
     };
 
     extern crate alloc;
@@ -4863,6 +4864,19 @@ mod program {
                             menu,
                             &event,
                         );
+                    }
+                    // The trusted picker is the session's own window, so the
+                    // shared mapping performs no close for it: what dismissal
+                    // *means* is the owner's, and here it means the same as
+                    // Escape — the pick is cancelled and the requesting
+                    // application is told so.
+                    if control == WindowControlKind::Close && picker.wm_id() == Some(window) {
+                        if let Some(concluded) = picker.cancel(shell, compositor) {
+                            conclude_pick(
+                                concluded, server, sink, shell, compositor, windows, picker, apps,
+                                menu,
+                            );
+                        }
                     }
                 }
                 // A secondary press landed on a title-bar control: the window

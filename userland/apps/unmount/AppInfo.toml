@@ -12,6 +12,7 @@
 # sysinfod. It reads no standard input.
 id = "os.tairix.unmount"
 name = "unmount"
+title = "Unmount"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_FS_MOUNT"]

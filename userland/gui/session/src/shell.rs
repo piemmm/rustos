@@ -444,12 +444,16 @@ impl DesktopShell {
     /// the task-id space is exhausted. The compositor is the
     /// embedder's, passed in here; the shell holds no framebuffer.
     ///
-    /// This opens the bare window; a served application window is additionally
-    /// decorated with the window-manager frame furniture through
-    /// [`decorate_window`](Self::decorate_window). The session's own trusted
-    /// modal surfaces (the file picker) open undecorated — they are session
-    /// chrome, dismissed by their own keys, not app windows the window manager
-    /// dresses with a title bar.
+    /// This opens the bare window; a window the session paints itself is
+    /// additionally decorated with the window-manager frame furniture through
+    /// [`decorate_window`](Self::decorate_window) when it is a dialog the user
+    /// closes (the trusted file picker), and left undecorated when it is
+    /// chrome dismissed another way (the screen lock, a confirmation prompt).
+    ///
+    /// A *served* window opens through
+    /// [`open_unpresented_window`](Self::open_unpresented_window) instead: its
+    /// pixels are its application's, so there is nothing to show until the
+    /// application presents.
     pub fn open_window(
         &mut self,
         compositor: &mut Compositor,
@@ -471,6 +475,56 @@ impl DesktopShell {
         self.sync_active_frame(compositor);
         self.present(compositor);
         Some(window)
+    }
+
+    /// Open a top-level window of client extent `client` at `origin` whose
+    /// pixels a client has yet to present, list it on the taskbar titled
+    /// `title`, and re-present the bar — but leave it **off screen** until
+    /// [`map_window`](Self::map_window).
+    ///
+    /// The task is listed, focusable, and retitleable from here on, so an
+    /// application that is slow to render is reachable while it gets ready;
+    /// what it is not is *visible*, because the session has no pixels of the
+    /// application's to show and a stand-in fill is a blank window the user
+    /// did not ask for.
+    ///
+    /// Returns `None`, opening nothing, only if the task-id space is
+    /// exhausted.
+    pub fn open_unpresented_window(
+        &mut self,
+        compositor: &mut Compositor,
+        origin: Point,
+        client: (u32, u32),
+        title: impl Into<String>,
+    ) -> Option<WindowId> {
+        let window = self.tasks.open_unpresented(
+            compositor,
+            self.session.taskbar_mut(),
+            origin,
+            client,
+            title,
+        )?;
+        self.present(compositor);
+        Some(window)
+    }
+
+    /// Put the already-open `window` on screen: show, raise, and focus it,
+    /// highlight its task, and re-present the bar — what a served window's
+    /// first present asks for.
+    ///
+    /// Returns `false`, changing nothing, when `window` is not a tracked task.
+    pub fn map_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
+        if !self.tasks.map(
+            compositor,
+            &mut self.router,
+            self.session.taskbar_mut(),
+            window,
+        ) {
+            return false;
+        }
+        self.sync_active_frame(compositor);
+        self.present(compositor);
+        true
     }
 
     /// Open `surface` as an undecorated window at `origin` belonging to
@@ -543,6 +597,12 @@ impl DesktopShell {
     /// passes `false` — every client pixel reaches it and the size toggle is
     /// inert — so the mechanism is per-app opt-in, never forced on an app that
     /// renders at one size.
+    ///
+    /// A window the *session* paints is decorated on the same terms when it is
+    /// a dialog the user closes — the trusted file picker — so it is moved,
+    /// dismissed, and titled like anything else on screen. Its close control
+    /// raises no app-ward event; the session interprets it
+    /// ([`window_control_event`](crate::windows::window_control_event)).
     pub fn decorate_window(
         &mut self,
         compositor: &mut Compositor,
@@ -598,11 +658,12 @@ impl DesktopShell {
     /// window-manager frame, its title bar, then re-present the bar so the
     /// new label shows.
     ///
-    /// One call moves both, so an app that renames its window can never
-    /// leave the bar naming the old subject. The session's own undecorated
-    /// trusted surfaces (the file picker) relabel on the bar alone — they
-    /// have no title bar to move. Returns `false`, changing nothing, when
-    /// `window` is not a tracked task.
+    /// One call moves both, so a window that renames itself can never leave
+    /// the bar naming the old subject — an application retitling its own
+    /// window, or the trusted picker relabelling itself as the user
+    /// navigates. A window wearing no title bar relabels on the bar alone.
+    /// Returns `false`, changing nothing, when `window` is not a tracked
+    /// task.
     pub fn retitle_window(
         &mut self,
         compositor: &mut Compositor,

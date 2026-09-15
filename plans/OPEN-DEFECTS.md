@@ -1902,25 +1902,26 @@ advanced, and the guest idled. The desktop session and `lib/window`
 delivery path were correct throughout; the app-ward `ipc_send` is
 non-blocking and the kernel wakes were not lost.
 
-**Fix — gate on window *creation*, which no repaint can inflate.** A
-window's shared frame region is mapped exactly once, when the window is
-created (`WindowServer::create` → the session `ShmMapper`); a present
-re-uses that mapping. So the harness now gates the terminal-window click on
-the count of shared-frame **map** operations (`sc=shm_map`), of which
-exactly three precede the terminal-window click — boot framebuffer
-scan-out, files window create, terminal window create — independent of how
-many times any window repaints. Contract constant
-`TERMINAL_WINDOW_FRAME_MAPS = 3` (renamed from `TERMINAL_WINDOW_REPLIES`)
-with the marker `AUTOLOAD_WINDOW_MAP_MARKER = "sc=shm_map"` in
-`tools/xtask` `qemu_tests`. The files-window click keeps its own
-create-keyed gate (the first window-endpoint reply), which is stable.
+**Fix — gate each in-window click on that window being *on screen*.** A
+count of replies over a shared rendezvous can be advanced by anyone; a count
+of window *creations* cannot, but it says only that the window **exists**.
+Since the session shows a served window on its client's first present
+(`plans/APPWIN.md` AW3), existence is not visibility, and a creation-keyed
+gate races that present — the shape this defect returned in once the mapping
+moved to the present. Both in-window clicks therefore key on the session's own
+per-window witness that a frame carrying it reached the display
+(`WINDOW_SHOWN_MARKER` = `tairix_desktop_session::WINDOW_SHOWN_MESSAGE`),
+occurrence 1 for the files window and 2 for the terminal. Only the session can
+state that fact, and the launched applications are the only window-channel
+clients in the image, so the occurrences name those two windows and nothing
+else.
 
 **Regression guard.** Host test
-`qemu_tests::tests::terminal_window_click_gates_on_window_creation_not_repaint_count`
-asserts the terminal-window click's steps key on the creation (`shm_map`)
-marker and its `TERMINAL_WINDOW_FRAME_MAPS` occurrence count, and never on
-the present-inclusive `CallReplied` count — so the fragile gate cannot
-return. The QEMU vertical itself is the end-to-end guard.
+`qemu_tests::tests::every_served_window_click_gates_on_that_window_being_on_screen`
+asserts both clicks key on the window-shown witness at their own occurrence,
+and that **no** step keys on the present-inclusive `CallReplied` count or on
+the existence-only `sc=shm_map` frame map — so none of the three superseded
+gates can return. The QEMU vertical itself is the end-to-end guard.
 
 **Note.** riscv64/x86_64 autoload siblings are input-only (no display,
 desktop, or terminal stage), so this gate exists only in the aarch64

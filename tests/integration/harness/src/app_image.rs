@@ -29,7 +29,9 @@
 //! declared file-type hints), `library` (the program-library folder a
 //! graphical application lists itself under — absence means the library
 //! never shows the bundle), `library-icon` (an icon asset inside the
-//! bundle's `Resources/`), `purpose`, `author`, and `icon-bar` (a bare
+//! bundle's `Resources/`), `title` (the human-readable name every surface
+//! draws; absent means the program name reads well enough), `purpose`,
+//! `author`, and `icon-bar` (a bare
 //! `true`/`false`; `false` for a bundle the desktop's icon bar gives no slot
 //! of its own, because it already reaches it another way). Each key appears
 //! at most once. Anything else — an unknown key, a duplicate, a multi-line
@@ -44,8 +46,8 @@ use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, LibraryCategory,
     ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR,
     APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
-    MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX,
+    LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 
@@ -80,6 +82,10 @@ pub struct AppManifestSource {
     /// The program's name — also its bundle directory stem and, for a
     /// command app, the command word the shell resolves.
     pub name: String,
+    /// The bundle's human-readable title, which every surface that names the
+    /// application to a user draws. `None` means the program name reads well
+    /// enough on its own and is what those surfaces show.
+    pub title: Option<String>,
     /// Bundle version string.
     pub version: String,
     /// Which store the bundle is planted in.
@@ -137,13 +143,15 @@ impl AppManifestSource {
     /// over-long or empty identity field, a name that is not a plain
     /// command word, an unknown `kind`, an unknown or duplicate `CAP_*`
     /// name, a capability list exceeding the manifest bound, an unknown
-    /// library folder, an over-long `library-icon`, `purpose`, or `author`,
+    /// library folder, an over-long `library-icon`, `title`, `purpose`, or
+    /// `author`,
     /// an `icon-bar` that is not a bare `true`/`false`, an `instances` that is
     /// neither `"single"` nor `"multiple"`, or a `library` on a `service`.
     pub fn parse(text: &str) -> Result<Self, AppImageError> {
         let ctx = APP_MANIFEST_SOURCE;
         let mut id = None;
         let mut name = None;
+        let mut title = None;
         let mut version = None;
         let mut kind = None;
         let mut capabilities = None;
@@ -167,6 +175,7 @@ impl AppManifestSource {
             match key {
                 "id" => set(&at, key, &mut id, parse_string(&at, value)?)?,
                 "name" => set(&at, key, &mut name, parse_string(&at, value)?)?,
+                "title" => set(&at, key, &mut title, parse_string(&at, value)?)?,
                 "version" => set(&at, key, &mut version, parse_string(&at, value)?)?,
                 "kind" => set(&at, key, &mut kind, parse_kind(&at, value)?)?,
                 "capabilities" => {
@@ -191,6 +200,7 @@ impl AppManifestSource {
         let manifest = Self {
             id: require(id, "id")?,
             name: require(name, "name")?,
+            title,
             version: require(version, "version")?,
             kind: require(kind, "kind")?,
             capabilities: require(capabilities, "capabilities")?,
@@ -220,6 +230,20 @@ impl AppManifestSource {
     #[must_use]
     pub fn bundle_dir(&self) -> String {
         format!("{}{BUNDLE_SUFFIX}", self.name)
+    }
+
+    /// The bundle's **effective** human-readable title: its declared one, else
+    /// its program name.
+    ///
+    /// The source-side mirror of
+    /// [`AppInfoHeader::bundle_title`](tairix_abi::AppInfoHeader::bundle_title),
+    /// which resolves the same fallback from the composed wire manifest. Any
+    /// build-time reader that shows a bundle's name to a user — or reproduces
+    /// what the guest will show — reads this rather than `name`, so the two
+    /// cannot disagree about a row's label or the order rows sort in.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.name)
     }
 
     /// Cross-field validation applied after a successful parse.
@@ -255,6 +279,9 @@ impl AppManifestSource {
         }
         if let Some(author) = &self.author {
             check_len(ctx, "author", author, BUNDLE_AUTHOR_MAX)?;
+        }
+        if let Some(title) = &self.title {
+            check_len(ctx, "title", title, BUNDLE_TITLE_MAX)?;
         }
         if self.library.is_some() && self.kind == ProgramKind::Service {
             // A service is a daemon, not a user-facing application; listing
@@ -658,14 +685,18 @@ pub fn compose_signed_appinfo(
             Some(author) => inline_len(ctx, "author", author, BUNDLE_AUTHOR_MAX)?,
             None => 0,
         },
+        title_len: match &manifest.title {
+            Some(title) => inline_len(ctx, "title", title, BUNDLE_TITLE_MAX)?,
+            None => 0,
+        },
         library: LibraryCategory::to_wire(manifest.library),
-        reserved0: [0; 1],
         id: inline_buf(&manifest.id),
         name: inline_buf(&manifest.name),
         version: inline_buf(&manifest.version),
         library_icon: inline_buf(manifest.library_icon.as_deref().unwrap_or("")),
         purpose: inline_buf(manifest.purpose.as_deref().unwrap_or("")),
         author: inline_buf(manifest.author.as_deref().unwrap_or("")),
+        title: inline_buf(manifest.title.as_deref().unwrap_or("")),
         syscall_table_hash,
         content_hash,
         signer_pubkey,
@@ -767,6 +798,10 @@ mod tests {
             [CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS]
         );
         assert_eq!(manifest.bundle_dir(), "example.app");
+        assert_eq!(
+            manifest.title, None,
+            "a title is optional; the program name reads for one"
+        );
         assert_eq!(manifest.library, None, "listing is an explicit opt-in");
         assert_eq!(manifest.library_icon, None);
         assert!(manifest.icon_bar, "the icon bar is the default");
@@ -774,6 +809,58 @@ mod tests {
             !manifest.multi_instance,
             "one instance per user is the default"
         );
+    }
+
+    /// The program name is the command word the shell resolves and the
+    /// bundle-directory stem; the title is the prose a surface shows. A
+    /// manifest declaring both must carry both through to the signed wire
+    /// header, so the desktop can draw one without the other constraining it.
+    #[test]
+    fn a_declared_title_reaches_the_signed_header_beside_the_command_word() {
+        let text = format!("{GOOD}title = \"Example Editor\"\n");
+        let manifest = AppManifestSource::parse(&text).expect("valid");
+        assert_eq!(manifest.title.as_deref(), Some("Example Editor"));
+        assert_eq!(manifest.name, "example");
+        assert_eq!(manifest.bundle_dir(), "example.app");
+
+        let composed = compose_signed_appinfo(
+            &[7u8; 32],
+            PublisherSource::SelfPublished,
+            &manifest,
+            [0xAB; 32],
+            &[BundleFileDigest {
+                path: "Run",
+                bytes: b"program bytes",
+            }],
+        )
+        .expect("composes");
+        let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
+        assert_eq!(header.bundle_name(), "example");
+        assert_eq!(header.bundle_title(), "Example Editor");
+        assert_eq!(
+            manifest.title(),
+            header.bundle_title(),
+            "the source-side title must answer what the composed header does"
+        );
+
+        // And with none declared, both fall back to the program name — the
+        // case a build-time reader and the guest once disagreed about, which
+        // reordered the program-library rows a QEMU pointer script clicks.
+        let plain = AppManifestSource::parse(GOOD).expect("valid");
+        assert_eq!(plain.title(), "example");
+        let composed = compose_signed_appinfo(
+            &[7u8; 32],
+            PublisherSource::SelfPublished,
+            &plain,
+            [0xAB; 32],
+            &[BundleFileDigest {
+                path: "Run",
+                bytes: b"program bytes",
+            }],
+        )
+        .expect("composes");
+        let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
+        assert_eq!(plain.title(), header.bundle_title());
     }
 
     #[test]
@@ -958,6 +1045,11 @@ mod tests {
                 format!("{GOOD}library = \"Office\"\nlibrary = \"Games\"\n"),
                 "duplicate library key",
             ),
+            (
+                format!("{GOOD}title = \"{}\"\n", "x".repeat(BUNDLE_TITLE_MAX + 1)),
+                "over-long title",
+            ),
+            (format!("{GOOD}title = \"\"\n"), "empty title"),
         ] {
             assert!(
                 AppManifestSource::parse(&broken).is_err(),
@@ -1133,6 +1225,11 @@ mod tests {
         let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
         assert_eq!(header.bundle_id(), "os.tairix.example");
         assert_eq!(header.bundle_name(), "example");
+        assert_eq!(
+            header.bundle_title(),
+            "example",
+            "a bundle declaring no title is titled by its program name"
+        );
         assert_eq!(header.bundle_version(), "1.2.3");
         assert_eq!(header.library_category(), None);
         assert_eq!(header.library_icon(), None);

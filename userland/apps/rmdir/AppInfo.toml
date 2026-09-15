@@ -8,6 +8,7 @@
 # VFS. The tool never prompts, so it requests no CAP_CONSOLE_READ.
 id = "os.tairix.rmdir"
 name = "rmdir"
+title = "Rmdir"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]

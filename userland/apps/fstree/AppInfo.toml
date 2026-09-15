@@ -17,6 +17,7 @@
 # instruction decoding runs there, never in this process.
 id = "os.tairix.fstree"
 name = "fstree"
+title = "Fstree"
 version = "0.1.0"
 kind = "command"
 # CAP_LOG_EMIT is the sandbox seam's voice: a decode worker that crashes is

@@ -16,6 +16,7 @@
 # never from this caller.
 id = "os.tairix.devmgr"
 name = "devmgr"
+title = "Devmgr"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_SYSINFO_HW", "CAP_DRV_LOAD", "CAP_NET_ADMIN", "CAP_FS_ACCESS", "CAP_LOG_EMIT"]

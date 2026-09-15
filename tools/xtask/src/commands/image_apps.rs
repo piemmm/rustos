@@ -1201,6 +1201,75 @@ mod tests {
         );
     }
 
+    /// How many of `icon`'s layers are painted flat in `colour`.
+    fn layers_painted(icon: &tairix_icon::VectorIcon, colour: tairix_raster::Color) -> usize {
+        icon.layers()
+            .iter()
+            .filter(|layer| layer.paint == tairix_raster::Paint::Solid(colour))
+            .count()
+    }
+
+    /// The vector master a bundle ships in its own `Resources/`, decoded
+    /// exactly as the desktop decodes it.
+    fn shipped_bundle_vector(bundle: &str, file: &str) -> tairix_icon::VectorIcon {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the crate lives at <workspace>/tools/xtask")
+            .join("userland/apps")
+            .join(bundle)
+            .join("Resources")
+            .join(file);
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path:?} should ship: {e}"));
+        let image = tairix_svg::decode(&bytes, tairix_svg::Viewport::Square)
+            .unwrap_or_else(|e| panic!("{file} should decode: {e:?}"));
+        tairix_icon::VectorIcon::from_svg(&image)
+    }
+
+    /// `sapper.svg` is authored at a weight that reads on the dark theme's
+    /// raised surface, which is what the icon bar draws a slot on.
+    ///
+    /// Its first palette was navy on near-black throughout — the tile at
+    /// 1.33:1 against that ground — so the icon disappeared into the bar while
+    /// passing every "decodes and draws something" check
+    /// ([`verify_icon_master`] included). Nothing about a silhouette says
+    /// whether it is *visible*, so the authored weights are pinned here: the
+    /// tile and its top band in the mid-bright blue the folder artwork uses,
+    /// the gutters one clear step darker rather than near-black, a light
+    /// uncovered cell, and the dark mine inside its lit rim. Re-darkening any
+    /// of them stops being a quiet edit.
+    #[test]
+    fn the_sapper_icon_is_authored_to_read_on_the_dark_icon_bar() {
+        let tile = tairix_raster::Color::rgb(0x64, 0x8B, 0xD8);
+        let top = tairix_raster::Color::rgb(0x82, 0xA2, 0xE3);
+        let gutter = tairix_raster::Color::rgb(0x38, 0x54, 0x94);
+        let cell = tairix_raster::Color::rgb(0x96, 0xB8, 0xE3);
+        let dark = tairix_raster::Color::rgb(0x12, 0x1B, 0x30);
+        let rim = tairix_raster::Color::rgb(0xD2, 0xE7, 0xF9);
+        let gleam = tairix_raster::Color::rgb(0xF3, 0xF8, 0xFC);
+        let pennant = tairix_raster::Color::rgb(0xE5, 0x48, 0x4D);
+
+        let icon = shipped_bundle_vector("sapper", "sapper.svg");
+        assert_eq!(icon.layers().len(), 16);
+        for ink in [tile, top, cell, rim, gleam, pennant] {
+            assert_eq!(layers_painted(&icon, ink), 1, "one layer per authored tone");
+        }
+        assert_eq!(layers_painted(&icon, gutter), 2, "two grid gutters");
+        // Four spikes, the mine disc, the pennant's base, its pole, and the
+        // dark edge behind the flag, which the red needs against this tile.
+        assert_eq!(layers_painted(&icon, dark), 8);
+
+        // A silhouette that decoded but drew almost nothing would still pass a
+        // "not empty" check, so pin the slot it actually covers.
+        let image = icon.rasterise(64).expect("renderable");
+        let drawn = image.pixels().iter().filter(|pixel| pixel.a > 0).count();
+        assert!(
+            drawn > 64 * 64 / 2,
+            "sapper covers only {drawn} of {} pixels",
+            64 * 64
+        );
+    }
+
     /// Every wallpaper master the image ships is a photograph the desktop's
     /// own decoder can actually turn into a picture. Discovered from disk
     /// exactly as the icon masters above are (only the wallpaper-family rows

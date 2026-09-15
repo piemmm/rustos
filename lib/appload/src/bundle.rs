@@ -149,7 +149,8 @@ pub struct BundleIdentity {
     /// The globally unique, developer-namespaced bundle identifier
     /// (`os.tairix.terminal`). Per-app state is keyed on it.
     pub id: String,
-    /// The human-readable bundle name.
+    /// The bundle's program name — the command word, not a label a surface
+    /// shows (`AppInfoHeader::bundle_title` is that).
     pub name: String,
     /// The bundle version string.
     pub version: String,
@@ -204,7 +205,7 @@ impl LoadedApp {
         &self.identity.id
     }
 
-    /// The human-readable bundle name from the manifest.
+    /// The bundle's program name from the manifest — the command word.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.identity.name

@@ -185,6 +185,21 @@ Done. What now holds:
   seat wake never touches the window endpoint (the wedge the first
   end-to-end run exposed); readiness is a non-consuming peek, so pending
   members re-report on the next wait.
+- **A served window is shown when its client first presents into it.** Its
+  pixels are the application's, so between the create and the first present
+  the session has nothing of the application's to put on screen: the window
+  opens **off screen and holding no pixels**
+  (`Compositor::add_unpresented_window` / `DesktopShell::open_unpresented_window`),
+  and `window_presented` maps it (`DesktopShell::map_window` — show, raise,
+  focus) on the never-presented → painted transition, before the frame is
+  composed, so the `WINDOW_SHOWN` witness still follows pixels the display
+  took. The taskbar entry is added at open, so an application that is slow to
+  render is listed and reachable while it gets ready. `WindowRecord`'s
+  `FirstFrame::Unpresented` is distinct from `Awaited` for exactly this
+  reason: `Awaited` is an *already-mapped* window whose pixels memory pressure
+  took back, and a present must never un-minimise a window the user put away.
+  There is no opening fill for a top-level window; a popup keeps one, because
+  it is placed on its parent and shown at once by the user's own gesture.
 - A served window is declared **app-presented** to the compositor when it
   opens, which is what makes its content pixels releasable under memory
   pressure; the windows the session paints itself (bar, lock screen,
@@ -316,6 +331,18 @@ Done (code + host coverage). What now holds:
   consumer, plus the renderer-mirroring row hit-test
   (`render::entry_index_at`/`row_height`) the picker's clicks resolve
   through.
+- **The chooser is a dialog.** It wears the window manager's frame
+  (`DesktopShell::decorate_window`, fixed-size because the shared browser view
+  renders at one geometry), so the user sees whose window it is, moves it by
+  its title bar, and closes it. `window_control_event` therefore has two
+  halves: the window-manager-local one (minimise, put-to-back, size toggle) is
+  performed for *any* decorated window, and the app-ward event is produced only
+  for a served one. Close on a session-owned window performs nothing there —
+  what dismissal means is the owner's — and the serve loop routes the picker's
+  to `SessionPicker::cancel`, which is the same conclusion Escape reaches. A
+  host-side observer reconstructing a row's screen position adds the frame's
+  own client inset (`WindowFrame::insets`) to `PICKER_ORIGIN`, which is the
+  outer top-left.
 - **The session's trusted picker** (`tairix_desktop_session::picker`):
   `SessionPicker` — one picker slot at a time, a fresh root listing under
   the session's own authority per pick (a refused listing refuses the

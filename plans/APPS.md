@@ -342,6 +342,26 @@ entry, `Help/` (the former `Documentation/`, merged into it):
 `Resources/` carries, among the bundle's other authored data, the one asset
 every launchable app MUST ship: its own icon, named by the manifest (§14).
 
+### 2.0 The manifest's two names
+
+`AppInfo` declares the program's **name** and its **title**, and they answer
+different questions:
+
+- `name` is the command word. It is the stem of the `<Name>.app` directory,
+  what the shell resolves (§8), and what `man` looks a bundle's help up by, so
+  it is held to a plain-word grammar and is never prose.
+- `title` is the human-readable name, the one §16.5 requires a manifest to
+  declare. Every surface that names the application *to a user* draws it — the
+  icon-bar slot label, the application menu's plate title, the information
+  panel, the program-library row, the "Open With…" candidate list. A bundle
+  that declares no title is titled by its command word, so an absent title
+  means "the word reads well enough" rather than a blank label.
+
+Nothing functional reads `title` and nothing shown to a user reads `name`. The
+two were one field, which is why the icon bar's menu was headed `sapper`:
+capitalising the manifest's `name` was not available, because that string is
+also a directory and a command.
+
 `Help/` is the bundle's **only** documentation mechanism — one
 internationalised, structured-Markdown tree, so there is no second,
 overlapping documentation entry to double-maintain (§2.2, §2.3). It is the

@@ -16,6 +16,7 @@
 # else.
 id = "os.tairix.confd"
 name = "confd"
+title = "Confd"
 version = "0.1.0"
 kind = "service"
 capabilities = ["CAP_IPC_BIND_PRIVILEGED", "CAP_APPDATA_ADMIN", "CAP_FS_ACCESS", "CAP_LOG_EMIT"]

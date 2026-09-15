@@ -12,6 +12,7 @@
 # refusal. It reads no standard input.
 id = "os.tairix.mdadm"
 name = "mdadm"
+title = "Mdadm"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SYSINFO_HW", "CAP_STORAGE_ADMIN"]

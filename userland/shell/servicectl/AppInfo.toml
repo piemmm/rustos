@@ -11,6 +11,7 @@
 # caller's attested identity.
 id = "os.tairix.servicectl"
 name = "servicectl"
+title = "Servicectl"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SERVICE_CONTROL", "CAP_FS_ACCESS"]

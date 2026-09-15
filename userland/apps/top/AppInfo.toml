@@ -16,6 +16,7 @@
 # sysinfo query, so no further capability is requested for it.
 id = "os.tairix.top"
 name = "top"
+title = "Top"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL"]

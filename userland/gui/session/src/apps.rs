@@ -446,7 +446,7 @@ where
     };
     BundleFacts {
         identity: AppIdentity {
-            name: header.bundle_name().to_string(),
+            name: header.bundle_title().to_string(),
             version: header.bundle_version().to_string(),
             purpose: header.bundle_purpose().map(ToString::to_string),
             author: header.bundle_author().map(ToString::to_string),

@@ -66,7 +66,7 @@ pub fn library_catalog(apps: &[(&[&[u8]], &[u8])]) -> Result<String, MkimageErro
         };
 
         let id = EntryId::new(header.bundle_id()).map_err(|e| fail(&e))?;
-        let name = DisplayName::new(header.bundle_name()).map_err(|e| fail(&e))?;
+        let name = DisplayName::new(header.bundle_title()).map_err(|e| fail(&e))?;
         let path =
             BundlePath::new(&format!("{}/{bundle_dir}", kind.store())).map_err(|e| fail(&e))?;
         let icon = match header.library_icon() {
@@ -120,13 +120,14 @@ pub(crate) fn test_manifest(
         author_len: 0,
         library_icon_len: icon_len,
         library: tairix_abi::LibraryCategory::to_wire(listing),
-        reserved0: [0; 1],
+        title_len: 0,
         id: id_buf,
         name: name_buf,
         version,
         library_icon: icon_buf,
         purpose: [0; tairix_abi::BUNDLE_PURPOSE_MAX],
         author: [0; tairix_abi::BUNDLE_AUTHOR_MAX],
+        title: [0; tairix_abi::BUNDLE_TITLE_MAX],
         syscall_table_hash: [0xAB; 32],
         content_hash: [0xCD; 32],
         signer_pubkey: [0xEF; 32],

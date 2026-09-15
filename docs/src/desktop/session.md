@@ -147,7 +147,12 @@ never be clicked windowless. The bar resolves that into `AppDefault` /
 A slot's label, icon, and information-panel facts come from the **signed**
 `AppInfo` of the bundle the desktop launched that process from — resolved from
 the existing launch table and the window engine's attested owner records,
-never from anything an application sent. So an application cannot state an
+never from anything an application sent. The label is the manifest's
+human-readable `title` (`AppInfoHeader::bundle_title`), not its `name`: `name`
+is the command word the shell resolves and the stem of the `<Name>.app`
+directory, so it cannot be capitalised, which is how the bar's menu came to be
+headed `sapper`. A bundle declaring no title is titled by its command word, so
+nothing a surface draws is ever blank. So an application cannot state an
 identity that is not its own inside system-drawn chrome
 (`AGENTS.md` §23.1). The manifest is read once per bundle and remembered while
 an application from it is on the bar, so a second copy of one application
@@ -946,6 +951,34 @@ limiter already armed. A submission still outstanding when the next is due is
 refused rather than queued, and its deadline retires it, so a wedged
 `sysinfod` costs a restated figure and never a frame.
 
+## When a served window is shown
+
+A served window's pixels are its application's, so between the create and the
+application's first present there is nothing of the application's to put on
+screen. The window therefore opens **off screen and holding no pixels**
+(`Compositor::add_unpresented_window`, reached through
+`DesktopShell::open_unpresented_window`), and `ShellWindowHost::window_presented`
+maps it — show, raise, focus — on the never-presented → painted transition,
+*before* the frame is composed, so the `WINDOW_SHOWN` witness still follows
+pixels the display actually took. Its taskbar entry is added at open, so an
+application slow to render is listed, retitleable and reachable while it gets
+ready; what it is not is visible.
+
+Every app presents immediately after it creates its window, so for them
+nothing about the timing changes. What it fixes is the application that
+deliberately does not: `view` launched on its own asks the session's trusted
+picker for a document first, and mapped at create it flashed an empty window
+and left it sitting behind the chooser for as long as the user took to choose.
+
+The never-presented state is tracked distinctly from "awaiting pixels again"
+(`FirstFrame::Unpresented` versus `Awaited`), because they are different
+situations: `Awaited` is an *already-mapped* window whose pixels memory
+pressure took back, and it may well be one the user minimised while its
+application carries on painting a clock or a progress bar. A blanket "show on
+present" would un-minimise it. There is no opening fill for a top-level window
+any more; an app-owned *popup* keeps one, because it is placed on its parent's
+client and shown at once by the user's own gesture.
+
 ## Where a served window opens
 
 An application never chooses its own position. `windows::placed_outer` is the
@@ -1192,11 +1225,11 @@ four-byte status reply, so "the reply after the create is the first present"
 is a guess about how many requests an application happens to make — and, on
 a shared rendezvous, about the other clients too.
 
-A window is announced only once its own first present has landed. Before
-that its body is the session's opening fill rather than the application's
-pixels, so a frame carrying it shows a blank window: `SessionWindows` tracks
-each window as awaited, then painted, then shown, and only the painted → shown
-step announces. A refused present leaves it awaited.
+A window is announced only once its own first present has landed. Before that
+it is not on screen at all — the session has no pixels of the application's to
+show, so it does not map the window — and `SessionWindows` tracks each window
+as unpresented, then painted, then shown, with only the painted → shown step
+announcing. A refused present maps nothing and announces nothing.
 
 Once, and once again after a release. Releasing a hidden window's content makes
 the record's claim false — the window composites as an empty plate, so nothing
@@ -1210,6 +1243,25 @@ showed nothing can tell "never drawn" from "never launched". And the icon-bar
 QEMU vertical gates both its screendumps and its bar gestures on it: a create
 reply would say only that the window exists, which is too early to photograph
 and too early to click.
+
+### The chooser is a dialog
+
+The trusted picker wears the window manager's frame like anything else on
+screen — fixed-size, because the shared browser view renders at one geometry —
+so the user can see whose window it is, move it by its title bar, and close it.
+`PICKER_TITLE`'s contract always said the title showed "in the window chrome";
+it now does.
+
+That makes the session the first owner of a *decorated* window it paints
+itself, so `windows::window_control_event` has two halves. The
+window-manager-local one — minimise, put-to-back, size toggle — is performed
+for **any** decorated window, because the window manager owns those and a
+dialog whose three of four controls did nothing would be a defect. The app-ward
+`WindowEvent` is produced only for a *served* window, which is the only kind
+with a client to tell. Close performs nothing in either case: a served window's
+client tears itself down cooperatively, and what closing means for a
+session-owned window is the owner's — the serve loop routes the picker's to
+`SessionPicker::cancel`, the same conclusion `Escape` reaches.
 
 ### And the trusted picker's own witness
 

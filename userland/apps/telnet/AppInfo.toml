@@ -13,6 +13,7 @@
 # `-b` binds an ephemeral local port.
 id = "os.tairix.telnet"
 name = "telnet"
+title = "Telnet"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_NET"]

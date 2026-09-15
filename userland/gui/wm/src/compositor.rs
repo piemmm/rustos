@@ -67,6 +67,45 @@ type ChromeFallback = Vec<(WindowId, WindowChrome)>;
 /// repaint of a few rows pays exactly what it did before a pool existed.
 const MIN_PARALLEL_BAND_PX: usize = 16_384;
 
+/// Which tier of the backdrop ration a window is weighed in
+/// ([`Compositor::grant_backdrops`]).
+///
+/// The ration is spent front to back, so a tier is the one thing that can put
+/// a window ahead of the ones in front of it. Both tiers below the first exist
+/// because being nearer the front does not by itself make a window's frost
+/// worth more:
+///
+/// * Desktop chrome is permanently on screen, wants a band-sized slice, and is
+///   deliberately not stacked topmost — so weighed among the applications it
+///   loses its blur to any pile of translucent windows over it, which is what
+///   made the icon bar's frost come and go with the number of terminals open.
+/// * A blur decides how a window *looks*, where a radius-zero retention only
+///   saves recomposing the stack beneath it and changes no pixel, so an
+///   unblurred window is served last whatever its depth.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum FrostTier {
+    /// A blurred window the embedder paints itself.
+    Chrome,
+    /// A blurred window whose pixels a client presents.
+    App,
+    /// A window with no blur, wanting only a retention.
+    Sheer,
+}
+
+impl FrostTier {
+    /// The order the ration is spent in.
+    const ORDER: [Self; 3] = [Self::Chrome, Self::App, Self::Sheer];
+
+    /// The tier `window` is weighed in.
+    fn of(window: &Window) -> Self {
+        match (window.blur_radius() > 0, window.is_app_presented()) {
+            (false, _) => Self::Sheer,
+            (true, false) => Self::Chrome,
+            (true, true) => Self::App,
+        }
+    }
+}
+
 /// Which end of the z-order a restack moves a window's family to.
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum StackEnd {
@@ -745,9 +784,9 @@ impl Compositor {
     /// cost climbing with the depth of the stack while the cache serves nobody.
     /// The frame therefore spends the cache's live ceiling from the **front**
     /// and stops: what it reaches is frosted and retained, and what it does not
-    /// composites as the plain translucent window it also is. Blurred windows
-    /// are served first, because a blur decides how a window *looks* while a
-    /// radius-zero retention only saves recomposing the stack beneath it.
+    /// composites as the plain translucent window it also is. It is spent a
+    /// [tier](FrostTier) at a time rather than in one sweep front to back, so
+    /// desktop chrome is served before the applications it sits behind.
     ///
     /// A window that gains or loses its frost draws differently, and the answer
     /// turns on the live pressure band as well as on the scene, so each change
@@ -757,14 +796,14 @@ impl Compositor {
     fn grant_backdrops(&mut self) {
         let screen = self.screen_rect();
         let (mut granted, mut payload) = (0usize, 0usize);
-        // Two passes so that every window is settled exactly once: the blurred
-        // backdrop readers, then everything else.
-        for serving_blurred in [true, false] {
+        // Tier by tier, front to back within each, so every window is settled
+        // exactly once.
+        for tier in FrostTier::ORDER {
             for index in (0..self.windows.len()).rev() {
                 let Some(window) = self.windows.get(index) else {
                     continue;
                 };
-                if (window.blur_radius() > 0) != serving_blurred {
+                if FrostTier::of(window) != tier {
                     continue;
                 }
                 let rect = window.bounds().intersection(&screen);
@@ -1272,9 +1311,34 @@ impl Compositor {
     /// Add `surface` as the top-most window at `origin`, returning its
     /// identifier. The new window's bounds are marked dirty.
     pub fn add_window(&mut self, origin: Point, surface: Surface) -> WindowId {
+        self.push(|id| Window::new(id, origin, surface))
+    }
+
+    /// Add the top-most window a client is *about* to present into: client
+    /// extent `width`×`height` at `origin`, holding no pixels and **not
+    /// shown** until [`set_visible`](Self::set_visible) maps it.
+    ///
+    /// This is what a served window is between its create and its first
+    /// present, and opening it in that state rather than mapping it over a
+    /// stand-in fill is what stops an application that is slow to render —
+    /// one still waiting on a file, or on the user — showing an empty window
+    /// meanwhile. The window is client-presented by construction, so a map
+    /// that arrives before the first present asks its client to redraw
+    /// instead of showing the desktop through it.
+    ///
+    /// No allocation, so no refusal: the buffer is established by the first
+    /// present ([`present_window_content`](Self::present_window_content)),
+    /// which is also what marks the whole client area.
+    pub fn add_unpresented_window(&mut self, origin: Point, width: u32, height: u32) -> WindowId {
+        self.push(|id| Window::unpresented(id, origin, (width, height)))
+    }
+
+    /// Mint the next window id, stack `build`'s window top-most, and mark its
+    /// bounds dirty.
+    fn push(&mut self, build: impl FnOnce(WindowId) -> Window) -> WindowId {
         let id = WindowId(self.next_id);
         self.next_id += 1;
-        let window = Window::new(id, origin, surface);
+        let window = build(id);
         let bounds = window.bounds();
         self.windows.push(window);
         self.mark_layer(id, bounds);

@@ -1051,6 +1051,17 @@ the **front** of the stack, once per frame, before the frame takes its damage:
   against the live band's ceiling, rather than one entry against what is charged
   (the old `admits`, now deleted — its only caller was this decision, and asking
   it per window is what let the working set outrun the budget).
+- **The ceiling is spent a tier at a time** (`FrostTier`), front to back within
+  each: blurred desktop chrome (`!Window::is_app_presented` — the taskbar, a
+  session dialog, the lock screen), then blurred application windows, then
+  everything unblurred. Chrome is permanently on screen and wants a band-sized
+  slice, yet it is an ordinary window deliberately not pinned topmost, so it is
+  at the back of the stack: weighed there in one sweep it kept its blur only
+  while the applications' frosts left a bar-sized slice over, which is why the
+  icon bar's frost came and went with the number and size of the windows open.
+  An unblurred window stays last whatever its depth, for the reason the split
+  already existed — a blur decides how a window looks, a radius-zero retention
+  only saves recomposing the stack beneath it.
 - What the budget reaches is frosted, retained, and recorded on the window
   (`Window::is_frosted`), so the plan and the composite read one answer.
 - What it does not reach composites as the **plain translucent window it also

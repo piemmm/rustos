@@ -12,6 +12,7 @@
 # otherwise, and every query is still gated at the broker.
 id = "os.tairix.cat"
 name = "cat"
+title = "Cat"
 version = "0.1.0"
 kind = "command"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW"]
