@@ -44,6 +44,7 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     a_reserved_admission_takes_its_id_and_refuses_a_second::<S>();
     block_wake_roundtrip::<S>();
     unpark_before_park_is_not_lost::<S>();
+    unpark_errs_only_for_a_task_that_can_never_run::<S>();
     cross_cpu_ipc_reply_wakes_the_caller_without_delay::<S>();
     lifecycle_error_codes::<S>();
     yield_current_semantics::<S>();
@@ -296,6 +297,51 @@ fn unpark_before_park_is_not_lost<S: SchedulerPolicy<TestArch>>() {
         sched.state_of(id),
         TaskState::Parked,
         "with no pending token, the next park takes effect"
+    );
+}
+
+/// `unpark` reports an error **only** for a task that can never run again.
+///
+/// Every consumer reads an `Err` as exactly that — a wait-queue ownership
+/// handoff uses it to decide a registered waiter is a corpse whose row it may
+/// drop — so reporting one for a live task strands whatever was being
+/// transferred to it. A task that is already runnable is not an error: the
+/// wake asked for runnable and runnable is what it got.
+fn unpark_errs_only_for_a_task_that_can_never_run<S: SchedulerPolicy<TestArch>>() {
+    let (_arch, sched) = make::<S>(1, 64);
+    let id = sched
+        .spawn(0, Priority::Normal, |_| TaskAction::Park)
+        .expect("spawn");
+
+    // Ready, never dispatched.
+    assert_eq!(sched.unpark(id), Ok(()), "a ready task is runnable already");
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "body ran");
+
+    // The early wake cancelled that park, so park it for real.
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "re-dispatched");
+    assert_eq!(sched.state_of(id), TaskState::Parked);
+    assert_eq!(sched.unpark(id), Ok(()), "a parked task is woken");
+    assert_eq!(sched.state_of(id), TaskState::Ready);
+
+    // A repeat against the task it just re-readied.
+    assert_eq!(sched.unpark(id), Ok(()), "already runnable is not an error");
+    // That repeat left a token, which cancels the next park and nothing
+    // beyond it — the park after that takes effect normally.
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "re-dispatched");
+    assert_eq!(
+        sched.state_of(id),
+        TaskState::Ready,
+        "the token cancelled it"
+    );
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "re-dispatched");
+    assert_eq!(sched.state_of(id), TaskState::Parked, "no token left");
+
+    // Terminal is the one state that is an error.
+    assert_eq!(sched.exit(id), Ok(ExitDisposition::Quiesced), "exit");
+    assert_eq!(
+        sched.unpark(id),
+        Err(crate::SchedError::InvalidState),
+        "a terminal task can never run again"
     );
 }
 

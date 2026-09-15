@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 26 open, 102 closed, 128 total.
+table normalises all three to **closed**. 27 open, 104 closed, 131 total.
 
-### Open (26)
+### Open (27)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -53,8 +53,9 @@ table normalises all three to **closed**. 26 open, 102 closed, 128 total.
 | D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
 | D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
 | D128 | the panic backtrace's stack reader rebuilds a pointer from the frame-pointer chain's integer addresses | `StackBounds` is an integer pair, so `RawStackReader` can only cast; the walk is bounds-checked and volatile, but the reads carry no provenance and the unwinder cannot be interpreted. Blocks D123's `kernel/core` enrolment |
+| D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static; `kernel/sched/api::park` would need one too. Distinct from D123, which is the UB oracle |
 
-### Closed (102)
+### Closed (104)
 
 | ID | Subject |
 |---|---|
@@ -160,10 +161,32 @@ table normalises all three to **closed**. 26 open, 102 closed, 128 total.
 | D124 | the kthread resume handle round-tripped a control-block pointer through a `usize`, stripping its provenance |
 | D125 | a host test identified a function by its address, which the language leaves unspecified |
 | D126 | the kernel heap allocator threaded its free list and slab pages through integers, so no UB oracle could look at it |
+| D129 | the `SleepLock` releaser deleted a live waiter's re-registered row, stranding it on a free lock |
+| D130 | a thread killed while parked left its row in every wait queue, where a counted wake spent itself on it |
 
 ## Scope
 
 The open items, in priority order:
+
+- **D129 — the `SleepLock` releaser deleted a live waiter's re-registered
+  row — FIXED.** SMP-only: about half of all four-CPU boots stopped at the
+  `ARXFS passphrase:` prompt with no input driver loaded. A wait-queue row was
+  named by task id alone, so the delete D112's fix introduced landed on a
+  *newer* park than the one the scan examined, and the lock was then released
+  with `CONTENDED` clear so no later release consulted the queue. Compounded
+  by `unpark` reporting `Err` for a live task whose `Parked -> Ready` claim
+  lost to a concurrent waker. Rows now carry a never-reused registration
+  identity, the park/unpark handshake is one definition in
+  `kernel/sched/api::park` with an honest error contract, and the enrolment
+  gained a four-CPU row for the unlock -> store-scan -> autoload chain. The
+  authoritative record is `plans/FIX-SLEEPLOCK.md` (S1, S3, S4, S6).
+- **D130 — a retired thread's rows outlived it and ate counted wakes —
+  FIXED.** Nothing deregistered a task on its behalf, and the batched wakes
+  counted the unparks they *issued*, so `wake_n(_, 1)` over a retired head
+  reported a wake it never delivered — a lost `FUTEX_WAKE` with a live waiter
+  still parked. Wakes now count what landed and reap what could not, and
+  `threads::retire` drops the thread's rows from every queue and futex key.
+  `plans/FIX-SLEEPLOCK.md` (S2, S5).
 
 - **D1 — FIX-SYSCALL residual verticals** (x86_64/riscv64 syscall-body
   tests + metal re-confirmation). The design and code are done; the

@@ -836,12 +836,16 @@ wait-queue or scheduler locks: the device-IRQ dispatcher and the timer
 one-shot only flag a pending wake (`WaitQueue::request_wake` /
 `timed_wake_sweep`), and the actual `wake_all` / deadline sweep + `unpark`
 runs at the next dispatcher-context `waitq::drain_pending_wakes` (between
-scheduler steps and before idle). Which queues each path visits is one
-list — `DEFERRED_WAKE_QUEUES` for the flagged wakes, `TIMED_QUEUES` for the
-deadlines — folded over by both of that list's consumers, so a flagged wake
-the preemption gate cannot see (stranding its waiters on a lone-task CPU)
-and a swept deadline the one-shot arming does not count (losing its wake to
-another queue's later arming) are structurally impossible. The first
+scheduler steps and before idle). Which queues each path visits is **one**
+list, `ALL_QUEUES`, naming every global queue with the paths it joins
+(`timed` for the deadline sweep and the one-shot arming, `deferred` for the
+flagged wake and the preemption gate); each of the five folds is a filter
+over it and retirement walks all of it. So a flagged wake the preemption
+gate cannot see (stranding its waiters on a lone-task CPU), a swept deadline
+the one-shot arming does not count (losing its wake to another queue's later
+arming), and a queue no retirement path can reach are each structurally
+impossible — a queue is forgotten by one thing, adding it there, rather than
+by any of five. The first
 consumer is the `hw_tree_wait` syscall, whose waiters `HW_TREE_WAITQ` holds
 and the discovered-hardware store wakes on every generation bump
 (`AGENTS.md` §18.4). Waking a parked
@@ -858,12 +862,25 @@ itself by a **wake-pending token** (mirroring Rust's `Thread`
 park/unpark). `Scheduler::unpark` of a task that has *not* yet committed to
 park (it is `Ready`/`Running`) cannot move a non-parked task, so instead of
 no-oping the wake away it sets the token; the dispatch loop's `Park` commit
-consumes the token and re-readies the task rather than sleeping it. A
+consumes the token and re-readies the task rather than sleeping it. Parking is
+lifecycle rather than policy, so both halves of that handshake are one
+definition in `kernel/sched/api::park` (`unpark_task` and `commit_park`),
+parameterised on the policy's own "admit this woken task" placement. A
 waiter therefore only ever sleeps through a wake it has not yet observed,
 and always re-checks its condition after each wake, so a finished or
 timed-out wait returns rather than parking forever. The shared
 `SchedulerPolicy` conformance suite's `unpark_before_park_is_not_lost`
 case asserts this for every policy.
+
+`unpark` reports an error **only** for a task that can never run again — it is
+terminal, or the id names none. Callers rely on exactly that reading: the
+`SleepLock` handoff uses it to decide a registered waiter is a corpse whose
+row it may reap. A wake another waker already satisfied is therefore `Ok`,
+because the task is runnable and runnable is what the wake asked for. Reading
+a lost `Parked -> Ready` claim as a failure reported a live task as
+unwakeable, which is the other half of D129;
+`unpark_errs_only_for_a_task_that_can_never_run` pins the contract for every
+policy.
 
 There is a second valid ordering: `park()` may publish `Parked` while the
 stackful task body is still switching back. If `unpark()` then changes the
@@ -878,6 +895,38 @@ that transition.
 retain FIFO registration order and release wakes only the oldest waiter,
 avoiding a thundering herd and preventing a long-waiting storage operation
 from being displaced indefinitely by newer app-load reads.
+
+### A registration, not a task id
+
+The FIFO handoff reads the queue, drops the queue lock, publishes ownership,
+and only then wakes its designate — and a waiter released by an unrelated
+wake can deregister and **park again** inside that window. So the queue
+addresses a *registration*, not a task: `oldest_registration` /
+`wake_registration` carry the row's arrival sequence, which is minted
+monotonically, preserved across a re-`register` of a row still present, and
+never reused. A decision taken about one park therefore cannot be applied to
+a later one. Identifying the row by task id alone let the releaser delete the
+waiter's *new* registration and then release the lock with its contention bit
+clear — so no later release consulted the queue and the waiter slept for ever
+on a free lock (`plans/OPEN-DEFECTS.md` D129, `plans/FIX-SLEEPLOCK.md`).
+
+### A row for a task that can never run is not a waiter
+
+Every wake path counts the wakes that **landed**, not the `unpark`s it
+issued, and reaps the row of one that could not — under that row's own
+identity, so a park begun in the meantime survives. Counting issued unparks
+let a single retired task's row swallow a counted wake: `wake_n(_, 1)` over
+it answered "one woken" and released nobody, which on the futex path is a
+lost `FUTEX_WAKE` with a live waiter still parked (D130).
+
+Rows are also dropped at the source. A thread that dies inside the kernel
+never unwinds to its own park site's `deregister`, so the one per-thread
+retirement path (`threads::retire`) calls `waitq::retire_task`, which clears
+that thread from every `ALL_QUEUES` entry and every futex key —
+task-major-indexed, so O(log n + rows) rather than a scan. A `SleepLock`'s own
+queue is embedded in the mount or device that owns it and is reachable from no
+registry; its rows are reaped by the release that next looks at the queue, and
+go with their owner when it is dropped.
 
 ## Current-task slot
 

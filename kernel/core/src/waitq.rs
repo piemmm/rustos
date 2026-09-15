@@ -32,7 +32,7 @@
 //! it. A build that never installs one (host tests of unrelated paths)
 //! leaves the explicit-wake / timed-wake helpers as fail-safe no-ops.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use core::ops::Bound;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -54,7 +54,10 @@ use tairix_sync::SpinLock;
 const WAKE_BATCH: usize = 32;
 
 /// One batch of waiters to release once the lock is dropped.
-type WakeBatch = ArrayVec<TaskId, WAKE_BATCH>;
+///
+/// Registrations rather than bare ids, so a wake that does not land can reap
+/// the exact row it was taken about — never a later park by the same task.
+type WakeBatch = ArrayVec<Registration, WAKE_BATCH>;
 
 /// Sentinel deadline meaning "no timeout": a waiter registered with this
 /// value is only ever released by an explicit [`WaitQueue::wake_all`], never
@@ -156,6 +159,29 @@ struct Waiter {
 /// waiting. Key-major, so one key's waiters are a contiguous range.
 type WaiterId = (WakeKey, TaskId);
 
+/// One waiter's *registration*, identified well enough that a decision taken
+/// about it cannot be applied to a later one.
+///
+/// A task id alone does not do that: a waiter released by one event may
+/// deregister, re-register and park again before a caller acting on the first
+/// row gets to it, and the two parks are then indistinguishable. The arrival
+/// `seq` is what separates them — it is minted from a monotonic counter,
+/// preserved across a re-`register` of a row that is still present, and never
+/// reused once a row is removed.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) struct Registration {
+    id: WaiterId,
+    seq: u64,
+}
+
+impl Registration {
+    /// The waiting task, for a caller that must name it (the
+    /// [`SleepLock`](crate::SleepLock) handoff publishes ownership to it).
+    pub(crate) const fn task(&self) -> TaskId {
+        self.id.1
+    }
+}
+
 /// The registered-waiter set behind a [`WaitQueue`]'s lock.
 ///
 /// A thin `Vec` scan was the P-2 slice; the complete primitive keeps three
@@ -167,7 +193,8 @@ type WaiterId = (WakeKey, TaskId);
 ///   `wake_waiter` membership and, because the key sorts first, an O(log n +
 ///   woken) [`WaitQueue::wake_key`] over one condition's waiters alone.
 /// - [`order`](Self::order): arrival `seq` → waiter, so the FIFO head
-///   ([`WaitQueue::wake_one`], [`WaitQueue::oldest_task`]) is the first key
+///   ([`WaitQueue::wake_one`], [`WaitQueue::oldest_registration`]) is the
+///   first key
 ///   — O(log n), a *stated* first-come-first-served fairness discipline with
 ///   no starvation (an older waiter is never overtaken).
 /// - [`deadlines`](Self::deadlines): `(deadline_ns, seq)` → waiter, holding
@@ -175,17 +202,23 @@ type WaiterId = (WakeKey, TaskId);
 ///   the first key (O(log n)) and [`WaitQueue::sweep`] visits only the
 ///   already-expired prefix (O(log n + woken)) instead of scanning every
 ///   waiter on every timer expiry.
+/// - [`by_task`](Self::by_task): task-major `(task, key)`, so one task's
+///   registrations are a contiguous range and dropping every row a retiring
+///   thread holds ([`WaitQueue::deregister_task`]) is O(log n + rows) rather
+///   than a scan of `by_waiter`, whose key-major order scatters them.
 ///
-/// The three stay consistent: a waiter is in `by_waiter` and `order` always,
-/// and in `deadlines` iff its deadline is finite.
+/// The four stay consistent: a waiter is in `by_waiter`, `order` and
+/// `by_task` always, and in `deadlines` iff its deadline is finite.
 struct WaitSet {
     /// Next FIFO arrival sequence to hand out. Monotonic; a fresh `register`
     /// takes and increments it, a re-`register` of a present waiter keeps its
-    /// existing `seq` so its FIFO position is preserved.
+    /// existing `seq` so its FIFO position is preserved. Never reused, which
+    /// is what makes a [`Registration`] name one park.
     next_seq: u64,
     by_waiter: BTreeMap<WaiterId, Waiter>,
     order: BTreeMap<u64, WaiterId>,
     deadlines: BTreeMap<(u64, u64), WaiterId>,
+    by_task: BTreeSet<(TaskId, WakeKey)>,
 }
 
 impl WaitSet {
@@ -197,6 +230,28 @@ impl WaitSet {
             by_waiter: BTreeMap::new(),
             order: BTreeMap::new(),
             deadlines: BTreeMap::new(),
+            by_task: BTreeSet::new(),
+        }
+    }
+
+    /// Drop `id` from every index, returning the row that went.
+    ///
+    /// The one removal, so no caller can leave an index behind.
+    fn remove(&mut self, id: WaiterId) -> Option<Waiter> {
+        let waiter = self.by_waiter.remove(&id)?;
+        self.order.remove(&waiter.seq);
+        self.by_task.remove(&(id.1, id.0));
+        if waiter.deadline_ns != NO_DEADLINE {
+            self.deadlines.remove(&(waiter.deadline_ns, waiter.seq));
+        }
+        Some(waiter)
+    }
+
+    /// Drop `reg` only if it is still the registration present under its
+    /// identity, so a park that began after `reg` was read survives.
+    fn remove_registration(&mut self, reg: &Registration) {
+        if self.by_waiter.get(&reg.id).map(|w| w.seq) == Some(reg.seq) {
+            let _ = self.remove(reg.id);
         }
     }
 }
@@ -303,6 +358,7 @@ impl WaitQueue {
             set.next_seq += 1;
             set.by_waiter.insert(id, Waiter { seq, deadline_ns });
             set.order.insert(seq, id);
+            set.by_task.insert((task, key));
             if deadline_ns != NO_DEADLINE {
                 set.deadlines.insert((deadline_ns, seq), id);
             }
@@ -318,12 +374,28 @@ impl WaitQueue {
     /// Remove `task`'s registration on `key` from the wait set. Idempotent:
     /// removing an absent waiter is a no-op. O(log n).
     pub fn deregister_keyed(&self, key: WakeKey, task: TaskId) {
+        let _ = self.waiters.lock().remove((key, task));
+    }
+
+    /// Remove **every** registration `task` holds, on any key.
+    ///
+    /// The retirement path: a thread that dies inside the kernel never unwinds
+    /// to its own `deregister`, so nothing else would drop its rows — and a
+    /// row for a task that can never run is not merely a leak. It sits at the
+    /// FIFO head and a counted wake ([`Self::wake_n`]) spends itself on it,
+    /// leaving a live waiter parked. Task-major indexed, so this is
+    /// O(log n + rows), not a scan.
+    pub fn deregister_task(&self, task: TaskId) {
         let mut set = self.waiters.lock();
-        if let Some(w) = set.by_waiter.remove(&(key, task)) {
-            set.order.remove(&w.seq);
-            if w.deadline_ns != NO_DEADLINE {
-                set.deadlines.remove(&(w.deadline_ns, w.seq));
-            }
+        // Allocation-free: take the task's first row and remove it until it
+        // holds none. No `unpark` is issued, so the lock hold is pure
+        // bookkeeping.
+        while let Some(&(_, key)) = set
+            .by_task
+            .range((task, WakeKey::NONE)..=(task, WakeKey(u64::MAX)))
+            .next()
+        {
+            let _ = set.remove((key, task));
         }
     }
 
@@ -362,8 +434,9 @@ impl WaitQueue {
             {
                 let set = self.waiters.lock();
                 let stop = *end.get_or_insert(set.next_seq);
-                for (&seq, &(_, task)) in set.order.range((cursor, Bound::Excluded(stop))) {
-                    if woken + batch.len() == limit || batch.try_push(task).is_err() {
+                for (&seq, &id) in set.order.range((cursor, Bound::Excluded(stop))) {
+                    let reg = Registration { id, seq };
+                    if woken + batch.len() == limit || batch.try_push(reg).is_err() {
                         break;
                     }
                     cursor = Bound::Excluded(seq);
@@ -372,12 +445,29 @@ impl WaitQueue {
             if batch.is_empty() {
                 break;
             }
-            woken += batch.len();
-            for &id in &batch {
-                arch.unpark(id);
-            }
+            woken += self.release(arch, &batch);
         }
         woken
+    }
+
+    /// `unpark` each registration in `batch`, returning how many wakes
+    /// **landed** and reaping the rows of those that could not.
+    ///
+    /// Counting the unparks issued instead would let one retired task's row
+    /// swallow a counted wake (`wake_n(arch, 1)` reporting a wake it never
+    /// delivered) and leave the live waiter behind it parked. The lock is not
+    /// held across an `unpark`, so the scheduler's locks are never taken
+    /// inside this one.
+    fn release(&self, arch: &dyn WaitQueueArch, batch: &WakeBatch) -> usize {
+        let mut landed = 0usize;
+        for reg in batch {
+            if arch.unpark(reg.task()) {
+                landed += 1;
+            } else {
+                self.waiters.lock().remove_registration(reg);
+            }
+        }
+        landed
     }
 
     /// Wake every waiter registered on the condition `key`, returning how many
@@ -401,8 +491,14 @@ impl WaitQueue {
             {
                 let set = self.waiters.lock();
                 let upper = Bound::Included((key, TaskId::MAX));
-                for (&id, _) in set.by_waiter.range((cursor, upper)) {
-                    if batch.try_push(id.1).is_err() {
+                for (&id, waiter) in set.by_waiter.range((cursor, upper)) {
+                    if batch
+                        .try_push(Registration {
+                            id,
+                            seq: waiter.seq,
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                     cursor = Bound::Excluded(id);
@@ -411,10 +507,7 @@ impl WaitQueue {
             if batch.is_empty() {
                 return woken;
             }
-            woken += batch.len();
-            for &id in &batch {
-                arch.unpark(id);
-            }
+            woken += self.release(arch, &batch);
         }
     }
 
@@ -445,20 +538,40 @@ impl WaitQueue {
         self.wake_in_arrival_order(arch, count)
     }
 
-    /// The oldest registered task without waking or removing it.
+    /// The oldest registration, without waking or removing it.
     ///
     /// Used by [`SleepLock`](crate::SleepLock) to publish direct ownership
     /// handoff before waking the designated FIFO waiter. The waiter remains
     /// registered until it resumes, so the normal register-before-retest
-    /// lost-wake discipline is preserved. O(log n).
+    /// lost-wake discipline is preserved. A [`Registration`] rather than a
+    /// task id because the lock is dropped before the designation is acted
+    /// on, and the waiter may park again in that window. O(log n).
     #[must_use]
-    pub(crate) fn oldest_task(&self) -> Option<TaskId> {
-        self.waiters
-            .lock()
-            .order
-            .values()
-            .next()
-            .map(|&(_, task)| task)
+    pub(crate) fn oldest_registration(&self) -> Option<Registration> {
+        let set = self.waiters.lock();
+        let (&seq, &id) = set.order.iter().next()?;
+        Some(Registration { id, seq })
+    }
+
+    /// Wake exactly the registration `reg`, reporting whether the wake
+    /// landed.
+    ///
+    /// `false` covers three outcomes a caller transferring ownership need not
+    /// tell apart, because none of them is a successor: the registration is
+    /// gone, a *newer* one stands in its place (its waiter went round its own
+    /// acquire loop), or the row is still there and the scheduler can never
+    /// run that task again. Only the last is reaped, and only under the same
+    /// identity check — removing a row this designation was not taken about
+    /// is what strands a live waiter on a free lock. O(log n).
+    pub(crate) fn wake_registration(&self, arch: &dyn WaitQueueArch, reg: &Registration) -> bool {
+        if self.waiters.lock().by_waiter.get(&reg.id).map(|w| w.seq) != Some(reg.seq) {
+            return false;
+        }
+        if arch.unpark(reg.task()) {
+            return true;
+        }
+        self.waiters.lock().remove_registration(reg);
+        false
     }
 
     /// Wake exactly `task`'s unkeyed registration ([`WakeKey::NONE`]), returning
@@ -478,15 +591,16 @@ impl WaitQueue {
     /// first poll and stays registered until it is done, so a target absent
     /// from the queue is running and will observe the event on its own next
     /// poll. A registered target the scheduler can no longer run — it was
-    /// retired while still on the queue — reports `false` too: the answer is
-    /// "the wake landed", not "a row existed", because a caller *transferring*
-    /// ownership to the target ([`SleepLock`](crate::SleepLock)'s FIFO
-    /// handoff) would otherwise wait for ever on a resume that cannot come.
+    /// retired while still on the queue — reports `false` too and has its row
+    /// reaped: the answer is "the wake landed", not "a row existed".
     /// The `unpark` runs after the lock is released, exactly as
     /// [`Self::wake_all`].
     pub fn wake_waiter(&self, arch: &dyn WaitQueueArch, key: WakeKey, task: TaskId) -> bool {
-        let registered = self.waiters.lock().by_waiter.contains_key(&(key, task));
-        registered && arch.unpark(task)
+        let id = (key, task);
+        let Some(seq) = self.waiters.lock().by_waiter.get(&id).map(|w| w.seq) else {
+            return false;
+        };
+        self.wake_registration(arch, &Registration { id, seq })
     }
 
     /// Wake every waiter whose finite deadline is at or before `now_ns`
@@ -529,19 +643,22 @@ impl WaitQueue {
                         break;
                     };
                     set.deadlines.remove(&deadline);
-                    if let Some(waiter) = set.by_waiter.get_mut(&id) {
-                        waiter.deadline_ns = NO_DEADLINE;
-                    }
+                    let Some(waiter) = set.by_waiter.get_mut(&id) else {
+                        continue;
+                    };
+                    waiter.deadline_ns = NO_DEADLINE;
+                    let reg = Registration {
+                        id,
+                        seq: waiter.seq,
+                    };
                     // Cannot fail: the loop condition already proved the room.
-                    let _ = batch.try_push(id.1);
+                    let _ = batch.try_push(reg);
                 }
             }
             if batch.is_empty() {
                 return;
             }
-            for &id in &batch {
-                arch.unpark(id);
-            }
+            let _ = self.release(arch, &batch);
         }
     }
 
@@ -1082,45 +1199,158 @@ pub fn port_room_wake_task(task: TaskId) {
     }
 }
 
-/// Every queue whose wake is *flagged* from a context that cannot take a
-/// lock ([`WaitQueue::request_wake`]) and performed later in dispatcher
-/// context.
+/// Drop every registration `task` holds — on every global queue, and on
+/// every futex key.
 ///
-/// One list, because the drain that consumes a flag
-/// ([`drain_pending_wakes`]) and the preemption gate that must reschedule
-/// so the drain is reached ([`has_pending_deferred_wake`]) have to name the
-/// same set: a queue on one and not the other either strands a flagged wake
-/// on a lone-task CPU or never consumes it at all.
-static DEFERRED_WAKE_QUEUES: &[&WaitQueue] = &[
-    &CONSOLE_WAITQ,
-    &IRQ_WAITQ,
-    &PRESSURE_WAITQ,
-    &WRITEBACK_WAITQ,
-    &CPUFREQ_WAITQ,
+/// Called from the one per-thread retirement path. A thread that dies inside
+/// the kernel never unwinds to its own `deregister`, so without this its rows
+/// outlive it: scheduler ids are drawn at random and never reused, so the
+/// rows accumulate for the life of the boot — and a row left at a FIFO head
+/// is worse than a leak, because a counted wake ([`WaitQueue::wake_n`], the
+/// futex's) spends itself on it and the live waiter behind stays parked.
+///
+/// A [`SleepLock`](crate::SleepLock)'s own queue is embedded in the mount or
+/// device that owns it and is reachable from no registry, so it is not walked
+/// here: its rows are reaped by the release that next looks at the queue, and
+/// go with their owner when it is dropped.
+pub fn retire_task(task: TaskId) {
+    for entry in ALL_QUEUES {
+        entry.queue.deregister_task(task);
+    }
+    crate::futex::deregister_task(task);
+}
+
+/// One global wait queue and the shared machinery it takes part in.
+struct GlobalQueue {
+    queue: &'static WaitQueue,
+    /// A park site can register a *finite deadline* here, so the timed sweep
+    /// ([`run_timed_sweep`]) must release an elapsed one and the one-shot
+    /// arming ([`nearest_timed_deadline`]) must count it. A queue swept but
+    /// not counted loses its wake to another queue's later arming; one
+    /// counted but not swept re-arms the timer on a deadline nothing
+    /// releases.
+    timed: bool,
+    /// Its wake is *flagged* from a context that cannot take a lock
+    /// ([`WaitQueue::request_wake`]) and performed later in dispatcher
+    /// context, so the drain that consumes the flag
+    /// ([`drain_pending_wakes`]) and the preemption gate that must
+    /// reschedule for the drain to be reached
+    /// ([`has_pending_deferred_wake`]) must both see it. On one and not the
+    /// other either strands a flagged wake on a lone-task CPU or never
+    /// consumes it at all.
+    deferred: bool,
+}
+
+/// Every global wait queue, with the paths each joins.
+///
+/// **One list.** Each of the five folds below is a filter over it, and
+/// retirement ([`WaitQueue::deregister_task`]) walks all of it — so a queue
+/// can be
+/// forgotten by exactly one thing, adding it here, rather than by any of
+/// five. Holding the membership as separate per-path lists is what let a
+/// queue sit on the sweep and not the arming, and left the six queues on
+/// neither list unreachable from a path that has to name them all.
+///
+/// The per-key futex queues are created on demand, so every path folds them
+/// through [`crate::futex`] rather than from here.
+static ALL_QUEUES: &[GlobalQueue] = &[
+    GlobalQueue {
+        queue: &SERVE_WAITQ,
+        timed: false,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &CONSOLE_WAITQ,
+        timed: true,
+        deferred: true,
+    },
+    GlobalQueue {
+        queue: &PROCWAIT_WAITQ,
+        timed: false,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &STREAM_WAITQ,
+        timed: true,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &FILE_LOCK_WAITQ,
+        timed: true,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &SIGNAL_INTAKE_WAITQ,
+        timed: false,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &IRQ_WAITQ,
+        timed: true,
+        deferred: true,
+    },
+    GlobalQueue {
+        queue: &PRESSURE_WAITQ,
+        timed: false,
+        deferred: true,
+    },
+    GlobalQueue {
+        queue: &WRITEBACK_WAITQ,
+        timed: true,
+        deferred: true,
+    },
+    GlobalQueue {
+        queue: &CPUFREQ_WAITQ,
+        timed: true,
+        deferred: true,
+    },
+    GlobalQueue {
+        queue: &HW_TREE_WAITQ,
+        timed: true,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &USERS_DB_WAITQ,
+        timed: true,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &APP_STORE_WAITQ,
+        timed: false,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &SEAT_INPUT_WAITQ,
+        timed: false,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &CALL_WAITQ,
+        timed: true,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &PORT_ROOM_WAITQ,
+        timed: false,
+        deferred: false,
+    },
 ];
 
-/// Every queue a park site can register a finite deadline on.
-///
-/// One list, because the sweep that releases an elapsed deadline
-/// ([`run_timed_sweep`]) and the arming that decides when the one-shot next
-/// fires ([`nearest_timed_deadline`]) have to name the same set: a queue
-/// swept but not counted loses its wake to another queue's later arming,
-/// and one counted but not swept re-arms the timer on a deadline nothing
-/// releases.
-///
-/// The per-key futex queues are created on demand, so both paths fold them
-/// through [`crate::futex`] rather than from here.
-static TIMED_QUEUES: &[&WaitQueue] = &[
-    &HW_TREE_WAITQ,
-    &IRQ_WAITQ,
-    &CONSOLE_WAITQ,
-    &USERS_DB_WAITQ,
-    &STREAM_WAITQ,
-    &CALL_WAITQ,
-    &WRITEBACK_WAITQ,
-    &FILE_LOCK_WAITQ,
-    &CPUFREQ_WAITQ,
-];
+/// The queues a park site can register a finite deadline on.
+fn timed_queues() -> impl Iterator<Item = &'static WaitQueue> {
+    ALL_QUEUES
+        .iter()
+        .filter(|entry| entry.timed)
+        .map(|entry| entry.queue)
+}
+
+/// The queues whose wake is flagged in one context and performed in another.
+fn deferred_queues() -> impl Iterator<Item = &'static WaitQueue> {
+    ALL_QUEUES
+        .iter()
+        .filter(|entry| entry.deferred)
+        .map(|entry| entry.queue)
+}
 
 /// Lock-free "the timed-wake one-shot fired and a deadline sweep is owed"
 /// flag, set by [`timed_wake_sweep`] in the timer ISR and consumed by
@@ -1162,7 +1392,7 @@ pub fn deadline_for(now_ns: u64, timeout_ns: u64) -> u64 {
 /// dispatcher context, out of [`drain_pending_wakes`].
 fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     let now = arch.now_ns();
-    for queue in TIMED_QUEUES {
+    for queue in timed_queues() {
         queue.sweep(arch, now);
     }
     // Per-key and created on demand, so swept through their own module
@@ -1183,7 +1413,7 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
 /// flags a pending wake ([`WaitQueue::request_wake`] / [`timed_wake_sweep`])
 /// and the dispatch loop calls this between scheduler steps and before it
 /// idles, where taking those locks is safe. It performs the real
-/// [`WaitQueue::wake_all`] for every flagged `DEFERRED_WAKE_QUEUES` entry
+/// [`WaitQueue::wake_all`] for every flagged deferred-wake queue
 /// and the deadline `run_timed_sweep`, unparking the affected tasks.
 ///
 /// Returns `true` if any wake was owed (a task may now be runnable), so
@@ -1194,7 +1424,7 @@ pub fn drain_pending_wakes() -> bool {
         return false;
     };
     let mut woke = false;
-    for queue in DEFERRED_WAKE_QUEUES {
+    for queue in deferred_queues() {
         if queue.take_wake_pending() {
             queue.wake_all(arch);
             woke = true;
@@ -1208,7 +1438,7 @@ pub fn drain_pending_wakes() -> bool {
     woke
 }
 
-/// Non-consuming peek: whether any `DEFERRED_WAKE_QUEUES` entry has a
+/// Non-consuming peek: whether any deferred-wake queue has a
 /// flagged wake awaiting its dispatcher-context [`drain_pending_wakes`].
 ///
 /// The preemption gate consults this so a timer tick on a CPU whose only
@@ -1226,9 +1456,7 @@ pub fn drain_pending_wakes() -> bool {
 /// elapsed), not by the flag alone.
 #[must_use]
 pub fn has_pending_deferred_wake() -> bool {
-    DEFERRED_WAKE_QUEUES
-        .iter()
-        .any(|queue| queue.wake_is_pending())
+    deferred_queues().any(WaitQueue::wake_is_pending)
 }
 
 /// Whether a timed waiter's finite deadline has already elapsed, so the
@@ -1284,15 +1512,14 @@ pub fn console_deregister(task: TaskId, deadline_ns: u64) {
     }
 }
 
-/// The soonest finite deadline pending across every `TIMED_QUEUES` entry
+/// The soonest finite deadline pending across every timed queue
 /// and the per-key futex queues, or [`None`] if none has one. A park site
 /// arms the one-shot to this so registering a *later* deadline never delays
 /// an already-pending earlier wake.
 #[must_use]
 pub fn nearest_timed_deadline() -> Option<u64> {
-    TIMED_QUEUES
-        .iter()
-        .filter_map(|queue| queue.earliest_deadline())
+    timed_queues()
+        .filter_map(WaitQueue::earliest_deadline)
         .chain(crate::futex::earliest_deadline())
         .min()
 }
@@ -1304,7 +1531,7 @@ mod tests {
     // The wake paths themselves are allocation-free; the recording mock is
     // ordinary test code and grows without a bound to respect.
     use alloc::vec::Vec;
-    use core::cell::{Cell, RefCell};
+    use core::cell::RefCell;
 
     /// A mock [`WaitQueueArch`] recording every `unpark` and `set_wakeup`,
     /// with a settable monotonic clock, so the wait-queue logic is testable
@@ -1318,9 +1545,11 @@ mod tests {
         wakeup_calls: RefCell<u32>,
         last_wakeup: RefCell<Option<u64>>,
         now: RefCell<u64>,
-        /// What the scheduler answers: `false` models a task it can no longer
-        /// run (retired while still registered).
-        wakeable: Cell<bool>,
+        /// Tasks the scheduler answers `false` for: retired while still
+        /// registered, so they can never run again. Per task rather than a
+        /// single switch, because the wake paths have to keep going past one
+        /// and release the live waiters behind it.
+        unwakeable: RefCell<Vec<TaskId>>,
     }
 
     impl MockArch {
@@ -1330,8 +1559,13 @@ mod tests {
                 wakeup_calls: RefCell::new(0),
                 last_wakeup: RefCell::new(None),
                 now: RefCell::new(0),
-                wakeable: Cell::new(true),
+                unwakeable: RefCell::new(Vec::new()),
             }
+        }
+
+        /// Model `id` as retired: the scheduler can never run it again.
+        fn refuse(&self, id: TaskId) {
+            self.unwakeable.borrow_mut().push(id);
         }
     }
 
@@ -1343,7 +1577,7 @@ mod tests {
     impl WaitQueueArch for MockArch {
         fn unpark(&self, id: TaskId) -> bool {
             self.unparked.borrow_mut().push(id);
-            self.wakeable.get()
+            !self.unwakeable.borrow().contains(&id)
         }
         fn now_ns(&self) -> u64 {
             *self.now.borrow()
@@ -1457,17 +1691,13 @@ mod tests {
     fn the_frequency_queue_is_on_every_shared_path() {
         let cpufreq: *const WaitQueue = &raw const CPUFREQ_WAITQ;
         assert!(
-            DEFERRED_WAKE_QUEUES
-                .iter()
-                .any(|queue| core::ptr::eq(*queue, cpufreq)),
+            deferred_queues().any(|queue| core::ptr::eq(queue, cpufreq)),
             "the drain must consume a flagged frequency wake and the preemption \
              gate must see it, or a lone-task CPU never reschedules to reach the \
              drain"
         );
         assert!(
-            TIMED_QUEUES
-                .iter()
-                .any(|queue| core::ptr::eq(*queue, cpufreq)),
+            timed_queues().any(|queue| core::ptr::eq(queue, cpufreq)),
             "the timed sweep must release the governor's review deadline and the \
              one-shot arming must count it, or the rate never steps down"
         );
@@ -1555,15 +1785,71 @@ mod tests {
         q.register(3, NO_DEADLINE);
         assert!(q.wake_task(&arch, 3));
 
-        arch.wakeable.set(false);
+        arch.refuse(3);
         assert!(
             !q.wake_task(&arch, 3),
-            "the row is still there, but the wake did not land"
+            "a row existed, but the wake did not land"
+        );
+        assert!(
+            q.is_empty(),
+            "and the row went with it: a task that can never run is not a waiter"
         );
         assert!(
             !q.wake_task(&arch, 4),
             "and an absent waiter is still false"
         );
+    }
+
+    #[test]
+    fn a_counted_wake_never_spends_itself_on_a_row_it_could_not_wake() {
+        // A thread killed while parked leaves its row behind, and a counted
+        // wake used to report the unparks it *issued* rather than the ones
+        // that landed: `wake_n(_, 1)` over that row answered "one woken" and
+        // released nobody, so the live waiter behind it stayed parked. On the
+        // futex path that is a lost `FUTEX_WAKE`.
+        let q = WaitQueue::new();
+        let arch = MockArch::new();
+        q.register(1, NO_DEADLINE);
+        q.register(2, NO_DEADLINE);
+        arch.refuse(1);
+
+        assert_eq!(q.wake_n(&arch, 1), 1, "one waiter was asked for");
+        assert_eq!(
+            arch.unparked.borrow().as_slice(),
+            &[1, 2],
+            "the corpse was passed over and the live waiter woken"
+        );
+        // The corpse is gone and the woken waiter keeps its row until it
+        // deregisters itself, which is the lost-wake discipline.
+        q.deregister(2);
+        assert!(q.is_empty(), "the row that could not be woken was reaped");
+    }
+
+    #[test]
+    fn a_retiring_task_leaves_no_row_on_any_key() {
+        // Nothing deregisters a waiter on its behalf, so a thread that dies
+        // inside the kernel would otherwise leave a row under every key it
+        // held — for the life of the boot, since ids are never reused.
+        let q = WaitQueue::new();
+        let arch = MockArch::new();
+        let (first, second) = (WakeKey::new(1), WakeKey::new(2));
+        q.register_keyed(first, 7, NO_DEADLINE);
+        q.register_keyed(second, 7, 4_000);
+        q.register(7, NO_DEADLINE);
+        q.register_keyed(first, 8, 9_000);
+
+        q.deregister_task(7);
+
+        assert!(!q.is_empty(), "the surviving waiter is untouched");
+        assert_eq!(
+            q.earliest_deadline(),
+            Some(9_000),
+            "the retired task's deadline left the index with its row"
+        );
+        assert_eq!(q.wake_key(&arch, first), 1, "only the survivor is there");
+        assert_eq!(q.wake_key(&arch, second), 0);
+        assert!(!q.wake_task(&arch, 7), "no unkeyed row either");
+        assert_eq!(arch.unparked.borrow().as_slice(), &[8]);
     }
 
     #[test]
@@ -1685,7 +1971,7 @@ mod tests {
         );
         // The waiter keeps its FIFO slot (register-before-retest / edge wakes).
         assert!(!q.is_empty(), "the waiter itself stays registered");
-        assert_eq!(q.oldest_task(), Some(1));
+        assert_eq!(q.oldest_registration().map(|r| r.task()), Some(1));
         // On its next park it re-registers a fresh deadline cleanly.
         q.register(1, 500);
         assert_eq!(q.earliest_deadline(), Some(500));
@@ -1750,7 +2036,11 @@ mod tests {
         q.register(3, NO_DEADLINE);
         // 7 re-arms with a new (finite) deadline; its FIFO seq is retained.
         q.register(7, 500);
-        assert_eq!(q.oldest_task(), Some(7), "re-register keeps FIFO head");
+        assert_eq!(
+            q.oldest_registration().map(|r| r.task()),
+            Some(7),
+            "re-register keeps FIFO head"
+        );
         assert!(q.wake_one(&arch));
         assert_eq!(*arch.unparked.borrow(), alloc::vec![7]);
     }
@@ -1848,7 +2138,7 @@ mod tests {
         // Gone from the deadline index (earliest is now 2's), from the FIFO
         // order (oldest is now 2), and from membership.
         assert_eq!(q.earliest_deadline(), Some(200));
-        assert_eq!(q.oldest_task(), Some(2));
+        assert_eq!(q.oldest_registration().map(|r| r.task()), Some(2));
         assert!(!q.wake_task(&arch, 1), "no longer a member");
         assert!(q.wake_task(&arch, 2));
     }
@@ -1865,7 +2155,10 @@ mod tests {
             q.register(id, NO_DEADLINE);
         }
         for _ in 0..4 {
-            let head = q.oldest_task().expect("a waiter remains");
+            let head = q
+                .oldest_registration()
+                .map(|r| r.task())
+                .expect("a waiter remains");
             assert!(q.wake_one(&arch));
             q.deregister(head);
         }

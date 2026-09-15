@@ -11,9 +11,9 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_kernel_sched_api::StealScan;
+use tairix_kernel_sched_api::{park, ParkableTask, StealScan};
 use tairix_sync::{RwLock, SpinLock};
 
 use crate::runqueue::{vslice, Entry, RunQueue};
@@ -435,57 +435,27 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// # Errors
     /// * [`SchedError::NoSuchTask`] if no task ever held that id.
-    /// * [`SchedError::InvalidState`] if the task is terminal.
+    /// * [`SchedError::InvalidState`] if the task is terminal. A wake another
+    ///   waker already satisfied is `Ok`, not an error: the task is runnable,
+    ///   which is what the wake asked for.
     pub fn unpark(&self, id: TaskId) -> SchedResult<()> {
         let task = self.lookup(id)?;
-        match task.load_state() {
-            TaskState::Exited => return Err(SchedError::InvalidState),
-            // Already committed to park: re-admit it directly.
-            TaskState::Parked => return self.wake_from_parked(&task),
-            // Not yet committed to park (running its body, or already
-            // queued): fall through to the token handshake below.
-            TaskState::Ready | TaskState::Running => {}
-        }
-        // Record the wake token, then re-read the state. This store then
-        // load, paired with the store-`Parked`-then-take-token sequence in
-        // the `step` Park commit and a `SeqCst` fence on each side, forbids
-        // the store-buffering outcome where the waker sees the task
-        // not-yet-parked *and* the parker misses the token — one side
-        // always observes the other. The earlier shape read the other
-        // side's flag *before* writing its own on both sides, which could
-        // drop the wake and park the task forever.
-        task.set_wake_pending();
-        fence(Ordering::SeqCst);
-        if task.load_state() == TaskState::Parked {
-            // The task committed to `Parked` concurrently and may not have
-            // observed our token. Reclaim it and, if the token is still
-            // owed, re-admit it; the `take` here and the CAS inside
-            // `wake_from_parked` make the re-admission single even when
-            // both racing sides reach it.
-            if task.take_wake_pending() {
-                return self.wake_from_parked(&task);
-            }
-        }
-        Ok(())
+        park::unpark_task(&*task, |woken| self.admit_woken(woken))
     }
 
-    /// Re-admit a task that is currently [`TaskState::Parked`] to a fresh
-    /// home CPU and send the placement IPI. The one definition of the
-    /// wake-from-parked transition, shared by [`Self::unpark`] and the
-    /// `step` Park-commit token re-check. Fails closed with
-    /// [`SchedError::InvalidState`] when the task is no longer `Parked`
-    /// (a concurrent waker already re-readied it), so a racing second
-    /// caller never admits the same task twice.
-    fn wake_from_parked(&self, task: &Arc<TaskInner>) -> SchedResult<()> {
-        task.cas_state(TaskState::Parked, TaskState::Ready)
-            .map_err(|_| SchedError::InvalidState)?;
+    /// Place a woken task and send its placement IPI.
+    ///
+    /// A wake is the moment a previously-idle task needs a CPU, so it is
+    /// re-placed on the least-loaded CPU of its priority's class rather than
+    /// queued behind its old home's backlog. An out-of-range placement is
+    /// absorbed by `admit_fresh_on`'s overflow list, so a woken task is never
+    /// left runnable-but-unqueued.
+    fn admit_woken(&self, task: &TaskInner) {
         let home = task.home_cpu.load(Ordering::Acquire);
         let target = self.placement_for(task.load_priority(), home);
         task.home_cpu.store(target, Ordering::Release);
-        self.cpu_state(target)?;
         self.admit_fresh_on(task, target);
         self.arch.send_ipi(target);
-        Ok(())
     }
 
     /// Terminate a task. Cancellation-safe and idempotent.
@@ -878,18 +848,7 @@ impl<A: SchedulerArch> Scheduler<A> {
                 if matches!(prev, TaskState::Ready | TaskState::Running) {
                     self.cpus[cpu as usize].queue.remove_weight(task.weight());
                 }
-                // Consume any wake token *after* publishing `Parked`, the
-                // store-then-load pair matching `unpark` (SeqCst-fenced on
-                // each side). A wake that raced this commit is never lost:
-                // the waker either set the token before this take (consumed
-                // here, task re-admitted) or observed `Parked` and
-                // re-admitted the task itself. The CAS inside
-                // `wake_from_parked` keeps the re-admission single when
-                // both sides run.
-                fence(Ordering::SeqCst);
-                if task.take_wake_pending() {
-                    let _ = self.wake_from_parked(&task);
-                }
+                park::commit_park(&*task, |woken| self.admit_woken(woken));
             }
             TaskAction::Yield => {
                 task.store_state(TaskState::Ready);
@@ -1085,7 +1044,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         if task.load_state() == TaskState::Exited {
             return Err(SchedError::InvalidState);
         }
-        // Record the class; every enqueue point (`wake_from_parked`,
+        // Record the class; every enqueue point (`admit_woken`,
         // `enqueue_home`, the yield-migrate path, overflow drain, steal)
         // reads it and routes the task to the matching band, so a task
         // adopts the class the next time it is placed on a run queue — its

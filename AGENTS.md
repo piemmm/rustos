@@ -1485,6 +1485,7 @@ You are not exempt from any rule above. In addition:
     | User accounts: default system/service identities, id ranges, the users/groups databases | `plans/USERS.md` |
     | Process spawn, userland multitasking | `plans/SPAWN.md` |
     | Lightweight threads: threads within a process, the thread-group model, the futex, per-thread thread pointers | `plans/THREADS.md` |
+    | Blocking in the kernel: the wait queue's registration identity and reap, the sleeping lock's FIFO ownership handoff, the park/unpark handshake and `unpark`'s error contract | `plans/FIX-SLEEPLOCK.md` |
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
     | App settings, secrets, blobs and temporary files: the per-app store keyed on bundle id, the publisher pin, the `key = value` format engine, the published scope one app reads another's values through, the sealed scope, descriptor-backed blobs and per-boot scratch | `plans/APPDATA.md` |
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |

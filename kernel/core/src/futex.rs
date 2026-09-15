@@ -196,6 +196,23 @@ pub fn deregister(key: FutexKey, thread: TaskId) {
     }
 }
 
+/// Remove every registration `thread` holds, dropping each key whose last
+/// waiter it was.
+///
+/// The retirement half: a thread that dies inside the kernel never reaches
+/// its own [`deregister`], and a row it leaves behind sits at its key's FIFO
+/// head where the next `futex_wake` spends itself on it — reporting a wake it
+/// never delivered and leaving the live waiter parked. Bucket lock then queue
+/// lock, the same order [`deregister`] takes.
+pub fn deregister_task(thread: TaskId) {
+    for bucket in buckets() {
+        bucket.lock().retain(|_, queue| {
+            queue.deregister_task(thread);
+            !queue.is_empty()
+        });
+    }
+}
+
 /// Wake the `count` oldest threads waiting on `key`, returning how many were
 /// woken.
 ///

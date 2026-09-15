@@ -7714,6 +7714,47 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
+    // `plans/FIX-SLEEPLOCK.md` S6: the same chain on **four** CPUs. Every
+    // enrolment of the unlock -> driver-store scan -> autoload chain ran
+    // single-CPU, so the one path that has many tasks contending the shared
+    // boot disk's `SleepLock` at once — the store scan beside each bundle
+    // load, each parking on a block completion — was never exercised with a
+    // second CPU able to resume a waiter while the releaser was mid-handoff.
+    // That is the window the FIFO handoff's stale-designation bug lived in
+    // (`plans/OPEN-DEFECTS.md` D129): about half of all four-CPU boots stopped
+    // dead at the passphrase prompt with no driver loaded.
+    //
+    // It reuses the very same production bin as the vertical above — the guest
+    // is byte-identical, only `-smp` differs — so there is no duplicated bin,
+    // and the runner disambiguates the two enrolments' planted backing images
+    // by their `TESTS` index (`sidecar_path`). This chain rather than the
+    // graphical `autoload_input` one because it reaches the same store scan and
+    // user-space driver spawn without the desktop and pty stages, so a failure
+    // here cannot be confused with D15's single-CPU freeze at the Ctrl-C stage.
+    //
+    // The budget is the inactivity window, not a runtime deadline, so it needs
+    // no headroom for the extra vCPUs; a strand shows up as silence and the
+    // same 240 s applies.
+    QemuTest {
+        package: "tairix-test-netstack-autoload-qemu-aarch64",
+        binary: "tairix-test-netstack-autoload-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 4,
+        timeout: Duration::from_secs(240),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6LinkLocal,
+        ramfb: true,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     // `plans/NETWORK.md` N4e-riscv64: the riscv64 **two-process** live-boot
     // netstack vertical — the `virt`-board
     // virtio-mmio / PLIC analogue of the aarch64

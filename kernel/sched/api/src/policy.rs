@@ -131,6 +131,11 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
 
     /// Wake a parked task. Cancellation-safe.
     ///
+    /// An error means the task can **never run again** and nothing else:
+    /// callers rely on that reading, so a wake another waker already
+    /// satisfied — the task is already runnable — reports `Ok`. The shared
+    /// [`crate::park::unpark_task`] handshake is the one definition.
+    ///
     /// # Errors
     /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
     /// * [`crate::SchedError::InvalidState`] if the task is terminal.

@@ -9,8 +9,14 @@
 //!
 //! When the `loom` cfg is *not* enabled, the file compiles to an empty
 //! test binary so the default `cargo test` workflow stays fast.
-//! `cargo xtask test` runs the loom suite when the helper-tool cache
-//! contains a usable `loom` build (mirroring `lib/sync/tests/loom.rs`).
+//!
+//! **Nothing runs these models today, and the command above does not build.**
+//! `cargo xtask loom` enrols `tairix-sync` only, and under `--cfg loom` the
+//! crate graph fails to compile: loom's atomics have no `const` constructor,
+//! so every `const fn`-built static below this crate is rejected in a static
+//! initialiser (`kernel/arch/api`'s `ACTIVE_FRAMES` is the first). See
+//! `plans/OPEN-DEFECTS.md` D131 — until that is resolved these models are
+//! unverified, so do not read their presence as coverage.
 //!
 //! Coverage:
 //!

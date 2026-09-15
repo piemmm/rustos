@@ -83,7 +83,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
-use crate::waitq::{wait_arch, WaitQueue, NO_DEADLINE};
+use crate::waitq::{wait_arch, Registration, WaitQueue, NO_DEADLINE};
 
 /// Lock-word bit: the lock is held.
 const LOCKED: u32 = 1 << 0;
@@ -338,41 +338,68 @@ impl<T: ?Sized> SleepLock<T> {
     /// a task the scheduler retired while it was still registered would
     /// otherwise be handed ownership it can never claim, and [`LOCKED`] would
     /// stay set on a lock nobody holds — every later acquirer parking for
-    /// ever on a free mount. Its registration is therefore dropped here, both
-    /// so the scan reaches a live successor and so a dead row cannot sit at
-    /// the head of the queue for the rest of the boot.
+    /// ever on a free mount.
+    ///
+    /// **Nothing is removed here.** The designation is a
+    /// [`Registration`], and the queue reaps a
+    /// row only when it has proved that row's own task can never run again.
+    /// Deleting by task id instead deletes whatever is registered *now*,
+    /// which — for a waiter that resumed, failed its claim, and parked again
+    /// inside this very window — is a live row; the lock is then released
+    /// with [`CONTENDED`] clear, so no later release consults the queue and
+    /// that waiter sleeps for ever on a free lock.
     ///
     /// Retracting the publication is a compare-exchange, not a store: the
     /// designated waiter may have been resumed by an unrelated wake (a
     /// deferred termination unparking it) and claimed the handoff on its way
     /// past, in which case it is already the owner and a second successor
     /// must not be named.
+    ///
+    /// The scan terminates. Every round that does not return either reaps the
+    /// head or observes it replaced, and a fresh registration takes a
+    /// strictly larger arrival sequence — so the head's sequence rises
+    /// monotonically and no round can revisit one.
     fn hand_off_oldest(&self, hook: &dyn crate::waitq::WaitQueueArch) -> bool {
-        while let Some(task) = self.waiters.oldest_task() {
-            self.handoff.store(task, Ordering::Release);
-            if self.waiters.wake_task(hook, task) {
+        while let Some(reg) = self.waiters.oldest_registration() {
+            if self.offer_to(hook, &reg) {
                 return true;
             }
-            if self.retract_handoff(task) {
-                return true;
-            }
-            self.waiters.deregister(task);
         }
         false
     }
 
+    /// One round of the scan: publish ownership to `reg` and wake it,
+    /// reporting whether it took the lock.
+    ///
+    /// On a wake that did not land the publication is withdrawn again and
+    /// **nothing is removed** — the queue reaps a row only when it has proved
+    /// that row's own task can never run, which it does under `reg`'s own
+    /// identity. Removing by task id instead removes whatever is registered
+    /// *now*, and for a waiter that resumed, failed its claim and parked
+    /// again inside this very round that is a live row.
+    fn offer_to(&self, hook: &dyn crate::waitq::WaitQueueArch, reg: &Registration) -> bool {
+        self.handoff.store(reg.task(), Ordering::Release);
+        if self.waiters.wake_registration(hook, reg) {
+            return true;
+        }
+        // Nothing left to withdraw means the waiter claimed on its way past,
+        // so it is already the owner.
+        !self.retract_handoff(reg.task())
+    }
+
     /// Withdraw a published handoff to `task` whose wake did not land,
-    /// reporting whether ownership transferred to it anyway.
+    /// reporting whether it was still there to withdraw.
     ///
     /// A compare-exchange, not a store: an unrelated wake — a deferred
     /// termination unparking the waiter — can resume the designated task
     /// between the publication and the wake, and it then claims on its way
-    /// past. Overwriting the claimed slot would let the scan name a second
+    /// past. `false` is that case, and it means ownership transferred after
+    /// all; overwriting the claimed slot would let the scan name a second
     /// successor and hand two tasks the same lock.
     fn retract_handoff(&self, task: u64) -> bool {
         self.handoff
             .compare_exchange(task, 0, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
+            .is_ok()
     }
 
     /// Release a lock no waiter wanted, then look at the queue once more.
@@ -391,7 +418,7 @@ impl<T: ?Sized> SleepLock<T> {
     /// so the two orders cannot both miss.
     fn release_and_recheck(&self) -> bool {
         self.state.fetch_and(!LOCKED, Ordering::AcqRel);
-        if self.waiters.oldest_task().is_none() {
+        if self.waiters.oldest_registration().is_none() {
             // Genuinely nobody. Drop the contention bit too, so the next
             // release is one compare-exchange again. A contender arriving
             // after the look above reads the cleared lock bit in its own
@@ -677,6 +704,130 @@ mod tests {
     }
 
     #[test]
+    fn a_designation_the_waiter_outran_deletes_nothing() {
+        // The SMP boot hang (`plans/OPEN-DEFECTS.md` D129). The releaser
+        // designates a waiter by reading the queue, which drops the queue
+        // lock; the waiter — resumed by an unrelated wake — then deregisters,
+        // fails its claim because the publication was withdrawn, fails
+        // `try_lock` because the handoff left `LOCKED` set, and **registers
+        // and parks again** inside that window. Deleting by task id deletes
+        // the new row, the queue then reads empty, and the lock is released
+        // with `CONTENDED` clear — so no later release ever consults the
+        // queue and the waiter sleeps for ever on a free lock.
+        //
+        // The halves are driven directly because nothing else can place a
+        // re-park between them deterministically.
+        let lock = SleepLock::new(());
+        let wake = RecordingWake::new();
+        lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
+        lock.waiters.register(81, NO_DEADLINE);
+
+        let designated = lock
+            .waiters
+            .oldest_registration()
+            .expect("81 is the FIFO head");
+
+        // 81 resumes, leaves the queue, and parks again on a fresh row.
+        lock.waiters.deregister(81);
+        lock.waiters.register(81, NO_DEADLINE);
+
+        assert!(
+            !lock.offer_to(&wake, &designated),
+            "the designated park is over, so this is no successor"
+        );
+        assert!(
+            wake.tasks.lock().is_empty(),
+            "and a registration that is gone is not unparked"
+        );
+        assert_eq!(
+            lock.handoff.load(Ordering::Acquire),
+            0,
+            "the publication is withdrawn, so the scan may name a successor"
+        );
+        assert!(
+            !lock.waiters.is_empty(),
+            "the live re-park survives: deleting it is the strand"
+        );
+
+        // The rescan finds that new row and hands the lock over properly.
+        assert!(lock.hand_off_oldest(&wake), "the re-parked waiter is next");
+        assert_eq!(lock.handoff.load(Ordering::Acquire), 81);
+        assert_eq!(wake.tasks.lock().as_slice(), &[81]);
+        assert_ne!(
+            lock.state.load(Ordering::Acquire) & LOCKED,
+            0,
+            "ownership is in flight, so the lock stays closed"
+        );
+    }
+
+    #[test]
+    fn a_release_never_clears_the_word_over_a_live_waiter() {
+        // The invariant the strand broke, asserted over the whole release:
+        // either ownership is in flight to a successor, or no live row is
+        // left behind. `CONTENDED` clear with a row still parked is the state
+        // no later release can recover from.
+        let lock = SleepLock::new(());
+        let wake = RecordingWake::new();
+        lock.state.store(LOCKED | CONTENDED, Ordering::Relaxed);
+        lock.waiters.register(82, NO_DEADLINE);
+        lock.waiters.register(83, NO_DEADLINE);
+
+        lock.release_contended(Some(&wake));
+
+        let state = lock.state.load(Ordering::Acquire);
+        assert_ne!(state & LOCKED, 0, "a successor took it");
+        assert_eq!(lock.handoff.load(Ordering::Acquire), 82);
+        assert!(!lock.waiters.is_empty(), "83 is still owed a wake");
+    }
+
+    #[test]
+    fn a_reap_only_removes_the_registration_it_was_taken_about() {
+        // Defence in depth for the other half: were a wake ever to report
+        // "did not land" for a task that is in fact live — which is what the
+        // scheduler's `unpark` used to do when its `Parked -> Ready` claim
+        // lost to a concurrent waker — the reap must still not remove a park
+        // that began after the designation was read.
+        /// Re-parks `task` while the wake is in flight, then refuses it —
+        /// the live-task-reported-unwakeable case. Legal because the wake is
+        /// issued with the queue lock released.
+        struct ReparkThenRefuse<'q> {
+            queue: &'q WaitQueue,
+            task: TaskId,
+        }
+
+        impl crate::waitq::WaitQueueArch for ReparkThenRefuse<'_> {
+            fn unpark(&self, _id: TaskId) -> bool {
+                self.queue.deregister(self.task);
+                self.queue.register(self.task, NO_DEADLINE);
+                false
+            }
+
+            fn now_ns(&self) -> u64 {
+                0
+            }
+
+            fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
+        }
+
+        let lock = SleepLock::new(());
+        lock.waiters.register(84, NO_DEADLINE);
+        let designated = lock
+            .waiters
+            .oldest_registration()
+            .expect("84 is the FIFO head");
+        let wake = ReparkThenRefuse {
+            queue: &lock.waiters,
+            task: 84,
+        };
+
+        assert!(!lock.waiters.wake_registration(&wake, &designated));
+        assert!(
+            !lock.waiters.is_empty(),
+            "the row present is a later park, so the reap left it alone"
+        );
+    }
+
+    #[test]
     fn a_successor_that_claimed_on_a_foreign_wake_is_not_superseded() {
         // A waiter resumed by an unrelated wake — a deferred termination
         // unparking it — deregisters and claims the handoff on its way past,
@@ -689,14 +840,14 @@ mod tests {
         assert!(lock.claim_handoff(91), "91 took ownership on its way past");
 
         assert!(
-            lock.retract_handoff(91),
-            "the claim is observed, so ownership transferred"
+            !lock.retract_handoff(91),
+            "nothing left to withdraw, so ownership transferred"
         );
 
         // The converse: an unclaimed publication is withdrawn, so the scan
         // may go on to name a real successor.
         lock.handoff.store(92, Ordering::Release);
-        assert!(!lock.retract_handoff(92));
+        assert!(lock.retract_handoff(92));
         assert_eq!(lock.handoff.load(Ordering::Acquire), 0);
     }
 

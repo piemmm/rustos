@@ -358,8 +358,8 @@ where
 /// ever fall through one definition: the syscall-side landing rule
 /// (`KernelSyscallHandlers::land_thread_down`) and the driver-store unload both
 /// reach it. What it retires is the thread's own and nothing the group shares —
-/// its signal-intake, kill-gate and running-kill overlays, its user-stack span,
-/// and its capability alias. Every one goes before the scheduler releases the
+/// its signal-intake, kill-gate and running-kill overlays, its wait-queue
+/// registrations, its user-stack span, and its capability alias. Every one goes before the scheduler releases the
 /// id, so a later task drawing it inherits nothing.
 ///
 /// Dropping the capability alias is what makes the count fall, so a thread the
@@ -377,6 +377,10 @@ pub fn retire(
 ) -> usize {
     crate::procsignal::clear_intake(thread.0);
     crate::procsignal::clear_kill_gate(thread.0);
+    // A thread killed inside the kernel never unwinds to its own park site's
+    // `deregister`, and a row left at a queue's FIFO head makes the next
+    // counted wake report a wake it never delivered.
+    crate::waitq::retire_task(thread.0);
     aspaces.write().withdraw_thread(thread);
     caps.write()
         .remove_thread(thread)

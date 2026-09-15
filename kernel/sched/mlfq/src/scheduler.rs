@@ -9,10 +9,10 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_kernel_sched_api::StealScan;
+use tairix_kernel_sched_api::{park, ParkableTask, StealScan};
 use tairix_sync::{RwLock, SpinLock};
 
-use crate::loom_compat::{fence, AtomicU64, Ordering};
+use crate::loom_compat::{AtomicU64, Ordering};
 use crate::runqueue::{RunDeque, Steal};
 use crate::task::{TaskBody, TaskInner};
 use crate::{
@@ -518,7 +518,9 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// # Errors
     /// * [`SchedError::NoSuchTask`] if no task ever held that id.
-    /// * [`SchedError::InvalidState`] if the task is in a terminal state.
+    /// * [`SchedError::InvalidState`] if the task is in a terminal state. A
+    ///   wake another waker already satisfied is `Ok`, not an error: the task
+    ///   is runnable, which is what the wake asked for.
     pub fn unpark(&self, id: TaskId) -> SchedResult<()> {
         let task = self
             .tasks
@@ -526,59 +528,29 @@ impl<A: SchedulerArch> Scheduler<A> {
             .get(&id)
             .cloned()
             .ok_or(SchedError::NoSuchTask)?;
-        match task.load_state() {
-            TaskState::Exited => return Err(SchedError::InvalidState),
-            // Already committed to park: re-admit it directly.
-            TaskState::Parked => return self.wake_from_parked(&task),
-            // Not yet committed to park (running its body, or already
-            // queued): fall through to the token handshake below.
-            TaskState::Ready | TaskState::Running => {}
-        }
-        // Record the wake token, then re-read the state. This store then
-        // load, paired with the store-`Parked`-then-take-token sequence in
-        // the `step` Park commit and a `SeqCst` fence on each side, forbids
-        // the store-buffering outcome where the waker sees the task
-        // not-yet-parked *and* the parker misses the token — one side
-        // always observes the other. The earlier shape read the other
-        // side's flag *before* writing its own on both sides, which could
-        // drop the wake and park the task forever.
-        task.set_wake_pending();
-        fence(Ordering::SeqCst);
-        if task.load_state() == TaskState::Parked {
-            // The task committed to `Parked` concurrently and may not have
-            // observed our token. Reclaim it and, if the token is still
-            // owed, re-admit it; the `take` here and the CAS inside
-            // `wake_from_parked` make the re-admission single even when
-            // both racing sides reach it.
-            if task.take_wake_pending() {
-                return self.wake_from_parked(&task);
-            }
-        }
-        Ok(())
+        park::unpark_task(&*task, |woken| self.admit_woken(woken))
     }
 
-    /// Re-admit a task that is currently [`TaskState::Parked`], steering it
-    /// onto a CPU of the class its priority calls for and re-enqueuing it
-    /// at its current band (a wake is not a voluntary yield, so no
-    /// demotion). The one definition of the wake-from-parked transition,
-    /// shared by [`Self::unpark`] and the `step` Park-commit token
-    /// re-check. Fails closed with [`SchedError::InvalidState`] when the
-    /// task is no longer `Parked` (a concurrent waker already re-readied
-    /// it), so a racing second caller never enqueues the same task twice.
-    fn wake_from_parked(&self, task: &Arc<TaskInner>) -> SchedResult<()> {
-        task.cas_state(TaskState::Parked, TaskState::Ready)
-            .map_err(|_| SchedError::InvalidState)?;
+    /// Place a woken task and send its placement IPI.
+    ///
+    /// Steered onto a CPU of the class its priority calls for and re-enqueued
+    /// at its current band: a wake is not a voluntary yield, so it earns no
+    /// demotion. An out-of-range placement falls to the overflow list, so a
+    /// woken task is never left runnable-but-unqueued.
+    fn admit_woken(&self, task: &TaskInner) {
         let prio = task.load_priority();
         let class = task.load_sched_class();
         let home = task.home_cpu.load(Ordering::Acquire);
         let target = self.preferred_home(prio, home);
         task.home_cpu.store(target, Ordering::Release);
-        let cpu = self.cpu_state(target)?;
-        if cpu.push_class(class, prio, task.id).is_err() {
+        let full = match self.cpus.get(target as usize) {
+            Some(cpu) => cpu.push_class(class, prio, task.id).is_err(),
+            None => true,
+        };
+        if full {
             self.overflow.lock().push(task.id);
         }
         self.arch.send_ipi(target);
-        Ok(())
     }
 
     /// Terminate a task. Cancellation-safe; idempotent.
@@ -1010,20 +982,8 @@ impl<A: SchedulerArch> Scheduler<A> {
                 self.tasks.write().remove(&id);
             }
             TaskAction::Park => {
-                // Publish `Parked`, then consume any wake token *after* the
-                // store (the store-then-load pair matching `unpark`,
-                // SeqCst-fenced on each side). A wake that raced this commit
-                // is never lost: the waker either set the token before this
-                // take (consumed here, task re-admitted at its current band
-                // — no demotion, this is not a voluntary yield) or observed
-                // `Parked` and re-admitted the task itself. The CAS inside
-                // `wake_from_parked` keeps the re-admission single when both
-                // sides run.
                 task.store_state(TaskState::Parked);
-                fence(Ordering::SeqCst);
-                if task.take_wake_pending() {
-                    let _ = self.wake_from_parked(task);
-                }
+                park::commit_park(&**task, |woken| self.admit_woken(woken));
             }
             TaskAction::Yield => self.reenqueue_after_yield(task, id, prio, cpu),
         }
@@ -1308,7 +1268,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         if task.load_state() == TaskState::Exited {
             return Err(SchedError::InvalidState);
         }
-        // Record the class; every enqueue point (`wake_from_parked`, the
+        // Record the class; every enqueue point (`admit_woken`, the
         // dispatch yield path, overflow drain, `yield_current`) reads it and
         // routes the task to the matching band, so a task adopts the class
         // the next time it is placed on a run queue — its next wake or

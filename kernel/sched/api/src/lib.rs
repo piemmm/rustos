@@ -11,7 +11,9 @@
 //! * the re-exported scheduler-facing Arch HAL surface ([`CpuId`],
 //!   [`SchedulerArch`]) and the host [`TestArch`] double;
 //! * [`StealScan`], the per-CPU work-stealing scan start every per-CPU-queue
-//!   policy shares; and
+//!   policy shares;
+//! * the [`park`] handshake — the park/unpark window and its wake token,
+//!   which is task lifecycle rather than policy; and
 //! * the shared `conformance` suite (feature `conformance`) every
 //!   concrete scheduler must pass.
 //!
@@ -29,6 +31,7 @@ pub mod config;
 pub mod conformance;
 pub mod error;
 pub mod outcome;
+pub mod park;
 pub mod policy;
 pub mod steal;
 pub mod task;
@@ -39,6 +42,7 @@ pub use arch::{CoreClass, CpuId, SchedulerArch};
 pub use config::SchedulerConfig;
 pub use error::{SchedError, SchedResult};
 pub use outcome::{ExitDisposition, StepOutcome};
+pub use park::ParkableTask;
 pub use policy::SchedulerPolicy;
 pub use steal::StealScan;
 pub use task::{

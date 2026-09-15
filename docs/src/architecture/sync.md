@@ -93,6 +93,27 @@ compare-exchange: an unrelated wake can resume the designated waiter between
 the publication and the wake, and it claims on its way past, so overwriting
 the slot would name a second successor and hand two tasks the same lock.
 
+Which makes *whose* registration is dropped the load-bearing question, because
+the scan reads the queue, drops the queue lock, and only then acts. A waiter
+resumed in that window can deregister, fail its claim against the withdrawn
+publication, fail `try_lock` against the `LOCKED` the handoff left set, and
+**park again** — so dropping "that task's registration" drops a live row. The
+queue then reads empty and the release clears `CONTENDED` with it, after which
+no release ever consults the queue again and that waiter sleeps for ever on a
+free lock. About half of all four-CPU boots stopped at the passphrase prompt
+with no input driver loaded (`plans/OPEN-DEFECTS.md` D129).
+
+So the designation is a *registration*, carrying the row's never-reused
+arrival sequence, and the scan removes nothing itself: `wake_registration`
+reaps a row only after proving that row's own task can never run again, under
+the same identity. A stale designation wakes nobody and is simply rescanned,
+which terminates because a fresh registration takes a strictly larger
+sequence — the head's sequence rises monotonically, so no round revisits one.
+The other half of the same defect was `unpark` reporting `Err` for a live task
+whose `Parked -> Ready` claim lost to a concurrent waker, which made
+"the wake did not land" mean two different things; it now means terminal and
+nothing else.
+
 ## What a spin round does — the port's spin service
 
 Every primitive above spins on contention, and a spinning CPU is by

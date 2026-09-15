@@ -15,6 +15,7 @@
 
 use crate::loom_compat::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use crate::{CpuId, Priority, SchedClass, TaskAction, TaskContext, TaskId, TaskState};
+use tairix_kernel_sched_api::ParkableTask;
 
 use alloc::boxed::Box;
 use tairix_sync::SpinLock;
@@ -104,19 +105,6 @@ impl TaskInner {
         }
     }
 
-    /// Record that a wake arrived before the task committed to park, so the
-    /// next park is cancelled (no lost wake-ups).
-    pub(crate) fn set_wake_pending(&self) {
-        self.wake_pending.store(true, Ordering::Release);
-    }
-
-    /// Atomically consume the wake-pending token, returning whether one was
-    /// set. Called at the dispatch-loop `Park` commit: a `true` cancels the
-    /// park (the task is re-readied instead of slept).
-    pub(crate) fn take_wake_pending(&self) -> bool {
-        self.wake_pending.swap(false, Ordering::AcqRel)
-    }
-
     /// Atomically load the priority.
     pub(crate) fn load_priority(&self) -> Priority {
         // Bounded at construction; demote() always returns a valid band.
@@ -153,14 +141,21 @@ impl TaskInner {
         self.sched_class.store(class.as_u8(), Ordering::Release);
     }
 
-    /// Atomically load the state.
-    pub(crate) fn load_state(&self) -> TaskState {
+    /// Unconditionally store the state (only for "any → Exited" sweeps).
+    pub(crate) fn store_state(&self, new: TaskState) {
+        self.state.store(new.as_u8(), Ordering::Release);
+    }
+}
+
+impl ParkableTask for TaskInner {
+    fn load_state(&self) -> TaskState {
+        // Only `TaskState`-produced bytes are ever stored; a corrupt one
+        // reads as terminal rather than panicking or reviving a task.
         let raw = self.state.load(Ordering::Acquire);
         TaskState::from_u8(raw).unwrap_or(TaskState::Exited)
     }
 
-    /// CAS the state; returns `Ok(())` on success, `Err(current)` otherwise.
-    pub(crate) fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState> {
+    fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState> {
         match self.state.compare_exchange(
             expected.as_u8(),
             new.as_u8(),
@@ -172,9 +167,12 @@ impl TaskInner {
         }
     }
 
-    /// Unconditionally store the state (only for "any → Exited" sweeps).
-    pub(crate) fn store_state(&self, new: TaskState) {
-        self.state.store(new.as_u8(), Ordering::Release);
+    fn set_wake_pending(&self) {
+        self.wake_pending.store(true, Ordering::Release);
+    }
+
+    fn take_wake_pending(&self) -> bool {
+        self.wake_pending.swap(false, Ordering::AcqRel)
     }
 }
 
