@@ -203,7 +203,11 @@ impl Game {
         let mut changed = false;
         if !self.motion.is_idle() {
             for at in self.motion.animating().collect::<Vec<_>>() {
-                damage.add(self.layout.cell_damage(at));
+                let reach = self
+                    .motion
+                    .cell(at, now_ns)
+                    .map_or(0, |m| paint::motion_bleed(m.kind, self.layout.cell));
+                damage.add(self.layout.cell_damage_reaching(at, reach));
             }
             self.motion.advance(now_ns);
             changed = true;

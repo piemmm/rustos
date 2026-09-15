@@ -341,6 +341,137 @@ fn only_a_rejection_shakes() {
     }
 }
 
+// --- Clipped repaints ---------------------------------------------------
+
+#[test]
+fn a_repaint_clipped_to_one_cell_draws_that_cell() {
+    // The window is presented by damage rectangle, so an incremental repaint is
+    // handed a surface clipped to it. Every cell inside that clip must land
+    // exactly what a whole-window paint puts there — a guard that read the clip
+    // wrongly skipped them all, so a hover erased the tiles it damaged.
+    let theme = Theme::dark();
+    let dims = beginner();
+    let mut game = Board::new(dims, true);
+    game.reveal(Coord::new(4, 4), &mut rng(5));
+    let (mut surface, layout, skin) = canvas(dims, &theme);
+    let motion = Motion::new(dims.cols(), true);
+
+    let whole = frame(
+        &mut surface,
+        &layout,
+        &game,
+        &motion,
+        &skin,
+        Focus::default(),
+        0,
+    );
+
+    // Start from a state no paint would produce, so an undrawn pixel is
+    // unmistakable.
+    let sentinel = Color::rgb(0xFF, 0x00, 0xFF);
+    surface.fill(sentinel);
+    let damage = layout.cell_damage(Coord::new(2, 3));
+    let (x, y) = (
+        u32::try_from(damage.left()).expect("on the surface"),
+        u32::try_from(damage.top()).expect("on the surface"),
+    );
+    surface.with_clip(x, y, damage.width, damage.height, |surface| {
+        board(
+            surface,
+            &layout,
+            &game,
+            &motion,
+            &skin,
+            font(),
+            Focus::default(),
+            0,
+            0,
+        );
+    });
+
+    let clipped: Vec<Pixel> = surface.pixels().to_vec();
+    let width = surface.width();
+    let mut inside = 0_u32;
+    for (index, pixel) in clipped.iter().enumerate() {
+        let px = u32::try_from(index).expect("fits") % width;
+        let py = u32::try_from(index).expect("fits") / width;
+        let covered = px >= x && px < x + damage.width && py >= y && py < y + damage.height;
+        if covered {
+            assert_eq!(
+                *pixel, whole[index],
+                "({px},{py}) inside the clip differs from a whole repaint"
+            );
+            inside += 1;
+        } else {
+            assert_eq!(
+                pixel.unpremultiply(),
+                sentinel,
+                "({px},{py}) outside the clip was written"
+            );
+        }
+    }
+    assert_eq!(inside, damage.width * damage.height);
+}
+
+#[test]
+fn a_clipped_repaint_covers_every_cell_it_reaches() {
+    // A damage rectangle spanning several tiles must draw all of them, not the
+    // first or the nearest.
+    let theme = Theme::light();
+    let dims = beginner();
+    let mut game = Board::new(dims, true);
+    game.reveal(Coord::new(4, 4), &mut rng(8));
+    let (mut surface, layout, skin) = canvas(dims, &theme);
+    let motion = Motion::new(dims.cols(), true);
+    let whole = frame(
+        &mut surface,
+        &layout,
+        &game,
+        &motion,
+        &skin,
+        Focus::default(),
+        0,
+    );
+
+    // The span a pointer crossing from one tile to another damages.
+    let from = layout.cell_damage(Coord::new(1, 1));
+    let to = layout.cell_damage(Coord::new(6, 5));
+    let span = from.union(&to);
+    surface.fill(Color::rgb(0xFF, 0x00, 0xFF));
+    let (x, y) = (
+        u32::try_from(span.left()).expect("on the surface"),
+        u32::try_from(span.top()).expect("on the surface"),
+    );
+    surface.with_clip(x, y, span.width, span.height, |surface| {
+        board(
+            surface,
+            &layout,
+            &game,
+            &motion,
+            &skin,
+            font(),
+            Focus::default(),
+            0,
+            0,
+        );
+    });
+
+    for at in [Coord::new(1, 1), Coord::new(3, 3), Coord::new(6, 5)] {
+        let rect = layout.cell_rect(at);
+        let centre = rect.center();
+        let index = usize::try_from(
+            u32::try_from(centre.y).expect("on the surface") * surface.width()
+                + u32::try_from(centre.x).expect("on the surface"),
+        )
+        .expect("fits");
+        assert_eq!(
+            surface.pixels()[index],
+            whole[index],
+            "{at:?} was not drawn inside the clip"
+        );
+    }
+}
+
 // --- Focus --------------------------------------------------------------
 
 #[test]

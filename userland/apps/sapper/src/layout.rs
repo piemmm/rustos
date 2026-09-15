@@ -151,14 +151,24 @@ impl Layout {
 
     /// Where `at` is drawn, grown by one gap on every side: what a repaint of
     /// that cell must cover, because a cell's motion spills into the gutter
-    /// around it (a shadow, a shockwave, a mark landing over its edge).
+    /// around it (a shadow, a mark landing over its edge).
     #[must_use]
     pub fn cell_damage(&self, at: Coord) -> Rect {
+        self.cell_damage_reaching(at, 0)
+    }
+
+    /// [`cell_damage`](Self::cell_damage) grown by a further `reach`, for a
+    /// wave that draws past the tile it belongs to.
+    ///
+    /// A repaint scoped to the tile alone would clip such a wave and draw a
+    /// square edge across it.
+    #[must_use]
+    pub fn cell_damage_reaching(&self, at: Coord, reach: u32) -> Rect {
         let rect = self.cell_rect(at);
         if rect.is_empty() {
             return rect;
         }
-        let bleed = self.gap.max(1);
+        let bleed = self.gap.max(1).saturating_add(reach);
         Rect::new(
             rect.left() - to_i32(bleed),
             rect.top() - to_i32(bleed),

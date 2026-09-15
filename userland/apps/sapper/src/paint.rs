@@ -464,13 +464,20 @@ fn cell(
     board: &Board,
 ) {
     let mut rect = layout.cell_rect(at);
-    if rect.is_empty() || !surface.admits(0, 0, 1, 1) {
+    if rect.is_empty() {
         return;
     }
     // A refused action shakes the cell it was refused on, which is the only
     // motion here that moves a whole tile rather than what is drawn in it.
     if let Some(shift) = shake(motion, rect.width) {
         rect = Rect::new(rect.left() + shift, rect.top(), rect.width, rect.height);
+    }
+    // A repaint is handed a surface clipped to the damage it is presenting, so
+    // most cells have nothing to write; skipping them here is what keeps a
+    // two-cell repaint from walking the whole board's geometry.
+    let reach = motion.map_or(0, |m| motion_bleed(m.kind, rect.width));
+    if !writes_any(surface, grown(rect, reach)) {
+        return;
     }
 
     // The finished face first; the lid, if any, goes over it.
@@ -733,6 +740,45 @@ fn shake(motion: Option<CellMotion>, width: u32) -> Option<i32> {
     let travel = swing * reach * decay / (64 * 255);
     let direction = if (progress * 4) / 255 % 2 == 0 { 1 } else { -1 };
     i32::try_from(travel * direction).ok()
+}
+
+/// How far past its own tile a wave of `kind` draws, over a `cell`-wide tile.
+///
+/// Only the shockwave leaves the tile it belongs to. A repaint that does not
+/// grow that cell's damage by this clips the wave to its tile and draws a
+/// square edge across it.
+#[must_use]
+pub fn motion_bleed(kind: WaveKind, cell: u32) -> u32 {
+    match kind {
+        WaveKind::Detonate => cell.saturating_mul(SHOCKWAVE_REACH) / 1000,
+        WaveKind::Reveal | WaveKind::Mark | WaveKind::Victory | WaveKind::Rejected => 0,
+    }
+}
+
+/// `rect` grown by `by` on every side.
+fn grown(rect: Rect, by: u32) -> Rect {
+    Rect::new(
+        rect.left() - to_i32(by),
+        rect.top() - to_i32(by),
+        rect.width.saturating_add(by.saturating_mul(2)),
+        rect.height.saturating_add(by.saturating_mul(2)),
+    )
+}
+
+/// Whether any pixel of `rect` is one `surface` would write.
+///
+/// A rectangle reaching off the top or left is trimmed to what the surface
+/// could hold rather than refused, so a cell the clip only partly covers still
+/// draws its visible part.
+fn writes_any(surface: &Surface, rect: Rect) -> bool {
+    let left = rect.left().max(0);
+    let top = rect.top().max(0);
+    surface.admits(
+        u32::try_from(left).unwrap_or(u32::MAX),
+        u32::try_from(top).unwrap_or(u32::MAX),
+        rect.width.saturating_sub(left.abs_diff(rect.left())),
+        rect.height.saturating_sub(top.abs_diff(rect.top())),
+    )
 }
 
 /// A rectangle scaled about its own centre, in per-mille.
