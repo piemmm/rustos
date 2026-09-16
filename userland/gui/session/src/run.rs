@@ -118,25 +118,27 @@ mod program {
     };
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
-        admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info,
-        drop_is_noteworthy, launch_argv, load_pinboard as read_pinboard_store, load_programs,
-        maybe_send_seat_report, open_tray, parse, publish_pinboard, reap_launched, relay_power,
-        resolve_launch, resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
-        window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
-        ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt,
-        Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell,
-        DeviceInputSource, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
-        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource,
-        KeyboardInputSource, Launch, LaunchHost, LaunchTable, LoadedPinboard, LoadedPrograms,
-        LockedDrain, OwnerBundleGate, OwnerWindow, PickConclusion, Prepared, PresentedOwners,
-        PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock,
-        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox,
-        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX,
-        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
-        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE,
-        MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
-        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
-        WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+        admitted_pid, bundle_of_run_path, catalogued, chain_geometry, deliver_pending_open,
+        desktop_info, drop_is_noteworthy, launch_argv, load_pinboard as read_pinboard_store,
+        load_programs, maybe_send_seat_report, open_tray, parse, publish_pinboard, reap_launched,
+        relay_power, resolve_launch, resolve_window_identities, serve_pinboard_apply,
+        serve_switchboard_request, window_control_alternate_event, window_control_event, Answer,
+        AppBarBridge, AppBarService, ArtworkFileReader, ArtworkSandbox, CliError, Command,
+        ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
+        DesktopOutcome, DesktopShell, DeviceInputSource, DocumentRelay, ElevatePrompt, Elevator,
+        FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
+        HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource, Launch,
+        LaunchHost, LaunchTable, LaunchTarget, LoadedPinboard, LoadedPrograms, LockedDrain,
+        OwnerBundleGate, OwnerWindow, PickConclusion, Prepared, PresentedOwners, PromptOutcome,
+        ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
+        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, WallpaperDesk, WallpaperSource, APP_BAR_SLOT_SHOWN,
+        APP_BAR_SLOT_SHOWN_MESSAGE, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
+        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN,
+        WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -155,7 +157,7 @@ mod program {
     use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
     use tairix_wallpaper::{PinboardSettings, MAX_WALLPAPER_BYTES};
     use tairix_window::{
-        event_endpoint_for, CallerIdentity, EventSink, WindowServer, WINDOW_REPLY_MAX,
+        event_endpoint_for, CallerIdentity, EventSink, OpenEntry, WindowServer, WINDOW_REPLY_MAX,
     };
     use tairix_wm::{
         chrome_cache, frost_cache, Compositor, InputResponse, Point, Rect, Region, Surface,
@@ -859,6 +861,7 @@ mod program {
     /// first painted frame this one carried is announced there too, and the
     /// menu chain and the trusted picker this one first carried, for the same
     /// reason: until the frame lands, nobody has seen any of them.
+    #[allow(clippy::too_many_arguments)] // Every surface a present may be the first showing of.
     fn present<S: tairix_browse::DirectorySource, F: FnMut() -> S>(
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -867,6 +870,7 @@ mod program {
         windows: &mut SessionWindows,
         menu: &mut MenuChain,
         picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarService,
     ) -> Result<(), i32> {
         let Some(display) = display.as_mut() else {
             return Ok(());
@@ -884,6 +888,21 @@ mod program {
                             fields: &[LogField {
                                 key: "window",
                                 value: LogFieldValue::UnsignedInt(window),
+                            }],
+                        },
+                    );
+                });
+                apps.report_newly_shown(|owner| {
+                    let mut hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
+                    log(
+                        &LOG_SINK,
+                        &LogEvent {
+                            level: LogLevel::Info,
+                            id: APP_BAR_SLOT_SHOWN,
+                            message: APP_BAR_SLOT_SHOWN_MESSAGE,
+                            fields: &[LogField {
+                                key: "app",
+                                value: LogFieldValue::Str(owner.write_hex(&mut hex)),
                             }],
                         },
                     );
@@ -1000,7 +1019,11 @@ mod program {
 
     /// The live window ownership an `ActivateOwner` is validated against:
     /// the window engine's own attested owner records, resolved through the
-    /// one `window_of_pid` every other owner lookup in this session uses.
+    /// one `window_of_app` every other owner lookup in this session uses.
+    ///
+    /// The owner arrives as a task id — what the tray feed names a task by —
+    /// so it is resolved to the attested instance the records are keyed on
+    /// before any window is matched.
     struct SessionOwnerWindows<'a> {
         server: &'a WindowServer<RtShmMapper>,
         windows: &'a SessionWindows,
@@ -1009,7 +1032,7 @@ mod program {
 
     impl OwnerWindow for SessionOwnerWindows<'_> {
         fn window_of(&self, owner: u64) -> Option<tairix_wm::WindowId> {
-            window_of_pid(owner, self.server, self.windows, self.identity)
+            window_of_app(self.identity.proc_id_of(owner)?, self.server, self.windows)
         }
     }
 
@@ -1842,6 +1865,7 @@ mod program {
             &mut windows,
             &mut menu,
             &mut picker,
+            &mut apps.service,
         ) {
             return code;
         }
@@ -2265,6 +2289,7 @@ mod program {
                         &mut windows,
                         &mut menu,
                         &mut picker,
+                        &mut apps.service,
                     ) {
                         return code;
                     }
@@ -2313,9 +2338,11 @@ mod program {
                             apps: &mut apps.service,
                             menu: &mut menu,
                             seat_held,
+                            relay: &mut RtDocumentRelay,
                         };
                         server.serve(
                             &mut bridge,
+                            &mut sink,
                             &mut identity,
                             ticket,
                             &request[..len],
@@ -2504,6 +2531,7 @@ mod program {
                             apps: &mut apps.service,
                             menu: &mut menu,
                             seat_held: true,
+                            relay: &mut RtDocumentRelay,
                         };
                         server.client_exited(&mut bridge, client);
                         if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -2687,6 +2715,7 @@ mod program {
                                 apps: &mut apps.service,
                                 menu: &mut menu,
                                 seat_held: true,
+                                relay: &mut RtDocumentRelay,
                             };
                             server.client_exited(&mut bridge, client);
                             if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -3150,6 +3179,7 @@ mod program {
                     &mut windows,
                     &mut menu,
                     &mut picker,
+                    &mut apps.service,
                 ) {
                     return code;
                 }
@@ -5350,6 +5380,7 @@ mod program {
                 // This bridge tears windows down and never serves an
                 // `OpenMenu`, so it cannot vouch for the seat and says so.
                 seat_held: true,
+                relay: &mut RtDocumentRelay,
             };
             server.client_exited(&mut bridge, owner);
         }
@@ -5607,7 +5638,7 @@ mod program {
                     FILES_RUN_PATH,
                     FILES_LABEL,
                     &[path.as_bytes()],
-                    Some(&path),
+                    Some(LaunchTarget::Path(&path)),
                 );
                 false
             }
@@ -5626,7 +5657,7 @@ mod program {
                     &run_path,
                     &label,
                     &args,
-                    argument.as_deref(),
+                    argument.as_deref().map(LaunchTarget::Path),
                 );
                 false
             }
@@ -5824,19 +5855,17 @@ mod program {
         DesktopOutcome::ignored()
     }
 
-    /// The compositor window of the first served window owned by `pid`,
+    /// The compositor window of the first served window owned by `app`,
     /// resolved through the window engine's attested ownership records —
     /// never a window title or any other app-controlled data.
-    fn window_of_pid(
-        pid: u64,
+    fn window_of_app(
+        app: ProcId,
         server: &WindowServer<RtShmMapper>,
         windows: &SessionWindows,
-        identity: &RtWindowIdentity,
     ) -> Option<tairix_wm::WindowId> {
-        windows.served().find_map(|(ipc, wm)| {
-            let owner = server.owner_of(ipc)?;
-            (identity.pid_of(owner)? == pid).then_some(wm)
-        })
+        windows
+            .served()
+            .find_map(|(ipc, wm)| (server.owner_of(ipc)? == app).then_some(wm))
     }
 
     /// Resolve a program-library launch: the chosen entry's bundle names its
@@ -5978,22 +6007,31 @@ mod program {
     }
 
     impl Reach<'_, '_> {
-        /// The instance `pid`'s most recent window, as both ids.
-        fn recent_window(&self, pid: u64) -> Option<(u64, tairix_wm::WindowId)> {
-            let wm = window_of_pid(pid, self.ctx.server, self.ctx.windows, self.ctx.identity)?;
-            Some((self.ctx.windows.ipc_id(wm)?, wm))
+        /// The instance `app`'s most recent window.
+        fn recent_window(&self, app: ProcId) -> Option<tairix_wm::WindowId> {
+            window_of_app(app, self.ctx.server, self.ctx.windows)
         }
     }
 
     impl LaunchHost for Reach<'_, '_> {
-        fn queue_open_target(&mut self, pid: u64, path: &str) -> bool {
-            let Some((window_id, _)) = self.recent_window(pid) else {
-                return false;
+        fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
+            let entry = match target {
+                LaunchTarget::Path(path) => OpenEntry::Path(alloc::string::String::from(path)),
+                LaunchTarget::Document { name, grant } => match RtDocumentRelay.relay(grant, app) {
+                    Ok(grant) => OpenEntry::Document {
+                        name: alloc::string::String::from(name),
+                        grant,
+                    },
+                    Err(err) => {
+                        let _ = writeln!(Stderr, "desktop: cannot relay a document ({err:?})");
+                        return false;
+                    }
+                },
             };
             match self
                 .ctx
                 .server
-                .hand_over_open_target(self.ctx.sink, window_id, path)
+                .hand_over_open_target(self.ctx.sink, app, entry)
             {
                 Ok(()) => true,
                 Err(err) => {
@@ -6005,21 +6043,40 @@ mod program {
             }
         }
 
-        fn ask_default(&mut self, pid: u64) -> bool {
-            let Some(app) = self.ctx.identity.proc_id_of(pid) else {
-                return false;
-            };
+        fn ask_default(&mut self, app: ProcId) -> bool {
             self.ctx
                 .server
                 .deliver_app_event(self.ctx.sink, app, &WindowEvent::AppBarDefault)
                 .is_ok()
         }
 
-        fn raise_recent_window(&mut self, pid: u64) -> bool {
-            let Some((_, wm)) = self.recent_window(pid) else {
+        fn raise_recent_window(&mut self, app: ProcId) -> bool {
+            let Some(wm) = self.recent_window(app) else {
                 return false;
             };
             self.shell.raise_window(self.compositor, wm)
+        }
+    }
+
+    /// The session's live document relay: redeem the grant the asking
+    /// process minted to this one, hand the same authority on to the
+    /// instance that will show it, and close this side's descriptor.
+    ///
+    /// The kernel copies the *first* grantor's captured identity onto the
+    /// onward delegation rather than re-capturing it here, so the document is
+    /// read under the authority of whoever opened it and never under the
+    /// session's own, larger reach. A read-only delegation has no extent to
+    /// bound, which is why the ceiling is zero.
+    struct RtDocumentRelay;
+
+    impl DocumentRelay for RtDocumentRelay {
+        fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno> {
+            let held = tairix_rt::File::from_delegation(grant).map_err(Errno::from_syscall)?;
+            let minted = tairix_rt::fd_grant(held.fd(), 0, app);
+            u64::try_from(minted)
+                .ok()
+                .filter(|&handle| handle != 0)
+                .ok_or(Errno::PermissionDenied)
         }
     }
 
@@ -6044,34 +6101,28 @@ mod program {
             run_path: &str,
             label: &str,
             args: &[&[u8]],
-            target: Option<&str>,
+            target: Option<LaunchTarget<'_>>,
         ) -> Option<u64> {
-            let plan = match self.launched.running_from(run_path) {
+            let running = self.launched.running_from(run_path);
+            let plan = match running.and_then(|pid| self.identity.proc_id_of(pid)) {
                 None => Launch::Spawn,
-                Some(pid) => {
+                Some(app) => {
                     let one_instance = self.apps.runs_one_instance(bundle_of_run_path(run_path));
                     let mut reach = Reach {
                         ctx: self,
                         shell,
                         compositor,
                     };
-                    resolve_launch(&mut reach, Some(pid), one_instance, target)
+                    resolve_launch(&mut reach, Some(app), one_instance, target)
                 }
             };
             match plan {
                 Launch::Spawn => spawn_and_record(self.launched, run_path, label, args),
-                Launch::Reused { pid, .. } => Some(pid),
+                // The recorded child the plan reused, named back as the pid
+                // the launch table and every caller here speak in.
+                Launch::Reused { .. } => running,
             }
         }
-    }
-
-    /// The bundle *directory* an entry-point `Run` path names.
-    ///
-    /// The launch table records the `Run` path (the child's attested bundle
-    /// identity) and the manifest lives beside it, so this is the one
-    /// conversion between them.
-    fn bundle_of_run_path(run_path: &str) -> &str {
-        run_path.strip_suffix(BUNDLE_RUN_SUFFIX).unwrap_or(run_path)
     }
 
     /// Spawn `run_path` and record the launch: the half of a launch that
@@ -6373,6 +6424,7 @@ mod program {
                 // vouch for the seat and says so rather than claiming it
                 // free.
                 seat_held: true,
+                relay: &mut RtDocumentRelay,
             };
             server.client_exited(&mut bridge, owner);
         }

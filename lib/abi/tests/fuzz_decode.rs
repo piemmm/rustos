@@ -85,10 +85,11 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, decode_minted_id_reply, AppBar, AppBarClick,
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
-    AppMenuRow, AppMenuShortcut, MenuOutcome, MenuRefusal, TooltipText, WindowEvent, WindowRegion,
-    WindowRequest, WindowSizing, WindowTitle,
+    decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_minted_id_reply,
+    decode_open_target_reply, AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId,
+    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
+    BundleRunPath, DocumentName, HandOverDocument, MenuOutcome, MenuRefusal, TooltipText,
+    WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
@@ -644,6 +645,8 @@ fn exercise_window_ipc(bytes: &[u8]) {
     let _ = decode_create_reply(bytes);
     let _ = decode_desktop_reply(bytes);
     let _ = decode_minted_id_reply(bytes);
+    let _ = decode_open_target_reply(bytes);
+    let _ = decode_hand_over_reply(bytes);
 }
 
 /// Drive the notification-channel decoder on `bytes` (one arm of
@@ -1334,9 +1337,30 @@ fn structured_reply_inputs_with_corrupted_fields_never_panic() {
 /// operation from having no coverage at all.
 #[test]
 fn structured_window_requests_with_corrupted_fields_never_panic() {
-    // A `Vec` rather than an array: a `WindowRequest` carries a whole menu
-    // inline, so nine of them is more than belongs on a stack frame.
-    let seeds = std::vec![
+    let mut base = std::vec![0u8; WindowRequest::MAX_WIRE_LEN + 1];
+    for seed in window_request_seeds() {
+        let len = seed
+            .encode(&mut base)
+            .expect("the max frame holds any request");
+        for byte in 0..len {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base[..len]);
+                exercise(&base[..len - 1]);
+                exercise(&base[..=len]);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
+/// One well-formed seed per window-channel operation, including the narrowest
+/// and widest form of each variable-width one.
+///
+/// A `Vec` rather than an array: a `WindowRequest` carries a whole menu
+/// inline, so a dozen of them is more than belongs on a stack frame.
+fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
+    std::vec![
         WindowRequest::Create {
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -1399,7 +1423,22 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
                 AppMenuLabel::new("Edit").expect("a valid title"),
             )),
         },
-        WindowRequest::TakeOpenTarget { window_id: 3 },
+        WindowRequest::TakeOpenTarget,
+        // Both hand-over shapes: a bare launch, and one carrying a document,
+        // so a flip lands on the grant handle and on each length prefix.
+        WindowRequest::HandOverLaunch {
+            run_path: BundleRunPath::new("/System/Applications/view.app/Run")
+                .expect("a valid bundle path"),
+            document: None,
+        },
+        WindowRequest::HandOverLaunch {
+            run_path: BundleRunPath::new("/System/Applications/view.app/Run")
+                .expect("a valid bundle path"),
+            document: Some(HandOverDocument {
+                name: DocumentName::new("holiday.png").expect("a valid name"),
+                grant: 9,
+            }),
+        },
         // Both tooltip shapes: one carrying text, and the empty one that
         // withdraws a declaration, so a flip lands on each length prefix.
         WindowRequest::SetTooltip {
@@ -1413,22 +1452,7 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
             text: TooltipText::new("").expect("empty withdraws"),
         },
         WindowRequest::QueryDesktop,
-    ];
-    let mut base = std::vec![0u8; WindowRequest::MAX_WIRE_LEN + 1];
-    for seed in seeds {
-        let len = seed
-            .encode(&mut base)
-            .expect("the max frame holds any request");
-        for byte in 0..len {
-            for bit in 0..8u32 {
-                base[byte] ^= 1 << bit;
-                exercise(&base[..len]);
-                exercise(&base[..len - 1]);
-                exercise(&base[..=len]);
-                base[byte] ^= 1 << bit;
-            }
-        }
-    }
+    ]
 }
 
 /// The rich menu both structured menu seeds carry, appended to `menu`: every
@@ -1526,7 +1550,7 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
             item: AppMenuItemId::new(7).expect("a valid id"),
         }
         .to_le_bytes(),
-        WindowEvent::OpenRequested { window_id: 4 }.to_le_bytes(),
+        WindowEvent::OpenRequested.to_le_bytes(),
     ];
     for mut base in events {
         for byte in 0..base.len() {

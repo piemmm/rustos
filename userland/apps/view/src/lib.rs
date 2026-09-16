@@ -598,8 +598,12 @@ impl Document {
 /// [`Open`](Request::Open) has been answered, so an open is never displaced.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Request {
-    /// Read the document the program was given and open it.
-    Open,
+    /// Read the document the embedder holds and open it.
+    Open {
+        /// The open this asks for, echoed on the answer so one the viewer has
+        /// abandoned is dropped rather than adopted.
+        open_id: u64,
+    },
     /// Bring the session to `page`, then draw `window` of the page scaled to
     /// `extent` — both in **page** space.
     ///
@@ -624,6 +628,8 @@ pub enum Request {
 pub enum Answer {
     /// The document opened, or would not.
     Opened {
+        /// The open this answers, echoed from the request.
+        open_id: u64,
         /// What the container declares, the file's name (empty when the
         /// embedder was never told one) and its length.
         opened: Result<(ViewDocument, String, u64), view::Refusal>,

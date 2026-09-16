@@ -34,8 +34,14 @@ thing the file manager hands a picture to (`Activation::OpenFile` /
 `OpenWith`, `plans/NEW-FILEMANAGER.md`), and a standalone app that asks the
 session's trusted picker when launched with no document.
 
-`instances = "multiple"`: several documents open side by side, because
-comparing two pictures is the ordinary case.
+**Single instance, a window per document, resident on the icon bar.** Several
+documents open side by side is the ordinary case for a viewer, and they are
+several *windows* in the one process — the rule for every application with an
+icon-bar slot. Containment is not lost by it: each window's document is decoded
+in its **own** sandbox, and each job and answer carries its window's key, so a
+malformed file crashes its own decoder and one window's decode can never land
+in another. The manifest states no `instances` key, because absent means
+single.
 
 **It is a viewer.** It holds no write capability and has no editing, saving,
 export, annotation, or printing. That is not an omission to be filled in later;
@@ -365,24 +371,49 @@ own — menus via
 `open_menu` + `AppMenu` (session-owned plates — the app draws no menu pixel),
 `set_tooltip` for the toolbar, and `Scrolled { dx, dy }` for the wheel.
 
-**The window appears with something in it.** Launched on its own the viewer
-holds no document and asks the session's picker for one, and a choice takes as
-long as the user takes — so it *withholds* its present until it has either a
-document or a reason there is none (`View::nothing_to_show`, which the embedder
-pairs with "has anything of this window been on screen yet"). The session shows
-a served window on its first present, so withholding the present withholds the
-window: without it, `view` launched standalone flashed an empty window and left
-it sitting behind the chooser. The first present that is *not* withheld is
-forced whole, because nothing of the window is on screen. Every conclusion
-shows it: the document once it decodes, `Refusal::Failed` if it will not,
-`Refusal::Cancelled` if the user chose nothing, and `Refusal::PickRefused` if
-the session would not open a chooser at all (a pick already showing for
-another application, a refused listing) — a refusal states its reason rather
-than leaving a blank window. That last one is why `View::cancelled` became
-`View::no_document(why)`: a refused *ask* is the one outcome with nothing
-coming after it, so a window withheld on it would never appear, and it has to
-be recorded as the reason there is no document rather than only mentioned on
-`stderr` a graphical launch has nobody reading.
+**No window until there is something to show.** Launched by the user the
+viewer opens **no window at all** and takes its icon-bar slot: with nothing to
+display there is nothing to show, and the session shows a served window on its
+first present, so opening one would put an empty frame on the desktop. A
+primary click on the slot (`AppBarDefault`, delivered only while the
+application owns no window) opens a window and asks the picker, and *that*
+window's present is withheld until it has either a document or a reason there
+is none (`View::nothing_to_show`, which the embedder pairs with "has anything
+of this window been on screen yet"). The first present that is not withheld is
+forced whole, because nothing of the window is on screen.
+
+A pick the user **cancels** closes that window rather than leaving it stating a
+refusal they already know about — they chose nothing, so there is nothing to
+display, and `Refusal::Cancelled` is therefore deleted rather than shown. A
+window that already holds a document keeps it. Every other conclusion is shown:
+the document once it decodes, `Refusal::Failed` if it will not, and
+`Refusal::PickRefused` if the session would not open a chooser at all (a pick
+already showing for another application, a refused listing). That last one is
+why `View::cancelled` became `View::no_document(why)`: a refused *ask* is the
+one outcome with nothing coming after it, so a window withheld on it would
+never appear.
+
+**Closing a window keeps the viewer; only *Quit* ends it.** The slot's Quit row
+closes every window and exits; `CloseRequested` closes one and leaves the
+process resident and clickable. A closed window's decoder is ended by a job on
+the worker (the sandboxes are the worker's and the loop may not reach them), so
+its child process goes with it.
+
+One job is outstanding at a time and the window it is asked *for* rotates: the
+desk is latest-wins, so submitting while one is in flight would displace a job
+a window is waiting for, and a fixed scan order would let an animating window
+starve another's open. `Request::Open` additionally carries a monotonic **open
+id** minted by `View::expect_document`, echoed back on the answer and dropped
+on mismatch — the same rule `Answer::Shown`'s echoed shape already has — so
+closing a window with a read in flight cannot land a stale document in a later
+one.
+
+**A document may also be handed to the running instance.** The file manager
+opens the file under its own authority and offers it through the desktop's
+single-instance funnel (`WindowRequest::HandOverLaunch`); the session relays the
+delegation on and wakes the viewer, which drains `TakeOpenTarget` and opens a
+window per document. A `Path` target it cannot act on and says so: it holds no
+authority to open a name with.
 
 Behaviour: zoom in/out/fit/actual size, drag pan with scrollbars when zoomed
 in, rotate and flip, page/frame navigation with a thumbnail sidebar, animation
@@ -737,11 +768,10 @@ read this paragraph first; the rustdoc on both types points here.
   than memory costs the window.
 
 - **`userland/apps/view` engine, `Run`, bundle, 13 Help locales — done.**
-  `instances = "multiple"` is what the flag actually means — several
-  *processes*, not several windows — so each viewer is one window over the
-  shell's `AppWindow`, and comparing two pictures is opening the second. That
-  is also the containment: a malformed file crashes its own decoder and
-  disturbs no other window.
+  Single instance, a window per document: each window holds its own
+  `WindowPane`, retained surface, engine, and sandbox, which is the
+  containment — a malformed file crashes its own decoder and disturbs no other
+  window.
 
   The engine holds the three spaces apart, and that is the load-bearing part.
   A render request names an extent and a window **in page space**, because the
@@ -912,6 +942,26 @@ read this paragraph first; the rustdoc on both types points here.
   take then.
 
 ## Noticed and not yet fixed
+
+- **The three-principal document hand-over has no QEMU vertical.** Every layer
+  is host-tested — the `HandOverLaunch` and open-target wire shapes and their
+  refusals, the engine's per-client queue and its wake, the session's
+  resolution and the relay's fail-closed paths, the kernel's non-widening
+  pass-through of a held delegation, and the viewer's drain — but the claim
+  that *three* principals and the kernel wire up end to end (files mints,
+  the session redeems and re-grants, the viewer redeems) is the one no host
+  test can make. It wants a vertical latching, in order, `comm=files
+  sc=fd_grant`, `comm=desktop sc=fd_redeem`, `comm=desktop sc=fd_grant`,
+  `comm=view sc=fd_redeem`, plus a second `WINDOW_SHOWN` for the same owner
+  (one viewer process, two windows).
+
+  What it needs first is a way to drive the **file manager's own window** by
+  pointer: the picker's rows are reconstructible because the picker is a
+  fixed-origin dialog (`reconstruct_pick_click` over `PICKER_ORIGIN`), while
+  the autostarted file manager's window is placed by the session's cascade and
+  no script reconstructs a row in it. That reconstruction is the work, and it
+  is shared with every future gesture into a file-manager window rather than
+  being this vertical's alone. Recorded rather than deferred silently.
 
 - **`WindowEvent::FilePicked` carries no name, so a picked document is
   unnamed.** The pick conclusion carries the one-shot `fd_grant` handle and

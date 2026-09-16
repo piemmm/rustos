@@ -57,14 +57,14 @@ use crate::{
     load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
     AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell,
-    FrameContent, FramePacer, FrameReportGate, Handover, IconRasteriser, InputSource, Launch,
-    LaunchHost, LaunchTable, LockOutcome, LockedDrain, OwnerBundleGate, OwnerWindow,
-    PresentedOwners, ScreenFade, ScreenLock, SessionFileReader, SessionInputResponse,
-    SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox,
-    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
-    BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS,
-    SWITCHBOARD_RUN_PATH,
+    DocumentRelay, FrameContent, FramePacer, FrameReportGate, Handover, IconRasteriser,
+    InputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LockOutcome, LockedDrain,
+    OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade, ScreenLock, SessionFileReader,
+    SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost,
+    SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge,
+    TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
+    DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
+    MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::WindowSizing;
 
@@ -4398,6 +4398,91 @@ fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
 }
 
 #[test]
+fn a_slot_is_announced_once_it_is_on_screen_and_again_only_if_it_returns() {
+    // The only honest witness that a *resident* application is clickable: it
+    // may never open a window, so nothing about a window can say when its
+    // slot appeared. Announced after a frame reached the display, which is
+    // when the claim becomes true, and latched so a steady desktop does not
+    // repeat it on every frame.
+    let mut service = AppBarService::new();
+    let owner = window_owner(1);
+    let mut announced = Vec::new();
+    service.report_newly_shown(|app| announced.push(app));
+    assert!(
+        announced.is_empty(),
+        "nothing is seated, so nothing is on screen"
+    );
+
+    service
+        .declare(owner, &app_bar(AppBarClick::Open))
+        .expect("declared");
+    let _ = service.strip(&[], |_| None, &mut MemoryAssets::default());
+    service.report_newly_shown(|app| announced.push(app));
+    assert_eq!(
+        announced,
+        vec![owner],
+        "a declaring application with no window still has a slot to click"
+    );
+    announced.clear();
+    service.report_newly_shown(|app| announced.push(app));
+    assert!(
+        announced.is_empty(),
+        "once on screen, it is not re-announced"
+    );
+
+    // The process going takes the latch with it, so an application that comes
+    // back is announced afresh rather than staying silent for ever.
+    service.withdraw(owner);
+    let _ = service.strip(&[], |_| None, &mut MemoryAssets::default());
+    service
+        .declare(owner, &app_bar(AppBarClick::Open))
+        .expect("re-declared");
+    let _ = service.strip(&[], |_| None, &mut MemoryAssets::default());
+    service.report_newly_shown(|app| announced.push(app));
+    assert_eq!(announced, vec![owner]);
+}
+
+#[test]
+fn a_resident_instance_is_found_by_the_bundle_it_was_launched_from() {
+    // What a hand-over resolves a live instance through: the bundle each
+    // slot-holder was launched from, which the strip already records for its
+    // icons. An application with no slot is not resident and is not found —
+    // it has no application-scoped route to reach either.
+    let mut service = AppBarService::new();
+    let resident = window_owner(1);
+    let barless = window_owner(2);
+    service
+        .declare(resident, &app_bar(AppBarClick::Open))
+        .expect("declared");
+    let _ = service.strip(
+        &[(resident, TaskId(0)), (barless, TaskId(1))],
+        |owner| {
+            (owner == resident)
+                .then(|| String::from("/System/Applications/view.app"))
+                .or_else(|| {
+                    (owner == barless).then(|| String::from("/System/Applications/other.app"))
+                })
+        },
+        &mut MemoryAssets::default(),
+    );
+    assert_eq!(
+        service.resident("/System/Applications/view.app"),
+        Some(resident)
+    );
+    assert_eq!(
+        service.resident("/System/Applications/other.app"),
+        None,
+        "an application that declared no icon-bar presence is not resident"
+    );
+    assert_eq!(service.resident("/System/Applications/absent.app"), None);
+
+    // And it stops being resident the moment its process goes.
+    service.withdraw(resident);
+    let _ = service.strip(&[], |_| None, &mut MemoryAssets::default());
+    assert_eq!(service.resident("/System/Applications/view.app"), None);
+}
+
+#[test]
 fn a_window_alone_holds_a_slot_with_no_menu_and_a_raising_click() {
     let mut service = AppBarService::new();
     let owner = window_owner(1);
@@ -4736,6 +4821,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             apps: &mut apps,
             menu: &mut MenuChain::new(),
             seat_held: false,
+            relay: &mut RecordingRelay::default(),
         };
         tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(AppBarClick::Open))
             .expect("the session lists it");
@@ -4755,6 +4841,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             apps: &mut apps,
             menu: &mut MenuChain::new(),
             seat_held: false,
+            relay: &mut RecordingRelay::default(),
         };
         tairix_window::WindowHost::app_bar_withdrawn(&mut host, owner);
     }
@@ -5890,6 +5977,12 @@ fn session_proc_id() -> ProcId {
     ProcId::from_raw([7u8; tairix_abi::PROC_ID_LEN])
 }
 
+/// The monitor instance's own kernel-attested identity — what every route
+/// to a live instance actually addresses.
+fn monitor_instance() -> ProcId {
+    ProcId::from_raw([40u8; tairix_abi::PROC_ID_LEN])
+}
+
 /// A launch table holding a live monitor instance, exactly as bring-up
 /// records it.
 fn monitor_launched() -> LaunchTable {
@@ -6025,12 +6118,14 @@ fn relaunching_the_monitor_reaches_the_recorded_instance() {
     assert_eq!(
         resolve_launch(
             &mut host,
-            launched.running_from(SWITCHBOARD_RUN_PATH),
+            launched
+                .running_from(SWITCHBOARD_RUN_PATH)
+                .map(|_| monitor_instance()),
             true,
             None
         ),
         Launch::Reused {
-            pid: MONITOR_PID,
+            app: monitor_instance(),
             by: Handover::Default
         },
         "the recorded instance is the live one"
@@ -6048,13 +6143,33 @@ fn relaunching_the_monitor_with_none_live_spawns() {
     assert_eq!(
         resolve_launch(
             &mut host,
-            launched.running_from(SWITCHBOARD_RUN_PATH),
+            launched
+                .running_from(SWITCHBOARD_RUN_PATH)
+                .map(|_| monitor_instance()),
             true,
             None
         ),
         Launch::Spawn
     );
     assert_eq!(host.asked, 0, "there is no instance to ask");
+}
+
+/// The session's document relay, recording every hand-on and answering with
+/// whatever a test wired — `NotSupported` by default, which is the relay a
+/// test that is not about hand-overs wants.
+#[derive(Default)]
+struct RecordingRelay {
+    /// Every `(grant, recipient)` the relay was asked to hand on.
+    relayed: Vec<(u64, ProcId)>,
+    /// The handle a successful relay mints, or `None` to refuse.
+    mints: Option<u64>,
+}
+
+impl DocumentRelay for RecordingRelay {
+    fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno> {
+        self.relayed.push((grant, app));
+        self.mints.ok_or(Errno::NotSupported)
+    }
 }
 
 /// A reach that counts what it was asked and refuses everything: the
@@ -6065,17 +6180,17 @@ struct CountingReach {
 }
 
 impl LaunchHost for CountingReach {
-    fn queue_open_target(&mut self, _pid: u64, _path: &str) -> bool {
+    fn queue_open_target(&mut self, _app: ProcId, _target: LaunchTarget<'_>) -> bool {
         self.asked += 1;
         false
     }
 
-    fn ask_default(&mut self, _pid: u64) -> bool {
+    fn ask_default(&mut self, _app: ProcId) -> bool {
         self.asked += 1;
         true
     }
 
-    fn raise_recent_window(&mut self, _pid: u64) -> bool {
+    fn raise_recent_window(&mut self, _app: ProcId) -> bool {
         self.asked += 1;
         false
     }
@@ -9978,6 +10093,7 @@ fn desktop_info_reports_compositor_state() {
         apps: &mut apps,
         menu: &mut MenuChain::new(),
         seat_held: false,
+        relay: &mut RecordingRelay::default(),
     };
 
     // What an application is actually handed, whole: the record is one
@@ -10026,6 +10142,7 @@ fn with_window_host<R>(
         apps: &mut apps,
         menu: &mut MenuChain::new(),
         seat_held: false,
+        relay: &mut RecordingRelay::default(),
     };
     body(&mut host)
 }

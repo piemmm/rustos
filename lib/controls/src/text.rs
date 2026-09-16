@@ -35,8 +35,8 @@ use tairix_util::secret::wipe;
 
 use crate::damage;
 use crate::paint::{
-    paint_bead, paint_filled_circle, paint_plate, plate_border, resolve_bead, resolve_frame,
-    role_font, surface_rect, to_i32, withheld, PlateStyle,
+    ground_fill, paint_bead, paint_filled_circle, paint_plate, plate_border, resolve_bead,
+    resolve_frame, role_font, surface_rect, to_i32, withheld, ChromeLayer, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, ValidationState,
@@ -685,16 +685,26 @@ impl FieldCore {
         let border = plate_border(theme, scale);
         let radius = scale.scale_length(metrics.control_corner_radius).min(h / 2);
         let disposition = self.state.disposition();
-        let frame = resolve_frame(theme, self.role, self.state);
-
-        // A read-only field recesses its plate (surface, not surface_raised)
-        // while keeping full-contrast text, so it reads differently from a
-        // muted disabled field and from a denied field's Authority Mark.
-        let plate = if self.read_only && disposition != ControlDisposition::DisabledByState {
-            Color::from(palette.surface)
+        // The ground a field's plate takes, where the recipe's plate is a
+        // plain background. A field the user may *write* in is a page — paper
+        // on a light appearance — because the ground is the affordance; a
+        // read-only one recesses onto the window ground so it reads as a value
+        // shown rather than entered, keeping full-contrast text so it is still
+        // not a muted disabled field. Neither substitutes a plate the recipe
+        // put a colour on: a disabled, denied, or failed-closed field is
+        // stating something there. `ground_fill` is what lets either ground
+        // sit on floating chrome as glass rather than as an opaque patch.
+        let ground = if self.editable() {
+            Some(palette.document)
+        } else if self.read_only && disposition != ControlDisposition::DisabledByState {
+            Some(palette.surface)
         } else {
-            frame.plate
+            None
         };
+        let mut frame = resolve_frame(theme, self.role, self.state);
+        if let Some(ground) = ground {
+            frame = frame.grounded_on(Color::from(ground_fill(theme, ground, ChromeLayer::Plate)));
+        }
 
         // Validation drives the rim segment on an otherwise-interactive field;
         // a denied/disabled/failed field keeps its disposition rim untouched.
@@ -715,7 +725,7 @@ impl FieldCore {
             &PlateStyle {
                 radius,
                 border,
-                plate,
+                plate: frame.plate,
                 rim,
                 focused: frame.focused,
                 ring: Color::from(palette.rim_active),

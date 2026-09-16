@@ -791,6 +791,23 @@ const AUTOLOAD_DESKTOP_REVEALED_MARKER: &str = tairix_desktop_session::DESKTOP_R
 /// whatever is behind it.
 const WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
 
+/// Serial marker a vertical gates a click on a *resident* application's
+/// icon-bar slot on: the session's own announcement that a frame carrying
+/// that slot reached the display. Imported from the session crate's own
+/// definition, so the emitter and this consumer cannot drift.
+///
+/// The only honest gate for such a click. An application that sits on the bar
+/// with no window open — the shape every single-instance application with a
+/// slot has — never emits [`WINDOW_SHOWN_MARKER`], so a click gated on that
+/// would wait for a window the application is waiting to be *told* to open.
+/// Its own declaration reply says only that the session accepted the
+/// declaration, which is not yet a drawn slot to hit.
+///
+/// A vertical counts occurrences: the strip seats the autostarted file manager
+/// first, so the launched application's slot is the
+/// [`APPBAR_LAUNCHED_SLOT`]-th after it.
+const APPBAR_SLOT_MARKER: &str = tairix_desktop_session::APP_BAR_SLOT_SHOWN_MESSAGE;
+
 /// Serial marker the picker-delegation vertical gates its pick-click on: the
 /// session's own announcement that a frame carrying the trusted picker — with
 /// its listing landed — reached the display. Imported from the session crate's
@@ -10757,9 +10774,16 @@ fn fsmutate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 ///   request was accepted, and the listing arrives on a worker, so an accepted
 ///   pick is not yet a row to click.
 ///
-/// The viewer holds no filesystem capability of its own and is handed no
-/// document, so it asks for a pick on launch; the click on a regular-file row
-/// is what makes the session mint the delegation the guest is waiting for.
+/// The viewer holds no filesystem capability of its own, and is a *resident*
+/// single-instance application: launched by the user it opens no window at all
+/// and simply takes its icon-bar slot. The primary click on that slot is what
+/// makes it open a window and ask for a pick, and the click on a regular-file
+/// row is what makes the session mint the delegation the guest is waiting for.
+///
+/// The slot click is gated on the session's own [`APPBAR_SLOT_MARKER`],
+/// counted: the autostarted file manager's slot is announced first, so the
+/// viewer's is the next one. Nothing earlier is honest — the viewer opens no
+/// window, so there is no window witness to wait for.
 fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_qemu::MouseButton;
     use tairix_test_filepick_qemu_aarch64::PICK_APP_NAME;
@@ -10774,11 +10798,23 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         "pick script",
     )?;
     let document_row = reconstruct_pick_click(&shell)?;
+    let slot = rect_centre(
+        appbar_slot_rect(shell.session().taskbar().theme(), APPBAR_LAUNCHED_SLOT)?,
+        "slot",
+    )?;
 
     let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
     pen.click(revealed, 1, MouseButton::Primary, library_button);
     pen.click(revealed, 1, MouseButton::Primary, entry_row);
+    // The viewer is resident: its slot is drawn and clickable before it owns
+    // any window, and the click is what makes it open one and ask to pick.
+    pen.click(
+        APPBAR_SLOT_MARKER,
+        u32::try_from(APPBAR_LAUNCHED_SLOT + 1).map_err(|_| "pick script: slot out of range")?,
+        MouseButton::Primary,
+        slot,
+    );
     pen.click(
         FILEPICK_PICKER_MARKER,
         1,

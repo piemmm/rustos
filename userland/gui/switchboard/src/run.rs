@@ -840,7 +840,7 @@ mod program {
             | WindowEvent::FilePicked { .. }
             // The monitor shows the machine, not a document: it declares no
             // file association, so no open target can name anything here.
-            | WindowEvent::OpenRequested { .. }
+            | WindowEvent::OpenRequested
             | WindowEvent::PickCancelled { .. } => return,
         };
         if let Some(action) = action {

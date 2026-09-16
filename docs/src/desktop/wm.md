@@ -324,13 +324,16 @@ that curve two ways:
 
 The title bar draws no ground of its own: the frame has already laid its plate
 under the whole window, rounded, so filling the band again would square off the
-very corners the rim curves around — in the colour that is already there.
+very corners the rim curves around — in the colour that is already there. That
+plate is the **title band's** ground (`Palette::title_band`), not the window
+surface the client draws its own content on, because the band is all of it the
+compositor leaves visible: the client covers the rest.
 
 ## The client plate
 
 **A decorated window's client rectangle is always fully covered.** The
 client's own pixels cover as much of it as they extend to; every remaining
-column and row is the frame's body colour (`Palette::surface`) — the same
+column and row is the frame's plate colour (`Palette::title_band`) — the same
 plate the frame lays inside its rim, resolved once per window with its band
 (`Window::refresh_band`) and laid a run at a time on the composite's fast path
 (`blend_solid_span`). An *undecorated* window is nothing but its client, so it

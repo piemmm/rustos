@@ -8,10 +8,12 @@ view — gwyliwr graffigol delweddau a dogfennau
 
 ## DESCRIPTION
 
-Yn agor ffenestr bwrdd gwaith sy'n dangos delwedd neu ddogfen. Wedi'i
-lansio â dogfen — o'r rheolwr ffeiliau, neu drwy agor delwedd — mae'n dangos
-y ffeil honno; wedi'i lansio ar ei ben ei hun, mae'n gofyn i ddewisydd
-ffeiliau dibynadwy sesiwn y bwrdd gwaith ddewis un.
+Yn dangos delweddau a dogfennau mewn ffenestri bwrdd gwaith. Wedi'i lansio
+â dogfen — o'r rheolwr ffeiliau, neu drwy agor delwedd — mae'n agor ffenestr
+ar y ffeil honno. Wedi'i lansio ar ei ben ei hun, nid yw'n agor ffenestr o
+gwbl: mae'n cymryd ei le ar y bar eiconau yn unig. Cliciwch ei eicon i agor
+ffenestr a dewis ffeil drwy ddewisydd ffeiliau dibynadwy sesiwn y bwrdd
+gwaith.
 
 Nid oes gan y gwyliwr unrhyw allu ar y system ffeiliau: ni all agor,
 rhestru na darllen dim ohono'i hun. Mae'r sesiwn yn pori ar ei ran o dan ei
@@ -27,8 +29,10 @@ RISC OS Sprite. Mae ffeil y mae'r dadgodiwr yn ei gwrthod yn nodi ei rheswm
 yn y ffenestr ac ar y llif gwallau safonol; ni adewir y ffenestr yn wag
 byth, ac ni ffugir delwedd byth.
 
-Mae sawl dogfen ar y tro yn wylwyr ar wahân: cymharu dwy ddelwedd ochr yn
-ochr yw agor yr ail. Mae cau ffenestr yn dod â'i gwyliwr i ben.
+Mae sawl dogfen ar y tro yn sawl ffenestr o'r un gwyliwr: cymharu dwy
+ddelwedd ochr yn ochr yw agor yr ail. Mae cau ffenestr yn gadael y gwyliwr
+ar y bar eiconau, yn barod am y ddogfen nesaf; rhes Gadael ei fwydlen eicon
+sy'n dod â'r gwyliwr i ben.
 
 Mae'r bar offer ar y brig yn cynnwys, yn eu trefn: lleihau, chwyddo, ffitio
 yn y ffenestr, maint gwirioneddol, cofnod blaenorol, cofnod nesaf, cylchdroi

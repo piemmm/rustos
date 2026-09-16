@@ -124,7 +124,9 @@ Every plate carries one, and it is `lib/controls::window`'s `TitleBar` with
 an **empty command set**, never a second title-bar control (§2.2). Two
 properties follow from that emptiness rather than from new knobs: with no
 command clusters the drag span is the whole band, and with no leading cluster
-to justify against the title centres. The gesture is the one already
+to justify against the title centres. Its ground is `Palette::title_band`, the
+same role a *window's* furniture bar takes — one role, because a heading band
+is this control with nothing in it. The gesture is the one already
 compared and tested — press, drag threshold, `TitleBarEvent::DragBegin` /
 `DragMoved` / `DragEnd` — and the title text goes through the same
 untrusted-label bounding a window title does.

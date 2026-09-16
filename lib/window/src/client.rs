@@ -23,16 +23,37 @@ use tairix_abi::input::{
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, decode_minted_id_reply, decode_open_target_reply,
-    AppBar, AppMenu, PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest,
-    WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_MINTED_ID_REPLY_LEN,
-    WINDOW_OPEN_TARGET_REPLY_MAX,
+    decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_minted_id_reply,
+    decode_open_target_reply, AppBar, AppMenu, BundleRunPath, HandOverDocument, HandOverOutcome,
+    OpenTarget, PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
+    WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
 use crate::server::{PopupSpec, WindowSizing};
+
+/// An open target an application pulled, owned rather than borrowed from the
+/// reply buffer so the pull can be drained in a loop.
+///
+/// [`tairix_abi::window_ipc::OpenTarget`]'s owned twin: the wire type
+/// borrows from the frame it decoded, which a caller draining a queue cannot
+/// hold across the next call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Target {
+    /// A path the user named. Confers no access.
+    Path(String),
+    /// A document already opened for this application, reachable through a
+    /// one-shot `fd_redeem` handle.
+    Document {
+        /// Its own file name, for a title. Empty when unknown.
+        name: String,
+        /// The `fd_redeem` handle. Never zero.
+        grant: u64,
+    },
+}
 
 /// High tag of an app's event-mailbox endpoint id (see
 /// [`event_endpoint_for`]).
@@ -694,37 +715,84 @@ impl<T: WindowTransport> WindowClient<T> {
         decode_minted_id_reply(&reply[..len])
     }
 
-    /// Take the next path queued for `window_id` to open, or `None` once the
-    /// queue is drained.
+    /// Take the next target queued for this application to open, or `None`
+    /// once the queue is drained.
     ///
     /// The answer to a [`WindowEvent::OpenRequested`] wake, which says only
     /// that *at least one* target is waiting: drain in a loop until this
     /// answers `None`, since one event may cover several targets and another
     /// may arrive while this one is still being drained.
     ///
-    /// The path is the file or folder the user asked this application to
-    /// open. It confers no access — the application opens it under its own
-    /// authority, exactly as it would a path in its own argument list.
+    /// A [`Target::Path`] is the file or folder the user asked this
+    /// application to open, and confers no access — the application opens it
+    /// under its own authority, exactly as it would a path in its own
+    /// argument list. A [`Target::Document`] is a file *already* opened by
+    /// whoever handed it over, reachable through a one-shot delegation the
+    /// kernel minted to this application, which is the only form an
+    /// application holding no filesystem capability can act on.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — no such window, or not this caller's.
+    /// * [`Errno::NotFound`] — this application has no target queue (it has
+    ///   declared no icon-bar presence and owns no window, so the session has
+    ///   nothing to deliver a wake to).
     /// * [`Errno::NotSupported`] — the session serves no open targets.
     /// * Any transport refusal, or a malformed reply (fail closed, never a
     ///   guessed path).
-    pub fn take_open_target(&mut self, window_id: u64) -> Result<Option<String>, Errno> {
-        let request = WindowRequest::TakeOpenTarget { window_id };
+    pub fn take_open_target(&mut self) -> Result<Option<Target>, Errno> {
+        let request = WindowRequest::TakeOpenTarget;
         let len = request.encode(&mut self.frame)?;
         let n = self
             .transport
             .call(&self.frame[..len], &mut self.target_reply)?;
-        let path = decode_open_target_reply(&self.target_reply[..n])?;
-        match path {
-            None => Ok(None),
-            Some(bytes) => Ok(Some(String::from(
+        let text = |bytes: &[u8]| -> Result<String, Errno> {
+            Ok(String::from(
                 core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?,
-            ))),
+            ))
+        };
+        match decode_open_target_reply(&self.target_reply[..n])? {
+            None => Ok(None),
+            Some(OpenTarget::Path(path)) => Ok(Some(Target::Path(text(path)?))),
+            Some(OpenTarget::Document { name, grant }) => Ok(Some(Target::Document {
+                name: text(name)?,
+                grant,
+            })),
         }
+    }
+
+    /// Ask the session to reach the live instance of the bundle whose entry
+    /// binary is `run_path`, handing it `document` if one is named.
+    ///
+    /// The single-instance funnel for a launcher that is not the desktop: a
+    /// file manager that spawns a viewer per document otherwise bypasses it
+    /// and a bundle declaring one instance gets several. `document`'s grant
+    /// is minted by the *caller*, to the session
+    /// ([`session`](Self::session)), from a descriptor the caller opened
+    /// itself — the session opens nothing on the caller's behalf.
+    ///
+    /// [`HandOverOutcome::NotRunning`] is an answer rather than a refusal: it
+    /// says there was no instance to reach, so the caller launches the bundle
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] — `run_path` is longer than a hand-over
+    ///   may name; the caller launches the bundle the ordinary way.
+    /// * The session's own refusal (a grant it could not redeem, a queue
+    ///   already full), a transport failure, or a malformed reply.
+    pub fn hand_over_launch(
+        &mut self,
+        run_path: &str,
+        document: Option<HandOverDocument>,
+    ) -> Result<HandOverOutcome, Errno> {
+        let request = WindowRequest::HandOverLaunch {
+            run_path: BundleRunPath::new(run_path)?,
+            document,
+        };
+        let len = request.encode(&mut self.frame)?;
+        let mut reply = [0u8; WINDOW_HAND_OVER_REPLY_LEN];
+        let n = self.transport.call(&self.frame[..len], &mut reply)?;
+        decode_hand_over_reply(&reply[..n])
     }
 
     /// Declare — or withdraw — the tooltip for `region` of `window_id`.

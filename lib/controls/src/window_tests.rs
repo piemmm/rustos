@@ -1093,7 +1093,7 @@ fn nothing_the_frame_draws_squares_off_its_rounded_corner() {
 }
 
 /// The wash each command lights up with on `theme`: its authored hue resolved
-/// against the window body its title bar is painted on.
+/// against the band it is seated in.
 ///
 /// The kind-to-role mapping is restated here on purpose rather than borrowed
 /// from the renderer. Asking the renderer which hue it uses would agree with
@@ -1107,7 +1107,7 @@ fn command_wash(theme: &Theme, kind: WindowControlKind) -> Pixel {
         WindowControlKind::SizeToggle => palette.window_maximize,
         WindowControlKind::PutToBack => palette.window_put_to_back,
     };
-    premul(hue.over(palette.surface))
+    premul(hue.over(palette.title_band))
 }
 
 /// `kind`'s plate rendered in the state `prepare` leaves it in.
@@ -1128,8 +1128,8 @@ fn command_surface(
 fn a_hovered_command_lights_up_in_its_own_colour() {
     // Each command carries its own hue, so the pointer landing on one says
     // which of the four it is about to fire. The wash is authored translucent
-    // and resolved against the window body, so the title bar reads through it
-    // rather than being covered by a block of colour.
+    // and resolved against the title band, so the bar reads through it rather
+    // than being covered by a block of colour.
     for theme in [Theme::dark(), Theme::light()] {
         for kind in CONTROL_ORDER {
             let resting = command_surface(&theme, kind, |_, _| {});
@@ -2874,7 +2874,7 @@ fn a_plate_band_lays_its_own_ground_one_shade_off_the_plate() {
         let palette = theme.palette();
         let surface = band_over_plate(TitleBarCommands::Empty, &theme);
         assert!(
-            has_pixel(&surface, premul(palette.surface_hover)),
+            has_pixel(&surface, premul(palette.title_band)),
             "a heading band shades its own strip so the plate reads as titled"
         );
         assert!(
@@ -2932,7 +2932,7 @@ fn a_plate_band_draws_its_ground_then_its_title_and_nothing_else() {
         TITLE_BOUNDS.height,
         Color::from(crate::paint::ground_fill(
             &theme,
-            palette.surface_hover,
+            palette.title_band,
             crate::paint::ChromeLayer::Ground,
         )),
     );
@@ -2969,8 +2969,39 @@ fn a_window_title_band_lays_no_ground_and_keeps_the_window_title_face() {
             "a window bar shows the surface beneath it, exactly as before"
         );
         assert!(
-            !has_pixel(&surface, premul(palette.surface_hover)),
-            "the heading shade is the plate band's alone"
+            !has_pixel(&surface, premul(palette.title_band)),
+            "a window bar's ground is its frame's to lay, not the band's"
+        );
+    }
+}
+
+#[test]
+fn the_frames_plate_is_the_title_bands_ground() {
+    // What the frame's inner plate is actually *seen* as is the title band:
+    // the compositor blits the client over everything else it covers. So it is
+    // the band's ground, and — under a light theme — reads darker than the
+    // window surface the client draws its own content on.
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let frame = WindowFrame::new(furniture());
+        let (w, h) = (200, 120);
+        let mut surface = Surface::new(w, h).expect("surface");
+        frame.render(
+            &mut surface,
+            Rect::new(0, 0, w, h),
+            Scale::ONE,
+            &theme,
+            None,
+        );
+        assert!(
+            has_pixel(&surface, premul(palette.title_band)),
+            "{}: the frame's plate is not the band's ground",
+            theme.name()
+        );
+        assert!(
+            !has_pixel(&surface, premul(palette.surface)),
+            "{}: the frame laid the client's own ground",
+            theme.name()
         );
     }
 }

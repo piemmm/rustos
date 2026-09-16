@@ -161,8 +161,6 @@ pub enum Refusal {
     Unreadable(Errno),
     /// The document is longer than a viewer will hold resident.
     TooLong,
-    /// The picker was asked and the user chose nothing.
-    Cancelled,
     /// The session would not open a file chooser at all, so there was never
     /// anything to choose from.
     PickRefused(Errno),
@@ -176,7 +174,6 @@ impl core::fmt::Display for Refusal {
             Self::Failed(inner) => write!(f, "{inner}"),
             Self::Unreadable(err) => write!(f, "the document could not be read ({err})"),
             Self::TooLong => f.write_str("the document is larger than this viewer opens"),
-            Self::Cancelled => f.write_str("no document was chosen"),
             Self::PickRefused(err) => {
                 write!(f, "the desktop offered no file chooser ({err})")
             }
@@ -194,6 +191,9 @@ struct Shape {
     window: Rect,
 }
 
+/// The id of a viewer's first open. Zero names no open at all.
+const FIRST_OPEN_ID: u64 = 1;
+
 /// What the viewer is waiting for.
 ///
 /// One value rather than an "opening" flag beside an in-flight render, so the
@@ -201,8 +201,14 @@ struct Shape {
 /// open, and this makes that unrepresentable rather than merely avoided.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Pending {
-    /// The document has still to be opened.
-    Open,
+    /// The document with this open id has still to be opened.
+    ///
+    /// The id is echoed back in the answer, so an open the viewer has since
+    /// abandoned — a window closed with a read in flight, then a document
+    /// asked for in another — is recognised and dropped rather than landing
+    /// in whichever window is waiting now. It is the same rule a render's
+    /// echoed shape already keeps.
+    Open(u64),
     /// Nothing is outstanding.
     Idle,
     /// This render has been asked for and not yet answered.
@@ -224,6 +230,8 @@ pub struct View {
     scratch: Option<Vec<u8>>,
     /// What the viewer is waiting for.
     pending: Pending,
+    /// How many opens this viewer has asked for; the next id is one above.
+    minted_opens: u64,
     /// The toolbar's tools.
     toolbar: Toolbar,
     /// The zoom slider.
@@ -270,10 +278,13 @@ impl View {
             picture: Picture::default(),
             scratch: None,
             pending: if opening {
-                Pending::Open
+                Pending::Open(FIRST_OPEN_ID)
             } else {
                 Pending::Idle
             },
+            // A viewer handed a document at spawn has already minted its
+            // first open; one that will ask for its own has minted none.
+            minted_opens: u64::from(opening),
             toolbar,
             zoom: Slider::new(slider_at_zoom(crate::ZOOM_ACTUAL_PER_MILLE))
                 .with_steps(ZOOM_SLIDER_LINE_STEP, ZOOM_SLIDER_PAGE_STEP),
@@ -328,9 +339,15 @@ impl View {
     /// inherited at spawn, or one the user just chose in the session's
     /// picker. No render is asked for until the open is answered, so a
     /// document being replaced costs no draw of the one it replaces.
-    pub fn expect_document(&mut self) {
-        self.pending = Pending::Open;
+    ///
+    /// Answers the **open id** the embedder carries on the request and back
+    /// on the answer. Minted per ask and never reused, so an answer to an
+    /// open this viewer has abandoned is dropped rather than adopted.
+    pub fn expect_document(&mut self) -> u64 {
+        self.minted_opens = self.minted_opens.saturating_add(1);
+        self.pending = Pending::Open(self.minted_opens);
         self.refusal = None;
+        self.minted_opens
     }
 
     /// Whether the information panel is open.
@@ -650,7 +667,7 @@ impl View {
             // embedder knows whether it holds a document to open yet, and
             // until the open is answered no render describes anything the
             // user is looking at.
-            Pending::Open => return Some(Request::Open),
+            Pending::Open(open_id) => return Some(Request::Open { open_id }),
             Pending::Show(_) => return None,
             Pending::Idle => {}
         }
@@ -706,8 +723,10 @@ impl View {
     /// window is the canvas and the chrome that describes it.
     pub fn deliver(&mut self, answer: Answer, layout: &Layout, damage: &mut Region) -> Outcome {
         match answer {
-            Answer::Opened { opened } => {
-                self.opened(opened);
+            Answer::Opened { open_id, opened } => {
+                if !self.opened(open_id, opened) {
+                    return Outcome::changed(false);
+                }
                 // A document that has just opened, or refused to, changes the
                 // title, the facts, the chrome and the canvas together.
                 damage.add(layout.window());
@@ -738,7 +757,17 @@ impl View {
     }
 
     /// Adopt an open, or the reason there is not one.
-    fn opened(&mut self, opened: Result<(ViewDocument, String, u64), Refusal>) {
+    fn opened(
+        &mut self,
+        open_id: u64,
+        opened: Result<(ViewDocument, String, u64), Refusal>,
+    ) -> bool {
+        // An answer to an open this viewer has abandoned describes a document
+        // nobody is waiting for; adopting it would put one window's document
+        // in another.
+        if self.pending != Pending::Open(open_id) {
+            return false;
+        }
         self.pending = Pending::Idle;
         match opened {
             Ok((info, name, bytes)) => {
@@ -758,6 +787,7 @@ impl View {
                 self.sync_controls();
             }
         }
+        true
     }
 
     /// Adopt a drawn window, or the reason there is not one.
@@ -829,11 +859,14 @@ impl View {
 
     /// State `why` no document will arrive.
     ///
-    /// The two ways an ask for one ends without a document — the user chose
-    /// nothing ([`Refusal::Cancelled`]), and the session would not offer a
-    /// chooser at all ([`Refusal::PickRefused`]) — so the window states the
-    /// reason instead of staying empty, or never appearing at all. A refused
-    /// optional action is an answer, not a death.
+    /// So a window asked for one states the reason instead of staying empty,
+    /// or never appearing at all — the session refusing a chooser
+    /// ([`Refusal::PickRefused`]) especially, because nothing comes after it.
+    /// A refused optional action is an answer, not a death.
+    ///
+    /// A pick the user *cancelled* is not one of these: they chose nothing, so
+    /// the embedder closes that window rather than showing them a reason they
+    /// already know.
     ///
     /// Answers `false`, changing nothing, when a document is already open: the
     /// picture on screen is still what the user is looking at.

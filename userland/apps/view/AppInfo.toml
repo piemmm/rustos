@@ -29,10 +29,12 @@ kind = "application"
 purpose = "Look at a picture or a document"
 author = "The TAIRiX Project"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_PROC_SPAWN"]
-# Several documents open side by side is the ordinary case for a viewer —
-# comparing two pictures — so each is its own process: a malformed file
-# crashes its own decoder and disturbs no other window.
-instances = "multiple"
+# Single instance, and deliberately: the viewer is resident on the icon bar
+# with a window per document, so opening a second picture opens a second
+# window in the one process rather than starting another. Containment is not
+# lost by it — each window's document is decoded in its own sandbox, so a
+# malformed file crashes its own decoder and disturbs no other window. Absent
+# means single, so the key is simply not stated.
 # File-type associations: the picture formats the decoder supports
 # *completely*. A format that can only be half-decoded is not claimed at all,
 # so `application/pdf` is absent until `lib/pdf` lands behind the page source

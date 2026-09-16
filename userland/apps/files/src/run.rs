@@ -114,7 +114,10 @@ mod program {
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
     };
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_abi::window_ipc::{MenuOutcome, PointerAction, WindowEvent, WindowRegion};
+    use tairix_abi::window_ipc::{
+        DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, PointerAction, WindowEvent,
+        WindowRegion,
+    };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, SpawnAttach, UnlinkFlags,
         WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
@@ -160,7 +163,8 @@ mod program {
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
         pointer_input_events, pointer_point, present_damage, Desktop, EventDrain, EventError,
-        EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents, WindowTransport,
+        EventMailbox, EventSource, Parked, Repaint, Target, WindowClient, WindowEvents,
+        WindowTransport,
     };
 
     use crate::appbar;
@@ -568,13 +572,12 @@ mod program {
                 );
                 BarRouted::Handled
             }
-            WindowEvent::OpenRequested { window_id } => {
+            WindowEvent::OpenRequested => {
                 // A wake, not a path: the desktop queued at least one folder
                 // for this instance, so drain until the queue answers empty.
                 // One event may cover several, and another may arrive while
                 // this drain is still running.
                 drain_open_targets(
-                    window_id,
                     windows,
                     client,
                     desktop,
@@ -843,7 +846,7 @@ mod program {
         windows.push(win);
     }
 
-    /// Drain every folder the desktop has queued for `window_id`, opening a
+    /// Drain every folder the desktop has queued for this instance, opening a
     /// window at each.
     ///
     /// How a *relaunch* that names a folder reaches this already-running
@@ -852,9 +855,13 @@ mod program {
     /// [`location_components`](crate::command::location_components) rule the
     /// command line's own starting location does, so a refused spelling is
     /// stated and skipped rather than opening a window somewhere else.
+    ///
+    /// A *document* target is not one of these: the file manager holds
+    /// `CAP_FS_ACCESS` and opens what it is given by name, so a delegated
+    /// descriptor is authority it has no use for. It is stated and skipped
+    /// rather than silently dropped.
     #[allow(clippy::too_many_arguments)] // The window set's whole surround, threaded explicitly.
     fn drain_open_targets(
-        window_id: u64,
         windows: &mut alloc::vec::Vec<OpenWindow>,
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &Desktop,
@@ -865,8 +872,16 @@ mod program {
         event_endpoint: u64,
     ) {
         loop {
-            let path = match client.take_open_target(window_id) {
-                Ok(Some(path)) => path,
+            let path = match client.take_open_target() {
+                Ok(Some(Target::Path(path))) => path,
+                Ok(Some(Target::Document { name, .. })) => {
+                    let _ = writeln!(
+                        Stderr,
+                        "files: {name} was handed over as a document; this is a file manager, \
+                         which opens what it is given by name"
+                    );
+                    continue;
+                }
                 Ok(None) => return,
                 Err(err) => {
                     let _ = writeln!(Stderr, "files: cannot take an open target: {err}");
@@ -934,10 +949,22 @@ mod program {
         /// load refusal that only shows once the image is read surfaces later
         /// through [`reap`](Self::reap). Either way the file manager carries on
         /// — a refused launch is an answer, not a crash.
-        fn launch(&mut self, bundle_path: &str) {
+        fn launch(&mut self, client: &mut WindowClient<app::RtWindowTransport>, bundle_path: &str) {
             let label = bundle_leaf(bundle_path);
             let mut run_path = String::from(bundle_path);
             run_path.push_str("/Run");
+            // The desktop's single-instance funnel first: a bundle that
+            // declares one instance and already has one should be *asked*
+            // rather than started again, and only the desktop knows what is
+            // running. Anything but "reached" — no instance, an instance that
+            // could not be reached, a session with no funnel — spawns, so a
+            // launch never silently does nothing.
+            if matches!(
+                client.hand_over_launch(&run_path, None),
+                Ok(HandOverOutcome::Reached)
+            ) {
+                return;
+            }
             let ret = tairix_rt::spawn(run_path.as_bytes());
             if ret < 0 {
                 report_error(&alloc::format!("could not launch {label}"));
@@ -987,7 +1014,11 @@ mod program {
         /// application claims the type the refusal is stated fail-loud on
         /// `stderr` and nothing is launched — an honest answer, never a
         /// fabricated open.
-        fn open_file(&mut self, file_path: &str) {
+        fn open_file(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            file_path: &str,
+        ) {
             let name = path_leaf(file_path);
             let mut source = RtBundleSource;
             // A store that cannot be enumerated yields no candidate rather than
@@ -1000,7 +1031,7 @@ mod program {
                 .first()
                 .map(|assoc| String::from(assoc.bundle_path()));
             match chosen {
-                Some(bundle_path) => self.launch_viewer(&bundle_path, file_path, name),
+                Some(bundle_path) => self.launch_viewer(client, &bundle_path, file_path, name),
                 None => report_error(&alloc::format!("no application to open {name}")),
             }
         }
@@ -1022,7 +1053,13 @@ mod program {
         /// counted clone. Launching is asynchronous and the child is reaped on
         /// the any-child wake exactly as [`launch`](Self::launch)'s children
         /// are; a refusal is stated fail-loud, never a fabricated open.
-        fn launch_viewer(&mut self, bundle_path: &str, file_path: &str, display_name: &str) {
+        fn launch_viewer(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            bundle_path: &str,
+            file_path: &str,
+            display_name: &str,
+        ) {
             // A negative (error) or out-of-range result is not a descriptor:
             // state the refusal and launch nothing (fail closed).
             let Ok(fd) = u32::try_from(tairix_rt::fs_open(file_path.as_bytes(), OpenFlags::READ))
@@ -1033,6 +1070,15 @@ mod program {
             let mut run_path = String::from(bundle_path);
             run_path.push_str("/Run");
             let label = bundle_leaf(bundle_path);
+            // The desktop's single-instance funnel first, handing the live
+            // instance the document itself: the grant is minted from *this*
+            // descriptor to the session, which relays it on, so the viewer
+            // reads it under this manager's authority and never the session's.
+            // Anything but "reached" spawns below, which still shows it.
+            if hand_over(client, &run_path, fd, display_name) {
+                let _ = tairix_rt::fs_close(fd);
+                return;
+            }
             let mut wires = [FdWire::Inherit; STD_STREAM_COUNT];
             wires[STDIN as usize] = FdWire::Handle(fd);
             let attach = SpawnAttach {
@@ -1059,6 +1105,39 @@ mod program {
             #[allow(clippy::cast_sign_loss)] // `pid >= 0` in this branch; it is a PID.
             self.in_flight.insert(pid as u64, label);
         }
+    }
+
+    /// Offer the document open on `fd` to a live instance of the bundle whose
+    /// entry binary is `run_path`, answering whether one took it.
+    ///
+    /// The delegation is minted from this manager's own descriptor to the
+    /// *session*, which redeems it and hands the same authority on to the
+    /// instance — so the viewer reads the document under this manager's
+    /// captured identity and the session lends none of its own, larger reach.
+    /// Every refusal answers `false` and leaves the caller to spawn, which
+    /// still shows the document.
+    fn hand_over(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        run_path: &str,
+        fd: u32,
+        display_name: &str,
+    ) -> bool {
+        let Some(session) = client.session() else {
+            return false;
+        };
+        let Ok(name) = DocumentName::new(display_name) else {
+            return false;
+        };
+        // A read-only delegation has no extent to bound, so the ceiling is
+        // zero — the kernel refuses any other for a descriptor opened to read.
+        let grant = tairix_rt::fd_grant(fd, 0, session);
+        let Some(grant) = u64::try_from(grant).ok().filter(|&handle| handle != 0) else {
+            return false;
+        };
+        matches!(
+            client.hand_over_launch(run_path, Some(HandOverDocument { name, grant })),
+            Ok(HandOverOutcome::Reached)
+        )
     }
 
     /// The last non-empty component of a `/`-separated path
@@ -2266,6 +2345,7 @@ mod program {
                 browser,
                 overlays,
                 acts.launcher,
+                acts.menu.client,
                 acts.reads,
                 scale,
                 theme,
@@ -2283,6 +2363,7 @@ mod program {
             let (changed, close) = apply_open_with_event(
                 overlays,
                 acts.launcher,
+                acts.menu.client,
                 scale,
                 theme,
                 viewport,
@@ -2391,6 +2472,7 @@ mod program {
                     whole(activate(
                         browser,
                         acts.launcher,
+                        acts.menu.client,
                         scale,
                         theme,
                         viewport,
@@ -2503,7 +2585,7 @@ mod program {
             // An open target opens a *new* window rather than moving this
             // one, so it is answered where the window set is (`bar_routed`)
             // and repaints nothing here.
-            | WindowEvent::OpenRequested { .. }
+            | WindowEvent::OpenRequested
             => (Repaint::Nothing, false),
         }
     }
@@ -2628,6 +2710,7 @@ mod program {
                 browser,
                 overlays,
                 acts.launcher,
+                acts.menu.client,
                 canvas,
                 viewport,
                 point,
@@ -2840,6 +2923,7 @@ mod program {
     fn activate<S: DirectorySource>(
         browser: &mut Browser<S>,
         launcher: &RefCell<Launcher>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
@@ -2853,11 +2937,11 @@ mod program {
                 (true, false)
             }
             Ok(Activation::LaunchBundle { path }) => {
-                launcher.borrow_mut().launch(&path);
+                launcher.borrow_mut().launch(client, &path);
                 (false, handoff == AfterHandoff::CloseWindow)
             }
             Ok(Activation::OpenFile { path }) => {
-                launcher.borrow_mut().open_file(&path);
+                launcher.borrow_mut().open_file(client, &path);
                 (false, handoff == AfterHandoff::CloseWindow)
             }
             Err(_) => (false, false),
@@ -3966,6 +4050,7 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         canvas: Canvas<'_>,
         viewport: Rect,
         point: Point,
@@ -3998,6 +4083,7 @@ mod program {
                 whole(activate(
                     browser,
                     launcher,
+                    client,
                     scale,
                     theme,
                     viewport,
@@ -4134,6 +4220,7 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         reads: &Reads,
         scale: Scale,
         theme: &Theme,
@@ -4144,7 +4231,8 @@ mod program {
         match outcome {
             MenuOutcome::Chosen(item) => match context_command_from_item(item) {
                 Some(command) => dispatch_context_command(
-                    browser, overlays, launcher, reads, scale, theme, viewport, toolbar, command,
+                    browser, overlays, launcher, client, reads, scale, theme, viewport, toolbar,
+                    command,
                 ),
                 None => (false, false),
             },
@@ -4165,6 +4253,7 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         reads: &Reads,
         scale: Scale,
         theme: &Theme,
@@ -4176,6 +4265,7 @@ mod program {
             ContextCommand::Open => activate(
                 browser,
                 launcher,
+                client,
                 scale,
                 theme,
                 viewport,
@@ -4188,6 +4278,7 @@ mod program {
             ContextCommand::OpenAndClose => activate(
                 browser,
                 launcher,
+                client,
                 scale,
                 theme,
                 viewport,
@@ -4314,9 +4405,11 @@ mod program {
     /// uses: the file opened read-only in the manager's own table and wired
     /// onto the child's `STDIN`, so the application reads it with no filesystem
     /// capability of its own.
+    #[allow(clippy::too_many_arguments)] // The chooser's whole surround, threaded explicitly.
     fn apply_open_with_event(
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
@@ -4338,7 +4431,7 @@ mod program {
                         (true, false)
                     }
                     KeyValue::Named(NamedKeyCode::Enter) => {
-                        launch_open_with(overlays, launcher);
+                        launch_open_with(overlays, launcher, client);
                         (true, false)
                     }
                     KeyValue::Named(NamedKeyCode::Up) => {
@@ -4392,7 +4485,7 @@ mod program {
                 match open_with_row_at(chooser, viewport, scale, theme, point) {
                     Some(index) => {
                         chooser.select(index);
-                        launch_open_with(overlays, launcher);
+                        launch_open_with(overlays, launcher, client);
                     }
                     // A press off the rows closes the chooser and launches
                     // nothing.
@@ -4408,12 +4501,17 @@ mod program {
     ///
     /// The chooser is taken out first, so the launch runs from owned state and
     /// a second activation cannot reach a chooser that is already gone.
-    fn launch_open_with(overlays: &mut Overlays, launcher: &RefCell<Launcher>) {
+    fn launch_open_with(
+        overlays: &mut Overlays,
+        launcher: &RefCell<Launcher>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+    ) {
         let Some(chooser) = overlays.open_with.take() else {
             return;
         };
         if let Some(candidate) = chooser.chosen() {
             launcher.borrow_mut().launch_viewer(
+                client,
                 candidate.bundle_path(),
                 chooser.file_path(),
                 chooser.display_name(),

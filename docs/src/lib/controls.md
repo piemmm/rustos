@@ -347,9 +347,10 @@ pointer, so the control still wears nothing at rest the way every other
 bar-seated one does, and keyboard focus still states itself on the ring alone.
 A disposition outranks it: a denied or disabled command reads as denied or
 disabled, never as its own colour. Because a plate is *laid down* rather than
-composited, the renderer resolves the authored translucency against the window
-body first (`Rgba::over`); laying the raw value down would cut a hole through
-the window's furniture strip instead of tinting it.
+composited, the renderer resolves the authored translucency against the band it
+is seated in first (`Palette::title_band`, `Rgba::over`); laying the raw value
+down would cut a hole through the window's furniture strip instead of tinting
+it.
 
 A window command is also seated **flush**: its cell fills the band's height and
 touches its neighbour, so the wash covers every pixel a press can land on. The
@@ -647,6 +648,28 @@ section whose items are cards has no wake: a card draws its own footer actions
 inside itself, so no anchored column stands beside the list.
 
 ## Masked text entry
+
+### The ground a field is written on
+
+An **editable** field — enabled, allowed, not read-only — draws its plate on
+`Palette::document`, the ground a document's own content is drawn on: paper on
+a light appearance, the deepest layer on a dark one. The ground is the
+affordance, so a field the user may type in reads as a page while a read-only
+one recesses onto the window ground (`Palette::surface`) to read as a value
+shown rather than entered — keeping full-contrast text, so it is still not a
+muted disabled field.
+
+Neither substitutes a plate the shared recipe put a *colour* on: a disabled,
+denied, or failed-closed field is stating something there, and a page ground
+would erase it. The recipe answers which of its arms carry a plain background
+(`FrameColors::grounded_on`), so a role-filled plate — whose label is resolved
+against that fill — is never swapped underneath. Both grounds go through
+`ground_fill`, so a field on floating chrome is a plate on glass at the theme's
+plate alpha rather than an opaque patch on a frosted popup.
+
+A hovered field states nothing on that page. The pointer over a text surface is
+reported by the seat's own text cursor and by the field's rim, not by washing
+the page it is written on; the focus ring is drawn inside the plate as always.
 
 `TextField::secret(max_len)` puts a field into masked mode for credential
 entry — a password, a passphrase, a PIN — and `TextField::is_secret` reports

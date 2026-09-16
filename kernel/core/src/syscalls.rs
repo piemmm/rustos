@@ -10154,9 +10154,16 @@ where
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
-        // Only a plain filesystem file is delegatable — the same question the
-        // spawn conferral asks, so both read the one answer.
-        let path = handle.delegatable_path().ok_or(Errno::OutOfRange)?;
+        // What the descriptor may be handed on as — the same question the
+        // spawn conferral asks, so both read the one answer. A plain file the
+        // caller opened itself captures the *caller's* kernel-attested
+        // identity, so every later operation on the redeemed descriptor is
+        // re-authorised under exactly that, never the recipient's and never
+        // anything claimed on a wire. A delegation the caller was itself
+        // given is passed on with the first grantor's authority intact.
+        let handed = handle
+            .handed_on(caller.caps.owner().0, *caller.caps.effective())
+            .ok_or(Errno::OutOfRange)?;
         // The delegation carries the descriptor's *own* read/write access and
         // nothing more, so it can never widen what the grantor opened. The
         // open-time flags are dropped because the file is already open, and
@@ -10173,15 +10180,16 @@ where
         if access.is_write() != (write_ceiling > 0) {
             return Err(Errno::OutOfRange);
         }
-        // Capture the *grantor's* kernel-attested identity beside the
-        // path: every later operation on the redeemed descriptor is
-        // re-authorised under exactly this, never the holder's identity
-        // and never anything claimed on a wire.
+        // A hand-off attenuates or preserves, never widens: a ceiling stated
+        // above the one the caller was itself handed is met from what the
+        // caller actually holds.
+        let ceiling = match handed.write_ceiling {
+            Some(held) => write_ceiling.min(held),
+            None => write_ceiling,
+        };
         let file = crate::aspace::DelegatedFile {
-            path: String::from(path),
-            uid: caller.caps.owner().0,
-            caps: *caller.caps.effective(),
-            write_ceiling: Some(write_ceiling),
+            write_ceiling: Some(ceiling),
+            ..handed
         };
         // The recipient is named by its attested process *instance*, not by
         // a task id: a number is redrawn once its task is gone, so one the
@@ -33778,11 +33786,13 @@ mod tests {
     }
 
     /// Offsets within a [`grant_page`] of the identities it stages: the
-    /// recipient, an instance no live process holds, and sixteen zero bytes
-    /// — the [`ProcId::KERNEL`] sentinel, which names no one process.
+    /// recipient, an instance no live process holds, sixteen zero bytes —
+    /// the [`ProcId::KERNEL`] sentinel, which names no one process — and the
+    /// second recipient a relayed delegation is handed on to.
     const GRANT_RECIPIENT_AT: usize = 0x10;
     const GRANT_STRANGER_AT: usize = 0x20;
     const GRANT_SENTINEL_AT: usize = 0x30;
+    const GRANT_ONWARD_AT: usize = 0x40;
 
     /// The user address a [`grant_page`] offset appears at, the page being
     /// mapped where `send_aspace` puts it.
@@ -33790,28 +33800,51 @@ mod tests {
         0x1000 + offset as u64
     }
 
-    /// The instance an `fd_grant` test's recipient runs as.
-    fn grant_recipient_instance() -> ProcId {
-        ProcId::from_raw([0xA1; PROC_ID_LEN])
+    /// The recipient of an `fd_grant` test's delegation: `ProcessId(3)`
+    /// holding nothing at all, which is what proves a delegation needs no
+    /// capability of the holder's own.
+    const GRANT_RECIPIENT: GrantHolder = GrantHolder {
+        process: ProcessId(3),
+        instance: ProcId::from_raw([0xA1; PROC_ID_LEN]),
+        granted: &[],
+    };
+
+    /// The process a relayed delegation is handed on *to*: `ProcessId(4)`,
+    /// likewise holding nothing.
+    const GRANT_ONWARD: GrantHolder = GrantHolder {
+        process: ProcessId(4),
+        instance: ProcId::from_raw([0xD4; PROC_ID_LEN]),
+        granted: &[],
+    };
+
+    /// One process an `fd_grant` test delegates to: the number its kernel
+    /// tables are keyed by, the attested instance a delegation names it as,
+    /// and the capabilities it holds.
+    struct GrantHolder {
+        process: ProcessId,
+        instance: ProcId,
+        granted: &'static [CapabilityId],
     }
 
-    /// A caller page holding `path` at its base and the three identities at
-    /// their offsets — everything an `fd_grant` request names, staged where
-    /// the handler's copy-in will find it.
+    /// A caller page holding `path` at its base and the staged identities at
+    /// their offsets — everything an `fd_grant` request names, where the
+    /// handler's copy-in will find it.
     fn grant_page(path: &[u8]) -> Vec<u8> {
-        let mut page = alloc::vec![0u8; 0x40];
+        let mut page = alloc::vec![0u8; 0x50];
         page[..path.len()].copy_from_slice(path);
         page[GRANT_RECIPIENT_AT..][..PROC_ID_LEN]
-            .copy_from_slice(grant_recipient_instance().as_bytes());
+            .copy_from_slice(GRANT_RECIPIENT.instance.as_bytes());
         page[GRANT_STRANGER_AT..][..PROC_ID_LEN].copy_from_slice(&[0xB2; PROC_ID_LEN]);
+        page[GRANT_ONWARD_AT..][..PROC_ID_LEN].copy_from_slice(GRANT_ONWARD.instance.as_bytes());
         page
     }
 
-    /// Register the recipient of an `fd_grant` test: an address space under
-    /// `ProcessId(3)` and the capability record that binds its number to
-    /// [`grant_recipient_instance`], which is what the handler resolves the
-    /// request's instance through.
-    fn register_grant_recipient(
+    /// Register `holder` for an `fd_grant` test: an address space under its
+    /// number and the capability record that binds that number to its
+    /// instance, which is what the handler resolves a request's instance
+    /// through.
+    fn register_grant_holder(
+        holder: &GrantHolder,
         table: &RwLock<CapTable>,
         aspaces: &RwLock<AddressSpaceRegistry>,
         space: Box<dyn UserAddressSpace + Send + Sync>,
@@ -33820,16 +33853,11 @@ mod tests {
     ) -> TaskCapabilities {
         aspaces
             .write()
-            .register(ProcessId(3), space, physmap)
-            .expect("recipient registers");
-        let caps = TaskCapabilities::derive(
-            ProcessId(3),
-            UserId(2000),
-            caps_with(&[]),
-            caps_with(&[]),
-            sink,
-        )
-        .with_proc_id(grant_recipient_instance());
+            .register(holder.process, space, physmap)
+            .expect("holder registers");
+        let granted = caps_with(holder.granted);
+        let caps = TaskCapabilities::derive(holder.process, UserId(2000), granted, granted, sink)
+            .with_proc_id(holder.instance);
         table.write().insert(caps.clone());
         caps
     }
@@ -33936,7 +33964,8 @@ mod tests {
             Err(Errno::BadAddress)
         );
         let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
-        let _recipient = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
+        let _recipient =
+            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
         // A read-only delegation has no extent to bound, so naming one is a
         // frame that does not mean what it says.
         assert_eq!(to_recipient(fd, 4096), Err(Errno::OutOfRange));
@@ -33995,7 +34024,8 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_filesystem(fs);
-        let recipient_caps = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
+        let recipient_caps =
+            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
 
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
@@ -34091,7 +34121,8 @@ mod tests {
         };
         // The recipient runs as a different user and holds **no**
         // capability at all.
-        let recipient_caps = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
+        let recipient_caps =
+            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
@@ -34155,9 +34186,122 @@ mod tests {
         assert_eq!(
             aspaces
                 .write()
-                .redeem_fd_delegation(ProcessId(3), grant_recipient_instance(), second),
+                .redeem_fd_delegation(ProcessId(3), GRANT_RECIPIENT.instance, second),
             Err(Errno::NotFound),
             "withdraw reclaimed the pending delegation"
+        );
+    }
+
+    /// A delegation its holder was given is handed on **unchanged**: the
+    /// relayed record keeps the *first* grantor's captured authority, and a
+    /// relay cannot widen the extent it was handed.
+    ///
+    /// This is what lets the desktop pass one application's chosen document
+    /// to a live instance of another without the document ever being read
+    /// under the desktop's own, larger authority — the relay holds the bytes
+    /// for the length of one hand-off and adds nothing to them
+    /// (`plans/CAPABILITY_USE.md` CU6).
+    #[test]
+    fn a_held_delegation_is_handed_on_without_widening_it() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let gctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &grantor_caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.read_data = b"hello".to_vec();
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        // The relay holds `CAP_FS_ACCESS` — delegating is gated exactly as
+        // acquiring is — and its page carries the identities it names. The
+        // process it hands on to holds nothing at all.
+        let relay = GrantHolder {
+            granted: &[CapabilityId::FS_ACCESS],
+            ..GRANT_RECIPIENT
+        };
+        let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
+        let relay_caps = register_grant_holder(&relay, &table, &aspaces, rspace, rphysmap, sink);
+        let rctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &relay_caps,
+        };
+        // Writable, so the onward read below has somewhere to copy out to.
+        let (ospace, ophysmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"");
+        let onward_caps =
+            register_grant_holder(&GRANT_ONWARD, &table, &aspaces, ospace, ophysmap, sink);
+        let octx = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &onward_caps,
+        };
+
+        let fd = u32::try_from(
+            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("grantor opens"),
+        )
+        .unwrap();
+        let first = h
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("grant mints a handle");
+        let held = u32::try_from(h.fd_redeem(&rctx, first).expect("relay redeems")).unwrap();
+
+        // A read-only delegation still has no extent to bound, so the relay
+        // may not invent one — and the relayed record is the one it holds.
+        assert_eq!(
+            h.fd_grant(&rctx, held, 4096, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN),
+            Err(Errno::OutOfRange),
+            "a relay must not widen a read-only delegation into a writable one"
+        );
+        let onward = h
+            .fd_grant(&rctx, held, 0, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN)
+            .expect("the relay hands the delegation on");
+        let ofd = u32::try_from(h.fd_redeem(&octx, onward).expect("onward redeems")).unwrap();
+        let entry = aspaces
+            .read()
+            .open_file_entry(GRANT_ONWARD.process, ofd)
+            .expect("descriptor recorded");
+        assert_eq!(entry.flags, OpenFlags::READ);
+        match &entry.backing {
+            crate::aspace::OpenBacking::Delegated(file) => {
+                assert_eq!(file.path, "/f");
+                assert_eq!(
+                    file.uid, 1000,
+                    "the relayed delegation keeps the first grantor's identity"
+                );
+                assert_eq!(file.write_ceiling, Some(0));
+            }
+            other => panic!("expected a delegated backing, got {other:?}"),
+        }
+
+        // And the onward read runs under that first grantor's identity, not
+        // the relay's — the relay added nothing by holding it.
+        let n = h.fs_read(&octx, ofd, 0, 0x1000, 5).expect("delegated read");
+        assert_eq!(n, 5);
+        assert!(
+            fs.calls()
+                .iter()
+                .any(|c| c.contains("read uid=1000 path=/f")),
+            "the onward read was authorised as the first grantor: {:?}",
+            fs.calls()
         );
     }
 
@@ -34194,7 +34338,8 @@ mod tests {
         };
         // The holder runs as a different user and holds no capability at
         // all: the delegation is its whole filesystem authority.
-        let recipient_caps = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
+        let recipient_caps =
+            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
@@ -34301,7 +34446,8 @@ mod tests {
         };
         // The holder runs as a different user and holds no capability at
         // all: the delegation is its whole filesystem authority.
-        let recipient_caps = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
+        let recipient_caps =
+            register_grant_holder(&GRANT_RECIPIENT, &table, &aspaces, rspace, rphysmap, sink);
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
@@ -34370,20 +34516,6 @@ mod tests {
         assert_eq!(region.path, "/blob");
         assert_eq!(region.uid, 1000);
         assert!(region.caps.contains(CapabilityId::FS_ACCESS));
-
-        // Delegation never chains: the holder cannot pass its delegation on,
-        // so the captured authority a descriptor exercises always names one
-        // grantor rather than a chain no audit record could attribute.
-        assert_eq!(
-            h.fd_grant(
-                &rctx,
-                rfd,
-                CEILING,
-                grant_addr(GRANT_RECIPIENT_AT),
-                PROC_ID_LEN
-            ),
-            Err(Errno::OutOfRange)
-        );
     }
 
     /// `call_peer_seat` answers only while the ticket is in service, only

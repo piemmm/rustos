@@ -142,14 +142,19 @@ const XTERM_ANSI: [Rgb; ANSI_COLORS] = [
 
 impl ColorScheme {
     /// The scheme a [`Scheme::System`] terminal resolves to on `theme`: the
-    /// desktop's own surface and text colours over the xterm ANSI palette, so
+    /// desktop's own page and text colours over the xterm ANSI palette, so
     /// the terminal reads as part of the session rather than as a foreign
     /// window.
+    ///
+    /// The ground is the theme's *document* role, not its window surface: a
+    /// terminal's grid is a page, and the full-screen curses tools that draw
+    /// on it (`edit`, `vim`) are editing text on it, so it belongs on the
+    /// same ground an editable field does.
     #[must_use]
     pub fn from_theme(theme: &Theme) -> Self {
         let palette = theme.palette();
         Self {
-            background: palette.surface.into(),
+            background: palette.document.into(),
             foreground: palette.on_surface.into(),
             cursor: palette.accent.into(),
             cursor_text: palette.on_accent.into(),

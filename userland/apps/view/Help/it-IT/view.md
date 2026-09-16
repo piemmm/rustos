@@ -8,10 +8,12 @@ view — visualizzatore grafico di immagini e documenti
 
 ## DESCRIPTION
 
-Apre una finestra del desktop che mostra un'immagine o un documento. Avviato
-con un documento — dal gestore dei file, o aprendo un'immagine — mostra quel
-file; avviato da solo, chiede al selettore di file fidato della sessione del
-desktop di scegliere uno.
+Mostra immagini e documenti in finestre del desktop. Avviato con un
+documento — dal gestore dei file, o aprendo un'immagine — apre una finestra
+su quel file. Avviato da solo non apre alcuna finestra: prende soltanto il
+suo posto nella barra delle icone. Fare clic sulla sua icona apre una
+finestra e permette di scegliere un file tramite il selettore di file fidato
+della sessione del desktop.
 
 Il visualizzatore non detiene alcuna capacità sul filesystem: non può
 aprire, elencare né leggere nulla da sé. La sessione naviga a suo nome sotto
@@ -27,9 +29,10 @@ RISC OS Sprite. Un file che il decodificatore rifiuta dichiara il proprio
 motivo nella finestra e sul flusso di errore standard; la finestra non resta
 mai vuota e nessuna immagine viene mai inventata.
 
-Più documenti alla volta sono visualizzatori distinti: confrontare due
-immagini affiancate significa aprire la seconda. Chiudere una finestra
-termina il suo visualizzatore.
+Più documenti alla volta sono più finestre dello stesso visualizzatore:
+confrontare due immagini affiancate significa aprire la seconda. Chiudere
+una finestra lascia il visualizzatore nella barra delle icone, pronto per il
+documento successivo; è la riga Esci del suo menu d'icona che lo termina.
 
 La barra degli strumenti in alto porta, nell'ordine: riduci, ingrandisci,
 adatta alla finestra, dimensione reale, voce precedente, voce successiva,

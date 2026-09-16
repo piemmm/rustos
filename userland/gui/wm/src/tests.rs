@@ -3291,7 +3291,7 @@ fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).expect("client");
     let rim_color = c.theme().palette().frame.to_array();
-    let surface = c.theme().palette().surface.to_array();
+    let band = c.theme().palette().title_band.to_array();
     c.composite();
 
     // A pixel inside the client shows the application content.
@@ -3306,9 +3306,9 @@ fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
     assert_eq!(frame_pixel(&c, rim_x, rim_y), rim_color);
     assert_ne!(rim_color, [0, 0, 255, 255], "chrome is not the background");
 
-    // ...and the title-bar interior above the client shows the window surface.
+    // ...and the title-bar interior above the client shows the band's ground.
     let by = u32::try_from(client.top() - 1).unwrap();
-    assert_eq!(frame_pixel(&c, cx, by), surface);
+    assert_eq!(frame_pixel(&c, cx, by), band);
 }
 
 #[test]
@@ -3753,12 +3753,12 @@ fn the_light_theme_draws_the_furniture_chrome() {
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).unwrap();
     let rim_color = c.theme().palette().frame.to_array();
-    let surface = c.theme().palette().surface.to_array();
+    let band = c.theme().palette().title_band.to_array();
     let desktop = c.theme().palette().desktop.to_array();
     c.composite();
 
-    // The light theme paints its own rim and title-bar surface, distinct from
-    // the desktop background.
+    // The light theme paints its own rim and title band, distinct from the
+    // desktop background.
     let rim = Point::new(centre(bounds).x, bounds.top());
     assert_eq!(
         frame_pixel(
@@ -3771,7 +3771,7 @@ fn the_light_theme_draws_the_furniture_chrome() {
     assert_ne!(rim_color, desktop);
     let by = u32::try_from(client.top() - 1).unwrap();
     let cx = u32::try_from(client.left() + 2).unwrap();
-    assert_eq!(frame_pixel(&c, cx, by), surface);
+    assert_eq!(frame_pixel(&c, cx, by), band);
     // The client still shows its content.
     let cc = centre(client);
     assert_eq!(
@@ -5056,7 +5056,7 @@ fn decorated_furniture_strips_render_pixel_exact_chrome() {
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).unwrap();
     let rim_color = c.theme().palette().frame.to_array();
-    let surface = c.theme().palette().surface.to_array();
+    let band = c.theme().palette().title_band.to_array();
     // `decorated_compositor` clears the screen to the literal `BLUE` test
     // constant, independently of the active theme's own palette colours.
     let desktop = [0, 0, 255, 255];
@@ -5084,10 +5084,10 @@ fn decorated_furniture_strips_render_pixel_exact_chrome() {
     assert_eq!(frame_pixel(&c, content_x, mid_y), [255, 0, 0, 255]);
 
     // The title-bar interior above the client (inside the top strip, off the
-    // rim) shows the window body surface colour, proving the top strip
-    // carries more than just the rim line.
+    // rim) shows the title band's own ground, proving the top strip carries
+    // more than just the rim line.
     let body_y = u32::try_from(client.top() - 1).unwrap();
-    assert_eq!(frame_pixel(&c, content_x, body_y), surface);
+    assert_eq!(frame_pixel(&c, content_x, body_y), band);
 
     // The rounded rim corners stay transparent: the extreme outer corner
     // (carried by the top strip) shows the desktop background straight

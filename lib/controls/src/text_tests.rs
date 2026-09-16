@@ -604,8 +604,10 @@ fn a_focused_search_field_shows_one_accent_line_not_two() {
             .count();
         assert_eq!(lines, 2, "{}: doubled focus border", theme.name());
 
-        // The pointer resting on the focused field states itself in the
-        // plate, so it cannot restore the second line either.
+        // The pointer resting on the focused field cannot restore the second
+        // line either. It states nothing on the plate: the page a field is
+        // written on is not a button's wash, and what reports the pointer is
+        // the seat's own text cursor.
         let mid = moved(i32::try_from(W / 2).expect("in range"), 1);
         search.on_pointer(&mid, bounds(), Scale::ONE, &theme, &mut sink());
         let hovered = search_surface(&search, &theme);
@@ -614,9 +616,102 @@ fn a_focused_search_field_shows_one_accent_line_not_two() {
             .count();
         assert_eq!(lines, 2, "{}: hover doubled the focus border", theme.name());
         assert!(
-            has_pixel(&hovered, premul(theme.palette().surface_hover)),
-            "{}: and then the pointer is stated nowhere",
+            !has_pixel(&hovered, premul(theme.palette().surface_hover)),
+            "{}: a hover washed the page instead of leaving it alone",
             theme.name()
+        );
+    }
+}
+
+#[test]
+fn an_editable_field_is_written_on_the_page_and_a_read_only_one_recesses() {
+    // The ground a field draws is what it *is*: a field the user may type in
+    // is a page (paper on a light appearance), while a read-only one recesses
+    // onto the window ground so it reads as a value shown rather than
+    // entered. Both keep full-contrast text, so neither is a muted disabled
+    // field.
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let editable = field_surface(&TextField::new(), &theme);
+        assert!(
+            has_pixel(&editable, premul(palette.document)),
+            "{}: an editable field is not on the page",
+            theme.name()
+        );
+        assert!(
+            !has_pixel(&editable, premul(palette.surface)),
+            "{}: an editable field still shows the window ground",
+            theme.name()
+        );
+
+        let read_only = field_surface(&TextField::new().read_only(true), &theme);
+        assert!(
+            has_pixel(&read_only, premul(palette.surface)),
+            "{}: a read-only field is not recessed",
+            theme.name()
+        );
+        assert!(
+            !has_pixel(&read_only, premul(palette.document)),
+            "{}: a read-only field is on the page an editable one owns",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn a_disposed_field_keeps_the_plate_that_states_it() {
+    // A page ground would erase what a disabled, denied, or failed-closed
+    // field is saying, so the shared recipe's plate outranks it. Checked by
+    // the one property that distinguishes them: none of the three is on the
+    // page.
+    let theme = Theme::light();
+    let palette = theme.palette();
+    let mut disabled = TextField::new();
+    disabled.set_state(ControlState::disabled());
+    let mut denied = TextField::new();
+    denied.set_state(ControlState::idle().with_authority(AuthorityState::Denied));
+    let mut failed = TextField::new();
+    failed.set_state(ControlState::idle().with_authority(AuthorityState::FailedClosed));
+    for (name, field) in [
+        ("disabled", &disabled),
+        ("denied", &denied),
+        ("failed-closed", &failed),
+    ] {
+        let surface = field_surface(field, &theme);
+        assert!(
+            !has_pixel(&surface, premul(palette.document)),
+            "a {name} field took the page and lost what it was stating"
+        );
+    }
+}
+
+#[test]
+fn a_field_on_floating_chrome_lets_the_backdrop_through_whatever_its_ground() {
+    // Both grounds go through the shared chrome-alpha path, so neither an
+    // editable field's page nor a read-only field's recess lands as an opaque
+    // patch on a frosted popup.
+    let theme = Theme::light().floating();
+    let palette = theme.palette();
+    for (name, field) in [
+        ("editable", TextField::new()),
+        ("read-only", TextField::new().read_only(true)),
+    ] {
+        let ground = if field.is_read_only() {
+            palette.surface
+        } else {
+            palette.document
+        };
+        let surface = field_surface(&field, &theme);
+        assert!(
+            has_pixel(
+                &surface,
+                premul(ground.with_alpha(palette.chrome_plate_alpha))
+            ),
+            "a {name} field on floating chrome is a plate on glass"
+        );
+        assert!(
+            !has_pixel(&surface, premul(ground)),
+            "a {name} field on floating chrome laid an opaque patch"
         );
     }
 }

@@ -8,10 +8,12 @@ view — visor gráfico de imágenes y documentos
 
 ## DESCRIPTION
 
-Abre una ventana de escritorio que muestra una imagen o un documento.
-Iniciado con un documento — desde el gestor de archivos, o al abrir una
-imagen — muestra ese archivo; iniciado por sí solo, pide al selector de
-archivos de confianza de la sesión de escritorio que elija uno.
+Muestra imágenes y documentos en ventanas de escritorio. Iniciado con un
+documento — desde el gestor de archivos, o al abrir una imagen — abre una
+ventana sobre ese archivo. Iniciado por sí solo no abre ninguna ventana:
+simplemente ocupa su lugar en la barra de iconos. Pulse su icono para abrir
+una ventana y elegir un archivo mediante el selector de archivos de
+confianza de la sesión de escritorio.
 
 El visor no posee ninguna capacidad sobre el sistema de archivos: no puede
 abrir, listar ni leer nada por sí mismo. La sesión navega en su nombre bajo
@@ -26,8 +28,10 @@ RISC OS Sprite. Un archivo que el decodificador rechaza declara su motivo en
 la ventana y en la salida de error estándar; la ventana nunca se deja en
 blanco y nunca se fabrica una imagen.
 
-Varios documentos a la vez son visores separados: comparar dos imágenes una
-al lado de la otra es abrir la segunda. Cerrar una ventana termina su visor.
+Varios documentos a la vez son varias ventanas del mismo visor: comparar dos
+imágenes una al lado de la otra es abrir la segunda. Cerrar una ventana deja
+el visor en la barra de iconos, listo para el siguiente documento; la fila
+Salir de su menú de icono es la que lo termina.
 
 La barra de herramientas superior lleva, en orden: reducir, ampliar, ajustar
 a la ventana, tamaño real, entrada anterior, entrada siguiente, girar a la

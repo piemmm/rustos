@@ -44,9 +44,10 @@ use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
-    encode_create_reply, encode_desktop_reply, encode_minted_id_reply, encode_open_target_reply,
-    AppBar, AppMenu, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
-    WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
+    encode_create_reply, encode_desktop_reply, encode_hand_over_reply, encode_minted_id_reply,
+    encode_open_target_reply, AppBar, AppMenu, HandOverDocument, HandOverOutcome, OpenTarget,
+    WindowEvent, WindowRegion, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
     WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
 };
 use tairix_abi::Errno;
@@ -54,24 +55,32 @@ use tairix_display::{FrameRegion, ShmMapper};
 
 /// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes,
 /// so one fixed buffer holds every outcome: the open-target frame (the
-/// widest, since a path is), the create frame, the desktop frame, or the
-/// status frame that fits inside any of them.
+/// widest, since a path is), the create frame, the desktop frame, the
+/// hand-over frame, or the status frame that fits inside any of them.
+///
+/// Derived from every reply the channel has rather than from the ones that
+/// happen to be widest today, so an operation whose reply outgrew the buffer
+/// could not slip past.
 ///
 /// A caller holds this buffer **once** for the life of its serve loop rather
 /// than taking one per request: it is sized to the widest reply the channel
 /// has, and a per-request array would cost a present — the hottest operation
 /// and one of the shortest — the whole of the widest one's clearing.
 pub const WINDOW_REPLY_MAX: usize = {
-    let widest = if WINDOW_CREATE_REPLY_LEN > WINDOW_DESKTOP_REPLY_LEN {
-        WINDOW_CREATE_REPLY_LEN
-    } else {
-        WINDOW_DESKTOP_REPLY_LEN
-    };
-    if WINDOW_OPEN_TARGET_REPLY_MAX > widest {
-        WINDOW_OPEN_TARGET_REPLY_MAX
-    } else {
-        widest
+    const fn wider(a: usize, b: usize) -> usize {
+        if a > b {
+            a
+        } else {
+            b
+        }
     }
+    wider(
+        wider(WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN),
+        wider(
+            wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN),
+            WINDOW_MINTED_ID_REPLY_LEN,
+        ),
+    )
 };
 
 /// The minted-id reply a menu open answers with is the shortest of the three,
@@ -277,6 +286,44 @@ pub trait WindowHost {
     /// to the client and no pick is recorded.
     fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno>;
 
+    /// A validated `HandOverLaunch`: attested `caller` asked the session to
+    /// reach the live instance of the bundle whose entry binary is
+    /// `run_path`, handing it `document` if one is named.
+    ///
+    /// The host owns the decision, because only it knows which bundles are
+    /// running and what their manifests attest: it resolves the launch
+    /// through its own funnel and answers [`HandOverOutcome::NotRunning`]
+    /// when there was no instance to reach, which is what tells the caller to
+    /// launch the bundle itself. `desk` is the one capability the *engine*
+    /// owns and lends for the occasion — queueing a target and waking its
+    /// owner — so the launch rule stays in one place rather than being
+    /// re-derived here.
+    ///
+    /// `document`'s grant was minted by `caller` **to the session**, from a
+    /// descriptor the caller opened under its own authority. The host redeems
+    /// it and hands it on to the instance it resolved; it never opens a path
+    /// on a caller's behalf, which would lend the session's own larger reach.
+    ///
+    /// The default refuses: a host with no launch table cannot say whether
+    /// anything is running, and telling the caller so is more honest than
+    /// answering "not running" for a bundle it never looked for.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host could not act on the request with — a grant it
+    /// could not redeem, a re-grant the kernel refused. Nothing is delegated
+    /// on a refusal.
+    fn hand_over_requested(
+        &mut self,
+        desk: &mut dyn HandOverDesk,
+        caller: ProcId,
+        run_path: &str,
+        document: Option<&HandOverDocument>,
+    ) -> Result<HandOverOutcome, Errno> {
+        let _ = (desk, caller, run_path, document);
+        Err(Errno::NotSupported)
+    }
+
     /// A validated `OpenMenu`: the attested owner of live window
     /// `window_id` (which has no open unanswered) asked for a menu chain,
     /// anchored at `anchor` in that window's own client pixels, over
@@ -480,6 +527,93 @@ pub struct PopupSpec {
     pub offset_y: i32,
 }
 
+/// The engine's own [`HandOverDesk`]: its queue and the sink the wake goes
+/// out on, bound for the length of one hand-over.
+struct EngineDesk<'a, M: ShmMapper> {
+    server: &'a mut WindowServer<M>,
+    sink: &'a mut dyn EventSink,
+}
+
+impl<M: ShmMapper> HandOverDesk for EngineDesk<'_, M> {
+    fn hand_over(&mut self, app: ProcId, entry: OpenEntry) -> bool {
+        self.server
+            .hand_over_open_target(self.sink, app, entry)
+            .is_ok()
+    }
+
+    fn ask_default(&mut self, app: ProcId) -> bool {
+        self.server
+            .deliver_app_event(self.sink, app, &WindowEvent::AppBarDefault)
+            .is_ok()
+    }
+
+    fn recent_window(&self, app: ProcId) -> Option<u64> {
+        self.server
+            .windows
+            .iter()
+            .rev()
+            .find(|(_, record)| record.owner == app)
+            .map(|(&id, _)| id)
+    }
+}
+
+/// The engine's half of reaching a live instance, lent to the host for the
+/// length of one hand-over.
+///
+/// Whether to reach an instance is the host's decision — only it knows what
+/// is running and what a manifest attests — while every *way* of reaching
+/// one is a fact or an action the engine owns: the target queue and its
+/// bound, the application's event route, and which window it most recently
+/// opened. So the engine hands these over rather than either party
+/// re-deriving the other's half.
+pub trait HandOverDesk {
+    /// Queue `entry` for `app` and wake it, answering whether it was taken.
+    ///
+    /// `false` is an unreachable instance: nothing is left queued, so the
+    /// caller is free to read it as "start a fresh process instead".
+    fn hand_over(&mut self, app: ProcId, entry: OpenEntry) -> bool;
+
+    /// Ask `app` for its icon-bar default action. `false` when it declared no
+    /// icon-bar presence, so it has no default to be asked for.
+    fn ask_default(&mut self, app: ProcId) -> bool;
+
+    /// The window `app` most recently opened, as its channel id, for a host
+    /// that means to raise it. `None` when it owns none.
+    fn recent_window(&self, app: ProcId) -> Option<u64>;
+}
+
+/// One target queued for an application to open — the session's owned form
+/// of [`tairix_abi::window_ipc::OpenTarget`].
+///
+/// The wire type borrows from the frame it is encoded into, which a queue
+/// cannot hold; this is what the session queues and the engine hands back.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpenEntry {
+    /// A path the user named. Confers no access.
+    Path(String),
+    /// A document already opened, reachable through a one-shot delegation the
+    /// session minted to the application this is queued for.
+    Document {
+        /// Its own file name, for a title. Empty when unknown.
+        name: String,
+        /// The `fd_redeem` handle. Never zero.
+        grant: u64,
+    },
+}
+
+impl OpenEntry {
+    /// This entry as the wire type, borrowing its text.
+    fn as_wire(&self) -> OpenTarget<'_> {
+        match self {
+            Self::Path(path) => OpenTarget::Path(path.as_bytes()),
+            Self::Document { name, grant } => OpenTarget::Document {
+                name: name.as_bytes(),
+                grant: *grant,
+            },
+        }
+    }
+}
+
 /// One live window: its attested owner, its event route, its
 /// once-mapped frame region, and whether a trusted-picker request is
 /// awaiting its conclusion.
@@ -512,14 +646,6 @@ struct WindowRecord<R> {
     /// is closed when the window it hangs from closes, so the link lives
     /// beside the window it binds.
     parent: Option<u64>,
-    /// Paths queued for this window to open, oldest first.
-    ///
-    /// Filled by the session when a user launches a bundle that is already
-    /// running and names a document, drained by the application pulling with
-    /// `TakeOpenTarget`. Bounded by [`WINDOW_MAX_OPEN_TARGETS`], and it dies
-    /// with the window: a target queued for a window that closes is reachable
-    /// by nothing and is dropped with the record.
-    open_targets: VecDeque<String>,
 }
 
 impl<R> WindowRecord<R> {
@@ -550,6 +676,15 @@ pub struct WindowServer<M: ShmMapper> {
     /// engine keeps only the route, so an application-scoped event can be
     /// delivered without asking the host where it goes.
     app_bars: BTreeMap<ProcId, u64>,
+    /// Targets queued for each application to open, oldest first.
+    ///
+    /// Keyed on the application rather than on one of its windows, because
+    /// the instance a hand-over most needs to reach is the one with nothing
+    /// open: a resident single-instance viewer sitting on the icon bar has no
+    /// window to queue against. Bounded per application by
+    /// [`WINDOW_MAX_OPEN_TARGETS`], and the whole queue dies with the client,
+    /// so a target nobody drained is reachable by nothing and is dropped.
+    open_targets: BTreeMap<ProcId, VecDeque<OpenEntry>>,
     /// The next menu-open id to mint. Its own sequence rather than the
     /// window ids': an open names a gesture, not a window, and the two are
     /// never interchangeable. Ids start at 1 and are never reused, so an
@@ -573,6 +708,7 @@ impl<M: ShmMapper> WindowServer<M> {
             next_id: 1,
             next_menu_open: 1,
             app_bars: BTreeMap::new(),
+            open_targets: BTreeMap::new(),
             client_frame_max,
         }
     }
@@ -625,6 +761,7 @@ impl<M: ShmMapper> WindowServer<M> {
     pub fn serve(
         &mut self,
         host: &mut dyn WindowHost,
+        sink: &mut dyn EventSink,
         identity: &mut dyn CallerIdentity,
         ticket: u64,
         request: &[u8],
@@ -648,7 +785,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 };
             }
         };
-        self.dispatch(host, caller, &decoded, reply)
+        self.dispatch(host, sink, caller, &decoded, reply)
     }
 
     /// Act on one decoded request from the attested `caller`, writing the
@@ -656,6 +793,7 @@ impl<M: ShmMapper> WindowServer<M> {
     fn dispatch(
         &mut self,
         host: &mut dyn WindowHost,
+        sink: &mut dyn EventSink,
         caller: ProcId,
         decoded: &WindowRequest,
         reply: &mut [u8; WINDOW_REPLY_MAX],
@@ -710,9 +848,22 @@ impl<M: ShmMapper> WindowServer<M> {
                 anchor,
                 ref menu,
             } => minted_id_reply(reply, self.open_menu(host, caller, window_id, anchor, menu)),
-            WindowRequest::TakeOpenTarget { window_id } => {
-                let taken = self.take_open_target(caller, window_id);
-                open_target_reply(reply, taken.as_ref().map(|path| path.as_deref()))
+            WindowRequest::TakeOpenTarget => {
+                let taken = self.take_open_target(caller);
+                open_target_reply(reply, Ok(taken.as_ref().map(OpenEntry::as_wire)))
+            }
+            WindowRequest::HandOverLaunch {
+                ref run_path,
+                ref document,
+            } => {
+                let mut desk = EngineDesk { server: self, sink };
+                let outcome = host.hand_over_requested(
+                    &mut desk,
+                    caller,
+                    run_path.as_str(),
+                    document.as_ref(),
+                );
+                hand_over_reply(reply, outcome)
             }
             ref other => self.dispatch_status_op(host, caller, other, reply),
         }
@@ -794,8 +945,10 @@ impl<M: ShmMapper> WindowServer<M> {
             // Likewise a menu open, which mints an open id.
             WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(Errno::NotSupported)),
             // ...and a target pull, which answers with its own frame.
-            WindowRequest::TakeOpenTarget { .. } => {
-                open_target_reply(reply, Err(&Errno::NotSupported))
+            WindowRequest::TakeOpenTarget => open_target_reply(reply, Err(Errno::NotSupported)),
+            // ...and a hand-over, likewise.
+            WindowRequest::HandOverLaunch { .. } => {
+                hand_over_reply(reply, Err(Errno::NotSupported))
             }
         }
     }
@@ -861,7 +1014,6 @@ impl<M: ShmMapper> WindowServer<M> {
                 pick_pending: false,
                 menu_open: None,
                 parent: None,
-                open_targets: VecDeque::new(),
             },
         );
         Ok(window_id)
@@ -926,7 +1078,6 @@ impl<M: ShmMapper> WindowServer<M> {
                 pick_pending: false,
                 menu_open: None,
                 parent: Some(spec.parent_window_id),
-                open_targets: VecDeque::new(),
             },
         );
         Ok(window_id)
@@ -1063,41 +1214,60 @@ impl<M: ShmMapper> WindowServer<M> {
         host.tooltip_declared(window_id, region, text)
     }
 
-    /// Pop the oldest path queued for `caller`'s own window `window_id`, or
-    /// `None` once the queue is drained.
+    /// Pop the oldest target queued for `caller`, or `None` once the queue is
+    /// drained.
     ///
     /// Popping is what makes a target one-shot: there is no id to mint or
-    /// validate, and the ordering is the protocol. A window the caller does
-    /// not own answers like one that never existed.
-    fn take_open_target(
-        &mut self,
-        caller: ProcId,
-        window_id: u64,
-    ) -> Result<Option<String>, Errno> {
-        let record = self
-            .windows
-            .get_mut(&window_id)
-            .filter(|record| record.owner == caller)
-            .ok_or(Errno::NotFound)?;
-        Ok(record.open_targets.pop_front())
+    /// validate, and the ordering is the protocol. An application with no
+    /// queue at all — nothing was ever handed to it — answers like one whose
+    /// queue is drained, so a pull leaks nothing about other clients.
+    fn take_open_target(&mut self, caller: ProcId) -> Option<OpenEntry> {
+        let queue = self.open_targets.get_mut(&caller)?;
+        let entry = queue.pop_front();
+        if queue.is_empty() {
+            self.open_targets.remove(&caller);
+        }
+        entry
     }
 
-    /// Hand `path` to window `window_id` to open: queue it, then wake its
-    /// owner with a [`WindowEvent::OpenRequested`].
+    /// Where an application-scoped event reaches `app`: its declared
+    /// icon-bar route, else the event endpoint of its most recent window.
+    ///
+    /// The bar route is preferred because an application that declared one
+    /// receives every application-scoped event there, and it is the only
+    /// route an instance with no window has. Falling back to a window keeps
+    /// an application that opted out of the icon bar reachable — it is a
+    /// window-owning client like any other, and a hand-over is not a bar
+    /// gesture.
+    fn app_event_endpoint(&self, app: ProcId) -> Option<u64> {
+        if let Some(&endpoint) = self.app_bars.get(&app) {
+            return Some(endpoint);
+        }
+        self.windows
+            .iter()
+            .rev()
+            .find(|(_, record)| record.owner == app)
+            .map(|(_, record)| record.event_endpoint)
+    }
+
+    /// Hand `entry` to application `app` to open: queue it, then wake the
+    /// application with a [`WindowEvent::OpenRequested`].
     ///
     /// The session's side of the channel, and **one** operation because the
-    /// two halves are one invariant: a queued target the owner was never
-    /// woken for would sit unreachable, so a refused wake takes the target
-    /// back off the queue rather than leaving it stranded. The caller may
-    /// therefore read the answer as "the instance has it", and fall back to
-    /// starting a fresh process when it does not.
+    /// two halves are one invariant: a queued target the application was
+    /// never woken for would sit unreachable, so a refused wake takes the
+    /// target back off the queue rather than leaving it stranded. The caller
+    /// may therefore read the answer as "the instance has it", and fall back
+    /// to starting a fresh process when it does not.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — no such live window.
+    /// * [`Errno::NotFound`] — `app` has no route an event can reach it by,
+    ///   so there is no live instance to hand anything to.
     /// * [`Errno::LengthOutOfRange`] — an empty path, or one longer than the
     ///   filesystem admits.
-    /// * [`Errno::NoSpace`] — the window already holds
+    /// * [`Errno::OutOfRange`] — a document naming no delegation.
+    /// * [`Errno::NoSpace`] — the application already holds
     ///   [`WINDOW_MAX_OPEN_TARGETS`] targets. The newest is refused with the
     ///   refusal stated rather than an older one dropped silently, or the
     ///   queue grown without bound.
@@ -1105,26 +1275,60 @@ impl<M: ShmMapper> WindowServer<M> {
     pub fn hand_over_open_target(
         &mut self,
         sink: &mut dyn EventSink,
-        window_id: u64,
-        path: &str,
+        app: ProcId,
+        entry: OpenEntry,
     ) -> Result<(), Errno> {
-        if path.is_empty() || path.len() > tairix_abi::FS_PATH_MAX {
-            return Err(Errno::LengthOutOfRange);
+        match &entry {
+            OpenEntry::Path(path) => {
+                if path.is_empty() || path.len() > tairix_abi::FS_PATH_MAX {
+                    return Err(Errno::LengthOutOfRange);
+                }
+            }
+            OpenEntry::Document { grant, .. } => {
+                if *grant == 0 {
+                    return Err(Errno::OutOfRange);
+                }
+            }
         }
-        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
-        if record.open_targets.len() >= WINDOW_MAX_OPEN_TARGETS {
+        let endpoint = self.app_event_endpoint(app).ok_or(Errno::NotFound)?;
+        let queue = self.open_targets.entry(app).or_default();
+        if queue.len() >= WINDOW_MAX_OPEN_TARGETS {
+            self.prune_empty_queue(app);
             return Err(Errno::NoSpace);
         }
-        record.open_targets.push_back(String::from(path));
-        let woken = self.deliver_event(sink, &WindowEvent::OpenRequested { window_id });
-        if let Err(err) = woken {
-            // Nothing was announced, so nothing may be left queued.
-            if let Some(record) = self.windows.get_mut(&window_id) {
-                record.open_targets.pop_back();
+        // A delegation handle is one-shot, and the kernel hands the *same*
+        // handle back when the same authority is granted to the same process
+        // twice. Queueing it twice would therefore promise a second document
+        // the first pull consumes, so an entry already waiting is the answer.
+        if let OpenEntry::Document { grant, .. } = entry {
+            if queue.iter().any(
+                |held| matches!(held, OpenEntry::Document { grant: held, .. } if *held == grant),
+            ) {
+                return Ok(());
             }
+        }
+        queue.push_back(entry);
+        if let Err(err) = sink.deliver(endpoint, &WindowEvent::OpenRequested) {
+            // Nothing was announced, so nothing may be left queued.
+            if let Some(queue) = self.open_targets.get_mut(&app) {
+                queue.pop_back();
+            }
+            self.prune_empty_queue(app);
             return Err(err);
         }
         Ok(())
+    }
+
+    /// Drop `app`'s queue entry once it holds nothing, so a refused hand-over
+    /// leaves no record behind for an application that has none.
+    fn prune_empty_queue(&mut self, app: ProcId) {
+        if self
+            .open_targets
+            .get(&app)
+            .is_some_and(alloc::collections::VecDeque::is_empty)
+        {
+            self.open_targets.remove(&app);
+        }
     }
 
     /// Whether `caller` is the attested owner of live window `window_id`.
@@ -1298,6 +1502,9 @@ impl<M: ShmMapper> WindowServer<M> {
         if self.app_bars.remove(&client).is_some() {
             host.app_bar_withdrawn(client);
         }
+        // A target queued for a client that has gone is reachable by
+        // nothing; its delegation dies with the process it was minted to.
+        self.open_targets.remove(&client);
     }
 
     /// Route one application-scoped event — an icon-bar click or menu
@@ -1430,22 +1637,26 @@ fn status(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<(), Errno>) -> usiz
 }
 
 /// Write a minted-id reply into `reply`, returning its length.
+/// Write a `HandOverLaunch` outcome into `reply`, answering its length.
+fn hand_over_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    result: Result<HandOverOutcome, Errno>,
+) -> usize {
+    let frame = encode_hand_over_reply(result);
+    reply[..frame.len()].copy_from_slice(&frame);
+    frame.len()
+}
+
 /// Write a `TakeOpenTarget` outcome into `reply`, answering its length.
 ///
 /// The frame is only as long as the answer: the drained queue costs its
 /// header, not the widest path.
 fn open_target_reply(
     reply: &mut [u8; WINDOW_REPLY_MAX],
-    result: Result<Option<&str>, &Errno>,
+    result: Result<Option<OpenTarget<'_>>, Errno>,
 ) -> usize {
     let mut frame = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
-    let len = encode_open_target_reply(
-        &mut frame,
-        match result {
-            Ok(path) => Ok(path.map(str::as_bytes)),
-            Err(&err) => Err(err),
-        },
-    );
+    let len = encode_open_target_reply(&mut frame, result);
     reply[..len].copy_from_slice(&frame[..len]);
     len
 }

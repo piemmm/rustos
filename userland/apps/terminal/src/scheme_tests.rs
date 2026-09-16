@@ -100,15 +100,20 @@ fn every_other_scheme_has_a_fixed_palette() {
 // --- Painted::resolve -------------------------------------------------------
 
 #[test]
-fn resolve_system_takes_the_theme_surface_and_accent_colors() {
-    let theme = Theme::dark();
-    let custom = ColorScheme::from_theme(&Theme::light());
-    let painted = Painted::resolve(Scheme::System, &custom, &theme, 255);
-    let palette = theme.palette();
-    assert_eq!(painted.scheme.background, Rgb::from(palette.surface));
-    assert_eq!(painted.scheme.foreground, Rgb::from(palette.on_surface));
-    assert_eq!(painted.scheme.cursor, Rgb::from(palette.accent));
-    assert_eq!(painted.scheme.cursor_text, Rgb::from(palette.on_accent));
+fn resolve_system_takes_the_theme_page_and_accent_colors() {
+    // The grid is a page, so its ground is the theme's document role and not
+    // the window surface around it — which is what keeps the full-screen
+    // editors that draw on it writing on paper under a light theme.
+    for theme in [Theme::dark(), Theme::light()] {
+        let custom = ColorScheme::from_theme(&Theme::light());
+        let painted = Painted::resolve(Scheme::System, &custom, &theme, 255);
+        let palette = theme.palette();
+        assert_eq!(painted.scheme.background, Rgb::from(palette.document));
+        assert_ne!(painted.scheme.background, Rgb::from(palette.surface));
+        assert_eq!(painted.scheme.foreground, Rgb::from(palette.on_surface));
+        assert_eq!(painted.scheme.cursor, Rgb::from(palette.accent));
+        assert_eq!(painted.scheme.cursor_text, Rgb::from(palette.on_accent));
+    }
 }
 
 #[test]

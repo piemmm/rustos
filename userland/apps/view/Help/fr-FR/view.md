@@ -8,10 +8,12 @@ view — visionneuse graphique d'images et de documents
 
 ## DESCRIPTION
 
-Ouvre une fenêtre de bureau affichant une image ou un document. Lancée avec
-un document — depuis le gestionnaire de fichiers, ou en ouvrant une image —
-elle affiche ce fichier ; lancée seule, elle demande au sélecteur de
-fichiers de confiance de la session de bureau d'en choisir un.
+Affiche images et documents dans des fenêtres de bureau. Lancée avec un
+document — depuis le gestionnaire de fichiers, ou en ouvrant une image —
+elle ouvre une fenêtre sur ce fichier. Lancée seule, elle n'ouvre aucune
+fenêtre et prend simplement sa place dans la barre d'icônes : cliquez sur
+son icône pour ouvrir une fenêtre et choisir un fichier au moyen du
+sélecteur de fichiers de confiance de la session de bureau.
 
 La visionneuse ne détient aucune capacité sur le système de fichiers : elle
 ne peut rien ouvrir, lister ni lire par elle-même. La session navigue pour
@@ -27,9 +29,11 @@ RISC OS Sprite. Un fichier que le décodeur refuse énonce sa raison dans la
 fenêtre et sur la sortie d'erreur standard ; la fenêtre n'est jamais laissée
 vide et aucune image n'est jamais fabriquée.
 
-Plusieurs documents à la fois, ce sont plusieurs visionneuses : comparer deux
-images côte à côte, c'est ouvrir la seconde. Fermer une fenêtre met fin à sa
-visionneuse.
+Plusieurs documents à la fois, ce sont plusieurs fenêtres de la même
+visionneuse : comparer deux images côte à côte, c'est ouvrir la seconde.
+Fermer une fenêtre laisse la visionneuse dans la barre d'icônes, prête pour
+le document suivant ; c'est la ligne Quitter de son menu d'icône qui y met
+fin.
 
 La barre d'outils en haut porte, dans l'ordre : réduire, agrandir, ajuster à
 la fenêtre, taille réelle, entrée précédente, entrée suivante, tourner à

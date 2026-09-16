@@ -47,11 +47,12 @@ fn drawn(document: ViewDocument, name: &str, bytes: u64) -> (View, Layout, Theme
     let theme = registry.active();
     let page = (document.width, document.height);
     let mut view = View::new(true);
-    assert_eq!(view.next_request(), Some(Request::Open));
+    assert_eq!(view.next_request(), Some(Request::Open { open_id: 1 }));
     let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, font(theme));
     let mut region = damage::sink();
     view.deliver(
         Answer::Opened {
+            open_id: 1,
             opened: Ok((document, String::from(name), bytes)),
         },
         &layout,
@@ -121,7 +122,7 @@ fn a_viewer_with_nothing_open_draws_its_reason_rather_than_a_blank_canvas() {
     let mut view = View::new(false);
     let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, font(theme));
     let waiting = painted(&view, &layout, theme);
-    assert!(view.no_document(Refusal::Cancelled));
+    assert!(view.no_document(Refusal::PickRefused(tairix_abi::Errno::AlreadyExists)));
     let refused = painted(&view, &layout, theme);
     assert_ne!(
         waiting.pixels(),
@@ -306,7 +307,7 @@ fn the_summary_names_the_document_and_the_refusal_names_the_reason() {
     assert!(line.contains("4032 x 3024"));
 
     let mut empty = View::new(false);
-    assert!(empty.no_document(Refusal::Cancelled));
+    assert!(empty.no_document(Refusal::PickRefused(tairix_abi::Errno::AlreadyExists)));
     let stated = summary(&empty);
     assert!(!stated.is_empty(), "a refusal always states something");
 }
@@ -320,6 +321,7 @@ fn a_refused_open_is_summarised_as_the_reason_it_gave() {
     let mut region = damage::sink();
     view.deliver(
         Answer::Opened {
+            open_id: 1,
             opened: Err(crate::Refusal::Failed(ViewFailure::Refused(
                 ViewRefusal::TooLarge,
             ))),

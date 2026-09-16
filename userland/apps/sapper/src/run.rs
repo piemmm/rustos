@@ -512,7 +512,7 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
-            | WindowEvent::OpenRequested { .. } => Acted::Idle,
+            | WindowEvent::OpenRequested => Acted::Idle,
         }
     }
 

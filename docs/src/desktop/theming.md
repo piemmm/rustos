@@ -21,8 +21,8 @@ bundles, under a stable `ThemeId`:
 
 - `Palette` — semantic `Rgba` colour roles plus the two floating-chrome
   opacities: the surface/foreground base
-  (`desktop`, `surface`, `surface_raised`, `on_surface`,
-  `on_surface_muted`,
+  (`desktop`, `surface`, `surface_raised`, `document`, `title_band`,
+  `on_surface`, `on_surface_muted`,
   `accent`, `on_accent`, `selection_fill`, `border`), the Reactive Alloy
   control roles
   (`surface_hover`, `surface_pressed`, `rim`, `rim_active`, `danger`), the
@@ -62,6 +62,22 @@ bundles, under a stable `ThemeId`:
     highlight at all, everywhere at once. The tests additionally hold body text
     legible *on* both plates, so the wash can never be strengthened into the
     foreground it carries.
+  - `document` is the ground a document's own *content* is drawn on: an
+    editor's or a terminal's page, an editable field's plate. Its own role
+    rather than `surface`, because a window and the page inside it are two
+    things — the window ground is chrome the eye reads past, while the page is
+    what the user is looking at. It therefore goes the *other* way from the
+    chrome around it: white on a light appearance, the deepest layer on a dark
+    one. A field that only shows a value stays on the plate ladder; a field
+    the user may type in takes this, so the ground is the affordance.
+  - `title_band` is the ground every title band is drawn on: a window's
+    furniture bar, and the band a menu or dialog plate is capped with. One
+    role for both, because a heading band *is* the title bar with no commands
+    in it. It separates from `surface` in the direction the appearance calls
+    for — deeper on light so a window's furniture reads as chrome rather than
+    as more page, lifted on dark — and the tests assert it is tellable from
+    both the window ground it borders and the plate it caps, with the title
+    legible on it whether the window is active or not.
   - `surface_selected` is the band filling the row a command surface will act
     on — a menu's current row, wherever the pointer or the keyboard put it. It
     is deliberately *not* `surface_hover`: in a menu there is no separate
@@ -280,8 +296,20 @@ for its layer. See
 `Theme::dark` is the default; `Theme::light` is its light counterpart. Both are
 the Reactive Alloy design boards (`plans/desktop1.png`, `plans/desktop2a.png`,
 `plans/desktop1-light.png`) read off rather than invented: near-black cool
-surfaces (dark) or warm off-white surfaces (light) under one alloy-orange
-accent family, with the semantic signal hues the boards' own legend fixes.
+surfaces (dark) or one descending ladder of **neutral greys** (light) under one
+alloy-orange accent family, with the semantic signal hues the boards' own
+legend fixes.
+
+The light theme's neutrals are neutral by test — `r == g == b` on every one of
+them — so the only colour on a light desktop is a signal hue. Its window
+ground is a mid-light grey (a 15% grey) rather than paper, and its title bands
+a 25% grey: white window grounds left every application reading as a blank
+sheet, with nothing for a plate to be raised off and nowhere for a title band
+to sit. Paper is `document`'s alone, so the surfaces a user *writes* on are the
+white ones. Raised chrome — plates, menus, the taskbar — catches the light
+*above* the window ground, and the interaction ladder deepens away from it;
+both those two levels and the ladder's direction are asserted rather than
+trusted to the authored numbers.
 
 The two appearances re-tune every role for their own background — except
 `on_accent`, which is deliberately the *same* warm white in both: a primary

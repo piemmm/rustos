@@ -88,7 +88,7 @@ pub fn operation_control(
         // than navigating the listing this operation is walking.
         // The rest is input that must not navigate behind the modal panel.
         WindowEvent::AlternateCloseRequested { .. }
-        | WindowEvent::OpenRequested { .. }
+        | WindowEvent::OpenRequested
         | WindowEvent::AppBarDefault
         | WindowEvent::AppBarMenu { .. }
         | WindowEvent::MenuClosed { .. }

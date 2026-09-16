@@ -479,12 +479,12 @@ impl WindowControl {
         let pressed = self.state.pointer == PointerState::Pressed;
         let focused = self.state.focus.focused;
         let awake = hovered || pressed || focused;
-        // The command's own hue, composed over the window body the title bar
-        // is painted on. A plate is laid down rather than blended, so the
-        // authored translucency has to be resolved against that ground here:
-        // laying it down as-is would leave a hole in the window's furniture
-        // strip and show the desktop through the button.
-        let tint = command_tint(palette, self.kind).over(palette.surface);
+        // The command's own hue, composed over the band it is seated in. A
+        // plate is laid down rather than blended, so the authored translucency
+        // has to be resolved against that ground here: laying it down as-is
+        // would leave a hole in the window's furniture strip and show the
+        // desktop through the button.
+        let tint = command_tint(palette, self.kind).over(palette.title_band);
         let frame = resolve_tinted_frame(theme, tint, self.state);
 
         // A flush cell is square except where the window's rim curves through
@@ -1393,10 +1393,12 @@ impl TitleBar {
 
         // A heading band lays its own ground, one shade off the plate it caps,
         // so a plate reads as a titled block rather than as a column of rows
-        // with an odd centred one on top.
+        // with an odd centred one on top. It is the same role a window's
+        // furniture bar takes, because a heading band *is* this control with
+        // no commands in it.
         if heading {
             if let Some((bx, by, bw, bh)) = surface_rect(bounds) {
-                let fill = ground_fill(theme, palette.surface_hover, ChromeLayer::Ground);
+                let fill = ground_fill(theme, palette.title_band, ChromeLayer::Ground);
                 surface.fill_rect(bx, by, bw, bh, Color::from(fill));
             }
         }
@@ -2319,9 +2321,22 @@ impl WindowFrame {
         // Window body behind the title bar and client viewport. It is the plate
         // the window manager cuts the client to, so both read one definition of
         // where the arc leaves room for content.
+        //
+        // The compositor blits the client over everything but the title band,
+        // the frame inset, and the arc behind the client's corners, so what
+        // this fill is actually *seen* as is the band — which is why it is the
+        // title-band ground rather than the window surface the client draws
+        // its own content on.
         let (plate_inset, plate_radius) = rim.plate();
         if let Some((ix, iy, iw, ih)) = inset(x, y, w, h, plate_inset) {
-            surface.fill_round_rect(ix, iy, iw, ih, plate_radius, Color::from(palette.surface));
+            surface.fill_round_rect(
+                ix,
+                iy,
+                iw,
+                ih,
+                plate_radius,
+                Color::from(palette.title_band),
+            );
             // In high contrast the active frame adds a doubled inner rim line
             // in the muted foreground, so focus reads as a difference in shape
             // and not only as the title tone; it never changes frame

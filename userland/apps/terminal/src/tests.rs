@@ -953,10 +953,10 @@ fn hidden_cursor_is_not_painted() {
     let theme = Theme::dark();
     let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
     let surface = screen.surface();
-    let surface_bg: Color = theme.palette().surface.into();
-    // With the cursor hidden the home cell shows the plain surface, not accent.
+    let page: Color = theme.palette().document.into();
+    // With the cursor hidden the home cell shows the plain page, not accent.
     let top_left = surface.get(0, 0).map(tairix_raster::Pixel::unpremultiply);
-    assert_eq!(top_left, Some(surface_bg));
+    assert_eq!(top_left, Some(page));
 }
 
 #[test]

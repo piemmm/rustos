@@ -15,6 +15,19 @@
 //! re-entered as, which holds no filesystem reach at all and answers pixels.
 //! A malformed or hostile file crashes that worker and nothing else.
 //!
+//! # One instance, many windows, resident
+//!
+//! The viewer is a *single* instance with a window per document: a second
+//! document opens a second window in this process rather than a second
+//! process, which is the rule for every application with an icon-bar slot.
+//! It stays on that slot with no window open — launched by the user it shows
+//! nothing at all until it has something to display — and only the slot's
+//! *Quit* row ends it.
+//!
+//! Each window holds its own engine, its own sandbox in the decode worker,
+//! and its own open and render state, so a malformed file refuses in its own
+//! window and disturbs no other.
+//!
 //! # What runs where
 //!
 //! Everything with behaviour worth testing is in the host-tested
@@ -48,13 +61,14 @@ mod program {
         AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
         AppMenuShortcut, MenuOutcome, TooltipText, WindowEvent, WindowRegion,
     };
-    use tairix_abi::{Errno, WaitSetOp, WaitSourceKind, DOCUMENT_ROLE_ARG, STDIN};
+    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, DOCUMENT_ROLE_ARG, STDIN};
     use tairix_controls::damage;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::NoArtwork;
     use tairix_input::InputEvent;
+    use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_sandbox::imagerender::{
         begin_document, close_view, open_view, push_document, render_page, select_page,
@@ -69,10 +83,11 @@ mod program {
         Answer, Layout, Refusal, Request, MAX_DOCUMENT_BYTES, MIN_WIN_HEIGHT, MIN_WIN_WIDTH,
         WIN_HEIGHT, WIN_WIDTH,
     };
-    use tairix_window::app::{self, Wake};
+    use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
-        key_input_event, pointer_input_events, pointer_point, present_damage, EventDrain,
-        EventError, EventMailbox, EventSource, Parked, Repaint, WindowEvents, WindowSizing,
+        key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
+        EventError, EventMailbox, EventSource, Parked, Repaint, Target, WindowClient, WindowEvents,
+        WindowSizing,
     };
 
     /// The name this program states its own refusals under.
@@ -163,14 +178,29 @@ mod program {
         format: Option<ViewFormat>,
     }
 
-    /// One job the worker carries out.
+    /// One job the worker carries out, and the window it belongs to.
     ///
     /// The engine's [`Request`] says *what* is wanted; this adds what only
-    /// this binary holds — the descriptor a document is read from. An open
-    /// therefore cannot be asked for without a source to open.
-    enum Job {
-        /// Stream `source` into the worker and open it.
-        Open(Source),
+    /// this binary holds — the descriptor a document is read from, and which
+    /// window asked. An open therefore cannot be asked for without a source
+    /// to open, and an answer cannot land in a window that did not ask.
+    struct Job {
+        /// The window this is for.
+        window: u64,
+        /// What to carry out.
+        work: Work,
+    }
+
+    /// The work half of a [`Job`].
+    enum Work {
+        /// Stream `source` into the window's sandbox and open it.
+        Open {
+            /// The open this answers, echoed so one the window has abandoned
+            /// is dropped rather than adopted.
+            open_id: u64,
+            /// The document to read.
+            source: Source,
+        },
         /// The engine's render request, carried through unchanged.
         Show {
             /// The entry to hold decoded.
@@ -182,70 +212,113 @@ mod program {
             /// The buffer to draw into, handed back in the answer.
             pixels: Vec<u8>,
         },
+        /// End the decoders of these closed windows.
+        ///
+        /// A job rather than a call from the loop, because the sandboxes are
+        /// the worker's and the loop may not reach them — which is the point
+        /// of the worker owning its state.
+        Forget(Vec<u64>),
     }
 
-    /// What the worker keeps between jobs: the sandbox, and so the open
-    /// document and the page it holds decoded.
+    /// What came back from one job.
+    enum Reply {
+        /// An answer for the window that asked.
+        Window {
+            /// The window that asked.
+            window: u64,
+            /// What came back, for that window's own engine.
+            answer: Answer,
+        },
+        /// The decoders of closed windows have been ended.
+        Forgotten,
+    }
+
+    /// What the worker keeps between jobs: **one sandbox per window**, and so
+    /// each window's open document and the page it holds decoded.
     ///
-    /// A view is a *session* — open once, then draw from the page held — so
-    /// the sandbox must outlive one job. It lives here, reachable only from
-    /// the thread carrying work out, so the loop can never touch it.
+    /// A view is a *session* — open once, then draw from the page held — so a
+    /// sandbox must outlive one job; and a window's decode must be its own, or
+    /// one document would land in another window and a malformed file would
+    /// take every window's picture down with it. It lives here, reachable only
+    /// from the thread carrying work out, so the loop can never touch it.
+    #[derive(Default)]
     struct Session {
-        sandbox: ParserSandbox<RtLauncher, tairix_rt::LogSink>,
-        /// Whether a document is open, so a replacement releases the one
-        /// before it rather than leaving the worker holding both.
-        open: bool,
+        sandboxes: alloc::collections::BTreeMap<u64, ParserSandbox<RtLauncher, tairix_rt::LogSink>>,
+    }
+
+    impl Session {
+        /// The sandbox serving `window`, started on first use.
+        ///
+        /// A window that never opens a document never spawns a decoder, which
+        /// is what keeps a viewer sitting on the icon bar costing nothing.
+        fn sandbox(&mut self, window: u64) -> &mut ParserSandbox<RtLauncher, tairix_rt::LogSink> {
+            self.sandboxes
+                .entry(window)
+                .or_insert_with(|| ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink))
+        }
+
+        /// Drop `window`'s sandbox, ending its decoder.
+        fn forget(&mut self, window: u64) {
+            self.sandboxes.remove(&window);
+        }
     }
 
     /// The worker desk: one job in flight, latest-wins, answers arriving as a
     /// wake on the loop's own wait-set.
-    type Worker = tairix_rt::work::Worker<Session, Job, Answer>;
+    type Worker = tairix_rt::work::Worker<Session, Job, Reply>;
 
-    /// Carry out one job against the session.
+    /// Carry out one job against the window's own sandbox.
     ///
     /// The job is taken by exclusive reference so the buffer a render was lent
     /// is drawn into and handed straight back in the answer, rather than a
     /// window's worth of pixels being allocated per pointer sample.
-    fn serve_job(session: &mut Session, job: &mut Job) -> Answer {
-        match job {
-            Job::Open(source) => Answer::Opened {
-                opened: open_source(session, source),
+    fn serve_job(session: &mut Session, job: &mut Job) -> Reply {
+        let window = job.window;
+        let answer = match &mut job.work {
+            Work::Open { open_id, source } => Answer::Opened {
+                open_id: *open_id,
+                opened: open_source(session.sandbox(window), source),
             },
-            Job::Show {
+            Work::Show {
                 page,
                 extent,
-                window,
+                window: rect,
                 pixels,
             } => {
-                let (decoded, outcome) = draw(session, *page, *extent, *window, pixels);
+                let (decoded, outcome) =
+                    draw(session.sandbox(window), *page, *extent, *rect, pixels);
                 Answer::Shown {
                     page: *page,
                     extent: *extent,
-                    window: *window,
+                    window: *rect,
                     decoded,
                     pixels: core::mem::take(pixels),
                     outcome,
                 }
             }
-        }
+            Work::Forget(closed) => {
+                for window in closed.drain(..) {
+                    session.forget(window);
+                }
+                return Reply::Forgotten;
+            }
+        };
+        Reply::Window { window, answer }
     }
 
     /// Stream `source` into the worker and open it, answering what the
     /// container declares.
     fn open_source(
-        session: &mut Session,
+        sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
         source: &Source,
     ) -> Result<(ViewDocument, String, u64), Refusal> {
-        if session.open {
-            // The worker holds a document and everything decoded from it;
-            // dropping that first is what keeps a replacement from paying for
-            // both at once.
-            let _ = close_view(&mut session.sandbox);
-            session.open = false;
-        }
-        let length = upload(session, &source.handle)?;
-        let declared = open_view(&mut session.sandbox, source.format).map_err(Refusal::Failed)?;
-        session.open = true;
+        // The sandbox may hold a document and everything decoded from it;
+        // dropping that first is what keeps a replacement from paying for
+        // both at once. A sandbox with nothing open refuses the close, which
+        // is nothing to act on.
+        let _ = close_view(sandbox);
+        let length = upload(sandbox, &source.handle)?;
+        let declared = open_view(sandbox, source.format).map_err(Refusal::Failed)?;
         Ok((declared, source.name.clone(), length))
     }
 
@@ -257,10 +330,13 @@ mod program {
     /// process hold more than one chunk of an untrusted file, and the fixed
     /// ceiling bounds what is *resident* rather than what is addressable,
     /// because the reads are positional.
-    fn upload(session: &mut Session, handle: &Handle) -> Result<u64, Refusal> {
+    fn upload(
+        sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
+        handle: &Handle,
+    ) -> Result<u64, Refusal> {
         let fd = handle.fd();
         let length = handle.length()?;
-        begin_document(&mut session.sandbox, length)
+        begin_document(sandbox, length)
             .map_err(|err| Refusal::Failed(ViewFailure::Document(err)))?;
         let length = length as u64;
         let mut chunk =
@@ -277,7 +353,7 @@ mod program {
                 // rather than pad the document with anything.
                 return Err(Refusal::Unreadable(Errno::OutOfRange));
             }
-            push_document(&mut session.sandbox, &chunk[..got])
+            push_document(sandbox, &chunk[..got])
                 .map_err(|err| Refusal::Failed(ViewFailure::Document(err)))?;
             sent = sent.saturating_add(got as u64);
         }
@@ -293,19 +369,13 @@ mod program {
     /// Bring the session to `page` and draw `window` of it scaled to
     /// `extent`, into `pixels`.
     fn draw(
-        session: &mut Session,
+        sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
         page: u32,
         extent: (u32, u32),
         window: Rect,
         pixels: &mut Vec<u8>,
     ) -> (Option<ViewPage>, Result<(), Refusal>) {
-        if !session.open {
-            return (
-                None,
-                Err(Refusal::Failed(ViewFailure::Refused(ViewRefusal::NotOpen))),
-            );
-        }
-        let decoded = match select_page(&mut session.sandbox, page) {
+        let decoded = match select_page(sandbox, page) {
             Ok(decoded) => decoded,
             Err(err) => return (None, Err(Refusal::Failed(err))),
         };
@@ -322,7 +392,7 @@ mod program {
         }
         pixels.truncate(wanted);
         let outcome = render_page(
-            &mut session.sandbox,
+            sandbox,
             extent,
             tairix_raster::Region {
                 x: u32::try_from(window.left()).unwrap_or(0),
@@ -362,20 +432,20 @@ mod program {
         }
     }
 
-    /// The document the session's picker delegated: a one-shot `fd_grant`
-    /// redeemed into a read-only descriptor whose reads the kernel authorises
-    /// under the session's captured identity.
+    /// A document delegated to this process: a one-shot `fd_grant` redeemed
+    /// into a read-only descriptor whose reads the kernel authorises under
+    /// the identity of whoever opened it.
     ///
-    /// The pick conclusion carries the authority and nothing else, so the
-    /// document arrives **unnamed**: the viewer states what it knows and
-    /// invents nothing. A picked sprite area therefore cannot be reached by
-    /// being named either, which is a limitation of the pick conclusion
-    /// rather than of the decoder (`plans/VIEW.md`).
-    fn delegated(handle: u64) -> Option<Source> {
+    /// `name` is what to call it, and is empty where the hand-off did not
+    /// carry one — the session's own picker, whose conclusion carries the
+    /// authority and nothing else. The viewer then states what it knows and
+    /// invents nothing, and a RISC OS sprite area (which no signature can
+    /// identify) cannot be reached by an unnamed hand-off at all.
+    fn delegated(handle: u64, name: String) -> Option<Source> {
         Some(Source {
             handle: Handle::Delegated(tairix_rt::File::from_delegation(handle).ok()?),
-            name: String::new(),
-            format: None,
+            format: format_for(&name),
+            name,
         })
     }
 
@@ -451,18 +521,26 @@ mod program {
         MENU.get(id.index()).map(|(_, _, command)| *command)
     }
 
-    // ---- the one window --------------------------------------------
+    // ---- one window per document ---------------------------------------
 
-    /// The viewer's window: the shell's single-window channel state and the
-    /// engine that draws into its retained surface.
+    /// One of the viewer's windows: its channel-side state, its retained
+    /// picture, and the engine that draws into it.
     ///
-    /// One window per process, because the bundle declares multiple
-    /// *instances*: opening a second document starts a second viewer, which
-    /// is what puts two pictures side by side without either being able to
-    /// disturb the other's decode.
+    /// Every window is independent of its siblings — its own document, its
+    /// own decode sandbox, its own menu and title — so a malformed file
+    /// refuses in the window that opened it and disturbs no other.
     struct Window {
-        shell: app::AppWindow,
+        /// Its channel-side state: the id its events arrive under, its shared
+        /// frame region, and the geometry both are shaped as.
+        pane: WindowPane,
+        /// The surface every frame of it is drawn into, held for the window's
+        /// life so a clipped repaint leaves the pixels outside the clip alone.
+        surface: Surface,
+        /// The viewer looking at this window's document.
         view: View,
+        /// The document this window is waiting for, once the embedder holds
+        /// one: submitted when the engine asks for its open.
+        pending: Option<Source>,
         /// The menu open over the window, so an outcome is matched to the
         /// gesture that asked for it rather than to whichever was last.
         menu: Option<u64>,
@@ -478,23 +556,22 @@ mod program {
 
     impl Window {
         /// Resolve the layout for the window's current extent.
-        ///
-        /// Answers the layout of a zero-sized window when there is none open,
-        /// which every painter and hit-test reads as absent.
         fn layout(&mut self, theme: &Theme, scale: Scale) -> Layout {
-            let (width, height) = self
-                .shell
-                .mode()
-                .map_or((0, 0), |mode| (mode.width_px, mode.height_px));
-            self.view
-                .layout(width, height, theme, scale, face(theme, scale))
+            let mode = *self.pane.mode();
+            self.view.layout(
+                mode.width_px,
+                mode.height_px,
+                theme,
+                scale,
+                face(theme, scale),
+            )
         }
 
         /// Whether presenting now would put an empty window on screen.
         ///
         /// The session shows a served window on its first present, so
         /// withholding that present is withholding the window — which is what
-        /// a viewer waiting on a pick must do, or it sits blank behind the
+        /// a window waiting on a pick must do, or it sits blank behind the
         /// chooser for as long as the choice takes. Once anything of the
         /// window has been on screen it is never withheld again, whatever the
         /// viewer goes on to show.
@@ -504,26 +581,25 @@ mod program {
 
         /// Paint what `repaint` owes and present it.
         ///
-        /// The whole viewer is re-derived under the clip the shell narrows to,
-        /// so a partial repaint lands the pixels a whole one would have —
-        /// there is no second "paint just this part" recipe.
+        /// The whole viewer is re-derived under the clip narrowed to, so a
+        /// partial repaint lands the pixels a whole one would have ��� there is
+        /// no second "paint just this part" recipe.
         fn present(
             &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
             repaint: Repaint,
             reported: &Region,
             theme: &Theme,
             scale: Scale,
         ) -> Result<(), Errno> {
-            let Some(mode) = self.shell.mode().copied() else {
-                return Ok(());
-            };
             if self.withholding() {
                 return Ok(());
             }
+            let mode = *self.pane.mode();
             // Nothing of what was on screen survives where the session gave
             // its copy of the region back, or where the window has never been
             // on screen at all.
-            let repaint = if self.shell.content_released() || !self.presented {
+            let repaint = if self.pane.content_released() || !self.presented {
                 Repaint::Whole
             } else {
                 repaint
@@ -533,9 +609,10 @@ mod program {
             };
             let layout = self.layout(theme, scale);
             let view = &self.view;
-            let landed = self.shell.present(area, |surface| {
+            let surface = &mut self.surface;
+            surface.with_clip(area.x, area.y, area.width_px, area.height_px, |clipped| {
                 tairix_view::paint::render_into(
-                    surface,
+                    clipped,
                     view,
                     &layout,
                     theme,
@@ -544,11 +621,70 @@ mod program {
                     &mut NoArtwork,
                 );
             });
+            let landed = self.pane.present(client, surface, area);
             if landed.is_ok() {
                 self.presented = true;
             }
             landed
         }
+
+        /// Close this window, its menu going with it.
+        fn close(self, client: &mut WindowClient<app::RtWindowTransport>) {
+            let _ = self.pane.close(client);
+        }
+    }
+
+    /// Open a window for `source`, or for the user to pick into when there is
+    /// none, answering it and the session identity it is served by.
+    ///
+    /// A refusal is stated and answers `None`: the viewer carries on with the
+    /// windows it has, which for a resident application is the honest outcome
+    /// — it is still on the icon bar and still clickable.
+    fn open_window(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        event_endpoint: u64,
+        server: ProcId,
+        desktop: &Desktop,
+        source: Option<Source>,
+    ) -> Option<Window> {
+        let (width, height) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let mode = app::mode_for(width, height);
+        let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
+            report("no drawing surface; no window opened");
+            return None;
+        };
+        let sizing = WindowSizing::Resizable {
+            min_width_px: MIN_WIN_WIDTH,
+            min_height_px: MIN_WIN_HEIGHT,
+        };
+        let (pane, replied) =
+            match WindowPane::open(client, event_endpoint, &mode, APP_TITLE, sizing) {
+                Ok(opened) => opened,
+                Err(err) => {
+                    report(&alloc::format!("{err}; no window opened"));
+                    return None;
+                }
+            };
+        // A reply from any other sender is something else answering for the
+        // window endpoint: the window it named is closed rather than drawn
+        // into, exactly as a popup's reply is checked.
+        if replied != server {
+            let _ = pane.close(client);
+            report("a window reply came from another sender; no window opened");
+            return None;
+        }
+        Some(Window {
+            pane,
+            surface,
+            // A window handed a document asks for its open from the start; one
+            // the user will pick into asks for nothing until they have chosen.
+            view: View::new(source.is_some()),
+            pending: source,
+            menu: None,
+            tip: None,
+            title: String::from(APP_TITLE),
+            presented: false,
+        })
     }
 
     /// The face the viewer sets its own text in.
@@ -635,16 +771,18 @@ mod program {
     /// A session that shows no tooltips refuses this; the tip is incidental
     /// to the viewer's purpose, so the refusal ends the asking and the viewer
     /// carries on rather than asking again on every pointer sample.
-    fn set_tip(window: &mut Window, layout: &Layout, at: Point) {
+    fn set_tip(
+        window: &mut Window,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        layout: &Layout,
+        at: Point,
+    ) {
         let wanted = tool_tip(layout, at);
         let region = wanted.map(|(rect, _)| rect);
         if region == window.tip {
             return;
         }
         window.tip = region;
-        let Some(id) = window.shell.window_id() else {
-            return;
-        };
         let (rect, text) = wanted.unwrap_or((Rect::EMPTY, ""));
         let (Ok(anchor), Ok(text)) = (
             WindowRegion::new(rect.left(), rect.top(), rect.width, rect.height),
@@ -652,13 +790,13 @@ mod program {
         ) else {
             return;
         };
-        if window.shell.client().set_tooltip(id, anchor, text).is_err() {
+        if client.set_tooltip(window.pane.id(), anchor, text).is_err() {
             window.tip = None;
         }
     }
 
     /// Tell the session what the window is showing, once, when it changes.
-    fn retitle(window: &mut Window) {
+    fn retitle(window: &mut Window, client: &mut WindowClient<app::RtWindowTransport>) {
         let wanted = window
             .view
             .document()
@@ -668,21 +806,20 @@ mod program {
         if wanted == window.title {
             return;
         }
-        if let Some(id) = window.shell.window_id() {
-            if window.shell.client().set_title(id, &wanted).is_ok() {
-                window.title = wanted;
-            }
+        if client.set_title(window.pane.id(), &wanted).is_ok() {
+            window.title = wanted;
         }
     }
 
     /// Declare this viewer's presence on the desktop's icon bar.
     ///
     /// A refused declaration is an answer, not a death: the viewer says so
-    /// and carries on with no slot of its own — its window is still reachable.
-    fn declare_app_bar(window: &mut Window, endpoint: u64) {
+    /// and carries on with no slot of its own — its windows are still
+    /// reachable, though nothing can then reach it with none open.
+    fn declare_app_bar(client: &mut WindowClient<app::RtWindowTransport>, endpoint: u64) {
         match tairix_window::info_and_quit(endpoint, AppBarClick::RaiseOrOpen) {
             Ok(bar) => {
-                if let Err(err) = window.shell.client().set_app_bar(&bar) {
+                if let Err(err) = client.set_app_bar(&bar) {
                     report(&alloc::format!(
                         "the desktop refused this application's icon-bar presence ({err}); \
                          carrying on without one"
@@ -707,16 +844,14 @@ mod program {
         }
     }
 
-    /// Ask the picker for a document, reporting a session that has none.
-    fn ask_for_document(window: &mut Window) {
-        let Some(id) = window.shell.window_id() else {
-            return;
-        };
+    /// Ask the picker for a document for `window`, reporting a session that
+    /// has none.
+    fn ask_for_document(window: &mut Window, client: &mut WindowClient<app::RtWindowTransport>) {
         // A refused ask is the one thing that leaves the window with nothing
         // to show and nothing coming, so it is recorded as the reason there is
         // no document: the window then appears stating it, where the stderr
         // line alone would leave a graphical launch silent.
-        if let Err(err) = window.shell.client().pick_file(id) {
+        if let Err(err) = client.pick_file(window.pane.id()) {
             report(&alloc::format!(
                 "the desktop offered no file chooser ({err}); \
                  open a document from the files app"
@@ -751,26 +886,26 @@ mod program {
         let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
 
         // How the viewer starts depends on how it was launched: handed a
-        // document at spawn it opens that, and launched on its own it asks
-        // the session's trusted picker.
-        let mut pending_source = tairix_rt::arg(1)
+        // document at spawn it opens a window on it, and launched by the user
+        // it opens nothing at all and sits on the icon bar.
+        let inherited_source = tairix_rt::arg(1)
             .is_some_and(|arg| arg == DOCUMENT_ROLE_ARG)
             .then(inherited);
 
-        let mut window = Window {
-            shell: app::AppWindow::new(),
-            view: View::new(pending_source.is_some()),
-            menu: None,
-            tip: None,
-            title: String::from(APP_TITLE),
-            presented: false,
-        };
-        let (desktop, themes) = match app::bring_up_desktop(window.shell.client()) {
+        let mut client = WindowClient::new(app::RtWindowTransport);
+        let (desktop, themes) = match app::bring_up_desktop(&mut client) {
             Ok(pair) => pair,
             Err(err) => return fail_shell(err),
         };
         let theme = themes.active();
         let scale = desktop.scale();
+        // The serving session's own identity, learned by the desktop query.
+        // An application that may own no window needs it from there: it is
+        // what authenticates the icon-bar events it still receives, and
+        // without it there is nothing to accept them against (fail closed).
+        let Some(server) = client.session() else {
+            return fail(app::EXIT_NO_WINDOW, "the desktop did not identify itself");
+        };
 
         let binding = match app::bind_event_mailbox() {
             Ok(binding) => binding,
@@ -783,10 +918,7 @@ mod program {
         // both go on the worker; the loop submits and carries on drawing.
         let worker = Arc::new(Worker::new(
             serve_job,
-            Session {
-                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
-                open: false,
-            },
+            Session::default(),
             tairix_rt::sync::WorkerWake::create(),
         ));
         if let Err(reason) = Worker::start(&worker) {
@@ -808,30 +940,36 @@ mod program {
             }
         }
 
-        let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-        let mode = app::mode_for(initial_w, initial_h);
-        let sizing = WindowSizing::Resizable {
-            min_width_px: MIN_WIN_WIDTH,
-            min_height_px: MIN_WIN_HEIGHT,
-        };
-        let server = match window.shell.open(event_endpoint, &mode, APP_TITLE, sizing) {
-            Ok(server) => server,
-            Err(err) => return fail_shell(err),
-        };
-        declare_app_bar(&mut window, event_endpoint);
-        if pending_source.is_none() {
-            ask_for_document(&mut window);
+        declare_app_bar(&mut client, event_endpoint);
+
+        // The windows open, in the order they were opened. A viewer launched
+        // by the user starts with none: it is resident on the icon bar, and
+        // shows nothing until it has something to show.
+        let mut windows: Vec<Window> = Vec::new();
+        if inherited_source.is_some() {
+            if let Some(opened) = open_window(
+                &mut client,
+                event_endpoint,
+                server,
+                &desktop,
+                inherited_source,
+            ) {
+                windows.push(opened);
+            }
         }
-        // The first frame is the whole window: nothing of it is on screen yet.
-        // Launched on its own, there is nothing to show until the pick
-        // concludes, so this present is withheld and the window with it.
-        if window
-            .present(Repaint::Whole, &damage::sink(), theme, scale)
-            .is_err()
-        {
-            return fail(app::EXIT_CHANNEL_LOST, "first present refused");
+        // The first frame of each window is the whole of it: nothing is on
+        // screen yet. A window with nothing to show withholds it, and the
+        // window with it.
+        for window in &mut windows {
+            if window
+                .present(&mut client, Repaint::Whole, &damage::sink(), theme, scale)
+                .is_err()
+            {
+                return fail(app::EXIT_CHANNEL_LOST, "first present refused");
+            }
         }
 
+        let mut desk = Desk::default();
         let deadline = Cell::new(None);
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
@@ -845,16 +983,26 @@ mod program {
 
             // An answer the worker landed first, so a picture appears the
             // moment it is ready rather than at whatever later input arrives.
-            if let Some(answer) = worker.collect() {
-                let layout = window.layout(theme, scale);
-                let changed = window.view.deliver(answer, &layout, &mut reported).changed;
-                retitle(&mut window);
-                if changed
-                    && window
-                        .present(Repaint::Reported, &reported, theme, scale)
-                        .is_err()
-                {
-                    return fail(app::EXIT_CHANNEL_LOST, "present refused");
+            // One that names a window this viewer has closed is dropped: the
+            // window it described is gone.
+            if let Some(reply) = worker.collect() {
+                desk.outstanding = false;
+                if let Reply::Window { window, answer } = reply {
+                    if let Some(index) = index_of(&windows, window) {
+                        let layout = windows[index].layout(theme, scale);
+                        let changed = windows[index]
+                            .view
+                            .deliver(answer, &layout, &mut reported)
+                            .changed;
+                        retitle(&mut windows[index], &mut client);
+                        if changed
+                            && windows[index]
+                                .present(&mut client, Repaint::Reported, &reported, theme, scale)
+                                .is_err()
+                        {
+                            return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                        }
+                    }
                 }
                 continue;
             }
@@ -864,56 +1012,31 @@ mod program {
             // and with nothing queued, whatever the park wakes on. Both reach
             // the one routing below: a park *consumes* the event it woke on,
             // so nothing else would ever see it again.
-            let delivered = match events.try_wait(window.shell.client()) {
+            let delivered = match events.try_wait(&mut client) {
                 Ok(None) => {
-                    // Nothing queued: submit whatever the state now calls
+                    // Nothing queued: submit whatever any window now calls
                     // for. The answer is collected on the next turn either
                     // way — a deferred job wakes the park, and one carried
                     // out inline for want of a worker thread is already on
                     // the desk — so what `submit` reports about where it ran
                     // changes nothing here.
-                    match window.view.next_request() {
-                        Some(Request::Open) => {
-                            // The open stays outstanding until it is
-                            // answered, so this arm repeats while the worker
-                            // is reading. Only a source is worth submitting;
-                            // without one the picker's conclusion is what
-                            // brings it, and that arrives as an event. Either
-                            // way park rather than re-ask a question whose
-                            // answer cannot have changed yet.
-                            if let Some(source) = pending_source.take() {
-                                worker.submit(Job::Open(source));
-                                continue;
-                            }
-                        }
-                        Some(Request::Show {
-                            page,
-                            extent,
-                            window: rect,
-                            pixels,
-                        }) => {
-                            worker.submit(Job::Show {
-                                page,
-                                extent,
-                                window: rect,
-                                pixels,
-                            });
-                            continue;
-                        }
-                        None => {}
+                    if submit_next(&mut windows, &worker, &mut desk, theme, scale) {
+                        continue;
                     }
 
                     // Nothing to submit: arm the animation deadline — one
-                    // shot, to the next frame the container actually asks
-                    // for — and park. A paused viewer arms nothing at all.
+                    // shot, to the next frame any window actually asks for —
+                    // and park. With nothing animating, nothing is armed.
                     let now = tairix_rt::clock_get();
-                    window.view.arm_deadline(now);
-                    deadline.set(window.view.deadline_ns());
-                    let woken = events.wait(window.shell.client());
+                    deadline.set(next_deadline(&mut windows, now));
+                    let woken = events.wait(&mut client);
                     // A frame may be due whether the park ended on the
                     // deadline or on an event; the render it calls for is
                     // asked for on the next turn.
-                    let _ = window.view.tick(tairix_rt::clock_get());
+                    let now = tairix_rt::clock_get();
+                    for window in &mut windows {
+                        let _ = window.view.tick(now);
+                    }
                     woken
                 }
                 other => other,
@@ -933,97 +1056,301 @@ mod program {
                     continue;
                 }
             };
-            let repaint = match route(
-                &mut window,
-                &mut pending_source,
+            match route(
+                &mut App {
+                    windows: &mut windows,
+                    client: &mut client,
+                    desk: &mut desk,
+                    event_endpoint,
+                    server,
+                    desktop: &desktop,
+                },
                 &event,
                 theme,
                 scale,
                 &mut reported,
             ) {
-                Routed::Changed(scope) => scope,
-                Routed::Closed => return 0,
-                Routed::Idle => continue,
-            };
-            if window.present(repaint, &reported, theme, scale).is_err() {
-                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                Routed::Quit => return 0,
+                Routed::Lost => return fail(app::EXIT_CHANNEL_LOST, "present refused"),
+                Routed::Served => {}
             }
         }
     }
 
-    /// What routing one event decided.
+    /// Everything routing one event may reach.
+    ///
+    /// Bundled because a viewer with several windows threads all of it to
+    /// every arm; each field is the one copy the process holds.
+    struct App<'a> {
+        windows: &'a mut Vec<Window>,
+        client: &'a mut WindowClient<app::RtWindowTransport>,
+        desk: &'a mut Desk,
+        event_endpoint: u64,
+        server: ProcId,
+        desktop: &'a Desktop,
+    }
+
+    /// What the loop knows about the decode desk.
+    ///
+    /// The desk takes one job at a time latest-wins, so submitting while one
+    /// is in flight would displace a job whose answer a window is waiting
+    /// for and leave that window's render outstanding for ever. Exactly one
+    /// is therefore submitted at a time, and the window it is asked *for*
+    /// rotates, so an animating window cannot starve another's open.
+    #[derive(Default)]
+    struct Desk {
+        /// Whether a job is in flight.
+        outstanding: bool,
+        /// The window after the one last served — where the next scan starts.
+        next: usize,
+        /// Closed windows whose decoders have still to be ended.
+        closed: Vec<u64>,
+    }
+
+    /// The index of the window `id` names, or `None` for one already closed.
+    fn index_of(windows: &[Window], id: u64) -> Option<usize> {
+        windows.iter().position(|open| open.pane.id() == id)
+    }
+
+    /// Submit the first request any window is asking for, answering whether
+    /// one was submitted.
+    ///
+    /// The desk takes one job at a time latest-wins, so exactly one is
+    /// submitted per turn and the next turn collects its answer and asks
+    /// again — which is what keeps several windows decoding in turn rather
+    /// than one starving the rest.
+    fn submit_next(
+        windows: &mut [Window],
+        worker: &Worker,
+        desk: &mut Desk,
+        theme: &Theme,
+        scale: Scale,
+    ) -> bool {
+        if desk.outstanding {
+            return false;
+        }
+        // A closed window's decoder first: it is a whole process holding
+        // memory for a window nobody can see any more.
+        if !desk.closed.is_empty() {
+            worker.submit(Job {
+                window: 0,
+                work: Work::Forget(core::mem::take(&mut desk.closed)),
+            });
+            desk.outstanding = true;
+            return true;
+        }
+        let count = windows.len();
+        for turn in 0..count {
+            let index = (desk.next + turn) % count;
+            let id = windows[index].pane.id();
+            // The layout the request is derived from, at this window's own
+            // current extent.
+            let _ = windows[index].layout(theme, scale);
+            let work = match windows[index].view.next_request() {
+                // The open stays outstanding until it is answered, so this
+                // arm repeats while the worker is reading. Only a source is
+                // worth submitting; without one the picker's conclusion is
+                // what brings it, and that arrives as an event.
+                Some(Request::Open { open_id }) => windows[index]
+                    .pending
+                    .take()
+                    .map(|source| Work::Open { open_id, source }),
+                Some(Request::Show {
+                    page,
+                    extent,
+                    window,
+                    pixels,
+                }) => Some(Work::Show {
+                    page,
+                    extent,
+                    window,
+                    pixels,
+                }),
+                None => None,
+            };
+            if let Some(work) = work {
+                worker.submit(Job { window: id, work });
+                desk.outstanding = true;
+                desk.next = (index + 1) % count;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The nearest animation frame any window owes, or `None` when none is
+    /// timed — in which case the park arms no timer at all.
+    fn next_deadline(windows: &mut [Window], now: u64) -> Option<u64> {
+        let mut nearest = None;
+        for window in windows.iter_mut() {
+            window.view.arm_deadline(now);
+            if let Some(due) = window.view.deadline_ns() {
+                nearest = Some(nearest.map_or(due, |held: u64| held.min(due)));
+            }
+        }
+        nearest
+    }
+
+    /// What routing one event decided for the process.
     enum Routed {
+        /// Carry on serving.
+        Served,
+        /// *Quit* was chosen: close every window and end.
+        Quit,
+        /// A present was refused: the channel is gone.
+        Lost,
+    }
+
+    /// What routing one event decided for the window it named.
+    enum Acted {
         /// Something drawn changed, at this scope.
         Changed(Repaint),
-        /// The window closed, which ends the viewer.
-        Closed,
+        /// This window closed. The viewer keeps its slot and carries on.
+        Close,
         /// Nothing to do.
         Idle,
     }
 
     /// Route one delivered window event.
+    ///
+    /// An event naming a window this viewer no longer has is dropped: the
+    /// window it addressed is gone, and there is nothing left to apply it to.
     fn route(
-        window: &mut Window,
-        pending_source: &mut Option<Source>,
+        app: &mut App<'_>,
         event: &WindowEvent,
         theme: &Theme,
         scale: Scale,
         reported: &mut Region,
     ) -> Routed {
-        let layout = window.layout(theme, scale);
+        // The application-scoped events first: they name no window, and two of
+        // them are the whole of a resident viewer's own lifecycle.
+        match event {
+            // The slot's primary click, delivered only while the viewer owns
+            // no window: open one and ask what to put in it.
+            WindowEvent::AppBarDefault => {
+                open_and_pick(app, theme, scale);
+                return Routed::Served;
+            }
+            WindowEvent::AppBarMenu { item } if tairix_window::is_quit(*item) => {
+                for window in app.windows.drain(..) {
+                    window.close(app.client);
+                }
+                return Routed::Quit;
+            }
+            // At least one document has been handed to this instance: drain
+            // them, opening a window at each.
+            WindowEvent::OpenRequested => {
+                drain_open_targets(app, theme, scale);
+                return Routed::Served;
+            }
+            _ => {}
+        }
+
+        let Some(id) = event.window_id() else {
+            return Routed::Served;
+        };
+        let Some(index) = index_of(app.windows, id) else {
+            return Routed::Served;
+        };
+        match act(app, index, event, theme, scale, reported) {
+            Acted::Changed(repaint) => {
+                if app.windows[index]
+                    .present(app.client, repaint, reported, theme, scale)
+                    .is_err()
+                {
+                    return Routed::Lost;
+                }
+            }
+            Acted::Close => {
+                // The viewer is not its windows: it keeps its icon-bar slot
+                // with none open, and a click there opens the next. Only
+                // *Quit* ends it.
+                let window = app.windows.remove(index);
+                app.desk.closed.push(window.pane.id());
+                window.close(app.client);
+            }
+            Acted::Idle => {}
+        }
+        Routed::Served
+    }
+
+    /// Route one event to the window at `index`.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one dispatch over the window-scoped event vocabulary; splitting it would hide the ordering"
+    )]
+    fn act(
+        app: &mut App<'_>,
+        index: usize,
+        event: &WindowEvent,
+        theme: &Theme,
+        scale: Scale,
+        reported: &mut Region,
+    ) -> Acted {
+        let layout = app.windows[index].layout(theme, scale);
         match event {
             WindowEvent::CloseRequested { .. } | WindowEvent::AlternateCloseRequested { .. } => {
-                let _ = window.shell.close();
-                Routed::Closed
+                Acted::Close
             }
             WindowEvent::Resized {
                 width_px,
                 height_px,
                 ..
             } => {
-                if !window.shell.resize(app::mode_for(*width_px, *height_px)) {
+                let mode = app::mode_for(*width_px, *height_px);
+                if !resize(&mut app.windows[index], app.client, &mode) {
                     // A refused resize leaves the old geometry standing, so
                     // the window is still drawable at the size it had.
                     report("the desktop refused a resize; the window keeps its size");
                 }
                 // The reported client size is what the layout follows either
                 // way, so the whole window is redrawn regardless.
-                Routed::Changed(Repaint::Whole)
+                Acted::Changed(Repaint::Whole)
             }
-            WindowEvent::RedrawRequested { .. } => Routed::Changed(Repaint::Whole),
+            WindowEvent::RedrawRequested { .. } => Acted::Changed(Repaint::Whole),
+            WindowEvent::ContentReleased { .. } => {
+                app.windows[index].pane.release_frames();
+                Acted::Idle
+            }
             WindowEvent::FilePicked { handle, .. } => {
-                let Some(source) = delegated(*handle) else {
+                let Some(source) = delegated(*handle, String::new()) else {
                     report("the delegated document could not be redeemed");
-                    return Routed::Idle;
+                    return Acted::Idle;
                 };
-                *pending_source = Some(source);
-                window.view.expect_document();
+                app.windows[index].pending = Some(source);
+                app.windows[index].view.expect_document();
                 reported.add(layout.window());
-                Routed::Changed(Repaint::Reported)
+                Acted::Changed(Repaint::Reported)
             }
+            // The user chose nothing, so there is nothing to display: the
+            // window they were choosing into closes rather than appearing to
+            // state a refusal they already know about. A window that already
+            // holds a document keeps it.
             WindowEvent::PickCancelled { .. } => {
-                if window.view.no_document(Refusal::Cancelled) {
-                    reported.add(layout.window());
-                    return Routed::Changed(Repaint::Reported);
+                if app.windows[index].view.document().is_some() {
+                    Acted::Idle
+                } else {
+                    Acted::Close
                 }
-                Routed::Idle
             }
             WindowEvent::Key {
                 key: pressed @ KeyInput::Pressed { .. },
                 ..
             } => {
                 let InputEvent::KeyPressed { key, modifiers } = key_input_event(*pressed) else {
-                    return Routed::Idle;
+                    return Acted::Idle;
                 };
-                let outcome = window.view.on_key(key, modifiers, &layout, reported);
-                act(window, outcome)
+                let outcome = app.windows[index]
+                    .view
+                    .on_key(key, modifiers, &layout, reported);
+                apply(app, index, outcome)
             }
             WindowEvent::Pointer { x, y, action, .. } => {
                 let at = pointer_point(*x, *y);
                 let mut changed = false;
                 let mut asked = None;
                 for input in pointer_input_events(*action, at) {
-                    let outcome = window
+                    let outcome = app.windows[index]
                         .view
                         .on_pointer(&input, &layout, scale, theme, reported);
                     changed |= outcome.changed;
@@ -1031,60 +1358,140 @@ mod program {
                         asked = Some(outcome);
                     }
                 }
-                set_tip(window, &layout, at);
+                set_tip(&mut app.windows[index], app.client, &layout, at);
                 match asked {
-                    Some(outcome) => act(window, outcome),
-                    None if changed => Routed::Changed(Repaint::Reported),
-                    None => Routed::Idle,
+                    Some(outcome) => apply(app, index, outcome),
+                    None if changed => Acted::Changed(Repaint::Reported),
+                    None => Acted::Idle,
                 }
             }
             WindowEvent::MenuClosed {
                 open_id, outcome, ..
             } => {
-                if window.menu != Some(*open_id) {
+                if app.windows[index].menu != Some(*open_id) {
                     // An answer to a gesture another open has superseded.
-                    return Routed::Idle;
+                    return Acted::Idle;
                 }
-                window.menu = None;
+                app.windows[index].menu = None;
                 let MenuOutcome::Chosen(item) = outcome else {
-                    return Routed::Idle;
+                    return Acted::Idle;
                 };
                 let Some(command) = menu_command(*item) else {
-                    return Routed::Idle;
+                    return Acted::Idle;
                 };
-                let outcome = window.view.run(command, &layout, reported);
-                act(window, outcome)
+                let outcome = app.windows[index].view.run(command, &layout, reported);
+                apply(app, index, outcome)
             }
-            // The slot's primary click with no window open asks for another
-            // document, which is what the viewer's slot means.
-            WindowEvent::AppBarDefault => {
-                ask_for_document(window);
-                Routed::Idle
-            }
-            WindowEvent::AppBarMenu { item } if tairix_window::is_quit(*item) => {
-                let _ = window.shell.close();
-                Routed::Closed
-            }
-            _ => Routed::Idle,
+            _ => Acted::Idle,
         }
     }
 
+    /// Re-map the window's frame region and its retained surface onto `mode`,
+    /// answering whether the new geometry was adopted.
+    ///
+    /// The fresh surface is allocated before the session is asked and adopted
+    /// only once it has accepted, so every refusal leaves the window at the
+    /// size it had and still drawable.
+    fn resize(
+        window: &mut Window,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        mode: &tairix_abi::driver::display::DisplayMode,
+    ) -> bool {
+        let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
+            return false;
+        };
+        if !window.pane.resize(client, mode) {
+            return false;
+        }
+        window.surface = surface;
+        true
+    }
+
     /// Carry out whatever an engine outcome asked the embedder for.
-    fn act(window: &mut Window, outcome: Outcome) -> Routed {
+    fn apply(app: &mut App<'_>, index: usize, outcome: Outcome) -> Acted {
         if outcome.close {
-            let _ = window.shell.close();
-            return Routed::Closed;
+            return Acted::Close;
         }
         if outcome.pick {
-            ask_for_document(window);
+            ask_for_document(&mut app.windows[index], app.client);
         }
         if let Some(at) = outcome.menu {
-            open_menu(window, at);
+            open_menu(&mut app.windows[index], app.client, at);
         }
         if outcome.changed {
-            Routed::Changed(Repaint::Reported)
+            Acted::Changed(Repaint::Reported)
         } else {
-            Routed::Idle
+            Acted::Idle
+        }
+    }
+
+    /// Open a window with nothing in it and ask the picker what to put there.
+    ///
+    /// What the icon-bar slot's primary click means. Its present is withheld
+    /// until there is something to show, so the window appears with the
+    /// document in it rather than sitting blank behind the chooser.
+    fn open_and_pick(app: &mut App<'_>, theme: &Theme, scale: Scale) {
+        let Some(mut opened) = open_window(
+            app.client,
+            app.event_endpoint,
+            app.server,
+            app.desktop,
+            None,
+        ) else {
+            return;
+        };
+        ask_for_document(&mut opened, app.client);
+        let _ = opened.present(app.client, Repaint::Whole, &damage::sink(), theme, scale);
+        app.windows.push(opened);
+    }
+
+    /// Drain every document the desktop has handed to this instance, opening
+    /// a window at each.
+    ///
+    /// How a launch that names a document reaches an instance already
+    /// running: the desktop relays the authority to this process and wakes
+    /// it, rather than starting a second viewer.
+    fn drain_open_targets(app: &mut App<'_>, theme: &Theme, scale: Scale) {
+        loop {
+            let target = match app.client.take_open_target() {
+                Ok(Some(target)) => target,
+                Ok(None) => return,
+                Err(err) => {
+                    report(&alloc::format!("cannot take an open target ({err})"));
+                    return;
+                }
+            };
+            let source = match target {
+                Target::Document { name, grant } => {
+                    if let Some(source) = delegated(grant, name) {
+                        source
+                    } else {
+                        report("a handed-over document could not be redeemed");
+                        continue;
+                    }
+                }
+                // Honest, and unreachable from the desktop, which hands this
+                // viewer a descriptor precisely because it holds no
+                // filesystem authority to open a name with.
+                Target::Path(path) => {
+                    report(&alloc::format!(
+                        "{path} was handed over as a path; this viewer holds no filesystem \
+                         authority and can only be given an open document"
+                    ));
+                    continue;
+                }
+            };
+            let Some(mut opened) = open_window(
+                app.client,
+                app.event_endpoint,
+                app.server,
+                app.desktop,
+                Some(source),
+            ) else {
+                continue;
+            };
+            let _ = opened.present(app.client, Repaint::Whole, &damage::sink(), theme, scale);
+            app.windows.push(opened);
         }
     }
 
@@ -1092,20 +1499,21 @@ mod program {
     ///
     /// The plate is the session's — the app draws no menu pixel — and a
     /// session that composes none is reported and carried on from.
-    fn open_menu(window: &mut Window, at: Point) {
+    fn open_menu(
+        window: &mut Window,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        at: Point,
+    ) {
         let (menu, skipped) = build_menu(&window.view);
         if skipped > 0 {
             report(&alloc::format!(
                 "{skipped} menu row(s) do not fit and are not shown"
             ));
         }
-        let (Some(id), Ok(anchor)) = (
-            window.shell.window_id(),
-            WindowRegion::new(at.x, at.y, 0, 0),
-        ) else {
+        let Ok(anchor) = WindowRegion::new(at.x, at.y, 0, 0) else {
             return;
         };
-        match window.shell.client().open_menu(id, anchor, &menu) {
+        match client.open_menu(window.pane.id(), anchor, &menu) {
             Ok(open) => window.menu = Some(open),
             Err(_) => report("the desktop composes no menu service"),
         }

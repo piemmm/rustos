@@ -4188,9 +4188,13 @@ transfer, landed in increments:
   listings, key+click navigation over the shared hit-test; the session
   manifest gained `CAP_FS_ACCESS`), and the `view.app` consumer holding
   **no** filesystem capability — it reads exactly the one user-chosen file
-  through the redeemed delegation. Remaining (staged in `plans/APPWIN.md`
-  AW5): the autoload QEMU vertical's picker stage, which shifts the
-  AW3/AW4 interaction contract's delivery counts and reply indices.
+  through the redeemed delegation. A held delegation may now be **handed on
+  unchanged** (the first grantor's captured authority copied, never
+  re-captured, the extent attenuated by `min`), which is what lets the
+  desktop relay one application's chosen document to a live instance of
+  another without lending its own larger reach. Remaining (staged in
+  `plans/VIEW.md`): the three-principal relay's own QEMU vertical, which
+  wants a way to drive a row in the *file manager's* window by pointer.
 - **First-class file manager (`plans/NEW-FILEMANAGER.md`, in progress).** The
   Stage-7 `files.app` browser is staged into a full graphical file manager
   — clickable file/folder icons, open/launch `.app` bundles, hand files to

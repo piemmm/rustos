@@ -8,10 +8,12 @@ view — visualizador gráfico de imagens e documentos
 
 ## DESCRIPTION
 
-Abre uma janela do ambiente de trabalho que mostra uma imagem ou um
-documento. Iniciado com um documento — a partir do gestor de ficheiros, ou
-ao abrir uma imagem — mostra esse ficheiro; iniciado sozinho, pede ao
-seletor de ficheiros de confiança da sessão para escolher um.
+Mostra imagens e documentos em janelas do ambiente de trabalho. Iniciado com
+um documento — a partir do gestor de ficheiros, ou ao abrir uma imagem —
+abre uma janela sobre esse ficheiro. Iniciado sozinho não abre janela
+alguma: ocupa apenas o seu lugar na barra de ícones. Clique no seu ícone
+para abrir uma janela e escolher um ficheiro através do seletor de ficheiros
+de confiança da sessão.
 
 O visualizador não detém qualquer capacidade sobre o sistema de ficheiros:
 não pode abrir, listar nem ler nada por si. A sessão navega em seu nome sob
@@ -27,9 +29,10 @@ RISC OS Sprite. Um ficheiro que o descodificador recusa declara o seu motivo
 na janela e no fluxo de erro padrão; a janela nunca é deixada em branco e
 nunca é fabricada uma imagem.
 
-Vários documentos ao mesmo tempo são visualizadores separados: comparar duas
-imagens lado a lado é abrir a segunda. Fechar uma janela termina o seu
-visualizador.
+Vários documentos ao mesmo tempo são várias janelas do mesmo visualizador:
+comparar duas imagens lado a lado é abrir a segunda. Fechar uma janela deixa
+o visualizador na barra de ícones, pronto para o documento seguinte; é a
+linha Sair do seu menu de ícone que o termina.
 
 A barra de ferramentas no topo tem, por ordem: reduzir, ampliar, ajustar à
 janela, tamanho real, entrada anterior, entrada seguinte, rodar à esquerda,

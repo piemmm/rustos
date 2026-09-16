@@ -224,7 +224,8 @@ mod tests;
 pub use apps::{
     picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail, AppBarBridge,
     AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, Declaration, IconRasteriser,
-    APP_BAR_RELAYED, BUNDLE_RUN_SUFFIX, MAX_BAR_APPS,
+    APP_BAR_RELAYED, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, BUNDLE_RUN_SUFFIX,
+    MAX_BAR_APPS,
 };
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};
@@ -253,8 +254,9 @@ pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use launch::{
-    admitted_pid, launch_argv, launch_failure_report, reap_launched, resolve_launch, Handover,
-    Launch, LaunchHost, LaunchTable, LaunchedApp,
+    admitted_pid, bundle_of_run_path, launch_argv, launch_failure_report, reap_launched,
+    resolve_launch, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,
+    LaunchedApp,
 };
 pub use library::{catalogued, load_library, load_programs, LoadedLibrary, LoadedPrograms};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};

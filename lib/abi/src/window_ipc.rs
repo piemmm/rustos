@@ -36,7 +36,7 @@
 
 use core::cmp::Ordering;
 
-use crate::bounded_text::BoundedText;
+use crate::bounded_text::{BoundedText, WideText};
 use crate::desktop::DesktopInfo;
 use crate::driver::display::{DamageRect, DisplayFormat};
 use crate::input::KeyInput;
@@ -97,7 +97,7 @@ pub const WINDOW_TITLE_MAX: usize = 64;
 /// a plate the width of the screen is not a tooltip.
 pub const TOOLTIP_TEXT_MAX: usize = 96;
 
-/// Most open targets one window may have queued for it at once
+/// Most open targets one application may have queued for it at once
 /// ([`WindowRequest::TakeOpenTarget`]).
 ///
 /// A containment bound, not a capacity: it caps what a burst of relaunches
@@ -106,6 +106,69 @@ pub const TOOLTIP_TEXT_MAX: usize = 96;
 /// the refusal stated, rather than dropping one silently or growing without
 /// bound.
 pub const WINDOW_MAX_OPEN_TARGETS: usize = 8;
+
+/// The document a [`WindowRequest::HandOverLaunch`] hands to a live
+/// instance: what to call it, and a one-shot delegation of the caller's own
+/// read access to it.
+///
+/// The name is carried because the authority does not identify the file: a
+/// delegation is byte access to a path the recipient never learns, so
+/// without it a viewer could not title its window with what the user just
+/// opened. It is display text, never a path to open.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct HandOverDocument {
+    /// The document's own file name, for a title. Empty when unknown.
+    pub name: DocumentName,
+    /// The `fd_grant` handle the caller minted **to the session**, from a
+    /// descriptor it opened itself. Never zero.
+    pub grant: u64,
+}
+
+/// What became of a [`WindowRequest::HandOverLaunch`].
+///
+/// "Not running" is an answer, not a refusal: it is the honest report that
+/// there was no live instance to reach, and it is what tells a launcher to
+/// start the bundle itself.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HandOverOutcome {
+    /// A live instance took the hand-over.
+    Reached,
+    /// The bundle has no live instance; the caller launches it itself.
+    NotRunning,
+}
+
+/// Longest bundle entry-point path a [`WindowRequest::HandOverLaunch`] may
+/// name, in bytes.
+///
+/// A fixed validation bound on untrusted input, and **derived** rather than
+/// picked: whatever is left of the widest frame the channel already carries
+/// once the hand-over's own fields and the widest document name are taken
+/// out. A request is a fixed-width `Copy` frame whose size is its widest
+/// variant's, and a `Present` is built in one on every composited frame, so
+/// an operation that widened that bound would inflate the hot path with it —
+/// while a bundle's `Run` path needs nothing like the filesystem's whole
+/// [`crate::FS_PATH_MAX`]: it is a program-store prefix, the directories the
+/// bundle is filed under, and `<Name>.app/Run`. A longer path is refused
+/// with its reason stated and the caller launches the bundle itself, so an
+/// absurdly-deep bundle loses the single-instance funnel and nothing else.
+pub const HAND_OVER_RUN_PATH_MAX: usize =
+    OPEN_MENU_MAX_WIRE_LEN - HAND_OVER_PATH_OFFSET - crate::FS_NAME_MAX;
+
+/// A bundle entry-point path a [`WindowRequest::HandOverLaunch`] names, at
+/// most [`HAND_OVER_RUN_PATH_MAX`] bytes of well-formed UTF-8 with no
+/// control characters.
+///
+/// Validated like a window title because it crosses into the session's own
+/// diagnostics and log, where an embedded control character would corrupt a
+/// line a reader has to trust.
+pub type BundleRunPath = WideText<1, HAND_OVER_RUN_PATH_MAX, false>;
+
+/// A document's own file name, at most [`crate::FS_NAME_MAX`] bytes.
+///
+/// A leaf name rather than a path — what a window is titled with — so it
+/// carries the filesystem's component bound. Empty is legitimate: a
+/// hand-over may know the authority without knowing the name.
+pub type DocumentName = BoundedText<0, { crate::FS_NAME_MAX }>;
 
 /// Widest backdrop-blur radius a window may request, in **logical** pixels
 /// ([`WindowRequest::SetBackdropBlur`]).
@@ -1468,27 +1531,64 @@ pub enum WindowRequest {
         /// The rows to open, and the title of the root plate's band.
         menu: AppMenu,
     },
-    /// Take the next path queued for this window to open, if any.
+    /// Take the next target queued for this **application** to open, if any.
     ///
     /// The answer to a [`WindowEvent::OpenRequested`] wake: that event says
     /// only *you have at least one target waiting*, and the application pulls
-    /// them one at a time until the queue answers empty. The path is not in
+    /// them one at a time until the queue answers empty. The target is not in
     /// the event because every event pays the widest event's width, and a
     /// path is far wider than one.
     ///
     /// Popping is what makes a target one-shot, so no id is minted or
     /// validated and the ordering is the protocol: the reply is the oldest
-    /// queued path, or the empty answer once the queue is drained. A pull
-    /// from a window the caller does not own is refused, as every
-    /// window-scoped operation is.
+    /// queued target ([`OpenTarget`]), or the empty answer once the queue is
+    /// drained.
     ///
-    /// It carries no capability: the window the caller already owns is the
-    /// scope. The path names a file or folder the *user* asked to open; it
-    /// confers no access, and the application opens it under its own
-    /// authority like any other path it is given.
-    TakeOpenTarget {
-        /// The caller's own window (from the `Create` reply).
-        window_id: u64,
+    /// Application-scoped rather than window-scoped, because an application
+    /// that owns no window is exactly the one a hand-over most needs to
+    /// reach: a single-instance viewer sitting on the icon bar with nothing
+    /// open has no window to address the queue to, and scoping the queue to
+    /// one would leave it unreachable. The kernel-attested identity of the
+    /// caller is the scope, so an application can pull only its own targets.
+    ///
+    /// It carries no capability. A [`OpenTarget::Path`] confers no access —
+    /// the application opens it under its own authority, like any other path
+    /// it is given — and a [`OpenTarget::Document`] carries a one-shot
+    /// delegation the kernel minted *to this application*, so the number is
+    /// useless to anyone else.
+    TakeOpenTarget,
+    /// Ask the session to reach the live instance of the bundle whose entry
+    /// binary is `run_path`, handing it `document` if the request names one.
+    ///
+    /// The single-instance funnel, reachable by a launcher that is not the
+    /// desktop: without it a file manager that spawns a viewer per document
+    /// bypasses the funnel entirely and a bundle declaring one instance gets
+    /// several. The session resolves it exactly as it resolves its own
+    /// launches — the live instance is handed the target, else asked for its
+    /// icon-bar default, else has its most recent window raised — and answers
+    /// [`HandOverOutcome`]: `Reached` when something took it, `NotRunning`
+    /// when there was no instance to reach, so the caller launches the bundle
+    /// itself rather than the request silently doing nothing.
+    ///
+    /// **No authority crosses that the caller did not already hold.** The
+    /// session opens nothing: `document`'s grant is minted by the *caller*,
+    /// from a descriptor the caller opened under its own
+    /// `CAP_FS_ACCESS`, to the session, which redeems it and hands it on
+    /// with the first grantor's captured authority intact. There is
+    /// deliberately no way to ask the session to open a path on an
+    /// application's behalf — that would be the session lending its own,
+    /// larger reach.
+    ///
+    /// It carries no capability of its own: what it can do to the named
+    /// bundle's instance is what the desktop does for the user when they
+    /// click it — deliver an open target, ask for a new window, raise one —
+    /// and none of those conveys authority or reads any of the instance's
+    /// state back to the caller.
+    HandOverLaunch {
+        /// The bundle entry-point path whose live instance is wanted.
+        run_path: BundleRunPath,
+        /// The document to hand that instance, or `None` for a bare launch.
+        document: Option<HandOverDocument>,
     },
     /// Declare — or withdraw — the tooltip for a region of this window.
     ///
@@ -1546,6 +1646,8 @@ const OP_OPEN_MENU: u16 = 14;
 const OP_TAKE_OPEN_TARGET: u16 = 15;
 /// Wire operation discriminant of [`WindowRequest::SetTooltip`].
 const OP_SET_TOOLTIP: u16 = 16;
+/// Wire operation discriminant of [`WindowRequest::HandOverLaunch`].
+const OP_HAND_OVER_LAUNCH: u16 = 17;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -1584,6 +1686,37 @@ const SET_BACKDROP_BLUR_WIRE_LEN: usize = 18;
 /// Encoded size of a [`WindowRequest::QueryDesktop`]: the header alone —
 /// the one request that names no window and carries no operand.
 const QUERY_DESKTOP_WIRE_LEN: usize = REQUEST_HEADER_LEN;
+
+/// Encoded size of a [`WindowRequest::TakeOpenTarget`]: the header alone.
+/// The queue it pulls from is the calling application's, whose identity the
+/// kernel attests, so the frame names nothing.
+const TAKE_OPEN_TARGET_WIRE_LEN: usize = REQUEST_HEADER_LEN;
+
+/// Byte offset of a [`WindowRequest::HandOverLaunch`]'s grant handle: zero
+/// when the hand-over names no document, which is what makes the document
+/// optional on the wire without a second flag to fall out of step with it.
+const HAND_OVER_GRANT_OFFSET: usize = REQUEST_HEADER_LEN;
+/// Byte offset of the run path's length.
+const HAND_OVER_PATH_LEN_OFFSET: usize = HAND_OVER_GRANT_OFFSET + 8;
+/// Byte offset of the document name's length.
+const HAND_OVER_NAME_LEN_OFFSET: usize = HAND_OVER_PATH_LEN_OFFSET + 2;
+/// Byte offset of the run path's bytes.
+const HAND_OVER_PATH_OFFSET: usize = HAND_OVER_NAME_LEN_OFFSET + 2;
+
+/// Encoded size of a [`WindowRequest::HandOverLaunch`] naming a `path`-byte
+/// run path and a `name`-byte document name.
+///
+/// Both are length-prefixed and packed, so a hand-over costs what it says
+/// rather than the widest path the filesystem admits — the same shape a
+/// menu's row text has.
+const fn hand_over_wire_len(path: usize, name: usize) -> usize {
+    HAND_OVER_PATH_OFFSET + path + name
+}
+
+/// Encoded size of the longest possible [`WindowRequest::HandOverLaunch`]:
+/// the widest path under the widest document name.
+const HAND_OVER_MAX_WIRE_LEN: usize =
+    hand_over_wire_len(HAND_OVER_RUN_PATH_MAX, crate::FS_NAME_MAX);
 
 /// Byte offset of a [`WindowRequest::CreatePopup`] operand tail that
 /// follows the shared frame-layout block: the parent window id (8), then
@@ -1760,7 +1893,7 @@ impl WindowRequest {
     /// own [`wire_len`](Self::wire_len), so a short operation sends a short
     /// frame rather than padding out to this.
     pub const MAX_WIRE_LEN: usize = longer(
-        CREATE_WIRE_LEN,
+        longer(CREATE_WIRE_LEN, HAND_OVER_MAX_WIRE_LEN),
         longer(APP_BAR_MAX_WIRE_LEN, OPEN_MENU_MAX_WIRE_LEN),
     );
 
@@ -1776,9 +1909,18 @@ impl WindowRequest {
             Self::Create { .. } => CREATE_WIRE_LEN,
             Self::CreatePopup { .. } => CREATE_POPUP_WIRE_LEN,
             Self::Present { .. } => PRESENT_WIRE_LEN,
-            Self::Close { .. } | Self::PickFile { .. } | Self::TakeOpenTarget { .. } => {
-                WINDOW_ID_WIRE_LEN
-            }
+            Self::Close { .. } | Self::PickFile { .. } => WINDOW_ID_WIRE_LEN,
+            Self::TakeOpenTarget => TAKE_OPEN_TARGET_WIRE_LEN,
+            Self::HandOverLaunch {
+                ref run_path,
+                ref document,
+            } => hand_over_wire_len(
+                run_path.len_u16() as usize,
+                match document {
+                    Some(doc) => doc.name.len_byte() as usize,
+                    None => 0,
+                },
+            ),
             Self::Resize { .. } => RESIZE_WIRE_LEN,
             Self::SetTitle { .. } => SET_TITLE_WIRE_LEN,
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
@@ -1854,7 +1996,8 @@ impl WindowRequest {
             Self::QueryDesktop => OP_QUERY_DESKTOP,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
             Self::OpenMenu { .. } => OP_OPEN_MENU,
-            Self::TakeOpenTarget { .. } => OP_TAKE_OPEN_TARGET,
+            Self::TakeOpenTarget => OP_TAKE_OPEN_TARGET,
+            Self::HandOverLaunch { .. } => OP_HAND_OVER_LAUNCH,
             Self::SetTooltip { .. } => OP_SET_TOOLTIP,
         }
     }
@@ -1877,11 +2020,13 @@ impl WindowRequest {
                 put_u32(out, 28, damage.width_px);
                 put_u32(out, 32, damage.height_px);
             }
-            Self::Close { window_id }
-            | Self::PickFile { window_id }
-            | Self::TakeOpenTarget { window_id } => {
+            Self::Close { window_id } | Self::PickFile { window_id } => {
                 put_u64(out, 8, window_id);
             }
+            Self::HandOverLaunch {
+                ref run_path,
+                ref document,
+            } => write_hand_over_operands(out, run_path, document.as_ref()),
             Self::Resize {
                 window_id,
                 shm_handle,
@@ -1921,7 +2066,9 @@ impl WindowRequest {
                 put_u64(out, 8, window_id);
                 put_u16(out, 16, radius_px);
             }
-            Self::QueryDesktop => {}
+            // The two header-only operations: both name the caller, whose
+            // identity the kernel attests, so neither carries an operand.
+            Self::TakeOpenTarget | Self::QueryDesktop => {}
             Self::SetAppBar(ref bar) => write_app_bar(out, bar),
             Self::OpenMenu {
                 window_id,
@@ -2078,10 +2225,10 @@ impl WindowRequest {
             }
             OP_SET_TITLE => read_set_title(bytes),
             OP_TAKE_OPEN_TARGET => {
-                exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
-                let window_id = nonzero_id(read_u64(bytes, 8))?;
-                Ok(Self::TakeOpenTarget { window_id })
+                exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN)?;
+                Ok(Self::TakeOpenTarget)
             }
+            OP_HAND_OVER_LAUNCH => read_hand_over(bytes),
             OP_SET_TOOLTIP => read_set_tooltip(bytes),
             OP_SET_APP_BAR => read_app_bar(bytes),
             OP_OPEN_MENU => read_open_menu(bytes),
@@ -2104,6 +2251,76 @@ impl WindowRequest {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Write a [`WindowRequest::HandOverLaunch`]'s operands into the already-
+/// headed frame `out`.
+///
+/// A hand-over with no document writes a zero grant handle and a zero name
+/// length, which is the same thing said twice on purpose: the decoder reads
+/// the handle, so a document is present exactly when the handle is non-zero
+/// and a zero-length name never has to mean "absent".
+fn write_hand_over_operands(
+    out: &mut [u8],
+    run_path: &BundleRunPath,
+    document: Option<&HandOverDocument>,
+) {
+    let path = run_path.as_str().as_bytes();
+    put_u64(out, HAND_OVER_GRANT_OFFSET, document.map_or(0, |d| d.grant));
+    put_u16(out, HAND_OVER_PATH_LEN_OFFSET, run_path.len_u16());
+    let name = document.map_or(&[][..], |d| d.name.as_str().as_bytes());
+    put_u16(
+        out,
+        HAND_OVER_NAME_LEN_OFFSET,
+        u16::from(document.map_or(0, |d| d.name.len_byte())),
+    );
+    out[HAND_OVER_PATH_OFFSET..HAND_OVER_PATH_OFFSET + path.len()].copy_from_slice(path);
+    let name_at = HAND_OVER_PATH_OFFSET + path.len();
+    out[name_at..name_at + name.len()].copy_from_slice(name);
+}
+
+/// Decode the operands of a [`WindowRequest::HandOverLaunch`].
+///
+/// The two length-prefixed fields are packed, so the frame must be exactly
+/// as long as the two lengths say — a shorter one is truncation and a longer
+/// one is a smuggled field.
+fn read_hand_over(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    if bytes.len() < HAND_OVER_PATH_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let grant = read_u64(bytes, HAND_OVER_GRANT_OFFSET);
+    let path_len = usize::from(read_u16(bytes, HAND_OVER_PATH_LEN_OFFSET));
+    let name_len = usize::from(read_u16(bytes, HAND_OVER_NAME_LEN_OFFSET));
+    if path_len > HAND_OVER_RUN_PATH_MAX || name_len > crate::FS_NAME_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    exact_len(bytes, hand_over_wire_len(path_len, name_len))?;
+    // A document is present exactly when a handle names one, so a name
+    // without a grant is a frame that does not mean what it says.
+    if grant == 0 && name_len != 0 {
+        return Err(Errno::OutOfRange);
+    }
+    let mut path_bytes = [0u8; HAND_OVER_RUN_PATH_MAX];
+    path_bytes[..path_len].copy_from_slice(&bytes[HAND_OVER_PATH_OFFSET..][..path_len]);
+    let run_path = BundleRunPath::from_wire(
+        u16::try_from(path_len).map_err(|_| Errno::LengthOutOfRange)?,
+        &path_bytes,
+    )?;
+    let document = if grant == 0 {
+        None
+    } else {
+        let mut name_bytes = [0u8; crate::FS_NAME_MAX];
+        name_bytes[..name_len]
+            .copy_from_slice(&bytes[HAND_OVER_PATH_OFFSET + path_len..][..name_len]);
+        Some(HandOverDocument {
+            name: DocumentName::from_wire(
+                u8::try_from(name_len).map_err(|_| Errno::LengthOutOfRange)?,
+                &name_bytes,
+            )?,
+            grant,
+        })
+    };
+    Ok(WindowRequest::HandOverLaunch { run_path, document })
 }
 
 /// Decode the operands of a [`WindowRequest::Present`]: the window, the
@@ -2688,99 +2905,192 @@ pub fn encode_create_reply(
 /// session's [`ProcId`].
 pub const WINDOW_DESKTOP_REPLY_LEN: usize = 4 + DesktopInfo::WIRE_LEN + crate::PROC_ID_LEN;
 
+/// What the desktop has queued for an application to open.
+///
+/// Two forms, because two things can be handed over and they are not the
+/// same kind of thing. A **path** names a file or folder and confers
+/// nothing: the application opens it under its own authority, exactly as it
+/// would an argument. A **document** is a file that has *already* been
+/// opened by whoever handed it over, reachable through a one-shot
+/// delegation — which is the only form an application holding no filesystem
+/// capability at all can act on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum OpenTarget<'a> {
+    /// A path the user named. Bounded by [`crate::FS_PATH_MAX`].
+    Path(&'a [u8]),
+    /// A document already opened for this application.
+    Document {
+        /// Its own file name, for a title. Empty when the hand-over did not
+        /// carry one.
+        name: &'a [u8],
+        /// The `fd_redeem` handle, minted to this application. Never zero.
+        grant: u64,
+    },
+}
+
 /// Encoded length of a [`WindowRequest::TakeOpenTarget`] reply: a status
-/// word, the path's length, then room for the widest path the filesystem
-/// admits.
+/// word, the entry's kind, the text length, a grant handle, then room for
+/// the widest path the filesystem admits.
 ///
 /// The path is at [`crate::FS_PATH_MAX`] because that is what a path is; the
 /// frame is *variable* length on the wire ([`encode_open_target_reply`]
-/// writes only what the answer holds), so the empty answer costs six bytes
-/// rather than four kibibytes. Both sides hold their buffer once for the life
-/// of the connection rather than taking one per call.
-pub const WINDOW_OPEN_TARGET_REPLY_MAX: usize = 6 + crate::FS_PATH_MAX;
+/// writes only what the answer holds), so the empty answer costs sixteen
+/// bytes rather than four kibibytes. Both sides hold their buffer once for
+/// the life of the connection rather than taking one per call.
+pub const WINDOW_OPEN_TARGET_REPLY_MAX: usize = OPEN_TARGET_REPLY_TEXT_OFFSET + crate::FS_PATH_MAX;
 
-/// Byte offset of the path length in a [`WindowRequest::TakeOpenTarget`]
+/// Byte offset of the entry kind in a [`WindowRequest::TakeOpenTarget`]
 /// reply.
-const OPEN_TARGET_REPLY_LEN_OFFSET: usize = 4;
-/// Byte offset of the path bytes in a [`WindowRequest::TakeOpenTarget`]
-/// reply.
-const OPEN_TARGET_REPLY_PATH_OFFSET: usize = OPEN_TARGET_REPLY_LEN_OFFSET + 2;
+const OPEN_TARGET_REPLY_KIND_OFFSET: usize = 4;
+/// Byte offset of the text length.
+const OPEN_TARGET_REPLY_LEN_OFFSET: usize = OPEN_TARGET_REPLY_KIND_OFFSET + 2;
+/// Byte offset of the grant handle.
+const OPEN_TARGET_REPLY_GRANT_OFFSET: usize = OPEN_TARGET_REPLY_LEN_OFFSET + 2;
+/// Byte offset of the path or name bytes.
+const OPEN_TARGET_REPLY_TEXT_OFFSET: usize = OPEN_TARGET_REPLY_GRANT_OFFSET + 8;
+
+/// Wire kind of a drained queue.
+const OPEN_TARGET_KIND_EMPTY: u16 = 0;
+/// Wire kind of an [`OpenTarget::Path`].
+const OPEN_TARGET_KIND_PATH: u16 = 1;
+/// Wire kind of an [`OpenTarget::Document`].
+const OPEN_TARGET_KIND_DOCUMENT: u16 = 2;
 
 /// Encode a [`WindowRequest::TakeOpenTarget`] outcome into `out`, answering
 /// the number of bytes written.
 ///
-/// `Ok(None)` is the drained queue: a zero length and no path, which is the
-/// honest "nothing waiting" rather than an error. `Ok(Some(path))` carries
-/// the popped path. A refusal is the shared status frame, so a client issues
-/// one receive whatever the answer.
-///
-/// # Panics
-///
-/// Never: `out` is required to be [`WINDOW_OPEN_TARGET_REPLY_MAX`] bytes, and
-/// a path longer than [`crate::FS_PATH_MAX`] cannot be constructed by the
-/// filesystem ABI, so the copy is always in range.
+/// `Ok(None)` is the drained queue: the empty kind and no text, which is the
+/// honest "nothing waiting" rather than an error. A refusal is the shared
+/// status frame, so a client issues one receive whatever the answer.
 #[must_use]
 pub fn encode_open_target_reply(
     out: &mut [u8; WINDOW_OPEN_TARGET_REPLY_MAX],
-    result: Result<Option<&[u8]>, Errno>,
+    result: Result<Option<OpenTarget<'_>>, Errno>,
 ) -> usize {
     *out = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
-    match result {
-        Ok(path) => {
-            let path = path.unwrap_or(&[]);
-            let Ok(len) = u16::try_from(path.len()) else {
-                out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(
-                    Errno::LengthOutOfRange,
-                )));
-                return 4;
-            };
-            if path.len() > crate::FS_PATH_MAX {
-                out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(
-                    Errno::LengthOutOfRange,
-                )));
-                return 4;
-            }
-            put_u16(out, OPEN_TARGET_REPLY_LEN_OFFSET, len);
-            out[OPEN_TARGET_REPLY_PATH_OFFSET..OPEN_TARGET_REPLY_PATH_OFFSET + path.len()]
-                .copy_from_slice(path);
-            OPEN_TARGET_REPLY_PATH_OFFSET + path.len()
-        }
-        Err(err) => {
-            out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
-            4
-        }
+    let refuse = |out: &mut [u8; WINDOW_OPEN_TARGET_REPLY_MAX], err: Errno| {
+        out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+        4
+    };
+    let (kind, text, grant) = match result {
+        Err(err) => return refuse(out, err),
+        Ok(None) => (OPEN_TARGET_KIND_EMPTY, &[][..], 0),
+        Ok(Some(OpenTarget::Path(path))) => (OPEN_TARGET_KIND_PATH, path, 0),
+        Ok(Some(OpenTarget::Document { name, grant })) => (OPEN_TARGET_KIND_DOCUMENT, name, grant),
+    };
+    let bound = match kind {
+        OPEN_TARGET_KIND_DOCUMENT => crate::FS_NAME_MAX,
+        _ => crate::FS_PATH_MAX,
+    };
+    if text.len() > bound || u16::try_from(text.len()).is_err() {
+        return refuse(out, Errno::LengthOutOfRange);
     }
+    // An empty path is not a target and a zero handle names no delegation;
+    // either would be an answer the puller could not act on.
+    if (kind == OPEN_TARGET_KIND_PATH && text.is_empty())
+        || (kind == OPEN_TARGET_KIND_DOCUMENT && grant == 0)
+    {
+        return refuse(out, Errno::OutOfRange);
+    }
+    put_u16(out, OPEN_TARGET_REPLY_KIND_OFFSET, kind);
+    #[allow(clippy::cast_possible_truncation)] // Bounded above by FS_PATH_MAX.
+    put_u16(out, OPEN_TARGET_REPLY_LEN_OFFSET, text.len() as u16);
+    put_u64(out, OPEN_TARGET_REPLY_GRANT_OFFSET, grant);
+    out[OPEN_TARGET_REPLY_TEXT_OFFSET..OPEN_TARGET_REPLY_TEXT_OFFSET + text.len()]
+        .copy_from_slice(text);
+    OPEN_TARGET_REPLY_TEXT_OFFSET + text.len()
 }
 
 /// Decode a [`WindowRequest::TakeOpenTarget`] reply.
 ///
 /// `Ok(None)` is the drained queue. The length is checked against the frame
-/// it arrived in, so a reply claiming more path than it carries is refused
+/// it arrived in, so a reply claiming more text than it carries is refused
 /// rather than read past.
 ///
 /// # Errors
 ///
 /// * The refusal the session stated, for a status-frame reply.
 /// * [`Errno::BufferTooSmall`] for a frame too short to hold its own header.
-/// * [`Errno::LengthOutOfRange`] for a length past the frame or past
-///   [`crate::FS_PATH_MAX`].
-pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<&[u8]>, Errno> {
+/// * [`Errno::OutOfRange`] for an unknown kind, an empty path, or a document
+///   naming no delegation.
+/// * [`Errno::LengthOutOfRange`] for a length past the frame or past the
+///   bound its kind carries.
+pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, Errno> {
     if bytes.len() >= 4 {
         crate::reply::decode_status_reply(&bytes[..4])?;
     }
-    if bytes.len() < OPEN_TARGET_REPLY_PATH_OFFSET {
+    if bytes.len() < OPEN_TARGET_REPLY_TEXT_OFFSET {
         return Err(Errno::BufferTooSmall);
     }
+    let kind = read_u16(bytes, OPEN_TARGET_REPLY_KIND_OFFSET);
     let len = usize::from(read_u16(bytes, OPEN_TARGET_REPLY_LEN_OFFSET));
-    if len == 0 {
-        return Ok(None);
-    }
-    if len > crate::FS_PATH_MAX || OPEN_TARGET_REPLY_PATH_OFFSET + len > bytes.len() {
+    let grant = read_u64(bytes, OPEN_TARGET_REPLY_GRANT_OFFSET);
+    let bound = match kind {
+        OPEN_TARGET_KIND_EMPTY => 0,
+        OPEN_TARGET_KIND_PATH => crate::FS_PATH_MAX,
+        OPEN_TARGET_KIND_DOCUMENT => crate::FS_NAME_MAX,
+        _ => return Err(Errno::OutOfRange),
+    };
+    if len > bound || OPEN_TARGET_REPLY_TEXT_OFFSET + len > bytes.len() {
         return Err(Errno::LengthOutOfRange);
     }
-    Ok(Some(
-        &bytes[OPEN_TARGET_REPLY_PATH_OFFSET..OPEN_TARGET_REPLY_PATH_OFFSET + len],
-    ))
+    let text = &bytes[OPEN_TARGET_REPLY_TEXT_OFFSET..OPEN_TARGET_REPLY_TEXT_OFFSET + len];
+    match kind {
+        OPEN_TARGET_KIND_EMPTY if grant == 0 => Ok(None),
+        OPEN_TARGET_KIND_PATH if grant == 0 && len != 0 => Ok(Some(OpenTarget::Path(text))),
+        OPEN_TARGET_KIND_DOCUMENT if grant != 0 => {
+            Ok(Some(OpenTarget::Document { name: text, grant }))
+        }
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
+/// Reply length, in bytes, of a [`WindowRequest::HandOverLaunch`]: the
+/// shared status word then the outcome.
+pub const WINDOW_HAND_OVER_REPLY_LEN: usize = 5;
+
+/// Wire value of [`HandOverOutcome::Reached`].
+const HAND_OVER_REACHED: u8 = 1;
+/// Wire value of [`HandOverOutcome::NotRunning`].
+const HAND_OVER_NOT_RUNNING: u8 = 2;
+
+/// Encode a [`WindowRequest::HandOverLaunch`] outcome: a zero status word
+/// then the outcome, or the shared status frame zero-padded to the same
+/// length on a refusal, so a client always issues one fixed-size receive.
+#[must_use]
+pub fn encode_hand_over_reply(
+    result: Result<HandOverOutcome, Errno>,
+) -> [u8; WINDOW_HAND_OVER_REPLY_LEN] {
+    let mut out = [0u8; WINDOW_HAND_OVER_REPLY_LEN];
+    match result {
+        Ok(outcome) => {
+            out[4] = match outcome {
+                HandOverOutcome::Reached => HAND_OVER_REACHED,
+                HandOverOutcome::NotRunning => HAND_OVER_NOT_RUNNING,
+            };
+        }
+        Err(err) => out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err))),
+    }
+    out
+}
+
+/// Decode a [`WindowRequest::HandOverLaunch`] reply.
+///
+/// # Errors
+///
+/// * The refusal the session stated.
+/// * [`Errno::BufferTooSmall`] for a short frame.
+/// * [`Errno::OutOfRange`] for an outcome outside the closed set.
+pub fn decode_hand_over_reply(bytes: &[u8]) -> Result<HandOverOutcome, Errno> {
+    if bytes.len() < WINDOW_HAND_OVER_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    match bytes[4] {
+        HAND_OVER_REACHED => Ok(HandOverOutcome::Reached),
+        HAND_OVER_NOT_RUNNING => Ok(HandOverOutcome::NotRunning),
+        _ => Err(Errno::OutOfRange),
+    }
 }
 
 /// Byte offset of the serving session's [`ProcId`] in a desktop reply.
@@ -3131,27 +3441,26 @@ pub enum WindowEvent {
         /// What became of the chain.
         outcome: MenuOutcome,
     },
-    /// At least one path is queued for this window to open.
+    /// At least one target is queued for this **application** to open.
     ///
-    /// A **wake**, not the path: the application answers by pulling with
+    /// A **wake**, not the target: the application answers by pulling with
     /// [`WindowRequest::TakeOpenTarget`] until the queue is empty. Every
     /// event pays the widest event's width, and a path is far wider than one
-    /// — so the wake is what crosses in the event and the path is pulled.
+    /// — so the wake is what crosses in the event and the target is pulled.
     ///
-    /// It is window-scoped so it reaches any application that owns a window,
-    /// whether or not it declared an icon-bar presence. The desktop delivers
-    /// it to the instance's most recent window when a user launches a bundle
-    /// that is already running and names a document: the running instance
-    /// opens it rather than a second process starting.
+    /// Application-scoped, like the icon-bar events, because the instance a
+    /// hand-over most needs to reach is the one with no window open: a
+    /// single-instance viewer resident on the icon bar has no window to
+    /// address, and a window-scoped wake would leave it unreachable. The
+    /// desktop delivers this when a user (or a launcher) opens something a
+    /// live instance of the bundle should take, rather than a second process
+    /// starting.
     ///
     /// More than one target may be queued and this event may arrive once for
     /// several, or again while the application is still draining, so an
     /// application drains in a loop rather than assuming one event is one
-    /// path.
-    OpenRequested {
-        /// The window the targets are queued for.
-        window_id: u64,
-    },
+    /// target.
+    OpenRequested,
 }
 
 impl WindowEvent {
@@ -3179,9 +3488,8 @@ impl WindowEvent {
             | Self::RedrawRequested { window_id }
             | Self::ContentReleased { window_id }
             | Self::Scrolled { window_id, .. }
-            | Self::MenuClosed { window_id, .. }
-            | Self::OpenRequested { window_id } => Some(window_id),
-            Self::AppBarDefault | Self::AppBarMenu { .. } => None,
+            | Self::MenuClosed { window_id, .. } => Some(window_id),
+            Self::AppBarDefault | Self::AppBarMenu { .. } | Self::OpenRequested => None,
         }
     }
 
@@ -3421,6 +3729,12 @@ fn read_app_scoped_event(kind: u16, bytes: &[u8]) -> Option<Result<WindowEvent, 
             }
             WindowEvent::AppBarDefault
         }
+        EV_OPEN_REQUESTED => {
+            if let Err(err) = event_reserved_zero(bytes, 16) {
+                return Some(Err(err));
+            }
+            WindowEvent::OpenRequested
+        }
         EV_APP_BAR_MENU => {
             if let Err(err) = event_reserved_zero(bytes, 18) {
                 return Some(Err(err));
@@ -3456,7 +3770,6 @@ fn read_id_only_event(
         EV_MINIMIZED => WindowEvent::Minimized { window_id },
         EV_REDRAW_REQUESTED => WindowEvent::RedrawRequested { window_id },
         EV_CONTENT_RELEASED => WindowEvent::ContentReleased { window_id },
-        EV_OPEN_REQUESTED => WindowEvent::OpenRequested { window_id },
         _ => return None,
     };
     Some(event_reserved_zero(bytes, 16).map(|()| event))
@@ -3505,29 +3818,34 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bar_wire_len, decode_create_reply, decode_desktop_reply, decode_minted_id_reply,
-        encode_create_reply, encode_desktop_reply, encode_minted_id_reply, open_menu_wire_len,
-        put_i32, put_u16, put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuItem,
-        AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
-        AppMenuRowView, AppMenuShortcut, MenuOutcome, MenuRefusal, PointerAction, TooltipText,
-        WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET,
-        APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
-        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU,
-        APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS,
-        APP_MENU_REASON_MAX, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
-        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
-        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
-        APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
-        CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
-        DESKTOP_REPLY_SERVER_OFFSET, MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET,
-        MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END, OPEN_MENU_ANCHOR_OFFSET,
-        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
-        OPEN_MENU_TITLE_LEN_OFFSET, PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
-        SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        app_bar_wire_len, decode_create_reply, decode_desktop_reply, decode_hand_over_reply,
+        decode_minted_id_reply, decode_open_target_reply, encode_create_reply,
+        encode_desktop_reply, encode_hand_over_reply, encode_minted_id_reply,
+        encode_open_target_reply, hand_over_wire_len, open_menu_wire_len, put_i32, put_u16,
+        put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel,
+        AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut,
+        BundleRunPath, DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, MenuRefusal,
+        OpenTarget, PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest,
+        WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
+        APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_KIND_SEPARATOR,
+        APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
+        APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_FLAGS_OFFSET,
+        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
+        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN,
+        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET,
+        CREATE_MIN_WIDTH_OFFSET, CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
+        DESKTOP_REPLY_SERVER_OFFSET, HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN,
+        HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX,
+        MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
+        MENU_CLOSED_WIRE_END, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
+        OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET,
+        PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET,
+        SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET,
+        SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
-        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
-        WINDOW_MINTED_ID_REPLY_LEN, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_FRAMES,
+        WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_REQUEST_MAGIC,
+        WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -3843,6 +4161,11 @@ mod tests {
         }
     }
 
+    /// A bundle entry-point path in the system application store.
+    fn sample_run_path() -> BundleRunPath {
+        BundleRunPath::new("/System/Applications/view.app/Run").expect("a valid bundle path")
+    }
+
     /// Visit one of every operation the request codec encodes, including the
     /// narrowest and widest form of each variable-width one.
     ///
@@ -3888,7 +4211,33 @@ mod tests {
         visit(opening(&sample_titled_menu()));
         visit(opening(&one_of_each_bare_row()));
         visit(opening(&widest_open_menu()));
-        visit(WindowRequest::TakeOpenTarget { window_id: 9 });
+        visit(WindowRequest::TakeOpenTarget);
+        visit(WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            document: None,
+        });
+        visit(WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            document: Some(HandOverDocument {
+                name: DocumentName::new("holiday.png").expect("a valid name"),
+                grant: 7,
+            }),
+        });
+        visit(WindowRequest::HandOverLaunch {
+            run_path: BundleRunPath::new(&"p".repeat(HAND_OVER_RUN_PATH_MAX))
+                .expect("the widest path"),
+            document: Some(HandOverDocument {
+                name: DocumentName::new(&"n".repeat(crate::FS_NAME_MAX)).expect("the widest name"),
+                grant: u64::MAX,
+            }),
+        });
+        visit(WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            document: Some(HandOverDocument {
+                name: DocumentName::new("").expect("an unnamed document"),
+                grant: 1,
+            }),
+        });
         visit(WindowRequest::SetTooltip {
             window_id: 3,
             region: sample_anchor(),
@@ -5457,14 +5806,24 @@ mod tests {
     }
 
     #[test]
-    fn an_open_requested_event_names_the_window_the_targets_wait_for() {
-        let event = WindowEvent::OpenRequested { window_id: 4 };
+    fn an_open_requested_wake_names_the_application_not_a_window() {
+        let event = WindowEvent::OpenRequested;
         let bytes = event.to_le_bytes();
         assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
         assert_eq!(
             event.window_id(),
-            Some(4),
-            "window-scoped, so it reaches an app that declared no icon-bar presence"
+            None,
+            "application-scoped, so it reaches an instance with no window open"
+        );
+        // The window field says so too, and a non-zero one is a second,
+        // contradictory addressing of an event that names no window.
+        assert_eq!(&bytes[8..16], &[0u8; 8]);
+        let mut addressed = bytes;
+        addressed[8] = 1;
+        assert_eq!(
+            WindowEvent::from_bytes(&addressed),
+            Err(Errno::OutOfRange),
+            "an application-scoped wake may not name a window"
         );
         // It carries only the wake: the reserved tail must stay zero, so a
         // path smuggled into it is refused rather than read.
@@ -5479,16 +5838,188 @@ mod tests {
     }
 
     #[test]
-    fn taking_an_open_target_is_scoped_by_the_window_alone() {
-        let request = WindowRequest::TakeOpenTarget { window_id: 9 };
-        assert_eq!(request.wire_len(), WINDOW_ID_WIRE_LEN);
+    fn taking_an_open_target_names_nothing_at_all() {
+        let request = WindowRequest::TakeOpenTarget;
+        assert_eq!(request.wire_len(), TAKE_OPEN_TARGET_WIRE_LEN);
         let frame = request.frame();
         assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
 
-        // A zero window names nothing and is refused, never read as "any".
-        let mut zero = frame;
-        zero[8..16].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(WindowRequest::from_bytes(&zero), Err(Errno::OutOfRange));
+        // The queue is the calling application's, whose identity the kernel
+        // attests, so a frame carrying an operand is a smuggled field.
+        let mut smuggled = [0u8; TAKE_OPEN_TARGET_WIRE_LEN + 8];
+        smuggled[..TAKE_OPEN_TARGET_WIRE_LEN].copy_from_slice(&frame);
+        assert_eq!(WindowRequest::from_bytes(&smuggled), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn a_hand_over_carries_a_bundle_path_and_an_optional_document() {
+        let bare = WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            document: None,
+        };
+        assert_eq!(
+            bare.wire_len(),
+            hand_over_wire_len("/System/Applications/view.app/Run".len(), 0),
+            "a hand-over costs the path it names"
+        );
+        let frame = bare.frame();
+        assert_eq!(WindowRequest::from_bytes(&frame), Ok(bare));
+
+        // A document is present exactly when a handle names one, so a name
+        // with no grant is a frame that does not mean what it says — and a
+        // zero-length name with a grant is the legitimate unnamed document.
+        let named = WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            document: Some(HandOverDocument {
+                name: DocumentName::new("holiday.png").expect("a valid name"),
+                grant: 7,
+            }),
+        };
+        let mut stripped = named.frame();
+        put_u64(&mut stripped, HAND_OVER_GRANT_OFFSET, 0);
+        assert_eq!(
+            WindowRequest::from_bytes(&stripped),
+            Err(Errno::OutOfRange),
+            "a named document with no delegation names nothing"
+        );
+
+        // An empty path names no bundle, and a path or name longer than its
+        // bound is refused rather than truncated.
+        let mut empty = bare.frame();
+        put_u16(&mut empty, HAND_OVER_PATH_LEN_OFFSET, 0);
+        assert_eq!(
+            WindowRequest::from_bytes(&empty[..hand_over_wire_len(0, 0)]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut over = [0u8; HAND_OVER_MAX_WIRE_LEN];
+        let len = bare.encode(&mut over).expect("the max frame holds any");
+        put_u16(
+            &mut over,
+            HAND_OVER_PATH_LEN_OFFSET,
+            u16::try_from(HAND_OVER_RUN_PATH_MAX + 1).expect("in range"),
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&over[..len]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut long_name = named.frame();
+        put_u16(
+            &mut long_name,
+            HAND_OVER_NAME_LEN_OFFSET,
+            u16::try_from(crate::FS_NAME_MAX + 1).expect("in range"),
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&long_name),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // The two fields are packed, so a frame that is not exactly as long
+        // as its lengths say is truncation or a smuggled field.
+        assert_eq!(
+            WindowRequest::from_bytes(&named.frame()[..named.wire_len() - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn a_hand_over_reply_states_reached_not_running_or_a_refusal() {
+        for outcome in [HandOverOutcome::Reached, HandOverOutcome::NotRunning] {
+            let frame = encode_hand_over_reply(Ok(outcome));
+            assert_eq!(frame.len(), WINDOW_HAND_OVER_REPLY_LEN);
+            assert_eq!(decode_hand_over_reply(&frame), Ok(outcome));
+        }
+        // A refusal is the shared status frame at the same width, so a client
+        // issues one fixed-size receive whatever the answer.
+        let refused = encode_hand_over_reply(Err(Errno::NotFound));
+        assert_eq!(decode_hand_over_reply(&refused), Err(Errno::NotFound));
+        assert_eq!(
+            decode_hand_over_reply(&refused[..4]),
+            Err(Errno::BufferTooSmall)
+        );
+        // An outcome outside the closed set is refused, never guessed at.
+        let mut unknown = encode_hand_over_reply(Ok(HandOverOutcome::Reached));
+        unknown[4] = 9;
+        assert_eq!(decode_hand_over_reply(&unknown), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn an_open_target_reply_carries_a_path_a_document_or_nothing() {
+        let mut out = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
+
+        let n = encode_open_target_reply(&mut out, Ok(None));
+        assert_eq!(decode_open_target_reply(&out[..n]), Ok(None));
+        assert!(
+            n < 64,
+            "the drained answer costs its header, not the widest path"
+        );
+
+        let path = b"Users:/ada/Documents";
+        let n = encode_open_target_reply(&mut out, Ok(Some(OpenTarget::Path(path))));
+        assert_eq!(
+            decode_open_target_reply(&out[..n]),
+            Ok(Some(OpenTarget::Path(path)))
+        );
+
+        let document = OpenTarget::Document {
+            name: b"holiday.png",
+            grant: 12,
+        };
+        let n = encode_open_target_reply(&mut out, Ok(Some(document)));
+        assert_eq!(decode_open_target_reply(&out[..n]), Ok(Some(document)));
+
+        // A document may be unnamed — the authority is what matters — but it
+        // can never name no delegation, and a path can never be empty.
+        let unnamed = OpenTarget::Document {
+            name: b"",
+            grant: 3,
+        };
+        let n = encode_open_target_reply(&mut out, Ok(Some(unnamed)));
+        assert_eq!(decode_open_target_reply(&out[..n]), Ok(Some(unnamed)));
+        let n = encode_open_target_reply(
+            &mut out,
+            Ok(Some(OpenTarget::Document {
+                name: b"x",
+                grant: 0,
+            })),
+        );
+        assert_eq!(
+            decode_open_target_reply(&out[..n]),
+            Err(Errno::OutOfRange),
+            "a document with no delegation is nothing to open"
+        );
+        let n = encode_open_target_reply(&mut out, Ok(Some(OpenTarget::Path(b""))));
+        assert_eq!(decode_open_target_reply(&out[..n]), Err(Errno::OutOfRange));
+
+        // Each kind carries its own bound, and a refusal is the status frame.
+        let n = encode_open_target_reply(
+            &mut out,
+            Ok(Some(OpenTarget::Path(&[b'p'; crate::FS_PATH_MAX]))),
+        );
+        assert!(decode_open_target_reply(&out[..n]).is_ok());
+        let n = encode_open_target_reply(
+            &mut out,
+            Ok(Some(OpenTarget::Document {
+                name: &[b'n'; crate::FS_NAME_MAX + 1],
+                grant: 1,
+            })),
+        );
+        assert_eq!(
+            decode_open_target_reply(&out[..n]),
+            Err(Errno::LengthOutOfRange),
+            "a name is a filesystem component, not a path"
+        );
+        let n = encode_open_target_reply(&mut out, Err(Errno::NotFound));
+        assert_eq!(decode_open_target_reply(&out[..n]), Err(Errno::NotFound));
+
+        // A reply claiming more text than it carries is refused rather than
+        // read past, and an unknown kind is never guessed at.
+        let n = encode_open_target_reply(&mut out, Ok(Some(OpenTarget::Path(path))));
+        assert_eq!(
+            decode_open_target_reply(&out[..n - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        put_u16(&mut out, 4, 9);
+        assert_eq!(decode_open_target_reply(&out[..n]), Err(Errno::OutOfRange));
     }
 
     #[test]

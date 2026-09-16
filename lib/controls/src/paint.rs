@@ -750,6 +750,11 @@ pub(crate) struct FrameColors {
     /// [`FrameColors::face`] needs to decide whether a bar-seated control
     /// wears a plate at all.
     resting: bool,
+    /// Whether [`plate`](Self::plate) is a plain *background* rather than a
+    /// role or disposition statement — the one fact
+    /// [`FrameColors::grounded_on`] needs. Private for the same reason
+    /// [`resting`](Self::resting) is: a renderer paints colours, not facts.
+    grounded: bool,
 }
 
 impl FrameColors {
@@ -774,6 +779,22 @@ impl FrameColors {
     /// put on the edge stays on the label *and* on the non-colour Signal Bead
     /// shape ([`resolve_bead`]), and a bare frame is by construction never the
     /// focused one, so the focus ring is never suppressed.
+    /// This frame with `ground` in place of its plate, where the plate is a
+    /// plain background rather than a statement of its own.
+    ///
+    /// How a control whose *content* has its own ground — the page an
+    /// editable field is written on — takes that ground without losing what
+    /// its state says. A role fill and a disposition fill are left alone:
+    /// their label is resolved against the plate they carry, so swapping the
+    /// plate underneath would leave the text unreadable.
+    #[must_use]
+    pub(crate) fn grounded_on(mut self, ground: Color) -> Self {
+        if self.grounded {
+            self.plate = ground;
+        }
+        self
+    }
+
     #[must_use]
     pub(crate) fn face(&self, seating: PlateSeating) -> Option<(Color, Color)> {
         match seating {
@@ -993,23 +1014,27 @@ fn resolve_emphasis(theme: &Theme, interactive: Emphasis, state: ControlState) -
     // whatever wallpaper is behind it, so those two arms stay solid.
     let raised = |fill: Rgba| ground_fill(theme, fill, ChromeLayer::Plate);
 
-    // The fourth element marks the *quiet resting* frame: the single arm in
-    // which a control states nothing of its own, and so the only one in which
-    // a bar-seated control wears no plate ([`FrameColors::face`]). It is
-    // carried out of the match rather than re-derived from the guards, which
-    // could silently drift from them.
-    let (plate, rim, label, resting) = match emphasis {
+    // The last two elements are facts about the arm rather than colours. The
+    // first marks the *quiet resting* frame: the single arm in which a control
+    // states nothing of its own, and so the only one in which a bar-seated
+    // control wears no plate ([`FrameColors::face`]). The second marks an arm
+    // whose plate is a plain *background*, and so one a control with a ground
+    // of its own may substitute ([`FrameColors::grounded_on`]) — every arm
+    // that puts a colour on the plate resolves its label against that colour,
+    // so those are not substitutable. Both are carried out of the match rather
+    // than re-derived from the guards, which could silently drift from them.
+    let (plate, rim, label, resting, grounded) = match emphasis {
         Emphasis::Filled(color) => {
             let fill = filled_plate(color, pointer);
-            (fill, fill, palette.on_accent, false)
+            (fill, fill, palette.on_accent, false, false)
         }
         // A press promotes an outlined control to a filled one: the colour it
         // was stating on its edge takes the plate, edge included.
         Emphasis::Outlined(color) if pointer == PointerState::Pressed => {
             let fill = filled_plate(color, pointer);
-            (fill, fill, palette.on_accent, false)
+            (fill, fill, palette.on_accent, false, false)
         }
-        Emphasis::Outlined(color) => (raised(palette.surface_raised), color, color, false),
+        Emphasis::Outlined(color) => (raised(palette.surface_raised), color, color, false, true),
         // The rest state is bare, so the authored wash is what a hover shows;
         // a press deepens it, the only step left once the colour is already on.
         Emphasis::Tinted(tint) => {
@@ -1018,12 +1043,13 @@ fn resolve_emphasis(theme: &Theme, interactive: Emphasis, state: ControlState) -
             } else {
                 tint
             });
-            (fill, fill, palette.on_surface, false)
+            (fill, fill, palette.on_surface, false, false)
         }
         Emphasis::Quiet if disposition == ControlDisposition::DisabledByState => (
             raised(palette.surface),
             palette.border,
             palette.on_surface_muted,
+            false,
             false,
         ),
         // A quiet control has no colour of its own, so a press borrows the
@@ -1033,6 +1059,7 @@ fn resolve_emphasis(theme: &Theme, interactive: Emphasis, state: ControlState) -
             lifted_rim,
             palette.rim_active,
             false,
+            true,
         ),
         // A hover lightens the plate as well as lifting the rim. The wash is
         // the whole of the feedback for a control that wears no rim at all, and
@@ -1042,6 +1069,7 @@ fn resolve_emphasis(theme: &Theme, interactive: Emphasis, state: ControlState) -
             lifted_rim,
             palette.on_surface,
             false,
+            true,
         ),
         // Keyboard focus states itself on the ring, never on the plate: the
         // wash belongs to the pointer, so a control the keyboard is merely
@@ -1053,11 +1081,13 @@ fn resolve_emphasis(theme: &Theme, interactive: Emphasis, state: ControlState) -
             lifted_rim,
             palette.on_surface,
             false,
+            true,
         ),
         Emphasis::Quiet => (
             raised(palette.surface_raised),
             palette.rim,
             palette.on_surface,
+            true,
             true,
         ),
     };
@@ -1084,6 +1114,7 @@ fn resolve_emphasis(theme: &Theme, interactive: Emphasis, state: ControlState) -
         label: Color::from(label),
         focused: state.focus.focused,
         resting,
+        grounded,
     }
 }
 

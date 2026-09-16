@@ -78,12 +78,13 @@ fn opened(document: ViewDocument) -> (View, Layout, ThemeRegistry) {
     let (registry, scale) = dressing();
     let mut view = View::new(true);
     // The open request is the only one there can be before a document lands.
-    assert_eq!(view.next_request(), Some(Request::Open));
+    assert_eq!(view.next_request(), Some(Request::Open { open_id: 1 }));
     let theme = registry.active();
     let layout = view.layout(WINDOW.0, WINDOW.1, theme, scale, font(theme, scale));
     let mut region = damage::sink();
     let outcome = view.deliver(
         Answer::Opened {
+            open_id: 1,
             opened: Ok((document, String::from("picture.png"), 4_096)),
         },
         &layout,
@@ -158,8 +159,8 @@ fn nothing_is_asked_for_before_the_document_is_open() {
     // latest-wins desk. The open stays outstanding rather than being handed
     // over once, because only the embedder knows when it holds a source.
     let mut view = View::new(true);
-    assert_eq!(view.next_request(), Some(Request::Open));
-    assert_eq!(view.next_request(), Some(Request::Open));
+    assert_eq!(view.next_request(), Some(Request::Open { open_id: 1 }));
+    assert_eq!(view.next_request(), Some(Request::Open { open_id: 1 }));
     assert!(view.document().is_none());
 }
 
@@ -167,16 +168,17 @@ fn nothing_is_asked_for_before_the_document_is_open() {
 fn a_document_replacing_another_costs_no_render_of_the_one_it_replaces() {
     let (mut view, layout, _registry) = drawn(still(400, 300));
     // The user chose another file, so the embedder says one is on its way.
-    view.expect_document();
+    let open_id = view.expect_document();
     assert!(view.refusal().is_none(), "nothing has gone wrong");
     assert_eq!(
         view.next_request(),
-        Some(Request::Open),
+        Some(Request::Open { open_id }),
         "the open is what is wanted, not a draw of the old picture"
     );
     let mut region = damage::sink();
     view.deliver(
         Answer::Opened {
+            open_id,
             opened: Ok((still(64, 64), String::from("other.png"), 128)),
         },
         &layout,
@@ -213,7 +215,7 @@ fn a_viewer_waiting_on_a_pick_has_nothing_to_show() {
     assert!(waiting.nothing_to_show());
     // The user has chosen, but the document has still to be read and decoded:
     // there is nothing on the canvas yet either.
-    waiting.expect_document();
+    let open_id = waiting.expect_document();
     assert!(waiting.nothing_to_show());
 
     let (registry, scale) = dressing();
@@ -224,6 +226,7 @@ fn a_viewer_waiting_on_a_pick_has_nothing_to_show() {
         waiting
             .deliver(
                 Answer::Opened {
+                    open_id,
                     opened: Ok((still(400, 300), String::from("picture.png"), 4_096)),
                 },
                 &layout,
@@ -236,14 +239,12 @@ fn a_viewer_waiting_on_a_pick_has_nothing_to_show() {
         "the document landed, so there is a picture to show"
     );
 
-    // And the other conclusions: the user chose nothing, or the session would
-    // not open a chooser at all. Either is a reason, which is something to
-    // show — a refused *ask* especially, because nothing is coming after it
-    // and a window withheld on it would never appear.
-    for why in [
-        Refusal::Cancelled,
-        Refusal::PickRefused(Errno::AlreadyExists),
-    ] {
+    // And the conclusions that are a *reason* rather than a document. Each is
+    // something to show — a refused ask especially, because nothing is coming
+    // after it and a window withheld on it would never appear. A pick the
+    // user cancelled is not among them: they chose nothing, so the embedder
+    // closes that window rather than showing them a reason they already know.
+    for why in [Refusal::PickRefused(Errno::AlreadyExists), Refusal::TooLong] {
         let mut refused = View::new(false);
         assert!(refused.nothing_to_show());
         assert!(refused.no_document(why));
@@ -338,6 +339,7 @@ fn a_refused_open_states_the_reason_and_holds_no_document() {
     let mut region = damage::sink();
     let outcome = view.deliver(
         Answer::Opened {
+            open_id: 1,
             opened: Err(Refusal::Failed(ViewFailure::Refused(ViewRefusal::TooLarge))),
         },
         &layout,
@@ -391,17 +393,69 @@ fn a_refused_render_states_the_reason_and_keeps_showing_what_it_had() {
 }
 
 #[test]
-fn a_cancelled_pick_leaves_the_window_open_and_says_so() {
-    // A refused optional action is an answer, not a death.
+fn a_refused_ask_is_recorded_only_while_nothing_is_open() {
+    // A refused optional action is an answer, not a death: the window appears
+    // stating why there is no document.
     let mut view = View::new(false);
-    assert!(view.no_document(Refusal::Cancelled));
-    assert!(matches!(view.refusal(), Some(Refusal::Cancelled)));
+    let why = Refusal::PickRefused(Errno::AlreadyExists);
+    assert!(view.no_document(why));
+    assert!(matches!(view.refusal(), Some(Refusal::PickRefused(_))));
 
-    // With a document already open, a cancelled pick says nothing new: the
-    // picture on screen is still what the user is looking at.
+    // With a document already open it says nothing new: the picture on screen
+    // is still what the user is looking at.
     let (mut open, _layout, _registry) = drawn(still(400, 300));
-    assert!(!open.no_document(Refusal::Cancelled));
+    assert!(!open.no_document(why));
     assert!(open.refusal().is_none());
+}
+
+#[test]
+fn an_answer_to_an_abandoned_open_is_dropped_rather_than_adopted() {
+    // A window closed with a read still in flight, then a document asked for
+    // in another window: the worker's answer to the first open names an id
+    // this viewer has moved past, and adopting it would put one window's
+    // document in another.
+    let (registry, scale) = dressing();
+    let theme = registry.active();
+    let mut view = View::new(false);
+    let layout = view.layout(WINDOW.0, WINDOW.1, theme, scale, font(theme, scale));
+    let mut region = damage::sink();
+    let abandoned = view.expect_document();
+    let current = view.expect_document();
+    assert_ne!(
+        abandoned, current,
+        "an open id is minted per ask, never reused"
+    );
+
+    let outcome = view.deliver(
+        Answer::Opened {
+            open_id: abandoned,
+            opened: Ok((still(400, 300), String::from("stale.png"), 4_096)),
+        },
+        &layout,
+        &mut region,
+    );
+    assert!(!outcome.changed, "a superseded answer changes nothing");
+    assert!(view.document().is_none(), "and lands no document");
+    assert!(region.is_empty(), "and owes no repaint");
+    assert_eq!(
+        view.next_request(),
+        Some(Request::Open { open_id: current }),
+        "the open the viewer is actually waiting for is still outstanding"
+    );
+
+    // The answer it is waiting for is adopted.
+    assert!(
+        view.deliver(
+            Answer::Opened {
+                open_id: current,
+                opened: Ok((still(64, 64), String::from("wanted.png"), 128)),
+            },
+            &layout,
+            &mut region,
+        )
+        .changed
+    );
+    assert_eq!(view.document().expect("open").natural(), (64, 64));
 }
 
 // ---- commands ----------------------------------------------------------

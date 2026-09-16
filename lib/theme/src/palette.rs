@@ -23,6 +23,25 @@ pub struct Palette {
     /// A raised/alternate fill (the taskbar, menus, headers) that must
     /// read as distinct from [`surface`](Self::surface).
     pub surface_raised: Rgba,
+    /// The ground a document's own content is drawn on: an editor's or a
+    /// terminal's page, an editable field's plate.
+    ///
+    /// Its own role rather than [`surface`](Self::surface), because a window
+    /// and the page inside it are two things: the window ground is chrome the
+    /// eye reads past, while the page is what the user is looking at and is
+    /// paper on a light appearance and the deepest layer on a dark one. A
+    /// field that only *shows* a value stays on the plate ladder — this is
+    /// the ground of something being written.
+    pub document: Rgba,
+    /// The ground every title band is drawn on: a window's furniture bar, and
+    /// the band a menu or dialog plate is capped with.
+    ///
+    /// One role for both, because they are one control with and without a
+    /// command set. It separates from [`surface`](Self::surface) in the
+    /// direction the appearance calls for — deeper on a light theme so a
+    /// window's furniture reads as chrome rather than as more page, lifted on
+    /// a dark one.
+    pub title_band: Rgba,
     /// How opaque a *floating desktop-chrome* surface is — the taskbar and
     /// the popups it puts on screen, laid over a backdrop blurred by
     /// [`Metrics::chrome_backdrop_blur`](crate::Metrics::chrome_backdrop_blur).

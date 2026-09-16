@@ -286,7 +286,7 @@ mod program {
             | WindowEvent::PickCancelled { .. }
             // The gallery shows its own controls, so it declares no file
             // association and has no document an open target could name.
-            | WindowEvent::OpenRequested { .. } => Acted::Idle,
+            | WindowEvent::OpenRequested => Acted::Idle,
         }
     }
 

@@ -33,7 +33,7 @@
 //! forbidden control character, or a dirty reserved tail all refuse rather
 //! than guessing.
 
-use crate::bounded_text::is_forbidden_character;
+use crate::bounded_text::WideText;
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::Errno;
 
@@ -80,107 +80,17 @@ pub const PINBOARD_DOCUMENT_MAX: usize = 512;
 /// A rendered pinboard settings document: at least one and at most
 /// [`PINBOARD_DOCUMENT_MAX`] bytes of well-formed UTF-8.
 ///
-/// Unlike [`crate::bounded_text::BoundedText`] — the shared bounded
-/// display-text validator every other short ABI text field builds on — a
-/// settings document is legitimately **multi-line**: the `key = value`
+/// A settings document is legitimately **multi-line**: the `key = value`
 /// grammar `lib/appconf` owns, over which `lib/wallpaper` defines the
-/// pinboard registry (`plans/PINBOARD.md` §2), puts one setting per line. `BoundedText` forbids every control character including
-/// `'\n'`, so it cannot represent this field; `PinboardDocument` is a
-/// sibling validator with the identical rule *except* that `'\n'` is
-/// privileged. No other control character is permitted — no `'\r'`, no
-/// `'\t'`, no NUL, nothing else outside printable UTF-8 — so the wire form
-/// stays a flat, unambiguous byte stream the receiving parser can split on
-/// `'\n'` alone. The two validators share the one character rule through
-/// `crate::bounded_text::is_forbidden_character` (crate-private, so not
-/// linkable here) rather than each carrying its own copy of "is this
-/// character acceptable"; only the length-prefix width (one byte versus
-/// two, since [`PINBOARD_DOCUMENT_MAX`] exceeds `u8::MAX`) and the newline
-/// exception keep the two from being the same type.
+/// pinboard registry (`plans/PINBOARD.md` §2), puts one setting per line —
+/// so it is the shared wide validator's newline-privileged form. No other
+/// control character is permitted, so the wire form stays a flat,
+/// unambiguous byte stream the receiving parser can split on `'\n'` alone.
 ///
 /// The document is validated at construction *and* again at decode, so a
 /// value that reached a [`PinboardRequest`] is always well-formed. It is
 /// never sanitised: a malformed document is refused, not silently repaired.
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub struct PinboardDocument {
-    bytes: [u8; PINBOARD_DOCUMENT_MAX],
-    len: u16,
-}
-
-impl PinboardDocument {
-    /// Build a document from `text`, validating length and content.
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::LengthOutOfRange`] — empty, or longer than
-    ///   [`PINBOARD_DOCUMENT_MAX`] bytes when UTF-8 encoded.
-    /// * [`Errno::OutOfRange`] — contains a control character other than
-    ///   `'\n'`.
-    pub fn new(text: &str) -> Result<Self, Errno> {
-        if text.is_empty() || text.len() > PINBOARD_DOCUMENT_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        if text.chars().any(|c| is_forbidden_character(c, true)) {
-            return Err(Errno::OutOfRange);
-        }
-        let mut bytes = [0u8; PINBOARD_DOCUMENT_MAX];
-        bytes[..text.len()].copy_from_slice(text.as_bytes());
-        Ok(Self {
-            bytes,
-            // `text.len() <= PINBOARD_DOCUMENT_MAX` (512), checked above.
-            #[allow(clippy::cast_possible_truncation)]
-            len: text.len() as u16,
-        })
-    }
-
-    /// The document text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        // The buffer was validated as UTF-8 at construction/decode; an
-        // impossible failure yields the empty string, never a panic.
-        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
-    }
-
-    /// Decode a document from its fixed-width wire image: `len` bytes of
-    /// validated text, with the tail required zero.
-    fn from_wire(len: u16, bytes: &[u8; PINBOARD_DOCUMENT_MAX]) -> Result<Self, Errno> {
-        let len_usize = usize::from(len);
-        if len_usize == 0 || len_usize > PINBOARD_DOCUMENT_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        if bytes[len_usize..].iter().any(|&b| b != 0) {
-            return Err(Errno::BadMagic);
-        }
-        let text = core::str::from_utf8(&bytes[..len_usize]).map_err(|_| Errno::OutOfRange)?;
-        if text.chars().any(|c| is_forbidden_character(c, true)) {
-            return Err(Errno::OutOfRange);
-        }
-        Ok(Self { bytes: *bytes, len })
-    }
-
-    /// The wire length-prefix value for this document.
-    ///
-    /// A crate-internal encoding detail of the fixed-width frame this type
-    /// is embedded in; callers read the text through [`Self::as_str`].
-    const fn len_u16(&self) -> u16 {
-        self.len
-    }
-
-    /// The fixed-width wire buffer backing this document.
-    ///
-    /// A crate-internal encoding detail; callers read the text through
-    /// [`Self::as_str`].
-    const fn raw_bytes(&self) -> &[u8; PINBOARD_DOCUMENT_MAX] {
-        &self.bytes
-    }
-}
-
-impl core::fmt::Debug for PinboardDocument {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_tuple("PinboardDocument")
-            .field(&self.as_str())
-            .finish()
-    }
-}
+pub type PinboardDocument = WideText<1, PINBOARD_DOCUMENT_MAX, true>;
 
 /// One pinboard-channel operation (`plans/PINBOARD.md` §6).
 ///

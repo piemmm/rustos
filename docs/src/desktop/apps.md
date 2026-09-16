@@ -69,12 +69,26 @@ The desktop resolves every launch through **one funnel**
    cache-only, deliberately: a launch is a click, and a click may not wait on
    the filesystem (`AGENTS.md` §28). A bundle the session has not resolved is
    treated as a singleton, the conservative answer;
-3. hands the request to the live instance, trying each route in turn — the
-   **open target** the launch named, then the instance's **icon-bar default**
-   action (a new window), then **raising** its most recent window;
+3. hands the request to the live instance. A launch that **names a target** has
+   exactly one route — the target itself — and is all-or-nothing: an instance
+   that will not take it spawns instead, which still shows what the user asked
+   for, whereas asking for a bare window would raise an empty one and lose the
+   target. A launch that names **nothing** asks the instance's **icon-bar
+   default** action (a new window), then **raises** its most recent window;
 4. **fails closed to spawning.** An instance that cannot be reached at all —
    no window, no icon-bar presence, a mailbox that has gone — is spawned as
    before, so a launch never silently does nothing.
+
+The funnel is reachable by a launcher that is **not** the desktop, through
+`WindowRequest::HandOverLaunch`: without it a file manager that spawns a viewer
+per document bypasses the funnel entirely and a bundle declaring one instance
+gets several. The reply is `Reached` or `NotRunning` — "not running" is an
+answer rather than a refusal, and is what tells the caller to launch the bundle
+itself. The live instance is resolved from the **resident** icon-bar slot (the
+bundle each slot-holder was launched from, which the strip already records for
+its icons), so an application that declared no icon-bar presence is not
+resident and is not found — the same reason a bare launch cannot ask it for its
+default action.
 
 ## Handing a document to a running instance
 
@@ -82,30 +96,51 @@ A relaunch that names a folder or a file reaches the running instance through
 a **wake plus a pull**, because a `WindowEvent` is a fixed 40-byte frame and
 every event pays the widest event's width — a path is far wider than one.
 
-- `WindowEvent::OpenRequested { window_id }` is the wake. It says only *you
-  have at least one target waiting*, and it is window-scoped so it reaches any
-  application that owns a window, whether or not it declared an icon-bar
-  presence. It is delivered to the instance's most recent window.
-- `WindowRequest::TakeOpenTarget { window_id }` is the pull. The reply is the
-  oldest queued path, or the empty answer once the queue is drained. Popping
-  is what makes a target one-shot, so no id is minted or validated and the
-  ordering is the protocol. An application drains in a loop: one event may
+- `WindowEvent::OpenRequested` is the wake. It says only *you have at least one
+  target waiting*, and it is **application**-scoped, like the icon-bar events:
+  the instance a hand-over most needs to reach is the one with nothing open, so
+  a window-scoped wake would leave a resident application unreachable. It
+  travels to the application's declared icon-bar route, or failing that to the
+  event endpoint of its most recent window.
+- `WindowRequest::TakeOpenTarget` is the pull, and names nothing — the queue is
+  the calling application's, whose identity the kernel attests. The reply is
+  the oldest queued target, or the empty answer once the queue is drained.
+  Popping is what makes a target one-shot, so no id is minted or validated and
+  the ordering is the protocol. An application drains in a loop: one event may
   cover several targets, and another may arrive mid-drain.
+- A queued target is one of **two** things. A `Path` names a file or folder and
+  confers nothing. A `Document` is a file *already opened* by whoever handed it
+  over, reachable through a one-shot delegation the kernel minted to this
+  application — the only form an application that requests no filesystem
+  capability can act on.
 - The queue lives in the window engine beside the pending pick and the
-  unanswered menu open, bounded per window by `WINDOW_MAX_OPEN_TARGETS` — a
-  containment bound, not a capacity (`AGENTS.md` §24.4). Reaching it refuses
+  unanswered menu open, bounded per application by `WINDOW_MAX_OPEN_TARGETS` —
+  a containment bound, not a capacity (`AGENTS.md` §24.4). Reaching it refuses
   the newest target with the refusal stated rather than dropping an older one
-  silently. It dies with the window.
+  silently. It dies with the client, and so does any delegation queued for it.
+  One delegation handle is queued once however often it is handed over: a
+  handle is one-shot and the kernel returns the *same* one for the same
+  authority twice, so a second entry would promise a document the first pull
+  consumes.
 - Queueing and waking are **one** operation (`hand_over_open_target`),
   because they are one invariant: a queued target the owner was never woken
   for would sit unreachable, so a refused wake takes the target back off the
   queue. The caller may therefore read the answer as "the instance has it".
-- The path confers **no access**. The application opens it under its own
+- A **path** confers no access. The application opens it under its own
   authority, exactly as it would a path in its own argument list — which is
   why `files.app` puts every open target through the very same
   `location_components` rule its command line's starting location goes
-  through, and why `view.app`, which requests no filesystem capability at
-  all, cannot act on one (see *Picture and document viewer* below).
+  through.
+- A **document**'s authority is relayed, never lent. The grant arrives minted
+  by the *asking* process to the session, from a descriptor that process opened
+  under its own `CAP_FS_ACCESS`; the session redeems it and hands the same
+  authority on to the instance, and the kernel copies the **first** grantor's
+  captured identity onto the onward delegation rather than re-capturing it. So
+  the document is read under the authority of whoever opened it, never the
+  session's own larger reach, and there is deliberately no way to ask the
+  session to open a *path* on an application's behalf. A refused relay
+  delegates nothing and answers `NotRunning`, so the caller spawns — which
+  still shows the document.
 
 ## An overlay is a popup surface, never pixels in the app's own window
 
@@ -1951,7 +1986,11 @@ erases, and wide-glyph clobbering.
 the sixteen ANSI slots plus background, foreground, cursor, and cursor text,
 and `Painted` resolves the scheme in force once per repaint rather than once
 per cell. **System** follows the desktop's own dark/light appearance and is
-the default; **Midnight**, **Phosphor**, **Amber**, **Ember**, **Contrast**,
+the default, taking its ground from the theme's *document* role rather than its
+window surface: a terminal's grid is a page, and the full-screen editors that
+draw on it (`edit`, `vim`) are editing text on it, so it belongs on the same
+ground an editable field does. **Midnight**, **Phosphor**, **Amber**,
+**Ember**, **Contrast**,
 and **Paper** carry fixed palettes; **Custom** is the user's own, editable in
 the settings sheet.
 
@@ -2132,9 +2171,9 @@ parked on a wait-set, and the `WindowClient` calls.
 ## Picture and document viewer (`tairix-view`)
 
 The `view.app` bundle is the desktop's viewer for pictures and documents
-(`plans/VIEW.md`): the app the file manager hands a picture to, and a
-standalone application that asks the session's trusted picker when launched
-with no document. It claims JPEG, PNG, SVG, GIF, TIFF, WEBP, BMP, ICO and
+(`plans/VIEW.md`): the app the file manager hands a picture to, and a resident
+application that asks the session's trusted picker when the user clicks its
+icon-bar slot. It claims JPEG, PNG, SVG, GIF, TIFF, WEBP, BMP, ICO and
 RISC OS Sprite — every format the decoder supports *completely*. PDF is
 deliberately absent from its `associations` until `lib/pdf` lands behind the
 same page source: claiming a format with no decoder behind it would offer the
@@ -2144,15 +2183,50 @@ viewer for a file it must always refuse.
 export, annotation, or printing — which is why it needs no filesystem
 authority of its own.
 
+### One instance, a window per document, resident on the bar
+
+The viewer is a **single** instance with a window per document: a second
+document opens a second window in the one process, which is the rule for every
+application with an icon-bar slot. Containment is not lost by it — each
+window's document is decoded in its **own** sandbox, so a malformed file
+crashes its own decoder and disturbs no other window, and each `Job` and answer
+carries its window's key so one window's decode can never land in another.
+
+Launched by the user it opens **no window at all** and simply takes its slot:
+with nothing to display there is nothing to show, and the session shows a
+served window on its first present, so opening one would put an empty frame on
+the desktop. A primary click on the slot opens a window and asks the picker;
+that window's present stays withheld until there is something in it. A pick the
+user *cancels* closes that window rather than leaving it stating a refusal they
+already know about, while a pick the session *refuses* and a document that will
+not decode both state their reason in the window — a refusal is something to
+show.
+
+Closing a window keeps the process and the slot; only the slot's **Quit** row
+ends it. The decoder of a closed window is ended by a job on the worker (the
+sandboxes are the worker's and the loop may not reach them), so a window's
+child process goes with its window.
+
+One job is outstanding at a time and the window it is asked *for* rotates: the
+desk is latest-wins, so submitting while one is in flight would displace a job
+a window is waiting for, and a fixed scan order would let an animating window
+starve another's open. An `Open` additionally carries a monotonic **open id**,
+echoed back and dropped on mismatch — the same rule a render's echoed shape
+has — so closing a window with a read in flight cannot land a stale document in
+a later one.
+
 ### Two capabilities the viewer does not have, and one it does
 
 Its manifest requests `CAP_CONSOLE_WRITE`, `CAP_SHM` and `CAP_PROC_SPAWN`,
 and deliberately **no filesystem capability**. A document reaches it only as
 the user's own act: a read-only descriptor the file manager had the kernel
 clone in at spawn (`DOCUMENT_ROLE_ARG` plus `STDIN`, the inherited-document
-hand-off), or the one-shot `fd_grant` a `FilePicked` carries after the user
-chose a file in the *session's* UI under the *session's* authority, which the
-unprivileged `fd_redeem` installs.
+hand-off), the one-shot `fd_grant` a `FilePicked` carries after the user chose a
+file in the *session's* UI under the *session's* authority, or a `Document`
+open target the session **relayed** from a launcher that opened the file
+itself — all three installed by the unprivileged `fd_redeem`. A `Path` open
+target it cannot act on at all, and says so on `stderr` rather than pretending
+to: it holds no authority to open a name with.
 
 `CAP_PROC_SPAWN` is what lets the viewer re-enter its own binary as a
 capability-empty decoder. A document is untrusted input and is **never**

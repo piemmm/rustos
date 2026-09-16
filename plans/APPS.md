@@ -773,21 +773,42 @@ target** if it named one, else asked for its **icon-bar default** action, else
 has its most recent window **raised**; and an instance that cannot be reached
 at all is spawned as before, so a launch never silently does nothing.
 
-A relaunch that names a document reaches the instance as a **wake plus a
-pull** — `WindowEvent::OpenRequested` then `WindowRequest::TakeOpenTarget` —
-because an event frame is fixed-width and a path is far wider than one. The
-path confers no access: the application opens it under its own authority,
-exactly as it would an argument.
+A launch that names a target is **all-or-nothing**: the target is its one
+route, and an instance that will not take it spawns instead — a fresh process
+is given the same target, so it still shows what the user asked for, whereas
+asking for a bare window would raise an empty one and lose the target. The
+default and the raise are what a launch naming *nothing* resolves to.
 
-**Open conflict.** `view.app` requests *no* filesystem capability by design
-(`plans/CAPABILITY_USE.md` CU6): it reads only the one file it is handed. A
-*path* is therefore not something it can open, so the open-target channel as
-specified cannot serve it — it drains the queue, states the refusal, and
-offers its picker instead. Handing the viewer a **delegated descriptor**
-rather than a path is the shape that works, and the spawn wire now proves it
-(a path-backed wire reaches the child carrying the parent's captured
-identity, D119); carrying a descriptor on the *relaunch* channel is the
-part still unbuilt, and needs a decision.
+The funnel is reachable by a launcher that is **not** the desktop, through
+`WindowRequest::HandOverLaunch` → `Reached` / `NotRunning`. Without it a file
+manager that spawns a viewer per document bypasses the funnel entirely and a
+bundle declaring one instance gets several. The live instance is resolved from
+the **resident** icon-bar slot — the bundle each slot-holder was launched from,
+which the strip already records for its icons — so an application that declared
+no icon-bar presence is not resident and is not found, the same reason a bare
+launch cannot ask it for its default action.
+
+A relaunch that names something reaches the instance as a **wake plus a
+pull** — `WindowEvent::OpenRequested` then `WindowRequest::TakeOpenTarget` —
+because an event frame is fixed-width and a path is far wider than one. Both
+are **application**-scoped: the instance a hand-over most needs to reach is the
+one with nothing open, so a window-scoped wake would leave a resident
+application unreachable, and the pull names nothing because the queue is the
+calling application's, whose identity the kernel attests.
+
+**The open conflict is resolved: a target is a path *or* a document.**
+`view.app` requests no filesystem capability by design
+(`plans/CAPABILITY_USE.md` CU6), so a *path* is not something it can open. A
+`Document` target carries a one-shot delegation instead, and that is what
+reaches it. The authority is relayed, never lent: the grant arrives minted by
+the *asking* process to the session, from a descriptor that process opened
+itself, and the session redeems it and hands the same authority on — the kernel
+copies the **first** grantor's captured identity onto the onward delegation
+rather than re-capturing it, so the document is read under the authority of
+whoever opened it and never the session's own larger reach. There is
+deliberately no way to ask the session to open a path on an application's
+behalf. A path confers no access as before: the application opens it under its
+own authority, exactly as it would an argument.
 
 ## 11. Security summary
 

@@ -17,16 +17,24 @@
 //! its frame disagree.
 
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
-use tairix_abi::window_ipc::{AppBar, AppMenu, MenuRefusal, WindowEvent, WindowRegion};
+use tairix_abi::window_ipc::{
+    AppBar, AppMenu, HandOverDocument, HandOverOutcome, MenuRefusal, WindowEvent, WindowRegion,
+};
 use tairix_abi::{Errno, ProcId};
 use tairix_controls::{ChainModel, PlatePlacement};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::EventId;
+use tairix_window::{HandOverDesk, OpenEntry};
+
+use crate::launch::{
+    bundle_of_run_path, resolve_launch, DocumentRelay, Launch, LaunchHost, LaunchTarget,
+};
 use tairix_taskbar::menu::info_facts;
 use tairix_window::WindowSizing;
 use tairix_wm::{Color, Compositor, Point, Rect, Surface, Window, WindowControlKind, WindowId};
@@ -589,6 +597,56 @@ pub struct ShellWindowHost<'a> {
     /// Resolved by the session, which owns all of them; the host is handed the
     /// answer rather than reaching for each in turn.
     pub seat_held: bool,
+    /// How a hand-over's document authority reaches the instance that will
+    /// show it — the session's own three-syscall relay in production.
+    pub relay: &'a mut dyn DocumentRelay,
+}
+
+/// The [`LaunchHost`] a hand-over resolves through: the engine's own routes,
+/// plus the session's relay and its shell for the raise.
+///
+/// So a hand-over and the desktop's own launches take the *same* decision
+/// ([`resolve_launch`]) rather than each carrying its own ladder.
+struct DeskReach<'a, 'b> {
+    desk: &'a mut dyn HandOverDesk,
+    host: &'a mut ShellWindowHost<'b>,
+}
+
+impl LaunchHost for DeskReach<'_, '_> {
+    fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
+        let entry = match target {
+            LaunchTarget::Path(path) => OpenEntry::Path(String::from(path)),
+            LaunchTarget::Document { name, grant } => {
+                // The relay is what makes the document the instance's to
+                // read: the grant it arrived as was minted to the session.
+                // A refused relay delegates nothing, so the launch falls
+                // back to a fresh process, which still has the document.
+                match self.host.relay.relay(grant, app) {
+                    Ok(grant) => OpenEntry::Document {
+                        name: String::from(name),
+                        grant,
+                    },
+                    Err(_) => return false,
+                }
+            }
+        };
+        self.desk.hand_over(app, entry)
+    }
+
+    fn ask_default(&mut self, app: ProcId) -> bool {
+        self.desk.ask_default(app)
+    }
+
+    fn raise_recent_window(&mut self, app: ProcId) -> bool {
+        let Some(wm) = self
+            .desk
+            .recent_window(app)
+            .and_then(|ipc| self.host.windows.wm_id(ipc))
+        else {
+            return false;
+        };
+        self.host.shell.raise_window(self.host.compositor, wm)
+    }
 }
 
 impl ShellWindowHost<'_> {
@@ -976,6 +1034,37 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.picker.begin(window_id, self.shell, self.compositor)
     }
 
+    fn hand_over_requested(
+        &mut self,
+        desk: &mut dyn HandOverDesk,
+        _caller: ProcId,
+        run_path: &str,
+        document: Option<&HandOverDocument>,
+    ) -> Result<HandOverOutcome, Errno> {
+        // The same funnel the desktop's own launches take, so a launcher that
+        // is not the desktop cannot get a second instance of a bundle that
+        // declares one. The resident slot is where a live instance is found:
+        // an application with no icon-bar presence has no application-scoped
+        // route, which is the same reason a bare launch cannot ask it for its
+        // default action.
+        let bundle = bundle_of_run_path(run_path);
+        let running = self.apps.resident(bundle);
+        let one_instance = self.apps.runs_one_instance(bundle);
+        let target = document.map(|doc| LaunchTarget::Document {
+            name: doc.name.as_str(),
+            grant: doc.grant,
+        });
+        let mut reach = DeskReach { desk, host: self };
+        Ok(
+            match resolve_launch(&mut reach, running, one_instance, target) {
+                Launch::Reused { .. } => HandOverOutcome::Reached,
+                // Nothing took it, so the caller launches the bundle itself — and
+                // with a document that is the only thing that still shows it.
+                Launch::Spawn => HandOverOutcome::NotRunning,
+            },
+        )
+    }
+
     fn app_bar_declared(&mut self, owner: ProcId, bar: &AppBar) -> Result<(), Errno> {
         // The engine attested the caller and bounded the declaration; the
         // icon-bar service records it, and the strip is re-resolved from the
@@ -1102,6 +1191,16 @@ mod tests {
         }
     }
 
+    /// A relay that hands nothing on: these tests exercise the window
+    /// lifecycle, and the hand-over has its own suite in `crate::tests`.
+    struct RefusingRelay;
+
+    impl DocumentRelay for RefusingRelay {
+        fn relay(&mut self, _grant: u64, _app: ProcId) -> Result<u64, Errno> {
+            Err(Errno::NotSupported)
+        }
+    }
+
     /// An icon-bar seam that records what the bridge relayed: these tests
     /// exercise the window lifecycle, and the icon bar has its own suite in
     /// `crate::tests`.
@@ -1109,6 +1208,8 @@ mod tests {
     struct RecordingBar {
         declared: Vec<ProcId>,
         withdrawn: Vec<ProcId>,
+        /// The resident instance each bundle resolves to, if a test wires one.
+        residents: Vec<(alloc::string::String, ProcId)>,
     }
 
     impl AppBarBridge for RecordingBar {
@@ -1125,9 +1226,158 @@ mod tests {
             true
         }
 
+        fn resident(&self, bundle: &str) -> Option<ProcId> {
+            self.residents
+                .iter()
+                .find(|(from, _)| from == bundle)
+                .map(|(_, owner)| *owner)
+        }
+
         fn app_bar_withdrawn(&mut self, owner: ProcId) {
             self.withdrawn.push(owner);
         }
+    }
+
+    /// A desk recording what the host asked the engine to do, and answering
+    /// with whatever a test wired.
+    #[derive(Default)]
+    struct RecordingDesk {
+        handed: alloc::vec::Vec<(ProcId, OpenEntry)>,
+        defaults: alloc::vec::Vec<ProcId>,
+        /// Whether a hand-over is taken.
+        takes: bool,
+        /// The window each application most recently opened, if a test says.
+        recent: alloc::vec::Vec<(ProcId, u64)>,
+    }
+
+    impl HandOverDesk for RecordingDesk {
+        fn hand_over(&mut self, app: ProcId, entry: OpenEntry) -> bool {
+            self.handed.push((app, entry));
+            self.takes
+        }
+
+        fn ask_default(&mut self, app: ProcId) -> bool {
+            self.defaults.push(app);
+            false
+        }
+
+        fn recent_window(&self, app: ProcId) -> Option<u64> {
+            self.recent
+                .iter()
+                .find(|(held, _)| *held == app)
+                .map(|(_, id)| *id)
+        }
+    }
+
+    /// A relay that hands on whatever a test wired, recording every ask.
+    #[derive(Default)]
+    struct WiredRelay {
+        relayed: alloc::vec::Vec<(u64, ProcId)>,
+        mints: Option<u64>,
+    }
+
+    impl DocumentRelay for WiredRelay {
+        fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno> {
+            self.relayed.push((grant, app));
+            self.mints.ok_or(Errno::NotSupported)
+        }
+    }
+
+    /// A hand-over reaches the resident instance of the bundle it names, with
+    /// the document relayed to *that* instance — and nothing is delegated on
+    /// any path that does not reach one.
+    #[test]
+    fn a_hand_over_relays_a_document_to_the_resident_instance_or_delegates_nothing() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut menu = MenuChain::new();
+        let resident = crate::tests::window_owner(1);
+        let caller = crate::tests::window_owner(2);
+        let bundle = "/System/Applications/view.app";
+        let run_path = alloc::format!("{bundle}/Run");
+        let document = HandOverDocument {
+            name: tairix_abi::window_ipc::DocumentName::new("holiday.png").expect("a valid name"),
+            grant: 31,
+        };
+
+        let mut reach = |bar: &mut RecordingBar,
+                         desk: &mut RecordingDesk,
+                         relay: &mut WiredRelay,
+                         document: Option<&HandOverDocument>| {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: bar,
+                menu: &mut menu,
+                seat_held: false,
+                relay,
+            };
+            host.hand_over_requested(desk, caller, &run_path, document)
+        };
+
+        // No resident instance: nothing is relayed and nothing is queued, so
+        // the caller launches the bundle itself.
+        let mut bar = RecordingBar::default();
+        let mut desk = RecordingDesk {
+            takes: true,
+            ..RecordingDesk::default()
+        };
+        let mut relay = WiredRelay {
+            mints: Some(77),
+            ..WiredRelay::default()
+        };
+        assert_eq!(
+            reach(&mut bar, &mut desk, &mut relay, Some(&document)),
+            Ok(HandOverOutcome::NotRunning)
+        );
+        assert!(relay.relayed.is_empty(), "nothing was delegated");
+        assert!(desk.handed.is_empty());
+
+        // With one resident, the document is relayed to *it* and queued under
+        // the handle the relay minted — never the one the caller sent, which
+        // was minted to the session.
+        bar.residents
+            .push((alloc::string::String::from(bundle), resident));
+        assert_eq!(
+            reach(&mut bar, &mut desk, &mut relay, Some(&document)),
+            Ok(HandOverOutcome::Reached)
+        );
+        assert_eq!(relay.relayed, [(31, resident)]);
+        assert_eq!(
+            desk.handed,
+            [(
+                resident,
+                OpenEntry::Document {
+                    name: alloc::string::String::from("holiday.png"),
+                    grant: 77,
+                }
+            )]
+        );
+
+        // A relay the kernel refused delegates nothing and queues nothing, so
+        // the caller launches instead of the document silently vanishing.
+        let mut refusing = WiredRelay::default();
+        desk.handed.clear();
+        assert_eq!(
+            reach(&mut bar, &mut desk, &mut refusing, Some(&document)),
+            Ok(HandOverOutcome::NotRunning)
+        );
+        assert_eq!(refusing.relayed, [(31, resident)]);
+        assert!(desk.handed.is_empty(), "a refused relay queues nothing");
+
+        // A bare hand-over asks the instance for its icon-bar default and
+        // relays nothing at all; with the default refused and no window to
+        // raise, the caller launches.
+        relay.relayed.clear();
+        assert_eq!(
+            reach(&mut bar, &mut desk, &mut relay, None),
+            Ok(HandOverOutcome::NotRunning)
+        );
+        assert_eq!(desk.defaults, [resident]);
+        assert!(relay.relayed.is_empty(), "a bare launch names no document");
     }
 
     /// The one seat rule every chain resolves through, whichever direction it
@@ -1170,6 +1420,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(
                 window_owner(1),
@@ -1227,6 +1478,7 @@ mod tests {
                     apps: &mut RecordingBar::default(),
                     menu: &mut MenuChain::new(),
                     seat_held: false,
+                    relay: &mut RefusingRelay,
                 };
                 host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                     .expect("opens");
@@ -1292,6 +1544,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -1322,6 +1575,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
                 .expect("presents");
@@ -1350,6 +1604,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             open_one_full(&mut host, 7, 64, 48, WindowSizing::default())
         };
@@ -1367,6 +1622,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_presented(7, &m, &[0x40u8; 64 * 48 * 4], whole(&m))
                 .expect("presents");
@@ -1394,6 +1650,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1410,6 +1667,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents");
@@ -1427,6 +1685,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents again");
@@ -1448,6 +1707,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("re-attached and presents");
@@ -1478,6 +1738,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(owner, 1, &m, "one", WindowSizing::default())
                 .expect("opens");
@@ -1497,6 +1758,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_presented(2, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents");
@@ -1522,6 +1784,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1564,6 +1827,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            relay: &mut RefusingRelay,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -1634,6 +1898,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(window_owner(1), 1, &m, "w", RESIZABLE)
                 .expect("opens");
@@ -1666,6 +1931,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            relay: &mut RefusingRelay,
         };
         let mut next = frame;
         next[0..4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
@@ -1713,6 +1979,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1731,6 +1998,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the repeat present is accepted");
@@ -1766,6 +2034,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1787,6 +2056,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the second present lands");
@@ -1826,6 +2096,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1864,6 +2135,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            relay: &mut RefusingRelay,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -1891,6 +2163,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(
                 window_owner(1),
@@ -1935,6 +2208,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             open_one_sized(&mut host, 3, RESIZABLE)
         };
@@ -1988,6 +2262,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             open_one_full(&mut host, 7, 480, 320, WindowSizing::default())
         };
@@ -2213,6 +2488,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             // A client wide and tall enough that even the first cascade slot
             // overhangs the 640x480 work area.
@@ -2334,6 +2610,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             (
                 open_one_full(&mut host, 7, 200, 120, RESIZABLE),
@@ -2368,6 +2645,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             (
                 open_one_sized(
@@ -2420,6 +2698,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             let wm = open_one(&mut host, 7);
             // A compositor window the session does not track (e.g. the taskbar
@@ -2469,6 +2748,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             open_one(&mut host, 7)
         };
@@ -2526,6 +2806,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            relay: &mut RefusingRelay,
         };
         let first = open_one(&mut host, 7);
         let second = open_one(&mut host, 8);
@@ -2582,6 +2863,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             open_one(&mut host, 7)
         };
@@ -2617,6 +2899,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             let back = open_one(&mut host, 7);
             let front = open_one(&mut host, 9);
@@ -2659,6 +2942,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             open_one(&mut host, 7)
         };
@@ -2729,6 +3013,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            relay: &mut RefusingRelay,
         };
         let wm = open_one(&mut host, 7);
         // A resize moves the client geometry the compositor draws and lays
@@ -2763,6 +3048,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             open_one_full(&mut host, 7, 200, 120, RESIZABLE)
         };
@@ -2798,6 +3084,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_resized(7, &mode(220, 135, DisplayFormat::Rgba8888))
                 .expect("accepted");
@@ -2825,6 +3112,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_resized(7, &mode(240, 150, DisplayFormat::Rgba8888))
                 .expect("resizes");
@@ -2849,6 +3137,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             let wm = open_one(&mut host, 7);
             host.window_retitled(7, "Files - Documents")
@@ -2891,6 +3180,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            relay: &mut RefusingRelay,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -2929,6 +3219,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             (
                 open_one_sized(&mut host, 1, WindowSizing::default()),
@@ -3046,6 +3337,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -3074,6 +3366,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
                 .expect("presents");
@@ -3110,6 +3403,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };
@@ -3165,6 +3459,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                relay: &mut RefusingRelay,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };

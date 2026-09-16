@@ -661,8 +661,12 @@ exist from CU3).
 
 **Status: done — the session/ceiling slice landed with `plans/DISPLAY.md`
 D7d, and the picker-issued one-shot descriptors landed with
-`plans/APPWIN.md` AW5 (its remaining QEMU-vertical stage is tracked
-there).**
+`plans/APPWIN.md` AW5. Its QEMU vertical is
+`tests/integration/filepick_qemu_aarch64`: the guest latches
+`comm=desktop sc=fd_grant` then `comm=view sc=fd_redeem`, in that order, so
+the claim is a hand-off *between* principals rather than one process touching
+its own descriptor. The three-principal relay below has no vertical yet, and
+what it wants first is recorded in `plans/VIEW.md`.**
 
 - Live: the graphical-session class (`CAP_DISPLAY`/`CAP_INPUT_READ`/
   `CAP_SHM`) is part of `SESSION_BASELINE` — a graphical login is an
@@ -684,8 +688,20 @@ there).**
   one-shot, recipient-bound **read-only** delegation the app redeems with
   the unprivileged `fd_redeem` — every later operation is re-authorised
   under the *grantor's* captured uid + effective set, the grant is audited,
-  delegation never chains, and an exited recipient's pending grants are
-  reclaimed.
+  and an exited recipient's pending grants are reclaimed.
+
+  **A delegation may be handed on, unchanged.** A holder re-granting one
+  mints a record that is the one it holds — the first grantor's path, uid,
+  effective set, and extent ceiling, copied rather than re-captured, with the
+  ceiling attenuated by `min` if the caller states a smaller one. So a relay
+  can never widen what it was handed and no chain forms for a reader to
+  follow: exactly one identity is ever exercised. That is what lets the
+  desktop hand one application's chosen document to a live instance of
+  another — the file manager opens it under its own authority, the session
+  redeems and hands the same authority on, and the viewer reads it as the file
+  manager, never as the session (`plans/APPS.md` §10.1, `plans/VIEW.md`). The
+  session opens nothing on an application's behalf; there is deliberately no
+  request that would let it.
 
   **The recipient is named by its attested `ProcId`, never by a task id.**
   `fd_grant(fd, write_ceiling, recipient, len)` takes a pointer to the

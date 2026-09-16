@@ -324,13 +324,20 @@ gate under the `CAP_PROC_SPAWN` grant this stage added (async and
 non-blocking, with launched children reaped on an any-child wait-set member).
 **Handing a data file to its associated viewer (`OpenFile`) is now done too**:
 `Activation::OpenFile` resolves the viewer from the installed bundles' signed
-`AppInfo` MIME associations (`RtBundleSource` + `applications_for`) and hands
-the file over through the race-free spawn-time inheritance — `fs_open`
-read-only + `spawn_attached` with the descriptor wired onto the child's `STDIN`
-(`FdWire::Handle`) and the reserved `DOCUMENT_ROLE_ARG` token, so the viewer
-reads its document with no filesystem capability of its own. This supersedes
-the earlier fd_grant-after-spawn sketch (`fd_grant`/`fd_redeem` remain the
-picker's post-hoc delegation to an already-running window owner). **The
+`AppInfo` MIME associations (`RtBundleSource` + `applications_for`), opens the
+file read-only in its own table, and **offers it to a live instance first**
+through the desktop's single-instance funnel
+(`WindowRequest::HandOverLaunch` with a `Document`): the grant is minted from
+that descriptor to the session, which relays it on to the resident instance, so
+a bundle declaring one instance opens a second window rather than a second
+process. Anything but `Reached` — no instance, one that could not be reached, a
+session with no funnel — spawns as before, handing the file over through the
+race-free spawn-time inheritance (`spawn_attached` with the descriptor wired
+onto the child's `STDIN`, `FdWire::Handle`, plus the reserved
+`DOCUMENT_ROLE_ARG` token). Either way the viewer reads its document with no
+filesystem capability of its own, and a bundle launch (`LaunchBundle`) goes
+through the same funnel with no document. This supersedes the earlier
+fd_grant-after-spawn sketch. **The
 explicit "Open With…" chooser over the full `applications_for` result is now
 done too** — the default open picks the first association, the chooser lets the
 user pick any. See FM6b below. FM6b is complete.

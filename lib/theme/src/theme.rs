@@ -212,6 +212,8 @@ impl Theme {
                 desktop: Rgba::rgb(0x0b, 0x0e, 0x10),
                 surface: Rgba::rgb(0x0f, 0x13, 0x16),
                 surface_raised: Rgba::rgb(0x15, 0x1b, 0x1f),
+                document: Rgba::rgb(0x0a, 0x0d, 0x0f),
+                title_band: Rgba::rgb(0x23, 0x2b, 0x31),
                 chrome_alpha: CHROME_ALPHA,
                 chrome_plate_alpha: CHROME_PLATE_ALPHA,
                 on_surface: Rgba::rgb(0xe8, 0xeb, 0xed),
@@ -264,10 +266,18 @@ impl Theme {
     /// The built-in **light** theme.
     ///
     /// The light board (`plans/desktop1-light.png`) keeps the dark variant's
-    /// alloy-orange accent family and semantic vocabulary and re-tunes it for
-    /// warm off-white surfaces: every signal hue is darkened until it carries
-    /// on paper-white, and the accent deepens to the burnt end of the family
-    /// so orange-on-white text and rims stay legible.
+    /// alloy-orange accent family and semantic vocabulary and re-tunes every
+    /// signal hue until it carries on a light ground, with the accent deepened
+    /// to the burnt end of the family so orange text and rims stay legible.
+    ///
+    /// The neutrals are one descending ladder of *neutral* greys — no warm
+    /// cast, so a signal hue is the only colour on screen. The window ground
+    /// is a mid-light grey rather than paper: white window grounds left every
+    /// app reading as a blank sheet, with nothing for a plate to be raised off
+    /// and nowhere for a title band to sit. Paper is [`Palette::document`]'s
+    /// alone, so the surfaces a user *writes* on are the white ones. Raised
+    /// chrome — plates, menus, the taskbar — catches the light *above* the
+    /// window ground, and the interaction ladder deepens away from it.
     #[must_use]
     pub fn light() -> Self {
         let accent = Rgba::rgb(0xc8, 0x50, 0x0c);
@@ -276,9 +286,11 @@ impl Theme {
             "TAIRiX Light",
             Appearance::Light,
             Palette {
-                desktop: Rgba::rgb(0xe8, 0xe3, 0xdd),
-                surface: Rgba::rgb(0xfd, 0xfc, 0xfa),
-                surface_raised: Rgba::rgb(0xf4, 0xf0, 0xec),
+                desktop: Rgba::rgb(0x80, 0x80, 0x80),
+                surface: Rgba::rgb(0xd9, 0xd9, 0xd9),
+                surface_raised: Rgba::rgb(0xec, 0xec, 0xec),
+                document: Rgba::rgb(0xff, 0xff, 0xff),
+                title_band: Rgba::rgb(0xbf, 0xbf, 0xbf),
                 chrome_alpha: CHROME_ALPHA,
                 chrome_plate_alpha: CHROME_PLATE_ALPHA,
                 on_surface: Rgba::rgb(0x1b, 0x1d, 0x20),
@@ -286,11 +298,11 @@ impl Theme {
                 accent,
                 on_accent: ON_ACCENT,
                 selection_fill: accent.with_alpha(SELECTION_ALPHA),
-                border: Rgba::rgb(0xdd, 0xd6, 0xce),
-                surface_hover: Rgba::rgb(0xe6, 0xe1, 0xda),
-                surface_pressed: Rgba::rgb(0xd7, 0xd1, 0xc8),
-                surface_selected: Rgba::rgb(0xc9, 0xc3, 0xb9),
-                rim: Rgba::rgb(0xcf, 0xc7, 0xbf),
+                border: Rgba::rgb(0xad, 0xad, 0xad),
+                surface_hover: Rgba::rgb(0xcc, 0xcc, 0xcc),
+                surface_pressed: Rgba::rgb(0xb3, 0xb3, 0xb3),
+                surface_selected: Rgba::rgb(0xa6, 0xa6, 0xa6),
+                rim: Rgba::rgb(0xc4, 0xc4, 0xc4),
                 rim_active: Rgba::rgb(0xd2, 0x54, 0x0b),
                 danger: Rgba::rgb(0xc4, 0x16, 0x1a),
                 cpu_pressure: Rgba::rgb(0xd8, 0x54, 0x0a),
@@ -310,9 +322,9 @@ impl Theme {
                 disk_write: Rgba::rgb(0xb0, 0x36, 0x2a),
                 net_receive: Rgba::rgb(0x11, 0x6f, 0xb0),
                 net_send: Rgba::rgb(0x55, 0x46, 0xc4),
-                scroll_track: Rgba::rgb(0xec, 0xe7, 0xe1),
-                scroll_thumb: Rgba::rgb(0xbd, 0xb5, 0xac),
-                frame: Rgba::rgb(0xc2, 0xbb, 0xb4),
+                scroll_track: Rgba::rgb(0xcf, 0xcf, 0xcf),
+                scroll_thumb: Rgba::rgb(0x9e, 0x9e, 0x9e),
+                frame: Rgba::rgb(0x91, 0x91, 0x91),
                 window_close: Rgba::rgb(0xd7, 0x1f, 0x18).with_alpha(COMMAND_ALPHA),
                 window_minimize: Rgba::rgb(0xc9, 0x8a, 0x00).with_alpha(COMMAND_ALPHA),
                 window_maximize: Rgba::rgb(0x1d, 0x8c, 0x3c).with_alpha(COMMAND_ALPHA),

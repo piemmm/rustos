@@ -72,6 +72,24 @@ pub const BUNDLE_RUN_SUFFIX: &str = "/Run";
 /// pointer position or a key, so it carries no input content.
 pub const APP_BAR_RELAYED: tairix_log::EventId = tairix_log::EventId(20_007);
 
+/// Log event: an application's icon-bar slot reached the display for the
+/// first time, in the desktop session's reserved range. Id `20_009` is the
+/// next free slot.
+///
+/// The sibling of [`WINDOW_SHOWN`](crate::WINDOW_SHOWN), for an application
+/// that may own no window at all: a resident single-instance application sits
+/// on the bar with nothing open, so nothing about a window can say when it
+/// became clickable. Only the session sees a composed frame carrying that
+/// slot reach the display, so the fact is announced here or nowhere — which
+/// is what lets anything asking the question (a user diagnosing an
+/// application that launched but showed nothing, a QEMU vertical deciding
+/// when a resident slot is worth clicking) read one record.
+pub const APP_BAR_SLOT_SHOWN: tairix_log::EventId = tairix_log::EventId(20_009);
+
+/// The exact message [`APP_BAR_SLOT_SHOWN`] is emitted with. A log consumer
+/// keys on this constant rather than on a copy of its text.
+pub const APP_BAR_SLOT_SHOWN_MESSAGE: &str = "icon-bar slot on screen";
+
 /// One application's icon-bar declaration, exactly as the window engine
 /// attested and bounded it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -130,6 +148,12 @@ pub struct AppBarService {
     /// so an embedder comparing live windows against the strip does not read
     /// their absence as a strip that has gone stale.
     iconless: BTreeSet<ProcId>,
+    /// The applications the last resolved strip seated, in its own order.
+    seated: Vec<ProcId>,
+    /// Applications whose slot a presented frame has already carried, so each
+    /// is announced once. An entry goes when its process does, so one that
+    /// comes back is announced afresh.
+    shown: BTreeSet<ProcId>,
     dirty: bool,
 }
 
@@ -266,7 +290,33 @@ impl AppBarService {
             .iter()
             .filter_map(|group| group.bundle.clone().map(|bundle| (group.owner, bundle)))
             .collect();
+        self.shown.retain(|owner| live.contains(owner));
+        self.seated = groups.iter().map(|group| group.owner).collect();
         groups
+    }
+
+    /// Report every application whose icon-bar slot a presented frame has
+    /// just carried for the first time.
+    ///
+    /// Called immediately after a frame reached the display, which is what
+    /// makes the claim true: the bar is composited into every frame, so a
+    /// slot the last resolved strip seated is on screen now. An application
+    /// with no slot — it declared no presence, or its bundle presents none —
+    /// says nothing, and one already announced is not announced again while
+    /// it lives.
+    ///
+    /// The only honest witness that a *resident* application is clickable: an
+    /// application whose whole purpose is to sit on the bar with nothing open
+    /// never opens the window a window witness would need.
+    ///
+    /// Takes a reporter rather than returning a collection so an idle wake —
+    /// which is nearly every wake — allocates nothing.
+    pub fn report_newly_shown(&mut self, mut report: impl FnMut(ProcId)) {
+        for &owner in &self.seated {
+            if self.shown.insert(owner) {
+                report(owner);
+            }
+        }
     }
 
     /// The identity `owner`'s bundle attests, if one has already been read.
@@ -369,6 +419,23 @@ impl AppBarService {
         self.facts
             .get(bundle)
             .is_none_or(|facts| facts.one_instance)
+    }
+
+    /// The process holding a slot for the bundle installed at `bundle`, if
+    /// one does — the **resident** instance a hand-over reaches.
+    ///
+    /// Read from the bundle each slot-holder was launched from, which the
+    /// strip already records for its icons, so there is no second table
+    /// pairing applications with bundles. An application that declared no
+    /// icon-bar presence is not resident and is not found here: it has no
+    /// application-scoped route to reach, which is the same reason a bare
+    /// launch cannot ask it for its default action.
+    #[must_use]
+    pub fn resident(&self, bundle: &str) -> Option<ProcId> {
+        self.bundles
+            .iter()
+            .find(|(owner, from)| from.as_str() == bundle && self.declared.contains_key(owner))
+            .map(|(owner, _)| *owner)
     }
 
     /// Read and remember what `bundle`'s signed manifest attests, unless it
@@ -728,6 +795,10 @@ pub trait AppBarBridge {
     /// [`attested_identity`](Self::attested_identity) is: a launch gesture
     /// may not wait on the filesystem either.
     fn runs_one_instance(&self, bundle: &str) -> bool;
+
+    /// The process holding a slot for the bundle installed at `bundle` — the
+    /// resident instance a hand-over reaches — or `None` when none does.
+    fn resident(&self, bundle: &str) -> Option<ProcId>;
 }
 
 impl AppBarBridge for AppBarService {
@@ -745,5 +816,9 @@ impl AppBarBridge for AppBarService {
 
     fn runs_one_instance(&self, bundle: &str) -> bool {
         Self::runs_one_instance(self, bundle)
+    }
+
+    fn resident(&self, bundle: &str) -> Option<ProcId> {
+        Self::resident(self, bundle)
     }
 }

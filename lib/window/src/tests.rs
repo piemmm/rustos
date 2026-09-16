@@ -18,8 +18,9 @@ use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    AppMenuRowView, MenuOutcome, MenuRefusal, PointerAction, TooltipText, WindowEvent,
-    WindowRegion, WindowRequest, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    AppMenuRowView, DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, MenuRefusal,
+    PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest, HAND_OVER_RUN_PATH_MAX,
+    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -27,12 +28,12 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
     damage_in, pointer_point, present_damage, EventDrain, EventError, EventSource, Parked, Repaint,
-    WindowClient, WindowEvents, WindowTransport,
+    Target, WindowClient, WindowEvents, WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    client_frame_budget_bytes, CallerIdentity, EventSink, PopupSpec, WindowHost, WindowServer,
-    WindowSizing, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, CallerIdentity, EventSink, HandOverDesk, OpenEntry, PopupSpec,
+    WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -156,6 +157,10 @@ struct RecordingHost {
     refuse_retitle: Option<Errno>,
     refuse_pick: Option<Errno>,
     refuse_menu_open: Option<Errno>,
+    hand_overs: Vec<(ProcId, String, Option<HandOverDocument>)>,
+    /// What the host answers a hand-over with: `NotRunning` unless a test
+    /// says otherwise, so the default is "nothing to reach".
+    hand_over: Result<HandOverOutcome, Errno>,
     /// The desktop this host composites, or the refusal a host with no
     /// screen to describe answers with.
     desktop: Result<DesktopInfo, Errno>,
@@ -184,6 +189,8 @@ impl Default for RecordingHost {
             refuse_retitle: None,
             refuse_pick: None,
             refuse_menu_open: None,
+            hand_overs: Vec::new(),
+            hand_over: Ok(HandOverOutcome::NotRunning),
             desktop: Ok(sample_desktop()),
         }
     }
@@ -268,6 +275,32 @@ impl WindowHost for RecordingHost {
         }
         self.picks.push(window_id);
         Ok(())
+    }
+
+    fn hand_over_requested(
+        &mut self,
+        desk: &mut dyn HandOverDesk,
+        caller: ProcId,
+        run_path: &str,
+        document: Option<&HandOverDocument>,
+    ) -> Result<HandOverOutcome, Errno> {
+        self.hand_overs
+            .push((caller, String::from(run_path), document.copied()));
+        // A host that says it reached an instance really queues something,
+        // so the engine's own half of the hand-over is exercised too.
+        if self.hand_over == Ok(HandOverOutcome::Reached) {
+            let entry = match document {
+                Some(doc) => OpenEntry::Document {
+                    name: String::from(doc.name.as_str()),
+                    grant: doc.grant,
+                },
+                None => OpenEntry::Path(String::from(run_path)),
+            };
+            if !desk.hand_over(caller, entry) {
+                return Ok(HandOverOutcome::NotRunning);
+            }
+        }
+        self.hand_over
     }
 
     fn menu_open_requested(
@@ -392,6 +425,9 @@ struct Loopback {
     server: WindowServer<MockMapper>,
     host: RecordingHost,
     identity: MockIdentity,
+    /// Where an event the engine sends while serving a request lands — the
+    /// hand-over's wake is the one that does.
+    sink: QueueSink,
     /// The ticket the "kernel" attaches to the next in-flight call.
     ticket: u64,
     /// Every frame the client put on the wire, in order.
@@ -404,6 +440,7 @@ impl Loopback {
             server: WindowServer::new(MockMapper::with_regions(regions), SERVER, CLIENT_FRAME_MAX),
             host: RecordingHost::default(),
             identity: MockIdentity,
+            sink: QueueSink::default(),
             ticket: TICKET_A,
             sent: alloc::vec::Vec::new(),
         }))
@@ -438,6 +475,7 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
         inner.sent.push(request.to_vec());
         let len = inner.server.serve(
             &mut inner.host,
+            &mut inner.sink,
             &mut inner.identity,
             inner.ticket,
             request,
@@ -1379,6 +1417,7 @@ fn a_malformed_request_answers_a_typed_status_refusal() {
     let inner = &mut *loopback.borrow_mut();
     let len = inner.server.serve(
         &mut inner.host,
+        &mut inner.sink,
         &mut inner.identity,
         TICKET_A,
         &[0u8; 4],
@@ -1390,6 +1429,7 @@ fn a_malformed_request_answers_a_typed_status_refusal() {
     );
     let len = inner.server.serve(
         &mut inner.host,
+        &mut inner.sink,
         &mut inner.identity,
         TICKET_A,
         &[0xFFu8; WindowRequest::MAX_WIRE_LEN],
@@ -1996,7 +2036,14 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
         title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
         sizing: WindowSizing::Fixed,
     });
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &create, &mut reply);
+    let len = server.serve(
+        &mut host,
+        &mut QueueSink::default(),
+        &mut identity,
+        TICKET_A,
+        &create,
+        &mut reply,
+    );
     let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
 
     // Setting the backdrop blur is infallible for an owned window: the
@@ -2005,7 +2052,14 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
         window_id: window,
         radius_px: 8,
     });
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &blur, &mut reply);
+    let len = server.serve(
+        &mut host,
+        &mut QueueSink::default(),
+        &mut identity,
+        TICKET_A,
+        &blur,
+        &mut reply,
+    );
     assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
 }
 
@@ -2308,7 +2362,14 @@ fn a_host_with_no_menu_service_refuses_an_open() {
         title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
         sizing: WindowSizing::Fixed,
     });
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &create, &mut reply);
+    let len = server.serve(
+        &mut host,
+        &mut QueueSink::default(),
+        &mut identity,
+        TICKET_A,
+        &create,
+        &mut reply,
+    );
     let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
 
     let open = request_frame(&WindowRequest::OpenMenu {
@@ -2316,7 +2377,14 @@ fn a_host_with_no_menu_service_refuses_an_open() {
         anchor: sample_menu_anchor(),
         menu: sample_open_menu(),
     });
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &open, &mut reply);
+    let len = server.serve(
+        &mut host,
+        &mut QueueSink::default(),
+        &mut identity,
+        TICKET_A,
+        &open,
+        &mut reply,
+    );
     assert_eq!(
         tairix_abi::window_ipc::decode_minted_id_reply(&reply[..len]),
         Err(Errno::NotSupported)
@@ -2748,30 +2816,114 @@ fn a_whole_round_presents_the_window_whatever_was_reported() {
 
 // ---- the open-target channel and the tooltip declaration ---------------
 
+/// Client A's attested identity, which its own targets are queued under.
+fn app_a() -> ProcId {
+    proc_id(0xA1)
+}
+
+/// A path entry for `path`.
+fn path_entry(path: &str) -> OpenEntry {
+    OpenEntry::Path(String::from(path))
+}
+
 #[test]
 fn an_open_target_is_queued_by_the_session_and_pulled_once_by_its_owner() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     // Nothing queued is the honest empty answer, not an error.
-    assert_eq!(client.take_open_target(window), Ok(None));
+    assert_eq!(client.take_open_target(), Ok(None));
 
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, window, "Users:/ada/Documents")
-        .expect("the window takes it");
+        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/Documents"))
+        .expect("the application takes it");
     assert_eq!(
-        client.take_open_target(window),
-        Ok(Some(String::from("Users:/ada/Documents")))
+        client.take_open_target(),
+        Ok(Some(Target::Path(String::from("Users:/ada/Documents"))))
     );
     assert_eq!(
-        client.take_open_target(window),
+        client.take_open_target(),
         Ok(None),
         "popping is what makes a target one-shot"
     );
+}
+
+#[test]
+fn a_document_hand_over_carries_its_delegation_and_its_name() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    loopback
+        .borrow_mut()
+        .server
+        .hand_over_open_target(
+            &mut sink,
+            app_a(),
+            OpenEntry::Document {
+                name: String::from("holiday.png"),
+                grant: 42,
+            },
+        )
+        .expect("the application takes it");
+    assert_eq!(
+        client.take_open_target(),
+        Ok(Some(Target::Document {
+            name: String::from("holiday.png"),
+            grant: 42,
+        })),
+        "a document is the form an application with no filesystem reach can open"
+    );
+
+    // A document with no delegation is nothing to open, so it never queues.
+    assert_eq!(
+        loopback.borrow_mut().server.hand_over_open_target(
+            &mut sink,
+            app_a(),
+            OpenEntry::Document {
+                name: String::from("holiday.png"),
+                grant: 0,
+            },
+        ),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(client.take_open_target(), Ok(None));
+}
+
+#[test]
+fn one_delegation_handle_is_queued_once_however_often_it_is_handed_over() {
+    // A grant handle is one-shot, and the kernel hands the *same* handle back
+    // when the same authority is granted to the same process twice. Queueing
+    // it twice would promise a second document the first pull consumes, so
+    // the repeat is the answer rather than a second entry.
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let document = OpenEntry::Document {
+        name: String::from("holiday.png"),
+        grant: 42,
+    };
+    for _ in 0..3 {
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, app_a(), document.clone())
+            .expect("a repeat is taken");
+    }
+    assert_eq!(
+        client.take_open_target(),
+        Ok(Some(Target::Document {
+            name: String::from("holiday.png"),
+            grant: 42,
+        }))
+    );
+    assert_eq!(client.take_open_target(), Ok(None), "one handle, one entry");
 }
 
 #[test]
@@ -2779,28 +2931,75 @@ fn handing_over_a_target_wakes_its_owner() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, window, "Users:/ada/report")
-        .expect("the window takes it");
+        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/report"))
+        .expect("the application takes it");
     let (endpoint, bytes) = sink.delivered.pop_front().expect("a wake was announced");
     assert_eq!(endpoint, EVENTS_A);
     assert_eq!(
         WindowEvent::from_bytes(&bytes),
-        Ok(WindowEvent::OpenRequested { window_id: window }),
-        "the wake is window-scoped and carries no path"
+        Ok(WindowEvent::OpenRequested),
+        "the wake names the application and carries no target"
     );
     assert!(sink.delivered.is_empty(), "one target, one wake");
+}
+
+#[test]
+fn a_windowless_application_is_reached_through_its_icon_bar_route() {
+    // The instance a hand-over most needs to reach: a resident
+    // single-instance application sitting on the icon bar with nothing open.
+    // A window-scoped queue would leave it unreachable.
+    let loopback = Loopback::with_regions(&[]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("the bar declaration is accepted");
+
+    loopback
+        .borrow_mut()
+        .server
+        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/report"))
+        .expect("an application with no window still has a route");
+    let (endpoint, bytes) = sink.delivered.pop_front().expect("a wake was announced");
+    assert_eq!(endpoint, EVENTS_A);
+    assert_eq!(
+        WindowEvent::from_bytes(&bytes),
+        Ok(WindowEvent::OpenRequested)
+    );
+    assert_eq!(
+        client.take_open_target(),
+        Ok(Some(Target::Path(String::from("Users:/ada/report"))))
+    );
+}
+
+#[test]
+fn an_application_with_no_route_at_all_takes_nothing() {
+    // No window and no icon-bar presence is no live instance to hand
+    // anything to: the session is told so and starts a fresh process
+    // instead of stranding a target.
+    let loopback = Loopback::with_regions(&[]);
+    let mut sink = QueueSink::default();
+    assert_eq!(
+        loopback.borrow_mut().server.hand_over_open_target(
+            &mut sink,
+            app_a(),
+            path_entry("Users:/ada/report")
+        ),
+        Err(Errno::NotFound)
+    );
+    assert!(sink.delivered.is_empty());
 }
 
 #[test]
 fn a_refused_wake_takes_the_target_back_off_the_queue() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     // Nothing was announced, so nothing may be left queued: a target the
     // owner was never woken for would sit unreachable, and the caller must
@@ -2808,13 +3007,13 @@ fn a_refused_wake_takes_the_target_back_off_the_queue() {
     assert_eq!(
         loopback.borrow_mut().server.hand_over_open_target(
             &mut FullSink,
-            window,
-            "Users:/ada/report"
+            app_a(),
+            path_entry("Users:/ada/report")
         ),
         Err(Errno::WouldBlock)
     );
     assert_eq!(
-        client.take_open_target(window),
+        client.take_open_target(),
         Ok(None),
         "a refused hand-over strands no target"
     );
@@ -2825,44 +3024,47 @@ fn queued_targets_are_pulled_oldest_first() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     for path in ["Users:/one", "Users:/two", "Users:/three"] {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, window, path)
+            .hand_over_open_target(&mut sink, app_a(), path_entry(path))
             .expect("room");
     }
     for path in ["Users:/one", "Users:/two", "Users:/three"] {
         assert_eq!(
-            client.take_open_target(window),
-            Ok(Some(String::from(path))),
+            client.take_open_target(),
+            Ok(Some(Target::Path(String::from(path)))),
             "the ordering is the protocol"
         );
     }
-    assert_eq!(client.take_open_target(window), Ok(None));
+    assert_eq!(client.take_open_target(), Ok(None));
 }
 
 #[test]
-fn a_pull_from_a_non_owner_is_refused_like_a_window_that_never_existed() {
+fn a_pull_reaches_only_the_callers_own_queue() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, window, "Users:/ada/secret")
+        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/secret"))
         .expect("room");
 
+    // Another client's pull answers like a drained queue: the identity the
+    // kernel attests is the scope, so the reply says nothing about who else
+    // has something waiting.
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.take_open_target(window), Err(Errno::NotFound));
+    assert_eq!(client.take_open_target(), Ok(None));
     loopback.borrow_mut().ticket = TICKET_A;
 
-    // And the refusal took nothing: the owner still finds its target.
+    // And that pull took nothing: the owner still finds its target.
     assert_eq!(
-        client.take_open_target(window),
-        Ok(Some(String::from("Users:/ada/secret")))
+        client.take_open_target(),
+        Ok(Some(Target::Path(String::from("Users:/ada/secret"))))
     );
 }
 
@@ -2871,36 +3073,39 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     for index in 0..WINDOW_MAX_OPEN_TARGETS {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, window, &alloc::format!("Users:/{index}"))
+            .hand_over_open_target(
+                &mut sink,
+                app_a(),
+                path_entry(&alloc::format!("Users:/{index}")),
+            )
             .expect("within the bound");
     }
     assert_eq!(
         loopback.borrow_mut().server.hand_over_open_target(
             &mut sink,
-            window,
-            "Users:/one-too-many"
+            app_a(),
+            path_entry("Users:/one-too-many")
         ),
         Err(Errno::NoSpace),
         "the newest is refused rather than an older one dropped silently"
     );
     // The oldest is still first: a refusal at the far end disturbs nothing.
     assert_eq!(
-        client.take_open_target(window),
-        Ok(Some(String::from("Users:/0")))
+        client.take_open_target(),
+        Ok(Some(Target::Path(String::from("Users:/0"))))
     );
 
-    // An empty or over-long path is refused too, and no unknown window
-    // accepts one.
+    // An empty or over-long path is refused too.
     assert_eq!(
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, window, ""),
+            .hand_over_open_target(&mut sink, app_a(), path_entry("")),
         Err(Errno::LengthOutOfRange)
     );
     let long = "p".repeat(tairix_abi::FS_PATH_MAX + 1);
@@ -2908,40 +3113,159 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, window, &long),
+            .hand_over_open_target(&mut sink, app_a(), path_entry(&long)),
         Err(Errno::LengthOutOfRange)
-    );
-    assert_eq!(
-        loopback
-            .borrow_mut()
-            .server
-            .hand_over_open_target(&mut sink, 9_999, "Users:/nowhere"),
-        Err(Errno::NotFound)
     );
 }
 
 #[test]
-fn a_windows_queued_targets_die_with_the_window() {
+fn an_applications_queued_targets_die_with_the_client() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("the bar declaration is accepted");
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, window, "Users:/ada/report")
+        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/report"))
         .expect("room");
 
+    // Closing the window leaves the queue alone: the application is still
+    // there, still on the icon bar it declared, and the target is still its
+    // to take.
     client.close(window).expect("the owner closes it");
     assert_eq!(
-        loopback
-            .borrow_mut()
-            .server
-            .hand_over_open_target(&mut sink, window, "Users:/ada/report"),
-        Err(Errno::NotFound),
-        "a target queued for a window that closed is reachable by nothing"
+        client.take_open_target(),
+        Ok(Some(Target::Path(String::from("Users:/ada/report")))),
+        "a target outlives the window that happened to be open"
     );
-    assert_eq!(client.take_open_target(window), Err(Errno::NotFound));
+
+    // The client going is what drops it: a target queued for a process that
+    // has gone is reachable by nothing, and its delegation dies with it.
+    loopback
+        .borrow_mut()
+        .server
+        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/report"))
+        .expect("room");
+    let mut host = RecordingHost::default();
+    loopback
+        .borrow_mut()
+        .server
+        .client_exited(&mut host, app_a());
+    assert_eq!(
+        loopback.borrow_mut().server.hand_over_open_target(
+            &mut sink,
+            app_a(),
+            path_entry("Users:/ada/report")
+        ),
+        Err(Errno::NotFound),
+        "a client with no windows and no bar has no route left"
+    );
+    assert_eq!(
+        client.take_open_target(),
+        Ok(None),
+        "and the queue went with it"
+    );
+}
+
+#[test]
+fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    // The host answers "nothing to reach" by default, which is the caller's
+    // cue to launch the bundle itself rather than a refusal.
+    assert_eq!(
+        client.hand_over_launch("/System/Applications/view.app/Run", None),
+        Ok(HandOverOutcome::NotRunning)
+    );
+    let document = HandOverDocument {
+        name: DocumentName::new("holiday.png").expect("a valid name"),
+        grant: 31,
+    };
+    // A host that reaches an instance queues through the desk the engine
+    // lends it, so the instance needs a route for the wake to reach.
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("the bar declaration is accepted");
+    loopback.borrow_mut().host.hand_over = Ok(HandOverOutcome::Reached);
+    assert_eq!(
+        client.hand_over_launch("/System/Applications/view.app/Run", Some(document)),
+        Ok(HandOverOutcome::Reached)
+    );
+    assert_eq!(
+        client.take_open_target(),
+        Ok(Some(Target::Document {
+            name: String::from("holiday.png"),
+            grant: 31,
+        })),
+        "the engine's half of the hand-over really queued it"
+    );
+
+    // An instance the desk cannot reach is answered `NotRunning`, whatever
+    // the host believed: a launch that reached nothing must fall back to
+    // starting a process rather than being reported as delivered.
+    let mut host = RecordingHost {
+        hand_over: Ok(HandOverOutcome::Reached),
+        ..RecordingHost::default()
+    };
+    let mut server = WindowServer::new(MockMapper::with_regions(&[]), SERVER, CLIENT_FRAME_MAX);
+    let mut reply = [0u8; WINDOW_REPLY_MAX];
+    let frame = request_frame(&WindowRequest::HandOverLaunch {
+        run_path: tairix_abi::window_ipc::BundleRunPath::new("/System/Applications/view.app/Run")
+            .expect("a valid bundle path"),
+        document: None,
+    });
+    let len = server.serve(
+        &mut host,
+        &mut QueueSink::default(),
+        &mut MockIdentity,
+        TICKET_A,
+        &frame,
+        &mut reply,
+    );
+    assert_eq!(
+        tairix_abi::window_ipc::decode_hand_over_reply(&reply[..len]),
+        Ok(HandOverOutcome::NotRunning),
+        "an unreachable instance is not a reached one"
+    );
+    assert_eq!(
+        loopback.borrow().host.hand_overs,
+        alloc::vec![
+            (
+                proc_id(0xA1),
+                String::from("/System/Applications/view.app/Run"),
+                None
+            ),
+            (
+                proc_id(0xA1),
+                String::from("/System/Applications/view.app/Run"),
+                Some(document)
+            ),
+        ],
+        "the host sees who asked, from the kernel and not from the wire"
+    );
+
+    // A refusal is relayed as itself, and a path longer than a hand-over may
+    // name never reaches the channel at all.
+    loopback.borrow_mut().host.hand_over = Err(Errno::NoSpace);
+    assert_eq!(
+        client.hand_over_launch("/System/Applications/view.app/Run", None),
+        Err(Errno::NoSpace)
+    );
+    let long = "p".repeat(HAND_OVER_RUN_PATH_MAX + 1);
+    assert_eq!(
+        client.hand_over_launch(&long, None),
+        Err(Errno::LengthOutOfRange)
+    );
+    assert_eq!(
+        loopback.borrow().host.hand_overs.len(),
+        3,
+        "an over-long path is refused before the session is asked"
+    );
 }
 
 #[test]

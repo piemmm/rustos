@@ -719,18 +719,21 @@ impl OpenFile {
         }
     }
 
-    /// The path this descriptor can hand on as a delegation, and [`None`]
-    /// when its authority is not one a delegation expresses.
+    /// The path this descriptor can hand on as a **fresh** delegation
+    /// captured under its holder's own authority, and [`None`] when it
+    /// cannot be captured that way.
     ///
     /// Only a plain filesystem file the holder opened itself qualifies. A
-    /// delegation does not re-delegate, because a chain would obscure whose
-    /// captured authority is exercised; a pipe, pty, or resource carries an
-    /// authority model of its own; and a directory's authority is a listing
-    /// and a namespace to open through, not a byte range.
+    /// pipe, pty, or resource carries an authority model of its own, and a
+    /// directory's authority is a listing and a namespace to open through,
+    /// rather than a byte range. A delegation declines too, but only because
+    /// re-capturing one under its *holder* would exercise it as the holder
+    /// rather than as the grantor; passing it on unchanged is legitimate and
+    /// is [`handed_on`](Self::handed_on)'s business.
     ///
     /// This is the one definition of that question, shared by `fd_grant`'s
     /// one-shot hand-off and the spawn conferral, so the two can never
-    /// disagree about what may be delegated.
+    /// disagree about what may be captured.
     #[must_use]
     pub fn delegatable_path(&self) -> Option<&str> {
         match &self.backing {
@@ -741,6 +744,33 @@ impl OpenFile {
             | OpenBacking::Delegated(_)
             | OpenBacking::PtyMaster(_)
             | OpenBacking::PtySlave(_) => None,
+        }
+    }
+
+    /// The delegation this descriptor may be handed on as — a plain file
+    /// captured under the holder's own `uid`/`caps`, or a delegation the
+    /// holder was itself given, passed on unchanged.
+    ///
+    /// Passing one on keeps the **first** grantor's captured authority, so a
+    /// relay can never widen what it was handed and no chain forms for a
+    /// later reader to have to follow: the minted record is the one the
+    /// relayer held. That is what lets the desktop hand an application's
+    /// chosen document to a live instance of another application without the
+    /// document ever being opened under the desktop's own, larger authority.
+    ///
+    /// `None` for everything [`delegatable_path`](Self::delegatable_path)
+    /// declines for an authority-model reason of its own: a pipe, a pty, a
+    /// resource, or a directory.
+    #[must_use]
+    pub fn handed_on(&self, uid: u32, caps: CapabilitySet) -> Option<DelegatedFile> {
+        match &self.backing {
+            OpenBacking::Delegated(file) => Some(file.clone()),
+            _ => self.delegatable_path().map(|path| DelegatedFile {
+                path: String::from(path),
+                uid,
+                caps,
+                write_ceiling: None,
+            }),
         }
     }
 

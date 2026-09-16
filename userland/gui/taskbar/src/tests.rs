@@ -5416,10 +5416,10 @@ fn open_popup_renders_panel_rows_and_search() {
         theme.palette().on_surface,
         ground,
     ));
-    // …and the search row is a plate raised on it: a step more solid, so it
-    // reads as a field rather than dissolving into the panel, while the
-    // backdrop still shows through.
-    let field = floating_plate(&theme, theme.palette().surface_raised);
+    // …and the search row is a page raised on it: the ground a field is
+    // written on, a step more solid so it reads as a field rather than
+    // dissolving into the panel, while the backdrop still shows through.
+    let field = floating_plate(&theme, theme.palette().document);
     assert!(region_has_pixel(
         &surface,
         layout.panel,

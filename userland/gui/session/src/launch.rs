@@ -31,21 +31,22 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{load_failure_reason, WaitStatus};
+use tairix_abi::{load_failure_reason, Errno, ProcId, WaitStatus};
 
 use crate::apps::BUNDLE_RUN_SUFFIX;
 
 /// How the desktop asks a live instance to open, once a launch has resolved
 /// to reuse it rather than start a second process.
 ///
-/// Attempted in this order, because each step is the honest answer for one
-/// less capable instance than the last: the target is the specific thing the
-/// user asked for, the icon-bar default is what the application itself says a
-/// bare launch means, and raising its most recent window is all a desktop can
-/// do for an application that says nothing.
+/// A launch that names something reaches the instance one way only — the
+/// target itself — because the other two routes would deliver a window
+/// without the thing the user asked to see in it. The icon-bar default and
+/// the raise are what a *bare* launch resolves to: the first is what the
+/// application itself says a bare launch means, and the second is all a
+/// desktop can do for an application that says nothing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Handover {
-    /// Queue the launch's named path for the instance and wake it.
+    /// Queue the launch's named target for the instance and wake it.
     OpenTarget,
     /// Ask the instance for its icon-bar default action — a new window.
     Default,
@@ -54,15 +55,40 @@ pub enum Handover {
     Raise,
 }
 
+/// What a launch names for the application to open, if anything.
+///
+/// Two forms, because the authority differs. A **path** is a name the
+/// application resolves under its own authority. A **document** is a file
+/// already opened by whoever asked for the launch, handed on as a one-shot
+/// delegation — the only form an application that requests no filesystem
+/// capability can act on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LaunchTarget<'a> {
+    /// A path the application opens itself.
+    Path(&'a str),
+    /// A document already opened for it: what to call it, and the authority
+    /// to read it.
+    Document {
+        /// Its own file name, for a title. Empty when unknown.
+        name: &'a str,
+        /// The grant the *asking* process minted to the session, which the
+        /// relay redeems and hands on to the instance.
+        grant: u64,
+    },
+}
+
 /// What a launch of a bundle resolved to.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Launch {
     /// Start a fresh process from the bundle's `Run` binary.
     Spawn,
-    /// The live instance `pid` took the request through `by`.
+    /// The live instance `app` took the request through `by`.
     Reused {
-        /// The instance that took it.
-        pid: u64,
+        /// The instance that took it, by its kernel-attested identity — the
+        /// one every route actually addresses. A task id is redrawn once its
+        /// task is gone, so it could name a later holder by the time a route
+        /// is taken.
+        app: ProcId,
         /// How it was reached.
         by: Handover,
     },
@@ -76,60 +102,98 @@ pub enum Launch {
 /// when something actually took it, and falls back to spawning when nothing
 /// did. Every one of them is a message to a live process; none waits on it.
 pub trait LaunchHost {
-    /// Queue `path` for the live instance `pid` to open and wake it.
-    fn queue_open_target(&mut self, pid: u64, path: &str) -> bool;
+    /// Queue `target` for the live instance `app` to open and wake it.
+    ///
+    /// For a [`LaunchTarget::Document`] this is also where the relay
+    /// happens: the grant the asking process minted to the session is
+    /// redeemed and handed on to `app`, so a `false` answer must leave
+    /// nothing delegated.
+    fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool;
 
-    /// Ask the live instance `pid` for its icon-bar default action.
+    /// Ask the live instance `app` for its icon-bar default action.
     /// `false` when it declared no icon-bar presence to ask.
-    fn ask_default(&mut self, pid: u64) -> bool;
+    fn ask_default(&mut self, app: ProcId) -> bool;
 
-    /// Raise the live instance `pid`'s most recent window. `false` when it
+    /// Raise the live instance `app`'s most recent window. `false` when it
     /// owns none.
-    fn raise_recent_window(&mut self, pid: u64) -> bool;
+    fn raise_recent_window(&mut self, app: ProcId) -> bool;
+}
+
+/// The session's one-shot document relay: how a hand-over's authority
+/// crosses from the asking application to the instance that will show it.
+///
+/// A seam because it is three syscalls under a decision that is host-tested.
+/// Nothing here opens a path — the grant is one the *asking* process minted
+/// from a descriptor it opened itself — so the session lends none of its own,
+/// larger filesystem reach.
+pub trait DocumentRelay {
+    /// Redeem `grant`, minted to this process, and hand the same authority
+    /// on to `app` as a fresh one-shot read-only delegation, answering the
+    /// handle `app` redeems. The session's own descriptor is closed either
+    /// way.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the kernel refused. Nothing is delegated on a refusal, so a
+    /// caller reads it as "the instance did not get it".
+    fn relay(&mut self, grant: u64, app: ProcId) -> Result<u64, Errno>;
+}
+
+/// The bundle *directory* an entry-point `Run` path names.
+///
+/// The launch table records the `Run` path (the child's attested bundle
+/// identity) and the manifest lives beside it, so this is the one conversion
+/// between them.
+#[must_use]
+pub fn bundle_of_run_path(run_path: &str) -> &str {
+    run_path.strip_suffix(BUNDLE_RUN_SUFFIX).unwrap_or(run_path)
 }
 
 /// Resolve a launch of the bundle whose entry binary is `run_path`.
 ///
-/// `running` is the live instance the [`LaunchTable`] holds for that path, and
-/// `one_instance` what the bundle's signed manifest attests. `target` is the
-/// document or folder the launch named, if any.
+/// `running` is the live instance's attested identity — the desktop's own
+/// funnel resolves it from the [`LaunchTable`], a hand-over from the
+/// resident icon-bar slot — and `one_instance` what the bundle's signed
+/// manifest attests. `target` is the document or folder the launch named, if
+/// any.
 ///
 /// Singleton is the default, so this is what a user means by clicking a
 /// program they already have open: the running instance is asked to open,
 /// rather than a second process starting. A bundle that declares itself
 /// multi-instance, or has no live instance, spawns.
 ///
-/// **Fails closed to the old behaviour.** An instance that cannot be reached
-/// at all — no window, no icon-bar presence, a mailbox that has gone — is
-/// spawned instead, so a launch never silently does nothing.
+/// **A launch that names a target is all-or-nothing.** Either the instance
+/// took the target or the launch spawns — a fresh process is given the same
+/// target, so it still shows what the user asked for, whereas asking the
+/// instance for a bare window instead would raise an empty one and lose the
+/// target entirely. The icon-bar default and the raise therefore apply only
+/// to a launch that names nothing.
+///
+/// **Fails closed to spawning.** An instance that cannot be reached at all —
+/// no window, no icon-bar presence, a mailbox that has gone — is spawned
+/// instead, so a launch never silently does nothing.
 pub fn resolve_launch<H: LaunchHost>(
     host: &mut H,
-    running: Option<u64>,
+    running: Option<ProcId>,
     one_instance: bool,
-    target: Option<&str>,
+    target: Option<LaunchTarget<'_>>,
 ) -> Launch {
-    let Some(pid) = running.filter(|_| one_instance) else {
+    let Some(app) = running.filter(|_| one_instance) else {
         return Launch::Spawn;
     };
-    if let Some(path) = target {
-        if host.queue_open_target(pid, path) {
-            return Launch::Reused {
-                pid,
-                by: Handover::OpenTarget,
-            };
-        }
-    }
-    if host.ask_default(pid) {
-        return Launch::Reused {
-            pid,
-            by: Handover::Default,
+    let reused = |by| Launch::Reused { app, by };
+    if let Some(target) = target {
+        return if host.queue_open_target(app, target) {
+            reused(Handover::OpenTarget)
+        } else {
+            Launch::Spawn
         };
     }
-    if host.raise_recent_window(pid) {
-        return Launch::Reused {
-            pid,
-            by: Handover::Raise,
-        };
+    if host.ask_default(app) {
+        return reused(Handover::Default);
+    }
+    if host.raise_recent_window(app) {
+        return reused(Handover::Raise);
     }
     Launch::Spawn
 }
@@ -327,21 +391,24 @@ pub fn reap_launched<R, P, T>(
 mod tests {
     use super::{
         admitted_pid, launch_argv, launch_failure_report, reap_launched, resolve_launch, Handover,
-        Launch, LaunchHost, LaunchTable, UNKNOWN_LABEL,
+        Launch, LaunchHost, LaunchTable, LaunchTarget, UNKNOWN_LABEL,
     };
     use alloc::string::String;
     use alloc::vec::Vec;
     use tairix_abi::{
-        Signal, WaitStatus, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
+        ProcId, Signal, WaitStatus, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
     };
+
+    /// The live instance the launch tests reach.
+    const APP: ProcId = ProcId::from_raw([0x2A; tairix_abi::PROC_ID_LEN]);
 
     /// A host recording every hand-over attempt, each of which may be
     /// configured to refuse — which is what an unreachable instance is.
     #[derive(Default)]
     struct FakeHost {
-        queued: Vec<(u64, String)>,
-        defaults: Vec<u64>,
-        raises: Vec<u64>,
+        queued: Vec<(ProcId, String)>,
+        defaults: Vec<ProcId>,
+        raises: Vec<ProcId>,
         takes_target: bool,
         takes_default: bool,
         has_window: bool,
@@ -360,18 +427,22 @@ mod tests {
     }
 
     impl LaunchHost for FakeHost {
-        fn queue_open_target(&mut self, pid: u64, path: &str) -> bool {
-            self.queued.push((pid, String::from(path)));
+        fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
+            let named = match target {
+                LaunchTarget::Path(path) => String::from(path),
+                LaunchTarget::Document { name, grant } => alloc::format!("{name}#{grant}"),
+            };
+            self.queued.push((app, named));
             self.takes_target
         }
 
-        fn ask_default(&mut self, pid: u64) -> bool {
-            self.defaults.push(pid);
+        fn ask_default(&mut self, app: ProcId) -> bool {
+            self.defaults.push(app);
             self.takes_default
         }
 
-        fn raise_recent_window(&mut self, pid: u64) -> bool {
-            self.raises.push(pid);
+        fn raise_recent_window(&mut self, app: ProcId) -> bool {
+            self.raises.push(app);
             self.has_window
         }
     }
@@ -380,14 +451,14 @@ mod tests {
     fn a_singleton_relaunch_reaches_the_running_instance_rather_than_spawning() {
         let mut host = FakeHost::reachable();
         assert_eq!(
-            resolve_launch(&mut host, Some(42), true, None),
+            resolve_launch(&mut host, Some(APP), true, None),
             Launch::Reused {
-                pid: 42,
+                app: APP,
                 by: Handover::Default
             },
             "an argument-less relaunch asks the instance for a new window"
         );
-        assert_eq!(host.defaults, [42]);
+        assert_eq!(host.defaults, [APP]);
         assert!(host.queued.is_empty(), "no document was named");
         assert!(
             host.raises.is_empty(),
@@ -399,17 +470,38 @@ mod tests {
     fn a_document_relaunch_queues_the_target_rather_than_asking_for_a_window() {
         let mut host = FakeHost::reachable();
         assert_eq!(
-            resolve_launch(&mut host, Some(42), true, Some("Users:/ada/report")),
+            resolve_launch(&mut host, Some(APP), true, Some(path("Users:/ada/report"))),
             Launch::Reused {
-                pid: 42,
+                app: APP,
                 by: Handover::OpenTarget
             }
         );
-        assert_eq!(host.queued, [(42, String::from("Users:/ada/report"))]);
+        assert_eq!(host.queued, [(APP, String::from("Users:/ada/report"))]);
         assert!(
             host.defaults.is_empty(),
             "the target is the specific thing asked for; a new window is not"
         );
+    }
+
+    #[test]
+    fn a_document_relaunch_hands_the_delegation_to_the_running_instance() {
+        let mut host = FakeHost::reachable();
+        assert_eq!(
+            resolve_launch(
+                &mut host,
+                Some(APP),
+                true,
+                Some(LaunchTarget::Document {
+                    name: "holiday.png",
+                    grant: 9,
+                })
+            ),
+            Launch::Reused {
+                app: APP,
+                by: Handover::OpenTarget
+            }
+        );
+        assert_eq!(host.queued, [(APP, String::from("holiday.png#9"))]);
     }
 
     #[test]
@@ -419,25 +511,25 @@ mod tests {
             ..FakeHost::default()
         };
         assert_eq!(
-            resolve_launch(&mut host, Some(7), true, None),
+            resolve_launch(&mut host, Some(APP), true, None),
             Launch::Reused {
-                pid: 7,
+                app: APP,
                 by: Handover::Raise
             }
         );
-        assert_eq!(host.defaults, [7], "the default is tried first");
-        assert_eq!(host.raises, [7]);
+        assert_eq!(host.defaults, [APP], "the default is tried first");
+        assert_eq!(host.raises, [APP]);
     }
 
     #[test]
     fn a_multi_instance_bundle_spawns_again_however_many_are_running() {
         let mut host = FakeHost::reachable();
         assert_eq!(
-            resolve_launch(&mut host, Some(42), false, None),
+            resolve_launch(&mut host, Some(APP), false, None),
             Launch::Spawn
         );
         assert_eq!(
-            resolve_launch(&mut host, Some(42), false, Some("Users:/ada/report")),
+            resolve_launch(&mut host, Some(APP), false, Some(path("Users:/ada/report"))),
             Launch::Spawn
         );
         assert!(
@@ -451,7 +543,7 @@ mod tests {
         let mut host = FakeHost::reachable();
         assert_eq!(resolve_launch(&mut host, None, true, None), Launch::Spawn);
         assert_eq!(
-            resolve_launch(&mut host, None, true, Some("Users:/ada/report")),
+            resolve_launch(&mut host, None, true, Some(path("Users:/ada/report"))),
             Launch::Spawn
         );
         assert!(
@@ -462,34 +554,43 @@ mod tests {
 
     #[test]
     fn an_unreachable_instance_spawns_rather_than_silently_doing_nothing() {
-        // No window, no icon-bar presence, and a queue that will not take a
-        // target: every route refused, so the launch falls back to what it
-        // did before the channel existed.
+        // No window, no icon-bar presence, and nothing takes a target:
+        // every route refused, so the launch falls back to starting a
+        // process, which is what still puts something on screen.
         let mut host = FakeHost::default();
         assert_eq!(
-            resolve_launch(&mut host, Some(42), true, Some("Users:/ada/report")),
+            resolve_launch(&mut host, Some(APP), true, None),
             Launch::Spawn
         );
-        assert_eq!(host.queued.len(), 1, "each route is tried once");
-        assert_eq!(host.defaults, [42]);
-        assert_eq!(host.raises, [42]);
+        assert_eq!(host.defaults, [APP]);
+        assert_eq!(host.raises, [APP], "each route is tried once");
     }
 
     #[test]
-    fn a_document_launch_falls_back_through_the_same_ladder() {
-        // The queue refused but the instance is otherwise live: the user's
-        // launch still reaches it, as a new window rather than as nothing.
+    fn a_target_the_instance_will_not_take_spawns_rather_than_losing_it() {
+        // The instance is otherwise live — it would take a bare launch — but
+        // a bare window is not what was asked for: raising one would show
+        // the user an empty window and drop the document on the floor. A
+        // fresh process is given the same target, so it still appears.
         let mut host = FakeHost {
             takes_default: true,
+            has_window: true,
             ..FakeHost::default()
         };
         assert_eq!(
-            resolve_launch(&mut host, Some(42), true, Some("Users:/ada/report")),
-            Launch::Reused {
-                pid: 42,
-                by: Handover::Default
-            }
+            resolve_launch(&mut host, Some(APP), true, Some(path("Users:/ada/report"))),
+            Launch::Spawn
         );
+        assert_eq!(host.queued.len(), 1, "the one route a target has");
+        assert!(
+            host.defaults.is_empty() && host.raises.is_empty(),
+            "a named target never degrades into a bare window"
+        );
+    }
+
+    /// A path target, spelled once for the tests that name one.
+    fn path(at: &str) -> LaunchTarget<'_> {
+        LaunchTarget::Path(at)
     }
 
     #[test]

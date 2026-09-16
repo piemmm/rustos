@@ -8,10 +8,11 @@ view — graphical picture and document viewer
 
 ## DESCRIPTION
 
-Opens a desktop window showing a picture or a document. Launched with a
-document — from the file manager, or by opening a picture — it shows that
-file; launched on its own it asks the desktop session's trusted file picker
-to choose one.
+Shows pictures and documents in desktop windows. Launched with a document —
+from the file manager, or by opening a picture — it opens a window on that
+file. Launched on its own it opens no window at all and simply takes its
+place on the icon bar: click its icon to open a window and choose a file
+through the desktop session's trusted file picker.
 
 The viewer holds no filesystem capability: it cannot open, list, or read
 anything on its own. The session browses on the viewer's behalf under its
@@ -26,8 +27,10 @@ Sprite. A file the decoder refuses states its reason in the window and on the
 standard error stream; the window is never left blank and no image is ever
 fabricated.
 
-Several documents at once are separate viewers, so comparing two pictures
-side by side is opening the second one; closing a window ends its viewer.
+Several documents at once are separate windows of the one viewer, so
+comparing two pictures side by side is opening the second. Closing a window
+leaves the viewer on the icon bar, ready for the next document; the Quit row
+of its icon menu ends it.
 
 The toolbar across the top carries, in order: zoom out, zoom in, fit in
 window, actual size, previous entry, next entry, rotate left, rotate right,

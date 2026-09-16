@@ -39,6 +39,8 @@ fn dark_and_light_palettes_differ_on_every_role() {
     assert_ne!(d.desktop, l.desktop);
     assert_ne!(d.surface, l.surface);
     assert_ne!(d.surface_raised, l.surface_raised);
+    assert_ne!(d.document, l.document);
+    assert_ne!(d.title_band, l.title_band);
     assert_ne!(d.on_surface, l.on_surface);
     assert_ne!(d.on_surface_muted, l.on_surface_muted);
     assert_ne!(d.accent, l.accent);
@@ -621,9 +623,156 @@ fn builtin_surfaces_are_opaque_and_distinct() {
         let p = theme.palette();
         assert!(p.desktop.is_opaque());
         assert!(p.surface.is_opaque());
+        assert!(p.document.is_opaque());
+        assert!(p.title_band.is_opaque());
         // The raised surface (taskbar/menus) must read as distinct from
         // the base surface in both themes.
         assert_ne!(p.surface, p.surface_raised);
+        // A page and a title band are each their own ground; either
+        // collapsing onto the window's would put the role back where it was.
+        assert_ne!(p.surface, p.document);
+        assert_ne!(p.surface, p.title_band);
+        assert_ne!(p.document, p.title_band);
+    }
+}
+
+#[test]
+fn the_light_window_ground_is_a_neutral_grey_with_a_deeper_title_band() {
+    // The authored ladder, at the two rungs the user asked for by name: a
+    // window's ground at 15% and the band its furniture sits in at 25%. Held
+    // to the value rather than to a relation, because "the light theme is too
+    // bright" is a report about *these* two levels — a relative check would
+    // pass on a ladder that had drifted back towards white together.
+    let p = *Theme::light().palette();
+    assert_eq!(p.surface, Rgba::rgb(0xd9, 0xd9, 0xd9));
+    assert_eq!(p.title_band, Rgba::rgb(0xbf, 0xbf, 0xbf));
+    assert_eq!(luma(p.surface), 217, "the window ground is a 15% grey");
+    assert_eq!(luma(p.title_band), 191, "the title band is a 25% grey");
+}
+
+/// Every light-theme neutral, so a role retuned with a cast cannot slip in.
+const LIGHT_NEUTRALS: [&str; 12] = [
+    "desktop",
+    "surface",
+    "surface_raised",
+    "document",
+    "title_band",
+    "surface_hover",
+    "surface_pressed",
+    "surface_selected",
+    "rim",
+    "border",
+    "scroll_track",
+    "scroll_thumb",
+];
+
+#[test]
+fn the_light_neutrals_are_neutral_and_descend_in_one_ladder() {
+    // A warm cast on the greys is what made every app read as an off-white
+    // sheet, and it is what the retune removed: a light-theme neutral is
+    // r == g == b, so the only colour on the desktop is a signal hue.
+    let p = *Theme::light().palette();
+    for (name, role) in LIGHT_NEUTRALS.into_iter().zip([
+        p.desktop,
+        p.surface,
+        p.surface_raised,
+        p.document,
+        p.title_band,
+        p.surface_hover,
+        p.surface_pressed,
+        p.surface_selected,
+        p.rim,
+        p.border,
+        p.scroll_track,
+        p.scroll_thumb,
+    ]) {
+        assert_eq!(role.r, role.g, "light {name} carries a colour cast");
+        assert_eq!(role.g, role.b, "light {name} carries a colour cast");
+    }
+    // The one place the ladder changes direction: raised chrome catches the
+    // light *above* the window ground, and every interaction rung deepens
+    // away from it. A raised plate that fell below the ground would leave a
+    // menu reading as a hole rather than as a card.
+    assert!(luma(p.document) > luma(p.surface_raised));
+    assert!(luma(p.surface_raised) > luma(p.surface));
+    assert!(luma(p.surface) > luma(p.title_band));
+    assert!(luma(p.title_band) > luma(p.desktop));
+}
+
+#[test]
+fn a_document_is_paper_on_light_and_the_deepest_layer_on_dark() {
+    // The ground an editor, a terminal page, or an editable field is drawn
+    // on. It is not the window's ground: a page the user writes on is the
+    // thing being looked at, so it goes the *other* way from the chrome
+    // around it — white on light, below every surface on dark.
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        assert!(
+            luma(p.on_surface).abs_diff(luma(p.document)) >= 96,
+            "{}: body text on a page has too little contrast",
+            theme.name()
+        );
+        match theme.appearance() {
+            Appearance::Dark => assert!(
+                luma(p.document) < luma(p.surface),
+                "{}: a dark page is the deepest layer",
+                theme.name()
+            ),
+            Appearance::Light => assert!(
+                luma(p.document) > luma(p.surface),
+                "{}: a light page is paper",
+                theme.name()
+            ),
+        }
+    }
+    assert_eq!(
+        Theme::light().palette().document,
+        Rgba::rgb(0xff, 0xff, 0xff)
+    );
+}
+
+#[test]
+fn a_title_band_separates_from_the_window_ground_and_the_plate_it_caps() {
+    // A window's furniture bar and a menu plate's heading band are one
+    // control, so one role grounds both. It has to be tellable from the
+    // window ground it borders — otherwise the furniture reads as more page —
+    // and from the plate it caps, or a titled menu reads as a column of rows
+    // with an odd centred one on top.
+    const MIN_STEP: u32 = 12;
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        assert!(
+            luma(p.title_band).abs_diff(luma(p.surface)) >= MIN_STEP,
+            "{}: the title band is not tellable from the window ground",
+            theme.name()
+        );
+        assert!(
+            luma(p.title_band).abs_diff(luma(p.surface_raised)) >= MIN_STEP,
+            "{}: the title band is not tellable from the plate it caps",
+            theme.name()
+        );
+        assert!(
+            luma(p.on_surface).abs_diff(luma(p.title_band)) >= 96,
+            "{}: an active title has too little contrast on its band",
+            theme.name()
+        );
+        assert!(
+            luma(p.on_surface_muted).abs_diff(luma(p.title_band)) >= 48,
+            "{}: an inactive title has too little contrast on its band",
+            theme.name()
+        );
+        match theme.appearance() {
+            Appearance::Dark => assert!(
+                luma(p.title_band) > luma(p.surface),
+                "{}: a dark band lifts off the window ground",
+                theme.name()
+            ),
+            Appearance::Light => assert!(
+                luma(p.title_band) < luma(p.surface),
+                "{}: a light band deepens into the window ground",
+                theme.name()
+            ),
+        }
     }
 }
 
@@ -975,6 +1124,8 @@ fn sample_theme(id: ThemeId) -> Theme {
             desktop: Rgba::rgb(0, 0, 0),
             surface: Rgba::rgb(10, 10, 10),
             surface_raised: Rgba::rgb(20, 20, 20),
+            document: Rgba::rgb(4, 4, 4),
+            title_band: Rgba::rgb(36, 36, 36),
             chrome_alpha: 128,
             chrome_plate_alpha: 192,
             on_surface: Rgba::rgb(240, 240, 240),

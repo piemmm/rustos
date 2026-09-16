@@ -359,7 +359,7 @@ pub struct Theme {
 
 | Theme value | Examples |
 |---|---|
-| Palette roles | `surface`, `surface_elevated`, `surface_hover`, `surface_pressed`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, the window-frame role, scroll track, and scroll thumb, plus the two opacities floating chrome is drawn at (`chrome_alpha`, `chrome_plate_alpha`). |
+| Palette roles | `surface`, `surface_elevated`, `surface_hover`, `surface_pressed`, `document`, `title_band`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, the window-frame role, scroll track, and scroll thumb, plus the two opacities floating chrome is drawn at (`chrome_alpha`, `chrome_plate_alpha`). |
 | Semantic signal roles | `cpu_pressure`, `memory_pressure`, `disk_pressure`, `network_activity`, `recovery`, `success`, `warning`, `denied`. |
 | Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size, title-bar height, frame inset, window-control extent, resize-grabber extent, scrollbar breadth, minimum thumb length, invisible hit slop, the taskbar's margin off the screen edges it faces, and the blur behind floating chrome. |
 | Typography | Font family token, label size, caption size, numeric size, weight roles, active title weight, and inactive title weight. |
@@ -583,6 +583,28 @@ The icon strip — launchers, pinned shortcuts, running-task buttons, and the
 status capsule — is bar-seated, and so are the window commands in a title bar
 (§11.18). A toolbar inside a window is not: it sits on a panel and keeps its
 plates.
+
+### The ground says what a surface *is*
+
+Two roles are grounds a control takes because of what it is rather than what
+state it is in, and both go through the same `ground_fill` path every other
+background does.
+
+`document` is the ground a document's own content is drawn on: an editor's or
+a terminal's page, an **editable** field's plate. The ground is the affordance,
+so a field the user may type in reads as a page (white on a light appearance)
+while a read-only one recesses onto the window ground to read as a value shown
+rather than entered. Neither substitutes a plate the recipe put a *colour* on —
+a disabled, denied, or failed-closed field is stating something there — which
+is why the recipe answers whether its plate is a plain background rather than
+each family guessing. A hovered field states nothing on that page: the pointer
+over a text surface is the seat's own text cursor, and the rim still lifts.
+
+`title_band` is the ground every title band is drawn on: a window's furniture
+bar, and the band a menu or dialog plate is capped with (§11.18) — one role,
+because a heading band *is* the title bar with no commands in it. A lit window
+command resolves its authored translucency against this rather than the window
+surface, because this is the ground it actually sits on.
 
 ### Surface ground: opaque or floating chrome
 

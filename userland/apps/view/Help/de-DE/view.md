@@ -8,10 +8,12 @@ view — grafischer Bild- und Dokumentbetrachter
 
 ## DESCRIPTION
 
-Öffnet ein Desktop-Fenster, das ein Bild oder ein Dokument anzeigt. Mit
-einem Dokument gestartet — aus der Dateiverwaltung oder durch Öffnen eines
-Bildes — zeigt er diese Datei; allein gestartet bittet er die
-vertrauenswürdige Dateiauswahl der Desktop-Sitzung, eine zu wählen.
+Zeigt Bilder und Dokumente in Desktop-Fenstern. Mit einem Dokument
+gestartet — aus der Dateiverwaltung oder durch Öffnen eines Bildes — öffnet
+er ein Fenster auf diese Datei. Allein gestartet öffnet er überhaupt kein
+Fenster, sondern nimmt nur seinen Platz in der Symbolleiste ein: Klicken Sie
+auf sein Symbol, um ein Fenster zu öffnen und über die vertrauenswürdige
+Dateiauswahl der Desktop-Sitzung eine Datei zu wählen.
 
 Der Betrachter besitzt keine Dateisystem-Berechtigung: Er kann von sich aus
 nichts öffnen, auflisten oder lesen. Die Sitzung navigiert in seinem Auftrag
@@ -27,9 +29,11 @@ RISC OS Sprite. Eine Datei, die der Dekodierer ablehnt, nennt ihren Grund im
 Fenster und auf der Standardfehlerausgabe; das Fenster bleibt niemals leer
 und es wird niemals ein Bild erfunden.
 
-Mehrere Dokumente gleichzeitig sind getrennte Betrachter: Zwei Bilder
-nebeneinander zu vergleichen heißt, das zweite zu öffnen. Das Schließen
-eines Fensters beendet seinen Betrachter.
+Mehrere Dokumente gleichzeitig sind mehrere Fenster des einen Betrachters:
+Zwei Bilder nebeneinander zu vergleichen heißt, das zweite zu öffnen. Das
+Schließen eines Fensters lässt den Betrachter in der Symbolleiste zurück,
+bereit für das nächste Dokument; die Zeile „Beenden“ seines Symbolmenüs
+beendet ihn.
 
 Die Werkzeugleiste oben enthält der Reihe nach: verkleinern, vergrößern, ins
 Fenster einpassen, Originalgröße, vorheriger Eintrag, nächster Eintrag, nach

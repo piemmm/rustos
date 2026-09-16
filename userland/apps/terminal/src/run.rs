@@ -2215,7 +2215,7 @@ mod program {
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Scrolled { .. }
                 | WindowEvent::Minimized { .. }
-                | WindowEvent::OpenRequested { .. }
+                | WindowEvent::OpenRequested
                 | WindowEvent::Resized { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. } => {}
