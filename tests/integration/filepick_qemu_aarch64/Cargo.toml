@@ -19,6 +19,12 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
+# The `abi-v1` syscall table, read for the audited *names* of the two
+# delegation syscalls so the witnesses cannot drift from the dispatcher's own
+# `sc` field. Host-buildable and dependency-free.
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
 [[bin]]
 name = "tairix-test-filepick-qemu-aarch64"
 path = "src/main.rs"

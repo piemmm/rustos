@@ -720,9 +720,13 @@ size of the viewport, in whichever of the two views the browser holds
 life of its window, which is what makes a repaint clipped to the rectangles one
 round reported sound: every pixel outside the clip is the one already on
 screen. The **file manager opens on the icon
-grid** and its toolbar toggle switches to the list; the engine's own default
+grid** (`MANAGER_VIEW_MODE`, with `MANAGER_TOOLBAR_BAND` saying no chrome band
+is drawn) and its toolbar toggle switches to the list; the engine's own default
 and the trusted file picker stay `List`, since a chooser wants names, sizes
-and dates rather than tiles. `tools` is the manager-only
+and dates rather than tiles. Those two are engine constants rather than app
+literals because where an item is *drawn* depends on them, and the QEMU
+vertical that drives a gesture into a manager window reconstructs that
+rectangle host-side from the same two values. `tools` is the manager-only
 `ManagerTool` set drawn after the read-only commands — the file manager passes
 `MANAGER_TOOLS`, the read-only picker an empty slice. The toolbar strip is drawn at the top
 (see the frame model above); the item area sits below it
@@ -1192,6 +1196,27 @@ on a `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed by
 `sc=fd_redeem` from `comm=view`. The planted document is a text file, which a
 picture viewer states it cannot draw — the claim the run makes is which
 principal delegated to which, and a refusal reads it just as a render would.
+
+Its sibling, the `handover-qemu-aarch64` vertical, drives the **three**-principal
+route the file manager uses (`plans/VIEW.md`): with `view` already running and
+holding no window, activating a planted picture in a file-manager window makes
+the *manager* open the file under the user's identity and mint a delegation for
+it *to the session*, the session redeem that delegation and grant the same
+authority on to the live instance, and the viewer redeem what arrives and open
+a window for it. Its PASS is two complete relays of `comm=files sc=fd_grant`,
+`comm=desktop sc=fd_redeem`, `comm=desktop sc=fd_grant`, `comm=view
+sc=fd_redeem` in that order, the viewer's two redeems required to come from the
+same kernel-attested task — so one process took both documents and opened a
+window for each, which is the single-instance funnel doing its job rather than
+a second viewer being started. Each latched step prints its own marker, so a
+failing run names the hop that was missing.
+
+The activation is the item's own context-menu *Open* row, which runs the
+manager's same `activate`: two single presses, each gated on a witness the
+emitting side states for itself, where the drawn plate is the only statement
+anywhere that the press reached an entry — no audit record names a pointer
+action. The *double-click* path to `activate` is host-tested where it is
+decided rather than stated by this run (`plans/OPEN-DEFECTS.md` D132).
 
 Attributing each half to the principal the kernel says made the call is what
 makes the run a statement about a hand-off *between* two processes rather than

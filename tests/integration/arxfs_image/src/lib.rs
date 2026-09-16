@@ -105,6 +105,25 @@ pub const HOME_DOC_NAME: &[u8] = b"Welcome.txt";
 pub const HOME_DOC_CONTENT: &[u8] =
     b"Welcome to TAIRiX.\nThis document was opened through the trusted file picker.\n";
 
+/// A picture planted beside [`HOME_DOC_NAME`] in the fixture account's home,
+/// so a gesture in the **file manager's** window has a document whose type an
+/// installed application claims. `view` declares `image/svg+xml`, so
+/// activating this resolves to that bundle and drives the three-principal
+/// hand-over — the manager mints the delegation, the session relays it, and
+/// the already-running viewer redeems it (`plans/VIEW.md`).
+///
+/// Vector rather than raster because the whole document is then legible here:
+/// a format the viewer draws completely, written out in full, with no encoder
+/// or binary blob between the fixture and what the guest reads.
+pub const HOME_PICTURE_NAME: &[u8] = b"Picture.svg";
+
+/// Contents of [`HOME_PICTURE_NAME`]: one filled square over the whole
+/// viewBox, the shape `lib/sandbox`'s own rasterisation tests use, so the
+/// document the guest decodes is known-good input for the desktop's SVG
+/// subset.
+pub const HOME_PICTURE_CONTENT: &[u8] =
+    br##"<svg viewBox="0 0 10 10"><polygon points="0,0 10,0 10,10 0,10" fill="#3070f0"/></svg>"##;
+
 /// Username of the interactive account planted on the users-root volume
 /// ([`build_users_root_image`]) on top of the canonical default
 /// system/service set.
@@ -329,6 +348,34 @@ fn create_service_overrides_dir(
     .map(drop)
 }
 
+/// Plant the regular file `name` holding `content` in the account's `home`.
+///
+/// Owned by the account and world-unreadable-but-owner-readable (0644 under
+/// the owner-only home), so only a process running as the user reaches it —
+/// exactly as a user's own document is, which is what makes a file reaching a
+/// capability-less viewer proof of a delegation rather than of ambient
+/// access.
+fn plant_home_file(
+    fs: &mut ARXFS<VecBlock>,
+    home: NodeId,
+    name: &[u8],
+    content: &[u8],
+) -> Result<(), DriverError> {
+    let node = fs.create(home, name, NodeKind::RegularFile)?;
+    fs.set_security(
+        node,
+        Security::new(
+            0o644,
+            tairix_users::FIRST_USER_UID,
+            tairix_users::FIRST_USER_GID,
+        ),
+    )?;
+    if fs.write_at(home, name, 0, content)? != content.len() {
+        return Err(DriverError::DeviceFault);
+    }
+    Ok(())
+}
+
 /// Build the users-root volume under an arbitrary `volume_key` — the same
 /// layout as [`build_users_root_image`] but keyed by the caller's key, so
 /// a consumer can exercise the production passphrase-derived-key mount
@@ -430,27 +477,13 @@ pub fn build_users_root_image_with_key(
                     )?;
                 }
             }
-            // A readable document in the account's home so the desktop
-            // session's trusted file picker — which opens at the user's
-            // home — shows a real regular file to choose, exercising the
-            // CU6 one-shot `fd_grant`/`fd_redeem` delegation into the
-            // viewer (`plans/NEW-FILEMANAGER.md` FM9-b). Owned by the
-            // account and world-unreadable-but-owner-readable (0644 under
-            // the owner-only home), so only a process running as the user
-            // reaches it, exactly as a user's own document is.
-            let doc = fs.create(home, HOME_DOC_NAME, NodeKind::RegularFile)?;
-            fs.set_security(
-                doc,
-                Security::new(
-                    0o644,
-                    tairix_users::FIRST_USER_UID,
-                    tairix_users::FIRST_USER_GID,
-                ),
-            )?;
-            let written = fs.write_at(home, HOME_DOC_NAME, 0, HOME_DOC_CONTENT)?;
-            if written != HOME_DOC_CONTENT.len() {
-                return Err(DriverError::DeviceFault);
-            }
+            // Two readable documents in the account's home, so both
+            // user-mediated routes to a file have something real to reach:
+            // the session's trusted picker (which opens at the home) shows a
+            // regular file to choose, and the file manager's own window has a
+            // picture whose type an installed application claims.
+            plant_home_file(&mut fs, home, HOME_DOC_NAME, HOME_DOC_CONTENT)?;
+            plant_home_file(&mut fs, home, HOME_PICTURE_NAME, HOME_PICTURE_CONTENT)?;
         }
         if name == "System" {
             let security = fs.create(node, b"Security", NodeKind::Directory)?;
@@ -591,19 +624,26 @@ mod tests {
         assert_eq!(sec.uid, tairix_users::FIRST_USER_UID);
         assert_eq!(sec.gid, tairix_users::FIRST_USER_GID);
 
-        // The pickable home document exists, is owner-readable, and reads
-        // back its known contents, so the trusted picker (opening at the
-        // user's home) finds a real file to delegate into the viewer.
-        let doc = fs
-            .lookup(home, HOME_DOC_NAME)
-            .expect("/Users/root/Welcome.txt present");
-        let doc_sec = fs.security(doc).expect("document security present");
-        assert_eq!(doc_sec.mode, 0o644);
-        assert_eq!(doc_sec.uid, tairix_users::FIRST_USER_UID);
-        assert_eq!(doc_sec.gid, tairix_users::FIRST_USER_GID);
-        let mut buf = [0u8; 128];
-        let n = fs.read_at(doc, 0, &mut buf).expect("read home document");
-        assert_eq!(&buf[..n], HOME_DOC_CONTENT);
+        // Both planted documents exist, are owner-readable, and read back
+        // their known contents: the text one the trusted picker delegates
+        // into the viewer, and the picture an installed application claims
+        // so the file manager's own activation has somewhere to hand it.
+        for (name, content) in [
+            (HOME_DOC_NAME, HOME_DOC_CONTENT),
+            (HOME_PICTURE_NAME, HOME_PICTURE_CONTENT),
+        ] {
+            let spelling = core::str::from_utf8(name).expect("a planted name is UTF-8");
+            let node = fs
+                .lookup(home, name)
+                .unwrap_or_else(|_| panic!("/Users/root/{spelling} present"));
+            let sec = fs.security(node).expect("document security present");
+            assert_eq!(sec.mode, 0o644, "{spelling}");
+            assert_eq!(sec.uid, tairix_users::FIRST_USER_UID, "{spelling}");
+            assert_eq!(sec.gid, tairix_users::FIRST_USER_GID, "{spelling}");
+            let mut buf = [0u8; 128];
+            let n = fs.read_at(node, 0, &mut buf).expect("read home document");
+            assert_eq!(&buf[..n], content, "{spelling}");
+        }
     }
 
     #[test]

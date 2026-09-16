@@ -369,12 +369,23 @@ Done (code + host coverage). What now holds:
   window-protocol round-trip/fail-closed tests (decoders remain in
   `fuzz_decode`), the `lib/window` loopback pick suite, the `lib/browse`
   hit-test tests, the session picker suite, and the viewer engine tests.
-- **Remaining:** extending the autoload QEMU vertical with a
-  picker-driven stage (menu → `Viewer` → picker clicks → delegated read,
-  gated on the `fd_grant`/`fd_redeem` audit records before the typing
-  gate) — every delivery count, reply index, and cascade slot in the
-  AW3/AW4 interaction contract shifts, so it is staged as its own
-  increment rather than landed blind.
+- **Guest coverage: two verticals, one per route.** Both are dedicated
+  siblings rather than stages bolted onto the autoload script, whose every
+  delivery count, reply index, and cascade slot would shift under them (and
+  which is the D15 freeze case, so a security path's only guest coverage must
+  not live on it). `filepick_qemu_aarch64` drives the **picker** route —
+  library → `view`'s row → its bar slot → the planted document's row, gated on
+  the session's own `PICKER_SHOWN`, passing on `desktop fd_grant` then `view
+  fd_redeem`. `handover_qemu_aarch64` drives the **three-principal** route the
+  file manager uses (`plans/VIEW.md`): activating a planted picture in a
+  file-manager window through the item's own context-menu *Open* row, passing
+  on two complete relays of `files fd_grant` → `desktop fd_redeem` →
+  `desktop fd_grant` → `view fd_redeem`, the viewer's two redeems required to
+  come from the same kernel-attested task, and each latched step printing its
+  own marker so a failing run names the missing hop. A host-side observer
+  reconstructs a gesture into a *cascade-placed* window through
+  `reconstruct_manager_item_click`, which is the shared counterpart of the
+  fixed-origin `PICKER_ORIGIN` arithmetic above.
 
 ### AW6 — app-owned popup surfaces `[x]`
 

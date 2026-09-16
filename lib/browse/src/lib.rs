@@ -239,6 +239,34 @@ pub const WIN_SIZING: WindowSizing = WindowSizing::Resizable {
     min_height_px: MIN_WIN_HEIGHT,
 };
 
+/// The item view a **file-manager** window opens showing: icons, not rows.
+///
+/// The engine's own default is the list a read-only picker wants, so the
+/// manager states its choice — and states it here, because where an item is
+/// drawn depends on it: the app's opening browser and the QEMU vertical's
+/// host-side reconstruction of a gesture into such a window read this one
+/// value, so the tile a script aims at and the tile the renderer paints
+/// cannot disagree.
+pub const MANAGER_VIEW_MODE: ViewMode = ViewMode::Grid;
+
+/// The command-toolbar band a **file-manager** window opens with: none.
+///
+/// The toolbar and the places rail are surfaces the user asks for rather than
+/// fixed parts of the layout, so neither reserves any of the window until it
+/// does — a plain window is the directory and nothing else. Read by the app's
+/// opening chrome and by the same host-side reconstruction as
+/// [`MANAGER_VIEW_MODE`], for the same reason.
+pub const MANAGER_TOOLBAR_BAND: ToolbarBand = ToolbarBand::Hidden;
+
+/// The title a **file-manager** window puts on the context menu it asks the
+/// desktop to draw ([`context_menu`]).
+///
+/// Stated here for the same reason as [`MANAGER_VIEW_MODE`]: the plate is
+/// sized around its title, so the row a QEMU vertical's host-side
+/// reconstruction aims at moves with this text. One definition keeps the row
+/// the script clicks and the row the desktop draws in step.
+pub const MANAGER_MENU_TITLE: &str = "Files";
+
 /// The deepest directory nesting any of the file manager's recursive
 /// component-path filesystem walks will descend, counted in root-first path
 /// components.

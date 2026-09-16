@@ -238,6 +238,18 @@ needs typing sequenced after the click that opens the editor, and the
 reveals the band (or via `Ctrl+Shift+N`) — neither key being expressible by a
 harness that injects characters. `manager_tool_rect` therefore has no caller
 yet, tracked as D99.
+
+What is no longer missing is the *geometry*: a gesture into a file-manager
+window is reconstructible host-side (`reconstruct_manager_item_click` — the
+session's own cascade placement, the compositor's furniture band, and the
+engine's content-area and item-rect over the listing the guest holds, with the
+opening presentation read from `lib/browse`'s `MANAGER_VIEW_MODE` /
+`MANAGER_TOOLBAR_BAND`). The three-principal hand-over vertical
+(`plans/VIEW.md`) is its first consumer, activating a real item in a real
+manager window through that item's own context-menu *Open* row
+(`reconstruct_manager_item_menu`, which composes the session's chain from the
+rows this app declares). D98 remains the block on FM9-a's remaining halves, and
+it is a block on *keys*, not on reaching the window.
 Landed: the trusted picker opens at the user's home (`Browser::open_at` over
 the session's `HOME`, falling back to `/`), and the CU6 one-shot delegation
 that hands the picked file to the viewer is host-tested end to end (mint, the
@@ -284,12 +296,16 @@ right-click never arrives" was a `tools/qemu` harness bug (QEMU's HMP
 middle — so the harness sent a right-press as the *middle* button); the
 `MouseButton::mask_bit` fix sends `0x2` and the dedicated
 `pointer_button_virtio_mmio_qemu_aarch64` vertical proves it (`BTN_RIGHT`,
-fails-before/passes-after). **No QEMU vertical clicks the context menu**: its
-plates are the desktop's own surfaces (`plans/NEW-MENUS.md` M3.3), and the
-session's chain is driven end to end by `tests/integration/menu_qemu_aarch64` —
-which waits for the `MENU_SHOWN` record that says a plate reached the display,
-photographs it at the rectangle the production chain reports, and clicks one of
-its rows. The starting point was
+fails-before/passes-after). **One QEMU vertical now clicks this app's context
+menu**: the hand-over vertical (`plans/VIEW.md`) right-presses an item and
+clicks the plate's *Open* row, reconstructing the desktop's chain
+(`plans/NEW-MENUS.md` M3.3 — the plates are the session's own surfaces) from
+the rows this app declares, and gating that click on the `MENU_SHOWN` record
+that says a plate reached the display. The session's chain is additionally
+driven end to end by `tests/integration/menu_qemu_aarch64`, which photographs
+the plate at the rectangle the production chain reports. The menu's *other*
+verbs (Rename/Cut/Copy/Paste/Properties/Delete) are still unreached by any
+vertical, blocked with FM9-a's remaining halves on D98. The starting point was
 `plans/APPWIN.md` AW3/AW5 (done): the
 `files.app` `Run` binary composes the shared `lib/browse` `Browser` model +
 `render` renderer over the AW2 window channel, parks on its event mailbox, and
@@ -1575,16 +1591,17 @@ the click-through that keys on them is written.
       `BTN_RIGHT` (`0x111`), never the middle button (`0x112`). It **fails
       (times out) with the old mask and passes with the fix** — the
       fails-before/passes-after regression guard (§2.18).
-    - **No vertical clicks the context menu.** Its plates are the desktop's
-      own surfaces (`plans/NEW-MENUS.md` M3.3), so a script that aimed at one
-      would reconstruct the *session's* chain rather than this app's layout —
-      and that chain is already driven end to end by
-      `tests/integration/menu_qemu_aarch64`, which waits for the `MENU_SHOWN`
-      record that says a plate reached the display, photographs it at the
-      rectangle the production chain reports, and clicks one of its rows. What
-      a host test cannot reach in this app is the glue that sends the open and
-      matches the answer's id, which is the shape that vertical already
-      exercises for the terminal.
+    - **One vertical clicks this app's context menu; the rest of its verbs
+      wait on D98.** Its plates are the desktop's own surfaces
+      (`plans/NEW-MENUS.md` M3.3), so a script aiming at one reconstructs the
+      *session's* chain — which is tractable, and is what the hand-over
+      vertical does (`reconstruct_manager_item_menu`): the chain is composed
+      from the rows this app declares, so nothing restates a row by position,
+      and the click is gated on the `MENU_SHOWN` record that says a plate
+      reached the display. That covers the glue a host test cannot reach —
+      sending the open and matching the answer's id — for the *Open* row. The
+      remaining verbs (Rename/Cut/Copy/Paste/Properties/Delete) need the
+      ordered typed-key script D98 blocks.
 - **Docs** kept current in the same changes (§2.8, §13):
   `docs/src/desktop/apps.md` (the manager's design as each stage lands),
   the `lib/browse`/`lib/icon`/`lib/controls` rustdoc + `README.md`

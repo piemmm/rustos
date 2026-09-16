@@ -419,6 +419,7 @@ members = [
     "tests/integration/encrypted_root_image",
     "tests/integration/appbar_qemu_aarch64",
     "tests/integration/filepick_qemu_aarch64",
+    "tests/integration/handover_qemu_aarch64",
     "tests/integration/fsmutate_qemu_aarch64",
     "tests/integration/menu_qemu_aarch64",
     "tests/integration/datetime_elevate_qemu_aarch64",

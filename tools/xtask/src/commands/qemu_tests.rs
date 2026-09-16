@@ -7224,6 +7224,88 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
+    // `plans/VIEW.md` / `plans/APPWIN.md` AW5: the **three-principal
+    // hand-over** vertical — the only test in which a document's authority
+    // travels from the principal that opened it, through the desktop, to a
+    // principal that could not have opened it, on a running machine.
+    //
+    // It boots the same graphical world as its siblings, types the unlock
+    // passphrase, logs in and starts `desktop`. The pointer script then
+    // launches **`view`** from the program library — resident, no window, no
+    // filesystem capability — opens a file-manager window from the manager's
+    // own icon-bar slot, and activates the planted picture in it through the
+    // item's own context menu — a secondary press on the tile, then the *Open*
+    // row of the plate the desktop draws, which runs the manager's same
+    // `activate`. The drawn plate is also the session's own witness that the
+    // press reached an entry, which nothing else here could state: no audit
+    // record anywhere names a pointer action. The
+    // manager resolves the installed bundle that claims the file's type, opens
+    // the file under the user's identity, mints a one-shot delegation for that
+    // descriptor *to the session*, and asks the desktop to hand the document
+    // to the live instance; the session redeems it and grants the same
+    // authority on, and the viewer redeems what arrives and opens a window for
+    // it. The script then opens a second manager window and activates the
+    // picture again, so the funnel is exercised against an instance that
+    // already has a window.
+    //
+    // The guest's PASS is two complete relays of four dispatched syscalls
+    // each, in order, every one attributed by the kernel to the principal that
+    // made it, with the viewer's two redeems required to come from the same
+    // attested task. That is a claim about one authority crossing three
+    // processes into one instance, which is exactly what no host test can
+    // make.
+    //
+    // Its own vertical rather than a stage bolted onto the picker-delegation
+    // or autoload scripts: the autoload vertical is the D15 freeze case, and
+    // the two delegation paths are separate security claims whose coverage
+    // should not be able to wedge each other (D19/D20).
+    //
+    // One screendump, of the manager window the first activation is aimed
+    // into: the gesture is reconstructed host-side from the session's cascade
+    // placement and the engine's own grid geometry, so the frame that window
+    // is in is what says the two agree about where it sits. The claim the
+    // *guest* makes is still a record rather than a picture.
+    //
+    // Single CPU and the same 300-second *inactivity* budget as its siblings:
+    // the longest the guest may fall silent, never a runtime deadline, so
+    // co-scheduling cannot turn a slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-handover-qemu-aarch64",
+        binary: "tairix-test-handover-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            // The encrypted-root passphrase, held until both autoloaded
+            // input drivers have armed their interrupts so no keystroke
+            // hits a dead device.
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            // The fixture account's login, then `desktop` at the text
+            // shell's prompt — the same bundle a graphical login spawns.
+            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[ScreendumpPlan {
+            marker: WINDOW_SHOWN_MARKER,
+            occurrences: 1,
+            suffix: "manager-window",
+            assert: assert_files_window_dark_screendump,
+        }],
+        pointer_script: Some(handover_pointer_script),
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     // `plans/NEW-FILEMANAGER.md` FM9: the **filesystem-mutation** vertical —
     // the only test in which a user's own gesture reaches a write syscall and
     // the kernel's mutation audit trail records it. Before it, no run in the
@@ -9679,6 +9761,11 @@ const MAX_BARE_APP_SLOT_SHARE: f64 = 0.0;
 /// under test.
 const APPBAR_LAUNCHED_SLOT: usize = 1;
 
+/// The strip index the autostarted file manager occupies: the leading slot it
+/// holds for the life of the session, which is what puts the launched
+/// application beside it at [`APPBAR_LAUNCHED_SLOT`].
+const APPBAR_COMPONENT_SLOT: usize = APPBAR_LAUNCHED_SLOT - 1;
+
 /// The strip index that must stay empty: the one beyond the launched
 /// application's. A regression that gave every *window* its own slot would
 /// draw here.
@@ -10595,16 +10682,17 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
 }
 
 /// The home listing the shared users-root fixture plants, for reconstructing
-/// the picker's row geometry.
+/// the row geometry of any surface that browses it.
 ///
-/// It answers for the account's home and refuses everywhere else: the picker
-/// opens at the home and this reconstruction needs that one listing, so a
-/// request for anything else is a mistake rather than a directory to invent.
+/// It answers for the account's home and refuses everywhere else: both the
+/// picker and the file manager open at the home and these reconstructions need
+/// that one listing, so a request for anything else is a mistake rather than a
+/// directory to invent.
 struct PlantedHome {
-    /// Root-first components of the home the picker opens at.
+    /// Root-first components of the home the surface opens at.
     home: Vec<String>,
-    /// Name of the planted document, decoded once by the caller.
-    doc: String,
+    /// Names of the planted documents, decoded once by the caller.
+    docs: Vec<String>,
 }
 
 impl tairix_browse::DirectorySource for PlantedHome {
@@ -10614,16 +10702,65 @@ impl tairix_browse::DirectorySource for PlantedHome {
         if components != self.home.as_slice() {
             return Err(tairix_abi::Errno::NotFound);
         }
-        // Derived from the same two definitions the fixture plants from — the
-        // fixed home subdirectory set and the planted document's name — so
+        // Derived from the same definitions the fixture plants from — the
+        // fixed home subdirectory set and the planted documents' names — so
         // neither side carries a copy of the listing.
         let mut entries: Vec<Entry> = tairix_users::HOME_SUBDIRS
             .iter()
             .map(|name| Entry::directory(*name))
             .collect();
-        entries.push(Entry::file(&self.doc));
+        entries.extend(self.docs.iter().map(String::as_str).map(Entry::file));
         Ok(Listing::Ready(entries))
     }
+}
+
+/// Names of the regular files the users-root fixture plants in the account's
+/// home, decoded from the fixture's own definitions.
+///
+/// One list, so a document added to the fixture cannot leave a reconstruction
+/// resolving a row the guest draws somewhere else: every entry after it in the
+/// listing has moved.
+fn planted_home_docs() -> Result<Vec<String>, String> {
+    [
+        tairix_test_arxfs_image::HOME_DOC_NAME,
+        tairix_test_arxfs_image::HOME_PICTURE_NAME,
+    ]
+    .into_iter()
+    .map(|name| {
+        core::str::from_utf8(name)
+            .map(str::to_owned)
+            .map_err(|e| format!("planted home: a planted document's name is not UTF-8: {e}"))
+    })
+    .collect()
+}
+
+/// A browser opened on the fixture's planted home, as the **production**
+/// engine lists and orders it.
+///
+/// The one place a host-side reconstruction gets that browser, so the picker's
+/// rows and the file manager's tiles are resolved over the same listing in the
+/// same order the guest holds. `what` names the caller in the refusals.
+fn planted_home_browser(what: &str) -> Result<tairix_browse::Browser<PlantedHome>, String> {
+    let home = planted_home_components()?;
+    let source = PlantedHome {
+        home: home.clone(),
+        docs: planted_home_docs()?,
+    };
+    tairix_browse::Browser::open_at(source, home)
+        .map_err(|e| format!("{what}: the planted home does not open: {e:?}"))
+}
+
+/// Index of the entry named `name` in `browser`'s listing.
+fn planted_entry_index<S: tairix_browse::DirectorySource>(
+    browser: &tairix_browse::Browser<S>,
+    name: &str,
+    what: &str,
+) -> Result<usize, String> {
+    browser
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == name)
+        .ok_or_else(|| format!("{what}: {name} is not listed in the planted home"))
 }
 
 /// Root-first components of the account the fixture plants, parsed with the
@@ -10651,43 +10788,31 @@ fn planted_home_components() -> Result<Vec<String>, String> {
 fn reconstruct_pick_click(
     shell: &tairix_desktop_session::DesktopShell,
 ) -> Result<tairix_geometry::Point, String> {
-    use tairix_browse::{Browser, WIN_HEIGHT, WIN_WIDTH};
     use tairix_desktop_session::{PICKER_ORIGIN, PICKER_TOOLBAR};
     use tairix_geometry::{Point, Rect};
     use tairix_wm::{WindowFrame, WindowFurnitureState};
 
-    let home = planted_home_components()?;
-    let doc = core::str::from_utf8(tairix_test_arxfs_image::HOME_DOC_NAME)
-        .map_err(|e| format!("pick script: the planted document's name is not UTF-8: {e}"))?;
-    let source = PlantedHome {
-        home: home.clone(),
-        doc: doc.to_string(),
-    };
-    let browser = Browser::open_at(source, home)
-        .map_err(|e| format!("pick script: the planted home does not open: {e:?}"))?;
-    let index = browser
-        .entries()
-        .iter()
-        .position(|entry| entry.name() == doc)
-        .ok_or_else(|| format!("pick script: {doc} is not listed in the planted home"))?;
-
+    const WHAT: &str = "pick script";
+    let theme = shell.session().active_theme();
     let scale = RECONSTRUCTION_SCALE;
-    let viewport = Rect::new(
-        0,
-        0,
-        scale.scale_length(WIN_WIDTH),
-        scale.scale_length(WIN_HEIGHT),
-    );
-    let local = rect_centre(
-        tairix_browse::render::entry_rect(
-            &browser,
-            scale,
-            shell.session().active_theme(),
-            viewport,
-            PICKER_TOOLBAR,
-            index,
-        )
-        .ok_or_else(|| format!("pick script: {doc}'s row is not drawn in the picker"))?,
+    let browser = planted_home_browser(WHAT)?;
+    let doc = core::str::from_utf8(tairix_test_arxfs_image::HOME_DOC_NAME)
+        .map_err(|e| format!("{WHAT}: the planted document's name is not UTF-8: {e}"))?;
+    let index = planted_entry_index(&browser, doc, WHAT)?;
+
+    // The picker draws the engine's own default list view over the whole
+    // client, below its own chrome band.
+    let local = browsed_entry_centre(
+        &browser,
+        theme,
+        Rect::new(
+            0,
+            0,
+            scale.scale_length(tairix_browse::WIN_WIDTH),
+            scale.scale_length(tairix_browse::WIN_HEIGHT),
+        ),
+        PICKER_TOOLBAR,
+        index,
         "picker document row",
     )?;
     // The picker is fixed-size, so the frame offers no resize edges and the
@@ -10696,7 +10821,7 @@ fn reconstruct_pick_click(
         resizable: false,
         ..WindowFurnitureState::default()
     })
-    .insets(scale, shell.session().active_theme());
+    .insets(scale, theme);
     let client = Point::new(
         PICKER_ORIGIN
             .x
@@ -10709,6 +10834,149 @@ fn reconstruct_pick_click(
         client.x.saturating_add(local.x),
         client.y.saturating_add(local.y),
     ))
+}
+
+/// Centre of the window-local rectangle a browser view draws entry `index` in,
+/// through the **production** renderer's own geometry.
+///
+/// The one inverse every reconstruction of a browsed surface reads, so a
+/// change to the engine's row or tile layout moves the script's aim with the
+/// pixels rather than leaving it where a screenshot once showed them. `what`
+/// names the caller in the refusal.
+fn browsed_entry_centre<S: tairix_browse::DirectorySource>(
+    browser: &tairix_browse::Browser<S>,
+    theme: &tairix_theme::Theme,
+    viewport: tairix_geometry::Rect,
+    toolbar: tairix_browse::ToolbarBand,
+    index: usize,
+    what: &str,
+) -> Result<tairix_geometry::Point, String> {
+    rect_centre(
+        tairix_browse::render::entry_rect(
+            browser,
+            RECONSTRUCTION_SCALE,
+            theme,
+            viewport,
+            toolbar,
+            index,
+        )
+        .ok_or_else(|| format!("{what}: entry {index} is not drawn in the view"))?,
+        what,
+    )
+}
+
+/// Screen point of the item the **file manager** draws the planted document
+/// `name` as, in the `slot`-th served window the session opens.
+///
+/// The gesture path into a file-manager window, shared rather than
+/// special-cased to one run: a manager window is placed by the session's own
+/// cascade, so its client origin is [`served_window_layout`]'s — the cascade
+/// slot pulled onto the work area, inset by the furniture band the compositor
+/// itself decorates with — and the item's window-local rectangle is the
+/// production renderer's, over the listing the guest holds.
+///
+/// A manager window opens on the **icon grid** with no chrome band drawn, and
+/// the reconstruction reads that presentation from the engine's own shared
+/// definitions ([`tairix_browse::MANAGER_VIEW_MODE`],
+/// [`tairix_browse::MANAGER_TOOLBAR_BAND`]) rather than restating it, so a
+/// changed opening view moves the aim with the pixels. The places rail is the
+/// other band, and a window that draws none lays its view out across the whole
+/// client — which is what passing no rail to the engine's own content-area
+/// rule expresses.
+///
+/// `slot` is the caller's: which cascade slot a window lands in is a fact of
+/// that script's own gesture order, and nothing here can know it.
+fn reconstruct_manager_item_click(
+    theme: &tairix_theme::Theme,
+    slot: u64,
+    name: &[u8],
+    what: &str,
+) -> Result<tairix_geometry::Point, String> {
+    use tairix_geometry::{Point, Rect};
+
+    let name = core::str::from_utf8(name)
+        .map_err(|e| format!("{what}: the planted document's name is not UTF-8: {e}"))?;
+    let mut browser = planted_home_browser(what)?;
+    browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+    let index = planted_entry_index(&browser, name, what)?;
+
+    let toolbar = tairix_browse::MANAGER_TOOLBAR_BAND;
+    let client = served_window_layout(
+        slot,
+        tairix_browse::WIN_WIDTH,
+        tairix_browse::WIN_HEIGHT,
+        tairix_browse::WIN_SIZING.resizable(),
+        theme,
+    )
+    .client;
+    // The view is laid out in window-local coordinates, inside the content
+    // area the drawn chrome leaves.
+    let viewport = tairix_browse::render::content_area(
+        Rect::new(0, 0, client.width, client.height),
+        RECONSTRUCTION_SCALE,
+        theme,
+        None,
+        toolbar,
+    );
+    let local = browsed_entry_centre(&browser, theme, viewport, toolbar, index, what)?;
+    Ok(Point::new(
+        client.left().saturating_add(local.x),
+        client.top().saturating_add(local.y),
+    ))
+}
+
+/// Screen points of the two gestures that activate the planted document `name`
+/// through the **file manager's own item context menu**, in the `slot`-th
+/// served window: the secondary press on the item, and the *Open* row of the
+/// plate the desktop draws for it.
+///
+/// The press is [`reconstruct_manager_item_click`]'s, so the item aimed at is
+/// the one every other file-manager gesture aims at. The plate is placed from
+/// that same screen point: a press inside a client reaches the app as a
+/// window-local event, and the session resolves the anchor the app sends back
+/// against that window's live client origin, so the press point in screen
+/// coordinates *is* the anchor's screen origin.
+///
+/// The rows are the manager's own — its engine composes them from
+/// [`tairix_browse::CONTEXT_COMMANDS`] under the model a *selected* entry
+/// offers, which is what the app does before it asks for the plate — so
+/// nothing here restates a row by position or a label by hand. Only the
+/// selected entry's **kind** reaches the model, so the browser is rebuilt for
+/// the selection rather than the index.
+fn reconstruct_manager_item_menu(
+    theme: &tairix_theme::Theme,
+    slot: u64,
+    name: &[u8],
+    what: &str,
+) -> Result<(tairix_geometry::Point, tairix_geometry::Point), String> {
+    use tairix_geometry::Rect;
+
+    let press = reconstruct_manager_item_click(theme, slot, name, what)?;
+    let name = core::str::from_utf8(name)
+        .map_err(|e| format!("{what}: the planted document's name is not UTF-8: {e}"))?;
+    let mut browser = planted_home_browser(what)?;
+    browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+    let index = planted_entry_index(&browser, name, what)?;
+    browser
+        .select(index)
+        .map_err(|err| format!("{what}: entry {index} cannot be selected: {err:?}"))?;
+    // The app holds no clipboard, so the model is the one a freshly opened
+    // window offers over a selected regular file: `Open` enabled and first.
+    let wire = tairix_browse::context_menu(
+        tairix_browse::ContextMenuModel::for_browser(&browser, false),
+        tairix_browse::MANAGER_MENU_TITLE,
+    )
+    .map_err(|err| format!("{what}: the manager's context menu is invalid: {err:?}"))?;
+    // No information row is declared, so the attested identity a chain would
+    // draw one from is never read.
+    let model = tairix_controls::ChainModel::from_app_menu(wire.title(), &wire, None);
+    let (_, row) = chain_plate_and_row(
+        model,
+        tairix_desktop_session::windows::window_menu_placement(Rect::new(press.x, press.y, 0, 0)),
+        tairix_browse::ContextCommand::Open.label(),
+        what,
+    )?;
+    Ok((press, rect_centre(row, "Open row")?))
 }
 
 /// Create a folder on the desktop through the backdrop's own menu.
@@ -10821,6 +11089,141 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         MouseButton::Primary,
         document_row,
     );
+    Ok(pen.steps())
+}
+
+/// Cascade slot of a served window in the hand-over script, by the order the
+/// script opens them.
+///
+/// The desktop's own surfaces are session-painted compositor windows and never
+/// go through the served-window path, and neither the autostarted file manager
+/// (a desktop component) nor the launched viewer (resident, handed no document
+/// yet) opens one — so the script's first gesture into a window is also the
+/// session's first cascade slot.
+const HANDOVER_FIRST_MANAGER_WINDOW: u64 = 0;
+
+/// The window the first hand-over opens in the viewer.
+///
+/// Placed over the first manager window's client and large enough to cover the
+/// item the first activation aimed at, which is why the second activation is
+/// not aimed there.
+const HANDOVER_VIEWER_WINDOW: u64 = HANDOVER_FIRST_MANAGER_WINDOW + 1;
+
+/// The manager window the second activation is aimed at: opened over both
+/// earlier windows and so the topmost surface at that point.
+const HANDOVER_SECOND_MANAGER_WINDOW: u64 = HANDOVER_VIEWER_WINDOW + 1;
+
+/// Launch the viewer, open a file-manager window from the manager's own
+/// icon-bar slot, and activate the planted picture in it — twice.
+///
+/// The gesture this vertical exists for is **activating an item in the file
+/// manager's own window**: activating a regular file is what makes the manager
+/// open it, resolve the installed application that claims its type, mint a
+/// delegation for the descriptor it opened, and ask the desktop to hand that
+/// document to the live instance. The picture is planted for exactly that —
+/// `view` claims its type, and holds no filesystem capability with which to
+/// have opened it itself.
+///
+/// Each activation is a secondary press on the item and a primary press on the
+/// *Open* row of the plate the desktop draws for it
+/// ([`reconstruct_manager_item_menu`]). That row runs the manager's own
+/// `activate` — the same call a double-click's second press reaches, over the
+/// paths the engine's rustdoc pins the menu to — so the authority this proves
+/// travelling is the same, and the claim is unchanged. The menu route is what
+/// makes it provable from two *single* presses, each gated on a witness the
+/// emitting side states for itself; pairing two presses inside the guest's own
+/// interval would instead rest the whole run on the host scheduler's timing of
+/// one injected burst, which no witness here can observe (the kernel's
+/// delivery record carries a port and a length, never a pointer action).
+/// Double-click pairing is host-tested where it is decided, in `lib/input` and
+/// `lib/browse` (`plans/OPEN-DEFECTS.md` D132).
+///
+/// Every gate is causal, and each is the strongest fact the emitting side can
+/// honestly state:
+///
+/// - The desktop's own reveal witness opens the script, so nothing is injected
+///   before there is a bar to hit.
+/// - The library button and the viewer's row follow it immediately: the press
+///   is what opens the popup, so the row is on screen by construction.
+/// - The first manager-slot click waits on the session's own
+///   [`APPBAR_SLOT_MARKER`], counted: the autostarted manager's slot is
+///   announced first and the launched viewer's is the next, so the second
+///   occurrence is the viewer *running* — which it must be, or the desktop's
+///   funnel would have nothing to reach and the manager would spawn a fresh
+///   viewer instead of handing over. Nothing later would do: a resident
+///   application with no window emits no window witness.
+/// - Each activation's secondary press waits on the session's per-window
+///   [`WINDOW_SHOWN_MARKER`] for the manager window it aims at — the witness
+///   that a frame carrying that window's painted pixels reached the display. A
+///   create reply would say only that the window exists, and the listing
+///   arrives on a worker, so anything earlier races the frame the items are
+///   in.
+/// - Each *Open* row click waits on [`MENU_SHOWN_MARKER`], the session's own
+///   witness that a frame carrying the chain went out. It is also the one
+///   statement anywhere that the press *reached the item*: the manager asks
+///   for a plate only once it has hit-tested an entry under the pointer, so a
+///   drawn plate is proof the gesture landed where the reconstruction aimed
+///   it, and its absence localises a failure to the aim rather than leaving a
+///   silent timeout.
+/// - The second manager window is opened from the same slot rather than
+///   reusing the first, because the viewer's window is placed over the first
+///   manager window's client and a component's slot click opens a window
+///   rather than raising one. The fresh window is the topmost surface, so the
+///   second activation reaches the manager.
+///
+/// The final activation is what completes the run: it drives the second relay,
+/// whose four audit records are the guest's verdict.
+fn handover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::MouseButton;
+    use tairix_test_handover_qemu_aarch64::VIEWER_APP_NAME;
+
+    const WHAT: &str = "hand-over script";
+    let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
+    let shell = reconstructed_shell(&[])?;
+    let taskbar = shell.session().taskbar();
+    let theme = shell.session().active_theme();
+    let bar = taskbar.layout(RECONSTRUCTION_SCALE);
+    let library_button = rect_centre(bar.library, "Library button")?;
+    let viewer_row = library_row_centre(
+        taskbar,
+        RECONSTRUCTION_SCALE,
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, VIEWER_APP_NAME),
+        WHAT,
+    )?;
+    let manager_slot = rect_centre(
+        appbar_slot_rect(taskbar.theme(), APPBAR_COMPONENT_SLOT)?,
+        "file-manager slot",
+    )?;
+
+    let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
+    pen.click(revealed, 1, MouseButton::Primary, library_button);
+    pen.click(revealed, 1, MouseButton::Primary, viewer_row);
+    // The viewer is resident: launched by the user it opens no window and
+    // simply takes the slot after the component's, which is the witness that
+    // it is running and so reachable by the desktop's funnel.
+    let viewer_seated = u32::try_from(APPBAR_LAUNCHED_SLOT + 1)
+        .map_err(|_| format!("{WHAT}: the viewer's bar slot is out of range"))?;
+    // The manager is a desktop component, so a primary click on its slot opens
+    // a window at the user's home rather than raising one it already has.
+    pen.click(
+        APPBAR_SLOT_MARKER,
+        viewer_seated,
+        MouseButton::Primary,
+        manager_slot,
+    );
+    let (first_item, first_open) =
+        reconstruct_manager_item_menu(theme, HANDOVER_FIRST_MANAGER_WINDOW, picture, WHAT)?;
+    pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, first_item);
+    pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, first_open);
+    // Gated on the *viewer's* window, not merely on the relay having a chance
+    // to happen: that witness is what fixes the cascade order the second
+    // activation's aim is reconstructed from — manager, viewer, manager.
+    pen.click(WINDOW_SHOWN_MARKER, 2, MouseButton::Primary, manager_slot);
+    let (second_item, second_open) =
+        reconstruct_manager_item_menu(theme, HANDOVER_SECOND_MANAGER_WINDOW, picture, WHAT)?;
+    pen.click(WINDOW_SHOWN_MARKER, 3, MouseButton::Secondary, second_item);
+    pen.click(MENU_SHOWN_MARKER, 2, MouseButton::Primary, second_open);
     Ok(pen.steps())
 }
 
@@ -12298,15 +12701,15 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 mod tests {
     use super::{
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
-        desktop_hover_pointer_script, fold_peer_verdict, login_type_plant, persist_serial,
-        qemu_host_budget_for, qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest,
-        BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
-        MEMSOAK_PASS_PREFIX, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
-        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
-        TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
-        UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
-        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
-        VALUE_PIPE_WRITE_REFUSED_MARKER,
+        desktop_hover_pointer_script, filepick_pointer_script, fold_peer_verdict,
+        handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
+        qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest, BOOT_DISK_HEALTH_MARKER,
+        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX,
+        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
+        SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX,
+        TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
+        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
+        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -12344,6 +12747,8 @@ mod tests {
             ("icon bar", appbar_pointer_script()),
             ("autoload desktop", autoload_desktop_pointer_script()),
             ("desktop hover", desktop_hover_pointer_script()),
+            ("picker delegation", filepick_pointer_script()),
+            ("hand-over", handover_pointer_script()),
         ] {
             let steps = script.unwrap_or_else(|e| panic!("{label} script builds: {e}"));
             for (index, step) in steps.iter().enumerate() {
@@ -12364,6 +12769,215 @@ mod tests {
                 "{label} script ends on something other than the click its guest exits on"
             );
         }
+    }
+
+    /// A gesture into a file-manager window lands inside that window's client,
+    /// on the picture the fixture plants — in *both* the manager windows the
+    /// hand-over script opens.
+    ///
+    /// The regression this pins: the aim is composed from a cascade slot, a
+    /// furniture band, a content area and an icon-grid tile, so an arithmetic
+    /// slip in any of them yields a point that is still plausibly on screen
+    /// while landing on the furniture, on a neighbouring entry, or on whatever
+    /// is behind the window. Round-tripping the point back through the
+    /// production hit-test is what catches that: the engine answers which
+    /// entry it would resolve, and it must be the picture the script means.
+    #[test]
+    fn a_manager_window_gesture_lands_on_the_planted_picture() {
+        use super::{
+            planted_entry_index, planted_home_browser, reconstruct_manager_item_click,
+            served_window_layout, HANDOVER_FIRST_MANAGER_WINDOW, HANDOVER_SECOND_MANAGER_WINDOW,
+            RECONSTRUCTION_SCALE,
+        };
+        use tairix_geometry::Rect;
+
+        let theme = tairix_theme::Theme::dark();
+        let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
+        let name = core::str::from_utf8(picture).expect("a planted name is UTF-8");
+
+        let mut browser = planted_home_browser("test").expect("the planted home opens");
+        browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+        let want = planted_entry_index(&browser, name, "test").expect("the picture is listed");
+
+        for slot in [
+            HANDOVER_FIRST_MANAGER_WINDOW,
+            HANDOVER_SECOND_MANAGER_WINDOW,
+        ] {
+            let at = reconstruct_manager_item_click(&theme, slot, picture, "test")
+                .unwrap_or_else(|e| panic!("slot {slot} reconstructs: {e}"));
+            let client = served_window_layout(
+                slot,
+                tairix_browse::WIN_WIDTH,
+                tairix_browse::WIN_HEIGHT,
+                tairix_browse::WIN_SIZING.resizable(),
+                &theme,
+            )
+            .client;
+            assert!(
+                at.x > client.left()
+                    && at.x < client.right()
+                    && at.y > client.top()
+                    && at.y < client.bottom(),
+                "slot {slot}: {at:?} is outside the window's client {client:?}",
+            );
+            // Back through the renderer's own inverse, in the window-local
+            // coordinates the application receives a press in.
+            let local = tairix_geometry::Point::new(at.x - client.left(), at.y - client.top());
+            let viewport = Rect::new(0, 0, client.width, client.height);
+            assert_eq!(
+                tairix_browse::render::entry_index_at(
+                    &browser,
+                    RECONSTRUCTION_SCALE,
+                    &theme,
+                    viewport,
+                    tairix_browse::MANAGER_TOOLBAR_BAND,
+                    local,
+                ),
+                Some(want),
+                "slot {slot}: the aim resolves to another entry",
+            );
+        }
+    }
+
+    /// The *Open* row the hand-over script clicks is one the manager actually
+    /// offers, and it is drawn somewhere the pointer can reach — for *both*
+    /// manager windows the script opens.
+    ///
+    /// Two regressions, both silent: the row is enabled only while an entry is
+    /// selected, so a reconstruction that stopped selecting one would aim at a
+    /// disabled row and the click would do nothing at all; and the plate is
+    /// placed at the item's own screen point, which for a deeper cascade slot
+    /// sits further into the screen, so a placement that stopped folding the
+    /// plate back would put the row off the edge. Either leaves a run that
+    /// fails by timing out with no gesture refused.
+    #[test]
+    fn the_manager_item_menus_open_row_is_offered_and_reachable() {
+        use super::{
+            planted_entry_index, planted_home_browser, ramfb_screen, reconstruct_manager_item_menu,
+            HANDOVER_FIRST_MANAGER_WINDOW, HANDOVER_SECOND_MANAGER_WINDOW,
+        };
+
+        let theme = tairix_theme::Theme::dark();
+        let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
+        let name = core::str::from_utf8(picture).expect("a planted name is UTF-8");
+
+        // The selection the manager makes for the entry under the pointer is
+        // what offers the row; without it the menu draws `Open` disabled.
+        let mut browser = planted_home_browser("test").expect("the planted home opens");
+        browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+        let index = planted_entry_index(&browser, name, "test").expect("the picture is listed");
+        browser.select(index).expect("the picture selects");
+        assert!(
+            tairix_browse::ContextMenuModel::for_browser(&browser, false)
+                .is_enabled(tairix_browse::ContextCommand::Open),
+            "the manager offers no Open row for the planted picture",
+        );
+
+        let (width, height) = ramfb_screen();
+        let mut rows = Vec::new();
+        for slot in [
+            HANDOVER_FIRST_MANAGER_WINDOW,
+            HANDOVER_SECOND_MANAGER_WINDOW,
+        ] {
+            let (_, row) = reconstruct_manager_item_menu(&theme, slot, picture, "test")
+                .unwrap_or_else(|e| panic!("slot {slot} reconstructs: {e}"));
+            #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+            let (w, h) = (width as i32, height as i32);
+            assert!(
+                row.x >= 0 && row.x < w && row.y >= 0 && row.y < h,
+                "slot {slot}: the Open row at {row:?} is off a {width}x{height} screen",
+            );
+            rows.push(row);
+        }
+        // Each window is a fresh cascade slot, so its menu opens somewhere
+        // else. Equal rows would mean the slot stopped reaching the placement
+        // and the second activation aimed into the first window's plate.
+        assert_ne!(
+            rows[0], rows[1],
+            "both manager windows' Open rows reconstruct to one point",
+        );
+    }
+
+    /// The viewer's window covers the first manager window's item area, which
+    /// is why the hand-over script opens a *second* manager window rather than
+    /// activating twice in the first.
+    ///
+    /// A gesture aimed at a covered client reaches whatever is on top of it,
+    /// so this is the reason for the extra window — and if it ever stops
+    /// holding, the extra window is pointless complexity to be removed rather
+    /// than a failure to work around.
+    #[test]
+    fn the_viewers_window_is_why_the_script_opens_a_second_manager_window() {
+        use super::{
+            reconstruct_manager_item_click, served_window_layout, HANDOVER_FIRST_MANAGER_WINDOW,
+            HANDOVER_VIEWER_WINDOW,
+        };
+
+        let theme = tairix_theme::Theme::dark();
+        let aim = reconstruct_manager_item_click(
+            &theme,
+            HANDOVER_FIRST_MANAGER_WINDOW,
+            tairix_test_arxfs_image::HOME_PICTURE_NAME,
+            "test",
+        )
+        .expect("the first manager window reconstructs");
+        // The viewer's own window size, as its `Create` request asks for it.
+        // Resizability is immaterial to the footprint (pinned by
+        // `served_window_layout_insets_the_client_inside_its_furniture`), so
+        // the viewer's sizing need not be plumbed out of its crate.
+        let viewer = served_window_layout(
+            HANDOVER_VIEWER_WINDOW,
+            tairix_view::WIN_WIDTH,
+            tairix_view::WIN_HEIGHT,
+            true,
+            &theme,
+        )
+        .outer;
+        assert!(
+            aim.x >= viewer.left()
+                && aim.x <= viewer.right()
+                && aim.y >= viewer.top()
+                && aim.y <= viewer.bottom(),
+            "the viewer's window {viewer:?} no longer covers {aim:?}: the second manager \
+             window the script opens is now unnecessary",
+        );
+    }
+
+    /// The planted picture is a file an installed application actually claims,
+    /// and the one the hand-over script launches is the application that
+    /// claims it.
+    ///
+    /// Without this the manager's activation would resolve no application, do
+    /// nothing but state so on `stderr`, and the run would fail as a timeout
+    /// with no indication that the *fixture*, not the hand-over, was wrong.
+    #[test]
+    fn the_planted_picture_is_claimed_by_the_viewer_the_script_launches() {
+        use tairix_test_handover_qemu_aarch64::VIEWER_APP_NAME;
+
+        let name = core::str::from_utf8(tairix_test_arxfs_image::HOME_PICTURE_NAME)
+            .expect("a planted name is UTF-8");
+        let media = tairix_browse::media_for_name(name)
+            .expect("the planted picture's extension is a known media type");
+
+        // The viewer's own signed manifest source is the only statement of
+        // what it claims, so the association is read from there rather than
+        // restated here.
+        let manifest = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../userland/apps")
+                .join(VIEWER_APP_NAME)
+                .join("AppInfo.toml"),
+        )
+        .expect("the viewer bundle's manifest source is in the tree");
+        assert!(
+            manifest
+                .lines()
+                .filter(|line| line.starts_with("associations"))
+                .any(|line| line.contains(&format!("\"{}\"", media.as_str()))),
+            "{VIEWER_APP_NAME} does not claim {}, so activating {name} would resolve no \
+             application",
+            media.as_str(),
+        );
     }
 
     /// The enrolment with `disk`, for a test that asserts on what that disk

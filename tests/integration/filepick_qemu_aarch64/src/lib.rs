@@ -45,6 +45,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+use tairix_abi::SyscallNumber;
+
 /// Bare name of the application the library row launches — the bundle is
 /// `<system application store>/<name>.app`, composed from the shared
 /// `lib/abi` spellings on both sides rather than written out here.
@@ -55,14 +57,15 @@
 /// delegation rather than of any authority it already had.
 pub const PICK_APP_NAME: &str = "view";
 
-/// Process name (`comm`) the kernel attests for the desktop session — the
-/// principal that mints the delegation.
+/// Process name (`comm`) the kernel attests for the desktop session.
 ///
 /// The session runs as the logged-in account, so this is what distinguishes
-/// the *grantor* from the recipient in the audit trail. Matching it is what
-/// makes the first witness a statement about which principal delegated, not
-/// merely that some process did.
-pub const GRANTOR_COMM: &str = "desktop";
+/// it from every other principal in the audit trail. Matching it is what
+/// makes a witness a statement about *which* process acted, not merely that
+/// some process did. The sibling hand-over vertical
+/// (`tairix-test-handover-qemu-aarch64`) names the same principal, so it
+/// reads this rather than restating the value.
+pub const SESSION_COMM: &str = "desktop";
 
 /// Process name (`comm`) the kernel attests for the launched viewer — the
 /// principal that redeems the delegation.
@@ -74,8 +77,43 @@ pub const RECIPIENT_COMM: &str = PICK_APP_NAME;
 
 /// Name of the syscall the session mints the one-shot delegation with, as the
 /// syscall audit field renders it.
-pub const GRANT_SYSCALL: &str = "fd_grant";
+///
+/// Read from the `abi-v1` table the dispatcher audits from, so a renamed
+/// syscall moves the witness with it instead of leaving a string here that
+/// matches nothing and fails the run as a timeout.
+pub const GRANT_SYSCALL: &str = syscall_name(SyscallNumber::FD_GRANT);
 
 /// Name of the syscall the viewer redeems the delegation with, as the syscall
-/// audit field renders it.
-pub const REDEEM_SYSCALL: &str = "fd_redeem";
+/// audit field renders it (see [`GRANT_SYSCALL`]).
+pub const REDEEM_SYSCALL: &str = syscall_name(SyscallNumber::FD_REDEEM);
+
+/// The audited name of `number`, as the dispatcher's `sc` field renders it.
+///
+/// An unassigned number has no name; the empty string matches no record, so
+/// a gate built on one never latches (fail closed) rather than latching on
+/// the wrong call.
+const fn syscall_name(number: SyscallNumber) -> &'static str {
+    match tairix_abi::spec_for(number) {
+        Some(spec) => spec.name,
+        None => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{syscall_name, GRANT_SYSCALL, REDEEM_SYSCALL};
+    use tairix_abi::SyscallNumber;
+
+    /// The witness names are the `abi-v1` table's own, so a renamed syscall
+    /// fails this test rather than silently leaving the guest's gate
+    /// unmatchable and the run reported as a timeout.
+    #[test]
+    fn the_witnesses_name_the_syscalls_the_dispatcher_audits() {
+        assert_eq!(GRANT_SYSCALL, syscall_name(SyscallNumber::FD_GRANT));
+        assert_eq!(REDEEM_SYSCALL, syscall_name(SyscallNumber::FD_REDEEM));
+        // An unassigned number renders as the empty string, which matches no
+        // record; both of these are assigned, so neither witness is inert.
+        assert!(!GRANT_SYSCALL.is_empty());
+        assert!(!REDEEM_SYSCALL.is_empty());
+    }
+}

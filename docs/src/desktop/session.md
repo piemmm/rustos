@@ -1244,6 +1244,13 @@ QEMU vertical gates both its screendumps and its bar gestures on it: a create
 reply would say only that the window exists, which is too early to photograph
 and too early to click.
 
+Counting its occurrences also fixes the **order** windows opened in, which is
+what lets a vertical reconstruct where a later one was placed: the cascade slot
+a window lands in is a function of how many opened before it, so a gesture into
+the third window is aimed from a slot only a script that waited for the first
+two can name. The three-principal hand-over vertical
+([apps](apps.md#rendering)) is built on exactly that.
+
 ### The chooser is a dialog
 
 The trusted picker wears the window manager's frame like anything else on

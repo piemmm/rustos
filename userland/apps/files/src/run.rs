@@ -140,8 +140,8 @@ mod program {
         DeleteWalk, DirectorySource, Entry, EntryKind, Listing, ListingDesk, ManagerChrome,
         ManagerTool, ManagerToolModel, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy,
         Places, Probe, ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader,
-        ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId,
-        MANAGER_TOOLS, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
+        ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
+        MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -177,12 +177,6 @@ mod program {
     use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::operation::{operation_control, OperationControl};
     use crate::sidebar::{self, press_point};
-
-    /// The application's own name, as its context menu's plate is titled.
-    ///
-    /// A per-window menu's title is the application's, bounded and sanitised
-    /// exactly as a row label is: a name, not a credential.
-    const APP_NAME: &str = "Files";
 
     /// Exit code when the initial directory listing was refused (no
     /// filesystem reach, or a corrupt stream). A reserved, fail-closed
@@ -4186,7 +4180,7 @@ mod program {
             None => browser.clear_selection(),
         }
         let model = ContextMenuModel::for_browser(browser, overlays.clipboard.is_some());
-        let rows = match context_menu(model, APP_NAME) {
+        let rows = match context_menu(model, tairix_browse::MANAGER_MENU_TITLE) {
             Ok(rows) => rows,
             Err(err) => {
                 report_error(&alloc::format!("menu model refused ({err}); not shown"));
@@ -5273,13 +5267,10 @@ mod program {
     }
 
     /// Open the manager's browser at the first location that actually lists,
-    /// showing its items as icons.
-    ///
-    /// The manager presents a desktop file view, so it opens on the icon grid
-    /// and the toolbar's view toggle switches to the list; the engine's own
-    /// default is the list the read-only picker wants, so the manager states
-    /// its choice here — once, for whichever location [`first_listable`]
-    /// opened.
+    /// showing its items as the shared opening view says
+    /// ([`MANAGER_VIEW_MODE`] — icons, with the toolbar's view toggle
+    /// switching to the list), once for whichever location
+    /// [`first_listable`] opened.
     fn open_browser(
         reads: &alloc::sync::Arc<Reads>,
         location: Option<alloc::vec::Vec<String>>,
@@ -5290,7 +5281,7 @@ mod program {
         // resume, a frame or two later.
         let mut browser =
             Browser::open_at(DeferredSource(alloc::sync::Arc::clone(reads)), start).ok()?;
-        browser.set_view_mode(ViewMode::Grid);
+        browser.set_view_mode(MANAGER_VIEW_MODE);
         Some(browser)
     }
 

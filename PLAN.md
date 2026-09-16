@@ -4192,9 +4192,15 @@ transfer, landed in increments:
   unchanged** (the first grantor's captured authority copied, never
   re-captured, the extent attenuated by `min`), which is what lets the
   desktop relay one application's chosen document to a live instance of
-  another without lending its own larger reach. Remaining (staged in
-  `plans/VIEW.md`): the three-principal relay's own QEMU vertical, which
-  wants a way to drive a row in the *file manager's* window by pointer.
+  another without lending its own larger reach. That three-principal route is
+  covered by the `handover_qemu_aarch64` vertical, which activates a planted
+  picture in a file-manager window through the item's own context-menu *Open*
+  row and passes only on two complete relays of `files fd_grant` -> `desktop
+  fd_redeem` -> `desktop fd_grant` -> `view fd_redeem`, the viewer's two
+  redeems required to come from the same kernel-attested task. Its prerequisite
+  is shared rather than that vertical's: a host-side reconstruction of a
+  gesture into a cascade-placed window, which every future file-manager gesture
+  reads.
 - **First-class file manager (`plans/NEW-FILEMANAGER.md`, in progress).** The
   Stage-7 `files.app` browser is staged into a full graphical file manager
   — clickable file/folder icons, open/launch `.app` bundles, hand files to

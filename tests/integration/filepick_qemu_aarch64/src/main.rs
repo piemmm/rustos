@@ -26,7 +26,7 @@
 //! the principal that made the call:
 //!
 //! 1. **The session minted the delegation.** A `SyscallInvoked` record naming
-//!    [`GRANT_SYSCALL`] from [`GRANTOR_COMM`] — the picker concluding the
+//!    [`GRANT_SYSCALL`] from [`SESSION_COMM`] — the picker concluding the
 //!    user's choice.
 //! 2. **The viewer redeemed it.** A `SyscallInvoked` record naming
 //!    [`REDEEM_SYSCALL`] from [`RECIPIENT_COMM`], counted **only** once the
@@ -72,7 +72,7 @@ mod kernel {
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
     use tairix_test_filepick_qemu_aarch64::{
-        GRANTOR_COMM, GRANT_SYSCALL, RECIPIENT_COMM, REDEEM_SYSCALL,
+        GRANT_SYSCALL, RECIPIENT_COMM, REDEEM_SYSCALL, SESSION_COMM,
     };
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -133,7 +133,7 @@ mod kernel {
                     _ => {}
                 }
             }
-            if comm == GRANTOR_COMM && call == GRANT_SYSCALL {
+            if comm == SESSION_COMM && call == GRANT_SYSCALL {
                 self.granted.store(true, Ordering::Release);
             } else if comm == RECIPIENT_COMM
                 && call == REDEEM_SYSCALL

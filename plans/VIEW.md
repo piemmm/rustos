@@ -415,6 +415,39 @@ delegation on and wakes the viewer, which drains `TakeOpenTarget` and opens a
 window per document. A `Path` target it cannot act on and says so: it holds no
 authority to open a name with.
 
+The chain is covered by the `handover_qemu_aarch64` vertical, the only test in
+the tree where one authority crosses three principals on a running machine.
+With `view` launched and holding no window, activating the fixture's planted
+picture in a file-manager window drives the whole route; its PASS is two
+complete relays of `comm=files sc=fd_grant`, `comm=desktop sc=fd_redeem`,
+`comm=desktop sc=fd_grant`, `comm=view sc=fd_redeem` in that order, with the
+viewer's two redeems required to come from the same kernel-attested task — so
+the funnel reached the instance already running and gave it a second window
+rather than a second viewer being started. Each latched step prints its own
+marker (`RELAY_STEP_MARKERS`), so a failing run names the hop that was missing
+instead of only falling silent.
+
+The activation is the item's **own context menu** — a secondary press on the
+tile, then the *Open* row of the plate the desktop draws, which runs the
+manager's same `activate`. Two single presses, each gated on a witness the
+emitting side states for itself: the drawn plate is the only statement anywhere
+that the press reached an entry, because no audit record names a pointer
+action. Whether a *double-click* reaches `activate` on a running guest is
+therefore not what this vertical states; that pairing is host-tested where it
+is decided, in `lib/input` and `lib/browse`, and the open question is
+`plans/OPEN-DEFECTS.md` D132.
+
+Its prerequisite is shared rather than the vertical's own: a host-side
+reconstruction of a gesture into a **cascade-placed** window
+(`reconstruct_manager_item_click`, and `reconstruct_manager_item_menu` over
+it), composed from the session's own placement rule, the compositor's furniture
+band, and the engine's content-area and item-rect geometry over the listing the
+guest holds. The manager's opening presentation and its menu title are read
+from `lib/browse`'s `MANAGER_VIEW_MODE` / `MANAGER_TOOLBAR_BAND` /
+`MANAGER_MENU_TITLE` rather than restated, so a changed opening view or title
+moves the aim with the pixels. Every future gesture into a file-manager window
+uses it.
+
 Behaviour: zoom in/out/fit/actual size, drag pan with scrollbars when zoomed
 in, rotate and flip, page/frame navigation with a thumbnail sidebar, animation
 play/pause and frame step, an alpha checkerboard, ICO size selection, an info
@@ -943,26 +976,6 @@ read this paragraph first; the rustdoc on both types points here.
 
 ## Noticed and not yet fixed
 
-- **The three-principal document hand-over has no QEMU vertical.** Every layer
-  is host-tested — the `HandOverLaunch` and open-target wire shapes and their
-  refusals, the engine's per-client queue and its wake, the session's
-  resolution and the relay's fail-closed paths, the kernel's non-widening
-  pass-through of a held delegation, and the viewer's drain — but the claim
-  that *three* principals and the kernel wire up end to end (files mints,
-  the session redeems and re-grants, the viewer redeems) is the one no host
-  test can make. It wants a vertical latching, in order, `comm=files
-  sc=fd_grant`, `comm=desktop sc=fd_redeem`, `comm=desktop sc=fd_grant`,
-  `comm=view sc=fd_redeem`, plus a second `WINDOW_SHOWN` for the same owner
-  (one viewer process, two windows).
-
-  What it needs first is a way to drive the **file manager's own window** by
-  pointer: the picker's rows are reconstructible because the picker is a
-  fixed-origin dialog (`reconstruct_pick_click` over `PICKER_ORIGIN`), while
-  the autostarted file manager's window is placed by the session's cascade and
-  no script reconstructs a row in it. That reconstruction is the work, and it
-  is shared with every future gesture into a file-manager window rather than
-  being this vertical's alone. Recorded rather than deferred silently.
-
 - **`WindowEvent::FilePicked` carries no name, so a picked document is
   unnamed.** The pick conclusion carries the one-shot `fd_grant` handle and
   nothing else, which is right about *authority* and short about *identity*:
@@ -1031,5 +1044,6 @@ echoed geometry, wrong pixel length) being refused. Engine host tests for
 viewport clamping, rotation/flip composition, layout at several `Scale`s, input
 routing, cache eviction across pressure bands, animation deadlines, the
 request/answer desk, and the three damage-correctness properties every app owes.
-The re-pointed `filepick_qemu_aarch64` vertical, extended to open a real image
-end to end from Files.
+The `filepick_qemu_aarch64` vertical for the picker route and
+`handover_qemu_aarch64` for the three-principal one, the latter opening a real
+image end to end from Files.

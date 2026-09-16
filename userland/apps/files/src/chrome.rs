@@ -15,7 +15,7 @@
 //! program only applies the answer.
 
 use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
-use tairix_browse::{Places, ToolbarBand};
+use tairix_browse::{Places, ToolbarBand, MANAGER_TOOLBAR_BAND};
 
 /// The chrome bands one window is showing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -30,7 +30,7 @@ impl Chrome {
     /// What a window opens with: the listing alone.
     pub const HIDDEN: Self = Self {
         rail: false,
-        toolbar: ToolbarBand::Hidden,
+        toolbar: MANAGER_TOOLBAR_BAND,
     };
 
     /// The rail model the renderer and every rail hit-test take, or `None`
