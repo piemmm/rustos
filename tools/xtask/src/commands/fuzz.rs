@@ -59,6 +59,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/abi wire decoders (IPC + manifest headers)",
     },
     Target {
+        package: "tairix-abi",
+        test: "fuzz_desktop_layer",
+        description: "lib/abi desktop-layer surface wire surface (the capability-gated requests, the two feed events, the terrain reply)",
+    },
+    Target {
         package: "tairix-collections",
         test: "fuzz_collections",
         description: "lib/collections heap-backed tier (hash map, recency map, range map and set, spilling small vector) against naive models",

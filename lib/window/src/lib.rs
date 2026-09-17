@@ -67,8 +67,8 @@ pub use frames::WindowFrames;
 #[cfg(feature = "rt")]
 pub use mailbox::EventMailbox;
 pub use server::{
-    client_frame_budget_bytes, CallerIdentity, EventSink, HandOverDesk, OpenEntry, PopupSpec,
-    WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, CallerIdentity, EventSink, HandOverDesk, LayerSpec, OpenEntry,
+    PopupSpec, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 #[cfg(test)]

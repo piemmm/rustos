@@ -102,15 +102,28 @@ mod tests {
         SERVED_HERE.with(core::cell::Cell::get)
     }
 
-    /// Set by the service so a holder can wait for proof that the other
+    /// Set by the service so a holder can wait for proof that the waiter
     /// thread is *already spinning*, making a contended acquisition
     /// deterministic instead of a matter of timing.
+    ///
+    /// Only the waiter's own rounds set it. The slot and its service are
+    /// process-wide, so any other spinning test in this binary would
+    /// otherwise satisfy the holder and let it release the lock before the
+    /// waiter ever reached it — an uncontended acquisition that passed the
+    /// assertion below without having tested anything.
     static WAITER_SPUN: AtomicBool = AtomicBool::new(false);
+
+    std::thread_local! {
+        /// Whether this thread is the contended-acquisition waiter.
+        static IS_WAITER: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
 
     fn count_one_service() {
         SERVED.fetch_add(1, Ordering::Relaxed);
         SERVED_HERE.with(|here| here.set(here.get() + 1));
-        WAITER_SPUN.store(true, Ordering::Release);
+        if IS_WAITER.with(core::cell::Cell::get) {
+            WAITER_SPUN.store(true, Ordering::Release);
+        }
     }
 
     fn never_installed() {
@@ -181,13 +194,28 @@ mod tests {
     /// the round is reached from the lock itself and not only from a direct
     /// `spin_wait` call.
     ///
-    /// Contention is established by construction rather than by timing: the
-    /// holder keeps the lock until the waiter's own spin rounds report it
-    /// spinning, so the waiter cannot have taken the lock uncontended. The
-    /// holder's wait is bounded so a broken implementation that serves no
-    /// round fails the assertion below instead of hanging the suite.
+    /// Contention is established by construction: the holder keeps the lock
+    /// until the waiter's *own* spin rounds report it spinning, so the waiter
+    /// cannot have taken the lock uncontended.
+    ///
+    /// The holder's wait is bounded by a **deadline**, not a spin count, and
+    /// that distinction is the whole of it. A spin count is not a duration —
+    /// a hundred thousand hints are microseconds on an idle core and can
+    /// elapse before the waiter thread is scheduled at all on a machine
+    /// running every test binary at once. The holder then released the lock,
+    /// the waiter acquired it uncontended, and the test asserted a
+    /// precondition its own setup had silently failed to establish. The
+    /// deadline is unreachable whenever a round is served (which takes
+    /// microseconds) and is generous enough that no load can approach it, so
+    /// a broken implementation that serves no round still fails here rather
+    /// than hanging the suite — and says which of the two happened.
     fn a_contended_acquisition_serves_rounds_through_the_lock() {
-        const HOLDER_SPIN_BUDGET: u32 = 100_000;
+        /// How long the holder waits for proof the waiter is spinning before
+        /// declaring the implementation broken.
+        ///
+        /// Orders of magnitude above the microseconds a served round takes,
+        /// so it bounds only the genuinely-broken case.
+        const HOLDER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
         let lock = Arc::new(SpinLock::new(0u32));
         let holder_has_it = Arc::new(AtomicBool::new(false));
@@ -200,20 +228,31 @@ mod tests {
             let mut guard = lock_held.lock();
             *guard = 7;
             held_flag.store(true, Ordering::Release);
-            let mut budget = HOLDER_SPIN_BUDGET;
-            while !WAITER_SPUN.load(Ordering::Acquire) && budget > 0 {
-                budget -= 1;
+            let until = std::time::Instant::now() + HOLDER_DEADLINE;
+            while !WAITER_SPUN.load(Ordering::Acquire) {
+                if std::time::Instant::now() >= until {
+                    return false;
+                }
                 core::hint::spin_loop();
             }
+            true
         });
 
         while !holder_has_it.load(Ordering::Acquire) {
             core::hint::spin_loop();
         }
-        let waiter = std::thread::spawn(move || *lock.lock());
+        let waiter = std::thread::spawn(move || {
+            IS_WAITER.with(|waiter| waiter.set(true));
+            *lock.lock()
+        });
 
-        holder.join().expect("holder thread");
+        let saw_the_waiter_spin = holder.join().expect("holder thread");
         assert_eq!(waiter.join().expect("waiter thread"), 7);
+        assert!(
+            saw_the_waiter_spin,
+            "the holder gave up before the waiter spun: this run established no \
+             contention, so it tested nothing"
+        );
         assert!(
             WAITER_SPUN.load(Ordering::Acquire),
             "a waiter that had to spin never reached the service"

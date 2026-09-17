@@ -20,8 +20,8 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
     key_activation, paint_bead, paint_chevron, paint_icon_slot, paint_plate, plate_border,
-    pointer_activation, resolve_bead, resolve_frame, resolve_rail, role_font, surface_rect, to_i32,
-    withheld, BeadShape, ChevronDir, PlateStyle, FULL_COLOUR,
+    pointer_activation, resolve_bead, resolve_frame, resolve_rail, role_font, surface_rect,
+    text_plate_height, to_i32, withheld, BeadShape, ChevronDir, PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
@@ -301,7 +301,7 @@ fn paint_content(
     }
     let cx = to_i32(x) + to_i32(w) / 2;
     let glyph_h = font.glyph_height();
-    let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
+    let text_y = text_row(y, h, glyph_h);
     // Where a content group `total` wide begins, for the requested seating.
     let group_start = |total: u32| match align {
         ContentAlign::Center => cx - to_i32(total) / 2,
@@ -310,6 +310,9 @@ fn paint_content(
 
     match content {
         ButtonContent::Label(text) => {
+            let Some(text_y) = text_y else {
+                return;
+            };
             let fitted = font.truncate_to_width(text, avail_w);
             let width = font.text_width(fitted);
             font.draw_text(surface, group_start(width), text_y, fitted, res.label);
@@ -345,10 +348,24 @@ fn paint_content(
                     surface.blit_tinted(start, iy, &mask, res.label);
                 }
             }
-            let text_x = start + to_i32(side.saturating_add(gap));
-            font.draw_text(surface, text_x, text_y, fitted, res.label);
+            if let Some(text_y) = text_y {
+                let text_x = start + to_i32(side.saturating_add(gap));
+                font.draw_text(surface, text_x, text_y, fitted, res.label);
+            }
         }
     }
+}
+
+/// The row a line of `glyph_h` type seats at within a plate `y..y + h`, or
+/// `None` when the plate is too short to hold the line box at all.
+///
+/// A line is seated by centring on the plate's own height: the text inset is
+/// horizontal clearance from the rim, not a vertical budget, so a plate
+/// shorter than twice that inset still shows its label rather than silently
+/// dropping it. A plate shorter than the line box has nowhere to put it, and
+/// drawing it anyway would spill type past the plate onto whatever is behind.
+fn text_row(y: u32, h: u32, glyph_h: u32) -> Option<i32> {
+    (h >= glyph_h).then(|| to_i32(y) + (to_i32(h) - to_i32(glyph_h)) / 2)
 }
 
 /// A labelled or icon-labelled action plate (spec §11.1).
@@ -382,6 +399,18 @@ pub struct Button {
 }
 
 impl Button {
+    /// The height a button occupies at `scale`: the shared text-plate height
+    /// every one-line control takes.
+    ///
+    /// Exposed because a button is not always laid out by a panel that already
+    /// knows this — an application sizing its own control strip needs the same
+    /// figure, and a strip that hand-picks one shorter than a line of type
+    /// draws a plate with nothing on it.
+    #[must_use]
+    pub fn height(scale: Scale, theme: &Theme) -> u32 {
+        text_plate_height(theme, scale, TextRole::Body)
+    }
+
     /// A button with the given content and role, in the resting state.
     #[must_use]
     pub fn new(content: ButtonContent, role: ControlRole) -> Self {

@@ -23,7 +23,8 @@ use alloc::vec::Vec;
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, HandOverDocument, HandOverOutcome, MenuRefusal, WindowEvent, WindowRegion,
+    AppBar, AppMenu, HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, TerrainPlate,
+    WindowEvent, WindowRegion,
 };
 use tairix_abi::{AppIdentity as AttestedApp, Errno, ProcId};
 use tairix_controls::{ChainModel, PlatePlacement};
@@ -37,9 +38,15 @@ use crate::launch::{
 };
 use tairix_taskbar::menu::info_facts;
 use tairix_window::WindowSizing;
-use tairix_wm::{Color, Compositor, Point, Rect, Surface, Window, WindowControlKind, WindowId};
+use tairix_wm::{
+    Color, Compositor, Pixel, Point, Rect, Surface, Window, WindowControlKind, WindowId,
+};
 
 use crate::apps::{AppBarBridge, BundleIndex};
+use crate::layer::{
+    apply_participation, clamped_origin, fits_layer_bound, stack_at_depth, terrain_into,
+    LayerDecision, LayerState, LayerSurface,
+};
 use crate::menu::{ChainGeometry, ChainOwner, MenuChain, ModelRefused};
 use crate::picker::PickerSlot;
 use crate::session::DesktopSession;
@@ -180,6 +187,8 @@ pub struct SessionWindows {
     /// last frame-report decision. Drained with the report so a frame whose
     /// only content is the Switchboard's own paint is not reported back.
     presented: Vec<u64>,
+    /// The seat's desktop layer surface and its two feeds.
+    pub layers: LayerState,
 }
 
 impl SessionWindows {
@@ -770,6 +779,114 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         Ok(())
     }
 
+    fn layer_opened(
+        &mut self,
+        owner: ProcId,
+        window_id: u64,
+        surface: &DisplayMode,
+        x: i32,
+        y: i32,
+        depth: LayerDepth,
+    ) -> Result<(), Errno> {
+        // The wire bound is the ceiling at a UI scale of one; this is the
+        // same bound in the pixels the desktop is actually drawn in, so a
+        // surface cannot grow past it by asking on a dense screen.
+        if !fits_layer_bound(
+            (surface.width_px, surface.height_px),
+            self.compositor.scale(),
+        ) {
+            self.windows
+                .layers
+                .note(LayerDecision::Refused(Errno::LengthOutOfRange));
+            return Err(Errno::LengthOutOfRange);
+        }
+        let work_area = self.shell.work_area(self.compositor);
+        if work_area.is_empty() {
+            self.windows
+                .layers
+                .note(LayerDecision::Refused(Errno::NotFound));
+            return Err(Errno::NotFound);
+        }
+        let origin = clamped_origin((x, y), (surface.width_px, surface.height_px), work_area);
+        // Opened *transparent* rather than unpresented, and off the taskbar.
+        // A window opened unpresented stays hidden until something maps it,
+        // and the only mapping path is the taskbar's — which a companion is
+        // deliberately not on, so it would never have become visible at all.
+        // A transparent surface is in the stack from the start, which the
+        // stacking and terrain paths want anyway, and its shaped hit test
+        // catches nothing until the client has drawn into it.
+        let Some(blank) = Surface::filled(surface.width_px, surface.height_px, Pixel::TRANSPARENT)
+        else {
+            self.windows
+                .layers
+                .note(LayerDecision::Refused(Errno::OutOfMemory));
+            return Err(Errno::OutOfMemory);
+        };
+        let wm = self.compositor.add_window(origin, blank);
+        self.compositor.set_app_presented(wm, true);
+        apply_participation(
+            self.compositor,
+            wm,
+            self.shell.presenter().bar_window(),
+            depth,
+        );
+        // A surface opened while a trusted surface is up stays hidden until
+        // that surface goes, rather than appearing over it.
+        if self.windows.layers.is_suppressed() {
+            self.compositor.set_visible(wm, false);
+        }
+        self.windows.layers.opened(LayerSurface {
+            ipc: window_id,
+            wm,
+            depth,
+        });
+        self.windows.layers.note(LayerDecision::Opened);
+        self.windows
+            .insert(window_id, wm, None, owner, FirstFrame::Awaited);
+        Ok(())
+    }
+
+    fn layer_refused(&mut self, owner: ProcId, reason: Errno) {
+        let _ = owner;
+        self.windows.layers.note(LayerDecision::Refused(reason));
+    }
+
+    fn layer_placed(
+        &mut self,
+        window_id: u64,
+        x: i32,
+        y: i32,
+        depth: LayerDepth,
+    ) -> Result<(), Errno> {
+        let Some(wm) = self.windows.wm_id(window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let Some(bounds) = self.compositor.window(wm).map(Window::bounds) else {
+            return Err(Errno::NotFound);
+        };
+        let work_area = self.shell.work_area(self.compositor);
+        if work_area.is_empty() {
+            return Err(Errno::NotFound);
+        }
+        let origin = clamped_origin((x, y), (bounds.width, bounds.height), work_area);
+        self.compositor.move_window(wm, origin);
+        stack_at_depth(
+            self.compositor,
+            wm,
+            self.shell.presenter().bar_window(),
+            depth,
+        );
+        self.windows.layers.placed(depth);
+        Ok(())
+    }
+
+    fn layer_terrain(&mut self, window_id: u64, out: &mut [TerrainPlate]) -> Result<usize, Errno> {
+        let Some(wm) = self.windows.wm_id(window_id) else {
+            return Err(Errno::NotFound);
+        };
+        Ok(terrain_into(self.compositor, wm, out))
+    }
+
     fn popup_opened(
         &mut self,
         window_id: u64,
@@ -982,11 +1099,14 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // conclusion is (or could be) delivered.
         self.picker
             .abort_for(window_id, self.shell, self.compositor);
+        // Retiring a layer surface is an ordinary close, so the feeds stop
+        // here rather than needing a teardown path of their own.
+        let was_layer = self.windows.layers.closed(window_id);
         if let Some(record) = self.windows.take(window_id) {
-            // A popup was never a task, so it leaves through the taskbar-less
-            // path; the engine tears a parent's popups down with it, so each
-            // arrives here in its own turn.
-            let _ = if record.parent.is_some() {
+            // A popup and a layer surface were never tasks, so they leave
+            // through the taskbar-less path; the engine tears a parent's
+            // popups down with it, so each arrives here in its own turn.
+            let _ = if record.parent.is_some() || was_layer {
                 self.shell.close_popup_window(self.compositor, record.wm)
             } else {
                 self.shell.close_window(self.compositor, record.wm)

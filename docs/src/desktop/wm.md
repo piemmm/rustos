@@ -1595,6 +1595,56 @@ The first consumer is the graphical terminal, whose settings sheet is a popup
 one chain, opened through `OpenMenu` rather than drawn by the application
 ([Menus](menus.md)).
 
+## Desktop layer surfaces (`CAP_DESKTOP_LAYER`)
+
+A popup is undecorated but *anchored*: it hangs off a window its app owns and
+is offset from that window's client origin, so its app is never told a screen
+position and can reach nowhere its own window is not. A **layer surface** is
+what that withholds — a surface placed in screen coordinates, in the desktop's
+own stacking layers rather than in a window of the caller's. It is what a
+desktop companion needs to be (`plans/CINDER.md`), and it is the one operation
+on the window channel that requires a capability.
+
+Three requests ride the existing channel, because a layer surface *is* a window
+in the one registry — it has a region, frames, damage, an owner, a budget, and a
+teardown, and `Present` and `Close` act on it unchanged:
+
+- `WindowRequest::OpenLayer { shm_handle, event_endpoint, frame_count,
+  width_px, height_px, stride_bytes, format, x, y, depth }`, answering the
+  ordinary create reply.
+- `WindowRequest::PlaceLayer { window_id, x, y, depth }` — move and re-stack
+  together, because a companion changes both in one step and splitting them
+  would let a frame land at the old depth.
+- `WindowRequest::TakeTerrain { window_id }` — the visible windows'
+  rectangles, back-to-front.
+
+`LayerDepth` is a closed two-value set: `Below` (above the wallpaper, under
+every application window) and `Above` (over application windows, still under
+the session's own chrome). There is no numeric layer index and no "topmost";
+both would be ways to climb above surfaces the session owns.
+
+### The three compositor mechanisms it needed
+
+- **`PointerCatch`** replaced the window's `input_transparent` flag with a
+  closed set — `Bounds`, `Shape`, `None`. `Shape` hit-tests the window's **own
+  content alpha** at the point against a midpoint threshold, so the silhouette
+  *is* what is drawn: no mask, no second geometry, no extra memory, and no way
+  for the shape to disagree with the pixels. A window whose content has been
+  released catches nothing, because it draws nothing.
+- **Focus refusal.** `Compositor::set_focusable(false)` makes a press neither
+  raise nor focus a window, and `InputRouter::focus` refuses it outright, so
+  there is no second route into the focus rotation. The press still reaches the
+  owner, so the surface stays clickable — which is what lets a companion be
+  petted while remaining structurally unable to receive a keystroke.
+- **`Compositor::stack_below(id, anchor)`** places a family immediately below
+  another's, which neither `raise` nor `lower` can express. It shares one
+  generalised restack with both: the destination is an index and the damage is
+  "everything that crossed the family", of which the two ends are special
+  cases.
+- **`Compositor::terrain(exclude)`** enumerates visible windows' bounds
+  back-to-front — rectangles and order only, never identity, title, owner, or
+  pixels.
+
 ## Failing closed
 
 Every fallible entry point returns a `Result`/`Option` rather than

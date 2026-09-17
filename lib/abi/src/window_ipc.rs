@@ -181,6 +181,150 @@ pub type DocumentName = BoundedText<0, { crate::FS_NAME_MAX }>;
 /// scale is applied, so a client cannot ask for an unbounded one.
 pub const WINDOW_BACKDROP_BLUR_MAX_PX: u16 = 64;
 
+/// Widest and tallest a **desktop layer surface** may be, in *logical*
+/// pixels ([`WindowRequest::OpenLayer`]).
+///
+/// A validation bound, and the load-bearing one: it is what keeps a layer
+/// surface a small resident presence rather than a screen-sized overlay
+/// that could cover the desktop, trap every click, or reproduce a surface
+/// the user is meant to trust. It is chosen **below the narrowest surface
+/// the session draws for a trusted decision** — the elevation and
+/// confirmation prompts, both 460 logical pixels wide — so a holder cannot
+/// render such a prompt at its own size however hostile it is. The session
+/// statically asserts that relationship against each of its trusted
+/// surfaces, so shrinking one below this bound fails the build rather than
+/// silently opening the hole.
+///
+/// Widening it is a security regression, not a tuning change: it is a bound
+/// in the fail-closed sense, never a capacity that scales with the machine.
+pub const DESKTOP_LAYER_MAX_SIDE_LOGICAL: u32 = 256;
+
+/// How many live layer surfaces one client may hold ([`WindowRequest::OpenLayer`]).
+///
+/// A companion is a single presence on the desktop, so one is what the
+/// authority is for; a second would be a way to multiply the screen area a
+/// holder occupies past [`DESKTOP_LAYER_MAX_SIDE_LOGICAL`].
+pub const DESKTOP_LAYER_MAX_PER_CLIENT: usize = 1;
+
+/// How many live layer surfaces one seat may hold across every client.
+///
+/// Bounds the total desktop area all holders together can occupy, so the
+/// per-client bound cannot be multiplied by launching more holders.
+pub const DESKTOP_LAYER_MAX_PER_SEAT: usize = 4;
+
+/// Most terrain plates one [`WindowRequest::TakeTerrain`] answer carries.
+///
+/// A validation bound on the reply frame. Terrain is what a layer surface
+/// needs to walk over, under, or around the windows on screen, and the
+/// desktop's *visible* windows are few; a deeper stack is reported
+/// truncated to the frontmost plates rather than growing the frame.
+pub const DESKTOP_LAYER_MAX_PLATES: u16 = 32;
+
+/// Where in the desktop's stacking layers a surface sits
+/// ([`WindowRequest::OpenLayer`], [`WindowRequest::PlaceLayer`]).
+///
+/// A closed two-value set: there is no "topmost" and no numeric layer
+/// index, because both would be ways to climb above surfaces the session
+/// owns. Neither value reaches the icon bar, the menus, the tooltips, or
+/// any trusted surface — those stay above a layer surface always.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LayerDepth {
+    /// Above the wallpaper and below every application window: burrowing.
+    Below,
+    /// Above application windows and below the session's own chrome:
+    /// perched.
+    Above,
+}
+
+/// Wire discriminant of [`LayerDepth::Below`].
+const LAYER_DEPTH_BELOW: u8 = 0;
+/// Wire discriminant of [`LayerDepth::Above`].
+const LAYER_DEPTH_ABOVE: u8 = 1;
+
+impl LayerDepth {
+    /// The wire byte for this depth.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Below => LAYER_DEPTH_BELOW,
+            Self::Above => LAYER_DEPTH_ABOVE,
+        }
+    }
+
+    /// The depth `byte` denotes.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any byte outside the closed set.
+    pub const fn from_u8(byte: u8) -> Result<Self, Errno> {
+        match byte {
+            LAYER_DEPTH_BELOW => Ok(Self::Below),
+            LAYER_DEPTH_ABOVE => Ok(Self::Above),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One visible window's screen rectangle, as a layer surface sees the
+/// desktop ([`WindowRequest::TakeTerrain`]).
+///
+/// Rectangles and stacking order only: no title, no window id, no owner,
+/// no pixels. Everything a plate says is already drawn on the screen the
+/// holder can see, so the feed tells it nothing the desktop does not
+/// already show — which is what keeps a terrain reader from becoming a
+/// window-activity monitor.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TerrainPlate {
+    /// Left edge in physical screen pixels.
+    pub x: i32,
+    /// Top edge in physical screen pixels.
+    pub y: i32,
+    /// Width in physical pixels; never zero.
+    pub width_px: u32,
+    /// Height in physical pixels; never zero.
+    pub height_px: u32,
+}
+
+impl TerrainPlate {
+    /// Encoded size on the wire: two signed edges and two extents.
+    pub const WIRE_LEN: usize = 16;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_i32(&mut out, 0, self.x);
+        put_i32(&mut out, 4, self.y);
+        put_u32(&mut out, 8, self.width_px);
+        put_u32(&mut out, 12, self.height_px);
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on an empty extent.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` is shorter than a plate.
+    /// * [`Errno::LengthOutOfRange`] — a zero width or height, which names
+    ///   no area and so can only be a corrupt or hostile frame.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let width_px = read_u32(bytes, 8);
+        let height_px = read_u32(bytes, 12);
+        if width_px == 0 || height_px == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self {
+            x: read_i32(bytes, 0),
+            y: read_i32(bytes, 4),
+            width_px,
+            height_px,
+        })
+    }
+}
+
 /// Most rows one **plate** of a menu may hold ([`AppMenu`]).
 ///
 /// A **format** bound, not a capacity: a plate is one column the desktop
@@ -1854,6 +1998,89 @@ pub enum WindowRequest {
         /// The one line to show. Empty withdraws the declaration.
         text: TooltipText,
     },
+    /// Open a **desktop layer surface**: an undecorated surface placed in
+    /// screen coordinates, in the desktop's own stacking layers rather than
+    /// in the caller's window (`plans/CINDER.md`).
+    ///
+    /// This is the one operation on the channel that requires
+    /// [`CapabilityId::DESKTOP_LAYER`](crate::CapabilityId::DESKTOP_LAYER),
+    /// and the capability is the whole difference between it and
+    /// [`Self::CreatePopup`]. A popup is also undecorated, but it is
+    /// anchored to a window the caller already owns and offset from that
+    /// window's client origin, so a popup tells its caller nothing about
+    /// the screen and can reach nowhere its owner is not. A layer surface
+    /// names an absolute screen point and a stacking position relative to
+    /// *other principals'* windows, which is presence on the desktop
+    /// outside any window of one's own.
+    ///
+    /// Because it is a spoofing primitive, the session bounds it
+    /// structurally: it is never in the focus rotation and is never routed
+    /// a key, it catches the pointer only where its own content is opaque,
+    /// each side is at most
+    /// [`DESKTOP_LAYER_MAX_SIDE_LOGICAL`] logical pixels, and it is hidden
+    /// with its feeds stopped whenever a trusted surface is up.
+    ///
+    /// It answers with the same [`WINDOW_CREATE_REPLY_LEN`]-byte reply as
+    /// `Create`, and thereafter [`Self::Present`] and [`Self::Close`] act
+    /// on its id unchanged — a layer surface is a window in the one
+    /// registry, so its ownership, budget, and teardown are the same code
+    /// every other window's are.
+    OpenLayer {
+        /// The `shm_grant` handle minted to the session's serving task,
+        /// naming the region that holds the surface's frames back-to-back.
+        shm_handle: u64,
+        /// The caller's own endpoint the session delivers this surface's
+        /// [`WindowEvent`]s to. Never a reserved endpoint.
+        event_endpoint: u64,
+        /// Frames laid out back-to-back in the region
+        /// (`1..=WINDOW_MAX_FRAMES`).
+        frame_count: u32,
+        /// Surface width in physical pixels; never zero, and at most
+        /// [`DESKTOP_LAYER_MAX_SIDE_LOGICAL`] once the desktop's UI scale
+        /// is applied.
+        width_px: u32,
+        /// Surface height in physical pixels, bounded as the width is.
+        height_px: u32,
+        /// Bytes between consecutive scanlines; at least one scanline.
+        stride_bytes: u32,
+        /// Pixel encoding of the frames.
+        format: DisplayFormat,
+        /// Left edge in physical screen pixels; the session clamps the
+        /// surface onto the work area, so any value is a legitimate ask.
+        x: i32,
+        /// Top edge in physical screen pixels, clamped as `x` is.
+        y: i32,
+        /// Which stacking layer the surface opens in.
+        depth: LayerDepth,
+    },
+    /// Move live layer surface `window_id` to a new screen point and
+    /// stacking layer.
+    ///
+    /// Placement and depth travel together because a layer surface changes
+    /// both at once — it crosses a window edge and passes over or under it
+    /// in the same step — and splitting them would let a frame land at the
+    /// old depth.
+    PlaceLayer {
+        /// The layer surface being moved (from its `OpenLayer` reply).
+        window_id: u64,
+        /// New left edge in physical screen pixels.
+        x: i32,
+        /// New top edge in physical screen pixels.
+        y: i32,
+        /// The stacking layer to sit in from now on.
+        depth: LayerDepth,
+    },
+    /// Pull the current desktop terrain for layer surface `window_id`: the
+    /// visible windows' screen rectangles, back-to-front.
+    ///
+    /// Pulled rather than pushed, so a holder that does not ask is told
+    /// nothing and the session never spends a frame's work on an answer
+    /// nobody reads. [`WindowEvent::TerrainChanged`] says an answer would
+    /// differ from the last one.
+    TakeTerrain {
+        /// The layer surface asking (from its `OpenLayer` reply).
+        window_id: u64,
+    },
 }
 
 /// Wire operation discriminant of [`WindowRequest::Create`].
@@ -1886,6 +2113,12 @@ const OP_SET_TOOLTIP: u16 = 16;
 const OP_HAND_OVER_LAUNCH: u16 = 17;
 /// Wire operation discriminant of [`WindowRequest::TakeMenuText`].
 const OP_TAKE_MENU_TEXT: u16 = 18;
+/// Wire operation discriminant of [`WindowRequest::OpenLayer`].
+const OP_OPEN_LAYER: u16 = 19;
+/// Wire operation discriminant of [`WindowRequest::PlaceLayer`].
+const OP_PLACE_LAYER: u16 = 20;
+/// Wire operation discriminant of [`WindowRequest::TakeTerrain`].
+const OP_TAKE_TERRAIN: u16 = 21;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -1971,6 +2204,25 @@ const POPUP_OFFSET_X: usize = POPUP_PARENT_OFFSET + 8;
 const POPUP_OFFSET_Y: usize = POPUP_OFFSET_X + 4;
 /// Encoded size of a [`WindowRequest::CreatePopup`].
 const CREATE_POPUP_WIRE_LEN: usize = POPUP_OFFSET_Y + 4;
+
+/// Byte offset of [`WindowRequest::OpenLayer::x`], the first operand after
+/// the shared frame-layout block.
+const LAYER_OPEN_X: usize = FRAME_LAYOUT_END;
+/// Byte offset of [`WindowRequest::OpenLayer::y`].
+const LAYER_OPEN_Y: usize = LAYER_OPEN_X + 4;
+/// Byte offset of [`WindowRequest::OpenLayer::depth`].
+const LAYER_OPEN_DEPTH: usize = LAYER_OPEN_Y + 4;
+/// Encoded size of a [`WindowRequest::OpenLayer`].
+const OPEN_LAYER_WIRE_LEN: usize = LAYER_OPEN_DEPTH + 1;
+
+/// Byte offset of [`WindowRequest::PlaceLayer::x`], after the window id.
+const LAYER_PLACE_X: usize = REQUEST_HEADER_LEN + 8;
+/// Byte offset of [`WindowRequest::PlaceLayer::y`].
+const LAYER_PLACE_Y: usize = LAYER_PLACE_X + 4;
+/// Byte offset of [`WindowRequest::PlaceLayer::depth`].
+const LAYER_PLACE_DEPTH: usize = LAYER_PLACE_Y + 4;
+/// Encoded size of a [`WindowRequest::PlaceLayer`].
+const PLACE_LAYER_WIRE_LEN: usize = LAYER_PLACE_DEPTH + 1;
 
 /// Byte offset of a [`WindowRequest::Create`] title length, immediately
 /// after the shared frame-layout block. The create tail runs on from here:
@@ -2159,7 +2411,11 @@ impl WindowRequest {
             Self::Create { .. } => CREATE_WIRE_LEN,
             Self::CreatePopup { .. } => CREATE_POPUP_WIRE_LEN,
             Self::Present { .. } => PRESENT_WIRE_LEN,
-            Self::Close { .. } | Self::PickFile { .. } => WINDOW_ID_WIRE_LEN,
+            Self::Close { .. } | Self::PickFile { .. } | Self::TakeTerrain { .. } => {
+                WINDOW_ID_WIRE_LEN
+            }
+            Self::OpenLayer { .. } => OPEN_LAYER_WIRE_LEN,
+            Self::PlaceLayer { .. } => PLACE_LAYER_WIRE_LEN,
             Self::TakeOpenTarget => TAKE_OPEN_TARGET_WIRE_LEN,
             Self::TakeMenuText { .. } => TAKE_MENU_TEXT_WIRE_LEN,
             Self::HandOverLaunch {
@@ -2251,6 +2507,9 @@ impl WindowRequest {
             Self::TakeMenuText { .. } => OP_TAKE_MENU_TEXT,
             Self::HandOverLaunch { .. } => OP_HAND_OVER_LAUNCH,
             Self::SetTooltip { .. } => OP_SET_TOOLTIP,
+            Self::OpenLayer { .. } => OP_OPEN_LAYER,
+            Self::PlaceLayer { .. } => OP_PLACE_LAYER,
+            Self::TakeTerrain { .. } => OP_TAKE_TERRAIN,
         }
     }
 
@@ -2272,8 +2531,22 @@ impl WindowRequest {
                 put_u32(out, 28, damage.width_px);
                 put_u32(out, 32, damage.height_px);
             }
-            Self::Close { window_id } | Self::PickFile { window_id } => {
+            Self::Close { window_id }
+            | Self::PickFile { window_id }
+            | Self::TakeTerrain { window_id } => {
                 put_u64(out, 8, window_id);
+            }
+            Self::OpenLayer { .. } => self.write_layer_operands(out),
+            Self::PlaceLayer {
+                window_id,
+                x,
+                y,
+                depth,
+            } => {
+                put_u64(out, 8, window_id);
+                put_i32(out, LAYER_PLACE_X, x);
+                put_i32(out, LAYER_PLACE_Y, y);
+                out[LAYER_PLACE_DEPTH] = depth.as_u8();
             }
             Self::TakeMenuText { window_id, open_id } => {
                 put_u64(out, 8, window_id);
@@ -2371,6 +2644,42 @@ impl WindowRequest {
         put_i32(out, POPUP_OFFSET_Y, offset_y);
     }
 
+    /// Write an [`OpenLayer`](Self::OpenLayer)'s operand block: the shared
+    /// surface prologue, then the screen point and stacking layer that are
+    /// the operation's own. A no-op for any other request.
+    fn write_layer_operands(&self, out: &mut [u8]) {
+        let Self::OpenLayer {
+            shm_handle,
+            event_endpoint,
+            frame_count,
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+            x,
+            y,
+            depth,
+        } = *self
+        else {
+            return;
+        };
+        write_surface_operands(
+            out,
+            shm_handle,
+            event_endpoint,
+            &FrameLayout {
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+            },
+        );
+        put_i32(out, LAYER_OPEN_X, x);
+        put_i32(out, LAYER_OPEN_Y, y);
+        out[LAYER_OPEN_DEPTH] = depth.as_u8();
+    }
+
     /// Write a [`Create`](Self::Create)'s operand block: the shared frame
     /// layout, then the title and the sizing contract that follow it.
     /// A no-op for any other request.
@@ -2463,6 +2772,22 @@ impl WindowRequest {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
                 Ok(Self::PickFile { window_id })
+            }
+            OP_TAKE_TERRAIN => {
+                exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
+                let window_id = nonzero_id(read_u64(bytes, 8))?;
+                Ok(Self::TakeTerrain { window_id })
+            }
+            OP_OPEN_LAYER => read_open_layer(bytes),
+            OP_PLACE_LAYER => {
+                exact_len(bytes, PLACE_LAYER_WIRE_LEN)?;
+                let window_id = nonzero_id(read_u64(bytes, 8))?;
+                Ok(Self::PlaceLayer {
+                    window_id,
+                    x: read_i32(bytes, LAYER_PLACE_X),
+                    y: read_i32(bytes, LAYER_PLACE_Y),
+                    depth: LayerDepth::from_u8(bytes[LAYER_PLACE_DEPTH])?,
+                })
             }
             OP_RESIZE => {
                 exact_len(bytes, RESIZE_WIRE_LEN)?;
@@ -3041,6 +3366,47 @@ fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     })
 }
 
+/// Decode a [`WindowRequest::OpenLayer`]: the shared surface prologue and
+/// frame layout every surface-opening request carries, then the screen point
+/// and stacking layer that are this operation's own.
+///
+/// Fails closed exactly as `CreatePopup`: a reserved event endpoint, a bad
+/// geometry, or a depth outside the closed set is refused. The screen point
+/// is an unconstrained signed pair — the session clamps the surface onto the
+/// work area, so any point is a legitimate ask — but the *extent* is bounded
+/// here, because a layer surface larger than
+/// [`DESKTOP_LAYER_MAX_SIDE_LOGICAL`] is what the bound exists to refuse and
+/// the decoder is the first place that can say no. The bound is in logical
+/// pixels and the wire carries physical ones, so this check is the ceiling
+/// at a UI scale of 1 and the session re-checks against the live scale; a
+/// frame this refuses could not be legitimate at any scale.
+fn read_open_layer(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, OPEN_LAYER_WIRE_LEN)?;
+    let shm_handle = read_u64(bytes, 8);
+    let event_endpoint = read_u64(bytes, 16);
+    if crate::ipc::is_reserved_endpoint(event_endpoint) {
+        return Err(Errno::OutOfRange);
+    }
+    let layout = read_frame_layout(bytes)?;
+    if layout.width_px > DESKTOP_LAYER_MAX_SIDE_LOGICAL
+        || layout.height_px > DESKTOP_LAYER_MAX_SIDE_LOGICAL
+    {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(WindowRequest::OpenLayer {
+        shm_handle,
+        event_endpoint,
+        frame_count: layout.frame_count,
+        width_px: layout.width_px,
+        height_px: layout.height_px,
+        stride_bytes: layout.stride_bytes,
+        format: layout.format,
+        x: read_i32(bytes, LAYER_OPEN_X),
+        y: read_i32(bytes, LAYER_OPEN_Y),
+        depth: LayerDepth::from_u8(bytes[LAYER_OPEN_DEPTH])?,
+    })
+}
+
 /// The frame-layout fields `Create`, `CreatePopup` and `Resize` share
 /// verbatim at the same wire offsets: the frame count, geometry, stride, and
 /// pixel format.
@@ -3198,6 +3564,69 @@ pub fn encode_create_reply(
 /// shared status word, the [`DesktopInfo`] record, and the serving
 /// session's [`ProcId`].
 pub const WINDOW_DESKTOP_REPLY_LEN: usize = 4 + DesktopInfo::WIRE_LEN + crate::PROC_ID_LEN;
+
+/// Reply length, in bytes, of a [`WindowRequest::TakeTerrain`] carrying a
+/// full page: the shared paged-reply header and
+/// [`DESKTOP_LAYER_MAX_PLATES`] plates.
+///
+/// The frame is *variable* length on the wire
+/// ([`crate::reply::encode_page_reply`] writes only the plates the answer
+/// holds), so a desktop with two windows costs two plates, not thirty-two.
+pub const WINDOW_TERRAIN_REPLY_MAX: usize = crate::reply::STATUS_REPLY_LEN
+    + crate::reply::PAGE_HEADER_LEN
+    + DESKTOP_LAYER_MAX_PLATES as usize * TerrainPlate::WIRE_LEN;
+
+/// Encode a [`WindowRequest::TakeTerrain`] answer: `plates` back-to-front,
+/// nearest the wallpaper first.
+///
+/// # Errors
+///
+/// * [`Errno::LengthOutOfRange`] — more than [`DESKTOP_LAYER_MAX_PLATES`]
+///   plates; the session truncates to the frontmost rather than calling
+///   this with an over-long list.
+/// * [`Errno::BufferTooSmall`] — `out` is shorter than the answer needs.
+pub fn encode_terrain_reply(plates: &[TerrainPlate], out: &mut [u8]) -> Result<usize, Errno> {
+    if plates.len() > DESKTOP_LAYER_MAX_PLATES as usize {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let mut records = [[0u8; TerrainPlate::WIRE_LEN]; DESKTOP_LAYER_MAX_PLATES as usize];
+    for (slot, plate) in records.iter_mut().zip(plates) {
+        *slot = plate.to_le_bytes();
+    }
+    crate::reply::encode_page_reply(&records[..plates.len()], DESKTOP_LAYER_MAX_PLATES, out)
+}
+
+/// Decode a [`WindowRequest::TakeTerrain`] answer into `out`, returning the
+/// plates that were carried.
+///
+/// Every plate is re-validated on arrival, so a caller only ever sees
+/// well-formed rectangles: a zero-extent plate refuses the whole frame
+/// rather than being skipped.
+///
+/// # Errors
+///
+/// * The [`Errno`] the session refused the request with.
+/// * [`Errno::BufferTooSmall`] — a truncated frame, or an `out` shorter
+///   than the declared count.
+/// * [`Errno::BadMagic`] — a dirty reserved pair.
+/// * [`Errno::LengthOutOfRange`] — a count above
+///   [`DESKTOP_LAYER_MAX_PLATES`], or a plate naming no area.
+pub fn decode_terrain_reply<'a>(
+    bytes: &[u8],
+    out: &'a mut [TerrainPlate],
+) -> Result<&'a [TerrainPlate], Errno> {
+    let (count, body) =
+        crate::reply::decode_page_reply(bytes, TerrainPlate::WIRE_LEN, DESKTOP_LAYER_MAX_PLATES)?;
+    let count = count as usize;
+    if out.len() < count {
+        return Err(Errno::BufferTooSmall);
+    }
+    for (index, slot) in out.iter_mut().take(count).enumerate() {
+        let at = index * TerrainPlate::WIRE_LEN;
+        *slot = TerrainPlate::from_bytes(&body[at..at + TerrainPlate::WIRE_LEN])?;
+    }
+    Ok(&out[..count])
+}
 
 /// What the desktop has queued for an application to open.
 ///
@@ -3602,6 +4031,10 @@ const EV_CONTENT_RELEASED: u16 = 15;
 const EV_MENU_CLOSED: u16 = 16;
 /// Wire kind discriminant of [`WindowEvent::OpenRequested`].
 const EV_OPEN_REQUESTED: u16 = 17;
+/// Wire kind discriminant of [`WindowEvent::TerrainChanged`].
+const EV_TERRAIN_CHANGED: u16 = 18;
+/// Wire kind discriminant of [`WindowEvent::LayerPointer`].
+const EV_LAYER_POINTER: u16 = 19;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -3858,6 +4291,42 @@ pub enum WindowEvent {
     /// application drains in a loop rather than assuming one event is one
     /// target.
     OpenRequested,
+    /// The desktop terrain a layer surface sees has changed: a window
+    /// moved, resized, opened, closed, or changed stacking or visibility.
+    ///
+    /// The event carries a `generation` rather than the terrain itself, so
+    /// a burst of window movement costs one small event and the holder
+    /// pulls the answer once with [`WindowRequest::TakeTerrain`] when it
+    /// is ready to use it. A holder that never pulls is told nothing and
+    /// costs the session nothing.
+    TerrainChanged {
+        /// The layer surface this addresses.
+        window_id: u64,
+        /// Monotonic counter of terrain changes; a pull answers the state
+        /// at or after the generation that prompted it.
+        generation: u64,
+    },
+    /// Where the pointer is on screen, for a layer surface that is placed
+    /// in screen coordinates and so cannot read a window-local position.
+    ///
+    /// Position only: no buttons, no modifiers, no timestamp, and nothing
+    /// about the window under it. A press *on* the surface arrives as an
+    /// ordinary [`Self::Pointer`] event with a surface-local position like
+    /// any window's, so this feed never needs to carry a click.
+    ///
+    /// Coalesced to at most one per composited frame and sent only when the
+    /// pointer actually moved, so a fast drag costs one event per frame
+    /// rather than one per input sample. It stops entirely while the
+    /// session shows a trusted surface, so a holder cannot watch the
+    /// pointer over a credential prompt.
+    LayerPointer {
+        /// The layer surface this addresses.
+        window_id: u64,
+        /// Pointer position in physical screen pixels.
+        x: i32,
+        /// Pointer position in physical screen pixels.
+        y: i32,
+    },
 }
 
 impl WindowEvent {
@@ -3885,6 +4354,8 @@ impl WindowEvent {
             | Self::RedrawRequested { window_id }
             | Self::ContentReleased { window_id }
             | Self::Scrolled { window_id, .. }
+            | Self::TerrainChanged { window_id, .. }
+            | Self::LayerPointer { window_id, .. }
             | Self::MenuClosed { window_id, .. } => Some(window_id),
             Self::AppBarDefault | Self::AppBarMenu { .. } | Self::OpenRequested => None,
         }
@@ -3943,6 +4414,9 @@ impl WindowEvent {
                 put_i32(&mut out, 16, dx);
                 put_i32(&mut out, 20, dy);
             }
+            Self::TerrainChanged { .. } | Self::LayerPointer { .. } => {
+                self.write_layer_feed(&mut out);
+            }
             Self::Minimized { .. } => {
                 put_u16(&mut out, 6, EV_MINIMIZED);
             }
@@ -3988,6 +4462,23 @@ impl WindowEvent {
             }
         }
         out
+    }
+
+    /// Write a layer-feed event's own operand block into the already-headed
+    /// frame `out`. A no-op for any other event.
+    fn write_layer_feed(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        match *self {
+            Self::TerrainChanged { generation, .. } => {
+                put_u16(out, 6, EV_TERRAIN_CHANGED);
+                put_u64(out, 16, generation);
+            }
+            Self::LayerPointer { x, y, .. } => {
+                put_u16(out, 6, EV_LAYER_POINTER);
+                put_i32(out, 16, x);
+                put_i32(out, 20, y);
+            }
+            _ => {}
+        }
     }
 
     /// Decode from `bytes`, failing closed on any malformed input.
@@ -4056,6 +4547,21 @@ impl WindowEvent {
                 let dx = read_i32(bytes, 16);
                 let dy = read_i32(bytes, 20);
                 Ok(Self::Scrolled { window_id, dx, dy })
+            }
+            EV_TERRAIN_CHANGED => {
+                event_reserved_zero(bytes, 24)?;
+                Ok(Self::TerrainChanged {
+                    window_id,
+                    generation: read_u64(bytes, 16),
+                })
+            }
+            EV_LAYER_POINTER => {
+                event_reserved_zero(bytes, 24)?;
+                Ok(Self::LayerPointer {
+                    window_id,
+                    x: read_i32(bytes, 16),
+                    y: read_i32(bytes, 20),
+                })
             }
             EV_RESIZED => {
                 event_reserved_zero(bytes, 24)?;
@@ -4219,13 +4725,14 @@ mod tests {
     use super::{
         app_bar_wire_len, decode_create_reply, decode_desktop_reply, decode_hand_over_reply,
         decode_menu_text_reply, decode_minted_id_reply, decode_open_target_reply,
-        encode_create_reply, encode_desktop_reply, encode_hand_over_reply, encode_menu_text_reply,
-        encode_minted_id_reply, encode_open_target_reply, hand_over_wire_len, open_menu_wire_len,
-        put_i32, put_u16, put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuBundle,
-        AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
-        AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath,
-        DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, MenuRefusal, OpenTarget,
-        PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing,
+        decode_terrain_reply, encode_create_reply, encode_desktop_reply, encode_hand_over_reply,
+        encode_menu_text_reply, encode_minted_id_reply, encode_open_target_reply,
+        encode_terrain_reply, hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64,
+        read_u16, AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText,
+        AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
+        AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath, DocumentName, HandOverDocument,
+        HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PointerAction,
+        TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing,
         WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
         APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
         APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
@@ -4234,21 +4741,23 @@ mod tests {
         APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
         APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
         APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
-        CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
-        DESKTOP_REPLY_SERVER_OFFSET, HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN,
-        HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX,
-        MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
-        MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
-        MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, OPEN_MENU_ANCHOR_OFFSET,
+        CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
+        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_REPLY_SERVER_OFFSET, HAND_OVER_GRANT_OFFSET,
+        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET,
+        HAND_OVER_RUN_PATH_MAX, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
+        MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END,
+        MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET,
+        MENU_TEXT_REPLY_TEXT_OFFSET, OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET,
         OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
-        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PRESENT_WIRE_LEN,
-        REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
-        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
-        SET_TOOLTIP_WIRE_LEN, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
-        WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
-        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_FRAMES,
+        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PLACE_LAYER_WIRE_LEN,
+        PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET,
+        SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET,
+        SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN, TAKE_MENU_TEXT_WIRE_LEN,
+        TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX, WINDOW_BACKDROP_BLUR_MAX_PX,
+        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
+        WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
         WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
-        WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -6972,6 +7481,317 @@ mod tests {
         assert_eq!(
             WindowEvent::from_bytes(&bad_modifiers),
             Err(Errno::OutOfRange)
+        );
+    }
+
+    fn layer_open(width_px: u32, height_px: u32) -> WindowRequest {
+        WindowRequest::OpenLayer {
+            shm_handle: 0x2222,
+            event_endpoint: 0x77,
+            frame_count: 2,
+            width_px,
+            height_px,
+            stride_bytes: width_px * 4,
+            format: DisplayFormat::Bgra8888,
+            x: -12,
+            y: 340,
+            depth: LayerDepth::Above,
+        }
+    }
+
+    #[test]
+    fn open_layer_round_trips_including_a_negative_origin() {
+        let request = layer_open(128, 96);
+        let frame = request.frame();
+        assert_eq!(frame.len(), OPEN_LAYER_WIRE_LEN);
+        assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+    }
+
+    #[test]
+    fn open_layer_refuses_a_surface_wider_or_taller_than_the_bound() {
+        // The bound is what keeps a layer surface from covering the desktop
+        // or reproducing a trusted prompt, so the decoder refuses rather
+        // than clamping.
+        let max = DESKTOP_LAYER_MAX_SIDE_LOGICAL;
+        assert!(WindowRequest::from_bytes(&layer_open(max, max).frame()).is_ok());
+        assert_eq!(
+            WindowRequest::from_bytes(&layer_open(max + 1, max).frame()),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&layer_open(max, max + 1).frame()),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn open_layer_refuses_a_reserved_event_endpoint() {
+        let WindowRequest::OpenLayer {
+            shm_handle,
+            frame_count,
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+            x,
+            y,
+            depth,
+            ..
+        } = layer_open(64, 64)
+        else {
+            unreachable!("constructed as OpenLayer")
+        };
+        let hijack = WindowRequest::OpenLayer {
+            shm_handle,
+            event_endpoint: SEATMGR_ENDPOINT,
+            frame_count,
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+            x,
+            y,
+            depth,
+        };
+        assert_eq!(
+            WindowRequest::from_bytes(&hijack.frame()),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn open_layer_refuses_a_depth_outside_the_closed_set() {
+        let mut frame = layer_open(64, 64).frame();
+        frame[LAYER_OPEN_DEPTH] = 2;
+        assert_eq!(WindowRequest::from_bytes(&frame), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn place_layer_round_trips_both_depths() {
+        for depth in [LayerDepth::Below, LayerDepth::Above] {
+            let request = WindowRequest::PlaceLayer {
+                window_id: 9,
+                x: -1,
+                y: i32::MAX,
+                depth,
+            };
+            let frame = request.frame();
+            assert_eq!(frame.len(), PLACE_LAYER_WIRE_LEN);
+            assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+        }
+    }
+
+    #[test]
+    fn place_and_take_terrain_refuse_a_zero_window_id() {
+        let mut frame = WindowRequest::PlaceLayer {
+            window_id: 9,
+            x: 0,
+            y: 0,
+            depth: LayerDepth::Below,
+        }
+        .frame();
+        frame[8..16].fill(0);
+        assert_eq!(WindowRequest::from_bytes(&frame), Err(Errno::OutOfRange));
+
+        let mut frame = WindowRequest::TakeTerrain { window_id: 9 }.frame();
+        frame[8..16].fill(0);
+        assert_eq!(WindowRequest::from_bytes(&frame), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn place_layer_refuses_a_depth_outside_the_closed_set() {
+        let mut frame = WindowRequest::PlaceLayer {
+            window_id: 3,
+            x: 0,
+            y: 0,
+            depth: LayerDepth::Below,
+        }
+        .frame();
+        frame[LAYER_PLACE_DEPTH] = 0xFF;
+        assert_eq!(WindowRequest::from_bytes(&frame), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn take_terrain_round_trips() {
+        let request = WindowRequest::TakeTerrain { window_id: 4 };
+        let frame = request.frame();
+        assert_eq!(frame.len(), WINDOW_ID_WIRE_LEN);
+        assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+    }
+
+    #[test]
+    fn layer_requests_refuse_a_short_or_over_long_frame() {
+        for request in [
+            layer_open(64, 64),
+            WindowRequest::PlaceLayer {
+                window_id: 1,
+                x: 0,
+                y: 0,
+                depth: LayerDepth::Below,
+            },
+            WindowRequest::TakeTerrain { window_id: 1 },
+        ] {
+            let frame = request.frame();
+            assert_eq!(
+                WindowRequest::from_bytes(&frame.truncated()),
+                Err(Errno::BufferTooSmall)
+            );
+            // A byte past the operation's own end is a smuggled field,
+            // however innocuous its value.
+            assert_eq!(
+                WindowRequest::from_bytes(&frame.over_long(0)),
+                Err(Errno::BadMagic)
+            );
+        }
+    }
+
+    #[test]
+    fn terrain_and_pointer_events_round_trip() {
+        for event in [
+            WindowEvent::TerrainChanged {
+                window_id: 7,
+                generation: u64::MAX,
+            },
+            WindowEvent::LayerPointer {
+                window_id: 7,
+                x: -640,
+                y: 480,
+            },
+        ] {
+            assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
+        }
+    }
+
+    #[test]
+    fn layer_events_refuse_a_dirty_reserved_tail_and_a_zero_window() {
+        let mut frame = WindowEvent::LayerPointer {
+            window_id: 7,
+            x: 1,
+            y: 2,
+        }
+        .to_le_bytes();
+        frame[24] = 1;
+        assert_eq!(WindowEvent::from_bytes(&frame), Err(Errno::BadMagic));
+
+        let mut frame = WindowEvent::TerrainChanged {
+            window_id: 7,
+            generation: 1,
+        }
+        .to_le_bytes();
+        frame[8..16].fill(0);
+        assert_eq!(WindowEvent::from_bytes(&frame), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_terrain_page_round_trips_and_keeps_its_back_to_front_order() {
+        let plates = [
+            TerrainPlate {
+                x: 0,
+                y: 0,
+                width_px: 100,
+                height_px: 50,
+            },
+            TerrainPlate {
+                x: -5,
+                y: 12,
+                width_px: 640,
+                height_px: 480,
+            },
+        ];
+        let mut frame = [0u8; WINDOW_TERRAIN_REPLY_MAX];
+        let len = encode_terrain_reply(&plates, &mut frame).expect("a two-plate answer");
+        let mut out = [TerrainPlate {
+            x: 0,
+            y: 0,
+            width_px: 1,
+            height_px: 1,
+        }; DESKTOP_LAYER_MAX_PLATES as usize];
+        assert_eq!(
+            decode_terrain_reply(&frame[..len], &mut out),
+            Ok(&plates[..])
+        );
+    }
+
+    #[test]
+    fn an_empty_terrain_page_is_a_valid_answer() {
+        let mut frame = [0u8; WINDOW_TERRAIN_REPLY_MAX];
+        let len = encode_terrain_reply(&[], &mut frame).expect("a bare desktop");
+        let mut out = [TerrainPlate {
+            x: 0,
+            y: 0,
+            width_px: 1,
+            height_px: 1,
+        }; DESKTOP_LAYER_MAX_PLATES as usize];
+        assert_eq!(decode_terrain_reply(&frame[..len], &mut out), Ok(&[][..]));
+    }
+
+    #[test]
+    fn a_full_terrain_page_fits_the_declared_maximum() {
+        let plate = TerrainPlate {
+            x: 1,
+            y: 2,
+            width_px: 3,
+            height_px: 4,
+        };
+        let plates = [plate; DESKTOP_LAYER_MAX_PLATES as usize];
+        let mut frame = [0u8; WINDOW_TERRAIN_REPLY_MAX];
+        let len = encode_terrain_reply(&plates, &mut frame).expect("a full page");
+        assert_eq!(len, WINDOW_TERRAIN_REPLY_MAX);
+    }
+
+    #[test]
+    fn encoding_more_plates_than_the_bound_is_refused() {
+        let plate = TerrainPlate {
+            x: 0,
+            y: 0,
+            width_px: 1,
+            height_px: 1,
+        };
+        let plates = [plate; DESKTOP_LAYER_MAX_PLATES as usize + 1];
+        let mut frame = [0u8; WINDOW_TERRAIN_REPLY_MAX + TerrainPlate::WIRE_LEN];
+        assert_eq!(
+            encode_terrain_reply(&plates, &mut frame),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_plate_naming_no_area_refuses_the_whole_page() {
+        let plates = [TerrainPlate {
+            x: 0,
+            y: 0,
+            width_px: 10,
+            height_px: 10,
+        }];
+        let mut frame = [0u8; WINDOW_TERRAIN_REPLY_MAX];
+        let len = encode_terrain_reply(&plates, &mut frame).expect("one plate");
+        // Zero the plate's width in place: a rectangle with no area is
+        // refused, never skipped.
+        put_i32(&mut frame, 8 + 8, 0);
+        let mut out = [TerrainPlate {
+            x: 0,
+            y: 0,
+            width_px: 1,
+            height_px: 1,
+        }; DESKTOP_LAYER_MAX_PLATES as usize];
+        assert_eq!(
+            decode_terrain_reply(&frame[..len], &mut out),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_refusal_reaches_the_caller_rather_than_an_empty_page() {
+        let frame = crate::reply::encode_status_reply(Err(Errno::PermissionDenied));
+        let mut out = [TerrainPlate {
+            x: 0,
+            y: 0,
+            width_px: 1,
+            height_px: 1,
+        }; DESKTOP_LAYER_MAX_PLATES as usize];
+        assert_eq!(
+            decode_terrain_reply(&frame, &mut out),
+            Err(Errno::PermissionDenied)
         );
     }
 }

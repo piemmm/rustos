@@ -188,6 +188,7 @@ pub mod holdback;
 pub mod input;
 pub mod keyboard;
 pub mod launch;
+pub mod layer;
 pub mod library;
 pub mod lock;
 pub mod menu;
@@ -257,6 +258,11 @@ pub use launch::{
     admitted_pid, bundle_of_run_path, launch_argv, launch_failure_report, reap_launched,
     resolve_launch, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,
     LaunchedApp,
+};
+pub use layer::{
+    LayerDecision, LayerFeed, LayerState, LayerSurface, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE,
+    LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED,
+    LAYER_REFUSED_MESSAGE, LAYER_RETIRED, LAYER_RETIRED_MESSAGE,
 };
 pub use library::{catalogued, load_library, load_programs, LoadedLibrary, LoadedPrograms};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};

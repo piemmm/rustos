@@ -66,5 +66,6 @@
 #define TAIRIX_CAP_APPDATA_ADMIN ((uint16_t)44u)
 #define TAIRIX_CAP_SERVICE_CONTROL ((uint16_t)45u)
 #define TAIRIX_CAP_CPUFREQ ((uint16_t)46u)
+#define TAIRIX_CAP_DESKTOP_LAYER ((uint16_t)47u)
 
 #endif /* TAIRIX_CAPABILITY_H */

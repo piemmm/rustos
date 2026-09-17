@@ -1073,6 +1073,7 @@ mod tests {
                 "basename",
                 "cat",
                 "chmod",
+                "cinder",
                 "clear",
                 "confd",
                 "configure",

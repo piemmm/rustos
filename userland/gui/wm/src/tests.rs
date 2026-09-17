@@ -12,7 +12,7 @@ use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region};
 use crate::surface::Surface;
-use crate::{Compositor, WindowId};
+use crate::{Compositor, PointerCatch, WindowId};
 
 use tairix_cursor::CursorImage;
 use tairix_hash::BuildFastHash;
@@ -172,6 +172,7 @@ impl Display for MockDisplay {
 const BLUE: Color = Color::rgb(0, 0, 255);
 const RED: Color = Color::rgb(255, 0, 0);
 const GREEN: Color = Color::rgb(0, 255, 0);
+const WHITE: Color = Color::rgb(255, 255, 255);
 
 // The colour algebra (`Color`/`Pixel`, premultiply, `over`, `scale_alpha`)
 // and the `Surface` pixel buffer are unit-tested in their own crate
@@ -1544,7 +1545,7 @@ fn secondary_press_on_desktop_is_reported_to_the_desktop_and_changes_nothing() {
 }
 
 #[test]
-fn an_input_transparent_window_never_takes_the_pointer() {
+fn a_pointer_transparent_window_never_takes_the_pointer() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let under = c.add_window(Point::new(10, 10), opaque(40, 40, RED));
     let overlay = c.add_window(Point::new(15, 15), opaque(20, 20, GREEN));
@@ -1553,7 +1554,7 @@ fn an_input_transparent_window_never_takes_the_pointer() {
     // Stacked above, the overlay is the target — until it is made
     // input-transparent, when the pointer passes straight through it.
     assert_eq!(c.window_at(at), Some(overlay));
-    assert!(c.set_input_transparent(overlay, true));
+    assert!(c.set_pointer_catch(overlay, PointerCatch::None));
     assert_eq!(
         c.window_at(at),
         Some(under),
@@ -1568,16 +1569,16 @@ fn an_input_transparent_window_never_takes_the_pointer() {
     // It is still composited: transparency to *input* says nothing about
     // pixels.
     assert!(c.window(overlay).expect("still tracked").is_visible());
-    assert!(c.set_input_transparent(overlay, false));
+    assert!(c.set_pointer_catch(overlay, PointerCatch::Bounds));
     assert_eq!(c.window_at(at), Some(overlay), "and it is reversible");
     assert!(
-        !c.set_input_transparent(WindowId(9_999), true),
+        !c.set_pointer_catch(WindowId(9_999), PointerCatch::None),
         "an unknown window is refused rather than silently accepted"
     );
 
     // A press therefore activates the window beneath, not the overlay — the
     // press raises it, so this is checked last.
-    assert!(c.set_input_transparent(overlay, true));
+    assert!(c.set_pointer_catch(overlay, PointerCatch::None));
     let mut router = InputRouter::new();
     router.handle(moved(at.x, at.y), &mut c, T0);
     assert!(matches!(
@@ -8596,4 +8597,172 @@ fn losing_and_regaining_a_frost_repaints_the_window() {
         &incremental[..],
         "losing a frost left the screen showing the frosted window"
     );
+}
+
+/// A surface whose left half is opaque and whose right half is fully
+/// transparent: the shape a companion with a transparent margin has.
+fn half_opaque(w: u32, h: u32, color: Color) -> Surface {
+    let mut surface = Surface::filled(w, h, Pixel::TRANSPARENT).expect("surface allocates");
+    surface.fill_rect(0, 0, w / 2, h, color);
+    surface
+}
+
+#[test]
+fn a_shaped_window_catches_the_pointer_only_where_it_drew() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let under = c.add_window(Point::new(0, 0), opaque(80, 80, RED));
+    let shaped = c.add_window(Point::new(10, 10), half_opaque(40, 40, GREEN));
+    assert!(c.set_pointer_catch(shaped, PointerCatch::Shape));
+
+    // Over the drawn half the shaped window is the target; over its
+    // transparent margin the press reaches the window beneath, which is
+    // what lets a companion be clickable without swallowing the desktop.
+    let on_shape = Point::new(15, 20);
+    let on_margin = Point::new(45, 20);
+    assert_eq!(c.window_at(on_shape), Some(shaped));
+    assert_eq!(c.window_at(on_margin), Some(under));
+    assert_eq!(
+        c.pointer_target(on_shape),
+        Some(PointerTarget::Window(shaped))
+    );
+    assert_eq!(
+        c.pointer_target(on_margin),
+        Some(PointerTarget::Window(under))
+    );
+
+    // Outside its bounds entirely it is not a candidate at all.
+    assert_eq!(c.window_at(Point::new(70, 70)), Some(under));
+}
+
+#[test]
+fn a_shaped_window_whose_content_is_released_catches_nothing() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let under = c.add_window(Point::new(0, 0), opaque(80, 80, RED));
+    let shaped = c.add_window(Point::new(10, 10), half_opaque(40, 40, GREEN));
+    assert!(c.set_pointer_catch(shaped, PointerCatch::Shape));
+    let on_shape = Point::new(15, 20);
+    assert_eq!(c.window_at(on_shape), Some(shaped));
+
+    // A released window draws nothing, so there is no silhouette to be
+    // inside: it fails closed rather than swallowing clicks invisibly.
+    c.teardown_content();
+    assert_eq!(c.window_at(on_shape), Some(under));
+}
+
+#[test]
+fn stack_below_puts_a_window_under_one_anchor_and_over_the_rest() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("codepositor");
+    let app = c.add_window(Point::new(0, 0), opaque(80, 80, RED));
+    let bar = c.add_window(Point::new(0, 0), opaque(80, 10, GREEN));
+    let layer = c.add_window(Point::new(0, 0), opaque(40, 40, WHITE));
+
+    // Freshly added, `layer` is already at the front; putting it below the
+    // bar must leave it above the application window.
+    assert!(c.stack_below(layer, bar));
+    assert_eq!(c.window_at(Point::new(5, 5)), Some(bar));
+    assert_eq!(c.window_at(Point::new(5, 20)), Some(layer));
+    assert_eq!(c.window_at(Point::new(60, 60)), Some(app));
+
+    // And lowering it takes it under the application too, which is the
+    // other depth a layer surface has.
+    assert!(c.lower(layer));
+    assert_eq!(c.window_at(Point::new(5, 20)), Some(app));
+}
+
+#[test]
+fn stack_below_refuses_an_unknown_or_own_family_anchor() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let one = c.add_window(Point::new(0, 0), opaque(20, 20, RED));
+    let two = c.add_window(Point::new(0, 0), opaque(20, 20, GREEN));
+    assert!(!c.stack_below(one, WindowId(9_999)));
+    assert!(!c.stack_below(WindowId(9_999), two));
+    assert!(
+        !c.stack_below(one, one),
+        "a family cannot be stacked below its own member"
+    );
+}
+
+#[test]
+fn stack_below_keeps_a_raised_menu_over_the_layer_surface() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let app = c.add_window(Point::new(0, 0), opaque(80, 80, RED));
+    let bar = c.add_window(Point::new(0, 0), opaque(80, 10, GREEN));
+    let layer = c.add_window(Point::new(0, 0), opaque(40, 40, WHITE));
+    assert!(c.stack_below(layer, bar));
+
+    // A menu the application opens raises over everything, companion
+    // included: a pet must never cover the surfaces the user acts through.
+    let menu = c
+        .add_transient_window(app, Point::new(10, 20), opaque(30, 30, BLUE))
+        .expect("a transient of a known window");
+    assert_eq!(c.window_at(Point::new(15, 25)), Some(menu));
+}
+
+#[test]
+fn terrain_reports_visible_windows_back_to_front_without_the_asking_surface() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let back = c.add_window(Point::new(0, 0), opaque(30, 20, RED));
+    let front = c.add_window(Point::new(40, 10), opaque(20, 30, GREEN));
+    let layer = c.add_window(Point::new(5, 5), opaque(10, 10, WHITE));
+
+    let plates: alloc::vec::Vec<Rect> = c.terrain(layer).collect();
+    assert_eq!(
+        plates,
+        [
+            c.window(back).expect("tracked").bounds(),
+            c.window(front).expect("tracked").bounds()
+        ],
+        "back-to-front, and never the asking surface itself"
+    );
+
+    // A hidden window is not terrain: nothing is drawn there to walk on.
+    assert!(c.set_visible(front, false));
+    let plates: alloc::vec::Vec<Rect> = c.terrain(layer).collect();
+    assert_eq!(plates, [c.window(back).expect("tracked").bounds()]);
+}
+
+#[test]
+fn a_window_that_refuses_focus_is_pressable_but_never_holds_the_keyboard() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let app = c.add_window(Point::new(0, 0), opaque(80, 80, RED));
+    let bar = c.add_window(Point::new(0, 0), opaque(80, 10, GREEN));
+    let layer = c.add_window(Point::new(20, 20), opaque(30, 30, WHITE));
+    assert!(c.stack_below(layer, bar));
+    assert!(c.set_focusable(layer, false));
+
+    let mut router = InputRouter::new();
+    router.focus(app, &c);
+    router.handle(moved(30, 30), &mut c, T0);
+    let response = router.handle(press_primary(), &mut c, T0);
+
+    // The press reaches the surface's owner, so a companion can be petted.
+    assert!(matches!(
+        response,
+        InputResponse::Activated { window, .. } if window == layer
+    ));
+    // ...but it takes neither the keyboard nor a new stacking position: a
+    // lookalike that cannot be typed into captures nothing, and a surface
+    // pinned to a layer must not climb out of it.
+    assert_eq!(router.focused(), Some(app));
+    assert_eq!(
+        c.window_at(Point::new(5, 5)),
+        Some(bar),
+        "the press must not have raised the layer surface over the bar"
+    );
+}
+
+#[test]
+fn focus_cannot_be_handed_to_a_window_that_refuses_it() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let app = c.add_window(Point::new(0, 0), opaque(40, 40, RED));
+    let layer = c.add_window(Point::new(40, 40), opaque(20, 20, WHITE));
+    assert!(c.set_focusable(layer, false));
+
+    let mut router = InputRouter::new();
+    assert!(router.focus(app, &c));
+    assert!(
+        !router.focus(layer, &c),
+        "there must be no second route into the focus rotation"
+    );
+    assert_eq!(router.focused(), Some(app));
 }

@@ -30,7 +30,7 @@ use core::fmt;
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
-use tairix_abi::window_ipc::{WindowEvent, WindowSizing, WINDOW_ENDPOINT};
+use tairix_abi::window_ipc::{LayerDepth, WindowEvent, WindowSizing, WINDOW_ENDPOINT};
 use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
 use tairix_display::{winframe, SERIAL};
 use tairix_raster::Surface;
@@ -39,7 +39,7 @@ use tairix_theme::ThemeRegistry;
 use crate::client::{WindowClient, WindowTransport};
 use crate::desktop::Desktop;
 use crate::frames::WindowFrames;
-use crate::server::PopupSpec;
+use crate::server::{LayerSpec, PopupSpec};
 
 /// Exit code when the shared frame region could not be created or granted to
 /// the window endpoint. A reserved, fail-closed value.
@@ -572,6 +572,83 @@ impl WindowPane {
             frames,
             mode: *mode,
         })
+    }
+
+    /// Open a desktop layer surface of `mode` at screen point `at` in
+    /// stacking layer `depth`, refusing a reply that did not come from
+    /// `server`.
+    ///
+    /// The same region, present, and resize bookkeeping every pane has —
+    /// a layer surface is a window in the session's one registry, so it
+    /// needs no second copy of any of it. What differs is only the opening:
+    /// it requires `CAP_DESKTOP_LAYER`, and it names a screen point instead
+    /// of a parent.
+    ///
+    /// A refusal is an ordinary outcome, not a fault: an account whose
+    /// ceiling does not carry the capability gets [`Errno::PermissionDenied`]
+    /// here and the caller carries on without a desktop presence.
+    ///
+    /// # Errors
+    ///
+    /// [`EXIT_NO_FRAMES`] for the region, [`EXIT_NO_WINDOW`] for a refused
+    /// open (including the missing capability), and
+    /// [`Errno::PermissionDenied`] under [`EXIT_NO_WINDOW`] for a reply from
+    /// another sender.
+    pub fn open_layer<T: WindowTransport>(
+        client: &mut WindowClient<T>,
+        server: ProcId,
+        event_endpoint: u64,
+        mode: &DisplayMode,
+        at: (i32, i32),
+        depth: LayerDepth,
+    ) -> Result<Self, ShellError> {
+        let (frames, grant) = Self::region(mode)?;
+        let (window, replied) = client
+            .open_layer(&LayerSpec {
+                shm_handle: grant,
+                event_endpoint,
+                frame_count: FRAME_COUNT,
+                surface: *mode,
+                x: at.0,
+                y: at.1,
+                depth,
+            })
+            .map_err(|err| {
+                ShellError::new(
+                    EXIT_NO_WINDOW,
+                    "desktop session refused the layer surface",
+                    err,
+                )
+            })?;
+        if replied != server {
+            let _ = client.close(window);
+            return Err(ShellError::new(
+                EXIT_NO_WINDOW,
+                "layer-surface reply came from another sender",
+                Errno::PermissionDenied,
+            ));
+        }
+        Ok(Self {
+            window,
+            frames,
+            mode: *mode,
+        })
+    }
+
+    /// Move this layer surface to screen point `at` in stacking layer
+    /// `depth`. The session clamps the point onto the work area.
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal — a pane that is not a layer surface, or a
+    /// transport failure.
+    pub fn place<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        at: (i32, i32),
+        depth: LayerDepth,
+    ) -> Result<(), Errno> {
+        client.place_layer(self.window, at.0, at.1, depth)
     }
 
     /// The session's id for this window, which its delivered events name.

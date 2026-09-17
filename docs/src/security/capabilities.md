@@ -149,11 +149,33 @@ Every account that may start an interactive session is granted at least
 `CAP_CONSOLE_WRITE`, `CAP_NET` (ordinary transport traffic through the
 socket surface; the coarser `CAP_NET_ADMIN` and `CAP_NET_RAW` are not
 baseline), `CAP_LOG_EMIT`, and the graphical-session class —
-`CAP_DISPLAY`, `CAP_INPUT_READ`, and `CAP_SHM`, so a graphical login is
-an ordinary session, not an administrative act; real reach stays
-per-inode, per-descriptor, and per-lease (the kernel owner-gates every
-seat acquire, input drain, and present against the live lease, and every
-shared-memory region against its owner).
+`CAP_DISPLAY`, `CAP_INPUT_READ`, `CAP_SHM`, and `CAP_DESKTOP_LAYER`, so a
+graphical login is an ordinary session, not an administrative act; real
+reach stays per-inode, per-descriptor, and per-lease (the kernel
+owner-gates every seat acquire, input drain, and present against the live
+lease, and every shared-memory region against its owner).
+
+`CAP_DESKTOP_LAYER` is presence on the desktop *outside a window of one's
+own*: a small undecorated surface placed in screen coordinates, stacked
+relative to other applications' windows, with the desktop-geometry and
+pointer feeds that placement needs. Being undecorated is not the
+privileged part — an app may already open an undecorated popup with no
+capability, because a popup is anchored to a window it owns and is never
+told its own screen position. This grants what that withholds.
+
+It is baseline because a desktop companion is an ordinary thing for a
+user to run, and because the ceiling is not what bounds it: the
+intersection with a *signed* manifest is, so only a bundle whose manifest
+asks for it can obtain one. It is a user-interface spoofing primitive, so
+the containment is structural and lives in the desktop session: the
+surface is capped below the narrowest surface the session draws for a
+trusted decision (asserted at compile time against each of them), is
+never in the focus rotation and is never routed a key, catches the
+pointer only where its own content is opaque, sits below the icon bar at
+its highest depth, and is hidden with both feeds stopped whenever a
+trusted surface is up. Every open, refusal and retirement is on the audit
+log, naming that the holder receives pointer position. See
+`plans/CINDER.md`.
 
 `CAP_LOG_EMIT` is baseline because a session legitimately reports its own
 operational state, and a program built to log that structurally cannot is

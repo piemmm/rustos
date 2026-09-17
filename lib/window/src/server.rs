@@ -45,13 +45,15 @@ use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
     encode_create_reply, encode_desktop_reply, encode_hand_over_reply, encode_menu_text_reply,
-    encode_minted_id_reply, encode_open_target_reply, AppBar, AppMenu, HandOverDocument,
-    HandOverOutcome, OpenTarget, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
-    APP_MENU_ENTRY_MAX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
-    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
-    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+    encode_minted_id_reply, encode_open_target_reply, encode_terrain_reply, AppBar, AppMenu,
+    HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, TerrainPlate, WindowEvent,
+    WindowRegion, WindowRequest, WindowTitle, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
+    DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES, WINDOW_CREATE_REPLY_LEN,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
+    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+    WINDOW_TERRAIN_REPLY_MAX,
 };
-use tairix_abi::Errno;
+use tairix_abi::{CapabilityId, Errno};
 use tairix_display::{FrameRegion, ShmMapper};
 
 /// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes,
@@ -79,7 +81,10 @@ pub const WINDOW_REPLY_MAX: usize = {
         wider(WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN),
         wider(
             wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN),
-            wider(WINDOW_MINTED_ID_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX),
+            wider(
+                wider(WINDOW_MINTED_ID_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX),
+                WINDOW_TERRAIN_REPLY_MAX,
+            ),
         ),
     )
 };
@@ -152,6 +157,30 @@ pub trait CallerIdentity {
     /// Any [`Errno`] the attestation surfaces (a vanished caller, a
     /// transport fault); the engine refuses the request in that case.
     fn caller(&mut self, ticket: u64) -> Result<ProcId, Errno>;
+
+    /// Whether the in-flight caller behind `ticket` holds `cap`, from the
+    /// **kernel's** attestation of that caller rather than anything the
+    /// caller said.
+    ///
+    /// The channel is bound unrestricted-sender, because a session is an
+    /// ordinary user process and the kernel reserves a restricted-sender
+    /// bind for holders of `CAP_IPC_BIND_PRIVILEGED` — a seat lease
+    /// substitutes only for the reserved-id half of that gate. So the one
+    /// gated operation on this channel is checked here instead, against the
+    /// same unforgeable fact the kernel would have used.
+    ///
+    /// The default answers `false`: an identity source that cannot attest
+    /// capabilities must not be taken to grant them, so a host without one
+    /// refuses the privileged operations rather than opening them.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the attestation surfaces; the engine refuses the
+    /// request in that case.
+    fn caller_holds(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
+        let _ = (ticket, cap);
+        Ok(false)
+    }
 }
 
 /// The session's compositor bridge: what the engine tells the desktop
@@ -220,6 +249,87 @@ pub trait WindowHost {
     ) -> Result<(), Errno> {
         let _ = (window_id, parent_window_id, offset_x, offset_y, surface);
         Ok(())
+    }
+
+    /// A validated, capability-gated `OpenLayer` opened desktop layer
+    /// surface `window_id` of `surface` geometry for the attested `owner`,
+    /// at screen point `x`/`y` in stacking layer `depth`.
+    ///
+    /// The engine has checked the caller's kernel-attested
+    /// `CAP_DESKTOP_LAYER`, the geometry, and the per-client and per-seat
+    /// surface counts. The host owns what is left, because only it knows
+    /// the screen: clamping the surface onto the work area, re-checking the
+    /// extent against the **live** UI scale (the wire bound is the ceiling
+    /// at a scale of one), stacking it under the session's own chrome,
+    /// keeping it out of the focus rotation and off the taskbar, and
+    /// hit-testing it against its own content alpha.
+    ///
+    /// Unlike [`popup_opened`](Self::popup_opened) the default **refuses**:
+    /// this is privileged authority, and a host that has not implemented it
+    /// must not appear to grant it.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host refuses the surface with; the engine unmaps
+    /// the region and relays the refusal, so engine and host stay in
+    /// lockstep.
+    fn layer_opened(
+        &mut self,
+        owner: ProcId,
+        window_id: u64,
+        surface: &DisplayMode,
+        x: i32,
+        y: i32,
+        depth: LayerDepth,
+    ) -> Result<(), Errno> {
+        let _ = (owner, window_id, surface, x, y, depth);
+        Err(Errno::NotSupported)
+    }
+
+    /// The engine refused a layer operation from `owner` at its capability
+    /// gate, before any state was touched.
+    ///
+    /// Reported because the gate is enforced *here* rather than by the
+    /// kernel — a session cannot bind a restricted-sender endpoint — so
+    /// without this the most security-relevant refusal on the channel would
+    /// be the one nothing recorded. The default is a no-op: a host with no
+    /// audit log to write to is not obliged to invent one.
+    fn layer_refused(&mut self, owner: ProcId, reason: Errno) {
+        let _ = (owner, reason);
+    }
+
+    /// A validated `PlaceLayer` moved layer surface `window_id` to screen
+    /// point `x`/`y` in stacking layer `depth`. Clamping is the host's, as
+    /// at open.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host refuses the move with.
+    fn layer_placed(
+        &mut self,
+        window_id: u64,
+        x: i32,
+        y: i32,
+        depth: LayerDepth,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, x, y, depth);
+        Err(Errno::NotSupported)
+    }
+
+    /// Fill `out` with the visible windows' screen rectangles, back-to-front,
+    /// as layer surface `window_id` sees them, and return how many were
+    /// written.
+    ///
+    /// The asking surface is never its own terrain. A desktop with more
+    /// visible windows than `out` holds is reported truncated to the
+    /// frontmost, which are the ones a surface can actually meet.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host refuses the query with.
+    fn layer_terrain(&mut self, window_id: u64, out: &mut [TerrainPlate]) -> Result<usize, Errno> {
+        let _ = (window_id, out);
+        Err(Errno::NotSupported)
     }
 
     /// A validated `Present`: `frame` is exactly one frame of
@@ -528,6 +638,24 @@ pub struct PopupSpec {
     pub offset_y: i32,
 }
 
+/// Everything a validated [`WindowRequest::OpenLayer`] carries.
+pub struct LayerSpec {
+    /// The `shm_grant`ed region holding the surface's frames, mapped once.
+    pub shm_handle: u64,
+    /// The endpoint the surface's own events are delivered to.
+    pub event_endpoint: u64,
+    /// How many frames the region holds, back to back.
+    pub frame_count: u32,
+    /// The geometry of one frame, which must hold for every frame.
+    pub surface: DisplayMode,
+    /// Left edge in physical screen pixels, before the host clamps it.
+    pub x: i32,
+    /// Top edge in physical screen pixels, before the host clamps it.
+    pub y: i32,
+    /// Which desktop stacking layer the surface opens in.
+    pub depth: LayerDepth,
+}
+
 /// The engine's own [`HandOverDesk`]: its queue and the sink the wake goes
 /// out on, bound for the length of one hand-over.
 struct EngineDesk<'a, M: ShmMapper> {
@@ -656,6 +784,13 @@ struct WindowRecord<R> {
     /// is closed when the window it hangs from closes, so the link lives
     /// beside the window it binds.
     parent: Option<u64>,
+    /// The desktop stacking layer this surface sits in, or `None` for an
+    /// ordinary window.
+    ///
+    /// One field answers both "is this a layer surface?" and "which layer?",
+    /// so the two can never disagree: an operation reserved for a layer
+    /// surface refuses any window whose answer here is `None`.
+    layer: Option<LayerDepth>,
 }
 
 /// One committed quick-entry text, with the open whose answer it belongs to.
@@ -793,14 +928,29 @@ impl<M: ShmMapper> WindowServer<M> {
                 return match decoded {
                     // A request that mints an id answers with the frame that
                     // carries it, so an attestation failure must too.
-                    WindowRequest::Create { .. } | WindowRequest::CreatePopup { .. } => {
-                        create_reply(reply, Err(err), self.server)
-                    }
+                    WindowRequest::Create { .. }
+                    | WindowRequest::CreatePopup { .. }
+                    | WindowRequest::OpenLayer { .. } => create_reply(reply, Err(err), self.server),
                     WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(err)),
                     _ => status(reply, Err(err)),
                 };
             }
         };
+        // The one gated group on this channel, checked before dispatch
+        // touches any state and re-checked on every layer operation rather
+        // than only at open, so a revoked grant stops the surface at its
+        // next request instead of lasting as long as the process does.
+        if is_layer_op(&decoded) {
+            let refusal = match identity.caller_holds(ticket, CapabilityId::DESKTOP_LAYER) {
+                Ok(true) => None,
+                Ok(false) => Some(Errno::PermissionDenied),
+                Err(err) => Some(err),
+            };
+            if let Some(err) = refusal {
+                host.layer_refused(caller, err);
+                return layer_refusal(&decoded, reply, err, self.server);
+            }
+        }
         self.dispatch(host, sink, caller, &decoded, reply)
     }
 
@@ -858,6 +1008,13 @@ impl<M: ShmMapper> WindowServer<M> {
                     offset_y,
                 };
                 create_reply(reply, self.create_popup(host, caller, spec), self.server)
+            }
+            WindowRequest::OpenLayer { .. } => {
+                let opened = match layer_spec(decoded) {
+                    Some(spec) => self.open_layer(host, caller, &spec),
+                    None => Err(Errno::NotSupported),
+                };
+                create_reply(reply, opened, self.server)
             }
             WindowRequest::OpenMenu {
                 window_id,
@@ -920,6 +1077,18 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::PickFile { window_id } => {
                 status(reply, self.pick_file(host, caller, window_id))
             }
+            WindowRequest::PlaceLayer {
+                window_id,
+                x,
+                y,
+                depth,
+            } => status(
+                reply,
+                self.place_layer(host, caller, window_id, x, y, depth),
+            ),
+            WindowRequest::TakeTerrain { window_id } => {
+                self.take_terrain(host, caller, window_id, reply)
+            }
             WindowRequest::SetTooltip {
                 window_id,
                 region,
@@ -965,7 +1134,9 @@ impl<M: ShmMapper> WindowServer<M> {
             // the create-reply frame; refusing it here keeps this total
             // without a second copy of that path, and refuses rather than
             // opening a window down a route that never validated one.
-            WindowRequest::Create { .. } | WindowRequest::CreatePopup { .. } => {
+            WindowRequest::Create { .. }
+            | WindowRequest::CreatePopup { .. }
+            | WindowRequest::OpenLayer { .. } => {
                 create_reply(reply, Err(Errno::NotSupported), self.server)
             }
             // Likewise a menu open, which mints an open id.
@@ -1043,6 +1214,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 menu_open: None,
                 menu_text: None,
                 parent: None,
+                layer: None,
             },
         );
         Ok(window_id)
@@ -1108,9 +1280,137 @@ impl<M: ShmMapper> WindowServer<M> {
                 menu_open: None,
                 menu_text: None,
                 parent: Some(spec.parent_window_id),
+                layer: None,
             },
         );
         Ok(window_id)
+    }
+
+    /// Open a desktop layer surface for `caller`.
+    ///
+    /// The caller's `CAP_DESKTOP_LAYER` was checked before this was
+    /// reached. What is left is containment: a layer surface is counted
+    /// per client and per seat, so neither one holder nor a crowd of them
+    /// can occupy more of the desktop than the bounds allow, and its frames
+    /// are charged against the same per-client budget every window's are.
+    /// The host is told before committing, so a refused surface leaves no
+    /// record and drops the mapping.
+    fn open_layer(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        spec: &LayerSpec,
+    ) -> Result<u64, Errno> {
+        if caller.is_kernel() {
+            return Err(Errno::PermissionDenied);
+        }
+        if self.layer_count(Some(caller)) >= DESKTOP_LAYER_MAX_PER_CLIENT
+            || self.layer_count(None) >= DESKTOP_LAYER_MAX_PER_SEAT
+        {
+            return Err(Errno::LimitExceeded);
+        }
+        let frame_len = frame_bytes(&spec.surface)?;
+        let total = frame_len
+            .checked_mul(spec.frame_count as usize)
+            .ok_or(Errno::LengthOutOfRange)?;
+        if !self.client_frames_fit(caller, total as u64, None) {
+            return Err(Errno::NoSpace);
+        }
+        let region = self.mapper.map(spec.shm_handle, total)?;
+        let window_id = self.next_id;
+        let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
+        host.layer_opened(caller, window_id, &spec.surface, spec.x, spec.y, spec.depth)?;
+        self.next_id = next;
+        self.windows.insert(
+            window_id,
+            WindowRecord {
+                owner: caller,
+                event_endpoint: spec.event_endpoint,
+                surface: spec.surface,
+                frame_count: spec.frame_count,
+                frame_len,
+                region: Some(region),
+                pick_pending: false,
+                menu_open: None,
+                menu_text: None,
+                parent: None,
+                layer: Some(spec.depth),
+            },
+        );
+        Ok(window_id)
+    }
+
+    /// How many live layer surfaces there are, for one `owner` or across
+    /// every client when `owner` is `None`.
+    fn layer_count(&self, owner: Option<ProcId>) -> usize {
+        self.windows
+            .values()
+            .filter(|record| {
+                record.layer.is_some() && owner.is_none_or(|caller| record.owner == caller)
+            })
+            .count()
+    }
+
+    /// Move `caller`'s own live layer surface to a new screen point and
+    /// stacking layer.
+    ///
+    /// Refuses any window the caller does not own, and any window of the
+    /// caller's that is not a layer surface — an ordinary window is placed
+    /// by the window manager, and letting this reposition one would hand
+    /// every `CAP_DESKTOP_LAYER` holder the authority to move its own
+    /// windows around the screen, which is not what the capability is for.
+    fn place_layer(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        x: i32,
+        y: i32,
+        depth: LayerDepth,
+    ) -> Result<(), Errno> {
+        let record = owned_window(&self.windows, caller, window_id)?;
+        if record.layer.is_none() {
+            return Err(Errno::NotSupported);
+        }
+        host.layer_placed(window_id, x, y, depth)?;
+        // Recorded only once the host accepted, so the engine's depth is
+        // always the one the compositor actually stacked.
+        if let Some(record) = self.windows.get_mut(&window_id) {
+            record.layer = Some(depth);
+        }
+        Ok(())
+    }
+
+    /// Answer `caller`'s terrain pull for its own live layer surface.
+    fn take_terrain(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        let plates = match owned_window(&self.windows, caller, window_id) {
+            Ok(record) if record.layer.is_none() => Err(Errno::NotSupported),
+            Ok(_) => Ok(()),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = plates {
+            return status(reply, Err(err));
+        }
+        let mut out = [TerrainPlate {
+            x: 0,
+            y: 0,
+            width_px: 1,
+            height_px: 1,
+        }; DESKTOP_LAYER_MAX_PLATES as usize];
+        let written = match host.layer_terrain(window_id, &mut out) {
+            Ok(written) => written.min(out.len()),
+            Err(err) => return status(reply, Err(err)),
+        };
+        match encode_terrain_reply(&out[..written], reply) {
+            Ok(len) => len,
+            Err(err) => status(reply, Err(err)),
+        }
     }
 
     /// Hang an attached window from a panel row of `caller`'s live chain,
@@ -1708,6 +2008,65 @@ impl<M: ShmMapper> WindowServer<M> {
 /// Look up `window_id` **as owned by** `caller`. A window owned by
 /// someone else answers exactly like a window that does not exist, so
 /// the reply leaks nothing about other clients.
+/// The [`LayerSpec`] a decoded [`WindowRequest::OpenLayer`] describes, or
+/// `None` for any other request.
+fn layer_spec(request: &WindowRequest) -> Option<LayerSpec> {
+    let WindowRequest::OpenLayer {
+        shm_handle,
+        event_endpoint,
+        frame_count,
+        width_px,
+        height_px,
+        stride_bytes,
+        format,
+        x,
+        y,
+        depth,
+    } = *request
+    else {
+        return None;
+    };
+    Some(LayerSpec {
+        shm_handle,
+        event_endpoint,
+        frame_count,
+        surface: surface_of(width_px, height_px, stride_bytes, format),
+        x,
+        y,
+        depth,
+    })
+}
+
+/// Whether `request` is one of the operations `CAP_DESKTOP_LAYER` gates.
+///
+/// Named once, so the gate in `serve` and the refusal frame it writes can
+/// never disagree about which operations are privileged.
+fn is_layer_op(request: &WindowRequest) -> bool {
+    matches!(
+        request,
+        WindowRequest::OpenLayer { .. }
+            | WindowRequest::PlaceLayer { .. }
+            | WindowRequest::TakeTerrain { .. }
+    )
+}
+
+/// Write the refusal frame `request`'s own reply shape requires.
+///
+/// An open mints an id and so answers with the create frame; the other two
+/// answer with a plain status word, which a terrain decode reads as the
+/// refusal it is rather than as an empty page.
+fn layer_refusal(
+    request: &WindowRequest,
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    err: Errno,
+    server: ProcId,
+) -> usize {
+    match request {
+        WindowRequest::OpenLayer { .. } => create_reply(reply, Err(err), server),
+        _ => status(reply, Err(err)),
+    }
+}
+
 fn owned_window<R>(
     windows: &BTreeMap<u64, WindowRecord<R>>,
     caller: ProcId,

@@ -192,6 +192,72 @@ fn destructive_role_uses_the_danger_rim() {
     assert_eq!(surface.get(0, H / 2), Some(premul(theme.palette().danger)));
 }
 
+/// Render `label` on a plate `height` tall, so two renderings can be compared
+/// for whether any glyph reached the surface at all.
+///
+/// Comparing against the same plate with nothing on it is independent of which
+/// palette entry a role's label resolves to.
+fn plate_with(label: &str, height: u32, theme: &Theme) -> Surface {
+    let button = Button::new(ButtonContent::Label(label.into()), ControlRole::Primary);
+    let mut surface = Surface::new(W, height).expect("surface");
+    button.render(&mut surface, Rect::new(0, 0, W, height), Scale::ONE, theme);
+    surface
+}
+
+#[test]
+fn a_plate_too_short_to_inset_still_shows_its_label() {
+    // The text inset is horizontal clearance from the rim, not a vertical
+    // budget: a line is seated by centring on the plate's own height. Treating
+    // the inset as vertical made a short plate drop its content silently — a
+    // frame with no label on it and no diagnostic anywhere.
+    let theme = Theme::dark();
+    let glyph_h = font().glyph_height();
+    let inset = Scale::ONE.scale_length(theme.metrics().control_inset);
+    assert!(
+        glyph_h < inset * 2,
+        "the case only exists while a line of type is shorter than twice the inset"
+    );
+    assert_ne!(
+        plate_with("Let Cinder out", glyph_h, &theme).pixels(),
+        plate_with("", glyph_h, &theme).pixels(),
+        "a plate exactly as tall as a line of type must draw that line"
+    );
+}
+
+#[test]
+fn a_plate_shorter_than_a_line_of_type_elides_rather_than_spilling() {
+    // The other half of the same rule: below the line box there is nowhere to
+    // put the text, and drawing it anyway would push type past the plate onto
+    // whatever sits behind it.
+    let theme = Theme::dark();
+    let short = font().glyph_height() / 2;
+    assert!(short > 0);
+    assert_eq!(
+        plate_with("Let Cinder out", short, &theme).pixels(),
+        plate_with("", short, &theme).pixels(),
+        "no glyph may be drawn where the plate cannot hold one"
+    );
+}
+
+#[test]
+fn a_button_states_the_height_it_needs() {
+    // Every other one-line family exposes this; a caller laying out its own
+    // control strip has no other way to ask, and a hand-picked figure is how a
+    // plate ends up too short to label.
+    let theme = Theme::dark();
+    for percent in [50, 100, 200] {
+        let Some(scale) = Scale::from_percent(percent) else {
+            continue;
+        };
+        let height = Button::height(scale, &theme);
+        let line = control_font(&theme, scale).glyph_height();
+        assert!(
+            height >= line,
+            "at {percent}% a button claims {height} and a line of type is {line}"
+        );
+    }
+}
+
 // --- Content seating ----------------------------------------------------
 
 #[test]

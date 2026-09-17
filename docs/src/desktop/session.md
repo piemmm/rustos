@@ -1918,6 +1918,48 @@ Relaying a theme switch to the apps over IPC remains a later increment; the
 desktop now reads a live pointer **and** keyboard event stream end to end,
 each channel drained from the kernel's owner-gated seat channels.
 
+## Desktop layer surfaces, and what bounds them
+
+The window engine checks a layer caller's kernel-attested `CAP_DESKTOP_LAYER`,
+the geometry against the wire bound, and the per-client and per-seat counts.
+Everything only the session knows lives in `layer.rs`: the live UI scale the
+extent is re-checked against, the work area the surface is clamped onto, which
+stacking anchor each depth resolves to, and when both feeds must stop.
+
+**The gate is session-side, and that is not a weakening.** A restricted-sender
+bind unconditionally requires `CAP_IPC_BIND_PRIVILEGED`, and the seat lease
+substitutes only for the reserved-id half of that gate — a session is an
+ordinary user process and cannot bind one. So the check is made against the
+caller's kernel-attested `Origin::capabilities()` summary, the same unforgeable
+fact the kernel would have used, before dispatch touches any state. It is
+re-checked on **every** layer operation rather than only at open, so a revoked
+grant stops the surface at its next request.
+
+**A layer surface is a user-interface spoofing primitive**, so it is bounded
+structurally rather than by trusting its holder:
+
+| Attack | What stops it |
+|---|---|
+| Reproduce a trusted prompt | The side bound is below the narrowest surface the session draws for a trusted decision. `layer::LAYER_FITS_UNDER_TRUSTED_SURFACES` asserts that at compile time against each, so shrinking a prompt below the bound fails the build rather than quietly opening the hole. |
+| Capture a keystroke | Never in the focus rotation, never routed a key. |
+| Clickjack | Catches the pointer only on its own opaque pixels. |
+| Cover what the user acts through | `Above` is `stack_below(surface, icon bar)`, never the front; a menu raises over it. |
+| Watch a credential | Hidden with both feeds stopped whenever the lock screen, the trusted picker, or the elevation prompt is up. A suppressed sample is dropped, never queued for replay. |
+
+**The two feeds** are resolved once a frame. Terrain is *pulled*: the event
+carries a generation, so a burst of window movement costs one small event and
+the holder asks when it is ready; change is detected by comparing the desktop's
+actual shape against a bounded snapshot, which cannot miss a change the way a
+hook on each mutation site eventually would. The pointer is sampled from the
+tracked pointer and delivered only when it moved — position only, no buttons, no
+modifiers, no timestamp, nothing about the window underneath.
+
+Every open, refusal and retirement is a security decision on the log
+(`LAYER_OPENED`, `LAYER_REFUSED`, `LAYER_RETIRED`), naming that the holder
+receives pointer position; the feeds starting and stopping is `LAYER_FEEDS`. The
+decision queue is bounded, and beyond it the count still rises, so a flood is
+visible as a flood rather than silently dropped.
+
 ## Giving memory back under pressure
 
 The desktop holds the largest reclaimable allocations on a graphical system:

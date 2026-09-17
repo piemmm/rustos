@@ -60,7 +60,7 @@ use tairix_theme::MotionInteraction;
 use tairix_wallpaper::Backdrop;
 use tairix_wm::{
     cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse,
-    Modifiers, Point, Rect, Scale, Surface, WindowActivationState, WindowFrame,
+    Modifiers, Point, PointerCatch, Rect, Scale, Surface, WindowActivationState, WindowFrame,
     WindowFurnitureState, WindowId, WindowSizeState,
 };
 
@@ -1309,7 +1309,7 @@ impl DesktopShell {
         let Some(id) = painted else {
             return false;
         };
-        compositor.set_input_transparent(id, true);
+        compositor.set_pointer_catch(id, PointerCatch::None);
         compositor.raise(id);
         self.tip_window = Some(id);
         true

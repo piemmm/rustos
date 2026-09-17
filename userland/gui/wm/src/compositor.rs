@@ -44,7 +44,7 @@ use crate::geometry::{Point, Rect, Region, Scale};
 use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::{blend_run, Surface};
 use crate::viewport::{FurnitureHit, RootViewport};
-use crate::window::{Window, WindowId, WindowRow};
+use crate::window::{PointerCatch, Window, WindowId, WindowRow};
 
 /// The furniture a composite pass built for itself because the cache would
 /// not retain it, kept alive for exactly that pass.
@@ -106,13 +106,18 @@ impl FrostTier {
     }
 }
 
-/// Which end of the z-order a restack moves a window's family to.
+/// Where in the z-order a restack moves a window's family.
 #[derive(Copy, Clone, Eq, PartialEq)]
-enum StackEnd {
+enum StackTarget {
     /// The front, above every other window: a raise.
     Front,
     /// The back, below every other window: a put-to-back.
     Back,
+    /// Immediately below the named window's family: what a surface placed
+    /// in a desktop layer needs, since "above the applications but below
+    /// the icon bar" is a position relative to another window rather than
+    /// an end of the stack.
+    Below(WindowId),
 }
 
 /// What the window stack claims a screen point for
@@ -1375,7 +1380,7 @@ impl Compositor {
         let bounds = window.bounds();
         self.windows.insert(above, window);
         self.mark_layer(id, bounds);
-        self.restack_family(parent, StackEnd::Front);
+        self.restack_family(parent, StackTarget::Front);
         Some(id)
     }
 
@@ -1416,7 +1421,7 @@ impl Compositor {
         self.windows
             .iter()
             .rev()
-            .find(|w| w.catches_pointer() && w.bounds().contains(point))
+            .find(|w| w.catches_pointer() && w.claims_pointer(point))
             .map(Window::id)
     }
 
@@ -1428,24 +1433,52 @@ impl Compositor {
         self.mutate(id, |w| w.set_origin(origin))
     }
 
-    /// Make the pointer pass straight through a window, or stop it doing so.
+    /// Choose which of a window's pixels claim the pointer.
     ///
-    /// An input-transparent window is composited exactly as before but is
-    /// never resolved to by [`pointer_target`](Self::pointer_target) or
+    /// A [`PointerCatch::None`] window is composited exactly as before but
+    /// is never resolved to by [`pointer_target`](Self::pointer_target) or
     /// [`window_at`](Self::window_at), so it neither takes the pointer nor
     /// shadows the window beneath it. That is what a non-interactive overlay
     /// is: a tooltip plate appears *under* the pointer by construction, and
     /// one that became the target would fight the hover it explains.
     ///
+    /// A [`PointerCatch::Shape`] window claims only the pixels it drew
+    /// opaquely, so a surface with a transparent margin does not swallow
+    /// clicks meant for what is behind it.
+    ///
     /// Its pixels do not change, so no damage is marked. Returns `false` for
     /// an unknown `id`; setting the state it already has returns `true`.
-    pub fn set_input_transparent(&mut self, id: WindowId, transparent: bool) -> bool {
+    pub fn set_pointer_catch(&mut self, id: WindowId, catch: PointerCatch) -> bool {
         // The closure's answer is "did the pixels change", and they did not:
         // a hit-testing property is invisible, so nothing is marked dirty.
         self.mutate(id, |window| {
-            window.set_input_transparent(transparent);
+            window.set_pointer_catch(catch);
             false
         })
+    }
+
+    /// Allow or refuse a window the keyboard and a press-raise.
+    ///
+    /// A window that refuses both is still pressable — the press reaches its
+    /// owner — but never becomes the focused window and never leaves the
+    /// stacking position it was placed in. That is what a desktop layer
+    /// surface needs: it is pinned to a layer, and it must be structurally
+    /// unable to receive a keystroke.
+    ///
+    /// Its pixels do not change, so no damage is marked. Returns `false` for
+    /// an unknown `id`.
+    pub fn set_focusable(&mut self, id: WindowId, focusable: bool) -> bool {
+        self.mutate(id, |window| {
+            window.set_focusable(focusable);
+            false
+        })
+    }
+
+    /// Whether a press may give the window named by `id` the keyboard and
+    /// raise it. An unknown window answers `false`.
+    #[must_use]
+    pub fn is_focusable(&self, id: WindowId) -> bool {
+        self.window(id).is_some_and(Window::is_focusable)
     }
 
     /// Set a window's opacity (`255` opaque); its bounds are marked dirty.
@@ -1723,7 +1756,7 @@ impl Compositor {
         if self.index_of(id).is_none() {
             return false;
         }
-        self.restack_family(self.family_root(id), StackEnd::Front);
+        self.restack_family(self.family_root(id), StackTarget::Front);
         true
     }
 
@@ -1738,8 +1771,49 @@ impl Compositor {
         if self.index_of(id).is_none() {
             return false;
         }
-        self.restack_family(self.family_root(id), StackEnd::Back);
+        self.restack_family(self.family_root(id), StackTarget::Back);
         true
+    }
+
+    /// Place `id`'s family immediately below `anchor`'s, marking what the
+    /// move changed.
+    ///
+    /// The third stacking primitive, and the one a desktop layer surface
+    /// needs: "above every application window but below the icon bar" is a
+    /// position relative to another window, which neither
+    /// [`raise`](Self::raise) nor [`lower`](Self::lower) can express. A
+    /// menu or tooltip opening later still raises over it, which is right —
+    /// a companion must never cover the surfaces the user acts through.
+    ///
+    /// Returns `false` for an unknown `id` or `anchor`, or when `anchor`
+    /// belongs to `id`'s own family: a family cannot be stacked below its
+    /// own member, and picking some nearby slot instead would be a guess.
+    pub fn stack_below(&mut self, id: WindowId, anchor: WindowId) -> bool {
+        if self.index_of(id).is_none() || self.index_of(anchor).is_none() {
+            return false;
+        }
+        let root = self.family_root(id);
+        if self.family_root(anchor) == root {
+            return false;
+        }
+        self.restack_family(root, StackTarget::Below(anchor));
+        true
+    }
+
+    /// Every visible window's outer rectangle, back-to-front — the desktop
+    /// as a surface placed in a layer sees it.
+    ///
+    /// Rectangles and order only: no identity, no title, no owner, no
+    /// pixels. Everything it reports is already drawn on the screen, so it
+    /// tells a reader nothing the desktop does not already show. Windows
+    /// belonging to `exclude`'s own family are left out, since a layer
+    /// surface is not terrain for itself.
+    pub fn terrain(&self, exclude: WindowId) -> impl Iterator<Item = Rect> + '_ {
+        let excluded = self.family_root(exclude);
+        self.windows
+            .iter()
+            .filter(move |window| window.is_visible() && self.family_root(window.id()) != excluded)
+            .map(Window::bounds)
     }
 
     /// The window every restack moves as one with `id`: the window it is a
@@ -1793,14 +1867,13 @@ impl Compositor {
     /// retained frost every time — a menu opening on a window with anything at
     /// all above it would re-blur the entire window, which is the expensive
     /// case, not the rare one, because the taskbar sits above app windows.
-    fn restack_family(&mut self, root: WindowId, end: StackEnd) -> bool {
+    fn restack_family(&mut self, root: WindowId, target: StackTarget) -> bool {
         let Some(root_at) = self.index_of(root) else {
             return false;
         };
         let owned = self.transients(root);
-        let first = match end {
-            StackEnd::Front => self.windows.len().saturating_sub(owned.saturating_add(1)),
-            StackEnd::Back => 0,
+        let Some(first) = self.destination_index(root, owned, target) else {
+            return false;
         };
         if root_at == first && self.family_is_placed(root, first, owned) {
             return false;
@@ -1816,7 +1889,7 @@ impl Compositor {
                 .filter(|window| window.parent() == Some(root))
                 .map(Window::id),
         );
-        let crossed = self.crossed_bounds(&order, end);
+        let crossed = self.crossed_bounds(&order, first);
         let mut taken = Vec::with_capacity(order.len());
         // Top-down, so each removal leaves the indices below it untouched.
         for id in order.iter().rev() {
@@ -1840,30 +1913,81 @@ impl Compositor {
         true
     }
 
-    /// The bounds of every window `family` swaps places with when it moves to
-    /// `end` — the only windows the move can put on the other side of it.
+    /// Where `root`'s family lands, as an index into the array with the
+    /// family's own windows already removed — which is what the insertion
+    /// loop indexes and what [`family_is_placed`](Self::family_is_placed)
+    /// probes, since a family already sitting contiguously at `k` has no
+    /// member below `k` to shift it.
     ///
-    /// The family lands contiguously at one end, so moving to the front puts it
-    /// above everything that was above its *lowest* member, and moving to the
-    /// back puts it below everything that was below its *highest*. Windows
-    /// beyond that keep their relative order with the family and so see exactly
-    /// the stack they always did. An invisible window contributes no pixel to
-    /// any composite, so crossing one changes nothing.
-    fn crossed_bounds(&self, family: &[WindowId], end: StackEnd) -> Vec<Rect> {
+    /// `None` only for a [`StackTarget::Below`] naming a window this
+    /// compositor does not know, or one inside the moving family itself —
+    /// a family cannot be stacked below its own member, and answering with
+    /// some nearby index would be a guess.
+    fn destination_index(
+        &self,
+        root: WindowId,
+        owned: usize,
+        target: StackTarget,
+    ) -> Option<usize> {
+        match target {
+            StackTarget::Front => Some(self.windows.len().saturating_sub(owned.saturating_add(1))),
+            StackTarget::Back => Some(0),
+            StackTarget::Below(anchor) => {
+                let anchor_root = self.family_root(anchor);
+                if anchor_root == root {
+                    return None;
+                }
+                let anchor_at = self.index_of(anchor_root)?;
+                // Members of the moving family that currently sit below the
+                // anchor vacate their slots, so the anchor slides down by
+                // exactly that many.
+                let vacated = self
+                    .windows
+                    .iter()
+                    .take(anchor_at)
+                    .filter(|window| self.family_root(window.id()) == root)
+                    .count();
+                Some(anchor_at.saturating_sub(vacated))
+            }
+        }
+    }
+
+    /// The bounds of every window `family` swaps places with when it lands at
+    /// post-removal index `first` — the only windows the move can put on the
+    /// other side of it.
+    ///
+    /// A window that was below every family member and stays below it, or
+    /// above every member and stays above, sees exactly the stack it always
+    /// did and keeps its retained backdrop. Everything else crossed the
+    /// family, including anything that was interleaved between its members
+    /// and so was above one and below another. An invisible window
+    /// contributes no pixel to any composite, so crossing one changes
+    /// nothing.
+    fn crossed_bounds(&self, family: &[WindowId], first: usize) -> Vec<Rect> {
         let indices = family.iter().filter_map(|id| self.index_of(*id));
         let (lowest, highest) = indices.fold((usize::MAX, 0), |(low, high), at| {
             (low.min(at), high.max(at))
         });
+        let mut below_family = 0usize;
         self.windows
             .iter()
             .enumerate()
             .filter(|(at, window)| {
-                window.is_visible()
-                    && !family.contains(&window.id())
-                    && match end {
-                        StackEnd::Front => *at > lowest,
-                        StackEnd::Back => *at < highest,
-                    }
+                let mine = family.contains(&window.id());
+                // Post-removal index of this window: its own index less the
+                // family members below it.
+                let after = at.saturating_sub(below_family);
+                if mine {
+                    below_family += 1;
+                    return false;
+                }
+                if !window.is_visible() {
+                    return false;
+                }
+                let was_below = *at < lowest;
+                let was_above = *at > highest;
+                let ends_below = after < first;
+                !((was_below && ends_below) || (was_above && !ends_below))
             })
             .map(|(_, window)| window.bounds())
             .collect()
@@ -2199,7 +2323,7 @@ impl Compositor {
             if !window.catches_pointer() {
                 return None;
             }
-            if window.bounds().contains(point) {
+            if window.claims_pointer(point) {
                 return Some(PointerTarget::Window(window.id()));
             }
             let FurniturePart::ResizeEdge(edge) =

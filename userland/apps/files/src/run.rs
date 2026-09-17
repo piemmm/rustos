@@ -3233,6 +3233,10 @@ mod program {
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::MenuClosed { .. }
+            // The layer-surface feeds address a desktop surface this
+            // application never opens, so neither can arrive here.
+            | WindowEvent::TerrainChanged { .. }
+            | WindowEvent::LayerPointer { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }

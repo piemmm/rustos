@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Cinder</title>
+  <!-- Cinder's head, as the mascot sheet draws it: a rust-orange ruff around a
+       cream face mask, charcoal cowl below, big amber eyes, dark nose. Every
+       shape is a filled polygon and every curve is cut as integer line
+       segments, because the desktop's SVG subset draws fills rather than
+       strokes — an outline is a slightly larger fill behind the shape it edges.
+
+       Drawn as a portrait rather than the whole creature: at an icon's size the
+       full body loses the face, and the face is what makes him recognisable. -->
+
+  <!-- Tile, in the charcoal the coat's body uses, so the icon reads against
+       both the dark and the light theme's bar -->
+  <polygon fill="#2A2B2F" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#3A3B41" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,88 20,88"/>
+
+  <!-- Ears: rust outside, cream inside -->
+  <polygon fill="#D24B17" points="52,96 58,50 76,44 100,62 106,88"/>
+  <polygon fill="#D24B17" points="204,96 198,50 180,44 156,62 150,88"/>
+  <polygon fill="#F2E1C8" points="66,90 70,62 80,58 94,72 96,88"/>
+  <polygon fill="#F2E1C8" points="190,90 186,62 176,58 162,72 160,88"/>
+
+  <!-- The ruff: layered rust fur framing the face -->
+  <polygon fill="#BB3A10" points="128,58 168,68 196,96 204,134 194,170 168,192 128,200 88,192 62,170 52,134 60,96 88,68"/>
+  <polygon fill="#F0782A" points="128,66 162,76 186,100 192,132 184,162 162,182 128,190 94,182 72,162 64,132 70,100 94,76"/>
+
+  <!-- The cream face mask -->
+  <polygon fill="#F2E1C8" points="128,92 152,98 166,116 168,140 158,162 138,174 128,176 118,174 98,162 88,140 90,116 104,98"/>
+  <polygon fill="#BDA18A" points="128,166 142,170 138,176 128,178 118,176 114,170"/>
+
+  <!-- Eyes: amber, ink pupil, one catchlight each -->
+  <polygon fill="#C86A14" points="106,124 114,118 124,122 126,132 120,140 110,140 104,132"/>
+  <polygon fill="#C86A14" points="150,124 142,118 132,122 130,132 136,140 146,140 152,132"/>
+  <polygon fill="#0A0A0C" points="110,126 118,122 124,128 122,136 114,138 108,132"/>
+  <polygon fill="#0A0A0C" points="146,126 138,122 132,128 134,136 142,138 148,132"/>
+  <polygon fill="#FFF4E6" points="117,125 121,124 122,128 118,129"/>
+  <polygon fill="#FFF4E6" points="139,125 143,124 144,128 140,129"/>
+
+  <!-- Muzzle and nose -->
+  <polygon fill="#F2E1C8" points="128,144 140,148 144,158 138,166 128,168 118,166 112,158 116,148"/>
+  <polygon fill="#0A0A0C" points="128,148 136,152 132,160 128,161 124,160 120,152"/>
+
+  <!-- The cowl, with its orange accent along the shoulder -->
+  <polygon fill="#0E1013" points="74,192 128,204 182,192 196,216 196,236 60,236 60,216"/>
+  <polygon fill="#1A1C1F" points="86,198 128,208 170,198 180,216 180,228 76,228 76,216"/>
+  <polygon fill="#F0782A" points="92,206 116,212 114,220 90,214"/>
+</svg>

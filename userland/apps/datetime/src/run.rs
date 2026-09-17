@@ -359,11 +359,35 @@ mod program {
                         }
                     }
                 }
-                // The session asked the window to close, or *Quit* was
-                // chosen on this application's own icon-bar slot: a clean
-                // end either way. A row the declaration never carried names
-                // no command and is ignored (fail closed).
-                WindowEvent::CloseRequested { .. } => return 0,
+                // Closing the window does not end a resident icon-bar
+                // application: the slot stays, and clicking it opens the form
+                // again. *Quit* is what ends it. A row the declaration never
+                // carried names no command and is ignored (fail closed).
+                WindowEvent::CloseRequested { .. } => {
+                    if window.close().is_err() {
+                        return fail(EXIT_CHANNEL_LOST, "close refused");
+                    }
+                    continue;
+                }
+                WindowEvent::AppBarDefault => {
+                    // Already open: the session raises it, and there is
+                    // nothing for this side to do.
+                    if window.is_open() {
+                        continue;
+                    }
+                    if let Err(err) =
+                        window.open(binding.endpoint(), &mode, view::TITLE, WindowSizing::Fixed)
+                    {
+                        // A refused re-open is a click that did not work, not
+                        // a fault: the application stays on the bar.
+                        report(&alloc::format!("{err}"));
+                        continue;
+                    }
+                    if repaint(&mut window, &editor, themes.active(), desktop.scale()).is_err() {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    }
+                    continue;
+                }
                 WindowEvent::AppBarMenu { item } if tairix_window::is_quit(item) => return 0,
                 // Nobody can see the window, so the session gave its copy of
                 // the pixels back and unmapped the region. Let go of this side

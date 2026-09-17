@@ -102,7 +102,7 @@ mod program {
         MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
-        DriverError, Errno, Notice, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp,
+        CapabilityId, DriverError, Errno, Notice, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp,
         WaitSourceKind, WaitStatus, CONSOLE_INHERIT, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN,
         SPAWN_UID_INHERIT, WAIT_PID_ANY,
     };
@@ -130,16 +130,19 @@ mod program {
         DesktopOutcome, DesktopShell, DeviceInputSource, DocumentRelay, ElevatePrompt, Elevator,
         FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
         HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource, Launch,
-        LaunchHost, LaunchTable, LaunchTarget, LoadedPinboard, LoadedPrograms, LockedDrain,
-        OwnerBundleGate, OwnerWindow, PickConclusion, Prepared, PresentedOwners, PromptOutcome,
-        ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
-        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, WallpaperDesk, WallpaperSource, APP_BAR_SLOT_SHOWN,
-        APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
-        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH,
-        MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN,
-        PICKER_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
-        USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard,
+        LoadedPrograms, LockedDrain, OwnerBundleGate, OwnerWindow, PickConclusion, Prepared,
+        PresentedOwners, PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
+        SessionClock, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
+        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource,
+        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
+        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        LAYER_RETIRED_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
+        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN,
+        WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -498,6 +501,17 @@ mod program {
                 },
             );
             Ok(origin.proc_id())
+        }
+
+        fn caller_holds(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
+            // The kernel's own attestation of the in-flight caller, not
+            // anything the caller said: the summary is minted by the kernel
+            // at call time and cannot be forged from user space.
+            let mut buf = [0u8; ORIGIN_WIRE_LEN];
+            let len = tairix_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
+                .map_err(Errno::from_syscall)?;
+            let origin = Origin::from_bytes(&buf[..len])?;
+            Ok(origin.capabilities().holds_cap(cap))
         }
     }
 
@@ -3201,6 +3215,19 @@ mod program {
                 &mut compositor,
                 now_ns,
             );
+            // The desktop layer surface's two feeds, resolved once a frame so
+            // a burst of pointer samples or window movement costs one message
+            // of each rather than one per sample. Ahead of the present, so a
+            // surface hidden by a trusted prompt is hidden in the frame that
+            // prompt appears in.
+            serve_layer_feeds(
+                &shell,
+                &mut windows,
+                &mut compositor,
+                &mut server,
+                &mut sink,
+                trusted_surface_up(&lock, &picker, &elevate),
+            );
             // One present per frame deadline: the compositor accumulates the
             // damage the pumped events and served presents produced, and the
             // ring copies only that region once the pacer admits the frame.
@@ -5668,6 +5695,134 @@ mod program {
         picker: &SessionPicker<S, F>,
     ) -> bool {
         lock.is_locked() || picker.wm_id().is_some()
+    }
+
+    /// Whether a surface the user is meant to trust is on screen.
+    ///
+    /// Wider than [`seat_held`], and deliberately so: a menu may not be drawn
+    /// over the lock screen or the trusted picker, but a *desktop layer
+    /// surface* must also go away for the elevation prompt — a pet watching
+    /// the pointer travel over a password field is exactly what the
+    /// suppression exists to stop. Built on `seat_held` rather than beside
+    /// it, so the shared part has one definition.
+    fn trusted_surface_up<S: DirectorySource, F: FnMut() -> S>(
+        lock: &ScreenLock,
+        picker: &SessionPicker<S, F>,
+        elevate: &ElevatePrompt,
+    ) -> bool {
+        seat_held(lock, picker) || elevate.wm_id().is_some()
+    }
+
+    /// Resolve the desktop layer surface's feeds for this frame: hide or show
+    /// it as a trusted surface comes and goes, notice whether the desktop's
+    /// shape changed, and deliver at most one message of each kind.
+    ///
+    /// Every open, refusal, and retirement of a layer surface is a security
+    /// decision recorded elsewhere; what is recorded *here* is the state edge
+    /// that starts and stops the pointer feed, because that is the moment the
+    /// holder's view of the screen changes.
+    fn serve_layer_feeds(
+        shell: &DesktopShell,
+        windows: &mut SessionWindows,
+        compositor: &mut Compositor,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        trusted_up: bool,
+    ) {
+        if windows.layers.set_suppressed(trusted_up, compositor) {
+            log(
+                &LOG_SINK,
+                &LogEvent {
+                    level: LogLevel::Info,
+                    id: LAYER_FEEDS,
+                    message: if trusted_up {
+                        LAYER_FEEDS_STOPPED_MESSAGE
+                    } else {
+                        LAYER_FEEDS_RESUMED_MESSAGE
+                    },
+                    fields: &[],
+                },
+            );
+        }
+        // Every open, refusal, and retirement is a security decision: the
+        // holder gains — or is denied — presence on the desktop and a feed of
+        // the pointer's position across the whole screen.
+        windows.layers.report_decisions(
+            |decision| {
+                let (message, reason) = match decision {
+                    LayerDecision::Opened => (LAYER_OPENED_MESSAGE, None),
+                    LayerDecision::Refused(err) => (LAYER_REFUSED_MESSAGE, Some(err)),
+                    LayerDecision::Retired => (LAYER_RETIRED_MESSAGE, None),
+                };
+                let id = match decision {
+                    LayerDecision::Opened => LAYER_OPENED,
+                    LayerDecision::Refused(_) => LAYER_REFUSED,
+                    LayerDecision::Retired => LAYER_RETIRED,
+                };
+                let fields = match reason {
+                    Some(err) => &[LogField {
+                        key: "reason",
+                        value: LogFieldValue::SignedInt(i64::from(err.as_i32())),
+                    }][..],
+                    None => &[][..],
+                };
+                log(
+                    &LOG_SINK,
+                    &LogEvent {
+                        level: LogLevel::Info,
+                        id,
+                        message,
+                        fields,
+                    },
+                );
+            },
+            |dropped| {
+                log(
+                    &LOG_SINK,
+                    &LogEvent {
+                        level: LogLevel::Warn,
+                        id: LAYER_REFUSED,
+                        message: LAYER_REFUSED_MESSAGE,
+                        fields: &[LogField {
+                            key: "unrecorded",
+                            value: LogFieldValue::UnsignedInt(u64::from(dropped)),
+                        }],
+                    },
+                );
+            },
+        );
+        let Some(surface) = windows.layers.surface() else {
+            return;
+        };
+        if !windows.layers.is_suppressed() {
+            windows.layers.observe_terrain(compositor, surface.wm);
+            // Sampled once a frame from the tracked pointer rather than
+            // hooked onto each input path: that is the coalescing the feed
+            // wants anyway, and it cannot miss a path that moves the pointer.
+            windows.layers.pointer_moved(shell.router().pointer());
+        }
+        // Collected before delivering: `take_feeds` borrows the state, and a
+        // delivery may tear the surface down when its owner has gone.
+        let mut pending = [None, None];
+        for (slot, feed) in pending.iter_mut().zip(windows.layers.take_feeds()) {
+            *slot = Some(feed);
+        }
+        for feed in pending.into_iter().flatten() {
+            let event = match feed {
+                LayerFeed::Terrain { ipc, generation } => WindowEvent::TerrainChanged {
+                    window_id: ipc,
+                    generation,
+                },
+                LayerFeed::Pointer { ipc, x, y } => WindowEvent::LayerPointer {
+                    window_id: ipc,
+                    x,
+                    y,
+                },
+            };
+            // A refused send is the sink's to hold; a vanished owner is torn
+            // down on the next window-scoped delivery like any other.
+            let _ = server.deliver_event(sink, &event);
+        }
     }
 
     #[allow(clippy::too_many_arguments)] // The chain's whole mutable surround, threaded explicitly.

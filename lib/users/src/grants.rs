@@ -75,6 +75,19 @@ use tairix_caps::CapabilitySet;
 ///   administrative act; on a headless build there is no seat to acquire
 ///   and the grants are inert.
 ///
+/// * `CAP_DESKTOP_LAYER` — presence on the desktop outside a window of
+///   one's own: a small undecorated surface placed in screen coordinates,
+///   stacked above or below other applications' windows, with the terrain
+///   and pointer feeds that placement needs (`plans/CINDER.md`). Baseline
+///   because a desktop companion is an ordinary thing for a user to run,
+///   not an administrative act, and because the ceiling is not what bounds
+///   it: the intersection with a *signed* manifest is, so only a bundle
+///   whose manifest asks for it can ever obtain one. The containment is
+///   structural and lives in the session — bounded surface size, never
+///   keyboard-focusable, pointer caught only on opaque content, and both
+///   feeds stopped whenever a trusted surface is up — so a baseline holder
+///   gains no way to reproduce or observe a credential prompt. On a
+///   headless build there is no session to serve it and the grant is inert.
 /// * `CAP_NET` — ordinary network use: opening datagram sockets and
 ///   originating/receiving transport traffic through the `netstack`
 ///   socket surface (`plans/NETWORK.md` §0). Baseline because using the
@@ -118,6 +131,7 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
     CapabilityId::DISPLAY,
     CapabilityId::INPUT_READ,
     CapabilityId::SHM,
+    CapabilityId::DESKTOP_LAYER,
     CapabilityId::NET,
     CapabilityId::LOG_EMIT,
 ];
@@ -403,7 +417,7 @@ mod tests {
     #[test]
     fn session_baseline_is_pinned() {
         let set = session_baseline();
-        assert_eq!(set.len(), 10);
+        assert_eq!(set.len(), 11);
         for cap in [
             CapabilityId::FS_ACCESS,
             CapabilityId::PROC_SPAWN,
@@ -413,6 +427,7 @@ mod tests {
             CapabilityId::DISPLAY,
             CapabilityId::INPUT_READ,
             CapabilityId::SHM,
+            CapabilityId::DESKTOP_LAYER,
             CapabilityId::NET,
             CapabilityId::LOG_EMIT,
         ] {
@@ -423,7 +438,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 28);
+        assert_eq!(set.len(), 29);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }

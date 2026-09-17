@@ -203,6 +203,7 @@ members = [
     "userland/apps/cat",
     "userland/apps/chmod",
     "userland/apps/chown",
+    "userland/apps/cinder",
     "userland/apps/clear",
     "userland/apps/configure",
     "userland/apps/cp",

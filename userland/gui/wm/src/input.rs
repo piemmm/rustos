@@ -473,7 +473,10 @@ impl InputRouter {
     /// `window` (fail closed; the router never grants itself
     /// focus over a window it was not handed).
     pub fn focus(&mut self, window: WindowId, compositor: &Compositor) -> bool {
-        if compositor.window(window).is_none() {
+        // A window that refuses focus refuses it however the request
+        // arrives, so there is no second route into the focus rotation for
+        // a surface that must never hold the keyboard.
+        if !compositor.is_focusable(window) {
             return false;
         }
         self.focused = Some(window);
@@ -759,8 +762,14 @@ impl InputRouter {
                 return InputResponse::DesktopPressed;
             }
         };
-        compositor.raise(window);
-        self.focused = Some(window);
+        // A window that refuses focus keeps neither the keyboard nor a new
+        // stacking position: a desktop layer surface is pinned to its layer
+        // and must be structurally unable to receive a keystroke. The press
+        // still reaches its owner below, so it stays pressable.
+        if compositor.is_focusable(window) {
+            compositor.raise(window);
+            self.focused = Some(window);
+        }
 
         // A press on the outer decoration frame is the window manager's, kept
         // off the client by the frame's furniture hit map: the title bar

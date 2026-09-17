@@ -25,8 +25,43 @@ use crate::viewport::RootViewport;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct WindowId(pub(crate) u64);
 
+/// Which pixels of a window claim the pointer.
+///
+/// A closed set rather than a flag, because the third case is not "more
+/// transparent" than the second: a shaped window catches the pointer on
+/// exactly the pixels it drew, which is neither all of its rectangle nor
+/// none of it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PointerCatch {
+    /// The whole rectangle claims the pointer: an ordinary window.
+    Bounds,
+    /// Only pixels the window drew opaquely enough claim it; the rest pass
+    /// through to whatever is beneath.
+    ///
+    /// The silhouette *is* the window's own content alpha, so a shaped
+    /// window needs no mask, no second geometry, and no extra memory, and
+    /// the shape can never disagree with the pixels on screen.
+    Shape,
+    /// Nothing claims the pointer: the window is drawn but never a target.
+    ///
+    /// A non-interactive overlay — a tooltip plate, a drag hint — is drawn
+    /// but must never *take* the pointer: it appears under it by
+    /// construction, so a window that became the pointer target the moment it
+    /// opened would fight the very hover it exists to explain.
+    None,
+}
+
+/// The alpha at or above which a [`PointerCatch::Shape`] window's own pixel
+/// claims the pointer.
+///
+/// Set at the midpoint so a shape follows the silhouette the eye sees: the
+/// soft edge a rounded corner or an anti-aliased outline leaves is half
+/// inside the shape and half outside it, and a threshold at either extreme
+/// would make a feathered edge either wholly solid or wholly absent.
+const SHAPE_ALPHA_THRESHOLD: u8 = 128;
+
 /// How a window takes part in the seat: whether it is composited at all, and
-/// whether the pointer is caught by it or passes straight through.
+/// which of its pixels catch the pointer.
 ///
 /// The two are independent facts rather than a state machine — a
 /// non-interactive overlay is drawn *and* transparent to the pointer — and
@@ -35,33 +70,40 @@ pub struct WindowId(pub(crate) u64);
 struct Participation {
     /// Whether the window participates in composition.
     visible: bool,
-    /// Whether the pointer passes straight through it.
+    /// Which of the window's pixels claim the pointer.
+    catch: PointerCatch,
+    /// Whether a press may give this window the keyboard and raise it.
     ///
-    /// A non-interactive overlay — a tooltip plate, a drag hint — is drawn
-    /// but must never *take* the pointer: it appears under it by
-    /// construction, so a window that became the pointer target the moment it
-    /// opened would fight the very hover it exists to explain.
-    input_transparent: bool,
+    /// A desktop layer surface declines both: it is pinned to a stacking
+    /// layer, so raising it would take it out of that layer, and it must
+    /// never be able to receive a keystroke — which is what makes a
+    /// pixel-perfect lookalike of a credential prompt harmless. It is still
+    /// *pressable*: the press reaches its owner as an ordinary pointer
+    /// event, so a companion can be petted.
+    focusable: bool,
 }
 
 impl Participation {
     /// Composited, and catching the pointer: what a window is when it opens.
     const DRAWN: Self = Self {
         visible: true,
-        input_transparent: false,
+        catch: PointerCatch::Bounds,
+        focusable: true,
     };
 
     /// Not composited: a minimised window, or a served one whose client has
     /// yet to present anything into it.
     const HIDDEN: Self = Self {
         visible: false,
-        input_transparent: false,
+        catch: PointerCatch::Bounds,
+        focusable: true,
     };
 
-    /// Whether a pointer inside the window's bounds resolves to it: it must
-    /// be composited *and* not transparent to the pointer.
+    /// Whether a pointer inside the window's bounds can resolve to it at
+    /// all. A shaped window answers `true` here and is then asked about the
+    /// specific pixel.
     const fn catches_pointer(self) -> bool {
-        self.visible && !self.input_transparent
+        self.visible && !matches!(self.catch, PointerCatch::None)
     }
 }
 
@@ -338,12 +380,16 @@ impl Window {
         self.participation.visible
     }
 
-    /// `true` if the pointer passes straight through this window: it is
-    /// composited, but never resolved to as a pointer target and never
-    /// shadows the window beneath it.
+    /// Which of this window's pixels claim the pointer.
     #[must_use]
-    pub const fn is_input_transparent(&self) -> bool {
-        self.participation.input_transparent
+    pub const fn pointer_catch(&self) -> PointerCatch {
+        self.participation.catch
+    }
+
+    /// Whether a press may give this window the keyboard and raise it.
+    #[must_use]
+    pub const fn is_focusable(&self) -> bool {
+        self.participation.focusable
     }
 
     /// `true` if a pointer inside this window's bounds resolves to it.
@@ -896,16 +942,53 @@ impl Window {
         true
     }
 
-    /// Make the pointer pass through — or stop passing through — this
-    /// window, returning whether it actually changed.
+    /// Change which of this window's pixels claim the pointer, returning
+    /// whether it actually changed.
     ///
     /// Nothing about the window's *pixels* changes, so this marks no damage.
-    pub(crate) fn set_input_transparent(&mut self, transparent: bool) -> bool {
-        if transparent == self.participation.input_transparent {
+    /// Allow or refuse this window the keyboard and a press-raise. Changes
+    /// no pixels, so it marks no damage.
+    pub(crate) fn set_focusable(&mut self, focusable: bool) {
+        self.participation.focusable = focusable;
+    }
+
+    pub(crate) fn set_pointer_catch(&mut self, catch: PointerCatch) -> bool {
+        if catch == self.participation.catch {
             return false;
         }
-        self.participation.input_transparent = transparent;
+        self.participation.catch = catch;
         true
+    }
+
+    /// Whether the window claims the pointer at screen `point`.
+    ///
+    /// The one answer both hit-test paths ask, so the rectangle test and
+    /// the shape test cannot diverge. A [`PointerCatch::Shape`] window is
+    /// measured against its *client* rectangle, because its content surface
+    /// is what the silhouette is made of; a shaped window whose content is
+    /// released claims nothing at all, since it draws nothing and an
+    /// invisible window must not swallow clicks.
+    #[must_use]
+    pub fn claims_pointer(&self, point: Point) -> bool {
+        match self.participation.catch {
+            PointerCatch::None => false,
+            PointerCatch::Bounds => self.bounds().contains(point),
+            PointerCatch::Shape => {
+                let client = self.client_rect();
+                if !client.contains(point) {
+                    return false;
+                }
+                let x = point.x.saturating_sub(client.left());
+                let y = point.y.saturating_sub(client.top());
+                let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+                    return false;
+                };
+                self.content
+                    .as_ref()
+                    .and_then(|content| content.get(x, y))
+                    .is_some_and(|pixel| pixel.a >= SHAPE_ALPHA_THRESHOLD)
+            }
+        }
     }
 
     pub(crate) fn set_cursor_hint(&mut self, cursor: CursorKind) {

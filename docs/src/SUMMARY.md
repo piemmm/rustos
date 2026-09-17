@@ -175,6 +175,7 @@
 - [Default desktop apps](./desktop/apps.md)
 - [Widget gallery](./desktop/widgets.md)
 - [Sapper](./desktop/sapper.md)
+- [Cinder](./desktop/cinder.md)
 - [Design artwork and storyboards](./desktop/artwork.md)
 
 # ABI

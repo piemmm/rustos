@@ -8931,3 +8931,58 @@ recipient's exit is inert rather than merely unlikely. The pid left the
 request entirely rather than gaining an assertion beside it, and the gate sits
 at redemption, where the redeemer's instance is the dispatcher's own snapshot
 and so needs no cross-lock atomicity argument (`plans/OPEN-DEFECTS.md` D92).
+
+## CINDER — the desktop companion and the desktop-layer authority (`plans/CINDER.md`)  **[CD1–CD11 DONE; CD12–CD13 PLANNED]**
+
+Two things landed together: the authority, and its first holder.
+
+**The authority.** `CAP_DESKTOP_LAYER` (id 47) grants presence on the desktop
+*outside a window of one's own* — a surface placed in screen coordinates,
+stacked relative to other principals' windows, with the desktop-geometry and
+pointer feeds that placement requires. Being undecorated was never the
+privileged part: `CreatePopup` already opens a furniture-less surface with no
+capability, safe because it is anchored to a window the caller owns and is never
+told a screen position. This grants exactly what that withholds.
+
+**Where it is enforced, and why there.** Not by a restricted-sender endpoint: a
+restricted-sender bind unconditionally requires `CAP_IPC_BIND_PRIVILEGED`, and
+the seat-lease attestation substitutes only for the reserved-id half of that
+gate, so a session cannot bind one. The gate is in `WindowServer::serve`,
+checked against the caller's kernel-attested `Origin::capabilities()` summary
+before dispatch touches state, and re-checked on every layer operation so a
+revoked grant stops the surface at its next request.
+
+**Why the operations ride `WINDOW_ENDPOINT`.** A layer surface *is* a window in
+the one registry — region, frames, damage, owner, budget, teardown — and
+`Present`/`Close` act on it unchanged. A second endpoint would have meant a
+second registry that had to agree with the first about id allocation, ownership
+and teardown, which is how an orphaned surface gets in. Three requests
+(`OpenLayer`, `PlaceLayer`, `TakeTerrain`) and two events (`TerrainChanged`,
+`LayerPointer`) instead.
+
+**It is a spoofing primitive, so it is bounded structurally.** The surface side
+is capped below the narrowest surface the session draws for a trusted decision,
+asserted at compile time against each of them; it is never in the focus rotation
+and never routed a key; it catches the pointer only on its own opaque pixels; its
+highest depth is below the icon bar; and it is hidden with both feeds stopped
+whenever a trusted surface is up. Three compositor mechanisms were added for it
+— `PointerCatch::{Bounds,Shape,None}` replacing the old `input_transparent`
+flag, a per-window focus refusal, and `stack_below` on a generalised restack
+whose two old ends are now special cases.
+
+**Cinder** is the first holder: the mascot as a virtual pet, in a playpen window
+he can be let out of. The camera is elevated ~35° above the ground plane, so one
+`GROUND_DEPTH` constant makes him read correctly running in any direction and
+makes the turnaround free — blobs paint far-first by projected depth, so his
+face falls behind his head when he walks away with no second sprite set and no
+branch on facing. The route planner takes him over, under, or around a window,
+flipping his stacking depth at the leap's apex rather than at its start.
+
+**Remaining.** CD12 is the QEMU vertical: the host tests and the fuzz harness
+cover every piece of logic, but only a real machine can show the compositor, the
+session and the application agreeing — the surface composited at both depths, a
+click on the silhouette reaching the companion while one on its transparent
+margin reaches the window beneath, and both feeds stopping when the lock screen
+comes up. `plans/CINDER.md` CD12 states the five steps. CD13 is a second holder
+of the authority, which is what will prove the seam is a seam rather than one
+app's private path.

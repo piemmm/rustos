@@ -66,6 +66,7 @@ for filesystems, the feature section below.
 | Threads within a process (`thread_create`, futex) | ✓ | ✓ | ✓ | — |
 | Advisory byte-range file locking (`fs_lock`, description-owned) | ✓ | ✓ | ✓ | ✓ |
 | Multi-core software compositing (banded composite + blur) | ✓ | ✓ | ✓ | — |
+| Desktop layer surfaces (`CAP_DESKTOP_LAYER`, shaped hit test) | ✓ | ✓ | ✓ | — |
 | C-callable ABI (`abi-v1`, non-Rust) | ✓ | ✓ | ✓ | — |
 | Machine power-off / restart (`system_power`) | ◐ restart | ✓ PSCI | ✓ SBI | — |
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |

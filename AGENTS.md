@@ -1573,6 +1573,7 @@ You are not exempt from any rule above. In addition:
     | TPM / measured boot | `plans/TPM.md` |
     | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
+    | The desktop companion (`cinder.app`) and the desktop-layer authority every companion-shaped app needs: `CAP_DESKTOP_LAYER`, the layer surface's containment controls, the terrain and pointer feeds, the elevated camera | `plans/CINDER.md` |
     | The `vim` app | `plans/VIM.md` |
     | Shared containers and hashing: the heap-backed tiers in `lib/collections`, the allocation-free tier in `lib/inline`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
     | Randomness: the non-cryptographic vs fast-secure vs DRBG tier split, the buffered ChaCha12 fast-key-erasure generator, the kernel output reserve's backing, task-id and scheduler draws, and the statistical test battery | `plans/FIX-RANDOMNESS.md` |

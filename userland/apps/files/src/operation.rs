@@ -86,8 +86,14 @@ pub fn operation_control(
         // it too waits for the panel to go. An open target waits too: the
         // queue keeps it, so the drain happens when the panel is down rather
         // than navigating the listing this operation is walking.
+        // The layer-surface feeds address a desktop surface this application
+        // never opens, so they cannot arrive here at all; they are listed
+        // rather than caught by a wildcard so a new event still has to be
+        // thought about.
         // The rest is input that must not navigate behind the modal panel.
-        WindowEvent::AlternateCloseRequested { .. }
+        WindowEvent::TerrainChanged { .. }
+        | WindowEvent::LayerPointer { .. }
+        | WindowEvent::AlternateCloseRequested { .. }
         | WindowEvent::OpenRequested
         | WindowEvent::AppBarDefault
         | WindowEvent::AppBarMenu { .. }

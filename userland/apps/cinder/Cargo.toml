@@ -1,0 +1,73 @@
+[package]
+name = "tairix-cinder"
+description = "TAIRiX Cinder: the desktop companion. The elevated camera, the fur model, the body, the mind, the desktop route planner, the playpen and the painters are the crate's [lib]; the freestanding `Run` binary is the on-disk cinder.app bundle's entry point composing it over lib/window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The host-testable companion. Everything with behaviour worth testing lives
+# here — the projection, the fur splat, the skeleton, the gait, the mind, the
+# route planner, the pen and the painters — so the `Run` binary only composes
+# it, exactly as sapper and the widget gallery do. `no_std` + `alloc`, so it
+# links unchanged into the freestanding binary and runs under the host harness.
+[lib]
+name = "tairix_cinder"
+path = "src/lib.rs"
+
+# The `Run` entry-point binary of the on-disk `cinder.app` bundle: a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert host
+# stub elsewhere (see `src/run.rs` / `build.rs`).
+[[bin]]
+name = "tairix-cinder-run"
+path = "src/run.rs"
+
+# The ABI types the window and layer channels speak, the `key = value`
+# configuration grammar the saved mood is written in, the app-data client that
+# holds it, the shared control behaviour and theme the pen's chrome is drawn
+# from, the coordinate and scale types, the desktop input vocabulary, the
+# software raster surface the fur is composited into, the first-party
+# generator every decision is drawn from, the allocation-free containers the
+# outline buffers are, and the maths the projection needs.
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+
+# The freestanding `Run` binary additionally drives the window channel's client
+# half, the deferral desk the saved-mood write is handed to, and the pure-Rust
+# userland runtime (`_start`, the allocator, the syscall wrappers). Bare-metal
+# only; on the host the binary is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The app-data client's runtime transport, so the saved mood reaches the real
+# service; the base dependency stays host-neutral for the tests below.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+# On the real target the `Run` binary reaches the sandboxed font service over
+# the runtime `ipc_call` transport; the base dependency stays host-neutral so
+# host tests inject the mock transport instead.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+
+# The painter's host tests draw text, so they inject the shared solid test
+# transport (never a running `fontd`), and the saved-mood tests speak the real
+# `appdata-v1` codec against the shared fake service.
+[dev-dependencies]
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true

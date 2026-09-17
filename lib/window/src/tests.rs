@@ -18,11 +18,12 @@ use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    AppMenuRowView, DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, MenuRefusal,
-    PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
-    HAND_OVER_RUN_PATH_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    AppMenuRowView, DocumentName, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome,
+    MenuRefusal, PointerAction, TerrainPlate, TooltipText, WindowEvent, WindowRegion,
+    WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX,
+    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
-use tairix_abi::Errno;
+use tairix_abi::{CapabilityId, Errno};
 use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
@@ -32,8 +33,8 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    client_frame_budget_bytes, CallerIdentity, EventSink, HandOverDesk, OpenEntry, PopupSpec,
-    WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, CallerIdentity, EventSink, HandOverDesk, LayerSpec, OpenEntry,
+    PopupSpec, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -117,10 +118,26 @@ impl ShmMapper for MockMapper {
 }
 
 /// The attestation table: each ticket maps to a fixed identity.
-struct MockIdentity;
+struct MockIdentity {
+    /// Which tickets the kernel attests as holding `CAP_DESKTOP_LAYER`.
+    /// Empty by default, so the gate is closed unless a test opens it.
+    layer_holders: Vec<u64>,
+    /// An attestation failure to surface instead of an answer.
+    attest_error: Option<Errno>,
+}
 
 fn proc_id(fill: u8) -> ProcId {
     ProcId::from_raw([fill; PROC_ID_LEN])
+}
+
+impl MockIdentity {
+    /// An identity attesting `CAP_DESKTOP_LAYER` for each of `tickets`.
+    fn holding_layer(tickets: &[u64]) -> Self {
+        Self {
+            layer_holders: tickets.to_vec(),
+            attest_error: None,
+        }
+    }
 }
 
 impl CallerIdentity for MockIdentity {
@@ -132,6 +149,13 @@ impl CallerIdentity for MockIdentity {
             _ => Err(Errno::NotFound),
         }
     }
+
+    fn caller_holds(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
+        if let Some(err) = self.attest_error {
+            return Err(err);
+        }
+        Ok(cap == CapabilityId::DESKTOP_LAYER && self.layer_holders.contains(&ticket))
+    }
 }
 
 /// A host recording every bridge call, optionally refusing opens, picker
@@ -139,6 +163,12 @@ impl CallerIdentity for MockIdentity {
 struct RecordingHost {
     opened: Vec<(ProcId, u64, DisplayMode, String, WindowSizing)>,
     popups: Vec<(u64, u64, i32, i32, DisplayMode)>,
+    layers: Vec<(ProcId, u64, DisplayMode, i32, i32, LayerDepth)>,
+    layer_places: Vec<(u64, i32, i32, LayerDepth)>,
+    refuse_layer: Option<Errno>,
+    /// The terrain the host reports, and the refusal it answers instead.
+    terrain: Vec<TerrainPlate>,
+    refuse_terrain: Option<Errno>,
     presented: Vec<(u64, Vec<u8>, DamageRect)>,
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
@@ -171,6 +201,11 @@ impl Default for RecordingHost {
         Self {
             opened: Vec::new(),
             popups: Vec::new(),
+            layers: Vec::new(),
+            layer_places: Vec::new(),
+            refuse_layer: None,
+            terrain: Vec::new(),
+            refuse_terrain: None,
             presented: Vec::new(),
             resized: Vec::new(),
             closed: Vec::new(),
@@ -220,6 +255,46 @@ impl WindowHost for RecordingHost {
         self.opened
             .push((owner, window_id, *surface, String::from(title), sizing));
         Ok(())
+    }
+
+    fn layer_opened(
+        &mut self,
+        owner: ProcId,
+        window_id: u64,
+        surface: &DisplayMode,
+        x: i32,
+        y: i32,
+        depth: LayerDepth,
+    ) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_layer {
+            return Err(err);
+        }
+        self.layers.push((owner, window_id, *surface, x, y, depth));
+        Ok(())
+    }
+
+    fn layer_placed(
+        &mut self,
+        window_id: u64,
+        x: i32,
+        y: i32,
+        depth: LayerDepth,
+    ) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_layer {
+            return Err(err);
+        }
+        self.layer_places.push((window_id, x, y, depth));
+        Ok(())
+    }
+
+    fn layer_terrain(&mut self, window_id: u64, out: &mut [TerrainPlate]) -> Result<usize, Errno> {
+        let _ = window_id;
+        if let Some(err) = self.refuse_terrain {
+            return Err(err);
+        }
+        let written = self.terrain.len().min(out.len());
+        out[..written].copy_from_slice(&self.terrain[..written]);
+        Ok(written)
     }
 
     fn popup_opened(
@@ -439,7 +514,7 @@ impl Loopback {
         Rc::new(RefCell::new(Self {
             server: WindowServer::new(MockMapper::with_regions(regions), SERVER, CLIENT_FRAME_MAX),
             host: RecordingHost::default(),
-            identity: MockIdentity,
+            identity: MockIdentity::holding_layer(&[TICKET_A, TICKET_B]),
             sink: QueueSink::default(),
             ticket: TICKET_A,
             sent: alloc::vec::Vec::new(),
@@ -2022,7 +2097,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
     let mapper = MockMapper::with_regions(&[(7, FRAME_LEN)]);
     let mut server = WindowServer::new(mapper, SERVER, CLIENT_FRAME_MAX);
     let mut host = MinimalHost;
-    let mut identity = MockIdentity;
+    let mut identity = MockIdentity::holding_layer(&[]);
     let mut reply = [0u8; WINDOW_REPLY_MAX];
 
     let create = request_frame(&WindowRequest::Create {
@@ -2464,7 +2539,7 @@ fn a_host_with_no_menu_service_refuses_an_open() {
     let mapper = MockMapper::with_regions(&[(7, FRAME_LEN)]);
     let mut server = WindowServer::new(mapper, SERVER, CLIENT_FRAME_MAX);
     let mut host = MinimalHost;
-    let mut identity = MockIdentity;
+    let mut identity = MockIdentity::holding_layer(&[]);
     let mut reply = [0u8; WINDOW_REPLY_MAX];
 
     let create = request_frame(&WindowRequest::Create {
@@ -3338,7 +3413,7 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
     let len = server.serve(
         &mut host,
         &mut QueueSink::default(),
-        &mut MockIdentity,
+        &mut MockIdentity::holding_layer(&[]),
         TICKET_A,
         &frame,
         &mut reply,
@@ -3445,4 +3520,321 @@ fn a_host_that_shows_no_tooltip_refuses_and_the_app_carries_on() {
 /// A tooltip's text, which the tests state as a plain literal.
 fn tip(text: &str) -> TooltipText {
     TooltipText::new(text).expect("a valid tip")
+}
+
+/// A one-frame SURFACE-shaped layer surface granted as `shm`, its events
+/// routed to `events`, opening at `(x, y)` in `depth`.
+fn layer_spec(shm: u64, events: u64, x: i32, y: i32, depth: LayerDepth) -> LayerSpec {
+    LayerSpec {
+        shm_handle: shm,
+        event_endpoint: events,
+        frame_count: 1,
+        surface: SURFACE,
+        x,
+        y,
+        depth,
+    }
+}
+
+#[test]
+fn opening_a_layer_surface_needs_the_capability_and_reaches_the_host() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    // The gate is the kernel's attestation of the caller, not anything the
+    // caller said: with the capability withheld the open is refused before
+    // the host is told anything at all.
+    loopback.borrow_mut().identity = MockIdentity::holding_layer(&[]);
+    assert_eq!(
+        client
+            .open_layer(&layer_spec(7, EVENTS_A, 10, 20, LayerDepth::Above))
+            .map(|(id, _)| id),
+        Err(Errno::PermissionDenied)
+    );
+    assert!(
+        loopback.borrow().host.layers.is_empty(),
+        "a refused open must not reach the host"
+    );
+
+    // Granted, the open carries the attested owner, the geometry, the
+    // screen point, and the depth through to the host.
+    loopback.borrow_mut().identity = MockIdentity::holding_layer(&[TICKET_A]);
+    let (id, _) = client
+        .open_layer(&layer_spec(7, EVENTS_A, 10, 20, LayerDepth::Above))
+        .expect("a held capability opens the surface");
+    let host = &loopback.borrow().host;
+    assert_eq!(
+        host.layers,
+        [(proc_id(0xA1), id, SURFACE, 10, 20, LayerDepth::Above)]
+    );
+}
+
+#[test]
+fn a_failed_capability_attestation_refuses_rather_than_grants() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    loopback.borrow_mut().identity.attest_error = Some(Errno::NotFound);
+    assert_eq!(
+        client
+            .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
+            .map(|(id, _)| id),
+        Err(Errno::NotFound),
+        "an attestation the kernel could not answer fails closed"
+    );
+    assert!(loopback.borrow().host.layers.is_empty());
+}
+
+#[test]
+fn every_layer_operation_is_gated_not_only_the_open() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let (id, _) = client
+        .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
+        .expect("opened while held");
+
+    // Revoking the grant stops the surface at its next request rather than
+    // letting it run as long as the process does.
+    loopback.borrow_mut().identity = MockIdentity::holding_layer(&[]);
+    assert_eq!(
+        client.place_layer(id, 5, 5, LayerDepth::Above),
+        Err(Errno::PermissionDenied)
+    );
+    let mut plates = [TerrainPlate {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    }; 4];
+    assert_eq!(
+        client.take_terrain(id, &mut plates).map(<[_]>::len),
+        Err(Errno::PermissionDenied)
+    );
+    assert!(loopback.borrow().host.layer_places.is_empty());
+}
+
+#[test]
+fn a_layer_surface_is_one_per_client() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    client
+        .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
+        .expect("the first is allowed");
+    assert_eq!(DESKTOP_LAYER_MAX_PER_CLIENT, 1);
+    assert_eq!(
+        client
+            .open_layer(&layer_spec(8, EVENTS_A, 0, 0, LayerDepth::Below))
+            .map(|(id, _)| id),
+        Err(Errno::LimitExceeded),
+        "a second would multiply the screen area one holder occupies"
+    );
+}
+
+#[test]
+fn closing_a_layer_surface_frees_its_slot() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let (id, _) = client
+        .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
+        .expect("the first is allowed");
+
+    // Retiring is the ordinary `Close`: a layer surface is a window in the
+    // one registry, so it needs no teardown path of its own.
+    client.close(id).expect("closed");
+    assert!(loopback.borrow().host.closed.contains(&id));
+    client
+        .open_layer(&layer_spec(8, EVENTS_A, 0, 0, LayerDepth::Below))
+        .expect("the slot is free again");
+}
+
+#[test]
+fn place_layer_is_owner_bound_and_refuses_an_ordinary_window() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let (layer, _) = client
+        .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
+        .expect("opened");
+    let window = create_id(&mut client, 8, EVENTS_A, 1, "a").expect("a window");
+
+    // An ordinary window is placed by the window manager; letting this move
+    // one would hand every holder authority over its own windows' positions.
+    assert_eq!(
+        client.place_layer(window, 1, 2, LayerDepth::Above),
+        Err(Errno::NotSupported)
+    );
+    // A window nobody owns here leaks nothing beyond "not found".
+    assert_eq!(
+        client.place_layer(9_999, 1, 2, LayerDepth::Above),
+        Err(Errno::NotFound)
+    );
+    client
+        .place_layer(layer, 3, 4, LayerDepth::Above)
+        .expect("its own surface moves");
+    assert_eq!(
+        loopback.borrow().host.layer_places,
+        [(layer, 3, 4, LayerDepth::Above)]
+    );
+}
+
+#[test]
+fn a_refused_place_leaves_the_recorded_depth_alone() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let (layer, _) = client
+        .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
+        .expect("opened");
+
+    // The engine records the depth only once the host accepted it, so the
+    // two can never disagree about what is actually stacked.
+    loopback.borrow_mut().host.refuse_layer = Some(Errno::WouldBlock);
+    assert_eq!(
+        client.place_layer(layer, 1, 1, LayerDepth::Above),
+        Err(Errno::WouldBlock)
+    );
+    loopback.borrow_mut().host.refuse_layer = None;
+    client
+        .place_layer(layer, 1, 1, LayerDepth::Above)
+        .expect("accepted once the host can");
+}
+
+#[test]
+fn terrain_is_answered_for_a_layer_surface_and_refused_for_anything_else() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let (layer, _) = client
+        .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
+        .expect("opened");
+    let window = create_id(&mut client, 8, EVENTS_A, 1, "a").expect("a window");
+
+    let reported = [
+        TerrainPlate {
+            x: 0,
+            y: 0,
+            width_px: 100,
+            height_px: 40,
+        },
+        TerrainPlate {
+            x: 30,
+            y: 60,
+            width_px: 20,
+            height_px: 20,
+        },
+    ];
+    loopback.borrow_mut().host.terrain = reported.to_vec();
+
+    let mut plates = [TerrainPlate {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    }; 8];
+    assert_eq!(client.take_terrain(layer, &mut plates), Ok(&reported[..]));
+
+    // An ordinary window has no terrain to ask about: the desktop's shape
+    // is what the layer authority buys, not something every window may read.
+    assert_eq!(
+        client.take_terrain(window, &mut plates).map(<[_]>::len),
+        Err(Errno::NotSupported)
+    );
+}
+
+#[test]
+fn a_refused_terrain_query_reaches_the_caller_as_a_refusal() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let (layer, _) = client
+        .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
+        .expect("opened");
+    loopback.borrow_mut().host.refuse_terrain = Some(Errno::SeatRevoked);
+    let mut plates = [TerrainPlate {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    }; 4];
+    assert_eq!(
+        client.take_terrain(layer, &mut plates).map(<[_]>::len),
+        Err(Errno::SeatRevoked),
+        "a refusal must not read as an empty desktop"
+    );
+}
+
+#[test]
+fn a_host_that_has_not_implemented_the_layer_refuses_it() {
+    // The default host bridge answers `NotSupported` rather than silently
+    // accepting: privileged authority a host never implemented must not
+    // appear to be granted.
+    struct BareHost;
+    impl WindowHost for BareHost {
+        fn window_opened(
+            &mut self,
+            _owner: ProcId,
+            _window_id: u64,
+            _surface: &DisplayMode,
+            _title: &str,
+            _sizing: WindowSizing,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn window_presented(
+            &mut self,
+            _window_id: u64,
+            _surface: &DisplayMode,
+            _frame: &[u8],
+            _damage: DamageRect,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn window_resized(&mut self, _window_id: u64, _surface: &DisplayMode) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn window_retitled(&mut self, _window_id: u64, _title: &str) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn pick_requested(&mut self, _window_id: u64) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn window_closed(&mut self, _window_id: u64) {}
+
+        fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
+            Ok(sample_desktop())
+        }
+    }
+
+    let mut server = WindowServer::new(
+        MockMapper::with_regions(&[(7, FRAME_LEN)]),
+        SERVER,
+        CLIENT_FRAME_MAX,
+    );
+    let mut reply = [0u8; WINDOW_REPLY_MAX];
+    let request = WindowRequest::OpenLayer {
+        shm_handle: 7,
+        event_endpoint: EVENTS_A,
+        frame_count: 1,
+        width_px: SURFACE.width_px,
+        height_px: SURFACE.height_px,
+        stride_bytes: SURFACE.stride_bytes,
+        format: SURFACE.format,
+        x: 0,
+        y: 0,
+        depth: LayerDepth::Above,
+    };
+    let mut frame = [0u8; 128];
+    let len = request.encode(&mut frame).expect("encodes");
+    let written = server.serve(
+        &mut BareHost,
+        &mut QueueSink::default(),
+        &mut MockIdentity::holding_layer(&[TICKET_A]),
+        TICKET_A,
+        &frame[..len],
+        &mut reply,
+    );
+    assert_eq!(
+        decode_status_reply(&reply[..written.min(4)]),
+        Err(Errno::NotSupported)
+    );
 }

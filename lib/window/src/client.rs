@@ -24,17 +24,18 @@ use tairix_abi::input::{
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_menu_text_reply,
-    decode_minted_id_reply, decode_open_target_reply, AppBar, AppMenu, BundleRunPath,
-    HandOverDocument, HandOverOutcome, OpenTarget, PointerAction, TooltipText, WindowEvent,
-    WindowRegion, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
-    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
-    WINDOW_OPEN_TARGET_REPLY_MAX,
+    decode_minted_id_reply, decode_open_target_reply, decode_terrain_reply, AppBar, AppMenu,
+    BundleRunPath, HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, PointerAction,
+    TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
+    WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+    WINDOW_TERRAIN_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
-use crate::server::{PopupSpec, WindowSizing};
+use crate::server::{LayerSpec, PopupSpec, WindowSizing};
 
 /// An open target an application pulled, owned rather than borrowed from the
 /// reply buffer so the pull can be drained in a loop.
@@ -480,6 +481,107 @@ impl<T: WindowTransport> WindowClient<T> {
         let (window_id, server) = decode_create_reply(&reply[..len])?;
         self.note_extent(window_id, spec.surface.width_px, spec.surface.height_px);
         Ok((window_id, server))
+    }
+
+    /// Open a desktop layer surface: an undecorated surface placed in
+    /// **screen** coordinates, in the desktop's own stacking layers rather
+    /// than inside a window of this app's.
+    ///
+    /// The one call on this channel that requires `CAP_DESKTOP_LAYER`, and
+    /// the difference between it and [`Self::create_popup`]: a popup is
+    /// also undecorated, but it hangs off a window this app already owns
+    /// and is offset from that window's client origin, so it tells the app
+    /// nothing about the screen. This names an absolute point and a
+    /// stacking position relative to other applications' windows.
+    ///
+    /// The session bounds what it hands back: the surface is clamped onto
+    /// the work area, never enters the focus rotation, never receives a
+    /// key, catches the pointer only where its own content is opaque, and
+    /// is hidden whenever a trusted surface is up. Each side is at most
+    /// `DESKTOP_LAYER_MAX_SIDE_LOGICAL` logical pixels.
+    ///
+    /// The reply is the same shape as [`Self::create`], and thereafter
+    /// [`Self::present`] and [`Self::close`] act on the surface's id
+    /// exactly as they do for a window.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — a geometry
+    ///   beyond the bound, or a reserved event endpoint, caught before any
+    ///   call.
+    /// * [`Errno::PermissionDenied`] — the caller does not hold
+    ///   `CAP_DESKTOP_LAYER`, which an app degrades over rather than dying:
+    ///   the refusal is the answer, not a fault.
+    /// * [`Errno::LimitExceeded`] — this client already holds a layer
+    ///   surface, or the seat's total is reached.
+    /// * A transport failure or a corrupt reply (fail closed, never a
+    ///   guessed id).
+    pub fn open_layer(&mut self, spec: &LayerSpec) -> Result<(u64, ProcId), Errno> {
+        let request = WindowRequest::OpenLayer {
+            shm_handle: spec.shm_handle,
+            event_endpoint: spec.event_endpoint,
+            frame_count: spec.frame_count,
+            width_px: spec.surface.width_px,
+            height_px: spec.surface.height_px,
+            stride_bytes: spec.surface.stride_bytes,
+            format: spec.surface.format,
+            x: spec.x,
+            y: spec.y,
+            depth: spec.depth,
+        };
+        let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
+        let len = self.call(&request, &mut reply)?;
+        let (window_id, server) = decode_create_reply(&reply[..len])?;
+        self.note_extent(window_id, spec.surface.width_px, spec.surface.height_px);
+        Ok((window_id, server))
+    }
+
+    /// Move this app's layer surface to a new screen point and stacking
+    /// layer. The session clamps the point onto the work area.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal (a window this app does not own, or one
+    /// that is not a layer surface) or a transport failure.
+    pub fn place_layer(
+        &mut self,
+        window_id: u64,
+        x: i32,
+        y: i32,
+        depth: LayerDepth,
+    ) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::PlaceLayer {
+            window_id,
+            x,
+            y,
+            depth,
+        })
+    }
+
+    /// Pull the desktop terrain this app's layer surface sits on: the
+    /// visible windows' screen rectangles, back-to-front, written into
+    /// `out` and returned as the filled prefix.
+    ///
+    /// Pulled rather than pushed, so a surface that does not care is told
+    /// nothing. [`WindowEvent::TerrainChanged`] says an answer would now
+    /// differ.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal, a transport failure, or a corrupt
+    /// reply. [`Errno::BufferTooSmall`] if `out` is shorter than the answer
+    /// the session sent.
+    ///
+    /// [`WindowEvent::TerrainChanged`]: tairix_abi::window_ipc::WindowEvent::TerrainChanged
+    pub fn take_terrain<'a>(
+        &mut self,
+        window_id: u64,
+        out: &'a mut [TerrainPlate],
+    ) -> Result<&'a [TerrainPlate], Errno> {
+        let request = WindowRequest::TakeTerrain { window_id };
+        let mut reply = [0u8; WINDOW_TERRAIN_REPLY_MAX];
+        let len = self.call(&request, &mut reply)?;
+        decode_terrain_reply(&reply[..len], out)
     }
 
     /// Ask the session to describe the desktop this app's windows are

@@ -1361,6 +1361,19 @@ mod tests {
     // row or manifest constant exists for them.
     const WINDOWED_APP_REQUEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
 
+    // The desktop companion's expected request (plans/CINDER.md): the windowed
+    // application's pair, plus `CAP_DESKTOP_LAYER` — presence on the desktop
+    // outside a window of its own, which is the whole difference between a
+    // companion and an ordinary windowed app. It earns a request of its own
+    // rather than widening `WINDOWED_APP_REQUEST`, because every other
+    // application would then be entitled to a desktop surface it never asks
+    // for.
+    const COMPANION_APP_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::SHM,
+        CapabilityId::DESKTOP_LAYER,
+    ];
+
     // The Switchboard monitor service (plans/NEW-TASKBAR.md T10/T11): console
     // write for its fail-loud stderr diagnostics, and the three sysinfo reads
     // its sampler has code paths for — `CAP_SYSINFO_GLOBAL` (the system-wide
@@ -1451,6 +1464,7 @@ mod tests {
             ("basename", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("cat", ProgramKind::Command, CAT_MANIFEST),
             ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("cinder", ProgramKind::Application, COMPANION_APP_REQUEST),
             ("clear", ProgramKind::Command, CLEAR_MANIFEST),
             ("confd", ProgramKind::Service, CONFD_MANIFEST),
             ("configure", ProgramKind::Command, CONFIGURE_REQUEST),

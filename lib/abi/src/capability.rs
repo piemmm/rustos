@@ -682,6 +682,40 @@ impl CapabilityId {
     /// while leaving the per-target wait unaudited, so a busy governor cannot
     /// drown the log.
     pub const CPUFREQ: Self = Self(46);
+    /// Place a surface in the desktop's own stacking layers, and read the
+    /// desktop geometry and pointer position that placement needs.
+    ///
+    /// An ordinary window lives inside its own bounds, and *being
+    /// undecorated is not the privileged part*:
+    /// [`WindowRequest::CreatePopup`](crate::window_ipc::WindowRequest::CreatePopup)
+    /// already opens a furniture-less surface with no capability at all,
+    /// because it is anchored to the caller's own window, offset from that
+    /// window's client origin (an app is never told its own screen
+    /// position), and clamped onto the screen by the session. This
+    /// capability grants exactly what that withholds: placement in
+    /// **screen** coordinates, a stacking position relative to *other
+    /// principals'* windows, and the terrain and pointer feeds such
+    /// placement requires. One capability for one class of authority —
+    /// presence on the desktop outside a window of one's own.
+    ///
+    /// It is a user-interface spoofing primitive, so it is bounded
+    /// structurally rather than by trusting its holder. A layer surface is
+    /// never in the focus rotation and is never routed a keystroke, so a
+    /// pixel-perfect lookalike of a credential prompt still captures
+    /// nothing. It catches the pointer only where its own content is
+    /// opaque, so it cannot serve as an invisible screen-wide click trap.
+    /// It is capped at
+    /// [`DESKTOP_LAYER_MAX_SIDE_LOGICAL`](crate::window_ipc::DESKTOP_LAYER_MAX_SIDE_LOGICAL),
+    /// which is below the narrowest surface the session draws for a trusted
+    /// decision, so no such surface can be reproduced at its own size. And
+    /// it is hidden, with both feeds stopped, whenever the session puts a
+    /// trusted surface up — a pet must not watch the pointer over a
+    /// password field.
+    ///
+    /// Not covered by an existing capability: `CAP_DISPLAY` is the raw
+    /// framebuffer the session itself holds, and `CAP_SEAT_ADMIN`
+    /// administers seats rather than drawing on one.
+    pub const DESKTOP_LAYER: Self = Self(47);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -739,6 +773,7 @@ impl CapabilityId {
         (Self::APPDATA_ADMIN, "CAP_APPDATA_ADMIN"),
         (Self::SERVICE_CONTROL, "CAP_SERVICE_CONTROL"),
         (Self::CPUFREQ, "CAP_CPUFREQ"),
+        (Self::DESKTOP_LAYER, "CAP_DESKTOP_LAYER"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -878,6 +913,8 @@ mod tests {
         assert_eq!(CapabilityId::SANDBOX_SPAWN.as_u16(), 43);
         assert_eq!(CapabilityId::APPDATA_ADMIN.as_u16(), 44);
         assert_eq!(CapabilityId::SERVICE_CONTROL.as_u16(), 45);
+        assert_eq!(CapabilityId::CPUFREQ.as_u16(), 46);
+        assert_eq!(CapabilityId::DESKTOP_LAYER.as_u16(), 47);
     }
 
     #[test]
@@ -912,6 +949,10 @@ mod tests {
             Some("CAP_APPDATA_ADMIN")
         );
         assert_eq!(CapabilityId::CPUFREQ.name(), Some("CAP_CPUFREQ"));
+        assert_eq!(
+            CapabilityId::DESKTOP_LAYER.name(),
+            Some("CAP_DESKTOP_LAYER")
+        );
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -922,15 +963,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=46 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=47 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=46 {
+        for raw in 1..=47 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(47).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(48).expect("in range").name(), None);
     }
 
     #[test]
