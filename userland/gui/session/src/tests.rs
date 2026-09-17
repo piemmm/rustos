@@ -19,8 +19,7 @@ use tairix_abi::window_ipc::{
     AppMenuLabel, AppMenuRow,
 };
 use tairix_abi::{
-    AppInfoHeader, DriverError, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
+    manifest_header, AppIdentity as AttestedApp, AppInfoHeader, DriverError, Errno, ProcId,
 };
 use tairix_controls::damage::Repaint;
 use tairix_controls::{ChainModel, ChainRow, ControlState, Fact, FactList, MenuItem, PointerState};
@@ -57,13 +56,13 @@ use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, load_icon_set, load_library,
     load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
-    AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell,
-    DocumentRelay, FrameContent, FramePacer, FrameReportGate, Handover, IconRasteriser,
-    InputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LockOutcome, LockedDrain,
-    OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade, ScreenLock, SessionFileReader,
-    SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost,
-    SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge,
-    TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
+    AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex, DesktopSession,
+    DesktopShell, DocumentRelay, FrameContent, FramePacer, FrameReportGate, Handover,
+    IconRasteriser, InputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LockOutcome,
+    LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade, ScreenLock,
+    SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome,
+    ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
+    TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
     DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
     MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
@@ -85,8 +84,9 @@ const MALFORMED_SVG: &[u8] = b"this is not an SVG document";
 #[derive(Default)]
 pub(crate) struct MemoryAssets {
     files: Vec<(String, Vec<u8>)>,
-    /// Every path read, in order, so a test can count reads.
-    reads: Vec<String>,
+    /// Every path read, in order, so a test can count reads. Shared rather
+    /// than owned because the store walk reads through a shared borrow.
+    reads: core::cell::RefCell<Vec<String>>,
 }
 
 impl MemoryAssets {
@@ -99,20 +99,62 @@ impl MemoryAssets {
     /// resolution reads a manifest once rather than once per slot.
     fn reads(&self, path: &str) -> usize {
         self.reads
+            .borrow()
             .iter()
             .filter(|read| read.as_str() == path)
             .count()
     }
-}
 
-impl SessionFileReader for MemoryAssets {
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
-        self.reads.push(String::from(path));
+    /// The bytes at `path`, recording the read.
+    fn get(&self, path: &str) -> Result<Vec<u8>, Errno> {
+        self.reads.borrow_mut().push(String::from(path));
         self.files
             .iter()
             .find(|(p, _)| p == path)
             .map(|(_, bytes)| bytes.clone())
             .ok_or(Errno::NotFound)
+    }
+}
+
+impl SessionFileReader for MemoryAssets {
+    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+        self.get(path)
+    }
+}
+
+/// The store tree the walk sees, derived from the very path table the file
+/// reads come from: a directory lists the distinct next components of every
+/// path beneath it, and holds no entries at all when nothing is beneath it —
+/// which is how an absent store root reads.
+impl tairix_appstore::StoreReader for MemoryAssets {
+    fn list_dir(&self, path: &str) -> Result<Option<Vec<tairix_appstore::DirEntry>>, Errno> {
+        let prefix = format!("{path}/");
+        let mut entries: Vec<tairix_appstore::DirEntry> = Vec::new();
+        for (held, _) in &self.files {
+            let Some(rest) = held.strip_prefix(&prefix) else {
+                continue;
+            };
+            let (name, directory) = match rest.split_once('/') {
+                Some((head, _)) => (head, true),
+                None => (rest, false),
+            };
+            if entries.iter().any(|entry| entry.name == name) {
+                continue;
+            }
+            entries.push(tairix_appstore::DirEntry {
+                name: String::from(name),
+                directory,
+            });
+        }
+        Ok((!entries.is_empty()).then_some(entries))
+    }
+
+    fn read_appinfo(&self, bundle: &str) -> Result<Option<Vec<u8>>, Errno> {
+        match self.get(&tairix_appstore::manifest_path(bundle)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(Errno::NotFound) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -208,9 +250,18 @@ fn app_bar(click: AppBarClick) -> AppBar {
 /// Run `resolve` over a real artwork cache and a resolver that serves
 /// nothing, so a slot's icon resolution is exercised without a decode.
 fn with_artwork<T>(resolve: impl FnOnce(&mut dyn ArtworkResolver, &mut ArtworkCache) -> T) -> T {
+    with_artwork_over(MemoryAssets::default(), resolve)
+}
+
+/// The same, reading `assets`, for a test whose subject is a bundle's own
+/// declared icon rather than the resolution around it.
+fn with_artwork_over<T>(
+    assets: MemoryAssets,
+    resolve: impl FnOnce(&mut dyn ArtworkResolver, &mut ArtworkCache) -> T,
+) -> T {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
-    let mut reader = ArtworkFileReader(MemoryAssets::default());
+    let mut reader = ArtworkFileReader(assets);
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
     let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
     resolve(&mut inline, &mut cache)
@@ -4067,32 +4118,65 @@ fn library_host(overlay: Option<&str>) -> tairix_appdata::fake::FakeService {
     }
 }
 
-/// The catalogue and the associations arrive as one snapshot, read on the
-/// worker rather than on the click that opens the launcher: a bundle the
-/// catalogue names contributes its declared types, one whose manifest cannot
-/// be read contributes nothing, and no directory of the store is walked.
+/// The catalogue, the associations, and the attested-identity index arrive as
+/// one snapshot, read on the worker rather than on the click that opens the
+/// launcher.
+///
+/// The bundles are **discovered**, not taken from the catalogue: an installed
+/// bundle nobody listed in the program library still declares its file types
+/// and still names itself on the icon bar, and a catalogue row naming a bundle
+/// that is not installed contributes nothing rather than being offered on a
+/// guess.
 #[test]
-fn load_programs_reads_one_manifest_per_catalogued_bundle() {
+fn load_programs_walks_the_installed_stores_rather_than_the_catalogue() {
     let machine_conf = "os.tairix.editor.name = Editor\nos.tairix.editor.bundle = /Apps/editor.app\nos.tairix.editor.category = Office\nos.tairix.ghost.name = Ghost\nos.tairix.ghost.bundle = /Apps/ghost.app\nos.tairix.ghost.category = Office\n";
     let mut reader = MemoryAssets::default()
         .with(LIBRARY_PATH, machine_conf.as_bytes())
         .with(
             "/Apps/editor.app/AppInfo",
-            &manifest_fixture("Editor", None),
+            &manifest_fixture(EDITOR_ID, "Editor", None),
+        )
+        // Installed but uncatalogued: it used to contribute nothing at all.
+        .with(
+            "/System/Applications/view.app/AppInfo",
+            &manifest_fixture("os.tairix.view", "View", None),
         );
     let mut host = library_host(None);
 
-    let programs = load_programs(&mut reader, &mut host);
+    let programs = load_programs(&mut reader, &mut host, None);
     assert_eq!(programs.catalog.len(), 2);
-    assert!(programs.warnings.is_empty());
-    // The readable manifest claims its bundle; the absent one claims nothing
-    // rather than being offered on a guess.
-    assert_eq!(programs.associations.len(), 1);
-    assert_eq!(programs.associations[0].bundle_path(), "/Apps/editor.app");
+    assert!(programs.warnings.is_empty(), "{:?}", programs.warnings);
+
+    let mut claimed: Vec<&str> = programs
+        .associations
+        .iter()
+        .map(tairix_browse::AppAssociation::bundle_path)
+        .collect();
+    claimed.sort_unstable();
+    assert_eq!(
+        claimed,
+        ["/Apps/editor.app", "/System/Applications/view.app"],
+        "every installed bundle claims its types; the catalogued ghost claims none"
+    );
+
+    assert_eq!(
+        programs.bundles.path_of(&attested(EDITOR_ID)),
+        Some("/Apps/editor.app")
+    );
+    assert_eq!(
+        programs.bundles.path_of(&attested("os.tairix.view")),
+        Some("/System/Applications/view.app"),
+        "an uncatalogued bundle still names itself"
+    );
+    assert_eq!(
+        programs.bundles.path_of(&attested("os.tairix.ghost")),
+        None,
+        "a catalogue row with no installed bundle attributes nothing"
+    );
     assert_eq!(
         reader.reads("/Apps/editor.app/AppInfo"),
         1,
-        "one read per catalogued bundle, not one per gesture"
+        "one read per installed bundle, not one per gesture"
     );
 }
 
@@ -4343,9 +4427,193 @@ fn the_strip_groups_windows_under_the_process_that_owns_them() {
     assert_eq!(strip[1].owner, two);
     assert_eq!(
         strip[1].bundle, None,
-        "a process the desktop did not launch has no bundle to attest"
+        "a process whose attested identity resolved to no installed bundle"
     );
     assert_eq!(strip[1].windows, vec![TaskId(1)]);
+}
+
+/// The index resolves an attested identity only where a manifest declares
+/// **both** halves of it.
+///
+/// A publisher key is public — it sits in every copy of a bundle — so a
+/// manifest is copyable text. Matching the identifier alone would let a
+/// bundle planted in a user-writable store supply the name, purpose, author
+/// and icon the desktop draws in system chrome for a shipped application.
+#[test]
+fn the_index_matches_an_identity_on_its_publisher_as_well_as_its_identifier() {
+    let assets = MemoryAssets::default().with(
+        "/System/Applications/view.app/AppInfo",
+        &manifest_fixture("os.tairix.view", "View", None),
+    );
+    let index = installed_index(&assets);
+
+    assert_eq!(
+        index.path_of(&attested("os.tairix.view")),
+        Some("/System/Applications/view.app")
+    );
+
+    let mut foreign = *fixture_publisher().as_bytes();
+    foreign[0] ^= 0xFF;
+    let impostor = AttestedApp::new("os.tairix.view", tairix_abi::PublisherId::from_raw(foreign))
+        .expect("a well-formed identity");
+    assert_eq!(
+        index.path_of(&impostor),
+        None,
+        "the same identifier under another developer resolves to no bundle"
+    );
+}
+
+/// A read-only, system-signed store wins an identifier a user-writable one
+/// also claims, whatever order the walk happened to see them in — and two
+/// bundles in the *same* store claiming one identifier leave it
+/// unattributed rather than letting whichever sorts first wear the other's
+/// identity.
+#[test]
+fn store_precedence_settles_a_duplicate_and_a_tie_inside_one_store_attributes_nothing() {
+    let mut index = BundleIndex::new();
+    let view = attested("os.tairix.view");
+    // Recorded in the order the breadth-first walk really produces: a
+    // top-level bundle in a later store is seen before a nested one in an
+    // earlier store, so precedence rather than visit order must decide.
+    index.record(&view, 2, "/Apps/planted.app");
+    index.record(&view, 1, "/System/Applications/nested/view.app");
+    assert_eq!(
+        index.path_of(&view),
+        Some("/System/Applications/nested/view.app"),
+        "the earlier store owns the identifier"
+    );
+
+    let mut tied = BundleIndex::new();
+    tied.record(&view, 1, "/System/Applications/aaa.app");
+    tied.record(&view, 1, "/System/Applications/view.app");
+    assert_eq!(
+        tied.path_of(&view),
+        None,
+        "one store cannot say which bundle a process came from"
+    );
+
+    // An earlier store still resolves what a later one left tied.
+    tied.record(&view, 0, "/System/Commands/view.app");
+    assert_eq!(tied.path_of(&view), Some("/System/Commands/view.app"));
+}
+
+/// The reported defect, and the whole point of this resolution: opening two
+/// pictures from the file manager produced **two** icon-bar slots, both
+/// labelled `Application`, both drawn with the built-in glyph, because the
+/// file manager — not the desktop — spawned the viewer, so the desktop's own
+/// launch bookkeeping had never heard of it.
+///
+/// Resolved from the identity the *kernel* attests, one process the desktop
+/// launched nothing for wears its bundle's own name and icon, and — the half
+/// that stops the second slot ever existing — is found by `resident`, so the
+/// single-instance funnel hands the next document to it instead of spawning.
+#[test]
+fn a_process_the_desktop_did_not_launch_wears_its_attested_identity_and_is_resident() {
+    const VIEW_BUNDLE: &str = "/System/Applications/view.app";
+    const VIEW_TINT: u8 = 0x7E;
+
+    let assets = identity_bundle(MemoryAssets::default(), VIEW_BUNDLE, "View", &[VIEW_TINT]);
+    let index = installed_index(&assets);
+    let viewer = window_owner(1);
+    let mut service = AppBarService::new();
+    service
+        .declare(viewer, &app_bar(AppBarClick::Open))
+        .expect("the viewer declares its bar presence");
+
+    let mut reader = MemoryAssets::default().with(
+        &format!("{VIEW_BUNDLE}/AppInfo"),
+        &manifest_fixture(&bundle_id_of(VIEW_BUNDLE), "View", Some("icon.svg")),
+    );
+    let strip = service.strip(
+        &[(viewer, TaskId(0))],
+        // Exactly what the serve loop resolves with: the kernel's attestation
+        // through the installed-store index, and no launch table at all.
+        |owner| {
+            index
+                .path_of(&attested(&bundle_id_of(VIEW_BUNDLE)))
+                .filter(|_| owner == viewer)
+                .map(String::from)
+        },
+        &mut reader,
+    );
+    assert_eq!(strip.len(), 1);
+    assert_eq!(strip[0].bundle.as_deref(), Some(VIEW_BUNDLE));
+
+    let slots = with_artwork_over(assets, |resolver, cache| {
+        service.slots(&strip, &mut reader, (resolver, cache, 24))
+    });
+    assert_eq!(
+        slots[0].label(),
+        "View",
+        "the manifest's name, not a fallback"
+    );
+    assert_eq!(slots[0].identity().version, "1.0.0");
+    assert_eq!(
+        slots[0]
+            .artwork()
+            .and_then(|art| art.pixels().first().map(|pixel| pixel.r)),
+        Some(VIEW_TINT),
+        "and the bundle's own declared icon, not the built-in glyph"
+    );
+
+    // The half that stops a second viewer: a hand-over naming this bundle
+    // finds the running instance and reuses it.
+    assert_eq!(service.resident(VIEW_BUNDLE), Some(viewer));
+    let mut host = CountingReach::default();
+    assert_eq!(
+        resolve_launch(
+            &mut host,
+            service.resident(VIEW_BUNDLE),
+            service.runs_one_instance(VIEW_BUNDLE),
+            None
+        ),
+        Launch::Reused {
+            app: viewer,
+            by: Handover::Default
+        },
+        "the next document reaches the instance already running"
+    );
+}
+
+/// Fail closed on both halves of the absence: a process with no attested
+/// identity, and one whose attested identity no installed bundle declares,
+/// each keep the neutral label and are not resident — so a slot never wears
+/// a name the desktop could not read, and a hand-over never reaches a
+/// process whose bundle it could not confirm.
+#[test]
+fn an_unresolvable_identity_keeps_the_neutral_label_and_is_not_resident() {
+    let unattested = window_owner(1);
+    let unknown = window_owner(2);
+    let mut service = AppBarService::new();
+    for owner in [unattested, unknown] {
+        service
+            .declare(owner, &app_bar(AppBarClick::Open))
+            .expect("declared");
+    }
+
+    let mut reader = MemoryAssets::default();
+    let index = installed_index(&reader);
+    let strip = service.strip(
+        &[(unattested, TaskId(0)), (unknown, TaskId(1))],
+        |owner| {
+            (owner == unknown)
+                .then(|| index.path_of(&attested("os.tairix.nowhere")))
+                .flatten()
+                .map(String::from)
+        },
+        &mut reader,
+    );
+    assert_eq!(strip.len(), 2);
+    assert!(strip.iter().all(|group| group.bundle.is_none()));
+
+    let slots =
+        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+    for slot in &slots {
+        assert_eq!(slot.label(), "Application");
+        assert_eq!(slot.identity().version, "");
+        assert_eq!(slot.identity().author, None);
+    }
+    assert_eq!(service.resident("/System/Applications/nowhere.app"), None);
 }
 
 #[test]
@@ -4558,7 +4826,7 @@ fn a_slots_identity_is_the_signed_manifests_and_a_missing_one_states_only_a_name
     let (named, bare, none) = (window_owner(1), window_owner(2), window_owner(3));
     let mut reader = MemoryAssets::default().with(
         "/Apps/terminal.app/AppInfo",
-        &described_manifest_fixture("Terminal", "Runs a shell", "TAIRiX"),
+        &described_manifest_fixture("os.tairix.terminal", "Terminal", "Runs a shell", "TAIRiX"),
     );
     let strip = service.strip(
         &[(named, TaskId(0)), (bare, TaskId(1)), (none, TaskId(2))],
@@ -4578,7 +4846,7 @@ fn a_slots_identity_is_the_signed_manifests_and_a_missing_one_states_only_a_name
 
     // The manifest's own fields, never anything the process claims.
     assert_eq!(slots[0].label(), "Terminal");
-    assert_eq!(slots[0].identity().version, "1");
+    assert_eq!(slots[0].identity().version, "1.0.0");
     assert_eq!(slots[0].identity().purpose.as_deref(), Some("Runs a shell"));
     assert_eq!(slots[0].identity().author.as_deref(), Some("TAIRiX"));
 
@@ -4600,7 +4868,7 @@ fn a_manifest_is_read_once_per_bundle_and_forgotten_when_nothing_runs_from_it() 
     let (one, two) = (window_owner(1), window_owner(2));
     let mut reader = MemoryAssets::default().with(
         "/Apps/terminal.app/AppInfo",
-        &manifest_fixture("Terminal", None),
+        &manifest_fixture("os.tairix.terminal", "Terminal", None),
     );
     let bundle = |_| Some(String::from("/Apps/terminal.app"));
 
@@ -4664,11 +4932,11 @@ fn a_bundle_that_presents_no_icon_bar_slot_is_off_the_strip_either_way() {
     let mut reader = MemoryAssets::default()
         .with(
             &format!("{ICONLESS}/AppInfo"),
-            &iconless_manifest_fixture("Switchboard"),
+            &iconless_manifest_fixture("os.tairix.switchboard", "Switchboard"),
         )
         .with(
             &format!("{ORDINARY}/AppInfo"),
-            &manifest_fixture("Terminal", None),
+            &manifest_fixture("os.tairix.terminal", "Terminal", None),
         );
     let (quiet, ordinary) = (window_owner(1), window_owner(2));
     let bundle = move |owner: ProcId| {
@@ -5383,8 +5651,8 @@ fn app_slot_point(shell: &DesktopShell, index: usize) -> Point {
 
 /// A manifest stating the two optional identity fields as well, for the
 /// information panel's own attestation.
-fn described_manifest_fixture(name: &str, purpose: &str, author: &str) -> Vec<u8> {
-    let mut bytes = manifest_fixture(name, None);
+fn described_manifest_fixture(id: &str, name: &str, purpose: &str, author: &str) -> Vec<u8> {
+    let mut bytes = manifest_fixture(id, name, None);
     let mut header = AppInfoHeader::from_bytes(&bytes).expect("the fixture decodes");
     header.purpose_len = u8::try_from(purpose.len()).expect("short");
     header.purpose[..purpose.len()].copy_from_slice(purpose.as_bytes());
@@ -5394,47 +5662,19 @@ fn described_manifest_fixture(name: &str, purpose: &str, author: &str) -> Vec<u8
     bytes
 }
 
-pub(crate) fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
-    let mut h = AppInfoHeader {
-        magic: APPINFO_MAGIC,
-        abi_version: ABI_VERSION_CURRENT,
-        flags: 0,
-        capability_count: 0,
-        mime_count: 0,
-        id_len: 2,
-        name_len: u8::try_from(name.len()).unwrap(),
-        version_len: 1,
-        purpose_len: 0,
-        author_len: 0,
-        library_icon_len: u8::try_from(icon.map_or(0, str::len)).unwrap(),
-        library: tairix_abi::LibraryCategory::to_wire(Some(tairix_abi::LibraryCategory::Other)),
-        title_len: 0,
-        id: [0; BUNDLE_ID_MAX],
-        name: [0; BUNDLE_NAME_MAX],
-        version: [0; BUNDLE_VERSION_MAX],
-        library_icon: [0; LIBRARY_ICON_MAX],
-        purpose: [0; tairix_abi::BUNDLE_PURPOSE_MAX],
-        author: [0; tairix_abi::BUNDLE_AUTHOR_MAX],
-        title: [0; tairix_abi::BUNDLE_TITLE_MAX],
-        syscall_table_hash: [0; SYSCALL_TABLE_HASH_LEN],
-        content_hash: [0; 32],
-        signer_pubkey: [0; 32],
-        publisher_pubkey: [0; 32],
-        publisher_cert: [0; 64],
-        signature: [0; 64],
-    };
-    h.id[0..2].copy_from_slice(b"fi");
-    h.name[..name.len()].copy_from_slice(name.as_bytes());
-    h.version[0] = b'1';
+pub(crate) fn manifest_fixture(id: &str, name: &str, icon: Option<&str>) -> Vec<u8> {
+    let mut header = manifest_header(id, name);
+    header.library = tairix_abi::LibraryCategory::to_wire(Some(tairix_abi::LibraryCategory::Other));
     if let Some(icon) = icon {
-        h.library_icon[..icon.len()].copy_from_slice(icon.as_bytes());
+        header.library_icon_len = u8::try_from(icon.len()).expect("fits");
+        header.library_icon[..icon.len()].copy_from_slice(icon.as_bytes());
     }
-    h.to_le_bytes().to_vec()
+    header.to_le_bytes().to_vec()
 }
 
 /// A manifest whose signed header says the bundle presents no icon-bar slot.
-fn iconless_manifest_fixture(name: &str) -> Vec<u8> {
-    let bytes = manifest_fixture(name, None);
+fn iconless_manifest_fixture(id: &str, name: &str) -> Vec<u8> {
+    let bytes = manifest_fixture(id, name, None);
     let mut header = AppInfoHeader::from_bytes(&bytes).expect("the fixture decodes");
     header.flags |= tairix_abi::APPINFO_FLAG_NO_ICON_BAR;
     header.to_le_bytes().to_vec()
@@ -8613,14 +8853,14 @@ fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
         MemoryAssets::default()
             .with(
                 &format!("{bundle}/AppInfo"),
-                &manifest_fixture("One", Some("icon.svg")),
+                &manifest_fixture("os.tairix.one", "One", Some("icon.svg")),
             )
             .with(&artwork_source(bundle), &[BUNDLE_TINT]),
     ));
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
     let mut manifests = MemoryAssets::default().with(
         &format!("{bundle}/AppInfo"),
-        &manifest_fixture("One", Some("icon.svg")),
+        &manifest_fixture("os.tairix.one", "One", Some("icon.svg")),
     );
     let mut service = AppBarService::new();
     let strip = service.strip(
@@ -11477,9 +11717,15 @@ impl<T: IconRasteriser> IconRasteriser for Shared<T> {
 const EDITOR_BUNDLE: &str = "/Apps/editor.app";
 const CHESS_BUNDLE: &str = "/Apps/chess.app";
 
-/// The task ids the launch table records those bundles under.
+/// The bundle identifiers those bundles' own manifests declare — what the
+/// kernel attests for a process running from each.
+const EDITOR_ID: &str = "os.tairix.editor";
+const CHESS_ID: &str = "os.tairix.chess";
+
+/// The task id the launch table records the editor's launch under, for the
+/// one thing that table still answers: warming a launch's artwork before any
+/// window or attestation exists.
 const EDITOR_PID: u64 = 41;
-const CHESS_PID: u64 = 42;
 
 /// The tint each bundle's own icon rasterises to, so a drawn slot names the
 /// bundle it came from.
@@ -11493,9 +11739,19 @@ fn identity_bundle(assets: MemoryAssets, bundle: &str, name: &str, icon: &[u8]) 
     assets
         .with(
             &format!("{bundle}/AppInfo"),
-            &manifest_fixture(name, Some("icon.svg")),
+            &manifest_fixture(&bundle_id_of(bundle), name, Some("icon.svg")),
         )
         .with(&format!("{bundle}/Resources/icon.svg"), icon)
+}
+
+/// The identifier the bundle installed at `bundle` declares: its leaf name
+/// without the suffix, under the project's reverse-DNS prefix.
+fn bundle_id_of(bundle: &str) -> String {
+    let leaf = bundle.rsplit('/').next().unwrap_or(bundle);
+    format!(
+        "os.tairix.{}",
+        leaf.strip_suffix(tairix_abi::BUNDLE_SUFFIX).unwrap_or(leaf)
+    )
 }
 
 /// A desktop whose artwork seams read `assets` and rasterise by tint, with
@@ -11541,14 +11797,40 @@ fn open_owned_window(
     });
 }
 
-/// A launch table recording each `(pid, bundle)` the desktop started, and
-/// the attestation map from that pid's owner to it.
-fn launched_bundles(records: &[(u64, &str)]) -> LaunchTable {
-    let mut launched = LaunchTable::new();
-    for (pid, bundle) in records {
-        launched.record(*pid, "App", &format!("{bundle}{BUNDLE_RUN_SUFFIX}"));
-    }
-    launched
+/// The bundle index the desktop builds by walking `reader`'s store tree —
+/// the real walk over the real manifests, so a test's attested identity is
+/// matched exactly as a running system matches one.
+fn installed_index(reader: &MemoryAssets) -> BundleIndex {
+    let mut index = BundleIndex::new();
+    tairix_appstore::walk(
+        reader,
+        &tairix_appstore::MACHINE_ROOTS,
+        |bundle: tairix_appstore::Bundle<'_>| {
+            if let Ok(app) = AttestedApp::new(
+                bundle.header.bundle_id(),
+                tairix_appload::publisher_id_of(bundle.header),
+            ) {
+                index.record(&app, bundle.root, bundle.path);
+            }
+            tairix_appstore::Verdict::Accepted
+        },
+    )
+    .expect("the fixture store walks");
+    index
+}
+
+/// The identity the kernel attests for a process running from the bundle
+/// whose manifest declares `id`, with the publisher the test fixtures use.
+fn attested(id: &str) -> AttestedApp {
+    AttestedApp::new(id, fixture_publisher()).expect("a well-formed identity")
+}
+
+/// The publisher every manifest fixture names, derived through the one
+/// derivation the load gate attests with.
+fn fixture_publisher() -> tairix_abi::PublisherId {
+    let bytes = manifest_fixture("os.tairix.probe", "Probe", None);
+    let header = tairix_abi::AppInfoHeader::from_bytes(&bytes).expect("the fixture decodes");
+    tairix_appload::publisher_id_of(&header)
 }
 
 /// The identity the decorated window `wm` wears, and the opaque tint of the
@@ -11567,13 +11849,15 @@ fn window_identity(comp: &Compositor, wm: WindowId) -> (Option<IconKind>, Option
 }
 
 #[test]
-fn a_windows_identity_comes_from_the_bundle_the_desktop_launched() {
-    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(identity_bundle(
+fn a_windows_identity_comes_from_the_bundle_the_kernel_attested() {
+    let assets = identity_bundle(
         MemoryAssets::default(),
         EDITOR_BUNDLE,
         "Editor",
         &[EDITOR_TINT],
-    ));
+    );
+    let index = installed_index(&assets);
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(assets);
     let mut windows = SessionWindows::new();
     open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
     let wm = windows.wm_id(1).expect("the window is live");
@@ -11581,18 +11865,14 @@ fn a_windows_identity_comes_from_the_bundle_the_desktop_launched() {
         .window_title_icon_side(wm)
         .expect("a decorated window draws an identity slot");
 
-    resolve_window_identities(
-        &mut shell,
-        &mut comp,
-        &mut windows,
-        &launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]),
-        |owner| (owner == window_owner(1)).then_some(EDITOR_PID),
-    );
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &index, |owner| {
+        (owner == window_owner(1)).then_some(attested(EDITOR_ID))
+    });
 
     assert_eq!(
         window_identity(&comp, wm),
         (Some(IconKind::AppBundle), Some(EDITOR_TINT)),
-        "the bundle the desktop launched supplies the icon"
+        "the bundle the kernel attested supplies the icon"
     );
     let artwork = comp
         .window(wm)
@@ -11607,36 +11887,75 @@ fn a_windows_identity_comes_from_the_bundle_the_desktop_launched() {
 }
 
 #[test]
-fn a_window_whose_owner_the_desktop_did_not_launch_gets_no_identity() {
-    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(identity_bundle(
+fn a_window_whose_owner_has_no_attested_bundle_gets_no_identity() {
+    let assets = identity_bundle(
         MemoryAssets::default(),
         EDITOR_BUNDLE,
         "Editor",
         &[EDITOR_TINT],
-    ));
+    );
+    let index = installed_index(&assets);
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(assets);
     let mut windows = SessionWindows::new();
     open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(9), 1);
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(8), 2);
+    let unattested = windows.wm_id(1).expect("the window is live");
+    let unknown = windows.wm_id(2).expect("the window is live");
+
+    // The first owner was not admitted from a signed bundle, so the kernel
+    // attests no application for it. The second was, but names a bundle no
+    // installed manifest declares — fail closed rather than guess.
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &index, |owner| {
+        (owner == window_owner(8)).then(|| attested("os.tairix.nowhere"))
+    });
+
+    assert_eq!(
+        window_identity(&comp, unattested),
+        (None, None),
+        "an application that cannot be named wears no badge"
+    );
+    assert_eq!(
+        window_identity(&comp, unknown),
+        (None, None),
+        "an attested identity no installed bundle declares names nothing"
+    );
+}
+
+/// The identity a slot wears is the manifest's *and* the publisher's: a
+/// bundle planted in a store may copy a shipped application's identifier and
+/// its public publisher key from any copy of it, so matching the identifier
+/// alone would let it supply the name and icon drawn in system chrome.
+#[test]
+fn a_bundle_claiming_another_publishers_identifier_names_nothing() {
+    let assets = identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[EDITOR_TINT],
+    );
+    let index = installed_index(&assets);
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(assets);
+    let mut windows = SessionWindows::new();
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
     let wm = windows.wm_id(1).expect("the window is live");
 
-    // A shell-spawned program: attested, but this desktop never launched it,
-    // so there is no bundle to name it by.
-    resolve_window_identities(
-        &mut shell,
-        &mut comp,
-        &mut windows,
-        &launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]),
-        |_| None,
-    );
+    let mut foreign = *fixture_publisher().as_bytes();
+    foreign[0] ^= 0xFF;
+    let elsewhere = AttestedApp::new(EDITOR_ID, tairix_abi::PublisherId::from_raw(foreign))
+        .expect("a well-formed identity");
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &index, |_| {
+        Some(elsewhere)
+    });
 
     assert_eq!(
         window_identity(&comp, wm),
         (None, None),
-        "an application that cannot be named wears no badge"
+        "the same identifier under another developer resolves to no bundle"
     );
 }
 
 #[test]
-fn one_owners_pid_cannot_yield_another_bundles_icon() {
+fn one_owners_identity_cannot_yield_another_bundles_icon() {
     let assets = identity_bundle(
         identity_bundle(
             MemoryAssets::default(),
@@ -11648,6 +11967,7 @@ fn one_owners_pid_cannot_yield_another_bundles_icon() {
         "Chess",
         &[CHESS_TINT],
     );
+    let index = installed_index(&assets);
     let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(assets);
     let mut windows = SessionWindows::new();
     open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
@@ -11657,10 +11977,10 @@ fn one_owners_pid_cannot_yield_another_bundles_icon() {
         &mut shell,
         &mut comp,
         &mut windows,
-        &launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE), (CHESS_PID, CHESS_BUNDLE)]),
+        &index,
         |owner| match owner {
-            owner if owner == window_owner(1) => Some(EDITOR_PID),
-            owner if owner == window_owner(2) => Some(CHESS_PID),
+            owner if owner == window_owner(1) => Some(attested(EDITOR_ID)),
+            owner if owner == window_owner(2) => Some(attested(CHESS_ID)),
             _ => None,
         },
     );
@@ -11679,23 +11999,16 @@ fn one_owners_pid_cannot_yield_another_bundles_icon() {
 fn a_window_opens_and_keeps_its_identity_when_the_icon_cannot_be_resolved() {
     // The bundle declares an icon whose bytes the decoder refuses, and no
     // shipped application-bundle master stands behind it.
-    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(identity_bundle(
-        MemoryAssets::default(),
-        EDITOR_BUNDLE,
-        "Editor",
-        &[],
-    ));
+    let assets = identity_bundle(MemoryAssets::default(), EDITOR_BUNDLE, "Editor", &[]);
+    let index = installed_index(&assets);
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(assets);
     let mut windows = SessionWindows::new();
     open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
     let wm = windows.wm_id(1).expect("the window opened regardless");
 
-    resolve_window_identities(
-        &mut shell,
-        &mut comp,
-        &mut windows,
-        &launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]),
-        |_| Some(EDITOR_PID),
-    );
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &index, |_| {
+        Some(attested(EDITOR_ID))
+    });
 
     assert_eq!(windows.len(), 1, "the window is live");
     assert_eq!(
@@ -11707,14 +12020,15 @@ fn a_window_opens_and_keeps_its_identity_when_the_icon_cannot_be_resolved() {
 
 #[test]
 fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
-    let (mut shell, mut comp, reader, rasteriser) = identity_desktop(identity_bundle(
+    let assets = identity_bundle(
         MemoryAssets::default(),
         EDITOR_BUNDLE,
         "Editor",
         &[EDITOR_TINT],
-    ));
+    );
+    let index = installed_index(&assets);
+    let (mut shell, mut comp, reader, rasteriser) = identity_desktop(assets);
     let mut windows = SessionWindows::new();
-    let launched = launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]);
 
     let mut costs = Vec::new();
     for window_id in 1..=2 {
@@ -11726,8 +12040,8 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
             window_owner(1),
             window_id,
         );
-        resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
-            Some(EDITOR_PID)
+        resolve_window_identities(&mut shell, &mut comp, &mut windows, &index, |_| {
+            Some(attested(EDITOR_ID))
         });
         costs.push((
             reader.borrow().reads - before.0,
@@ -11780,26 +12094,27 @@ fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
     }
 
     let landed = Rc::new(Cell::new(false));
+    let assets = identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[EDITOR_TINT],
+    );
+    let index = installed_index(&assets);
     let mut shell = shell();
     shell.set_artwork_resolver(alloc::boxed::Box::new(Gated {
         inner: InlineArtwork::new(
-            ArtworkFileReader(identity_bundle(
-                MemoryAssets::default(),
-                EDITOR_BUNDLE,
-                "Editor",
-                &[EDITOR_TINT],
-            )),
+            ArtworkFileReader(assets),
             ArtworkSandbox(TaggedRasteriser::new()),
         ),
         landed: Rc::clone(&landed),
     }));
     let mut comp = compositor();
     let mut windows = SessionWindows::new();
-    let launched = launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]);
 
     open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
-    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
-        Some(EDITOR_PID)
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &index, |_| {
+        Some(attested(EDITOR_ID))
     });
     let wm = windows.wm_id(1).expect("live");
     assert_eq!(
@@ -11811,8 +12126,8 @@ fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
     // The decode lands. Nothing else about the desktop changed, so the window
     // is pictured only because it kept its place on the identification list.
     landed.set(true);
-    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
-        Some(EDITOR_PID)
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &index, |_| {
+        Some(attested(EDITOR_ID))
     });
     assert_eq!(
         window_identity(&comp, wm).1,
@@ -11821,9 +12136,15 @@ fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
     );
 
     // Pictured, so it is off the list: a later landing has nothing to redo.
-    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
-        panic!("a window already wearing its picture was offered identification again")
-    });
+    resolve_window_identities(
+        &mut shell,
+        &mut comp,
+        &mut windows,
+        &index,
+        |_| -> Option<AttestedApp> {
+            panic!("a window already wearing its picture was offered identification again")
+        },
+    );
 }
 
 /// A window opens a spawn, a load, and an application's own bring-up after the
@@ -11838,7 +12159,21 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
     let mut shell = shell();
     shell.set_artwork_resolver(alloc::boxed::Box::new(Deferring(Rc::clone(&desk))));
     let mut windows = SessionWindows::new();
-    let launched = launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]);
+    let assets = identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[EDITOR_TINT],
+    );
+    let index = installed_index(&assets);
+    // Warming is the one thing the launch table still answers: it is about
+    // what the desktop *started*, before any window or attestation exists.
+    let mut launched = LaunchTable::new();
+    launched.record(
+        EDITOR_PID,
+        "App",
+        &format!("{EDITOR_BUNDLE}{BUNDLE_RUN_SUFFIX}"),
+    );
 
     // The launch is recorded; no window exists yet. The desktop asks for the
     // application's picture at both the bar's and the title band's slot
@@ -11849,12 +12184,7 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
         "a recorded launch must start its icon"
     );
 
-    let mut reader = ArtworkFileReader(identity_bundle(
-        MemoryAssets::default(),
-        EDITOR_BUNDLE,
-        "Editor",
-        &[EDITOR_TINT],
-    ));
+    let mut reader = ArtworkFileReader(assets);
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
     let mut rounds = 0;
     while desk.borrow().has_work() {
@@ -11877,8 +12207,8 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
     // Only now does the window open. Its first identification wears the
     // picture, with nothing deferred for a later pass to finish.
     open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
-    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
-        Some(EDITOR_PID)
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &index, |_| {
+        Some(attested(EDITOR_ID))
     });
     let wm = windows.wm_id(1).expect("live");
     assert_eq!(
@@ -11886,9 +12216,15 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
         Some(EDITOR_TINT),
         "the window opens wearing its application's own icon"
     );
-    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
-        panic!("a window pictured on its first pass was offered identification again")
-    });
+    resolve_window_identities(
+        &mut shell,
+        &mut comp,
+        &mut windows,
+        &index,
+        |_| -> Option<AttestedApp> {
+            panic!("a window pictured on its first pass was offered identification again")
+        },
+    );
 }
 
 /// A window whose application has no picture at all must not stay on the
@@ -11896,13 +12232,19 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
 /// landing for as long as the window is open would be work with no end.
 #[test]
 fn a_window_whose_application_has_no_picture_leaves_the_identification_list() {
-    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(MemoryAssets::default());
+    // The bundle is installed and attested, so it has an identity; its
+    // manifest declares no icon and no class master stands behind it.
+    let assets = MemoryAssets::default().with(
+        &format!("{EDITOR_BUNDLE}/AppInfo"),
+        &manifest_fixture(EDITOR_ID, "Editor", None),
+    );
+    let index = installed_index(&assets);
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(assets);
     let mut windows = SessionWindows::new();
-    let launched = launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]);
 
     open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
-    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
-        Some(EDITOR_PID)
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &index, |_| {
+        Some(attested(EDITOR_ID))
     });
     let wm = windows.wm_id(1).expect("live");
     assert_eq!(
@@ -11911,9 +12253,13 @@ fn a_window_whose_application_has_no_picture_leaves_the_identification_list() {
         "no manifest and no class master: the built-in glyph, for good"
     );
 
-    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
-        panic!("a refused identity was offered again")
-    });
+    resolve_window_identities(
+        &mut shell,
+        &mut comp,
+        &mut windows,
+        &index,
+        |_| -> Option<AttestedApp> { panic!("a refused identity was offered again") },
+    );
 }
 
 /// The reported stall, through the real window host: right-clicking a frosted,

@@ -125,10 +125,10 @@ mod program {
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, SpawnAttach,
-        UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX,
-        DOCUMENT_ROLE_ARG, INSTALLED_APP_STORE, STDIN, STD_STREAM_COUNT, SYSTEM_APPLICATION_STORE,
-        SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+        UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, APPINFO_WIRE_MAX,
+        DOCUMENT_ROLE_ARG, STDIN, STD_STREAM_COUNT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
+    use tairix_appstore::{DirEntry as StoreDirEntry, StoreReader, Verdict};
     use tairix_browse::render::{
         build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_open_with_chooser,
         draw_progress_dialog, draw_properties_window, manager_tool_at, open_with_action_at,
@@ -138,7 +138,7 @@ mod program {
         DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        applications_for, association_from_appinfo, context_choice_from_item, context_menu,
+        applications_for, association_from_manifest, context_choice_from_item, context_menu,
         empty_trash_plan, paste_strategy, plan_paste, quick_applications, suggest_new_dir_name,
         trash_dest_path, trash_dir, trash_strategy, validate_new_name, Activation, AppAssociation,
         Attribute, Attributes, Browser, BundleIntent, BundleSource, Clipboard, ClipboardOp,
@@ -1627,71 +1627,60 @@ mod program {
         String::from(path_leaf(bundle_path))
     }
 
-    /// The largest `AppInfo` manifest the bundle scan reads: a signed manifest
-    /// is a small fixed header plus a bounded capability/MIME body, far under
-    /// this, so a file larger than this at a bundle's `AppInfo` path is
-    /// malformed and skipped (bounded read, never unbounded memory).
-    const APPINFO_READ_MAX: usize = 64 * 1024;
-
-    /// Depth bound on the app-store walk: bundles may be filed in nested plain
-    /// subdirectories, but a pathological tree must not recurse without limit
-    /// (fail closed). Ample for the store's real nesting.
-    const MAX_BUNDLE_SCAN_DEPTH: usize = 8;
-
     /// The running-system [`BundleSource`]: the installed applications and the
     /// file types each declares, read from the on-disk app stores under the
     /// file manager's own `CAP_FS_ACCESS` (never a compiled-in list).
     ///
-    /// It walks the machine-wide stores (`/System/Commands`, then
-    /// `/System/Applications`, then `/Apps`), descending nested plain
-    /// subdirectories and reading each `<Name>.app` bundle's `AppInfo` manifest
-    /// for its declared MIME associations ([`association_from_appinfo`]). The
-    /// MIME table is a display *hint* only: a bundle offered here is still
-    /// launched through the ordinary signed load gate, which verifies its
-    /// signature and capabilities. A store or manifest that cannot be read is
-    /// skipped fail-closed, so a corrupt bundle is never offered on a guess.
+    /// The walk is the shared one (`lib/appstore`), so this table, the program
+    /// library's `rescan`, and the desktop's icon-bar identity index find the
+    /// same bundles by the same rule. The MIME table each declares is a display
+    /// *hint* only: a bundle offered here is still launched through the ordinary
+    /// signed load gate, which verifies its signature and capabilities.
     struct RtBundleSource;
 
     impl BundleSource for RtBundleSource {
         fn installed_bundles(&mut self) -> Result<alloc::vec::Vec<AppAssociation>, Errno> {
-            let mut out = alloc::vec::Vec::new();
-            for store in [
-                SYSTEM_COMMAND_STORE,
-                SYSTEM_APPLICATION_STORE,
-                INSTALLED_APP_STORE,
-            ] {
-                collect_bundles(store, 0, &mut out);
-            }
-            Ok(out)
+            Ok(scan_bundles())
         }
     }
 
-    /// Collect every `<Name>.app` bundle's declared associations under the
-    /// directory `dir` into `out`, descending nested plain subdirectories to
-    /// [`MAX_BUNDLE_SCAN_DEPTH`]. A directory that cannot be listed is skipped
-    /// (an absent `/Apps` is not an error); a `.app` is a sealed unit and is
-    /// never descended into.
-    fn collect_bundles(dir: &str, depth: usize, out: &mut alloc::vec::Vec<AppAssociation>) {
-        let Ok(stream) = tairix_rt::read_dir_all(dir.as_bytes()) else {
-            return;
-        };
-        let Ok(entries) =
-            tairix_browse::vfs::entries_from_dir_stream(dir, &stream, &mut RtLinkReader)
-        else {
-            return;
-        };
-        for entry in entries {
-            let name = entry.name();
-            let mut path = String::from(dir);
-            path.push('/');
-            path.push_str(name);
-            if name.ends_with(BUNDLE_SUFFIX) {
-                if let Some(assoc) = read_bundle_association(&path) {
-                    out.push(assoc);
-                }
-            } else if entry.is_directory_backed() && depth < MAX_BUNDLE_SCAN_DEPTH {
-                collect_bundles(&path, depth + 1, out);
-            }
+    /// The store-reading seam behind the shared walk: directory listings and
+    /// one bundle's manifest, both under this process's own attested identity.
+    ///
+    /// Listings resolve through the browser's own entry decode, so a bundle
+    /// reached by a symbolic link is still found; the manifest read is bounded
+    /// by the shared manifest ceiling, so an unexpectedly huge file at a
+    /// bundle's `AppInfo` path is refused rather than read without limit.
+    struct RtStoreReader;
+
+    impl StoreReader for RtStoreReader {
+        fn list_dir(&self, path: &str) -> Result<Option<alloc::vec::Vec<StoreDirEntry>>, Errno> {
+            let Ok(stream) = tairix_rt::read_dir_all(path.as_bytes()) else {
+                // An absent or unreadable store root contributes nothing; the
+                // walk carries on with the roots it can see.
+                return Ok(None);
+            };
+            let Ok(entries) =
+                tairix_browse::vfs::entries_from_dir_stream(path, &stream, &mut RtLinkReader)
+            else {
+                return Ok(None);
+            };
+            Ok(Some(
+                entries
+                    .iter()
+                    .map(|entry| StoreDirEntry {
+                        name: String::from(entry.name()),
+                        directory: entry.is_directory_backed(),
+                    })
+                    .collect(),
+            ))
+        }
+
+        fn read_appinfo(&self, bundle: &str) -> Result<Option<alloc::vec::Vec<u8>>, Errno> {
+            Ok(read_bounded_file(
+                tairix_appstore::manifest_path(bundle).as_bytes(),
+                APPINFO_WIRE_MAX,
+            ))
         }
     }
 
@@ -1728,16 +1717,6 @@ mod program {
             return Err("a shortcut could not be recreated");
         }
         Ok(())
-    }
-
-    /// Read the `AppInfo` manifest of the bundle at `bundle_path` and decode
-    /// its declared associations, or `None` when the manifest cannot be read or
-    /// does not parse (fail closed — the bundle is simply not offered).
-    fn read_bundle_association(bundle_path: &str) -> Option<AppAssociation> {
-        let mut manifest_path = String::from(bundle_path);
-        manifest_path.push_str("/AppInfo");
-        let bytes = read_bounded_file(manifest_path.as_bytes(), APPINFO_READ_MAX)?;
-        association_from_appinfo(bundle_path, &bytes)
     }
 
     /// Read the file at `path` (opened read-only), stopping one chunk past
@@ -2348,14 +2327,30 @@ mod program {
 
     /// Walk the machine-wide program stores for the file types their bundles
     /// declare.
+    ///
+    /// Fail-closed per bundle: one whose manifest cannot be read, is
+    /// over-long, or does not decode simply declares no types, so a corrupt
+    /// bundle is never offered on a guess. A tree the shared walk refuses
+    /// outright yields no candidates at all rather than a partial table.
     fn scan_bundles() -> Vec<AppAssociation> {
         let mut out = Vec::new();
-        for store in [
-            SYSTEM_COMMAND_STORE,
-            SYSTEM_APPLICATION_STORE,
-            INSTALLED_APP_STORE,
-        ] {
-            collect_bundles(store, 0, &mut out);
+        let scanned = tairix_appstore::walk(
+            &RtStoreReader,
+            &tairix_appstore::MACHINE_ROOTS,
+            |bundle: tairix_appstore::Bundle<'_>| match association_from_manifest(
+                bundle.path,
+                bundle.header,
+                bundle.manifest,
+            ) {
+                Some(assoc) => {
+                    out.push(assoc);
+                    Verdict::Accepted
+                }
+                None => Verdict::Refused,
+            },
+        );
+        if scanned.is_err() {
+            out.clear();
         }
         out
     }

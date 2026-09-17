@@ -568,6 +568,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-appdata",
+ "tairix-appstore",
  "tairix-help",
  "tairix-proglib",
  "tairix-rt",
@@ -589,6 +590,13 @@ name = "tairix-appmgr"
 version = "0.0.0"
 dependencies = [
  "tairix-appload",
+]
+
+[[package]]
+name = "tairix-appstore"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
 ]
 
 [[package]]
@@ -940,6 +948,8 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-appdata",
+ "tairix-appload",
+ "tairix-appstore",
  "tairix-browse",
  "tairix-caps",
  "tairix-controls",
@@ -1538,6 +1548,7 @@ name = "tairix-files"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appstore",
  "tairix-browse",
  "tairix-controls",
  "tairix-display",

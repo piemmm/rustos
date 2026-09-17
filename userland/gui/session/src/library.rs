@@ -31,14 +31,17 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::Errno;
+use tairix_abi::{AppIdentity, Errno};
 use tairix_appconf::Document;
 use tairix_appdata::{read_published, AppDataHost};
-use tairix_browse::open_with::{association_from_appinfo, AppAssociation};
+use tairix_appload::publisher_id_of;
+use tairix_appstore::{store_roots, walk, Bundle, StoreReader, Verdict, WalkError};
+use tairix_browse::open_with::{association_from_manifest, AppAssociation};
 use tairix_proglib::{
     load, merge, Catalog, EntryId, LibraryEntry, LIBRARY_PATH, LIBRARY_PUBLISHER,
 };
 
+use crate::apps::BundleIndex;
 use crate::assets::SessionFileReader;
 
 /// The resolved program library plus any per-layer warnings.
@@ -74,55 +77,101 @@ where
     }
 }
 
-/// The resolved program library and the file associations its bundles declare.
+/// The resolved program library, the file associations the installed bundles
+/// declare, and which bundle directory each attested application identity
+/// names.
 ///
-/// One snapshot rather than two, because the associations are derived from the
-/// catalog: computing them separately would let a click resolve a bundle
-/// against a catalog it was not read from.
+/// One snapshot rather than three, because all three come from the same scan:
+/// computing them separately would let a click resolve a bundle against a
+/// catalogue it was not read from, or a slot draw the identity of a bundle the
+/// associations no longer name.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LoadedPrograms {
     /// The merged machine ∪ overlay catalog the popup lists.
     pub catalog: Catalog,
-    /// Which installed application opens which file, from the `AppInfo` of
-    /// every bundle the catalog names.
+    /// Which installed application opens which file.
     pub associations: Vec<AppAssociation>,
+    /// Which bundle directory each attested application identity names — how
+    /// a running process's slot finds the manifest and artwork of the bundle
+    /// the kernel says it is.
+    pub bundles: BundleIndex,
     /// One line per layer or manifest that could not be used, ready for
     /// `stderr`.
     pub warnings: Vec<String>,
 }
 
-/// Load the program library and read one `AppInfo` per catalogued bundle for
-/// its declared associations.
+/// Load the program library and walk the installed stores for what each
+/// bundle's own manifest declares.
 ///
 /// This is the program-catalog worker's whole body: two documents and then a
-/// manifest per application, which on a machine with a full program store is
-/// far more than a frame's worth of reads. It therefore never runs on the serve
-/// loop — the popup opens on the catalog already in hand and adopts this the
-/// moment it lands.
+/// walk of every program store, which on a machine with a full store is far
+/// more than a frame's worth of reads. It therefore never runs on the serve
+/// loop — the popup opens on the catalogue already in hand, a slot keeps its
+/// neutral label until an index arrives, and both adopt this the moment it
+/// lands.
+///
+/// The bundles are discovered rather than taken from the catalogue: an
+/// installed bundle nobody has listed in the program library still opens the
+/// file types it claims, and still wears its own identity on the icon bar.
+/// `home` is the logged-in account's home directory, so the account's own two
+/// stores are walked after the machine-wide ones.
 ///
 /// Fail-closed per bundle, like the layers above it: a manifest that cannot be
-/// read or does not parse simply contributes no association, so one broken
-/// bundle costs only its own file types.
-pub fn load_programs<R>(reader: &mut R, host: &mut dyn AppDataHost) -> LoadedPrograms
+/// read or does not decode contributes neither an association nor an
+/// attribution, so one broken bundle costs only itself. A store tree the walk
+/// refuses outright (unlistable, or past its containment bounds) contributes
+/// nothing at all and says why on `stderr` — the desktop then draws neutral
+/// labels and opens no file types, rather than acting on a partial tree.
+pub fn load_programs<R>(
+    reader: &mut R,
+    host: &mut dyn AppDataHost,
+    home: Option<&str>,
+) -> LoadedPrograms
 where
-    R: SessionFileReader + ?Sized,
+    R: SessionFileReader + StoreReader + ?Sized,
 {
     let loaded = load_library(reader, host);
-    let associations = loaded
-        .catalog
-        .entries()
-        .filter_map(|entry| {
-            let bundle = entry.bundle().as_str();
-            let manifest = format!("{bundle}/AppInfo");
-            let bytes = reader.read(&manifest).ok()?;
-            association_from_appinfo(bundle, &bytes)
-        })
-        .collect();
+    let mut warnings = loaded.warnings;
+    let mut associations = Vec::new();
+    let mut bundles = BundleIndex::new();
+    let roots = store_roots(home);
+    if let Err(err) = walk(reader, &roots, |bundle: Bundle<'_>| {
+        if let Some(assoc) = association_from_manifest(bundle.path, bundle.header, bundle.manifest)
+        {
+            associations.push(assoc);
+        }
+        // The identity the manifest *claims*. Nothing here verifies its
+        // signature, so it is only ever matched against what the kernel
+        // attested for a running process; a claim the identity grammar
+        // refuses attributes nothing.
+        if let Ok(app) = AppIdentity::new(bundle.header.bundle_id(), publisher_id_of(bundle.header))
+        {
+            bundles.record(&app, bundle.root, bundle.path);
+        }
+        Verdict::Accepted
+    }) {
+        warnings.push(store_warning(err));
+        associations.clear();
+        bundles = BundleIndex::new();
+    }
     LoadedPrograms {
         catalog: loaded.catalog,
         associations,
-        warnings: loaded.warnings,
+        bundles,
+        warnings,
     }
+}
+
+/// One ready-to-print warning line for a program-store tree the walk refused.
+fn store_warning(err: WalkError) -> String {
+    let detail = match err {
+        WalkError::Listing(err) => format!("a store directory could not be listed ({err:?})"),
+        WalkError::TreeTooLarge => String::from("the store tree exceeds the scan bound"),
+    };
+    format!(
+        "desktop: installed application stores: {detail}; \
+         keeping no file associations or application identities\n"
+    )
 }
 
 /// Read and read-in the machine-wide store, contributing the empty catalog

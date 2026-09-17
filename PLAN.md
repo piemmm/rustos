@@ -3736,7 +3736,7 @@ Load-bearing decisions a future contributor needs:
 Desktop paradigm: traditional GNOME/Windows-style `userland/gui/taskbar` (the
 RISC OS iconbar idea was dropped; §3/§10 updated).
 
-Full **icon-bar** build-out (staged, `in progress` — T1–T12 done) —
+Full **icon-bar** build-out (staged, `in progress` — T1–T19 done) —
 `plans/NEW-TASKBAR.md`: a first-class, folder-organised program library,
 landed **as data** (T1–T3): `lib/proglib` (closed folder taxonomy, validated
 entry model, the `<id>.<field>` registry over the one `lib/appconf` document
@@ -3824,6 +3824,39 @@ program-library entry through its context menu, open the Switchboard, and
 launch the app from its new bar slot, with the bar read back out of the
 scan-out). The panel's services list stays honestly empty pending a System
 Information API service-enumeration query rather than fabricating rows.
+
+**A slot's application is the kernel's answer (T19).** The strip resolved a
+slot's bundle from the desktop's own launch table, which is a record of *who
+spawned* rather than an attestation — so an application another application
+started had no bundle at all, and the same map is what the single-instance
+funnel reads: two pictures opened from the file manager produced two viewers,
+each with its own `Application`-labelled, glyph-drawn slot. It now resolves
+the `AppIdentity` the kernel attests on every window-channel caller's `Origin`
+(the session already decoded the whole origin per request) through
+`apps::BundleIndex`, which turns that identity into a bundle *directory* by
+walking the installed program stores and accepting a path only where the
+manifest there declares **both** the attested identifier and the attested
+publisher — a publisher key is public, so matching the identifier alone would
+let a bundle planted in a user-writable store wear a shipped application's
+name and icon in system chrome. Store roots are held in resolution precedence
+and a tie inside one root attributes nothing, so the resolution fails closed.
+The window title band's badge resolves through the same index, so the two
+surfaces cannot disagree; the launch table keeps only what it really answers
+(labels, reaping, warming a launch's artwork, the monitor's restart check).
+
+New `lib/*` crate: **`lib/appstore`** (`tairix-appstore`, `experimental`) —
+the one bounded walk of the program stores, hoisted out of the three private
+copies (`applib rescan`, the file manager's open-with table, and the session's
+own manifest reads). It owns the roots in store precedence, the depth and
+entry-count containment bounds (§24.4 — a tree past either abandons the whole
+scan), the fail-closed-per-bundle rule, and the `APPINFO_WIRE_MAX`-bounded
+manifest decode, behind an injected `StoreReader` seam so the crate holds no
+authority and verifies no signature. The session's scan now also produces the
+file-type associations, which previously came from one manifest read per
+*catalogued* bundle and so gave an installed-but-uncatalogued bundle none.
+`lib/appload` gained `publisher_id_of`, the one publisher-identity derivation,
+so an attested identity is matched against an on-disk manifest by the same
+digest the load gate attests it from.
 
 Shipped (headless-testable, model + renderer over injected seams):
 - `userland/gui/wm` software compositor: premultiplied-alpha blending

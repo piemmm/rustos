@@ -37,6 +37,7 @@ members = [
     "lib/appconf",
     "lib/appdata",
     "lib/appload",
+    "lib/appstore",
     "lib/binfmt",
     "lib/blkclient",
     "lib/bootload",

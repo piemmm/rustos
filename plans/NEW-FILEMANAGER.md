@@ -52,11 +52,22 @@ which the drift guard enforces.
 | FM13 | The places / devices rail | done |
 | FM-polish | UI polish: the resizable/maximizable window, the labelled permissions grid, and plate-filling icon-only buttons | done |
 | FM-dialogs | The two popup surfaces made first class: the sectioned Properties window, the working "Open With…" chooser, and the control-plate label fix beneath both | done |
+| FM14 | Opening a second document reaches the viewer this manager started: the desktop resolves an application from the kernel's attestation, and the open-with table shares the one program-store walk | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
 driven. Both product halves are landed and host-tested; only the guest witness
 is missing.
+
+**FM14** — the manager spawns the viewer itself whenever the desktop's funnel
+answers `NotRunning`, and the desktop used to answer that every time because it
+resolved a slot's application from its own launch bookkeeping rather than from
+the kernel's attestation. Two pictures therefore produced two viewers, each
+with its own unattributed icon-bar slot. Fixed in the session
+(`plans/NEW-TASKBAR.md` T19); the manager's own side is unchanged except that
+its "Open With…" table now discovers installed bundles through the shared
+`lib/appstore` walk instead of a private copy of it. Witnessed by
+`handover_qemu_aarch64`, which no longer pre-launches the viewer.
 
 ## What the landed work guarantees
 

@@ -1,0 +1,24 @@
+[package]
+name = "tairix-appstore"
+description = "TAIRiX installed-bundle discovery: the one bounded walk of the program stores that finds every installed `<Name>.app` and decodes its own signed `AppInfo` manifest. The store roots in fixed precedence order, the depth and entry-count containment bounds, the fail-closed-per-bundle rule, and the `APPINFO_WIRE_MAX`-bounded manifest decode live here once, so the program-library rescan, the file manager's open-with table, and the desktop session's icon-bar identity index all find the same bundles by the same rule. Reading is injected through a `StoreReader` seam: the crate performs no I/O, checks no permission, and verifies no signature. no_std + alloc, never panics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The store spellings and the manifest format the walk is defined over: the
+# two system stores, the machine-wide installed store, the home-relative
+# per-user store names, `BUNDLE_SUFFIX`, `BundleEntry::AppInfo`, the
+# `AppInfoHeader` decoder and its `APPINFO_WIRE_MAX` ceiling, and `Errno`.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
+[dev-dependencies]
+# The neutral `AppInfoHeader` fixture builder, so these tests carry no copy of
+# the manifest header's field list.
+tairix-abi = { path = "../abi", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true

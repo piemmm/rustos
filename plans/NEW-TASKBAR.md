@@ -42,8 +42,9 @@ change today is allowed; it requires regenerating the C header
 
 ## Status
 
-`done` — **T1–T16 complete**, including T15's documentation deliverable and
-its QEMU icon-bar vertical, and T16's desktop icon surface.
+`done` — **T1–T19 complete**, including T15's documentation deliverable and
+its QEMU icon-bar vertical, T16's desktop icon surface, and T19's
+kernel-attested slot identity over the shared program-store walk.
 Each stage's done-state section below records what it now guarantees. The
 **Switchboard tray** is landed whole
 (T9/T10): the immovable trailing-most capsule slot with the
@@ -749,17 +750,16 @@ application is one kernel-attested process. What now stands:
   a guessed one.
 - **The session** (`tairix-desktop-session`, `apps.rs`) owns the strip:
   `AppBarService` holds every application's declaration as the window engine
-  attested it, groups each live served window under the process that owns it
-  (the existing launch table + the engine's attested owner records, never a
-  window title), keeps a declaring application's slot for the life of its
-  process, drops a slot when it has neither a declaration nor a window — and
-  whenever the bundle's *signed* manifest sets `APPINFO_FLAG_NO_ICON_BAR`
-  (`icon-bar = false`), which the Switchboard and the wallpaper chooser do
-  because the trailing capsule and the backdrop menu already reach them,
-  bounds the strip at `MAX_BAR_APPS`, and resolves each slot's label, icon,
-  and information-panel identity from the **signed** `AppInfo` of the bundle
-  the desktop launched that process from — read once per bundle. A process
-  the desktop did not launch has no bundle to attest and states no version,
+  attested it, groups each live served window under the process the engine
+  attests owns it (never a window title), keeps a declaring application's slot
+  for the life of its process, drops a slot when it has neither a declaration
+  nor a window — and whenever the bundle's *signed* manifest sets
+  `APPINFO_FLAG_NO_ICON_BAR` (`icon-bar = false`), which the Switchboard and
+  the wallpaper chooser do because the trailing capsule and the backdrop menu
+  already reach them, bounds the strip at `MAX_BAR_APPS`, and resolves each
+  slot's label, icon, and information-panel identity from the **signed**
+  `AppInfo` of the bundle the *kernel* attested that process runs (T19) — read
+  once per bundle. A process with no attested identity states no version,
   purpose, or author at all.
 - **Per-application icons**: a bundle icon (the manifest's `library_icon`
   asset, SVG or PNG) is untrusted third-party input, so the session never
@@ -1895,6 +1895,60 @@ What that guarantees now:
   denies it. The same rule is why the lock screen is safe: its window is not
   one the presenter placed, so while it is up the pointer cannot reach the bar
   at all.
+
+## T19 — A slot's application is the kernel's answer, not the desktop's launch record — **done**
+
+The strip resolved a slot's bundle from the desktop's own launch bookkeeping,
+which is not an attestation but a side effect of *who spawned*. So an
+application another application started had no bundle at all: opening two
+pictures from the file manager produced two slots, both labelled `Application`,
+both on the built-in glyph, both with an empty information row — and, because
+the same map is what `resident` reads, the single-instance funnel could not
+find the running viewer and the manager spawned a fresh one per document.
+
+What it guarantees now:
+
+- **The attribution key is the kernel-attested `AppIdentity`.** The kernel puts
+  a bundle identifier and a publisher on the `Origin` of every process admitted
+  from a signed bundle, whoever spawned it; the session already decodes a whole
+  `Origin` per window-channel request and now keeps that pair beside the
+  process instance. No extra syscall, no extra wire bytes, and `lib/window` is
+  untouched.
+- **`apps::BundleIndex` resolves an identity to a bundle *directory*.** Built
+  by walking the installed program stores (`lib/appstore`) and reading each
+  bundle's own manifest, it accepts a path only where that manifest declares
+  **both** the attested identifier and the attested publisher. Matching the
+  identifier alone would let a bundle planted in a user-writable store supply
+  the name, purpose, author, and icon drawn in system chrome for a shipped
+  application — a publisher key is public, so a manifest is copyable text.
+  Roots are held in resolution precedence, so a user-writable store can never
+  claim an identifier the read-only system stores already declare, and two
+  bundles in one root claiming an identifier leave it unattributed rather than
+  letting whichever sorts first wear the other's identity.
+- **Both surfaces resolve identically.** The icon-bar slot and the window title
+  band's badge come from the one index, so they cannot show different
+  applications; the launch table keeps only what it really answers (launch
+  labels, reaping, warming a launch's artwork before a window exists, and the
+  monitor's restart check, which genuinely asks about the desktop's own
+  children).
+- **The walk is I/O, so it never runs on the serve loop.** It happens where the
+  catalogue scan already does — once synchronously at bring-up, before any
+  window is on screen, and on the `Catalogs` worker desk thereafter. A slot
+  whose identity is not yet resolved draws the neutral label and built-in glyph
+  and adopts its identity when the scan lands.
+- **The same walk produces the file-type associations**, replacing a manifest
+  read per *catalogued* bundle — which silently gave an installed but
+  uncatalogued bundle no associations at all.
+- **A shared walk, not a fourth copy.** `lib/appstore` is the one
+  program-store walk: the roots in store precedence, the depth and entry
+  containment bounds, the fail-closed-per-bundle rule, and the bounded manifest
+  decode. `applib rescan`, the file manager's open-with table, and this index
+  all import it.
+- **Witnessed on a running machine.** `handover_qemu_aarch64` no longer
+  pre-launches the viewer: the first activation makes the *file manager* start
+  it, and the later activations must relay to that same kernel-attested task.
+  While the script pre-launched it the desktop's own launch table knew it, and
+  the vertical could not have failed.
 
 ## Open questions to resolve in review (stop and ask, §15.7)
 

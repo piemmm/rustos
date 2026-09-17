@@ -46,13 +46,13 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::fs::{DirEntries, FileKind, OpenFlags};
-    use tairix_abi::{BundleEntry, Errno, APPINFO_WIRE_MAX};
+    use tairix_abi::{Errno, APPINFO_WIRE_MAX};
     use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
     use tairix_appdata::RtHost;
     use tairix_applib::{
-        parse, run, AppDataStore, AppLibError, Bundles, DirEntryInfo, Output, Store, Stores,
-        OWN_WORD, USAGE,
+        parse, run, AppDataStore, AppLibError, Output, Store, Stores, OWN_WORD, USAGE,
     };
+    use tairix_appstore::{manifest_path, DirEntry, StoreReader};
     use tairix_help::BundleHelp;
     use tairix_proglib::LIBRARY_PATH;
     use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
@@ -162,13 +162,13 @@ mod program {
         Ok(())
     }
 
-    /// The production [`Bundles`] over the secured VFS: directory listings
+    /// The production [`StoreReader`] over the secured VFS: directory listings
     /// through the shared packed-stream walker, and bounded bundle-manifest
     /// reads. The kernel authorises every access; the seam adds nothing.
     struct VfsBundles;
 
-    impl Bundles for VfsBundles {
-        fn list_dir(&self, path: &str) -> Result<Option<Vec<DirEntryInfo>>, Errno> {
+    impl StoreReader for VfsBundles {
+        fn list_dir(&self, path: &str) -> Result<Option<Vec<DirEntry>>, Errno> {
             let stream = match tairix_rt::read_dir_all(path.as_bytes()) {
                 Ok(stream) => stream,
                 Err(ret) => {
@@ -186,7 +186,7 @@ mod program {
             for entry in DirEntries::new(&stream) {
                 let entry = entry?;
                 let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
-                entries.push(DirEntryInfo {
+                entries.push(DirEntry {
                     name: String::from(name),
                     directory: entry.kind == FileKind::Directory,
                 });
@@ -195,7 +195,7 @@ mod program {
         }
 
         fn read_appinfo(&self, bundle: &str) -> Result<Option<Vec<u8>>, Errno> {
-            let path = format!("{bundle}/{}", BundleEntry::AppInfo.as_str());
+            let path = manifest_path(bundle);
             let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
             if ret < 0 {
                 // A directory without a manifest is simply not a bundle.

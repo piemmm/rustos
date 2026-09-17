@@ -78,6 +78,8 @@ pub mod volume;
 pub mod waitset;
 pub mod window_ipc;
 
+#[cfg(feature = "test-util")]
+pub use appinfo::manifest_header;
 pub use appinfo::{
     body_len as appinfo_body_len, digest_bundle_contents, mime_type_at, resolve_library,
     validate_bundle_id, validate_bundle_layout, AppInfoHeader, BundleEntry, BundleFileDigest,

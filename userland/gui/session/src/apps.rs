@@ -29,13 +29,24 @@
 //! application, is when the window engine proved the process gone and
 //! withdrew its declaration.
 //!
-//! **Identity is the manifest's, never the process's.** A slot's label,
-//! icon, and information panel come from the *signed* `AppInfo` of the
-//! bundle the desktop launched the process from, so an application cannot
-//! state an identity that is not its own inside system-drawn chrome. A
-//! process the desktop did not launch — a shell-spawned program — has no
-//! bundle to attest, so its slot states only what the window channel makes
-//! knowable and carries no version or author at all.
+//! **Identity is the kernel's answer, never the process's, and never the
+//! desktop's launch bookkeeping.** A slot stands for one process, and the
+//! bundle it belongs to is the [`AppIdentity`](tairix_abi::AppIdentity) the
+//! *kernel* attested for that process from the manifest the load gate
+//! verified — so it is the same answer whoever started the process: the
+//! desktop, a shell, or another application. The label, icon, and information
+//! panel are then read from that bundle's own `AppInfo`, which the
+//! [`BundleIndex`] resolves to a directory by walking the installed stores and
+//! accepting a path only where the manifest there declares **both** the
+//! attested identifier and the attested publisher. Matching the identifier
+//! alone would let a bundle planted in a user-writable store supply the name,
+//! purpose, author, and icon drawn in system chrome for a shipped application.
+//!
+//! A process with no attested identity — one not admitted through the signed
+//! bundle gate, or whose identifier the identity grammar refuses — keeps the
+//! neutral label and carries no version or author at all, and so does one
+//! whose bundle the index has not resolved yet. Identity is stated when it is
+//! attested and never otherwise.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -43,7 +54,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppBar, AppBarClick, AppMenu};
-use tairix_abi::{AppInfoHeader, Errno, ProcId, APPINFO_WIRE_MAX};
+use tairix_abi::{AppIdentity as AttestedApp, Errno, ProcId, PublisherId};
+use tairix_appstore::{decode_manifest, manifest_path};
 use tairix_geometry::Scale;
 use tairix_icon::{
     ArtworkCache, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconKind, IconPicture,
@@ -127,6 +139,121 @@ pub struct AppGroup {
     pub bundle: Option<String>,
     /// The application's windows, in the order they opened.
     pub windows: Vec<TaskId>,
+}
+
+/// Which installed bundle *directory* each attested application identity
+/// names.
+///
+/// The kernel attests a bundle *identifier* and a *publisher* for every
+/// process admitted from a signed bundle; the icon bar needs the bundle's
+/// directory, because the `AppInfo` it states a name and version from and the
+/// `Resources/` its artwork lives in are files inside it. This is the map
+/// between the two, built by walking the installed stores and reading each
+/// bundle's own manifest.
+///
+/// # Why both halves must match
+///
+/// A path is accepted for an attested identity only where the manifest there
+/// declares that identifier **and** that publisher. A publisher key is public
+/// — it is in every copy of the bundle — so a manifest is copyable text, and
+/// matching the identifier alone would let a bundle planted in a
+/// user-writable store supply the name, purpose, author, and icon the desktop
+/// draws in system chrome for a shipped application. The kernel never attests
+/// an identity from an unverified manifest, so the process is always genuine;
+/// the risk is entirely in resolving it to the wrong directory.
+///
+/// Two further rules close the rest of that gap:
+///
+/// * **The earliest store wins.** Roots are recorded in the precedence a
+///   program name resolves against them, and a bundle from a later root never
+///   displaces one from an earlier root, so a user-writable store can never
+///   claim an identifier the read-only system stores already declare.
+/// * **A tie inside one store is unresolvable.** Two bundles in the *same*
+///   root claiming one identifier leave it unattributed rather than letting
+///   whichever sorts first wear the other's identity. Nothing legitimately
+///   produces such a pair — the build refuses two bundles claiming one name —
+///   so the honest answer is that the desktop cannot tell which bundle a
+///   process came from, and it says nothing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BundleIndex {
+    by_id: BTreeMap<String, Attribution>,
+}
+
+/// What one bundle identifier resolved to, and from which store.
+///
+/// The store is kept because precedence, not visit order, decides a
+/// collision: the shared walk is breadth-first across every root at once, so
+/// a nested bundle in the system store is seen *after* a top-level one in a
+/// user store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Attribution {
+    /// Exactly one bundle in store `root` declares this identifier.
+    One {
+        /// The developer the manifest there names.
+        publisher: PublisherId,
+        /// The store it was found in.
+        root: usize,
+        /// Its bundle directory.
+        path: String,
+    },
+    /// Two bundles in store `root` declare it, so which one a process came
+    /// from is unknowable.
+    Tied {
+        /// The store the tie is in; an earlier store still resolves it.
+        root: usize,
+    },
+}
+
+impl Attribution {
+    /// The store this attribution came from.
+    const fn root(&self) -> usize {
+        match self {
+            Self::One { root, .. } | Self::Tied { root } => *root,
+        }
+    }
+}
+
+impl BundleIndex {
+    /// An index that resolves nothing.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the bundle directory `path`, found in store `root`, whose own
+    /// manifest declares `app`.
+    ///
+    /// `root` is the store's precedence; `app` is what the *manifest* claims,
+    /// which is what an attested identity is matched against.
+    pub fn record(&mut self, app: &AttestedApp, root: usize, path: &str) {
+        let claim = Attribution::One {
+            publisher: app.publisher(),
+            root,
+            path: path.to_string(),
+        };
+        match self.by_id.get(app.bundle_id()) {
+            Some(held) if held.root() < root => {}
+            Some(held) if held.root() == root && *held != claim => {
+                self.by_id
+                    .insert(app.bundle_id().to_string(), Attribution::Tied { root });
+            }
+            _ => {
+                self.by_id.insert(app.bundle_id().to_string(), claim);
+            }
+        }
+    }
+
+    /// The bundle directory the attested identity `app` names, if exactly one
+    /// installed bundle declares both halves of it.
+    #[must_use]
+    pub fn path_of(&self, app: &AttestedApp) -> Option<&str> {
+        match self.by_id.get(app.bundle_id())? {
+            Attribution::One {
+                publisher, path, ..
+            } if *publisher == app.publisher() => Some(path.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// The session's icon-bar service: every application's declaration, the
@@ -495,10 +622,10 @@ where
     R: SessionFileReader + ?Sized,
 {
     let header = reader
-        .read(&bundle_manifest_path(bundle))
+        .read(&manifest_path(bundle))
         .ok()
         .as_deref()
-        .and_then(decode_bundle_manifest);
+        .and_then(decode_manifest);
     let Some(header) = header else {
         return BundleFacts {
             identity: AppIdentity {
@@ -521,25 +648,6 @@ where
         icon_bar: header.presents_icon_bar_slot(),
         one_instance: header.runs_one_instance(),
     }
-}
-
-/// The path of `bundle`'s own signed manifest, `bundle` being the bundle
-/// *directory* (no trailing separator).
-fn bundle_manifest_path(bundle: &str) -> String {
-    format!("{bundle}/AppInfo")
-}
-
-/// Decode a bundle's `AppInfo` bytes, bounded by the shared ABI manifest cap
-/// and decoded by the shared fail-closed header decoder.
-///
-/// `manifest` is the raw contents of [`bundle_manifest_path`]. An absent,
-/// over-long, or malformed manifest is `None`, so a caller degrades to the
-/// bundle's leaf identity rather than handling an error.
-fn decode_bundle_manifest(manifest: &[u8]) -> Option<AppInfoHeader> {
-    if manifest.len() > APPINFO_WIRE_MAX {
-        return None;
-    }
-    AppInfoHeader::from_bytes(manifest).ok()
 }
 
 /// The human-facing fallback label for a bundle path: its leaf directory

@@ -1077,11 +1077,12 @@ device. Probed both ways — restoring the drivers' old inline decode fails it o
 the abort, and restoring just the `NotFound` fallback fails it on the
 misattribution.
 
-### Open — two duplications too large for the change that found them
+### Open — three duplications too large for the change that found them
 
-Both were noticed while landing `plans/NEW-SWITCHBOARD.md` Q3 and are recorded
-here rather than left silent (§2.18). Neither is a behaviour defect; both are
-§2.2 duplications whose fix touches far more than the change that found them.
+The first two were noticed while landing `plans/NEW-SWITCHBOARD.md` Q3 and the
+third while landing `plans/NEW-TASKBAR.md` T19; all are recorded here rather
+than left silent (§2.18). None is a behaviour defect; all are §2.2 duplications
+whose fix touches far more than the change that found them.
 
 - **Seventeen identical paged-list request types in `lib/abi::sysinfo`.**
   `ProcessListRequest`, `MountListRequest`, `SeatListRequest`,
@@ -1104,6 +1105,18 @@ here rather than left silent (§2.18). Neither is a behaviour defect; both are
   same one-method abstraction and still define their own. Migrating
   `lib/appload` reaches `kernel/core`, `userland/system/appmgr` and six
   integration fixtures, so it is its own change.
+- **Seven hand-written `AppInfoHeader` fixture builders.** Each crate that
+  reads a manifest spelled the header's two dozen fields itself:
+  `lib/abi`, `lib/appload`, `lib/icon`, `lib/browse`, `userland/apps/files`,
+  `userland/apps/applib` and `userland/gui/session`. T19 added the shared home
+  — `tairix_abi::manifest_header` behind the `test-util` feature, a neutral
+  well-formed header a caller mutates only the field its own subject is — and
+  moved `lib/browse`, `applib`, the session and the new `lib/appstore` onto it.
+  `lib/icon` and `lib/appload` still carry their own, and `lib/abi`'s own
+  `sample()` legitimately sets *every* field (its subject is the round trip),
+  so it is not a duplicate. Finishing it is two small mechanical diffs; it was
+  left out of T19 because that change had no other reason to touch either
+  crate's tests.
 
 ### Note for the next context — a text sweep needs its own audit
 

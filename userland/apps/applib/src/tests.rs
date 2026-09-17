@@ -11,15 +11,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::{
-    Errno, LibraryCategory, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-    BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
-};
+use tairix_abi::{manifest_header, Errno, LibraryCategory};
+use tairix_appstore::{DirEntry, StoreReader, MAX_WALK_DEPTH, MAX_WALK_ENTRIES};
 use tairix_help::HelpSource;
 
 use super::{
-    parse, push_json_string, run, AddRequest, AppLibError, Bundles, Command, DirEntryInfo, Output,
-    Side, Store, Stores, MAX_WALK_DEPTH, MAX_WALK_ENTRIES, USAGE,
+    parse, push_json_string, run, AddRequest, AppLibError, Command, Output, Side, Store, Stores,
+    USAGE,
 };
 
 /// An in-memory store fixture: `None` models the absent document.
@@ -77,7 +75,7 @@ impl Store for MemStore {
 /// An in-memory store tree: directory listings plus per-bundle manifests.
 #[derive(Default)]
 struct MemBundles {
-    dirs: BTreeMap<String, Vec<DirEntryInfo>>,
+    dirs: BTreeMap<String, Vec<DirEntry>>,
     manifests: BTreeMap<String, Result<Vec<u8>, Errno>>,
 }
 
@@ -89,7 +87,7 @@ impl MemBundles {
             path.to_owned(),
             entries
                 .iter()
-                .map(|(name, directory)| DirEntryInfo {
+                .map(|(name, directory)| DirEntry {
                     name: (*name).to_owned(),
                     directory: *directory,
                 })
@@ -108,8 +106,8 @@ impl MemBundles {
     }
 }
 
-impl Bundles for MemBundles {
-    fn list_dir(&self, path: &str) -> Result<Option<Vec<DirEntryInfo>>, Errno> {
+impl StoreReader for MemBundles {
+    fn list_dir(&self, path: &str) -> Result<Option<Vec<DirEntry>>, Errno> {
         Ok(self.dirs.get(path).cloned())
     }
 
@@ -169,45 +167,13 @@ impl HelpSource for NoHelp {
 /// A decodable wire manifest for `name`, listed under `listing` with
 /// `icon` when given.
 fn manifest_bytes(name: &str, listing: Option<LibraryCategory>, icon: Option<&str>) -> Vec<u8> {
-    fn inline<const N: usize>(text: &str) -> ([u8; N], u8) {
-        let mut buf = [0u8; N];
-        buf[..text.len()].copy_from_slice(text.as_bytes());
-        (buf, u8::try_from(text.len()).expect("fits"))
+    let mut header = manifest_header(&format!("os.tairix.{name}"), name);
+    header.library = LibraryCategory::to_wire(listing);
+    if let Some(icon) = icon {
+        header.library_icon_len = u8::try_from(icon.len()).expect("fits");
+        header.library_icon[..icon.len()].copy_from_slice(icon.as_bytes());
     }
-    let (id, id_len) = inline::<BUNDLE_ID_MAX>(&format!("os.tairix.{name}"));
-    let (name_buf, name_len) = inline::<BUNDLE_NAME_MAX>(name);
-    let (version, version_len) = inline::<BUNDLE_VERSION_MAX>("1.0");
-    let (library_icon, library_icon_len) = inline::<LIBRARY_ICON_MAX>(icon.unwrap_or(""));
-    tairix_abi::AppInfoHeader {
-        magic: APPINFO_MAGIC,
-        abi_version: ABI_VERSION_CURRENT,
-        flags: 0,
-        capability_count: 0,
-        mime_count: 0,
-        id_len,
-        name_len,
-        version_len,
-        purpose_len: 0,
-        author_len: 0,
-        library_icon_len,
-        library: LibraryCategory::to_wire(listing),
-        title_len: 0,
-        id,
-        name: name_buf,
-        version,
-        library_icon,
-        purpose: [0; tairix_abi::BUNDLE_PURPOSE_MAX],
-        author: [0; tairix_abi::BUNDLE_AUTHOR_MAX],
-        title: [0; tairix_abi::BUNDLE_TITLE_MAX],
-        syscall_table_hash: [0xAB; SYSCALL_TABLE_HASH_LEN],
-        content_hash: [0xCD; 32],
-        signer_pubkey: [0xEF; 32],
-        publisher_pubkey: [0xEF; 32],
-        publisher_cert: [0; 64],
-        signature: [0x99; 64],
-    }
-    .to_le_bytes()
-    .to_vec()
+    header.to_le_bytes().to_vec()
 }
 
 /// A `Stores` view over two fixtures with a home.

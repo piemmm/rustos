@@ -23,9 +23,11 @@
 //! * [`Store`] — read and replace one catalog document (the `Run` binary
 //!   wires the syscall-backed machine store and, when the environment names
 //!   a home, the caller's own overlay; tests wire in-memory fixtures).
-//! * [`Bundles`] — list a directory and read a bundle's `AppInfo` manifest,
-//!   bounded by [`tairix_abi::APPINFO_WIRE_MAX`] (the `Run` binary wires the
-//!   secured VFS; tests wire an in-memory tree).
+//! * [`tairix_appstore::StoreReader`] — list a directory and read a bundle's
+//!   `AppInfo` manifest, bounded by [`tairix_abi::APPINFO_WIRE_MAX`] (the `Run`
+//!   binary wires the secured VFS; tests wire an in-memory tree). The store
+//!   walk `rescan` drives is the shared one, so this tool, the file manager's
+//!   open-with table, and the desktop's icon-bar index find the same bundles.
 //! * [`Output`] — write listings to standard output and emit the fd-3
 //!   `stdinfo` advisory records (best-effort, never load-bearing).
 //! * `HelpSource` (from `lib/help`) — the tool's own bundle `Help/` tree,
@@ -60,18 +62,17 @@ extern crate alloc;
 pub mod store;
 pub use store::AppDataStore;
 
-use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
-use tairix_abi::{
-    AppInfoHeader, Errno, LibraryCategory, BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR,
-    HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
-};
+use tairix_abi::{Errno, LibraryCategory};
 use tairix_appconf::Document;
+use tairix_appstore::{
+    decode_manifest, user_roots, walk, Bundle, StoreReader, Verdict, WalkError, MACHINE_ROOTS,
+};
 use tairix_help::{own_short_help, HelpSource};
 use tairix_proglib::{
     document as catalog_document, load as load_catalog, merge, BundlePath, Catalog, CatalogError,
@@ -84,17 +85,6 @@ pub const OWN_WORD: &str = "applib";
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `applib`'s own Help tree is unavailable.
 pub const USAGE: &str = "usage: applib [list [--category <folder>]]\n       applib add <bundle> [--category <folder>] [--name <name>] [--icon <asset>] [--user]\n       applib remove <id|bundle> [--user]\n       applib hide <id> [--user]\n       applib show <id> [--user]\n       applib rescan [--user]";
-
-/// Depth bound on the `rescan` store walk. Bundles may be filed in nested
-/// plain subdirectories, but a pathological tree must not recurse without
-/// limit: directories deeper than this are not descended into.
-pub const MAX_WALK_DEPTH: usize = 8;
-
-/// Bound on directory entries a single `rescan` examines across all roots.
-/// Ample for real stores — the catalog itself holds at most
-/// `tairix_proglib::MAX_ENTRIES` records — while a hostile tree exhausts
-/// the bound and fails the scan closed rather than walking forever.
-pub const MAX_WALK_ENTRIES: usize = 4 * tairix_proglib::MAX_ENTRIES;
 
 /// One thing the `applib` tool can do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -206,8 +196,9 @@ pub enum AppLibError {
     Entry(EntryError),
     /// The catalog already holds its maximum number of records.
     Full,
-    /// The `rescan` walk exhausted [`MAX_WALK_ENTRIES`]; the store tree is
-    /// not believable and nothing was changed.
+    /// The `rescan` walk exhausted the shared store-walk entry bound
+    /// ([`tairix_appstore::MAX_WALK_ENTRIES`]); the store tree is not
+    /// believable and nothing was changed.
     TreeTooLarge,
     /// A store document could not be fully parsed by the shared engine (a
     /// hand edit outside the grammar); the operation refuses rather than
@@ -285,41 +276,6 @@ pub trait Store {
     /// [`Errno::PermissionDenied`] when the caller may not change the
     /// machine-wide catalog.
     fn write(&self, document: &Document) -> Result<(), Errno>;
-}
-
-/// One directory entry the [`Bundles`] seam reports.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DirEntryInfo {
-    /// The entry's name within its directory.
-    pub name: String,
-    /// Whether the entry is itself a directory.
-    pub directory: bool,
-}
-
-/// Reads the application stores: directory listings for the `rescan` walk
-/// and bundle `AppInfo` manifests for `add`/`rescan`.
-///
-/// The `Run` binary wires the secured VFS (every path resolution and
-/// per-inode permission decision is the kernel's, under the caller's
-/// attested identity); tests wire an in-memory tree.
-pub trait Bundles {
-    /// List one directory, or `None` when the path does not exist (an
-    /// absent store root is the ordinary state on a machine without one).
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises other than absence.
-    fn list_dir(&self, path: &str) -> Result<Option<Vec<DirEntryInfo>>, Errno>;
-
-    /// Read the `AppInfo` manifest inside the bundle directory at `bundle`,
-    /// or `None` when no manifest file exists there. The read is bounded:
-    /// a file larger than [`tairix_abi::APPINFO_WIRE_MAX`] is refused with
-    /// [`Errno::LengthOutOfRange`], never half-read.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises other than absence.
-    fn read_appinfo(&self, bundle: &str) -> Result<Option<Vec<u8>>, Errno>;
 }
 
 /// Writes the tool's terminal output and advisory records.
@@ -534,7 +490,7 @@ pub fn run(
     command: Command<'_>,
     locale: Option<&str>,
     stores: &Stores<'_>,
-    bundles: &dyn Bundles,
+    bundles: &dyn StoreReader,
     help: &dyn HelpSource,
     output: &dyn Output,
 ) -> Result<(), AppLibError> {
@@ -621,7 +577,7 @@ fn list(
 /// unless overridden.
 fn add(
     stores: &Stores<'_>,
-    bundles: &dyn Bundles,
+    bundles: &dyn StoreReader,
     output: &dyn Output,
     request: &AddRequest<'_>,
 ) -> Result<(), AppLibError> {
@@ -633,7 +589,7 @@ fn add(
         .read_appinfo(bundle)
         .map_err(AppLibError::Bundle)?
         .ok_or(AppLibError::NoManifest)?;
-    let header = AppInfoHeader::from_bytes(&bytes).map_err(|_| AppLibError::BadManifest)?;
+    let header = decode_manifest(&bytes).ok_or(AppLibError::BadManifest)?;
 
     let id = EntryId::new(header.bundle_id()).map_err(AppLibError::Entry)?;
     let folder = request
@@ -754,29 +710,24 @@ fn set_visibility(
 /// bundle the catalog does not know yet, and report what changed.
 fn rescan(
     stores: &Stores<'_>,
-    bundles: &dyn Bundles,
+    bundles: &dyn StoreReader,
     output: &dyn Output,
     user: bool,
 ) -> Result<(), AppLibError> {
     let (store, side) = target(stores, user);
+    // The machine roots are already in resolution precedence, so a duplicate
+    // identifier folds to the shipped bundle's record deterministically.
     let roots: Vec<String> = if user {
-        let home = stores
-            .home
-            .map(|home| home.strip_suffix('/').unwrap_or(home))
-            .filter(|home| !home.is_empty())
-            .ok_or(AppLibError::NoHome)?;
-        alloc::vec![
-            format!("{home}/{HOME_COMMAND_STORE_DIR}"),
-            format!("{home}/{HOME_APPLICATION_STORE_DIR}"),
-        ]
+        let roots = user_roots(stores.home);
+        if roots.is_empty() {
+            return Err(AppLibError::NoHome);
+        }
+        roots
     } else {
-        // The system stores first: on a duplicate identifier the shipped
-        // bundle's record wins the fold deterministically.
-        alloc::vec![
-            String::from(SYSTEM_COMMAND_STORE),
-            String::from(SYSTEM_APPLICATION_STORE),
-            String::from(INSTALLED_APP_STORE),
-        ]
+        MACHINE_ROOTS
+            .iter()
+            .map(|root| String::from(*root))
+            .collect()
     };
 
     let mut catalog = load(store, side)?;
@@ -799,64 +750,46 @@ fn rescan(
     Ok(())
 }
 
-/// Walk `roots` breadth-first for `.app` bundle directories and read each
-/// one's manifest, returning the library candidates and how many bundles
-/// were skipped as unreadable or undecodable.
+/// Walk `roots` through the shared store walk for library candidates,
+/// answering them and how many bundles were skipped fail-closed.
 ///
-/// Listings are consumed in sorted order so the result — and therefore
-/// which record wins a duplicate identifier in the fold — is deterministic.
-/// A bundle directory is a sealed unit: the walk never descends into one.
-/// An absent root contributes nothing; a listing refusal surfaces.
+/// The walk's own guarantees — sorted, deterministic order (so which record
+/// wins a duplicate identifier is a rule rather than a race), a `.app` never
+/// descended into, an absent root contributing nothing, the depth and
+/// entry-count containment bounds — are `lib/appstore`'s. This adds only the
+/// catalog's own question: a bundle that declares a library folder becomes a
+/// record, and one whose fields the catalog model refuses is skipped.
+///
+/// A bundle declaring no folder is *not* skipped: it is simply not a library
+/// application, which is the ordinary state of most commands.
 fn discover(
-    bundles: &dyn Bundles,
+    bundles: &dyn StoreReader,
     roots: &[String],
 ) -> Result<(Vec<LibraryEntry>, usize), AppLibError> {
-    let mut queue: VecDeque<(String, usize)> = roots.iter().map(|root| (root.clone(), 0)).collect();
     let mut discovered = Vec::new();
-    let mut visited = 0usize;
-    let mut skipped = 0usize;
-
-    while let Some((dir, depth)) = queue.pop_front() {
-        let Some(mut entries) = bundles.list_dir(&dir).map_err(AppLibError::Bundle)? else {
-            continue;
-        };
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        for item in entries {
-            visited += 1;
-            if visited > MAX_WALK_ENTRIES {
-                return Err(AppLibError::TreeTooLarge);
+    let scan = walk(bundles, roots, |bundle: Bundle<'_>| {
+        match candidate(bundle.path, bundle.header) {
+            Ok(Some(entry)) => {
+                discovered.push(entry);
+                Verdict::Accepted
             }
-            if !item.directory {
-                continue;
-            }
-            let path = format!("{dir}/{}", item.name);
-            if item.name.ends_with(BUNDLE_SUFFIX) {
-                match candidate(bundles, &path) {
-                    Ok(Some(entry)) => discovered.push(entry),
-                    Ok(None) => {}
-                    Err(()) => skipped += 1,
-                }
-            } else if depth + 1 < MAX_WALK_DEPTH {
-                queue.push_back((path, depth + 1));
-            }
+            Ok(None) => Verdict::Accepted,
+            Err(()) => Verdict::Refused,
         }
-    }
-    Ok((discovered, skipped))
+    })
+    .map_err(|err| match err {
+        WalkError::Listing(err) => AppLibError::Bundle(err),
+        WalkError::TreeTooLarge => AppLibError::TreeTooLarge,
+    })?;
+    Ok((discovered, scan.skipped))
 }
 
 /// Read one discovered bundle's manifest into a library candidate.
 ///
-/// `Ok(None)` is the ordinary "not a library application" (no manifest, or
-/// no library listing declared); `Err(())` is a bundle skipped fail-closed
-/// (an unreadable, over-long, or undecodable manifest, or a field the
-/// catalog model refuses) — counted, never aborting the scan.
-fn candidate(bundles: &dyn Bundles, path: &str) -> Result<Option<LibraryEntry>, ()> {
-    let bytes = match bundles.read_appinfo(path) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return Ok(None),
-        Err(_) => return Err(()),
-    };
-    let header = AppInfoHeader::from_bytes(&bytes).map_err(|_| ())?;
+/// `Ok(None)` is the ordinary "not a library application" — the bundle
+/// declares no library folder; `Err(())` is a field the catalog model refuses,
+/// counted among the skipped and never aborting the scan.
+fn candidate(path: &str, header: &tairix_abi::AppInfoHeader) -> Result<Option<LibraryEntry>, ()> {
     let Some(category) = header.library_category() else {
         return Ok(None);
     };

@@ -34,6 +34,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # `render`, the `VfsDirectorySource` composition, and the canonical
 # browser-view geometry.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The one installed-bundle walk: the open-with table discovers bundles through
+# the shared store walk — its roots in resolution precedence, its containment
+# bounds, and its bounded manifest decode — rather than a private copy of it.
+tairix-appstore = { path = "../../../lib/appstore", version = "=0.0.0" }
 # Shared integer screen geometry (`Point`/`Rect`/`Scale`/`Region`) for the
 # render viewport, the rail's hit-test, the inline rename editor's overlay, and
 # the damage a round reports.

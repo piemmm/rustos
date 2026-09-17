@@ -114,23 +114,26 @@ impl AppAssociation {
     }
 }
 
-/// Build an [`AppAssociation`] from a bundle's raw `AppInfo` manifest bytes and
-/// its `<Name>.app` directory path.
+/// Build an [`AppAssociation`] from the decoded manifest of the bundle at
+/// `bundle_path`.
 ///
-/// This is the pure decode the running-system [`BundleSource`] uses per bundle:
-/// it reads the manifest header and the declared MIME table (the same body
-/// layout the loader reads) and returns the bundle's name and declared types.
-/// It is **fail-closed** — a manifest that does not parse, or whose MIME table
-/// is malformed or non-UTF-8, yields `None`, so a corrupt bundle is silently
-/// skipped rather than offered on a guess. The MIME set is a display *hint*
-/// only: this does **not** verify the manifest signature (the signed load gate
-/// does that when the chosen bundle is launched), it only reads what the
-/// bundle claims. Keeping the decode here means it is host-tested without a
-/// kernel, exactly like the rest of this model.
+/// `header` is that bundle's already-decoded `AppInfo` and `manifest` the whole
+/// manifest it came from, because the declared MIME table sits in the body past
+/// the header — the shared store walk (`lib/appstore`) hands both, so a bundle
+/// is decoded once however many things read it.
+///
+/// **Fail-closed**: a MIME table that is malformed or non-UTF-8 yields `None`,
+/// so a corrupt bundle is silently skipped rather than offered on a guess. The
+/// MIME set is a display *hint* only: nothing here verifies the manifest
+/// signature (the signed load gate does that when the chosen bundle is
+/// launched), it only reads what the bundle claims.
 #[must_use]
-pub fn association_from_appinfo(bundle_path: &str, appinfo: &[u8]) -> Option<AppAssociation> {
-    let header = AppInfoHeader::from_bytes(appinfo).ok()?;
-    let body = appinfo.get(AppInfoHeader::WIRE_LEN..)?;
+pub fn association_from_manifest(
+    bundle_path: &str,
+    header: &AppInfoHeader,
+    manifest: &[u8],
+) -> Option<AppAssociation> {
+    let body = manifest.get(AppInfoHeader::WIRE_LEN..)?;
     let caps = usize::from(header.capability_count);
     let mut mimes = Vec::with_capacity(usize::from(header.mime_count));
     for index in 0..usize::from(header.mime_count) {

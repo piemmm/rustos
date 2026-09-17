@@ -4,9 +4,9 @@
 //! ([`SwitchboardRequest::ActivateOwner`] /
 //! [`SwitchboardRequest::RestartOwner`]), and the reverse direction — the
 //! tray-icon press that opens the panel, the seat's unresponsive-owner
-//! report, what the last composited frame cost, and which bundle each window
-//! owner was launched from — that the session sends on the service's own
-//! command mailbox.
+//! report, what the last composited frame cost, and which installed bundle
+//! each window owner's attested application resolves to — that the session
+//! sends on the service's own command mailbox.
 //!
 //! Every side effect (raising a window, relaunching a bundle, sending on
 //! the mailbox) is an injected seam ([`OwnerWindow`], the `relaunch`

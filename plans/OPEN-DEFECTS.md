@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 27 open, 105 closed, 132 total.
+table normalises all three to **closed**. 28 open, 105 closed, 133 total.
 
-### Open (27)
+### Open (28)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -54,6 +54,8 @@ table normalises all three to **closed**. 27 open, 105 closed, 132 total.
 | D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
 | D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static; `kernel/sched/api::park` would need one too. Distinct from D123, which is the UB oracle |
 | D132 | no run states whether a *double-click* in a file-manager window reaches `activate` on a guest | coverage gap with an unexplained observation behind it, not a confirmed defect. The `handover_qemu_aarch64` vertical originally injected the pair as one four-edge burst and never passed. The burst **was** delivered: four window events reached the manager's own event mailbox (`0xE117…` tagged with the `files` task) in the 60 ms after that window's first frame, and the manager repainted twice after them — yet no `fd_grant` followed. The aim was verified independently against the run's screendump and round-trips to the intended entry through the production hit-test, and the shared pairing rule accepts two presses 32 ms apart on one subject (neither `Moved` nor `Released` resets the tracker). So either the burst yielded one press rather than two, or the two resolved to different subjects — and **no existing record can tell them apart**: `MessageDelivered` carries a port, a sender and a length, every window event is 40 bytes, and no audit event anywhere names a pointer action. Answering it needs a witness that names the delivered event kind, plus re-adding injection (`PointerAction::DoubleClick` was deleted with its last consumer). The vertical now activates through the item's context-menu *Open* row, which runs the same `activate`, so the delegation chain is covered and only the pairing path is host-tested only |
+
+| D133 | a task can grow another task's kernel-side pending-`fd_grant` table without bound | noticed while re-pointing the hand-over vertical; not absorbed. Fail-closed refusal, not a capacity |
 
 ### Closed (105)
 
@@ -7840,3 +7842,36 @@ D123's budget half (1097 s against a 287 s stage makespan, dominated by
 `groups::` and `fs::fscache`, neither carrying `unsafe`) is untouched by this
 change. The baseline also moved under `4dbe8d79e`, so it needs re-measuring
 before it is relied on.
+
+## D133 — a task can grow another task's pending-delegation table without bound (OPEN)
+
+`AddressSpaceRegistry::mint_fd_delegation` keys a `BTreeMap` of unredeemed
+one-shot file delegations by recipient task and inserts one entry per distinct
+`(path, captured authority, flags)` a grantor hands over. Nothing bounds that
+map. Identical re-grants are suppressed — the existing pending handle is
+returned — and the whole record is dropped when the *recipient* is withdrawn,
+so a short-lived recipient reclaims everything; a long-lived one does not.
+
+The reachable shape is a grantor holding `CAP_FS_ACCESS` that opens, grants,
+and closes a stream of *different* paths to one long-lived recipient that never
+redeems them. Its own descriptor table stays small — the pending record holds
+the path and the captured authority, not the descriptor — so one process can
+place an unbounded number of kernel-side entries against another. The desktop
+session is the natural target: the file manager mints a delegation *to the
+session* before asking whether an instance is running, and the session does not
+redeem it when it answers "not running", so every such launch leaves one behind
+for the session's whole life.
+
+Noticed while re-pointing `handover_qemu_aarch64` onto a manager-spawned viewer
+(`plans/NEW-TASKBAR.md` T19), which made that leak the ordinary first-open
+path rather than a rarity. Not absorbed into that change: it is a kernel
+resource bound in a subsystem that change does not touch, and the fix is a
+**fixed containment bound** rather than a capacity — a per-recipient ceiling on
+pending delegations, refused as a typed error at the mint (so the grantor
+learns, and an honest hand-over of one document is never near it), with the
+existing duplicate suppression unchanged. The session should additionally
+consume what it cannot hand on, so an honest refusal leaves nothing pending.
+
+Its regression test is part of the fix: mint past the ceiling and assert the
+typed refusal with the earlier delegations still redeemable, plus the session
+answering `NotRunning` leaving no pending entry.

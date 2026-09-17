@@ -53,7 +53,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-/// Bare name of the viewer bundle the library row launches — the bundle is
+/// Bare name of the viewer bundle the file manager launches — the bundle is
 /// `<system application store>/<name>.app`, composed from the shared
 /// `lib/abi` spellings on both sides rather than written out here.
 ///
@@ -63,6 +63,14 @@
 /// than of any authority it already had, and a *second* document reaching the
 /// same process is proof the desktop's single-instance funnel was used rather
 /// than a fresh viewer started.
+///
+/// Nothing launches it in advance. The **file manager** starts it, on the
+/// first activation, because the desktop's funnel answers "not running" — so
+/// the instance every later document must reach is one the desktop itself
+/// never spawned, and the only thing that can name it is the identity the
+/// kernel attested for it. Pre-launching it from the program library, as this
+/// script once did, put it in the desktop's own launch table and hid exactly
+/// that.
 pub const VIEWER_APP_NAME: &str = tairix_test_filepick_qemu_aarch64::PICK_APP_NAME;
 
 /// Process name (`comm`) the kernel attests for the file manager — the
@@ -90,15 +98,25 @@ pub const GRANT_SYSCALL: &str = tairix_test_filepick_qemu_aarch64::GRANT_SYSCALL
 /// field renders it.
 pub const REDEEM_SYSCALL: &str = tairix_test_filepick_qemu_aarch64::REDEEM_SYSCALL;
 
-/// Complete relays the PASS gate wants, and so the number of documents the
-/// pointer script activates in the manager's window.
+/// Complete relays the PASS gate wants.
 ///
 /// Two, because one relay proves the chain and the second proves *whose*: the
-/// viewer redeems both from the same kernel-attested task, so the second
+/// viewer redeems both from the same kernel-attested task, so the later
 /// document went to the instance that was already running rather than to a
 /// viewer started for it. That is the desktop's single-instance funnel doing
 /// its job — one process, a window per document.
 pub const RELAY_ROUNDS: u32 = 2;
+
+/// Documents the pointer script activates in the manager's window.
+///
+/// One more than [`RELAY_ROUNDS`], because the **first** activation is the one
+/// that starts the viewer: the desktop's funnel answers "not running", so the
+/// manager spawns it and hands the document over on `STDIN` rather than through
+/// the relay. Only from the second activation on is there a live instance for
+/// the authority to travel to — and that instance was started by the *manager*,
+/// so a desktop resolving a slot's application from its own launch bookkeeping
+/// could not find it and would spawn a second viewer per document.
+pub const ACTIVATIONS: u32 = RELAY_ROUNDS + 1;
 
 /// Syscalls one relay is recognised by, in the order the chain makes them:
 /// the manager mints, the session redeems, the session mints again, the viewer

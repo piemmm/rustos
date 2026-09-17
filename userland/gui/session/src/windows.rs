@@ -25,7 +25,7 @@ use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::window_ipc::{
     AppBar, AppMenu, HandOverDocument, HandOverOutcome, MenuRefusal, WindowEvent, WindowRegion,
 };
-use tairix_abi::{Errno, ProcId};
+use tairix_abi::{AppIdentity as AttestedApp, Errno, ProcId};
 use tairix_controls::{ChainModel, PlatePlacement};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
@@ -39,8 +39,7 @@ use tairix_taskbar::menu::info_facts;
 use tairix_window::WindowSizing;
 use tairix_wm::{Color, Compositor, Point, Rect, Surface, Window, WindowControlKind, WindowId};
 
-use crate::apps::{AppBarBridge, BUNDLE_RUN_SUFFIX};
-use crate::launch::LaunchTable;
+use crate::apps::{AppBarBridge, BundleIndex};
 use crate::menu::{ChainGeometry, ChainOwner, MenuChain, ModelRefused};
 use crate::picker::PickerSlot;
 use crate::session::DesktopSession;
@@ -497,10 +496,10 @@ pub fn window_control_alternate_event(
 /// ([`AppBarService::slots`](crate::apps::AppBarService::slots)), so the
 /// two surfaces cannot show different applications.
 ///
-/// A window whose owner this desktop did not launch — a shell-spawned
-/// program, a child process — is left with no identity, so its title keeps
-/// the whole band rather than wearing a badge for an application that
-/// cannot be named. An identified bundle whose declared artwork is absent,
+/// A window whose owner carries no attested application identity, or whose
+/// bundle the installed-store index cannot resolve, is left with no identity,
+/// so its title keeps the whole band rather than wearing a badge for an
+/// application that cannot be named. An identified bundle whose declared artwork is absent,
 /// refused, or undecodable keeps the identity and loses only the picture,
 /// falling back to the shared application-bundle artwork and then to the
 /// built-in glyph. Resolution never fails a window; it is already open.
@@ -512,16 +511,13 @@ pub fn resolve_window_identities<F>(
     shell: &mut DesktopShell,
     compositor: &mut Compositor,
     windows: &mut SessionWindows,
-    launched: &LaunchTable,
-    task_of: F,
+    bundles: &BundleIndex,
+    app_of: F,
 ) where
-    F: Fn(ProcId) -> Option<u64>,
+    F: Fn(ProcId) -> Option<AttestedApp>,
 {
     for (wm, owner) in windows.take_opened_owners() {
-        let Some(bundle) = task_of(owner)
-            .and_then(|task| launched.get(task))
-            .and_then(|app| app.run_path.strip_suffix(BUNDLE_RUN_SUFFIX))
-        else {
+        let Some(bundle) = app_of(owner).and_then(|app| bundles.path_of(&app)) else {
             continue;
         };
         // An undecorated window draws no identity slot and reports no side,

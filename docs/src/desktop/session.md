@@ -142,12 +142,29 @@ to raise, or `Raise` for an application that ends with its window and so can
 never be clicked windowless. The bar resolves that into `AppDefault` /
 `AppRaise` / nothing; the session only relays.
 
-### Identity is the manifest's, never the process's
+### Identity is the kernel's answer, never the process's
 
-A slot's label, icon, and information-panel facts come from the **signed**
-`AppInfo` of the bundle the desktop launched that process from — resolved from
-the existing launch table and the window engine's attested owner records,
-never from anything an application sent. The label is the manifest's
+A slot stands for one process, and the bundle it belongs to is the
+`AppIdentity` the **kernel** attested for that process from the manifest the
+load gate verified — so it is the same answer whoever started the process: the
+desktop, a shell, or another application. `apps::BundleIndex` turns that
+identity into a bundle *directory* by walking the installed program stores
+(`lib/appstore`) and accepting a path only where the manifest there declares
+**both** the attested identifier and the attested publisher; a slot's label,
+icon, and information-panel facts are then read from that bundle's **signed**
+`AppInfo`, never from anything an application sent.
+
+Both halves must match because a publisher key is public — it sits in every
+copy of a bundle — so a manifest is copyable text, and matching the identifier
+alone would let a bundle planted in a user-writable store supply the name,
+purpose, author, and icon drawn in system chrome for a shipped application.
+Two further rules close the rest: store roots are walked in resolution
+precedence, so a user-writable store can never claim an identifier the
+read-only system stores already declare; and two bundles in the *same* root
+claiming one identifier leave it unattributed rather than letting whichever
+sorts first wear the other's identity.
+
+The label is the manifest's
 human-readable `title` (`AppInfoHeader::bundle_title`), not its `name`: `name`
 is the command word the shell resolves and the stem of the `<Name>.app`
 directory, so it cannot be capitalised, which is how the bar's menu came to be
@@ -158,9 +175,20 @@ identity that is not its own inside system-drawn chrome
 an application from it is on the bar, so a second copy of one application
 costs a lookup rather than a read.
 
-A process the desktop did **not** launch — a shell-spawned program — has no
-bundle to attest, so its slot carries a neutral label and no version, purpose,
-or author at all: the panel states what it read and never what it did not.
+A process with **no attested identity** — one not admitted through the signed
+bundle gate — carries a neutral label and no version, purpose, or author at
+all, and so does one whose bundle the index cannot resolve: the panel states
+what it read and never what it did not. A slot resolves its identity when the
+first store walk lands and keeps the neutral label until then, so a frame is
+never owed a filesystem read.
+
+The same resolution names a window: `resolve_window_identities` draws the
+title band's badge from the very bundle the slot's picture comes from, so the
+two surfaces cannot show different applications. Until this was the kernel's
+answer, opening two pictures from the file manager produced two unattributed
+icon-bar slots and started a second viewer per document — the manager, not the
+desktop, spawns the viewer, so the desktop's own launch bookkeeping had never
+heard of it.
 
 `Taskbar::app_icon_side` exposes the exact pixel side a slot's icon paints at,
 so the session rasterises artwork at the drawn size.
@@ -694,9 +722,13 @@ remembers every child still running — its PID, the display label
 diagnostics report it by, and the `Run` path it was spawned from (its
 **attested bundle identity**: the desktop spawned the child itself, so no
 window title or other app-controlled data is ever trusted for it,
-`AGENTS.md` §23.1). `running_from` resolves the file manager's idempotent
-open; `window_of_pid` (in the `Run` binary) finds the running app's served
-window through the window engine's kernel-attested ownership records.
+`AGENTS.md` §23.1). `running_from` answers whether the desktop has a child of its own running
+from a bundle (the monitor's relaunch check), and `bundles` names the launches
+whose icon artwork is worth starting before a window exists; `window_of_pid`
+(in the `Run` binary) finds the running app's served window through the window
+engine's kernel-attested ownership records. It is **not** what names an
+application on the icon bar: that is the kernel's attestation, above, because
+a process another application spawned is the same application either way.
 Asynchronous launch admits a child and returns its PID before the image
 loads, so a load refusal surfaces as the child's reserved `LOAD_*` exit
 status: the shared `reap_launched` drains every exited child in one wake,

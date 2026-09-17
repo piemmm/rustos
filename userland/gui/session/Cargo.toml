@@ -125,6 +125,16 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
 # store is one of its documents, so the session reads it through the engine
 # and `lib/proglib`'s registry rather than a second parser.
 tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
+# The one installed-bundle walk: the icon bar resolves a kernel-attested app
+# identity to the bundle directory that declares it by walking the program
+# stores through the shared walk — its roots in resolution precedence, its
+# containment bounds, and its bounded manifest decode — rather than a private
+# copy of it. The same walk produces the file-type associations.
+tairix-appstore = { path = "../../../lib/appstore", version = "=0.0.0" }
+# The one publisher-identity derivation: an attested identity is matched
+# against an on-disk manifest by the same digest the load gate attests it
+# from, so the two can never key the same developer differently.
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared fake app-data service the pinboard store's host tests drive the
@@ -137,6 +147,11 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features =
 # pin test verifies every locale's `OPTIONS` section documents exactly the
 # switches the parser accepts (plans/APPS.md).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The neutral `AppInfoHeader` fixture builder the manifest fixtures are built
+# on, so they carry no copy of the header's field list.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", features = [
+    "test-util",
+] }
 # The trusted picker's host tests draw text, so they inject the shared solid
 # test transport via the `test-util` feature (never a running `fontd`).
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }

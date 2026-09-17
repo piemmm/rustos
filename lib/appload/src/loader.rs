@@ -22,6 +22,23 @@ use crate::bundle::{BundleIdentity, BundleStore, Clock, LoadedApp, ResolvedLibra
 use crate::error::AppError;
 use crate::events;
 
+/// The developer identity a manifest's publisher key digests to.
+///
+/// One definition, because it is what per-app stored state is *owned by*: two
+/// hosts deriving it differently would key the same developer's data
+/// differently, so the load gate, the kernel's attestation, and any consumer
+/// matching an attested identity against an on-disk bundle all call this.
+///
+/// It is a derivation, never a judgement: the caller decides whether the key
+/// it hashes was authenticated. [`AppLoader`] calls it only after the
+/// manifest's signature and publisher binding verify, which is what makes the
+/// identity it attests trustworthy; a consumer reading an unverified manifest
+/// gets the identity that manifest *claims*.
+#[must_use]
+pub fn publisher_id_of(header: &AppInfoHeader) -> PublisherId {
+    PublisherId::from_raw(sha256(&header.publisher_id_preimage()))
+}
+
 /// Construction-time configuration for an [`AppLoader`].
 ///
 /// All seams are borrowed for the loader's lifetime, mirroring `init`'s
@@ -390,9 +407,7 @@ impl<'a> AppLoader<'a> {
             )
             .map_err(|_| refuse())?;
         }
-        Ok(PublisherId::from_raw(sha256(
-            &header.publisher_id_preimage(),
-        )))
+        Ok(publisher_id_of(header))
     }
 
     fn store_error(&self, bundle: &str, err: Errno) -> AppError {
@@ -813,12 +828,32 @@ mod tests {
             .expect("loads");
 
         let header = AppInfoHeader::from_bytes(&store.appinfo).expect("decodes");
-        assert_eq!(
-            app.publisher(),
-            PublisherId::from_raw(sha256(&header.publisher_id_preimage()))
-        );
+        assert_eq!(app.publisher(), super::publisher_id_of(&header));
         assert!(!app.publisher().is_none());
         assert_eq!(sink.count(events::APP_PUBLISHER_INVALID), 0);
+    }
+
+    /// The hoisted derivation is the labelled digest of the manifest's
+    /// publisher key, and a different key is a different developer.
+    ///
+    /// Pinned here rather than at the attestation site, so the gate's own
+    /// `publisher()` test comparing against this helper cannot be satisfied by
+    /// both sides being wrong together.
+    #[test]
+    fn the_publisher_derivation_is_the_labelled_digest_of_the_manifest_key() {
+        let header = AppInfoHeader::from_bytes(&MockStore::good(&[]).appinfo).expect("decodes");
+        assert_eq!(
+            super::publisher_id_of(&header),
+            PublisherId::from_raw(sha256(&header.publisher_id_preimage()))
+        );
+        assert!(!super::publisher_id_of(&header).is_none());
+
+        let mut rotated = header;
+        rotated.publisher_pubkey[0] ^= 0xFF;
+        assert_ne!(
+            super::publisher_id_of(&rotated),
+            super::publisher_id_of(&header)
+        );
     }
 
     /// A manifest may claim any publisher it likes; claiming one it cannot

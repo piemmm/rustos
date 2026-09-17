@@ -1458,6 +1458,58 @@ fn validate_digest_path(path: &str) -> Result<(), Errno> {
     Ok(())
 }
 
+/// A minimal, well-formed [`AppInfoHeader`] naming bundle `id` with display
+/// name `name`, for a consumer's tests.
+///
+/// Every other field is left neutral — no capabilities, no MIME table, no
+/// library listing, zero hashes and a zero signature — so a caller sets only
+/// the field its own subject is and carries no copy of the header's two dozen
+/// others. Nothing here is signed, which is exactly what a consumer that
+/// reads a manifest as an unverified *claim* sees; the load gate refuses it.
+///
+/// Test scaffolding, behind a feature no TAIRiX build enables.
+#[cfg(feature = "test-util")]
+#[must_use]
+pub fn manifest_header(id: &str, name: &str) -> AppInfoHeader {
+    fn inline<const N: usize>(text: &str) -> ([u8; N], u8) {
+        let mut buf = [0u8; N];
+        let bytes = text.as_bytes();
+        buf[..bytes.len()].copy_from_slice(bytes);
+        (buf, u8::try_from(bytes.len()).expect("fits u8"))
+    }
+    let (id, id_len) = inline(id);
+    let (name, name_len) = inline(name);
+    let (version, version_len) = inline("1.0.0");
+    AppInfoHeader {
+        magic: APPINFO_MAGIC,
+        abi_version: crate::ABI_VERSION_CURRENT,
+        flags: 0,
+        capability_count: 0,
+        mime_count: 0,
+        id_len,
+        name_len,
+        version_len,
+        purpose_len: 0,
+        author_len: 0,
+        library_icon_len: 0,
+        library: LibraryCategory::to_wire(None),
+        title_len: 0,
+        id,
+        name,
+        version,
+        library_icon: [0; LIBRARY_ICON_MAX],
+        purpose: [0; BUNDLE_PURPOSE_MAX],
+        author: [0; BUNDLE_AUTHOR_MAX],
+        title: [0; BUNDLE_TITLE_MAX],
+        syscall_table_hash: [0; SYSCALL_TABLE_HASH_LEN],
+        content_hash: [0; 32],
+        signer_pubkey: [0; 32],
+        publisher_pubkey: [0; 32],
+        publisher_cert: [0; 64],
+        signature: [0; 64],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

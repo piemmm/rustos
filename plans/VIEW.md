@@ -492,6 +492,16 @@ clients, and their exit-code sets are their own.
 ## Status
 
 - `plans/VIEW.md` and the jump-sheet row — **done**.
+- **One viewer for every document, whoever launched it** — **done**. The
+  single-instance funnel found a running viewer only when the *desktop* had
+  spawned it, so a viewer the file manager started was invisible to it and
+  every document opened a fresh process with its own unattributed icon-bar
+  slot. The desktop now resolves a slot's application from the identity the
+  **kernel** attests for the process (`plans/NEW-TASKBAR.md` T19), so the
+  viewer the manager started is the resident instance a later document reaches
+  — one process, a window per document, with `view`'s own name and icon on its
+  slot. The `handover_qemu_aarch64` vertical no longer pre-launches it, which
+  is what makes that claim testable on a running machine.
 - `lib/window::app` shared shell, and the migration of every other app-side
   consumer — **done**. `datetime`, `widgets`, `wallpaper`, and `switchboard`
   are single-window and took `AppWindow` whole; `datetime` additionally stopped

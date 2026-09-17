@@ -637,8 +637,14 @@ applications are running by showing them at all; there is no running bar
 under a slot, no focus seam, and no recessed minimised plate. Only the
 pointer's own wash distinguishes one slot from another.
 
-**Which applications hold a slot** is the session's answer, not the bar's
-(see [the session's icon bar](session.md#the-icon-bar)): an application that
+**Which applications hold a slot, and which application each slot is**, are
+the session's answers, not the bar's (see
+[the session's icon bar](session.md#the-icon-bar)). One slot stands for one
+kernel-attested process, and the bundle whose name and icon it wears is the
+one the *kernel* attested that process runs — not one the desktop happens to
+have launched, so a program a shell or another application started is the same
+application on the bar as one the desktop started, and gets one slot rather
+than a fresh unattributed one per launch. An application that
 declared a presence keeps its slot for the life of its process, windows or
 not, and one that declared nothing but owns a window still gets a slot — with
 no menu and a click the session answers by raising — so no window is ever

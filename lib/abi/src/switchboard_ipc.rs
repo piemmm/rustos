@@ -57,9 +57,10 @@
 //! tray icon, and [`SwitchboardCommand::SeatReport`] to hand over the one
 //! fact only the session holds — which window owners have stopped draining
 //! their event mailbox and are therefore unresponsive.
-//! [`SwitchboardCommand::OwnerBundle`] is the other such fact: which
-//! application bundle a window owner was launched from, which the kernel's
-//! process record does not carry and only the launching session knows. The
+//! [`SwitchboardCommand::OwnerBundle`] is the other such fact: which installed
+//! bundle *directory* a window owner's kernel-attested application resolves
+//! to, which only the session — the thing that walks the program stores —
+//! knows. The
 //! service authenticates every command against the session [`ProcId`] the
 //! publish reply attested, never a wire claim, and joins the reported owners
 //! against the process list it already samples rather than trusting names
@@ -345,8 +346,8 @@ pub enum SwitchboardRequest {
     },
     /// Re-launch the window owner named by its kernel task id through the
     /// session's attested launch path — the panel's restart action for an
-    /// unresponsive app, applied by the session because it alone holds the
-    /// bundle each window was launched from.
+    /// unresponsive app, applied by the session because it alone resolves a
+    /// window owner to a bundle directory it can launch.
     RestartOwner {
         /// The owning app's kernel task id.
         owner: u64,
@@ -952,23 +953,25 @@ pub enum SwitchboardCommand {
         /// The report.
         report: FrameReport,
     },
-    /// Name the application bundle one window owner was launched from, so
-    /// the monitor can draw that application's own icon against its rows
-    /// instead of one generic executable glyph for every process.
+    /// Name the application bundle one window owner belongs to, so the
+    /// monitor can draw that application's own icon against its rows instead
+    /// of one generic executable glyph for every process.
     ///
-    /// Only the session knows this: the kernel's process record carries a
-    /// name and no image path, and the launch that produced the process is
-    /// the session's own. It is reported per owner as the strip changes
-    /// rather than as a whole roster, so a newly launched application costs
-    /// one frame and every other frame on this mailbox keeps its size.
+    /// Only the session knows the *directory*: the kernel attests which
+    /// application a process is (a bundle identifier and a publisher, on its
+    /// `Origin`), and the session is what resolves that to an installed
+    /// bundle by walking the program stores. It is reported per owner as the
+    /// strip changes rather than as a whole roster, so a newly launched
+    /// application costs one frame and every other frame on this mailbox
+    /// keeps its size.
     ///
     /// The owner is its kernel-attested [`ProcId`], never its numeric pid:
     /// a pid is recycled, and a recycled one would hand a stranger's process
     /// the icon of the application that held the number before it.
     OwnerBundle {
-        /// The process the bundle launched, as the kernel attests it.
+        /// The process, as the kernel attests it.
         owner: ProcId,
-        /// The `<Name>.app` directory it was launched from.
+        /// The `<Name>.app` directory its attested application resolved to.
         bundle: OwnerBundleDir,
     },
     /// Perform the machine power transition `action`. Sent only after the
@@ -1104,7 +1107,7 @@ impl SwitchboardCommand {
 }
 
 /// Decode an owner-bundle report: the attested process identity and the
-/// bundle directory it was launched from.
+/// bundle directory its attested application resolved to.
 ///
 /// The reserved zero identity names no process, and the directory passes the
 /// shared bounded-text validator, so a malformed or over-long path is refused

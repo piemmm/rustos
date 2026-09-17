@@ -50,6 +50,7 @@
   - [`tairix-appconf`](./lib/appconf.md)
   - [`tairix-appdata`](./lib/appdata.md)
   - [`tairix-appload`](./lib/appload.md)
+  - [`tairix-appstore`](./lib/appstore.md)
   - [`tairix-binfmt`](./lib/binfmt.md)
   - [`tairix-blkclient`](./lib/blkclient.md)
   - [`tairix-bootload`](./lib/bootload.md)

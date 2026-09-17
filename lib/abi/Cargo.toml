@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# A neutral, well-formed `AppInfoHeader` fixture builder for a *consumer's*
+# tests (`manifest_header`), so no crate that reads manifests carries its own
+# copy of the header's two dozen fields. Test scaffolding; no TAIRiX build
+# enables it.
+test-util = []
+
 [lints]
 workspace = true
 

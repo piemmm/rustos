@@ -223,9 +223,9 @@ mod tests;
 
 pub use apps::{
     picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail, AppBarBridge,
-    AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, Declaration, IconRasteriser,
-    APP_BAR_RELAYED, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, BUNDLE_RUN_SUFFIX,
-    MAX_BAR_APPS,
+    AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex, Declaration,
+    IconRasteriser, APP_BAR_RELAYED, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+    BUNDLE_RUN_SUFFIX, MAX_BAR_APPS,
 };
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};

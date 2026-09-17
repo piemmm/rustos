@@ -18,9 +18,16 @@
 //! So the guest boots the **production** aarch64 pipeline
 //! (`boot_aarch64::boot`) against a planted encrypted root, and the host drives
 //! the desktop blind through the QEMU monitor: unlock, log in, start the
-//! desktop, launch `view` from the program library, open a file-manager window
-//! from its icon-bar slot, and activate the planted picture in it. Only the
-//! audit sink is swapped, for the PASS witnesses below.
+//! desktop, open a file-manager window from its icon-bar slot, and activate the
+//! planted picture in it — once per relay, plus the first activation, which
+//! finds no viewer and makes the *manager* start one. Only the audit sink is
+//! swapped, for the PASS witnesses below.
+//!
+//! Nothing pre-launches the viewer, deliberately: the instance every later
+//! document must reach is then one the **desktop never spawned**, so the only
+//! thing that can name it is the identity the kernel attested. While the script
+//! launched it from the program library first, the desktop's own launch table
+//! knew it and this vertical could not have failed.
 //!
 //! # The PASS gate
 //!
@@ -46,14 +53,16 @@
 //! than only falling silent — the difference between "the gesture never
 //! reached an item" and "the desktop never redeemed what it was handed".
 //!
-//! The second relay additionally requires the viewer's redeem to come from the
-//! **same kernel-attested task** as the first. That is what makes this "one
-//! viewer process, two documents" rather than "two viewers, one document
-//! each": a task belongs to one process for its whole life, so the same task
-//! redeeming both means the desktop's single-instance funnel reached the
-//! instance that was already running, and the viewer opened a second window
-//! rather than a second viewer being started. A redeem from any other task
-//! resets the chain instead of completing it (fail closed).
+//! Every relay after the first additionally requires the viewer's redeem to
+//! come from the **same kernel-attested task**. That is what makes this "one
+//! viewer process, three documents" rather than "a viewer per document": a task
+//! belongs to one process for its whole life, so the same task redeeming each
+//! means the desktop's single-instance funnel reached the instance that was
+//! already running, and the viewer opened another window rather than another
+//! viewer being started. A redeem from any other task resets the chain instead
+//! of completing it (fail closed) — which is exactly what a desktop resolving a
+//! slot's application from its own launch bookkeeping produced, because the
+//! manager, not the desktop, started the viewer.
 //!
 //! # Why the guest latches no frame
 //!

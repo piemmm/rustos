@@ -70,4 +70,4 @@ pub use bundle::{
     BundleContents, BundleIdentity, BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier,
 };
 pub use error::AppError;
-pub use loader::{AppLoader, AppLoaderConfig};
+pub use loader::{publisher_id_of, AppLoader, AppLoaderConfig};

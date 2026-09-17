@@ -36,6 +36,11 @@ path = "src/run.rs"
 # the `stdinfo` record type for the fd-3 advisory records. Never a kernel
 # or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one installed-bundle walk: `rescan` discovers bundles through the shared
+# store walk — its roots in resolution precedence, its depth and entry
+# containment bounds, its fail-closed-per-bundle rule, and its bounded manifest
+# decode — rather than a private copy of it.
+tairix-appstore = { path = "../../../lib/appstore", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md §4, §6).
@@ -77,5 +82,10 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features =
 # wire the service actually answers rather than a mock of it.
 [dev-dependencies]
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }
+# The neutral `AppInfoHeader` fixture builder the store-tree fixtures need, so
+# they carry no copy of the manifest header's field list.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", features = [
     "test-util",
 ] }

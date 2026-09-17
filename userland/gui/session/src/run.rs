@@ -107,7 +107,9 @@ mod program {
         SPAWN_UID_INHERIT, WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
-    use tairix_browse::{AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk};
+    use tairix_browse::{
+        AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk, RtLinkReader,
+    };
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::menu::{
         open_desktop_menu, ChainAction, ChainOutcome, ChainOwner, MenuChain,
@@ -123,8 +125,8 @@ mod program {
         load_programs, maybe_send_seat_report, open_tray, parse, publish_pinboard, reap_launched,
         relay_power, resolve_launch, resolve_window_identities, serve_pinboard_apply,
         serve_switchboard_request, window_control_alternate_event, window_control_event, Answer,
-        AppBarBridge, AppBarService, ArtworkFileReader, ArtworkSandbox, CliError, Command,
-        ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
+        AppBarBridge, AppBarService, ArtworkFileReader, ArtworkSandbox, BundleIndex, CliError,
+        Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
         DesktopOutcome, DesktopShell, DeviceInputSource, DocumentRelay, ElevatePrompt, Elevator,
         FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
         HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource, Launch,
@@ -133,12 +135,11 @@ mod program {
         ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
         SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
         SwitchboardServe, WallpaperDesk, WallpaperSource, APP_BAR_SLOT_SHOWN,
-        APP_BAR_SLOT_SHOWN_MESSAGE, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
-        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN,
-        WINDOW_SHOWN_MESSAGE,
+        APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
+        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH,
+        MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN,
+        PICKER_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
+        USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -395,11 +396,25 @@ mod program {
     /// The production [`CallerIdentity`]: the kernel's `call_peer_origin`
     /// on the served window endpoint, so every request is attributed to
     /// the kernel-attested in-flight caller — never a claim the request
-    /// carried. Each attested caller's `(pid → ProcId)` pair is retained
-    /// so a reaped child pid resolves back to the client whose windows
-    /// must be torn down.
+    /// carried. Each attested caller is retained so a reaped child pid
+    /// resolves back to the client whose windows must be torn down, and so
+    /// the icon bar can say which *application* a process is.
     struct RtWindowIdentity {
-        peers: BTreeMap<u64, ProcId>,
+        peers: BTreeMap<u64, Peer>,
+    }
+
+    /// What the kernel attested about one window-channel client.
+    ///
+    /// The whole origin is decoded per request already, so keeping the app
+    /// identity beside the process instance costs nothing and no extra
+    /// syscall — and it is the only trustworthy answer to "which bundle is
+    /// this?": it comes from the manifest the load gate verified, whoever
+    /// started the process. A client not admitted from a signed bundle
+    /// carries none, which is the absence the bar states as such.
+    #[derive(Copy, Clone)]
+    struct Peer {
+        proc_id: ProcId,
+        app: Option<tairix_abi::AppIdentity>,
     }
 
     impl RtWindowIdentity {
@@ -411,7 +426,7 @@ mod program {
 
         /// Resolve (and forget) the client that ran as child `pid`.
         fn take_by_pid(&mut self, pid: u64) -> Option<ProcId> {
-            self.peers.remove(&pid)
+            self.peers.remove(&pid).map(|peer| peer.proc_id)
         }
 
         /// Resolve (and forget) the client whose event mailbox is
@@ -439,8 +454,22 @@ mod program {
         fn pid_of(&self, id: ProcId) -> Option<u64> {
             self.peers
                 .iter()
-                .find(|(_, proc_id)| **proc_id == id)
+                .find(|(_, peer)| peer.proc_id == id)
                 .map(|(pid, _)| *pid)
+        }
+
+        /// The application the kernel attested `id` is running, if it was
+        /// admitted from a signed bundle.
+        ///
+        /// The icon bar's whole attribution: it answers the same for a
+        /// process the desktop launched, one a shell launched, and one another
+        /// application launched, because the answer is the kernel's rather
+        /// than the desktop's record of what it spawned.
+        fn app_of(&self, id: ProcId) -> Option<tairix_abi::AppIdentity> {
+            self.peers
+                .values()
+                .find(|peer| peer.proc_id == id)
+                .and_then(|peer| peer.app)
         }
 
         /// The attested client that ran as child `pid`, *without* forgetting
@@ -451,7 +480,7 @@ mod program {
         /// `ProcId`. Read-only, unlike [`take_by_pid`](Self::take_by_pid),
         /// which forgets because a reaped child is gone.
         fn proc_id_of(&self, pid: u64) -> Option<ProcId> {
-            self.peers.get(&pid).copied()
+            self.peers.get(&pid).map(|peer| peer.proc_id)
         }
     }
 
@@ -461,7 +490,13 @@ mod program {
             let len = tairix_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
                 .map_err(Errno::from_syscall)?;
             let origin = Origin::from_bytes(&buf[..len])?;
-            self.peers.insert(origin.pid(), origin.proc_id());
+            self.peers.insert(
+                origin.pid(),
+                Peer {
+                    proc_id: origin.proc_id(),
+                    app: origin.app().copied(),
+                },
+            );
             Ok(origin.proc_id())
         }
     }
@@ -1747,12 +1782,12 @@ mod program {
         // anyone — and the very first double-click on a document should find
         // the application that opens it rather than a not-yet-scanned
         // catalogue.
-        let mut associations = alloc::vec::Vec::new();
+        let mut programs = Programs::new();
         adopt_programs(
-            load_programs(&mut VfsFileReader, &mut RtHost),
+            load_programs(&mut VfsFileReader, &mut RtHost, home_dir().as_deref()),
             &mut shell,
             &mut compositor,
-            &mut associations,
+            &mut programs,
         );
 
         // The icon bar's application strip: one slot per running
@@ -2343,16 +2378,15 @@ mod program {
                         )
                     };
                     // A window opened by this pass wears the icon of the
-                    // application the kernel says opened it. It runs here,
-                    // not in the bridge, because the attested-caller table
-                    // and the launch records are both borrowed while a
-                    // request is served.
+                    // application the kernel says owns it. It runs here, not
+                    // in the bridge, because the attested-caller table is
+                    // borrowed while a request is served.
                     resolve_window_identities(
                         &mut shell,
                         &mut compositor,
                         &mut windows,
-                        &launched,
-                        |owner| identity.pid_of(owner),
+                        &programs.bundles,
+                        |owner| identity.app_of(owner),
                     );
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
                     // A chain this pass brought up has to reach the screen,
@@ -2381,7 +2415,7 @@ mod program {
                             catalogs: &catalogs,
                             desktop: &mut desktop,
                             launched: &mut launched,
-                            associations: &mut associations,
+                            programs: &mut programs,
                             answered: &mut answered,
                         },
                         tairix_rt::clock_get(),
@@ -2548,8 +2582,8 @@ mod program {
                     &mut compositor,
                     tairix_rt::clock_get(),
                 );
-                if let Some(programs) = catalogs.collect() {
-                    adopt_programs(programs, &mut shell, &mut compositor, &mut associations);
+                if let Some(loaded) = catalogs.collect() {
+                    adopt_programs(loaded, &mut shell, &mut compositor, &mut programs);
                 }
                 let relisted = desktop.relist(tairix_rt::clock_get());
                 let papered = prepare_wallpaper(
@@ -2583,7 +2617,7 @@ mod program {
                         &server,
                         &windows,
                         &identity,
-                        &launched,
+                        &programs.bundles,
                     );
                     // The monitor draws these same applications against its
                     // task rows, and the bundle each was launched from is a
@@ -2595,8 +2629,8 @@ mod program {
                         &mut shell,
                         &mut compositor,
                         &mut windows,
-                        &launched,
-                        |owner| identity.pid_of(owner),
+                        &programs.bundles,
+                        |owner| identity.app_of(owner),
                     );
                     shell.present_icon_artwork(&mut compositor);
                 }
@@ -2873,7 +2907,7 @@ mod program {
                             catalogs: &catalogs,
                             desktop: &mut desktop,
                             launched: &mut launched,
-                            associations: &mut associations,
+                            programs: &mut programs,
                             answered: &mut answered,
                         },
                         now_ns,
@@ -2913,7 +2947,7 @@ mod program {
                             windows: &windows,
                             identity: &identity,
                         },
-                        &mut associations,
+                        &mut programs,
                         now_ns,
                     );
                     match route_outcome(
@@ -2938,7 +2972,7 @@ mod program {
                         &mut apps,
                         &mut switchboard_pid,
                         &mut pending_open,
-                        &mut associations,
+                        &mut programs,
                     ) {
                         Routed::Continue => {}
                         Routed::EndSession => {
@@ -3000,7 +3034,7 @@ mod program {
                                     windows: &windows,
                                     identity: &identity,
                                 },
-                                &mut associations,
+                                &mut programs,
                                 now_ns,
                             );
                             match route_outcome(
@@ -3025,7 +3059,7 @@ mod program {
                                 &mut apps,
                                 &mut switchboard_pid,
                                 &mut pending_open,
-                                &mut associations,
+                                &mut programs,
                             ) {
                                 Routed::Continue => {}
                                 Routed::EndSession => {
@@ -3124,7 +3158,14 @@ mod program {
             // — so the strip is re-resolved exactly when an application
             // joined the bar, left it, re-declared, or opened or closed a
             // window.
-            if apps.service.take_dirty() || app_strip_is_stale(&apps, &shell, &server, &windows) {
+            // A fresh bundle index is the third reason: an identity the last
+            // strip could not resolve is knowable now, and no window or
+            // declaration changed to say so. Both latches are drained before
+            // the decision, so neither survives a wake the other caused and
+            // provokes a second re-resolution on the next one.
+            let declared = apps.service.take_dirty();
+            let attributed = programs.take_adopted();
+            if declared || attributed || app_strip_is_stale(&apps, &shell, &server, &windows) {
                 refresh_app_strip(
                     &mut apps,
                     &mut shell,
@@ -3132,7 +3173,7 @@ mod program {
                     &server,
                     &windows,
                     &identity,
-                    &launched,
+                    &programs.bundles,
                 );
                 owner_bundles.publish(switchboard_pid, &apps.strip, &mut RtSwitchboardMailbox);
             }
@@ -3212,6 +3253,38 @@ mod program {
     struct AppBarPanel {
         service: AppBarService,
         strip: alloc::vec::Vec<tairix_desktop_session::AppGroup>,
+    }
+
+    /// What the installed programs let the desktop resolve: the file types
+    /// each opens, and the bundle directory each kernel-attested application
+    /// identity names.
+    ///
+    /// One value rather than two because one scan produces both, so a click
+    /// can never resolve a bundle against a scan the identities did not come
+    /// from.
+    struct Programs {
+        associations: alloc::vec::Vec<AppAssociation>,
+        bundles: BundleIndex,
+        /// Set when a scan replaced the index. The app strip drains it, so a
+        /// slot that took the neutral label while the first scan was still
+        /// running adopts its real identity the moment the index lands —
+        /// requested, never waited for.
+        adopted: bool,
+    }
+
+    impl Programs {
+        fn new() -> Self {
+            Self {
+                associations: alloc::vec::Vec::new(),
+                bundles: BundleIndex::new(),
+                adopted: false,
+            }
+        }
+
+        /// Take the adoption latch.
+        fn take_adopted(&mut self) -> bool {
+            core::mem::take(&mut self.adopted)
+        }
     }
 
     impl AppBarPanel {
@@ -3815,8 +3888,8 @@ mod program {
                     }
                 }
                 // The reads, with no lock held.
-                let programs = load_programs(&mut VfsFileReader, &mut RtHost);
-                if self.desk.lock().deliver(programs) {
+                let loaded = load_programs(&mut VfsFileReader, &mut RtHost, home_dir().as_deref());
+                if self.desk.lock().deliver(loaded) {
                     self.wake.nudge();
                 }
             }
@@ -3829,7 +3902,11 @@ mod program {
                 let mut desk = self.desk.lock();
                 if desk.stopping() {
                     drop(desk);
-                    return Some(load_programs(&mut VfsFileReader, &mut RtHost));
+                    return Some(load_programs(
+                        &mut VfsFileReader,
+                        &mut RtHost,
+                        home_dir().as_deref(),
+                    ));
                 }
                 desk.submit(())
             };
@@ -3981,7 +4058,7 @@ mod program {
         catalogs: &'a Catalogs,
         desktop: &'a mut Desktop<S>,
         launched: &'a mut LaunchTable,
-        associations: &'a mut alloc::vec::Vec<AppAssociation>,
+        programs: &'a mut Programs,
         /// The outcomes the bar's own chains resolved to, in the order they
         /// were chosen.
         answered: &'a mut Vec<tairix_desktop_session::ShellOutcome>,
@@ -4344,7 +4421,9 @@ mod program {
         let Some(command) = command else {
             return;
         };
-        let acted = desk.desktop.command(command, desk.associations, now_ns);
+        let acted = desk
+            .desktop
+            .command(command, &desk.programs.associations, now_ns);
         let whole = acted.relisted
             | apply_desktop_action(
                 acted.action,
@@ -4365,7 +4444,7 @@ mod program {
                 now_ns,
             );
         if acted.relisted {
-            request_programs(desk.catalogs, shell, compositor, desk.associations);
+            request_programs(desk.catalogs, shell, compositor, desk.programs);
         }
         if whole {
             shell.present_desktop(compositor, desk.desktop);
@@ -4483,16 +4562,22 @@ mod program {
         server: &WindowServer<RtShmMapper>,
         windows: &SessionWindows,
         identity: &RtWindowIdentity,
-        launched: &LaunchTable,
+        bundles: &BundleIndex,
     ) {
         let owners = window_owners(shell, server, windows);
+        // The bundle the *kernel* attested each process belongs to, resolved
+        // to a directory by the installed-store index. Not what the desktop
+        // happens to have launched: a viewer the file manager spawned, or a
+        // program started from a shell, is the same application either way,
+        // and reading the launch table instead gave each of those a second
+        // unattributed slot and hid the running instance from the
+        // single-instance funnel.
         apps.strip = apps.service.strip(
             &owners,
             |owner| {
                 identity
-                    .pid_of(owner)
-                    .and_then(|pid| launched.get(pid))
-                    .and_then(|app| app.run_path.strip_suffix(BUNDLE_RUN_SUFFIX))
+                    .app_of(owner)
+                    .and_then(|app| bundles.path_of(&app))
                     .map(alloc::string::String::from)
             },
             &mut VfsFileReader,
@@ -4625,7 +4710,7 @@ mod program {
         apps: &mut AppBarPanel,
         switchboard: &mut Option<u64>,
         pending_open: &mut Option<CommandSection>,
-        associations: &mut alloc::vec::Vec<AppAssociation>,
+        programs: &mut Programs,
     ) -> Routed {
         use tairix_desktop_session::ShellOutcome;
         match outcome {
@@ -5091,7 +5176,7 @@ mod program {
                 // doing them on this click is what used to freeze the desktop
                 // as the launcher opened. What each application opens comes
                 // from the same scan, so the two can never disagree.
-                request_programs(catalogs, shell, compositor, associations);
+                request_programs(catalogs, shell, compositor, programs);
             }
             ShellOutcome::Taskbar(TaskbarResponse::AppDefault { app }) => {
                 // The application declared that it handles the primary click
@@ -5431,17 +5516,21 @@ mod program {
     /// click can never resolve a bundle against a catalog it was not read
     /// from.
     fn adopt_programs(
-        programs: LoadedPrograms,
+        loaded: LoadedPrograms,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        associations: &mut alloc::vec::Vec<AppAssociation>,
+        programs: &mut Programs,
     ) {
-        for warning in &programs.warnings {
+        for warning in &loaded.warnings {
             let _ = write!(Stderr, "{warning}");
         }
-        shell.set_library(compositor, programs.catalog);
+        shell.set_library(compositor, loaded.catalog);
         shell.warm_icon_artwork(compositor);
-        *associations = programs.associations;
+        programs.associations = loaded.associations;
+        // Latched only on a real change, so the strip is re-resolved when an
+        // identity actually became knowable rather than once per rescan.
+        programs.adopted |= programs.bundles != loaded.bundles;
+        programs.bundles = loaded.bundles;
     }
 
     /// Ask for a fresh program catalogue, adopting it at once when there is no
@@ -5450,10 +5539,10 @@ mod program {
         catalogs: &Catalogs,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        associations: &mut alloc::vec::Vec<AppAssociation>,
+        programs: &mut Programs,
     ) {
-        if let Some(programs) = catalogs.submit() {
-            adopt_programs(programs, shell, compositor, associations);
+        if let Some(loaded) = catalogs.submit() {
+            adopt_programs(loaded, shell, compositor, programs);
         }
     }
 
@@ -5483,7 +5572,7 @@ mod program {
         menu: &mut MenuChain,
         seat_held: bool,
         launch: &mut LaunchCtx<'_>,
-        associations: &mut alloc::vec::Vec<AppAssociation>,
+        programs: &mut Programs,
         now_ns: u64,
     ) {
         let pointer = shell.router().pointer();
@@ -5501,9 +5590,13 @@ mod program {
                 InputResponse::DesktopPointerMoved => {
                     desktop.pointer_moved(pointer, &layout, now_ns, &mut damage)
                 }
-                InputResponse::DesktopPressed => {
-                    desktop.press(pointer, &layout, now_ns, associations, &mut damage)
-                }
+                InputResponse::DesktopPressed => desktop.press(
+                    pointer,
+                    &layout,
+                    now_ns,
+                    &programs.associations,
+                    &mut damage,
+                ),
                 InputResponse::DesktopSecondaryPressed => {
                     // The backdrop menu is the seat's one chain, so this asks
                     // for it directly rather than naming an action: it is the
@@ -5516,7 +5609,7 @@ mod program {
                     DesktopOutcome::ignored()
                 }
                 InputResponse::DesktopKey { key, pressed, .. } => {
-                    desktop.key(*key, *pressed, &layout, associations, &mut damage)
+                    desktop.key(*key, *pressed, &layout, &programs.associations, &mut damage)
                 }
                 _ => departed(desktop, compositor, pointer, &layout, &mut damage),
             },
@@ -5542,7 +5635,7 @@ mod program {
             // program installed since bring-up can open a document from here
             // without waiting for the library popup to be opened. A re-list
             // that found nothing changed costs none of this.
-            request_programs(catalogs, shell, compositor, associations);
+            request_programs(catalogs, shell, compositor, programs);
         }
         if whole {
             shell.present_desktop(compositor, desktop);
@@ -5919,6 +6012,63 @@ mod program {
         fn read(&mut self, path: &str) -> Result<alloc::vec::Vec<u8>, Errno> {
             read_file(path, tairix_appconf::MAX_DOCUMENT_LEN)
         }
+    }
+
+    impl tairix_appstore::StoreReader for VfsFileReader {
+        fn list_dir(
+            &self,
+            path: &str,
+        ) -> Result<Option<alloc::vec::Vec<tairix_appstore::DirEntry>>, Errno> {
+            let stream = match tairix_rt::read_dir_all(path.as_bytes()) {
+                Ok(stream) => stream,
+                // A store root this installation does not have is ordinary;
+                // anything else surfaces and the walk fails closed.
+                Err(ret) => {
+                    let err = Errno::from_syscall(ret);
+                    return if err == Errno::NotFound {
+                        Ok(None)
+                    } else {
+                        Err(err)
+                    };
+                }
+            };
+            let entries =
+                tairix_browse::vfs::entries_from_dir_stream(path, &stream, &mut RtLinkReader)
+                    .map_err(|_| Errno::OutOfRange)?;
+            Ok(Some(
+                entries
+                    .iter()
+                    .map(|entry| tairix_appstore::DirEntry {
+                        name: alloc::string::String::from(entry.name()),
+                        directory: entry.is_directory_backed(),
+                    })
+                    .collect(),
+            ))
+        }
+
+        fn read_appinfo(&self, bundle: &str) -> Result<Option<alloc::vec::Vec<u8>>, Errno> {
+            match read_file(
+                &tairix_appstore::manifest_path(bundle),
+                tairix_abi::APPINFO_WIRE_MAX,
+            ) {
+                Ok(bytes) => Ok(Some(bytes)),
+                // A directory with no manifest is simply not a bundle.
+                Err(Errno::NotFound) => Ok(None),
+                Err(err) => Err(err),
+            }
+        }
+    }
+
+    /// The logged-in account's home directory, as the session inherited it.
+    ///
+    /// The account's own two program stores are resolved against it, so a
+    /// session with no usable `HOME` simply has none — every machine-wide
+    /// store is still walked.
+    fn home_dir() -> Option<alloc::string::String> {
+        let home = tairix_rt::env_var(b"HOME")?;
+        core::str::from_utf8(home)
+            .ok()
+            .map(alloc::string::String::from)
     }
     /// Read the whole file at `path` through the kernel VFS under the
     /// session's own kernel-attested identity, stopping one chunk past `cap`
