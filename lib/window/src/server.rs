@@ -44,10 +44,11 @@ use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
-    encode_create_reply, encode_desktop_reply, encode_hand_over_reply, encode_minted_id_reply,
-    encode_open_target_reply, AppBar, AppMenu, HandOverDocument, HandOverOutcome, OpenTarget,
-    WindowEvent, WindowRegion, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
+    encode_create_reply, encode_desktop_reply, encode_hand_over_reply, encode_menu_text_reply,
+    encode_minted_id_reply, encode_open_target_reply, AppBar, AppMenu, HandOverDocument,
+    HandOverOutcome, OpenTarget, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
+    APP_MENU_ENTRY_MAX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
     WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
 };
 use tairix_abi::Errno;
@@ -78,7 +79,7 @@ pub const WINDOW_REPLY_MAX: usize = {
         wider(WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN),
         wider(
             wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN),
-            WINDOW_MINTED_ID_REPLY_LEN,
+            wider(WINDOW_MINTED_ID_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX),
         ),
     )
 };
@@ -641,11 +642,26 @@ struct WindowRecord<R> {
     /// shape is enforced in one place and an application can tell one
     /// gesture's answer from the next's.
     menu_open: Option<u64>,
+    /// The text the user committed into a menu chain's quick-entry field,
+    /// with the open it belongs to, until the owning application pulls it.
+    ///
+    /// One slot, not a queue: a window has at most one unanswered open, so it
+    /// has at most one commit to hand back, and the next open on this window
+    /// clears it — a commit nobody pulled can never answer a later gesture.
+    /// It is held here rather than sent in the event because an event is one
+    /// fixed 40-byte frame and a name is wider than that.
+    menu_text: Option<CommittedText>,
     /// The top-level window this record is a **transient** of — the parent
     /// of a popup — or `None` for an ordinary top-level window. A transient
     /// is closed when the window it hangs from closes, so the link lives
     /// beside the window it binds.
     parent: Option<u64>,
+}
+
+/// One committed quick-entry text, with the open whose answer it belongs to.
+struct CommittedText {
+    open_id: u64,
+    text: String,
 }
 
 impl<R> WindowRecord<R> {
@@ -852,6 +868,16 @@ impl<M: ShmMapper> WindowServer<M> {
                 let taken = self.take_open_target(caller);
                 open_target_reply(reply, Ok(taken.as_ref().map(OpenEntry::as_wire)))
             }
+            WindowRequest::TakeMenuText { window_id, open_id } => {
+                let taken = self.take_menu_text(caller, window_id, open_id);
+                menu_text_reply(
+                    reply,
+                    match taken {
+                        Ok(ref held) => Ok(held.as_deref()),
+                        Err(err) => Err(err),
+                    },
+                )
+            }
             WindowRequest::HandOverLaunch {
                 ref run_path,
                 ref document,
@@ -946,6 +972,8 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(Errno::NotSupported)),
             // ...and a target pull, which answers with its own frame.
             WindowRequest::TakeOpenTarget => open_target_reply(reply, Err(Errno::NotSupported)),
+            // ...and a committed-text pull, likewise.
+            WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
             // ...and a hand-over, likewise.
             WindowRequest::HandOverLaunch { .. } => {
                 hand_over_reply(reply, Err(Errno::NotSupported))
@@ -1013,6 +1041,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 region: Some(region),
                 pick_pending: false,
                 menu_open: None,
+                menu_text: None,
                 parent: None,
             },
         );
@@ -1077,6 +1106,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 region: Some(region),
                 pick_pending: false,
                 menu_open: None,
+                menu_text: None,
                 parent: Some(spec.parent_window_id),
             },
         );
@@ -1370,8 +1400,76 @@ impl<M: ShmMapper> WindowServer<M> {
         }
         host.menu_open_requested(window_id, open_id, anchor, menu)?;
         record.menu_open = Some(open_id);
+        // A commit the application never pulled belongs to the gesture that
+        // is now over, so it goes with the open that replaces it.
+        record.menu_text = None;
         self.next_menu_open = next;
         Ok(open_id)
+    }
+
+    /// Record the text the user committed into the quick-entry field of the
+    /// chain opened as `open_id` on window `window_id`, for its application
+    /// to pull.
+    ///
+    /// Called by the embedder as it settles the chain, *before* it delivers
+    /// the `Entered` outcome, so the answer and the text it refers to are
+    /// never out of order. The open must be the one that window is still
+    /// waiting on: a text recorded against any other names a gesture whose
+    /// answer has already gone, and is refused rather than held for a puller
+    /// to find.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such live window.
+    /// * [`Errno::OutOfRange`] — `open_id` is not the window's unanswered
+    ///   open.
+    /// * [`Errno::LengthOutOfRange`] — longer than a quick-entry field can
+    ///   hold.
+    pub fn record_menu_text(
+        &mut self,
+        window_id: u64,
+        open_id: u64,
+        text: &str,
+    ) -> Result<(), Errno> {
+        if text.len() > APP_MENU_ENTRY_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+        if record.menu_open != Some(open_id) {
+            return Err(Errno::OutOfRange);
+        }
+        record.menu_text = Some(CommittedText {
+            open_id,
+            text: String::from(text),
+        });
+        Ok(())
+    }
+
+    /// Take the text committed for `caller`'s window `window_id` under
+    /// `open_id`, if that is the one it holds.
+    ///
+    /// Taken once: the slot is emptied, so a second pull answers nothing and
+    /// two readers cannot both act on one commit. A window the caller does
+    /// not own answers exactly like one that never existed.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] — no such live window owned by `caller`.
+    fn take_menu_text(
+        &mut self,
+        caller: ProcId,
+        window_id: u64,
+        open_id: u64,
+    ) -> Result<Option<String>, Errno> {
+        let record = self
+            .windows
+            .get_mut(&window_id)
+            .filter(|record| record.owner == caller)
+            .ok_or(Errno::NotFound)?;
+        if record.menu_text.as_ref().map(|held| held.open_id) != Some(open_id) {
+            return Ok(None);
+        }
+        Ok(record.menu_text.take().map(|held| held.text))
     }
 
     /// Retitle `caller`'s window `window_id` to `title`.
@@ -1645,6 +1743,20 @@ fn hand_over_reply(
     let frame = encode_hand_over_reply(result);
     reply[..frame.len()].copy_from_slice(&frame);
     frame.len()
+}
+
+/// Write a `TakeMenuText` outcome into `reply`, answering its length.
+///
+/// The frame is only as long as the answer: "nothing held" costs its header
+/// rather than the widest name.
+fn menu_text_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    result: Result<Option<&str>, Errno>,
+) -> usize {
+    let mut frame = [0u8; WINDOW_MENU_TEXT_REPLY_MAX];
+    let len = encode_menu_text_reply(&mut frame, result);
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
 }
 
 /// Write a `TakeOpenTarget` outcome into `reply`, answering its length.

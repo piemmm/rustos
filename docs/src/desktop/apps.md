@@ -430,7 +430,9 @@ A command the model reports inapplicable is declared **disabled with its
 reason** rather than left out, so the menu's shape does not move with the
 selection and a row says *why* it cannot be chosen — `ContextMenuModel::reason`
 is the one rule, and `is_enabled` is derived from it, so a row can never grey
-out with nothing to say. Removal declares the destructive emphasis. A row's id
+out with nothing to say. The desktop shows that reason as a tooltip when the
+pointer rests on the row; it is never drawn beside the label, which is what
+made this plate as wide as "only a file opens with an application". Removal declares the destructive emphasis. A row's id
 is its command's position in `CONTEXT_COMMANDS`, so `context_command_from_item`
 reads a chosen row back through the exact inverse of numbering it.
 
@@ -445,6 +447,19 @@ Rename, Cut, Copy, Paste, Properties, and Delete (the same modal-confirmed
 from them (`AGENTS.md` §2.2) and adds no authority (every verb is the user's own
 §5.3-checked action). A refused open is an answer: it is stated on `stderr` and
 the window carries on with no menu, never drawing one of its own.
+
+**Two of those rows carry a child as well as a command**, which is what a
+chevron on them means (`plans/NEW-MENUS.md` M6). **Rename** opens the in-place
+editor when clicked, and arriving on it opens a desktop-drawn quick-entry field
+pre-filled with the current name: type, press `Enter`, and the name is
+committed through the very same `Browser::rename_selected` — the same
+permission-checked `fs_rename` under the user's own identity — that `F2` runs.
+The two answers are distinct ids, so neither can be read as the other, and the
+typed text is pulled from the desktop rather than delivered, because an event
+frame is far narrower than a name. **Open With…** opens the chooser when
+clicked and a submenu of the applications that claim the file when arrived on
+(below). Both children are offered only where the row itself can act, so a
+field can never commit a rename the model says cannot happen.
 
 **A desktop shortcut, not a taskbar pin, is how an application gets a second
 place to launch from.** Taskbar pinning was removed from the design
@@ -615,22 +630,33 @@ application claims leaves the listing unchanged and states the refusal on
 of prompting the session's trusted picker (its standalone launch is
 unchanged).
 
-**"Open With…" is a chooser, not a menu.** The candidate set is as long as the
-applications a user has installed, so no menu plate can promise to hold it, and
-the desktop's menu model crosses the wire *complete* — every row of every plate
-in the one open — so candidates could not be filled in lazily either. Making
-them rows would put a read of three program stores on **every** right-click for
-a list the user rarely asks for (`plans/NEW-MENUS.md` §6, decision 2). So the
-menu row concludes the chain, and the file manager then opens a list surface of
-its own.
+**"Open With…" is two things, and the row is both.** Arriving on it opens a
+**submenu** of the applications that claim the file — the highest-ranked few
+(`OPEN_WITH_QUICK_MAX`), each drawing its own application icon, so the common
+case is one gesture inside the menu with the right picture to aim at. Clicking
+the row itself opens the **chooser**, which is the complete list.
+
+The split is forced by what a plate is. A plate does not scroll, and the
+candidate set is as long as the applications a user has installed, so no plate
+can promise to hold all of it — the quick list is deliberately the top of the
+ranked order and the chooser remains the whole of it. And the desktop's menu
+model crosses the wire *complete* — every row of every plate in the one open —
+so the candidates must exist before the menu does. The file manager therefore
+keeps its `RtBundleSource` scan **warm** on the worker it already uses: a
+right-click reads the answer that has already landed and performs no I/O at
+all, and asks again so the next gesture is current. Before the first scan lands
+the row simply carries no chevron and its click opens the chooser
+(`plans/NEW-MENUS.md` §6, decision 2).
 
 Choosing **Open With…** resolves the file's absolute path (the one shared
 `selected_target_path` spelling), enumerates the full `applications_for`
 candidate list over `RtBundleSource`, and — when at least one application claims
-the type — opens an `OpenWithChooser`: a centred modal panel titled for the file,
-holding one `ListRow` per candidate in ranked order with the current one
-selected, drawn by `render::draw_open_with_chooser` and scrolled inside its own
-fixed shape. The list is reached in full however long it is: by wheel, by the
+the type — opens an `OpenWithChooser` in **its own popup window** above the
+manager's, sized to the candidates it actually holds (never a fixed eight rows'
+worth of empty plate) and carrying **Open** and **Cancel** so the way out is
+drawn rather than guessed. It holds one `ListRow` per candidate in ranked order
+with the current one selected, drawn by `render::draw_open_with_chooser`. The
+list is reached in full however long it is: by wheel, by the
 drawn scrollbar's drag (which routes through the very rule the listing's bar
 does, so the two cannot behave differently), and by Up/Down/Home/End with the
 selection revealed. `Enter`, or a primary press on a row resolved through
@@ -1144,8 +1170,13 @@ application strip and opens a window on demand (`plans/NEW-TASKBAR.md` T4).
 kernel; the `Run` binary supplies only the text editor and the `fs_rename`
 seam. Pressing `F2` opens the one shared `lib/controls` `TextField`
 (`AGENTS.md` §2.2 — never a browser-private text box) directly over the
-selected row, pre-filled with the current name and bounded by the kernel's
-`FS_NAME_MAX`. Typing edits the name and live-validates it: a name that
+selected item's **name** — the list row's name cell, past its icon and well
+short of the size and date columns, or the tile's label band under its
+picture — pre-filled with the current name and bounded by the kernel's
+`FS_NAME_MAX`. That rectangle is `render::selection_name_rect`, read from the
+drawn controls' own geometry (`TableRow::cell_text_rect`,
+`IconTile::label_rect`), so the field lands on the text it is editing and
+cannot drift from where the renderer put it. Typing edits the name and live-validates it: a name that
 breaks a rule or clashes with an existing sibling shows the reason in the
 field as you type. `Enter` commits and `Escape` abandons the edit.
 
@@ -1613,7 +1644,7 @@ production desktop by the autoload QEMU vertical
 (`plans/NEW-FILEMANAGER.md` FM9-a, appended after the AW4 terminal round
 trip): the runner refocuses the served files window, descends into
 `/Users/root` by coordinate-computed pointer clicks — reconstructing the
-browser's own row layout through `render::selection_rect` over the real
+browser's own row layout through `render::entry_rect` over the real
 listings and the New Folder tool through `render::manager_tool_rect` over the
 whole window (the band the toolbar is drawn across), the same layout code the
 guest paints with, offset by the window manager's client inset

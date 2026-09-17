@@ -14,7 +14,10 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow};
+use tairix_abi::window_ipc::{
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow,
+    APP_MENU_REASON_MAX,
+};
 
 use crate::damage::sink;
 use crate::menu::{
@@ -493,8 +496,14 @@ fn escape_dismisses() {
     );
 }
 
+/// The keyboard's Right key is the one gesture that means only "open the
+/// child"; Enter and a click activate the row, chevron or not.
+///
+/// A row may legitimately act *and* open a child, so what a click on a
+/// chevroned row means belongs to the owner's model — this control owns rows
+/// and chevrons, not what a chevron implies.
 #[test]
-fn submenu_parent_opens_on_right_and_enter() {
+fn a_chevroned_row_activates_and_only_right_walks_into_it() {
     let theme = Theme::dark();
     let mut menu = Menu::new(vec![MenuItem::new("More").with_submenu(true)]).with_current(0);
     let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
@@ -516,7 +525,47 @@ fn submenu_parent_opens_on_right_and_enter() {
             &theme,
             &mut sink()
         ),
-        Some(MenuAction::OpenSubmenu { index: 0 })
+        Some(MenuAction::Activated { index: 0 })
+    );
+    // And a completed click on it reports the same activation an unchevroned
+    // row's click does.
+    let row = menu
+        .row_rect(0, bounds, Scale::ONE, &theme)
+        .expect("the row is laid out");
+    let at = Point::new(row.left() + 2, row.top() + 2);
+    assert_eq!(
+        menu.on_pointer(
+            &InputEvent::PointerMoved { to: at },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
+    assert_eq!(
+        menu.on_pointer(
+            &InputEvent::PointerPressed {
+                button: PointerButton::Primary
+            },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
+    assert_eq!(
+        menu.on_pointer(
+            &InputEvent::PointerReleased {
+                button: PointerButton::Primary
+            },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        Some(MenuAction::Activated { index: 0 })
     );
 }
 
@@ -1461,6 +1510,124 @@ fn an_information_row_without_an_attested_identity_is_left_out() {
     );
 }
 
+/// A declared row that other rows name as their parent opens their plate and
+/// draws the chevron for it — while keeping the id a choice of it answers.
+///
+/// A submenu is a relationship between rows, not a row kind, which is what
+/// lets one row both act when chosen and open on arrival.
+#[test]
+fn a_chooseable_row_that_has_children_draws_a_chevron_and_keeps_its_id() {
+    let mut wire = wire_menu("App");
+    wire.push(AppMenuRow::Item(AppMenuItem::new(
+        wire_id(1),
+        wire_label("Open With\u{2026}"),
+    )))
+    .expect("a row");
+    wire.push_under(
+        AppMenuRow::Item(
+            AppMenuItem::new(wire_id(2), wire_label("View")).with_icon_bundle(
+                tairix_abi::window_ipc::AppMenuBundle::new("/System/Applications/view.app")
+                    .expect("a valid path"),
+            ),
+        ),
+        0,
+    )
+    .expect("a candidate under it");
+
+    let model = ChainModel::from_app_menu("App", &wire, None);
+    let parent = &model.rows()[0];
+    assert_eq!(parent.id(), Some(wire_id(1)), "choosing it still answers");
+    assert!(parent.drawn().is_submenu(), "and it draws the chevron");
+    assert_eq!(parent.child(), &ChainChild::Submenu);
+    assert_eq!(parent.icon_bundle(), None);
+
+    let candidate = &model.rows()[1];
+    assert_eq!(candidate.parent(), Some(0), "filed under the item above");
+    assert_eq!(
+        candidate.icon_bundle(),
+        Some("/System/Applications/view.app"),
+        "the row asks for a picture; resolving it is the owner's"
+    );
+    assert!(
+        candidate.drawn().artwork().is_none(),
+        "a decoded row carries no pixels of its own"
+    );
+}
+
+/// A declared quick-entry field becomes the desktop's own child surface,
+/// answering an id of its own beside the row's.
+#[test]
+fn a_declared_entry_field_becomes_the_rows_child() {
+    let mut wire = wire_menu("App");
+    wire.push(AppMenuRow::Item(
+        AppMenuItem::new(wire_id(1), wire_label("Rename")).with_entry(
+            tairix_abi::window_ipc::AppMenuEntry {
+                id: wire_id(90),
+                initial: tairix_abi::window_ipc::AppMenuEntryText::new("report.txt")
+                    .expect("a valid name"),
+            },
+        ),
+    ))
+    .expect("a row");
+
+    let model = ChainModel::from_app_menu("App", &wire, None);
+    let row = &model.rows()[0];
+    assert_eq!(row.id(), Some(wire_id(1)), "clicking it still answers");
+    assert!(row.drawn().is_submenu(), "and it draws the chevron");
+    match row.child() {
+        ChainChild::Entry(id, initial) => {
+            assert_eq!(*id, wire_id(90), "the field answers its own id");
+            assert_eq!(initial, "report.txt");
+        }
+        other => panic!("the child is a field, not {other:?}"),
+    }
+}
+
+/// A row given already-rasterised artwork draws it in the icon column, in
+/// place of the glyph an unresolved row falls back to.
+#[test]
+fn a_rows_artwork_draws_in_its_icon_column() {
+    let theme = Theme::dark();
+    let art = {
+        let mut art = Surface::new(8, 8).expect("a small picture");
+        art.fill_rect(0, 0, 8, 8, Color::from(theme.palette().danger));
+        art
+    };
+    let menu = Menu::new(vec![
+        MenuItem::new("Plain"),
+        MenuItem::new("Pictured").with_artwork(art),
+    ]);
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
+    let mut surface = Surface::new(W, bounds.height).expect("a surface");
+    menu.render(&mut surface, bounds, Scale::ONE, &theme);
+    let row = menu
+        .row_rect(1, bounds, Scale::ONE, &theme)
+        .expect("the row is laid out");
+    let top = u32::try_from(row.top()).expect("a positive row top");
+    assert!(
+        region_has(
+            &surface,
+            (0, W / 2),
+            (top, top + row.height),
+            premul(theme.palette().danger)
+        ),
+        "the artwork's own pixels land in the leading column"
+    );
+    let plain = menu
+        .row_rect(0, bounds, Scale::ONE, &theme)
+        .expect("the row is laid out");
+    let plain_top = u32::try_from(plain.top()).expect("a positive row top");
+    assert!(
+        !region_has(
+            &surface,
+            (0, W / 2),
+            (plain_top, plain_top + plain.height),
+            premul(theme.palette().danger)
+        ),
+        "and nowhere near the row that asked for none"
+    );
+}
+
 #[test]
 fn a_row_reports_the_plate_it_is_filed_under_and_the_id_an_answer_names() {
     let mut model = ChainModel::new("Bar");
@@ -1475,4 +1642,91 @@ fn a_row_reports_the_plate_it_is_filed_under_and_the_id_an_answer_names() {
     );
     assert_eq!(model.rows()[child].parent(), Some(parent));
     assert_eq!(model.rows()[child].id(), Some(wire_id(7)));
+}
+
+// --- a row's explanation is a tip, never a caption -----------------------
+
+/// A menu of one disabled row labelled `label`, decoded from the wire with
+/// `why` as its declared reason.
+fn refused_row(label: &str, why: &str) -> ChainModel {
+    let mut wire = wire_menu("App");
+    wire.push(AppMenuRow::Item(
+        AppMenuItem::new(wire_id(1), wire_label(label))
+            .disabled()
+            .with_reason(AppMenuReason::new(why).expect("a bounded reason")),
+    ))
+    .expect("a row");
+    ChainModel::from_app_menu("App", &wire, None)
+}
+
+/// The reported defect: a disabled row's reason was drawn beside its label,
+/// so one long excuse made the whole plate as wide as itself.
+#[test]
+fn a_refused_rows_reason_does_not_widen_the_plate() {
+    let theme = Theme::dark();
+    let long = "r".repeat(APP_MENU_REASON_MAX);
+    let explained = refused_row("Open With\u{2026}", &long);
+    let silent = refused_row("Open With\u{2026}", "");
+
+    let width = |model: &ChainModel| {
+        Menu::new(
+            model
+                .rows()
+                .iter()
+                .map(|row| row.drawn().clone())
+                .collect::<alloc::vec::Vec<_>>(),
+        )
+        .preferred_width(Scale::ONE, &theme)
+    };
+    assert_eq!(
+        width(&explained),
+        width(&silent),
+        "the plate is the width of its labels, whatever a row has to explain"
+    );
+}
+
+/// And nothing of it reaches the pixels — including on the one row state the
+/// old caption was drawn for, the disabled row the highlight rests on.
+#[test]
+fn a_refused_rows_reason_draws_nothing_even_while_it_is_current() {
+    let theme = Theme::dark();
+    let long = "r".repeat(APP_MENU_REASON_MAX);
+    let plate = |why: &str| {
+        let model = refused_row("Paste", why);
+        let menu = Menu::new(
+            model
+                .rows()
+                .iter()
+                .map(|row| row.drawn().clone())
+                .collect::<alloc::vec::Vec<_>>(),
+        )
+        .with_current(0);
+        render(&menu, &theme, menu.preferred_height(Scale::ONE, &theme))
+    };
+    assert_eq!(
+        plate(&long).pixels(),
+        plate("").pixels(),
+        "a reason is the seat's tip on dwell; the row draws its label alone"
+    );
+}
+
+/// The text is not lost by any of that: the model still states why, for the
+/// seat to show on dwell.
+#[test]
+fn a_refused_row_still_states_why_it_cannot_be_chosen() {
+    let model = refused_row("Paste", "The clipboard is empty");
+    let row = &model.rows()[0];
+    assert_eq!(row.tip(), Some("The clipboard is empty"));
+    assert!(!row.drawn().state().is_actionable());
+    assert_eq!(
+        row.drawn(),
+        &MenuItem::new("Paste").with_state(ControlState::default().with_enabled(false)),
+        "the drawn row carries the label and the state, and nothing else"
+    );
+
+    assert_eq!(
+        refused_row("Paste", "").rows()[0].tip(),
+        None,
+        "a row that declared no reason has nothing to show"
+    );
 }

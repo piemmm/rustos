@@ -102,9 +102,12 @@ since a query is not a credential.
 
 The **command surfaces** are the menu, toolbar, tab strip, and combo box:
 
-- `menu` — `MenuItem` rows and the elevated `Menu` plate (icon column, shortcut
-  or disabled-row reason, submenu chevron, destructive danger rail, §13 Signal
-  Bead; current-row highlight distinct from a keyboard focus ring). An ordinary
+- `menu` — `MenuItem` rows and the elevated `Menu` plate (icon column,
+  accelerator caption, submenu chevron, destructive danger rail, §13 Signal
+  Bead; current-row highlight distinct from a keyboard focus ring). A row
+  carries no help text: why a row cannot be chosen is `ChainRow::explained`,
+  shown as the seat's tooltip on dwell, because a caption beside every
+  disabled label made a plate as wide as its longest excuse. An ordinary
   row's highlight is the `surface_selected` band — a shade of the surface
   rather than the accent hue, but laid **solid**, because it is the mark that
   says which row will act and a mark diluted by the wallpaper leaves it no

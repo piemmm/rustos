@@ -599,6 +599,62 @@ fn table_row_cell_rects_match_where_render_draws_the_cells() {
     );
 }
 
+/// The span a cell's *text* occupies is inside its column, past the leading
+/// icon — which is what an overlay laid over the text needs, and what the
+/// whole-column rect is not.
+#[test]
+fn table_row_cell_text_rect_is_where_render_draws_that_cells_glyphs() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let row = TableRow::new(vec![
+        TableCell::new("Name").with_icon(IconKind::Text),
+        TableCell::new("Type"),
+        TableCell::numeric("128"),
+    ]);
+    let column = row.cell_rects(bounds, Scale::ONE, &theme, &COLUMNS)[0];
+    let text = row
+        .cell_text_rect(bounds, Scale::ONE, &theme, &COLUMNS, 0)
+        .expect("the first cell seats its text");
+    assert!(
+        text.left() > column.left() && text.right() <= column.right(),
+        "the text span lies inside its own column"
+    );
+
+    // A cell with no icon starts its text further left than one with, which
+    // is the very reservation the whole-column rect cannot express.
+    let bare = TableRow::new(vec![
+        TableCell::new("Name"),
+        TableCell::new("Type"),
+        TableCell::numeric("128"),
+    ]);
+    let bare_text = bare
+        .cell_text_rect(bounds, Scale::ONE, &theme, &COLUMNS, 0)
+        .expect("the first cell seats its text");
+    assert!(
+        bare_text.left() < text.left(),
+        "the icon slot is carved out of the text's own budget"
+    );
+
+    // And the glyphs that cell's paint actually laid down start inside the
+    // span it reports. Read from the row with no icon, because an icon is
+    // tinted in the same foreground and would be the first column found.
+    let surface = table_surface(&bare, &theme, &COLUMNS);
+    let start = first_col(&surface, premul(theme.palette().on_surface)).expect("the name drawn");
+    assert!(
+        bare_text.contains(Point::new(xi(start), xi(H / 2))),
+        "the drawn name falls inside the span `cell_text_rect` reports"
+    );
+
+    // Bounds that seat no content at all, and a cell the row does not have,
+    // each report nothing rather than a guess.
+    assert!(row
+        .cell_text_rect(Rect::new(0, 0, 1, 1), Scale::ONE, &theme, &COLUMNS, 0)
+        .is_none());
+    assert!(row
+        .cell_text_rect(bounds, Scale::ONE, &theme, &COLUMNS, 9)
+        .is_none());
+}
+
 #[test]
 fn table_row_cell_rects_degrades_when_bounds_cannot_seat_them() {
     let theme = Theme::dark();
@@ -1566,6 +1622,55 @@ const BEHIND: Color = Color::rgb(0, 255, 128);
 fn behind_pixels(surface: &Surface) -> usize {
     let want = BEHIND.premultiply();
     surface.pixels().iter().filter(|p| **p == want).count()
+}
+
+/// The rectangle a tile draws its name in is the band beneath the picture —
+/// which is what an overlay laid over the name needs, and what the whole tile
+/// rect is not.
+#[test]
+fn icon_tile_label_rect_is_the_band_the_name_is_drawn_in() {
+    let theme = Theme::dark();
+    let band = IconTile::label_rect(TILE, Scale::ONE, &theme).expect("the tile seats a name");
+    assert!(
+        band.top() > TILE.top() && band.bottom() <= TILE.bottom(),
+        "the band lies beneath the picture and inside the tile"
+    );
+    assert_eq!(
+        IconTile::label_lines(TILE, Scale::ONE, &theme),
+        usize::try_from(band.height / control_font(&theme, Scale::ONE).line_height())
+            .expect("a line count"),
+        "the band holds exactly the lines the tile says it draws"
+    );
+
+    // The pixels the *name* is responsible for lie inside it. Told apart by
+    // drawing the same tile under two names: the picture above is identical
+    // either way, so every pixel that differs is one the name laid down —
+    // which a single shot could not separate, since the glyph above is
+    // tinted in the same foreground.
+    let named = |label: &str| {
+        let mut s = Surface::new(TW, TH).expect("surface");
+        s.fill(BEHIND);
+        IconTile::new(label, IconKind::Text).render(&mut s, TILE, Scale::ONE, &theme, None);
+        s
+    };
+    let long = named("Report.txt");
+    let bare = named("");
+    let mut differing = 0usize;
+    for (at, (a, b)) in long.pixels().iter().zip(bare.pixels().iter()).enumerate() {
+        if a == b {
+            continue;
+        }
+        differing += 1;
+        let y = xi(u32::try_from(at).expect("an index") / TW);
+        assert!(
+            y >= band.top() && y < band.bottom(),
+            "every pixel the name laid down lies inside the reported band"
+        );
+    }
+    assert!(differing > 0, "the tile drew its name");
+
+    // A tile with no room for a whole line draws no name and reports none.
+    assert!(IconTile::label_rect(Rect::new(0, 0, 4, 4), Scale::ONE, &theme).is_none());
 }
 
 /// A resting tile is a picture and a label over whatever is behind it — no

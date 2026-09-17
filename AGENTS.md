@@ -1306,6 +1306,29 @@ an update to this section.
     (or human) can hold and are a review blocker (§2.3).
   - The exception is `PLAN.md`'s "Charter Amendments" section, which logs *why*
     an `AGENTS.md` rule exists; keep each entry to a one-line rationale.
+- **Every planning file opens with a progress ledger, and the ledger is kept
+  current.** `PLAN.md` and every `plans/*.md` carries a status table at the
+  **top**, ahead of the prose: one row per deliverable item, each with a stable
+  item id, a one-line statement of what the item *is*, and its status —
+  `planned`, `in progress`, `done`, or `blocked`, a blocked row naming what
+  blocks it. A reader, human or AI, must be able to see what is built and what
+  is left without reading the plan, and must be able to cite an item by id.
+  - **It is updated in the same change that moves an item's status**, exactly
+    as the code's docs are. A ledger that disagrees with the tree is a stale
+    doc and a reviewer treats it as the defect it is.
+  - **It stays a ledger, not a log.** A finished item's row says `done` and its
+    prose says what the finished part now guarantees. The ledger never grows a
+    dated history, a per-increment landing record, or a second row for the same
+    item — that is the changelog the rule above forbids.
+  - **The table is the only place status is recorded.** Status repeated in the
+    prose is a second copy to keep in sync and drifts; the prose states the
+    design and the invariants, the ledger states where the work is.
+  - **Plans predating this rule adopt it with the next body of work they
+    stage**, not in a sweep and not on an incidental edit: the ledger arrives
+    when there is work to record in it, so the gap closes with the work rather
+    than as a formatting pass. A plan that predates the rule is not a defect
+    for lacking a ledger; a plan whose work moved without its ledger moving
+    is.
 - `cargo xtask docs-check` runs:
   - `cargo doc` with `RUSTDOCFLAGS="-D warnings"`,
   - mdBook build,
@@ -1491,6 +1514,7 @@ You are not exempt from any rule above. In addition:
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | The picture and document viewer (`view.app`): the formats it claims, the page-source seam every document is reached through, sequence/animation decode, the sandboxed document decode, and the shared app-side window shell | `plans/VIEW.md` |
+    | Sound: the one audio path (client stream ABI, the `audiod` mixer/router, the `audiochan-v1` device channel), the exported device clock and latency grant, seat-leased sinks and gated capture, the file decoders (`lib/sound`) and their sandboxed decode, the audio driver class, and the two players (`play`, `music.app`) | `plans/SOUND.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
     | Diagnosing a desktop pause: the per-thread frame budget, the overrun report, the user-stack backtrace of the stalling call | `plans/FIX-STALLTRACE.md` |
     | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, the per-user settings the session publishes), the `Desktop` folder's icon arrangement and sort order, the backdrop context menu, and the wallpaper chooser app | `plans/PINBOARD.md` |

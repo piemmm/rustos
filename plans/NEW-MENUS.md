@@ -19,16 +19,18 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M3.5 | ~~The bar's start menu~~ — **not in scope** (decision 3) | **settled** |
 | M4 | Plate as a cached damage-reporting surface | **landed** |
 | M5 | Plates are floating chrome: 80% opacity over the shared chrome blur | **landed** |
+| M6 | A row may act *and* open a child: quick-entry fields, candidate submenus with their own icons | **landed** |
 
 Open decisions: none. Decision 4 is **settled** by the owner — floating chrome
 moves to 80% opacity as one shared value, and the blur stays the one the
 right-hand icon-bar surfaces already use; landed as M5.
 Decision 1 is **settled** — variable-length framing, landed
-as M1a. Decision 2 is **settled** — Open With… is one row that concludes the
-chain, and the chooser is the application's own list surface; landed as M3.3.
-Decision 3 is **settled** — the program-library popup is not a menu and stays
-bespoke, so M3.5 is closed with nothing to do; the context menu *on* one of its
-rows is a genuine menu and migrated with M3.4.
+as M1a. Decision 2 is **reversed** by the owner and superseded by M6: Open
+With… is a row that *both* concludes the chain and opens a submenu of the
+applications that claim the file. Decision 3 stands, on the one of its two
+reasons that survives M6: a plate does not scroll, and the program-library
+popup is a list as long as what a user has installed. Its other reason — that
+a plate takes no text — is no longer true, and the text below says so.
 
 ### Defects found, to fix in the stage named
 
@@ -42,7 +44,7 @@ stage that closes it carries its regression test (§2.18, §7).
 | D3 | Exact-length decoding refuses a random-length input before it reaches any operand, so the request decoders' fuzz coverage came to rest on the seeded frames — and only `SetAppBar` had one. `fuzz_decode` now seeds and bit-flips one frame per operation, at its length and one byte either side. | **closed in M1a** |
 | D4 | Menu-child placement existed twice with two rules: `lib/controls`' `Menu::anchored_rect` slides a plate onto the screen, while the bar's own `child_rect` flips a child to its parent's other side. A root at a pointer and a child beside its parent legitimately differ, but the two rules must end up as one owner's (§2.2) rather than one shared and one private to the bar. M1c's wire anchor is a *region* precisely so one rule can serve both: a slot-anchored bar menu and an app's context menu differ only in whether that region has an extent. **One rule now**: `plate_rect(size, anchor, side, gap, viewport)` bounds the plate to the viewport, opens edge-adjacent on the asked-for side, flips when that side has no room (roomier side when neither does), then slides the cross axis and clamps. `Menu::anchored_rect` is its point case and the bar's `child_rect` is deleted. Placement is now *flip*-then-slide where a context menu used to slide only, which also keeps the press point at a corner of the plate rather than inside it. | **closed in M2** |
 | D5 | `AppMenu::push_under` refused a submenu inside a submenu, so the model could not express a chain at all — the one-level bound was load-bearing in the builder, not only in the renderer. Nesting is now bounded by `APP_MENU_MAX_DEPTH` instead, and a submenu on the deepest plate is refused rather than drawn opening nothing. | **closed in M1b** |
-| D6 | A row's text was a widest-case buffer per row, so the three fields `MenuItem` draws (label, accelerator caption, disabled-row reason) would have multiplied by the row bound — and `WindowRequest` carries a menu inline, so the hot `Present` path's own frame would have grown with them. A menu now holds its rows' text in one bounded block (`APP_MENU_TEXT_BYTES`) and the wire carries lengths, not offsets, in row order. | **closed in M1b** |
+| D6 | A row's text was a widest-case buffer per row, so the three fields a declared row carries (label, accelerator caption, refusal reason) would have multiplied by the row bound — and `WindowRequest` carries a menu inline, so the hot `Present` path's own frame would have grown with them. A menu now holds its rows' text in one bounded block (`APP_MENU_TEXT_BYTES`) and the wire carries lengths, not offsets, in row order. | **closed in M1b** |
 | D7 | `lib/window`'s client encoded every request into a fresh `MAX_WIRE_LEN` stack array and the session's serve loop received into one, so both cleared the widest operation's width on every call — including the hot `Present`. M1a made the *frame* per-operation but left these two buffers at the ceiling. Each is now held once for the life of the connection. | **closed in M1b** |
 | D8 | The bar built a child plate's rows without folding a declared separator into the next row's group break, so a separator inside a declared submenu drew as a blank disabled row where the same separator on the root plate drew a divider. One `plate_rows` builder now serves both. | **closed in M1b** |
 | D9 | The model describes a chain `APP_MENU_MAX_DEPTH` plates deep; the bar renders one level, so a submenu declared *inside* a submenu draws its chevron and opens nothing. Nothing in the tree declares one (`appbar::declaration` refuses a submenu outright), and the chain renderer is what M2 is. **Closed**: the chain opens a plate per level to `APP_MENU_MAX_DEPTH`, each placed against its own parent. | **closed in M2** |
@@ -67,6 +69,9 @@ stage that closes it carries its regression test (§2.18, §7).
 | D28 | A plate band **measured** its title box in the titling face (`TextRole::WindowTitle`, Medium) and **painted** it in the heading face (`TextRole::SectionHeader`, Bold). The box is the measured line's own width, so on a variable face — whose advance widens with `wght`, as `lib/abi`'s `FontWeight` states — the bold line overflowed a box measured in the lighter weight and a plate titled *System* drew "Syst…" with the band half empty. The face was spelled three times (`seat_identity`, `render`, `TitleBar::icon_side`); one `band_text_role(commands)` is now the single reading, and `icon_side` takes the commands so it cannot drift either. Undetectable on the host until D29. | **closed** |
 | D29 | `lib/font`'s `SolidTestTransport` decoded the requested weight and discarded it, reporting one advance for Medium and Bold alike — so the double contradicted the server it stands in for (`FontWeight`: the service instantiates the outline at the weight's `wght` axis and the advance moves with it), and no host test could see D28 at all. The proportional test face now widens one pixel per weight step; a fixed-pitch family stays one cell wide at every weight, as a real monospace face does. | **closed** |
 | D30 | `plate_extent` sized a plate to `max(widest row, min_band_width)` and never asked its band what its *title* needed, so a title wider than every row was elided to fit rows that happened to be short — on chrome the desktop sizes to its own content and could simply have made wider. `TitleBar::preferred_band_width` answers what seats the commands and the whole identity group, floored at `min_band_width`, and the plate takes it. | **closed** |
+| D31 | The quick-entry surface's pointer routing carried a `pointer` argument it never read, and its rustdoc claimed the band dragged the surface "exactly as a plate's does" — which it never did: every event went to the field, so the band was a title with a drag affordance it did not have. A press on it was harmless (the field ignores an outside press), so only the unused argument showed it. **Closed**: the argument is gone and the rule is stated — a plate is placed by the user, a child of a row is placed by the chain against its row, which is why neither this nor the information panel drags. | **closed in M6** |
+| D33 | A refused row drew its reason as a caption beside its label, so `Menu::preferred_width` measured the reason and **every plate was as wide as its longest excuse**: a secondary press on a directory in `files.app` sized the whole context menu to "only a file opens with an application" — 913 physical pixels where its commands needed 145. Not a cosmetic one: the plate then covered what the user right-clicked. **Closed by removing the facility, not by shortening the text.** `MenuItem` has no reason field, no `with_reason`, no `reason()`, no caption branch for one and no width term for one, so a row *cannot* carry help text; the line moved to `ChainRow::explained`, which nothing draws, and the seat shows it as a tooltip on dwell (`plans/TOOLTIPS.md`). `AppMenuItem::reason` stays on the wire — an application cannot declare a tip region on a desktop-owned plate, so the declared reason is what the desktop puts in the tip. Every producer (the bar's system and clock menus, the backdrop, `lib/browse`'s context menu) reroutes, so no row lost its explanation. | **closed** |
+| D32 | `render::selection_name_rect` landed with its own regression test and **no caller**: `files.app` still drew the in-place rename editor at `selection_rect`, the whole item rectangle, in both the paint and the key-handling bounds. The geometry was fixed and the defect it was for was not, which a host test over the primitive alone could never show. **Closed in M6**: both sites take the name rect, and `selection_rect` — whose last consumer this was — is deleted rather than left as a wrapper with no caller. | **closed in M6** |
 
 **This is an architecture change, not a performance one.** The ~300 ms
 context-menu stall that first prompted it was a kernel defect and is closed
@@ -110,13 +115,31 @@ A menu is a **chain of session-owned plates**, not a window an app draws.
   child is placed edge-adjacent to its parent at its parent row's top,
   flipped to the parent's other side when the screen edge leaves no room,
   and slid vertically to stay on screen.
-- **A child is one of two things**: a **submenu** (more rows, from the same
-  model) or the **information panel** — the session's own `FactList` of the
-  owning bundle's signed manifest. Both hang where a submenu hangs and both
+- **A child is one of three things**: a **submenu** (more rows, from the same
+  model), the **information panel** — the session's own `FactList` of the
+  owning bundle's signed manifest — or a **quick-entry field**, the session's
+  own one-line `TextField`. All three hang where a submenu hangs and all three
   obey the chain's lifetime.
+- **A row that has a child may still be chooseable.** Carrying a command and
+  opening a child are independent: clicking such a row answers its id, and
+  arriving on it opens its child. The file manager's Rename (click to edit in
+  place, arrive to type the new name) and Open With… (click for the whole
+  chooser, arrive for the applications that claim the file) are the worked
+  examples.
 - **The chain is the seat's singleton.** One chain per seat, whoever asked
   for it. Opening a menu closes the chain that was open and answers its
   requester `Dismissed`.
+- **Why a row cannot be chosen is a tip, not a caption.** A refused row states
+  its reason through the seat's tooltip on dwell (`plans/TOOLTIPS.md`):
+  `ChainRow::explained` holds the line, `MenuChain::hovered_tip` answers for
+  the row the pointer rests on the **deepest** plate, and
+  `DesktopShell::present_menu_chain` declares it over that row's screen
+  rectangle once the plates are placed. The row control cannot draw help text
+  at all — `MenuItem` has no reason field and measures none — because a caption
+  beside every disabled label sized each plate to its longest excuse (D33).
+  `AppMenuItem::reason` stays on the wire: an application cannot declare a tip
+  region on a plate the desktop owns, so the declared reason is the tip's
+  content.
 
 ### 1.1 The title band
 
@@ -167,9 +190,9 @@ deterministic without one:
 
 A disabled submenu row opens nothing (fail closed).
 
-### 1.4 The information panel
+### 1.4 The children that are not plates of rows
 
-The one child of a chain that is not a plate of rows is the **information
+The first is the **information
 panel**: a `FactList` of the owning bundle's `AppInfo`, hanging where a
 submenu's plate would and dying with the chain — it closes when the pointer
 settles on another row of its parent, when the chain dismisses, or when the
@@ -181,13 +204,29 @@ It stays **session-drawn from the signed manifest**. The app declares only
 that the row exists and supplies none of the panel's text, so it cannot state
 an identity that is not its own inside desktop chrome.
 
+The second is the **quick-entry field**: one line of session-drawn `TextField`
+under the plate band, pre-filled with text the row declared. It is what lets a
+menu ask for a short answer — a new name — without the application drawing
+anything or seeing a keystroke. While it is up it owns the keyboard: every key
+is text, its own Escape closes it before the chain's would dismiss the chain,
+and `Enter` **commits**, ending the chain with the field's own id. Its band
+titles it and does not drag it, because a child of a row is placed by the chain
+against that row, exactly as the information panel is.
+
+The declaring row supplies only the id and the initial text; the committed text
+is the desktop's answer, held for the owning window and pulled once
+(`TakeMenuText`) because an event frame is far narrower than a name. The field
+cannot be masked — the model has no way to say so — so a menu row is
+structurally incapable of being a password prompt.
+
 **There is deliberately no app-drawn attached window.** M1d landed one — a
 surface the *application* presented, hanging off a menu row, detaching when
-its row was chosen — and it never found a client: decision 2 established that
-a selection list cannot be one (a panel cannot conclude a gesture), and M3.4
-established that a *desktop*-owned chain has no application to ask in the
-first place. The whole mechanism is deleted (D19). A presentation child the
-desktop draws itself is this panel's kind, not a second one.
+its row was chosen — and it never found a client: a selection list cannot be
+one (a panel cannot conclude a gesture), and M3.4 established that a
+*desktop*-owned chain has no application to ask in the first place. The whole
+mechanism is deleted (D19). A presentation child the desktop draws itself is
+the information panel's kind, and one that takes an answer is the field's;
+neither is an application's surface.
 
 ### 1.5 The grab
 
@@ -310,8 +349,8 @@ special case the general chain generalises.
 **Has to change (M1):**
 
 - ~~Submenu depth, per-plate rows, a root title, accelerator text, and
-  `About` → `Info`~~ — landed as M1b, along with the disabled-row reason and
-  the role the same control draws.
+  `About` → `Info`~~ — landed as M1b, along with the refusal reason (now the
+  seat's tip, D33) and the role the same control draws.
 - ~~The per-gesture open: an anchor, and the three-way outcome
   `Chosen(id)` / `Dismissed` / `Refused(reason)` delivered **once** to the
   requesting window~~ — landed as M1c, with the outcome keyed to a
@@ -682,8 +721,8 @@ Three rules landed with it rather than being carried over. A row's id is its
 command's own position in its table (M3.2's rule), so the system menu without
 *Switch User…* shifts no other row's meaning — and that numbering is now one
 definition rather than three (D22). D10's remainder is applied: the in-force
-appearance row is a radio group, not `ActivityState::Complete`, and states no
-reason beside the mark. And D19 is
+appearance row is a radio group, not `ActivityState::Complete`, and explains
+nothing — the mark already says the appearance is in force. And D19 is
 closed by deletion: a desktop-owned chain has no application to draw an
 attached window, so the mechanism had no client and is gone.
 
@@ -806,6 +845,42 @@ holds a translucent plate to the exact composite the theme asks for, over the
 terminal and over the wallpaper alike, where a bare distance from the ground
 colour would have admitted any dark repaint.
 
+### M6 — a row may act *and* open a child (landed)
+
+Three capabilities, one shape: a row's command and a row's child stop being
+alternatives.
+
+- **A submenu is a relationship, not a row kind.** `AppMenu::push_under`
+  accepts an `Item` parent, so a chooseable row with children draws the chevron
+  and opens a plate on arrival while still answering its id when clicked.
+  `AppMenuRow::Submenu` stays for a parent with no command of its own. The
+  shared control stopped guessing: `Menu::activate` reports `Activated` for
+  every clicked actionable row and the *chain* decides whether that is an
+  answer or a child, because only the model knows which rows carry a command
+  (the keyboard's `Right` is the gesture that means only "walk in", and keeps
+  its own arm).
+- **A quick-entry field** (§1.4) is the second non-plate child:
+  `AppMenuItem::with_entry`, `ChainChild::Entry`, `SurfaceKind::Entry`, and
+  `MenuOutcome::Entered` naming the field's own id. The text is held per window
+  by the window engine — which already mints and owns the open id and already
+  checks that a caller owns the window it names — and pulled once with
+  `TakeMenuText`: owner-bound, one-shot, cleared by that window's next open, so
+  a commit nobody pulled can never answer a later gesture. The session records
+  it *before* the answer goes out, and a refusal to record degrades the gesture
+  to a dismissal rather than naming a text nobody holds.
+- **A row may name the bundle its icon comes from** (`with_icon_bundle`), and
+  the session resolves it through the one `ArtworkCache` with the identical
+  `IconRequest::bundle` a taskbar slot uses — so the artwork tier reads the
+  bundle's own *signed* manifest and nothing else, an unresolvable path costs
+  only the picture, and the paint itself reads nothing (`resolve_chain_icons`
+  runs before it, mirroring `resolve_library_icons`).
+
+The bounds are the format's, not capacities: `APP_MENU_ENTRY_MAX` is
+`FS_NAME_MAX` because the field's purpose is a name, and `APP_MENU_BUNDLE_MAX`
+is what a row record's one-byte length can state. The whole model still has to
+fit `APP_MENU_TEXT_BYTES`, so a builder asks what is left before adding a row
+rather than pushing and swallowing a refusal.
+
 ---
 
 ## 6. Decisions required (§15.7)
@@ -821,74 +896,57 @@ colour would have admitted any dark repaint.
    the widening; or grant a shared region per declaration (rejected at M0
    for a per-open cost, but a *declaration* is rare enough that it would now
    be defensible).
-2. **A dynamic list longer than a plate — settled.** Open With… stays **one
-   `Item` row on the one plate**. Choosing it concludes the chain, and the
-   application then opens **its own chooser**, which is not a menu: a scrolled
-   list of `ListRow`s in a `Panel` (`lib/browse::open_with`'s
-   `OpenWithChooser`, drawn by `lib/browse::render`). Both named alternatives
-   were rejected, each for a reason that is fatal on its own:
-   - **Raising the per-plate row bound: no.** The candidate set grows with the
-     applications a user installs, so no fixed value can promise to hold it —
-     raising the bound moves the refusal rather than removing it. And it buys
-     an expressible plate no screen can draw in full: `plate_rect` bounds a
-     plate to the viewport and nothing scrolls it, so thirty-two rows is
-     already about seven hundred logical pixels and a raised bound would put
-     rows where no pointer can reach them. Widening a format bound "to be
-     flexible" is what §24.4 forbids, and the total-row bound is what the
-     endpoint's receive ceiling is sized to, so every menu on the channel
-     would pay for this one list.
-   - **A submenu of candidates: no, because a submenu cannot be lazy.** The
-     model crosses the wire *complete* — every row of every plate rides in the
-     one `OpenMenu` — so the candidates must be enumerated **before** the menu
-     opens. Enumerating them is filesystem I/O over three program stores,
-     reading and decoding every `<Name>.app/AppInfo` (`RtBundleSource`), one of
-     which is `/Apps` and may live on a slow or failing volume. Every
-     right-click would pay it, for a list the user rarely opens, with a latency
-     that scales with the number of installed applications (§2.16, §26.1). The
-     only escape is a cache of every bundle's MIME table held for the life of a
-     long-running desktop component, which then goes stale the moment an
-     application is installed — and the list would *still* be bounded by what
-     one plate holds.
-   - **An attached window: no, because it cannot conclude the gesture.** Only
-     a *row* of the chain ends a chain (`MenuOutcome::Chosen`), and an
-     application deliberately holds no request that dismisses one (invariant 2
-     — it cannot pin a chain open, and symmetrically cannot close one). A
-     candidate list inside a panel would therefore leave the chain standing
-     after the user had chosen an application, and every gesture that would
-     then end it means something else: clicking the panel's own row *detaches*
-     the panel, Escape closes the panel first, an outside press dismisses. The
-     panel is a **presentation** surface — the session-drawn info panel it
-     generalises is a `FactList` — not a selection one. That leaves it without
-     a client (D19).
-   What this costs is that Open With… does not look like a submenu, which is
-   the honest shape: a *chooser over a data set whose size is a property of the
-   machine* is a list, and lists scroll. What it buys is that the menu stays a
-   menu — nine command rows, no I/O to open, one plate — and the unbounded list
-   sits in the surface kind the file manager already draws for Properties and
-   the delete confirmation. M3.1 set the precedent: the terminal's settings
-   sheet is not a menu and kept its own surface.
+2. **A dynamic list longer than a plate — settled, reversed by the owner and
+   superseded by M6.** Open With… is **a row that both acts and opens a
+   submenu**: arriving on it opens a plate of the applications that claim the
+   file, highest-ranked first and each drawing its own icon; clicking the row
+   itself opens the complete scrolling chooser. A plate still cannot promise to
+   hold a list that grows with what a user installs, so the submenu is the
+   *top* of the ranked list (`OPEN_WITH_QUICK_MAX`) and the chooser remains the
+   whole of it. Two of the three original objections are answered rather than
+   waived, and the third no longer applies:
+   - **The per-plate row bound is not raised.** A plate does not scroll, so the
+     quick list is bounded well inside it and the row's own click is the way to
+     everything else. Widening a format bound "to be flexible" is still what
+     §24.4 forbids.
+   - **A submenu cannot be lazy, so the candidates are warm before the
+     gesture.** The model crosses the wire complete, so the rows must exist
+     when `OpenMenu` is sent. The file manager therefore keeps its program-store
+     scan warm on the worker it already has (`Reads::want_bundles`): a
+     right-click reads the answer that has **already landed** and performs no
+     I/O at all, and asks again so the next gesture is current. Before the
+     first scan lands the row simply carries no chevron and its click opens the
+     chooser — the honest degradation, not a stall (§28). The staleness the
+     original objection feared is bounded by one gesture, not by the life of a
+     long-running component.
+   - **An attached window still cannot conclude the gesture**, and nothing here
+     is one: a submenu's rows are rows of the chain, so choosing one ends the
+     chain with its id exactly as any other row does (D19 stands).
+   What this buys is that the common case — "open this in that" — is one
+   gesture inside the menu, with the application's own icon to aim at. What it
+   costs is that the file manager must keep a scan warm to offer it, which is
+   stated above and is where the cost belongs: in the application that knows
+   what it browses, never on the desktop's open path.
 3. **The bar's start menu — settled. It is not a menu and stays bespoke**, so
    M3 step 5 is closed with nothing to migrate. The program-library popup
    (`userland/gui/taskbar/src/library.rs`) is a **searchable, scrolled list over
    a data set the machine's size decides**: it holds a text filter, a scroll
    offset with the shared `ScrollBar`, and expandable folders over a catalog as
-   large as the programs a user installs. That is decision 2's shape exactly,
-   and two of its reasons bind here whatever else does not:
+   large as the programs a user installs. One reason binds, and it is enough:
    - **A plate does not scroll.** `plate_rect` bounds a plate to the viewport
      and nothing scrolls it, so the entry set — which grows with what is
      installed — has no bound a plate could promise to hold. Raising the
      per-plate row bound moves the refusal rather than removing it, and widens a
      format bound "to be flexible" (§24.4).
-   - **A plate has no text input.** The filter is the popup's primary
-     affordance: typing narrows the list. A menu's rows are fixed at open, and
-     the model carries no field a keystroke could edit.
-   Two reasons that would have bound an application's list deliberately do
-   **not** apply, and saying so is what makes this a decision rather than a
-   restatement: the popup is session-owned, so nothing about it crosses the
-   wire complete, and its rows carry icons, which `MenuItem::with_icon` can
-   already draw. Neither rescues it from the two above. Expandable folders are
-   *disclosure within one surface*, not a chain of child plates, so they are not
-   a submenu either.
+   Three reasons that might have been expected to bind do **not**, and saying so
+   is what makes this a decision rather than a restatement. A plate now *does*
+   take text (M6's quick-entry field), so the popup's filter is no longer a
+   reason — but a field is one line the desktop commits, not a live filter over
+   rows fixed at open, so it does not give the launcher what it needs either.
+   The popup is session-owned, so nothing about it crosses the wire complete.
+   And its rows carry icons, which `MenuItem` draws. None of the three rescues
+   it from the scroll. Expandable folders are *disclosure within one surface*,
+   not a chain of child plates, so they are not a submenu either.
    What this costs is that the launcher does not read as a menu, which is the
    honest shape: a list of *everything installed* is a browser, and browsers
    scroll and filter. What it buys is that the popup keeps the search and the

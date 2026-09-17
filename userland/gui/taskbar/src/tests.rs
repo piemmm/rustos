@@ -1739,20 +1739,18 @@ fn the_menu_states_exactly_the_rows_the_application_declared() {
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
     // Every top-level declared row is stated, in declaration order, with the
-    // enablement, mark, accelerator caption, disabled-row reason and role
-    // the application asked for; the declared separator opens the group its
-    // next row begins rather than becoming a row; the submenu's own child is
-    // not a top-level row; and the information row is the one row whose
-    // label and child are the desktop's.
+    // enablement, mark, accelerator caption and role the application asked
+    // for; the declared separator opens the group its next row begins rather
+    // than becoming a row; the submenu's own child is not a top-level row;
+    // and the information row is the one row whose label and child are the
+    // desktop's.
     assert_eq!(
         plate_of(&request.model, None),
         alloc::vec![
             MenuItem::new("New window"),
             MenuItem::new("Wrap lines").with_mark(MenuMark::Check),
             MenuItem::new("Green screen").with_mark(MenuMark::Radio),
-            MenuItem::new("Paste")
-                .with_reason("The clipboard is empty")
-                .with_state(ControlState::disabled()),
+            MenuItem::new("Paste").with_state(ControlState::disabled()),
             MenuItem::new("Close all")
                 .with_shortcut("Ctrl Shift Q")
                 .with_role(ControlRole::Destructive),
@@ -1826,7 +1824,13 @@ fn a_disabled_declared_row_is_stated_disabled_with_its_reason() {
 
     let row = row_named(&request.model, "Paste");
     assert!(!row.drawn().state().is_actionable());
-    assert_eq!(row.drawn().reason(), Some("The clipboard is empty"));
+    // The reason is tip text, so the drawn row states only the label the
+    // application declared.
+    assert_eq!(row.tip(), Some("The clipboard is empty"));
+    assert_eq!(
+        row.drawn(),
+        &MenuItem::new("Paste").with_state(ControlState::disabled())
+    );
 }
 
 #[test]
@@ -7401,21 +7405,32 @@ fn chosen_at(bar: &mut Taskbar, request: &MenuRequest, index: usize) -> Option<T
     )
 }
 
+/// The chain row at position `index` of the table the menu was built from, or
+/// `None` when `permits` left it out.
+fn table_chain_row(request: &MenuRequest, index: usize) -> Option<&ChainRow> {
+    let id = AppMenuItemId::for_index(index).expect("a numbered row");
+    request.model.rows().iter().find(|row| row.id() == Some(id))
+}
+
 /// The row at position `index` of the table the menu was built from, or `None`
 /// when `permits` left it out.
 fn table_row(request: &MenuRequest, index: usize) -> Option<&MenuItem> {
-    let id = AppMenuItemId::for_index(index).expect("a numbered row");
-    request
-        .model
-        .rows()
-        .iter()
-        .find(|row| row.id() == Some(id))
-        .map(ChainRow::drawn)
+    table_chain_row(request, index).map(ChainRow::drawn)
 }
 
 /// The row at position `index`, or the test fails.
 fn offered_row(request: &MenuRequest, index: usize) -> &MenuItem {
     table_row(request, index).unwrap_or_else(|| panic!("row {index} is offered"))
+}
+
+/// The tip the row at position `index` carries, or the test fails.
+///
+/// Why a row cannot be chosen is tip text rather than a caption, so it is
+/// asked of the chain row and never of the drawn one.
+fn offered_tip(request: &MenuRequest, index: usize) -> Option<&str> {
+    table_chain_row(request, index)
+        .unwrap_or_else(|| panic!("row {index} is offered"))
+        .tip()
 }
 
 #[test]
@@ -7497,10 +7512,10 @@ fn the_active_appearance_row_is_the_groups_chosen_member_and_is_not_actionable()
             "the appearance already in use cannot be chosen again ({appearance:?})"
         );
         assert_eq!(
-            active.reason(),
+            offered_tip(&request, active_row),
             None,
-            "the radio mark says the appearance is in force; a reason beside it \
-             only repeats it ({appearance:?})"
+            "the radio mark says the appearance is in force; a tip repeating it \
+             would say nothing more ({appearance:?})"
         );
 
         let inactive = offered_row(&request, inactive_row);
@@ -7509,7 +7524,7 @@ fn the_active_appearance_row_is_the_groups_chosen_member_and_is_not_actionable()
             "the other appearance is the one worth choosing ({appearance:?})"
         );
         assert_eq!(inactive.mark(), MenuMark::None);
-        assert_eq!(inactive.reason(), None);
+        assert_eq!(offered_tip(&request, inactive_row), None);
     }
 }
 
@@ -7599,7 +7614,7 @@ fn an_unpermitted_power_row_is_denied_with_the_authority_mark_and_a_reason() {
         );
         assert!(!item.state().is_actionable());
         assert_eq!(
-            item.reason(),
+            offered_tip(&request, row),
             Some("The system service cannot power this machine")
         );
     }
@@ -7652,7 +7667,7 @@ fn the_lock_row_is_denied_until_the_session_attests_it_can_prompt() {
     );
     assert!(!item.state().is_actionable());
     assert_eq!(
-        item.reason(),
+        offered_tip(&request, 5),
         Some("This session has no password prompt to unlock with")
     );
 
@@ -7661,7 +7676,7 @@ fn the_lock_row_is_denied_until_the_session_attests_it_can_prompt() {
     let request = ask_system_menu(&mut input, &mut bar);
     let item = offered_row(&request, 5);
     assert!(item.state().is_actionable());
-    assert_eq!(item.reason(), None);
+    assert_eq!(offered_tip(&request, 5), None);
     assert_eq!(
         chosen_at(&mut bar, &request, 5),
         Some(TaskbarResponse::LockSession)
@@ -7701,7 +7716,7 @@ fn the_switch_user_row_is_absent_until_the_session_can_be_resumed() {
     let item = offered_row(&request, 6);
     assert_eq!(item.label(), "Switch User…");
     assert!(item.state().is_actionable());
-    assert_eq!(item.reason(), None);
+    assert_eq!(offered_tip(&request, 6), None);
     assert_eq!(
         chosen_at(&mut bar, &request, 6),
         Some(TaskbarResponse::SwitchUser)
@@ -7753,14 +7768,17 @@ fn the_set_time_row_is_denied_until_the_session_attests_a_broker() {
         "the set-time row fails closed before the session attests"
     );
     assert!(!item.state().is_actionable());
-    assert_eq!(item.reason(), Some(crate::clock_menu::REASON_NO_BROKER));
+    assert_eq!(
+        offered_tip(&request, 1),
+        Some(crate::clock_menu::REASON_NO_BROKER)
+    );
 
     // The session attests, and the row becomes the real command.
     bar.set_elevation_available(true);
     let request = ask_clock_menu(&mut input, &mut bar);
     let item = offered_row(&request, 1);
     assert!(item.state().is_actionable());
-    assert_eq!(item.reason(), None);
+    assert_eq!(offered_tip(&request, 1), None);
     assert_eq!(
         chosen_at(&mut bar, &request, 1),
         Some(TaskbarResponse::SetDateTime)
@@ -7799,7 +7817,7 @@ fn a_launch_row_whose_bundle_is_absent_is_disabled_and_asks_for_nothing() {
     let item = offered_row(&request, 2);
     assert_eq!(item.label(), "Task Shell");
     assert!(!item.state().is_actionable());
-    assert_eq!(item.reason(), Some("Not installed"));
+    assert_eq!(offered_tip(&request, 2), Some("Not installed"));
 }
 
 #[test]

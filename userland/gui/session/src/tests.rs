@@ -15,14 +15,15 @@ use tairix_abi::switchboard_ipc::{
 };
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::window_ipc::{
-    AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
+    AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
+    AppMenuLabel, AppMenuRow,
 };
 use tairix_abi::{
     AppInfoHeader, DriverError, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX,
     BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
 };
 use tairix_controls::damage::Repaint;
-use tairix_controls::{ChainModel, Fact, FactList, PointerState};
+use tairix_controls::{ChainModel, ChainRow, ControlState, Fact, FactList, MenuItem, PointerState};
 use tairix_cursor::CursorTheme;
 use tairix_greeter::{Verdict, Verifier, UNNAMED_ACCOUNT};
 use tairix_hash::BuildFastHash;
@@ -9683,6 +9684,203 @@ fn moving_a_menu_highlight_recomposites_two_rows_and_not_the_plate() {
     );
 }
 
+/// A chain of one offered row and one refused row that explains itself, open
+/// on the backdrop at `(40, 40)`.
+fn explained_chain(shell: &DesktopShell, comp: &Compositor, chain: &mut MenuChain) {
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let mut model = ChainModel::new("Files");
+    model.push(ChainRow::item(
+        AppMenuItemId::new(1).expect("a non-zero id"),
+        MenuItem::new("Open"),
+    ));
+    model.push(
+        ChainRow::item(
+            AppMenuItemId::new(2).expect("a non-zero id"),
+            MenuItem::new("Open With\u{2026}")
+                .with_state(ControlState::default().with_enabled(false)),
+        )
+        .explained(REFUSAL),
+    );
+    chain
+        .open(
+            ChainOwner::Backdrop,
+            model,
+            crate::windows::window_menu_placement(Rect::new(40, 40, 0, 0)),
+            &geom,
+        )
+        .expect("the model opens");
+}
+
+/// Why the refused row cannot be chosen — the very text that used to be drawn
+/// beside its label and made the plate as wide as itself.
+const REFUSAL: &str = "only a file opens with an application";
+
+/// The compositor window the chain's root plate is drawn in.
+fn chain_plate(shell: &DesktopShell, comp: &Compositor, chain: &MenuChain) -> Option<WindowId> {
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    comp.window_at(centre(chain.row_rect(0, 0, &geom)?))
+}
+
+/// The centre of row `row` of the chain's root plate, in screen pixels.
+fn chain_row_centre(
+    shell: &DesktopShell,
+    comp: &Compositor,
+    chain: &MenuChain,
+    row: usize,
+) -> Point {
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    centre(
+        chain
+            .row_rect(0, row, &geom)
+            .unwrap_or_else(|| panic!("row {row} is laid out")),
+    )
+}
+
+/// A refused chain row is explained by the seat's tooltip: declared when the
+/// pointer arrives, shown only once it has rested for the dwell, and never
+/// drawn on the row itself.
+///
+/// The reported defect was the row carrying that text as a caption, which made
+/// every plate as wide as its longest excuse.
+#[test]
+fn a_refused_chain_row_is_explained_by_a_tip_only_after_the_dwell() {
+    let (mut shell, mut comp) = headless_desktop();
+    shell.present(&mut comp);
+    let mut chain = MenuChain::new();
+    explained_chain(&shell, &comp, &mut chain);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    let with_chain = comp.window_count();
+
+    // Nothing is hovered, so nothing is declared and no plate is placed.
+    assert!(!shell.present_tooltip(&mut comp));
+    assert_eq!(comp.window_count(), with_chain);
+
+    // Rest on the refused row. The chain declares its explanation as it
+    // presents, and the pointer arms the dwell — but a tip answers a *rest*,
+    // so nothing is on screen yet.
+    let at = chain_row_centre(&shell, &comp, &chain, 1);
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    shell.apply(moved(at.x, at.y), &mut comp, 0);
+    chain.handle(&moved(at.x, at.y), at, &geom);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    shell.settle(&mut comp);
+    assert_eq!(
+        comp.window_count(),
+        with_chain,
+        "a pointer merely arriving shows nothing"
+    );
+
+    // Re-presenting while the pointer has not moved must not restart the
+    // rest: a declaration that has not changed is not a new one.
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+
+    // The dwell elapses, which is what the session's frame tick resolves.
+    assert!(shell.tooltip_tick(crate::tip::TOOLTIP_DWELL_NS));
+    assert!(shell.present_tooltip(&mut comp));
+    assert_eq!(comp.window_count(), with_chain + 1, "one plate, one window");
+
+    // And a re-present with the shown tip's row unchanged leaves it alone: a
+    // declaration equal to the one held is not a new one, so the plate does
+    // not blink off and back once per frame.
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    assert!(shell.present_tooltip(&mut comp));
+    assert_eq!(
+        comp.window_count(),
+        with_chain + 1,
+        "the tip stayed up across a re-present"
+    );
+
+    // The plate hangs below the row, so the row it explains is still what the
+    // pointer is on. (That the plate could not take the pointer even where it
+    // does overlap is the compositor's own input-transparency rule.)
+    assert_eq!(
+        comp.window_at(at),
+        Some(chain_plate(&shell, &comp, &chain).expect("the chain's plate is on screen")),
+        "the tip did not come between the pointer and the row"
+    );
+
+    // A press is not about the tip, so it takes it down.
+    shell.apply(PRIMARY_PRESS, &mut comp, crate::tip::TOOLTIP_DWELL_NS);
+    shell.settle(&mut comp);
+    assert_eq!(
+        comp.window_count(),
+        with_chain,
+        "a press takes the tip down"
+    );
+}
+
+/// Leaving the row withdraws the explanation, and a row that explains nothing
+/// replaces the declaration rather than joining it.
+#[test]
+fn a_tip_is_withdrawn_when_the_pointer_leaves_the_row_it_explains() {
+    let (mut shell, mut comp) = headless_desktop();
+    shell.present(&mut comp);
+    let mut chain = MenuChain::new();
+    explained_chain(&shell, &comp, &mut chain);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    let with_chain = comp.window_count();
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+
+    let refused = chain_row_centre(&shell, &comp, &chain, 1);
+    shell.apply(moved(refused.x, refused.y), &mut comp, 0);
+    chain.handle(&moved(refused.x, refused.y), refused, &geom);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    assert!(shell.tooltip_tick(crate::tip::TOOLTIP_DWELL_NS));
+    assert!(shell.present_tooltip(&mut comp));
+    assert_eq!(comp.window_count(), with_chain + 1);
+
+    // Travel to the row above, which is offered and explains nothing. The
+    // chain withdraws the declaration as it presents, so the plate goes.
+    let offered = chain_row_centre(&shell, &comp, &chain, 0);
+    shell.apply(
+        moved(offered.x, offered.y),
+        &mut comp,
+        crate::tip::TOOLTIP_DWELL_NS,
+    );
+    chain.handle(&moved(offered.x, offered.y), offered, &geom);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    shell.settle(&mut comp);
+    assert_eq!(
+        comp.window_count(),
+        with_chain,
+        "the row under the pointer has nothing to explain"
+    );
+    assert!(
+        !shell.tooltip_tick(crate::tip::TOOLTIP_DWELL_NS * 4),
+        "and no dwell is left running for a withdrawn declaration"
+    );
+}
+
 /// The backdrop blur `window` asks the compositor for.
 fn blur_of(comp: &Compositor, window: Option<WindowId>, what: &str) -> u16 {
     let id = window.unwrap_or_else(|| panic!("{what} is on screen"));
@@ -9836,6 +10034,218 @@ fn every_menu_chain_surface_frosts_what_is_behind_it() {
             );
         }
     }
+}
+
+/// The model of a chain whose one row is chooseable *and* carries a
+/// quick-entry field, as the file manager's Rename row is.
+fn renaming_menu() -> ChainModel {
+    let mut wire = AppMenu::titled(AppMenuLabel::new("Files").expect("a valid title"));
+    wire.push(AppMenuRow::Item(
+        AppMenuItem::new(
+            AppMenuItemId::new(4).expect("a valid id"),
+            AppMenuLabel::new("Rename").expect("a valid label"),
+        )
+        .with_entry(AppMenuEntry {
+            id: AppMenuItemId::new(90).expect("a valid id"),
+            initial: AppMenuEntryText::new("report.txt").expect("a valid name"),
+        }),
+    ))
+    .expect("the rename row fits");
+    wire.push(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(5).expect("a valid id"),
+        AppMenuLabel::new("Delete").expect("a valid label"),
+    )))
+    .expect("a second row fits");
+    ChainModel::from_app_menu("Files", &wire, None)
+}
+
+/// A chain with the rename row's field open, and the geometry it was opened
+/// against.
+fn chain_with_entry_open(geom: &ChainGeometry<'_>) -> MenuChain {
+    let mut chain = MenuChain::new();
+    chain
+        .open(
+            ChainOwner::Window {
+                window_id: 1,
+                open_id: 7,
+            },
+            renaming_menu(),
+            crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
+            geom,
+        )
+        .expect("the model opens");
+    let row = chain.row_rect(0, 0, geom).expect("the rename row");
+    let at = centre(row);
+    assert_eq!(
+        chain.handle(&moved(at.x, at.y), at, geom),
+        ChainAction::Redraw,
+        "arriving on the row opens its field"
+    );
+    chain
+}
+
+/// The quick-entry field is a child the desktop draws, opened by arrival like
+/// a submenu and dying with the chain like the information panel — and it owns
+/// the keyboard while it is up, so a commit answers the text the user typed.
+#[test]
+fn a_quick_entry_field_opens_on_arrival_owns_the_keyboard_and_answers_its_text() {
+    let (shell, comp) = headless_desktop();
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let mut chain = chain_with_entry_open(&geom);
+    let entry = chain
+        .surfaces()
+        .into_iter()
+        .find(|placed| placed.kind == SurfaceKind::Entry)
+        .expect("the field hangs where a submenu would");
+    let plate = chain.surfaces().first().expect("the root plate").rect;
+    assert!(
+        entry.rect.intersection(&plate).is_empty(),
+        "and beside its parent plate, not over it"
+    );
+
+    // Keys reach the field: a letter is text, not a traversal.
+    assert_eq!(
+        chain.handle(&key_press(Key::Char('2')), Point::ORIGIN, &geom),
+        ChainAction::Redraw
+    );
+    // Committing answers the field's own id and the whole text.
+    assert_eq!(
+        chain.handle(
+            &key_press(Key::Named(NamedKey::Enter)),
+            Point::ORIGIN,
+            &geom
+        ),
+        ChainAction::Closed
+    );
+    let answers = chain.take_answers();
+    assert_eq!(answers.len(), 1, "one chain, one answer");
+    match &answers[0].1 {
+        ChainOutcome::Entered(id, text) => {
+            assert_eq!(id.get(), 90, "the field's own id, never the row's");
+            assert_eq!(text, "report.txt2", "the text as the user left it");
+        }
+        other => panic!("a commit answers Entered, not {other:?}"),
+    }
+    assert!(chain.surfaces().is_empty(), "and the chain is gone");
+}
+
+/// Escape closes the field before it dismisses the chain, so repeated Escape
+/// still gets the user out — and a field the user never committed answers
+/// nothing.
+#[test]
+fn escape_closes_a_quick_entry_field_before_the_chain_and_discards_its_text() {
+    let (shell, comp) = headless_desktop();
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let mut chain = chain_with_entry_open(&geom);
+    assert_eq!(
+        chain.handle(
+            &key_press(Key::Named(NamedKey::Escape)),
+            Point::ORIGIN,
+            &geom
+        ),
+        ChainAction::Redraw
+    );
+    assert!(
+        !chain
+            .surfaces()
+            .iter()
+            .any(|placed| placed.kind == SurfaceKind::Entry),
+        "the field closed"
+    );
+    assert!(chain.is_open(), "and the chain did not");
+    assert!(
+        chain.take_answers().is_empty(),
+        "an uncommitted field answers nothing"
+    );
+    assert_eq!(
+        chain.handle(
+            &key_press(Key::Named(NamedKey::Escape)),
+            Point::ORIGIN,
+            &geom
+        ),
+        ChainAction::Closed,
+        "and the next Escape gets the user out"
+    );
+    assert_eq!(
+        chain.take_answers().first().map(|(_, out)| out.clone()),
+        Some(ChainOutcome::Dismissed)
+    );
+}
+
+/// Clicking the row itself is still the row's own answer, and the chain's
+/// grab is unchanged: a press outside it dismisses and is consumed.
+#[test]
+fn clicking_a_field_bearing_row_answers_the_rows_own_id() {
+    let (shell, comp) = headless_desktop();
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let mut chain = chain_with_entry_open(&geom);
+    let row = chain.row_rect(0, 0, &geom).expect("the rename row");
+    let at = centre(row);
+    chain.handle(&PRIMARY_PRESS, at, &geom);
+    assert_eq!(
+        chain.handle(&PRIMARY_RELEASE, at, &geom),
+        ChainAction::Closed
+    );
+    assert_eq!(
+        chain.take_answers().first().map(|(_, out)| out.clone()),
+        Some(ChainOutcome::Chosen(
+            AppMenuItemId::new(4).expect("a valid id")
+        )),
+        "the row answers its own id, not its field's"
+    );
+
+    // And a chain displaced while a field is open drops the text: the commit
+    // is the answer, so there is nothing else for an unanswered field to say.
+    let mut chain = chain_with_entry_open(&geom);
+    chain
+        .open(
+            ChainOwner::Backdrop,
+            renaming_menu(),
+            crate::windows::window_menu_placement(Rect::new(10, 10, 0, 0)),
+            &geom,
+        )
+        .expect("the next open displaces it");
+    let answers = chain.take_answers();
+    assert_eq!(answers.len(), 1);
+    assert_eq!(
+        answers[0].1,
+        ChainOutcome::Dismissed,
+        "a displaced chain is dismissed, never Entered"
+    );
+
+    // The grab is unchanged: a press with nothing of the chain under it ends
+    // it and is consumed.
+    let mut chain = chain_with_entry_open(&geom);
+    let outside = Point::new(
+        comp.screen_rect().right() - 1,
+        comp.screen_rect().bottom() - 1,
+    );
+    assert_eq!(
+        chain.handle(&PRIMARY_PRESS, outside, &geom),
+        ChainAction::Closed
+    );
+    assert_eq!(
+        chain.take_answers().first().map(|(_, out)| out.clone()),
+        Some(ChainOutcome::Dismissed)
+    );
 }
 
 /// A plate the chain hangs on an owner window is composited as that window's

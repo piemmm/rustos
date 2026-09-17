@@ -331,7 +331,7 @@ pub fn sidebar_view(
 /// spans the full window width across the top, above the rail and over this
 /// area's own top strip, so [`toolbar_command_at`], [`manager_tool_at`], and
 /// [`manager_tool_rect`] take the *window* while every entry point below the
-/// band — [`entry_index_at`], [`selection_rect`], [`scrollbar_bounds`] and the
+/// band — [`entry_index_at`], [`entry_rect`], [`scrollbar_bounds`] and the
 /// overlays — takes this area. A caller drawing a rail resolves this once and
 /// passes it wherever it would otherwise pass the window; the rows and the
 /// scrollbar then sit exactly where a click looks for them.
@@ -1175,40 +1175,14 @@ pub fn entry_index_at<S: DirectorySource>(
     view.index_at(browser.scroll_offset(), x, y)
 }
 
-/// The window-local pixel rectangle the browser's currently selected item is
-/// drawn in, or `None` when nothing is selected or the selection is scrolled
-/// out of view.
-///
-/// This is [`render_into`]'s own layout for the selected entry, through the shared
-/// [`ViewLayout`], so an overlay drawn there — the in-place rename editor —
-/// sits exactly over the item the renderer painted. A caller reveals the
-/// selection first (via [`reveal_selection`]) if it needs the rect to be on
-/// screen.
-#[must_use]
-pub fn selection_rect<S: DirectorySource>(
-    browser: &Browser<S>,
-    scale: Scale,
-    theme: &Theme,
-    viewport: Rect,
-    toolbar: ToolbarBand,
-) -> Option<Rect> {
-    entry_rect(
-        browser,
-        scale,
-        theme,
-        viewport,
-        toolbar,
-        browser.selected_index()?,
-    )
-}
-
 /// The window-local pixel rectangle entry `index` is drawn in, or `None` when
 /// it is scrolled out of view (or the view seats nothing there).
 ///
-/// [`selection_rect`] is this for the selected entry. A host that moves a mark
-/// between two entries — the file manager reporting the row the focus left and
-/// the one it arrived on — needs both rectangles, so the general form is the
-/// definition and the selected one is a call to it.
+/// This is [`render_into`]'s own layout for that entry, through the shared
+/// [`ViewLayout`], so a caller reporting damage for a mark that moved between
+/// two entries names exactly the rectangles the renderer painted. A caller
+/// reveals the selection first (via [`reveal_selection`]) if it needs an
+/// entry's rect to be on screen.
 #[must_use]
 pub fn entry_rect<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1220,6 +1194,68 @@ pub fn entry_rect<S: DirectorySource>(
 ) -> Option<Rect> {
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     view.item_rect(browser.scroll_offset(), index)
+}
+
+/// The window-local pixel rectangle the browser's currently selected item
+/// draws its **name** in, or `None` when nothing is selected or the selection
+/// is scrolled out of view.
+///
+/// This is where the in-place rename editor goes: the whole item rectangle is
+/// the row (icon, name, size and date columns) or the whole tile (picture
+/// above the label), and a field laid over either covers what the user is not
+/// editing. [`entry_rect`] stays the *item's* rectangle, which is what a
+/// damage report needs.
+#[must_use]
+pub fn selection_name_rect<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+) -> Option<Rect> {
+    entry_name_rect(
+        browser,
+        scale,
+        theme,
+        viewport,
+        toolbar,
+        browser.selected_index()?,
+    )
+}
+
+/// The window-local pixel rectangle entry `index` draws its **name** in, or
+/// `None` when it is scrolled out of view (or the view seats no name there).
+///
+/// Read from the drawn controls themselves — the list row's own name-cell text
+/// span, the grid tile's own label band — so an overlay cannot land where the
+/// name is not. The band is grown to a field's own height where it is shorter
+/// (a tile's label band is one line of glyphs, and a field wants its plate)
+/// and clamped back into the item's rectangle, so the editor never spills onto
+/// a neighbour.
+#[must_use]
+pub fn entry_name_rect<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+    index: usize,
+) -> Option<Rect> {
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
+    let item = view.item_rect(browser.scroll_offset(), index)?;
+    let name = match view {
+        // The name is the first cell, and the row control reports the span
+        // its glyphs occupy inside that column.
+        ViewLayout::List(_) => {
+            let entry = browser.entries().get(index)?;
+            let kind = icon_for_entry(entry, browser.components());
+            entry_row(entry, false, kind).cell_text_rect(item, scale, theme, &COLUMNS, 0)?
+        }
+        ViewLayout::Grid(_) => IconTile::label_rect(item, scale, theme)?,
+    };
+    let height = name.height.max(TextField::height(scale, theme));
+    Some(Rect::new(name.left(), name.top(), name.width, height).intersection(&item))
+        .filter(|rect| !rect.is_empty())
 }
 
 /// The window-local pixel rectangle the item area occupies — every entry the
@@ -2095,12 +2131,7 @@ fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_li
     let title = scale.scale_length(theme.metrics().title_bar_height).max(1);
     let content = line.saturating_mul(content_lines);
     let height = title.saturating_add(content).min(viewport.height.max(1));
-    let width = viewport
-        .width
-        .saturating_mul(4)
-        .checked_div(5)
-        .unwrap_or(viewport.width)
-        .clamp(1, viewport.width.max(1));
+    let width = overlay_width(viewport);
     let x = viewport
         .origin
         .x
@@ -2110,6 +2141,21 @@ fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_li
         .y
         .saturating_add(to_i32(viewport.height.saturating_sub(height) / 2));
     Rect::new(x, y, width, height)
+}
+
+/// The width every one of the manager's modal surfaces takes within
+/// `viewport`: four fifths of it, clamped to it, so they read as a family.
+///
+/// Its own definition because a surface in its own popup window takes the
+/// width without taking the centring — the session places the popup — and two
+/// spellings of "four fifths" would be one too many.
+fn overlay_width(viewport: Rect) -> u32 {
+    viewport
+        .width
+        .saturating_mul(4)
+        .checked_div(5)
+        .unwrap_or(viewport.width)
+        .clamp(1, viewport.width.max(1))
 }
 
 /// Draw the delete-confirmation `dialog` centered in `viewport`, on top of the
@@ -2287,34 +2333,71 @@ pub fn progress_cancel_at(viewport: Rect, scale: Scale, theme: &Theme, point: Po
     point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom
 }
 
-/// Most candidate rows the "Open With…" chooser shows at once.
+/// Most candidate rows the "Open With…" chooser's list shows at once.
 ///
-/// The panel is a fixed shape a dialog can sit in rather than one that grows
-/// with the applications a user has installed; a longer list scrolls inside it
-/// ([`OpenWithChooser`]). A smaller window shrinks the list further, because
-/// the panel is still clamped to the window it is centred in.
-const OPEN_WITH_MAX_ROWS: u32 = 8;
+/// A bound on the *popup*, not on the candidate set: the set grows with the
+/// applications a user installs, and a longer list scrolls inside the panel.
+/// Fewer candidates make a **shorter** popup — the surface is sized to its
+/// content, so one candidate is one row of plate and not eight.
+pub const OPEN_WITH_MAX_ROWS: usize = 8;
 
-/// The bounds of the "Open With…" chooser panel, centred and clamped within
-/// `viewport`.
+/// The rows the chooser's list wants for `candidates`: all of them, up to the
+/// bound, and never none — a chooser is never built over an empty list.
+fn open_with_wanted_rows(candidates: usize) -> u32 {
+    u32::try_from(candidates.clamp(1, OPEN_WITH_MAX_ROWS)).unwrap_or(1)
+}
+
+/// The extent of the chooser's own popup window for `candidates` candidates,
+/// capped to the `screen` it must fit on.
+///
+/// The popup **is** the chooser: the panel fills it, so the surface's own size
+/// is what decides how many rows are shown, and a one-candidate chooser is a
+/// one-row popup rather than a plate with seven rows of nothing. The width is
+/// the same centred-overlay proportion the manager's other modal surfaces
+/// take, so they read as a family.
+#[must_use]
+pub fn open_with_chooser_extent(
+    candidates: usize,
+    scale: Scale,
+    theme: &Theme,
+    screen: Rect,
+) -> (u32, u32) {
+    // One line for the actions beneath the list, which the panel's content
+    // holds along with the rows. The height comes from the panel's own
+    // inverse rather than a second reckoning of its header and rim: a
+    // difference of one border there costs the list a whole row once it is
+    // divided by a row height.
+    let lines = open_with_wanted_rows(candidates).saturating_add(1);
+    let content = row_height(scale, theme).saturating_mul(lines);
+    let height = Panel::height_for_content(content, scale, theme);
+    (
+        overlay_width(screen),
+        height.min(screen.height.max(1)).max(1),
+    )
+}
+
+/// The chooser panel's bounds within its own popup `viewport`: the whole of
+/// it.
 ///
 /// One placement definition, shared by [`draw_open_with_chooser`],
-/// [`open_with_row_at`] and [`open_with_visible_rows`], so what is drawn and
-/// what a press resolves to can never disagree. It sits on the same centred
-/// sizing the delete confirmation ([`delete_dialog_rect`]) and the progress
-/// panel use, so the manager's modal surfaces are placed alike.
+/// [`open_with_row_at`], [`open_with_action_at`] and
+/// [`open_with_visible_rows`], so what is drawn and what a press resolves to
+/// can never disagree.
 #[must_use]
-pub fn open_with_chooser_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
-    centered_overlay_rect(viewport, scale, theme, OPEN_WITH_MAX_ROWS)
+pub const fn open_with_chooser_rect(viewport: Rect) -> Rect {
+    viewport
 }
 
 /// How many candidate rows the chooser's list shows at the current geometry.
 ///
-/// Zero when the window leaves the panel no content area at all, which draws
-/// and hit-tests nothing rather than dividing by an empty row.
+/// Derived from the content the popup actually has, so a popup the screen
+/// clamped shows what it can rather than what it asked for — and the count
+/// the extent was computed for and the count the list draws are one fact.
+/// Zero when the popup leaves the list no room at all, which draws and
+/// hit-tests nothing rather than dividing by an empty row.
 #[must_use]
 pub fn open_with_visible_rows(viewport: Rect, scale: Scale, theme: &Theme) -> usize {
-    let Some(content) = open_with_content_rect(viewport, scale, theme) else {
+    let Some(content) = open_with_list_rect(viewport, scale, theme) else {
         return 0;
     };
     let row = row_height(scale, theme);
@@ -2324,15 +2407,25 @@ pub fn open_with_visible_rows(viewport: Rect, scale: Scale, theme: &Theme) -> us
     (content.height / row) as usize
 }
 
-/// The chooser panel's content area — where the rows and the scroll gutter go.
+/// The chooser panel's whole content area — the rows, the scroll gutter, and
+/// the action band beneath them.
 fn open_with_content_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
-    let bounds = open_with_chooser_rect(viewport, scale, theme);
+    let bounds = open_with_chooser_rect(viewport);
     Panel::new(String::new()).content_rect(bounds, scale, theme)
 }
 
-/// The window-local rectangle the chooser's `visible` list draws its row at
-/// `slot` (a position on screen, not a candidate index) into, and the gutter
-/// the scrollbar occupies beside them.
+/// The part of the content the candidate list occupies: everything above the
+/// action band.
+fn open_with_list_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    let content = open_with_content_rect(viewport, scale, theme)?;
+    let actions = row_height(scale, theme).min(content.height);
+    let height = content.height.saturating_sub(actions);
+    (height > 0).then(|| Rect::new(content.left(), content.top(), content.width, height))
+}
+
+/// The window-local rectangle the chooser's list draws its row at `slot` (a
+/// position on screen, not a candidate index) into, and the gutter the
+/// scrollbar occupies beside them.
 fn open_with_row_rect(content: Rect, scale: Scale, theme: &Theme, slot: usize) -> Rect {
     let row = row_height(scale, theme);
     let gutter = gutter_width(scale, theme, content.width);
@@ -2365,24 +2458,81 @@ fn open_with_gutter_rect(content: Rect, scale: Scale, theme: &Theme) -> Option<R
     ))
 }
 
-/// Draw the "Open With…" `chooser` centred over the current view: a titled
-/// panel naming the file, one [`ListRow`] per visible candidate with the
-/// current one selected, and the scrollbar beside them when the list is longer
-/// than the panel shows.
+/// What a press on the chooser's action band asks for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum OpenWithAction {
+    /// Open the file with the current candidate.
+    Open,
+    /// Close the chooser without opening anything.
+    Cancel,
+}
+
+/// The two action buttons the chooser offers, in the order they are drawn.
+const OPEN_WITH_ACTIONS: [(OpenWithAction, &str); 2] = [
+    (OpenWithAction::Cancel, "Cancel"),
+    (OpenWithAction::Open, "Open"),
+];
+
+/// Where each action button is drawn in the band beneath the list, trailing
+/// edge last — the one definition [`draw_open_with_chooser`] paints and
+/// [`open_with_action_at`] hit-tests.
 ///
-/// It reads only the passed-in chooser and draws — no I/O, no authority — and
-/// every blit clips, so a window too small for the panel simply shows what fits.
+/// `None` when the popup leaves no band, which draws and resolves nothing
+/// (fail closed): a chooser with no visible Open button is closed with Escape
+/// or by choosing a row, never left with a hidden action.
+fn open_with_action_rects(
+    viewport: Rect,
+    scale: Scale,
+    theme: &Theme,
+    font: BitmapFont,
+) -> Option<[Rect; OPEN_WITH_ACTIONS.len()]> {
+    let content = open_with_content_rect(viewport, scale, theme)?;
+    let height = row_height(scale, theme);
+    if height == 0 || content.height < height {
+        return None;
+    }
+    let pad = font.text_width("  ").max(scale.scale_length(LABEL_PADDING));
+    let top = content
+        .top()
+        .saturating_add(to_i32(content.height.saturating_sub(height)));
+    let mut right = content.left().saturating_add(to_i32(content.width));
+    let mut rects = [Rect::EMPTY; OPEN_WITH_ACTIONS.len()];
+    // Laid out from the trailing edge back, so the primary action sits
+    // furthest right whatever the labels measure.
+    for (slot, (_, label)) in OPEN_WITH_ACTIONS.iter().enumerate().rev() {
+        let width = font
+            .text_width(label)
+            .saturating_add(pad.saturating_mul(2))
+            .min(content.width);
+        let left = right.saturating_sub(to_i32(width));
+        rects[slot] = Rect::new(left, top, width, height);
+        right = left.saturating_sub(to_i32(pad));
+    }
+    Some(rects)
+}
+
+/// Draw the "Open With…" `chooser` into its own popup `viewport`: a titled
+/// panel naming the file, one [`ListRow`] per visible candidate with the
+/// current one selected, the scrollbar beside them when the list is longer
+/// than the panel shows, and the Open/Cancel actions beneath.
+///
+/// Each candidate's row draws its application's own icon where `artwork`
+/// resolves one and the built-in bundle glyph otherwise, exactly as a grid
+/// tile does. It reads only the passed-in chooser and draws — no I/O, no
+/// authority — and every blit clips, so a popup too small for the panel simply
+/// shows what fits.
 pub fn draw_open_with_chooser(
     surface: &mut Surface,
     chooser: &OpenWithChooser,
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    artwork: &mut dyn IconArtwork,
 ) {
-    let bounds = open_with_chooser_rect(viewport, scale, theme);
+    let bounds = open_with_chooser_rect(viewport);
     let panel = Panel::new(alloc::format!("Open {} with", chooser.display_name()));
     panel.render(surface, bounds, scale, theme);
-    let Some(content) = panel.content_rect(bounds, scale, theme) else {
+    let Some(content) = open_with_list_rect(viewport, scale, theme) else {
         return;
     };
     let visible = open_with_visible_rows(viewport, scale, theme);
@@ -2393,27 +2543,77 @@ pub fn draw_open_with_chooser(
         };
         let mut row = ListRow::new(candidate.name()).with_icon(IconKind::AppBundle);
         row.set_selected(first.saturating_add(slot) == chooser.selected());
-        row.render(
-            surface,
-            open_with_row_rect(content, scale, theme, slot),
-            scale,
-            theme,
-            None,
+        let bounds = open_with_row_rect(content, scale, theme, slot);
+        let side = row.icon_side(bounds, scale, theme);
+        let art = artwork.artwork(
+            IconRequest::bundle(IconKind::AppBundle, candidate.bundle_path()),
+            side,
         );
+        row.render(surface, bounds, scale, theme, art);
     }
     if let Some(gutter) = open_with_gutter_rect(content, scale, theme) {
         let mut bar: ScrollBar = *chooser.scrollbar();
         bar.set_model(chooser.scroll_model(visible));
         bar.render(surface, gutter, scale, theme);
     }
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    if let Some(rects) = open_with_action_rects(viewport, scale, theme, font) {
+        for ((action, label), rect) in OPEN_WITH_ACTIONS.iter().zip(rects.iter()) {
+            build_open_with_action(*action, label, chooser).render(surface, *rect, scale, theme);
+        }
+    }
 }
 
-/// The candidate index the drawn `chooser` resolves window-local pixel `point`
-/// to, or `None` when the press is not on a candidate row — off the panel, on
-/// its title band, in the scroll gutter, or past the last row (fail closed).
+/// Build one of the chooser's action buttons: Open is the primary action and
+/// is offered only while a candidate is current, Cancel is always available.
+fn build_open_with_action(
+    action: OpenWithAction,
+    label: &str,
+    chooser: &OpenWithChooser,
+) -> Button {
+    let role = match action {
+        OpenWithAction::Open => ControlRole::Primary,
+        OpenWithAction::Cancel => ControlRole::Neutral,
+    };
+    let mut button = Button::new(ButtonContent::Label(String::from(label)), role);
+    if action == OpenWithAction::Open && chooser.chosen().is_none() {
+        button.set_state(ControlState::disabled());
+    }
+    button
+}
+
+/// The action the drawn `chooser` resolves popup-local pixel `point` to, or
+/// `None` when the press is not on one.
 ///
-/// It mirrors [`draw_open_with_chooser`]'s geometry through the shared
-/// [`open_with_chooser_rect`], so a press resolves to exactly the row the user
+/// Mirrors [`draw_open_with_chooser`]'s own band through the one private
+/// action-rectangle rule they share, so a click resolves to exactly the button
+/// the user pressed. An Open with no current candidate resolves to nothing
+/// rather than opening whatever happens to be first (fail closed).
+#[must_use]
+pub fn open_with_action_at(
+    chooser: &OpenWithChooser,
+    viewport: Rect,
+    scale: Scale,
+    theme: &Theme,
+    point: Point,
+) -> Option<OpenWithAction> {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let rects = open_with_action_rects(viewport, scale, theme, font)?;
+    OPEN_WITH_ACTIONS
+        .iter()
+        .zip(rects.iter())
+        .find(|(_, rect)| !rect.is_empty() && rect.contains(point))
+        .map(|((action, _), _)| *action)
+        .filter(|action| *action != OpenWithAction::Open || chooser.chosen().is_some())
+}
+
+/// The candidate index the drawn `chooser` resolves popup-local pixel `point`
+/// to, or `None` when the press is not on a candidate row — off the panel, on
+/// its title band, in the scroll gutter, on the action band, or past the last
+/// row (fail closed).
+///
+/// It mirrors [`draw_open_with_chooser`]'s geometry through the one private
+/// list rectangle they share, so a press resolves to exactly the row the user
 /// saw. The index is absolute (the chooser's scroll offset is applied), so it
 /// names a candidate rather than a position on screen.
 #[must_use]
@@ -2424,7 +2624,7 @@ pub fn open_with_row_at(
     theme: &Theme,
     point: Point,
 ) -> Option<usize> {
-    let content = open_with_content_rect(viewport, scale, theme)?;
+    let content = open_with_list_rect(viewport, scale, theme)?;
     let visible = open_with_visible_rows(viewport, scale, theme);
     let first = usize::try_from(chooser.offset()).unwrap_or(usize::MAX);
     (0..visible).find_map(|slot| {
@@ -2454,7 +2654,7 @@ pub fn open_with_scroll_pointer(
     event: &InputEvent,
     damage: &mut Region,
 ) -> Option<bool> {
-    let content = open_with_content_rect(viewport, scale, theme)?;
+    let content = open_with_list_rect(viewport, scale, theme)?;
     let gutter = open_with_gutter_rect(content, scale, theme)?;
     let visible = open_with_visible_rows(viewport, scale, theme);
     let model = chooser.scroll_model(visible);

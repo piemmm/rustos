@@ -19,6 +19,7 @@ use tairix_controls::{AuthorityState, ControlRole, ControlState, MenuItem};
 
 use crate::clock;
 use crate::input::TaskbarResponse;
+use crate::menu::BarMenuRow;
 
 /// One row of the clock's menu.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -93,34 +94,40 @@ pub struct ClockPermits {
 /// guessing) and never silently offered (which would promise an action that
 /// cannot happen).
 #[must_use]
-pub(crate) fn rows(permits: &ClockPermits) -> Vec<(usize, MenuItem)> {
+pub(crate) fn rows(permits: &ClockPermits) -> Vec<BarMenuRow> {
     ROWS.iter()
         .enumerate()
         .map(|(index, row)| {
-            let item = match row {
+            let (item, why) = match row {
                 ClockRow::Reading => {
                     let label = if states_a_time(&permits.reading) {
                         permits.reading.as_str()
                     } else {
                         READING_UNSET_LABEL
                     };
-                    MenuItem::new(label).with_state(ControlState::disabled())
+                    (
+                        MenuItem::new(label).with_state(ControlState::disabled()),
+                        None,
+                    )
                 }
                 ClockRow::SetDateTime => {
                     let item = MenuItem::new(SET_ROW_LABEL)
                         .with_group_break(true)
                         .with_role(ControlRole::Neutral);
                     if permits.set_available {
-                        item
+                        (item, None)
                     } else {
-                        item.with_state(
-                            ControlState::default().with_authority(AuthorityState::NeedsCapability),
+                        (
+                            item.with_state(
+                                ControlState::default()
+                                    .with_authority(AuthorityState::NeedsCapability),
+                            ),
+                            Some(REASON_NO_BROKER),
                         )
-                        .with_reason(REASON_NO_BROKER)
                     }
                 }
             };
-            (index, item)
+            (index, item, why)
         })
         .collect()
 }
@@ -158,7 +165,12 @@ mod tests {
 
     /// The rows a menu built for `permits` draws, in plate order.
     fn drawn(permits: &ClockPermits) -> alloc::vec::Vec<tairix_controls::MenuItem> {
-        rows(permits).into_iter().map(|(_, item)| item).collect()
+        rows(permits).into_iter().map(|(_, item, _)| item).collect()
+    }
+
+    /// The tip each row carries, in plate order.
+    fn tips(permits: &ClockPermits) -> alloc::vec::Vec<Option<&'static str>> {
+        rows(permits).into_iter().map(|(_, _, why)| why).collect()
     }
 
     #[test]
@@ -184,9 +196,18 @@ mod tests {
 
     #[test]
     fn without_a_broker_the_command_is_rendered_refused_with_its_reason() {
-        let items = drawn(&permits("09:41", false));
+        let permits = permits("09:41", false);
+        let items = drawn(&permits);
         assert!(!items[1].state().is_actionable());
-        assert_eq!(items[1].reason(), Some(REASON_NO_BROKER));
+        // The reason travels beside the row as tip text, never on the row:
+        // a caption would widen the plate to the length of the excuse.
+        assert_eq!(tips(&permits)[1], Some(REASON_NO_BROKER));
+        assert!(!items[1].label().contains(REASON_NO_BROKER));
+    }
+
+    #[test]
+    fn an_offered_command_carries_no_tip() {
+        assert_eq!(tips(&permits("09:41", true)), [None, None]);
     }
 
     #[test]
@@ -201,7 +222,7 @@ mod tests {
     fn every_row_in_the_table_renders_and_carries_its_own_position() {
         let built = rows(&permits("09:41", true));
         for (index, row) in ROWS.iter().enumerate() {
-            let (position, item) = &built[index];
+            let (position, item, _) = &built[index];
             assert_eq!(*position, index, "a row carries its own table position");
             assert_eq!(response_at(index), row.response());
             assert!(!item.label().is_empty());

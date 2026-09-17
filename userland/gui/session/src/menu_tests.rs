@@ -1381,3 +1381,106 @@ fn a_plate_is_wide_enough_for_its_own_title_not_only_its_rows() {
     let (_, marked) = font.elide_to_width(TITLE, title_box.width);
     assert!(!marked, "and draws the title without eliding it");
 }
+
+// --- a row's explanation is a tip --------------------------------------
+
+/// A root plate whose second row is refused and explains why, and whose
+/// third is refused and says nothing.
+fn explained_model() -> ChainModel {
+    let refused = || MenuItem::new("Open With\u{2026}").with_state(refused_state());
+    let mut model = ChainModel::new("Files");
+    model.push(ChainRow::item(id(1), MenuItem::new("Open")));
+    model.push(ChainRow::item(id(2), refused()).explained("only a file opens with an application"));
+    model.push(ChainRow::item(
+        id(3),
+        MenuItem::new("Paste").with_state(refused_state()),
+    ));
+    model
+}
+
+/// The state a row the desktop will not let be chosen is drawn in.
+fn refused_state() -> tairix_controls::ControlState {
+    tairix_controls::ControlState::default().with_enabled(false)
+}
+
+#[test]
+fn the_hovered_row_reports_its_own_screen_rect_and_its_explanation() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, explained_model(), Point::new(40, 40), &g);
+
+    assert_eq!(
+        chain.hovered_tip(&g),
+        None,
+        "a chain nothing is hovering on explains nothing"
+    );
+
+    settle_on(&mut chain, 0, 1, &g);
+    let (rect, why) = chain.hovered_tip(&g).expect("the refused row explains");
+    assert_eq!(why, "only a file opens with an application");
+    assert_eq!(
+        rect,
+        chain.row_rect(0, 1, &g).expect("the row is laid out"),
+        "the region is the row's own screen rectangle, because the chain \
+         placed the plate itself"
+    );
+
+    // A row with nothing to explain answers nothing, refused or not.
+    settle_on(&mut chain, 0, 2, &g);
+    assert_eq!(chain.hovered_tip(&g), None);
+    settle_on(&mut chain, 0, 0, &g);
+    assert_eq!(chain.hovered_tip(&g), None);
+}
+
+#[test]
+fn a_closed_chain_explains_nothing() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, explained_model(), Point::new(40, 40), &g);
+    settle_on(&mut chain, 0, 1, &g);
+    assert!(chain.hovered_tip(&g).is_some());
+
+    chain.handle(&key(NamedKey::Escape), row_point(&chain, 0, 1, &g), &g);
+    assert_eq!(
+        chain.hovered_tip(&g),
+        None,
+        "a dismissed chain has no row under the pointer to explain"
+    );
+}
+
+/// The pointer works on the deepest plate; an ancestor keeps its highlight to
+/// show the path it came down, not to say where the pointer is. So it is the
+/// child's row that answers a tip, and the child's rectangle.
+#[test]
+fn the_deepest_plate_is_the_one_that_explains_the_pointer() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+
+    let mut model = ChainModel::new("Nested");
+    let parent = model.push(ChainRow::submenu(MenuItem::new("Open With\u{2026}")));
+    model.push(
+        ChainRow::item(id(2), MenuItem::new("View").with_state(refused_state()))
+            .under(parent)
+            .explained("that application cannot open this file"),
+    );
+    open(&mut chain, APP, model, Point::new(40, 40), &g);
+
+    // Resting on the parent opens its child, which becomes the deepest plate
+    // with nothing hovered on it yet. The parent is offered, so there is
+    // nothing to explain either way.
+    settle_on(&mut chain, 0, parent, &g);
+    assert_eq!(plates(&chain), 2, "the child plate is up");
+    assert_eq!(chain.hovered_tip(&g), None);
+
+    settle_on(&mut chain, 1, 0, &g);
+    let (rect, why) = chain.hovered_tip(&g).expect("the child's refused row");
+    assert_eq!(why, "that application cannot open this file");
+    assert_eq!(
+        rect,
+        chain.row_rect(1, 0, &g).expect("the child row is laid out"),
+        "and its own rectangle on its own plate"
+    );
+}

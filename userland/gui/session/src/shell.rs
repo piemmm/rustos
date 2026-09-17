@@ -68,12 +68,14 @@ use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumb
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
-use crate::menu::{MenuChain, SurfaceKind};
+use crate::menu::{resolve_chain_icons, MenuChain, SurfaceKind};
 use crate::presenter::{chrome_blur, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
 use crate::thumbs::WindowThumbnails;
+use crate::tip::{SeatTooltip, TipSource};
 use crate::windows::chain_geometry;
+use tairix_abi::window_ipc::WindowRegion;
 
 /// A source of live pointer/keyboard events for the desktop.
 ///
@@ -168,6 +170,15 @@ pub struct DesktopShell {
     /// the chain no longer has cannot be left on the screen and none has to
     /// be taken down by a second path.
     menu_windows: Vec<(SurfaceKind, WindowId)>,
+    /// The seat's one tooltip: what each source has declared, the dwell in
+    /// flight, and the tip on screen.
+    tip: SeatTooltip,
+    /// The compositor window the shown tip's plate is drawn in.
+    ///
+    /// Input-transparent, because a tip appears under the pointer it explains
+    /// and a plate that took that pointer would fight the very hover it is
+    /// answering.
+    tip_window: Option<WindowId>,
     /// The owner window those surfaces were opened under, so a chain that
     /// displaced another under a different owner cannot inherit them.
     menu_owner: Option<WindowId>,
@@ -282,6 +293,8 @@ impl DesktopShell {
             backdrop_fade: BackdropFade::default(),
             menu_windows: Vec::new(),
             menu_owner: None,
+            tip: SeatTooltip::new(),
+            tip_window: None,
             thumbs: WindowThumbnails::new(),
             #[cfg(test)]
             settled: SettleWork::default(),
@@ -1104,6 +1117,15 @@ impl DesktopShell {
         }
         let scale = compositor.scale();
         let geom = chain_geometry(&self.session, compositor);
+        // A candidate row's own application icon is resolved before the
+        // paint, so the row that asked for it is drawn with it in the same
+        // frame — and the paint itself reads nothing.
+        resolve_chain_icons(
+            chain,
+            &geom,
+            self.artwork_resolver.as_mut(),
+            &mut self.artwork,
+        );
         let corners =
             Corners::from_radius(scale.scale_length(geom.theme.metrics().popup_corner_radius));
         let blur = chrome_blur(geom.theme);
@@ -1154,14 +1176,143 @@ impl DesktopShell {
             kept.push((placed.kind, id));
             chain.presented(placed.kind);
         }
+        // What the row under the pointer explains, if it explains anything.
+        // Read once the plates are placed, so the region names where the row
+        // actually is; taken as an owned line because declaring it needs the
+        // seat and the geometry is borrowed from the session.
+        let explained = chain
+            .hovered_tip(&geom)
+            .and_then(|(rect, why)| tip_region(rect).map(|region| (region, String::from(why))));
         for (kind, id) in core::mem::take(&mut self.menu_windows) {
             if !kept.iter().any(|(live, _)| *live == kind) {
                 self.drop_menu_window(compositor, id);
             }
         }
         self.menu_windows = kept;
+        match explained {
+            Some((region, why)) => self.declare_chain_tooltip(region, &why),
+            // A chain that closed, or a row that has nothing to explain, has
+            // the same answer: nothing to show.
+            None => self.withdraw_chain_tooltip(),
+        };
         self.sync_active_frame(compositor);
         drawn
+    }
+
+    /// Record what `window` declared for a region of its own client area, or
+    /// withdraw it when `text` is empty. Answers whether the screen changed.
+    ///
+    /// The compositor resolves where that window's client pixels begin, so a
+    /// declaration landing under a pointer already at rest inside it starts
+    /// counting rather than waiting for a sample that will not come.
+    pub fn declare_tooltip(
+        &mut self,
+        window: WindowId,
+        region: WindowRegion,
+        text: &str,
+        compositor: &Compositor,
+    ) -> bool {
+        let src = TipSource::Window(window);
+        self.tip
+            .declare(src, region, text, tip_origin(src, compositor))
+    }
+
+    /// Forget everything `window_id` declared: it closed, or its owner died.
+    pub fn forget_tooltip(&mut self, window: WindowId) -> bool {
+        self.tip.forget(TipSource::Window(window))
+    }
+
+    /// Take any tip down and disarm the dwell — a press, a key, a scroll, or
+    /// any change of scale, theme or mode. None of them is *about* the tip.
+    pub fn dismiss_tooltip(&mut self) -> bool {
+        self.tip.dismiss()
+    }
+
+    /// Note the pointer at screen `at`, arming or clearing the dwell.
+    pub fn tooltip_pointer(&mut self, at: Point, now_ns: u64, compositor: &Compositor) -> bool {
+        self.tip
+            .pointer_moved(at, now_ns, |src| tip_origin(src, compositor))
+    }
+
+    /// Resolve a dwell that has come due.
+    pub fn tooltip_tick(&mut self, now_ns: u64) -> bool {
+        self.tip.tick(now_ns)
+    }
+
+    /// The park this seat needs, shortened to the moment a pending tip is due.
+    #[must_use]
+    pub fn tooltip_park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        self.tip.park_deadline_ns(now_ns, park_ns)
+    }
+
+    /// Declare the explanation for the chain row the pointer rests on, in
+    /// screen pixels.
+    ///
+    /// The chain's plates are the desktop's own surfaces, so it knows where
+    /// the row is and states the region directly rather than in some window's
+    /// client space.
+    fn declare_chain_tooltip(&mut self, region: WindowRegion, text: &str) -> bool {
+        self.tip
+            .declare(TipSource::Chain, region, text, Some(CHAIN_ORIGIN))
+    }
+
+    /// Withdraw it: no row under the pointer explains anything, or the chain
+    /// closed.
+    ///
+    /// Its own call rather than an empty-text `declare`, because a withdrawal
+    /// has no region to state and the desktop is the declarer here — there is
+    /// no caller to invent one.
+    fn withdraw_chain_tooltip(&mut self) -> bool {
+        self.tip.withdraw(TipSource::Chain)
+    }
+
+    /// Put the shown tip's plate on screen, or take it down when none is
+    /// shown. Answers whether anything was drawn.
+    ///
+    /// Presented after the menu chain so a tip explaining a row sits above the
+    /// plate it explains, and marked input-transparent so it never becomes the
+    /// pointer target it appeared under.
+    pub fn present_tooltip(&mut self, compositor: &mut Compositor) -> bool {
+        let scale = compositor.scale();
+        let theme = self.session.floating_theme().clone();
+        let viewport = compositor.screen_rect();
+        let placed = self
+            .tip
+            .placed(viewport, scale, &theme, |src| tip_origin(src, compositor));
+        let Some((tooltip, rect)) = placed else {
+            if let Some(id) = self.tip_window.take() {
+                compositor.remove(id);
+            }
+            return false;
+        };
+        let size = (rect.width, rect.height);
+        let live = self
+            .tip_window
+            .filter(|id| compositor.window(*id).is_some());
+        let painted = if let Some(id) = live {
+            compositor.move_window(id, rect.origin);
+            let area = Region::from(Rect::new(0, 0, size.0, size.1));
+            compositor
+                .repaint_window(id, size, &area, |surface, rects| {
+                    damage::paint_parts(surface, rects, |surface| {
+                        tooltip.render(surface, Rect::new(0, 0, size.0, size.1), scale, &theme);
+                    });
+                })
+                .then_some(id)
+        } else {
+            let Some(mut pixels) = Surface::new(size.0, size.1) else {
+                return false;
+            };
+            tooltip.render(&mut pixels, Rect::new(0, 0, size.0, size.1), scale, &theme);
+            Some(compositor.add_window(rect.origin, pixels))
+        };
+        let Some(id) = painted else {
+            return false;
+        };
+        compositor.set_input_transparent(id, true);
+        compositor.raise(id);
+        self.tip_window = Some(id);
+        true
     }
 
     /// Take one of the chain's compositor windows down, giving the keyboard
@@ -1569,13 +1720,23 @@ impl DesktopShell {
         compositor: &mut Compositor,
         now_ns: u64,
     ) -> ShellOutcome {
-        match self.router.handle(
+        // A tip answers a *resting* pointer: motion arms or clears the dwell,
+        // and every other event means the user has moved on from asking.
+        let moved = matches!(event, InputEvent::PointerMoved { .. });
+        let routed = self.router.handle(
             event,
             compositor,
             self.session.taskbar_mut(),
             &self.presenter,
             now_ns,
-        ) {
+        );
+        if moved {
+            let at = self.router.pointer();
+            self.tooltip_pointer(at, now_ns, compositor);
+        } else {
+            self.dismiss_tooltip();
+        }
+        match routed {
             SessionInputResponse::Ignored => ShellOutcome::Ignored,
             SessionInputResponse::WindowManager(response) => {
                 self.mirror_focus(&response);
@@ -1658,6 +1819,9 @@ impl DesktopShell {
         // activate/minimise, a desktop press — keep the decorated active frame
         // in step, so exactly the focused window shows its active title bar.
         self.sync_active_frame(compositor);
+        // A tip shown, moved, or taken down by this batch reaches the screen
+        // with it, so the plate never lags the pointer that asked for it.
+        self.present_tooltip(compositor);
         // The hotspot follows pointer motion and the shape follows what is
         // under it (or the move cursor during a drag), so the desktop always
         // shows a live pointer.
@@ -1986,5 +2150,27 @@ pub fn work_area_excluding(screen: Rect, bar: Rect, edge: Edge) -> Rect {
                 screen.height,
             )
         }
+    }
+}
+
+/// The chain states its rows in screen pixels already, so its regions are
+/// resolved against the screen's own origin.
+const CHAIN_ORIGIN: Point = Point::new(0, 0);
+
+/// A screen rectangle as the region a tip is declared over, or `None` when it
+/// is not a representable one.
+fn tip_region(rect: Rect) -> Option<WindowRegion> {
+    WindowRegion::new(rect.left(), rect.top(), rect.width, rect.height).ok()
+}
+
+/// Where the region a tip source declared begins, in screen pixels.
+///
+/// An application states its own client pixels and never learns where its
+/// window sits, so the seat resolves them; the menu chain's rows are already
+/// screen-space, because the chain placed the plates itself.
+fn tip_origin(src: TipSource, compositor: &Compositor) -> Option<Point> {
+    match src {
+        TipSource::Chain => Some(CHAIN_ORIGIN),
+        TipSource::Window(id) => Some(compositor.window(id)?.client_rect().origin),
     }
 }

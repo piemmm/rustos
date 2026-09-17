@@ -174,15 +174,17 @@ pub fn model(on_icon: bool, settings: &PinboardSettings) -> ChainModel {
             continue;
         };
         let mut item = MenuItem::new(command.label());
+        let mut why = None;
         if command.in_force(settings) {
             item = item
                 .with_mark(MenuMark::Radio)
                 .with_state(ControlState::disabled());
-            if let Some(reason) = command.already_reason() {
-                item = item.with_reason(reason);
-            }
+            why = command.already_reason();
         }
         let mut row = ChainRow::item(id, item);
+        if let Some(why) = why {
+            row = row.explained(why);
+        }
         if command.opens_group() && !model.rows().is_empty() {
             row = row.grouped();
         }

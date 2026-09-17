@@ -94,7 +94,17 @@ window holds at most one declaration, so a second replaces the first, and
 empty text withdraws it — one operation, with no second "hide" to fall out of
 step with. The plate is drawn in an **input-transparent** compositor window,
 so the tip that appears under the pointer cannot take the hover it exists to
-explain. See `plans/TOOLTIPS.md` and [the window manager](./wm.md).
+explain.
+
+Two things declare tips. An application declares them for its own client
+pixels, as above. The desktop declares them for **its own menu rows**: a row
+that cannot be chosen states why on dwell rather than in a caption beside its
+label, which is what used to make a plate as wide as its longest excuse
+([menus](./menus.md)). The two cannot collide — a declaration is keyed on
+either the compositor window presenting an application or the menu chain
+itself, never on a bare id both could mint.
+
+See `plans/TOOLTIPS.md` and [the window manager](./wm.md).
 
 ## Container pointer routing
 

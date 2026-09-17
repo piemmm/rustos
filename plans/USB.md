@@ -1490,9 +1490,9 @@ acceptance step (QEMU models no Pi USB, §0.4).
 ## 4. Out of scope (explicitly)
 
 - Arbitrary (non-boot-vocabulary) HID collections — gamepads, consumer
-  controls, custom report layouts beyond the mouse/keyboard boot fields — and
-  isochronous transfers, each a later class driver or HCD extension on top of
-  this seam. (Report protocol itself is now *used* for a **mouse** — the
+  controls, custom report layouts beyond the mouse/keyboard boot fields — a
+  later class driver on top of this seam. (Report protocol itself is now *used*
+  for a **mouse** — the
   enumeration parses its Report Descriptor and runs it in report protocol so
   `SET_IDLE` quiesces the otherwise-streaming pointer, normalising its reports
   back into the boot vocabulary; a keyboard stays in boot protocol, and any
@@ -1505,3 +1505,12 @@ acceptance step (QEMU models no Pi USB, §0.4).
 - A second host-controller driver (a non-xHCI controller): the architecture
   admits it (it binds a different controller node and serves the same URB ABI),
   but none is planned here.
+
+**Isochronous transfers are no longer out of scope here; they are specified and
+staged in `plans/SOUND.md` (SND6), whose USB audio driver is their first
+consumer.** The work is the periodic endpoint kind and service-interval model
+in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and
+feedback endpoints in `drivers/bus/usb/xhci` — an extension of this plan's seam
+rather than a departure from it, shaped for a periodic endpoint in general so
+the next consumer (a camera) reuses it. Read that plan before touching the
+transfer path.

@@ -27,6 +27,7 @@ use tairix_proglib::EntryId;
 use tairix_theme::Appearance;
 
 use crate::input::TaskbarResponse;
+use crate::menu::BarMenuRow;
 
 /// One system quick action the menu can offer.
 ///
@@ -237,36 +238,41 @@ fn offered(permits: SystemPermits) -> impl Iterator<Item = (usize, &'static Syst
 /// does not have at all ([`SystemRow::offered_by`]) is the exception and is
 /// not rendered.
 #[must_use]
-pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<(usize, MenuItem)> {
+pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<BarMenuRow> {
     offered(permits)
         .map(|(index, row)| {
             let item = MenuItem::new(row.label)
                 .with_group_break(row.group_break)
                 .with_role(row.role);
-            let item = match row.action {
+            let (item, why) = match row.action {
                 // The two appearances are a group of alternatives exactly one
                 // of which holds, so the one in force is the group's chosen
                 // member: a bullet, disabled. The mark already says why it
-                // cannot be chosen again, so no reason is stated beside it.
-                SystemAction::Appearance(choice) if choice == permits.appearance => item
-                    .with_mark(MenuMark::Radio)
-                    .with_state(ControlState::disabled()),
-                SystemAction::TaskShell if !permits.task_shell_installed => item
-                    .with_state(ControlState::disabled())
-                    .with_reason(REASON_NOT_INSTALLED),
-                SystemAction::Lock if !permits.lock_available => item
-                    .with_state(
+                // cannot be chosen again, so nothing explains it twice.
+                SystemAction::Appearance(choice) if choice == permits.appearance => (
+                    item.with_mark(MenuMark::Radio)
+                        .with_state(ControlState::disabled()),
+                    None,
+                ),
+                SystemAction::TaskShell if !permits.task_shell_installed => (
+                    item.with_state(ControlState::disabled()),
+                    Some(REASON_NOT_INSTALLED),
+                ),
+                SystemAction::Lock if !permits.lock_available => (
+                    item.with_state(
                         ControlState::default().with_authority(AuthorityState::NeedsCapability),
-                    )
-                    .with_reason(REASON_NO_UNLOCK_PROMPT),
-                SystemAction::Restart | SystemAction::ShutDown if !permits.power => item
-                    .with_state(
+                    ),
+                    Some(REASON_NO_UNLOCK_PROMPT),
+                ),
+                SystemAction::Restart | SystemAction::ShutDown if !permits.power => (
+                    item.with_state(
                         ControlState::default().with_authority(AuthorityState::NeedsCapability),
-                    )
-                    .with_reason(REASON_NO_POWER_AUTHORITY),
-                _ => item,
+                    ),
+                    Some(REASON_NO_POWER_AUTHORITY),
+                ),
+                _ => (item, None),
             };
-            (index, item)
+            (index, item, why)
         })
         .collect()
 }

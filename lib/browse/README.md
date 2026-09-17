@@ -131,20 +131,23 @@ can never diverge in navigation semantics, listing policy, or look.
   New Folder is absent from `CONTEXT_COMMANDS` (it is a toolbar write tool) and
   lands with the stage that first wires its behaviour.
   `is_enabled` is **derived from** `reason`, so a row can never grey out with
-  nothing to say — the reason is the display text the menu states beside the
-  label. **Nothing here draws a menu**: `context_menu(model, title)` declares
+  nothing to say — the reason is the text the seat shows as a tooltip when the
+  pointer rests on the row, never a caption beside its label. **Nothing here draws a menu**: `context_menu(model, title)` declares
   the row model the desktop's own menu service renders
   (`plans/NEW-MENUS.md`), read back by `context_command_from_item`, whose
   one-based numbering is that declaration's exact inverse. The files app sends
   it on a secondary-button press and routes the one answer to the same verbs the
   toolbar and keyboard drive.
-  The **Open With…** chooser is *not* a menu: `open_with::OpenWithChooser`
-  holds the candidates, a selection and a scroll offset, and the renderer's
-  `draw_open_with_chooser` / `open_with_row_at` / `open_with_scroll_pointer`
-  draw a scrolled list of `ListRow`s in a `Panel` and resolve a press through
-  the one placement all three share. A list, because the candidate set grows
-  with the applications a user installs and no menu plate can promise to hold
-  it.
+  The **Open With…** row carries both answers. Its submenu offers the
+  highest-ranked candidates a plate can hold (`quick_applications`, bounded by
+  `OPEN_WITH_QUICK_MAX`), each naming the bundle whose icon the desktop draws
+  beside it. Its own click opens the complete list, which is *not* a menu:
+  `open_with::OpenWithChooser` holds the candidates, a selection and a scroll
+  offset, and the renderer's `draw_open_with_chooser` / `open_with_row_at` /
+  `open_with_scroll_pointer` draw a scrolled list of `ListRow`s with Open and
+  Cancel, sized to the candidates it holds, and resolve a press through the one
+  placement all three share. A list, because the candidate set grows with the
+  applications a user installs and no menu plate can promise to hold it.
 - **In-place rename** (`rename`, `Browser::rename_selected`): the model of
   the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
   host-tested without a kernel. `validate_new_name` spells the typed name
@@ -616,10 +619,14 @@ can never diverge in navigation semantics, listing policy, or look.
   hit-test, resolving only an *enabled* tool (fail closed), so the picker can
   neither draw nor resolve a write tool. `chrome_height` (the toolbar strip)
   is the one header offset the item views, the scrollbar
-  gutter, and every hit-test share. `selection_rect` is
-  `entry_index_at`'s inverse — the rectangle the selected item is drawn in, so
-  an overlay (the in-place rename editor) sits exactly over it.
-  `selection_rect`'s sibling `draw_properties` draws the FM8b Properties
+  gutter, and every hit-test share. `entry_rect` is
+  `entry_index_at`'s inverse — the rectangle an item is drawn in, which is what
+  a damage report names — and `selection_name_rect` is the narrower rectangle
+  the selected item's **name** occupies, read from the drawn controls
+  themselves (`TableRow::cell_text_rect` for a list row's name cell,
+  `IconTile::label_rect` for a tile's label band) so the in-place rename editor
+  sits on the name rather than over the icon and the columns beside it.
+  `draw_properties` draws the FM8b Properties
   overlay — a centered `lib/controls` `Panel` painting `properties_rows` for
   the selected node's `Properties`, clipped so a too-small window shows what
   fits rather than panicking. `draw_properties_editable` is the file manager's

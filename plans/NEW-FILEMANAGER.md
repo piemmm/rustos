@@ -223,7 +223,7 @@ mutation vertical keys on). **FM9-b is now complete, app side and guest side.
 FM9-a and FM9-c are app-side only: their product halves are landed, and their
 guest click-throughs are partly delivered and partly blocked, as below.**
 
-**FM9-a — what is true.** The *product* half is landed: `render::selection_rect`
+**FM9-a — what is true.** The *product* half is landed: `render::selection_name_rect`
 for rows, the forward `render::manager_tool_rect` over `Toolbar::tool_rect` for
 the New Folder tool, and the inline-rename commit. The *guest* half is
 `tests/integration/fsmutate_qemu_aarch64`, a
@@ -795,9 +795,12 @@ reason* — never hidden — when the model reports it inapplicable, so the menu
 shape does not move with the selection), and the `Run` binary sends it as an
 `OpenMenu` anchored at the window-local press point. `ContextMenuModel::reason`
 is the one rule and `is_enabled` derives from it, so a row cannot grey out with
-nothing to say; removal declares the destructive emphasis; a row's id is its
-command's position in `CONTEXT_COMMANDS`, and `context_command_from_item` is
-that numbering's exact inverse.
+nothing to say; the desktop shows that reason as the seat's tip on dwell and
+never as a caption beside the label, which used to size the whole plate to
+"only a file opens with an application" (`plans/NEW-MENUS.md` D33); removal
+declares the destructive emphasis; a row's id is its command's position in
+`CONTEXT_COMMANDS`, and `context_command_from_item` is that numbering's exact
+inverse.
 
 The answer is one `MenuClosed` matched against the open id the window minted, so
 an answer to a settled gesture cannot run a stale command. The `Run` binary
@@ -813,7 +816,8 @@ holds no menu shell.
 Host-tested in `lib/browse`: the row-id inverse over the whole command list, one
 declared row per command carrying its own label and caption, every inapplicable
 row disabled *with* the model's reason, the three distinct reasons Open With…
-and Open and Close can state, the destructive emphasis on removal alone, and a
+and Open and Close can state, that a decoded reason reaches the chain row's tip
+and never its drawn form, the destructive emphasis on removal alone, and a
 title the bounds refuse opening nothing. Docs: `docs/src/desktop/apps.md`,
 `docs/src/desktop/menus.md`, `lib/browse/README.md` + rustdoc.
 
@@ -848,16 +852,22 @@ binary supplies the inline text editor and the `fs_rename` seam.
   `RenameError::Refused(errno)` (§2.24, §5.4). The read-only picker composes
   the same `Browser` and never calls the write path.
 - **App** (`files.app`): `F2` opens the one shared `lib/controls::TextField`
-  over the selected row (via the new `render::selection_rect` / `ViewLayout::item_rect`
-  overlay geometry), pre-filled and bounded by `FS_NAME_MAX`; keys route to
-  the editor, edits live-validate (a clash/bad char shows in the field),
+  over the selected item's **name** (via `render::selection_name_rect`, which
+  reads the drawn controls' own geometry — the list row's name-cell text span
+  through `TableRow::cell_text_rect`, the grid tile's label band through
+  `IconTile::label_rect`), pre-filled and bounded by `FS_NAME_MAX`; keys route
+  to the editor, edits live-validate (a clash/bad char shows in the field),
   `Enter` commits and `Escape` cancels. The window-channel wire key is mapped
-  onto the `lib/input` vocabulary locally.
+  onto the `lib/input` vocabulary locally. The same rename is reachable without
+  the in-place editor at all: the context menu's Rename row carries a
+  quick-entry field as its child (`plans/NEW-MENUS.md` M6), and a name
+  committed there runs this very `rename_selected`.
 - Host tests (`lib/browse`, `lib/path`): valid commit-then-refresh with the
   selection following, each invalid-name class refused before any syscall,
   clash, no-op unchanged, VFS refusal surfaced, empty-directory no-selection,
-  `validate_new_name` purity, every `RenameError` message non-empty, and
-  `selection_rect`. Docs: `docs/src/desktop/apps.md`, `lib/browse`/`lib/path`
+  `validate_new_name` purity, every `RenameError` message non-empty, and the
+  field's rectangle lying on the name in both views rather than over the whole
+  item. Docs: `docs/src/desktop/apps.md`, `lib/browse`/`lib/path`
   README + rustdoc.
 
 ### FM6a — the engine activation decision `[x]`
@@ -1501,7 +1511,7 @@ the click-through that keys on them is written.
   - **FM9-a — New Folder + inline-rename: product `[x]` (done); the create's
     guest click-through `[x]` (done, by a different route); the rename commit
     and the toolbar gesture `[ ]` (blocked, D98).** The product half is
-    landed — `render::selection_rect` for rows, the forward
+    landed — `render::selection_name_rect` for rows, the forward
     `render::manager_tool_rect` over `Toolbar::tool_rect` for the New Folder
     tool, and the inline-rename commit — and is host-tested.
     The create's guest coverage is

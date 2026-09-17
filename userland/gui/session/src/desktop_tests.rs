@@ -1278,8 +1278,8 @@ fn the_menu_offers_exactly_the_closed_row_set_with_the_settings_in_force_marked(
             "the setting in force is not a command"
         );
         assert!(
-            item.reason().is_some(),
-            "a marked row says why it is not offered"
+            row.tip().is_some(),
+            "a marked row says why it is not offered, as a tip rather than a caption"
         );
         assert_eq!(
             item.state().activity,

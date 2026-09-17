@@ -4258,7 +4258,7 @@ transfer, landed in increments:
   FM9-a is landed**: the aarch64 `autoload_input` QEMU vertical now appends,
   after the AW4 terminal round trip, a New-Folder + inline-rename click-through
   that descends into `/Users/root` by layout-reconstructed pointer clicks
-  (`render::selection_rect` for rows, the new forward `render::manager_tool_rect`
+  (`render::selection_name_rect` for rows, the new forward `render::manager_tool_rect`
   over the new `Toolbar::tool_rect` for the New Folder tool, offset by the WM's
   `WindowFrame::insets` client inset) and seat-keyboard `Enter`s, creating and
   naming a folder; the guest PASS gate latches two new `FsNodeMutated`
@@ -7496,6 +7496,19 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-09-17 — §13 requires every planning file to open with a progress
+  ledger and to keep it current.** Owner decision. Status was recorded in
+  whatever shape each plan chose — a prose "Status" list, a status word folded
+  into a section heading, a table buried nine hundred lines down, or nowhere —
+  so "what is built and what is left" could not be answered without reading the
+  plan, and a reader could not cite an item by id. Two of eighty-five plans had
+  a status table in their first sixty lines when the rule landed, and the owner
+  took the decision that there is **no sweep**: `plans/SOUND.md` is written to
+  the rule and every other plan adopts it the next time that plan is touched,
+  so the gap closes with the work rather than as a formatting pass. A plan that
+  predates the rule and has not been touched since is therefore not a defect;
+  one edited without gaining its ledger is.
 
 - **2026-09-07 — §25 gains the arena resize granule, so the userland heap's
   retention is no longer the only thing bounding its syscalls.** Owner decision.

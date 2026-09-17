@@ -201,6 +201,29 @@ pub fn applications_for<'a>(name: &str, bundles: &'a [AppAssociation]) -> Vec<&'
     ranked.sort_by_key(|(distance, _)| *distance);
     ranked.into_iter().map(|(_, bundle)| bundle).collect()
 }
+/// Most candidate applications the context menu's "Open With…" submenu
+/// offers.
+///
+/// A **format** bound on a plate, not on the candidate set: a plate does not
+/// scroll and cannot promise to hold a list that grows with what a user
+/// installs, so the submenu offers the highest-ranked candidates that fit and
+/// the row's own click opens the complete, scrolling chooser
+/// ([`OpenWithChooser`]). Half a plate's worth, so the menu stays a menu with
+/// its command rows still on it.
+pub const OPEN_WITH_QUICK_MAX: usize = 6;
+
+/// The highest-ranked candidates a menu plate can promise to hold, from the
+/// ranked list [`applications_for`] answered.
+///
+/// Ranked order is preserved, so the submenu's first row is the application
+/// that claims the file most specifically — the same one the chooser opens on.
+/// An empty answer is the honest "nothing to offer as a submenu"; the row then
+/// carries no chevron and its click opens the chooser exactly as before.
+#[must_use]
+pub fn quick_applications<'a>(ranked: &[&'a AppAssociation]) -> Vec<&'a AppAssociation> {
+    ranked.iter().take(OPEN_WITH_QUICK_MAX).copied().collect()
+}
+
 /// One candidate application the "Open With…" chooser offers: what the row
 /// says, and the bundle a chosen row launches.
 ///
@@ -214,6 +237,21 @@ pub struct OpenWithCandidate {
 }
 
 impl OpenWithCandidate {
+    /// One candidate: what its row says, and the bundle a choice of it
+    /// launches.
+    ///
+    /// Public because the chooser is not the only surface that offers
+    /// candidates: the context menu's own submenu offers the top of the same
+    /// ranked list, and the answer it reads back has to name the same
+    /// candidates the rows were built from.
+    #[must_use]
+    pub fn new(name: impl Into<String>, bundle_path: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            bundle_path: bundle_path.into(),
+        }
+    }
+
     /// The bundle's human-readable name — the chooser row's label.
     #[must_use]
     pub fn name(&self) -> &str {

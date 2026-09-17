@@ -2211,6 +2211,8 @@ mod program {
             // no held frame can reach a screen it does not own, nothing it
             // animates is on screen, and a timer would wake a core for no
             // work.
+            // Applied in turn rather than nested: nine levels of nesting said
+            // nothing the order does not.
             let timeout_ns = {
                 let now_ns = tairix_rt::clock_get();
                 // A thumbnail slice is owed *now*: the wait still reports a
@@ -2220,31 +2222,17 @@ mod program {
                 } else {
                     u64::MAX
                 };
-                switch.park_deadline_ns(lock.park_deadline_ns(
-                    now_ns,
-                    clock.park_deadline_ns(
-                        now_ns,
-                        fade.park_deadline_ns(
-                            now_ns,
-                            shell.backdrop_park_deadline_ns(
-                                now_ns,
-                                shell.taskbar_park_deadline_ns(
-                                    now_ns,
-                                    frames.park_deadline_ns(
-                                        now_ns,
-                                        frame_stats.park_deadline_ns(
-                                            now_ns,
-                                            pacer.park_deadline_ns(
-                                                now_ns,
-                                                tairix_rt::cachereport::fold_wait_deadline_ns(owed),
-                                            ),
-                                        ),
-                                    ),
-                                ),
-                            ),
-                        ),
-                    ),
-                ))
+                let mut park = tairix_rt::cachereport::fold_wait_deadline_ns(owed);
+                park = pacer.park_deadline_ns(now_ns, park);
+                park = frame_stats.park_deadline_ns(now_ns, park);
+                park = frames.park_deadline_ns(now_ns, park);
+                park = shell.taskbar_park_deadline_ns(now_ns, park);
+                park = shell.backdrop_park_deadline_ns(now_ns, park);
+                park = shell.tooltip_park_deadline_ns(now_ns, park);
+                park = fade.park_deadline_ns(now_ns, park);
+                park = clock.park_deadline_ns(now_ns, park);
+                park = lock.park_deadline_ns(now_ns, park);
+                switch.park_deadline_ns(park)
             };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
             if waited != 0 {
@@ -2270,6 +2258,11 @@ mod program {
                 // this is what opens a picker whose dwell has elapsed and
                 // takes down one whose grace has.
                 shell.tick_taskbar(&mut compositor, now_ns);
+                // A pointer at rest produces no events either, so this is what
+                // shows the tip whose dwell has elapsed.
+                if shell.tooltip_tick(now_ns) {
+                    shell.present_tooltip(&mut compositor);
+                }
                 shell.advance_window_thumbnails(&mut compositor);
                 animate(
                     &mut fade,
@@ -4203,7 +4196,7 @@ mod program {
                 ChainOwner::Window { window_id, open_id } => (window_id, open_id),
                 ChainOwner::Backdrop => {
                     answer_backdrop_menu(
-                        outcome,
+                        &outcome,
                         shell,
                         compositor,
                         desk,
@@ -4219,12 +4212,27 @@ mod program {
                     continue;
                 }
                 ChainOwner::Bar(subject) => {
-                    answer_bar_menu(&subject, outcome, shell, desk);
+                    answer_bar_menu(&subject, &outcome, shell, desk);
                     continue;
                 }
             };
             let outcome = match outcome {
                 ChainOutcome::Chosen(item) => MenuOutcome::Chosen(item),
+                // The text is wider than the one fixed event frame, so the
+                // answer names the field and the engine holds the text for
+                // the application to pull. Recorded *before* the answer goes
+                // out, so a pull cannot arrive ahead of what it asks for; a
+                // refusal to record leaves the gesture a dismissal rather
+                // than an answer naming a text nobody holds.
+                ChainOutcome::Entered(entry, text) => {
+                    match server.record_menu_text(window_id, open_id, &text) {
+                        Ok(()) => MenuOutcome::Entered(entry),
+                        Err(err) => {
+                            let _ = writeln!(Stderr, "desktop: menu text refused ({err:?})");
+                            MenuOutcome::Dismissed
+                        }
+                    }
+                }
                 ChainOutcome::Dismissed => MenuOutcome::Dismissed,
                 ChainOutcome::Refused(reason) => MenuOutcome::Refused(reason),
             };
@@ -4257,13 +4265,15 @@ mod program {
     /// carries on.
     fn answer_bar_menu<S: DirectorySource>(
         subject: &MenuSubject,
-        outcome: ChainOutcome,
+        outcome: &ChainOutcome,
         shell: &mut DesktopShell,
         desk: &mut DesktopMenuDesk<'_, S>,
     ) {
         let item = match outcome {
-            ChainOutcome::Chosen(item) => item,
-            ChainOutcome::Dismissed => return,
+            ChainOutcome::Chosen(item) => *item,
+            // The bar's menus declare no quick-entry field, so a committed
+            // one answers a row nothing asked for.
+            ChainOutcome::Entered(..) | ChainOutcome::Dismissed => return,
             ChainOutcome::Refused(reason) => {
                 let _ = writeln!(Stderr, "desktop: no bar menu ({reason:?})");
                 return;
@@ -4314,7 +4324,7 @@ mod program {
     /// session merely carries it out. A row id the menu never declared names
     /// no command and is dropped (fail closed — never guessed at).
     fn answer_backdrop_menu<S: DirectorySource>(
-        outcome: ChainOutcome,
+        outcome: &ChainOutcome,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         desk: &mut DesktopMenuDesk<'_, S>,
@@ -4322,8 +4332,10 @@ mod program {
         now_ns: u64,
     ) {
         let command = match outcome {
-            ChainOutcome::Chosen(item) => PinboardCommand::from_item(item),
-            ChainOutcome::Dismissed => None,
+            ChainOutcome::Chosen(item) => PinboardCommand::from_item(*item),
+            // The backdrop's menu declares no quick-entry field, so a
+            // committed one answers a row nothing asked for.
+            ChainOutcome::Entered(..) | ChainOutcome::Dismissed => None,
             ChainOutcome::Refused(reason) => {
                 let _ = writeln!(Stderr, "desktop: no backdrop menu ({reason:?})");
                 None
@@ -4375,6 +4387,9 @@ mod program {
             // once more, now over an empty list.
             let _ = shell.present_menu_chain(compositor, menu, owner);
         }
+        // The chain's own presentation declared or withdrew the hovered row's
+        // explanation; this raises the plate above the surfaces it explains.
+        shell.present_tooltip(compositor);
     }
 
     /// Attest the caller of a pending pinboard call from the kernel, decode

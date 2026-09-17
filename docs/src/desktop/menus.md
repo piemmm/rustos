@@ -27,8 +27,13 @@ A menu is a **chain of session-owned plates**.
   placed edge-adjacent to its parent at its parent row's top, flipped to the
   parent's other side when the screen edge leaves no room, and slid to stay on
   screen.
-- A **child** is either a **submenu** — more rows from the same model — or the
-  **information panel**, which hangs where a submenu's plate would.
+- A **child** is a **submenu** — more rows from the same model — or one of the
+  two surfaces the session draws itself: the **information panel** and the
+  **quick-entry field**. All three hang where a submenu's plate would.
+- A row that has a child **may still be chooseable**. Clicking it answers its
+  id; arriving on it opens its child. Carrying a command and opening a child
+  are independent, so one row can offer both the direct action and the longer
+  way round to it.
 - The chain is the **seat's singleton**. Opening a menu closes whatever was up
   and answers its requester `Dismissed`.
 
@@ -103,9 +108,30 @@ hover delay, no timer. Two rules make that deterministic without one:
 
 A disabled row opens nothing and closes nothing.
 
+## Why a row cannot be chosen is a tip, not a caption
+
+A row that cannot be chosen states *why* — but never on the row. The
+explanation is the seat's own tooltip
+([the controls' tooltip section](./widgets.md)), declared over the row's screen
+rectangle as the chain presents and shown after the usual dwell.
+
+It was drawn beside the label once, and that made every plate as wide as its
+longest excuse: a file manager's context menu on a directory carried "only a
+file opens with an application", so the plate was sized to that sentence
+rather than to its commands. The row control therefore has no way to carry
+help text at all — `MenuItem` has no reason field and measures none — and the
+text lives on `ChainRow::explained`, which nothing draws.
+
+`AppMenuItem::reason` still crosses the wire, unchanged: an application cannot
+declare a tooltip region on a plate the desktop owns, so the desktop takes the
+declared reason as the tip's content. The chain answers the row under the
+pointer through `MenuChain::hovered_tip`, and it answers for the **deepest**
+plate only — an ancestor keeps its highlight to show the path travelled, not
+to say where the pointer is.
+
 ## The information panel
 
-The one child of a chain that is not a plate of rows. It hangs where a submenu's
+The first child of a chain that is not a plate of rows. It hangs where a submenu's
 plate would and lives and dies with the chain: it closes when the pointer
 settles on another row of its parent, when the chain dismisses, or when the
 chain's owner dies. A press on it is claimed and acts on nothing — it states
@@ -121,6 +147,44 @@ There is deliberately no *application*-drawn child. One was built and deleted
 for want of a client: a presentation surface cannot conclude a gesture (below),
 and a chain the desktop opened for itself — the icon bar's, the backdrop's — has
 no application to ask in the first place.
+
+## The quick-entry field
+
+The second, and the one that takes an answer rather than stating one: a single
+line of session-drawn text field under the plate band, pre-filled with text the
+declaring row supplied. It is how a menu asks for a short answer — a new name —
+without the application drawing anything or seeing a keystroke.
+
+While it is up it **owns the keyboard**. Every key is text, so a name
+containing `h` is typed rather than moving a highlight; its own `Escape` closes
+the field before the chain's would dismiss the chain; and `Enter` **commits**,
+ending the chain and answering with the *field's own id*, which is not the
+row's. That distinction is what lets one row mean two things: the file
+manager's Rename row opens the in-place editor when clicked and commits a typed
+name when its field is used, and the two answers are told apart by id rather
+than by the application guessing which the user did.
+
+The committed text does not ride in the answer — an event is one fixed frame
+and a name is far wider — so the desktop holds it for the window that owns the
+gesture and hands it over once, when that application asks. It is owner-bound,
+taken once, and cleared by that window's next menu, so a commit nobody
+collected can never answer a later gesture.
+
+Its band titles the surface and does not drag it: a plate is placed by the
+user, a child of a row is placed by the chain against the row it hangs off.
+And the field **cannot be masked** — the model has no way to say so — so a menu
+row is structurally incapable of being a password prompt.
+
+## A row may carry its own icon
+
+A row may name the application bundle its icon comes from, and the desktop
+resolves the picture through the one artwork cache every other slot draws
+through — the same request a taskbar slot makes, so a candidate row and that
+application's slot show the same picture. The artwork layer reads the bundle's
+own *signed* manifest and draws only the icon that manifest declares, so a row
+naming something that is not a bundle resolves to nothing and falls back to its
+built-in glyph. Resolution happens before the paint; the paint itself reads
+nothing.
 
 ## The grab
 
@@ -200,33 +264,52 @@ A declared separator becomes the next row's group break rather than a row of
 its own, so a separator inside a submenu draws the divider it draws on the root
 plate and no index the chain reports names a rule.
 
+A **submenu is a relationship, not a row kind**: any chooseable row that other
+rows name as their parent draws the chevron and opens their plate, while still
+answering its own id when it is clicked. The separate submenu row kind is what
+a parent with no command of its own uses. The shared row control does not
+guess at this — it reports every click as an activation, and the model, which
+alone knows which rows carry a command, decides whether that is an answer or a
+child. The keyboard keeps the two apart by gesture: `Enter` activates, `Right`
+walks in.
+
 ## What a menu is not
 
-A menu is a column of **commands** the desktop draws in full. A chooser over a
-data set whose size is a property of the *machine* — the applications that claim
-a file's type, say — is not one, and no bound on a plate's rows can make it one:
-the set grows with what a user installs. Two further properties of the model
-settle it rather than a matter of taste.
+A menu is a column of **commands** the desktop draws in full, and a plate does
+not scroll. So a surface over a data set whose size is a property of the
+*machine* — everything a user has installed — is not a menu, however menu-like
+it looks, because no bound on a plate's rows can promise to hold it.
+
+That bites on the **whole** of such a set, not on a useful part of it. The
+file manager's "Open With…" is the worked example: the applications that claim
+a file's type are as many as the user installed, so the complete list is a
+scrolling chooser in its own window — but the *few* most specific claims fit a
+plate easily, so the row carries them as a submenu and its own click opens the
+chooser. One row, both answers.
 
 A menu's rows must all exist **before it opens**, because the model crosses the
-wire complete in the one request. So candidates could not be filled in lazily,
-and gathering them — filesystem reads over the program stores — would be paid on
-*every* gesture that opens the menu, for a list rarely asked for.
+wire complete in the one request. A submenu therefore cannot be filled in
+lazily, and gathering candidates is filesystem work over the program stores.
+That does not make the submenu impossible; it decides *where the work goes*.
+The file manager keeps that scan warm on the worker it already has, so opening
+the menu reads an answer that has already landed and performs no I/O at all.
+Before the first scan lands the row simply carries no chevron. What a menu must
+never do is make the user wait for a disk to draw a plate.
 
-And a **presentation surface cannot conclude the gesture**. Only a row of the
+A **presentation surface still cannot conclude the gesture**. Only a row of the
 chain ends a chain, and an application holds no request that dismisses one; a
-list drawn inside a child surface would therefore leave the chain standing after
-the user had chosen.
+list drawn inside a child surface would leave the chain standing after the user
+had chosen. A submenu is not that surface — its rows are rows of the chain, so
+choosing one ends the chain exactly as any other row does.
 
-So a dynamic list is one row that concludes the chain, and the application's own
-list surface after it. The file manager's "Open With…" is the worked example
-(`plans/NEW-MENUS.md` §6, decision 2).
-
-The same test settles the desktop's own launcher. The program-library popup is a
-searchable, scrolled list over as many entries as a user has installed: a plate
-neither scrolls nor takes text, so it is not a menu and keeps its own surface.
-The genuine menu *inside* it — the context menu on one of its rows — is the
-desktop's chain like every other (`plans/NEW-MENUS.md` §6, decision 3).
+The scroll alone settles the desktop's own launcher. The program-library popup
+is a searchable, scrolled list over as many entries as a user has installed, so
+it is not a menu and keeps its own surface. A plate now *does* take text (the
+quick-entry field above), but a field is one line the desktop commits, not a
+live filter over rows that were fixed when the menu opened — so that is not
+what rescues the launcher either. The genuine menu *inside* it — the context
+menu on one of its rows — is the desktop's chain like every other
+(`plans/NEW-MENUS.md` §6, decision 3).
 
 ## The desktop's own menus
 
@@ -267,7 +350,8 @@ application's and the desktop never interprets one.
   opens its context menu, declared by `lib/browse::chrome::context_menu` over
   the same `ContextMenuModel` the trusted picker composes, so the two cannot
   diverge. An inapplicable command is declared *disabled with its reason*
-  rather than left out, so the menu's shape does not move with the selection.
+  rather than left out, so the menu's shape does not move with the selection;
+  the reason is shown as a tip on dwell, never drawn on the row.
   See [the file manager](./apps.md).
 
 Neither keeps a menu shell, and neither draws a menu pixel.

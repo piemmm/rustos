@@ -16,7 +16,7 @@
 //!   offers is currently actionable, and why not when it is not
 //!   ([`reason`](ContextMenuModel::reason)). [`context_menu`] turns that into
 //!   the row model the desktop's own menu service renders
-//!   (`plans/NEW-MENUS.md`), read back by [`context_command_from_item`]; the
+//!   (`plans/NEW-MENUS.md`), read back by [`context_choice_from_item`]; the
 //!   file manager draws no menu pixel. Only commands the file manager can
 //!   actually carry out today are modelled — Open
 //!   ([`activate_selected`](crate::Browser::activate_selected)), Open With…
@@ -36,8 +36,8 @@
 //! same model and simply never invokes a write action).
 
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRole, AppMenuRow,
-    AppMenuShortcut,
+    AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
+    AppMenuLabel, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
 };
 use tairix_abi::Errno;
 use tairix_icon::IconKind;
@@ -46,6 +46,7 @@ use crate::browser::Browser;
 use crate::entry::{Entry, EntryKind};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
+use crate::open_with::AppAssociation;
 use crate::sort::SortMode;
 use crate::source::DirectorySource;
 
@@ -478,24 +479,102 @@ impl ContextCommand {
     }
 }
 
-/// The context-menu command the chosen row `item` names, or `None` for an id
-/// this menu never declared (fail closed — an outcome is never guessed at).
+/// What a chosen row of the file manager's context menu asks for.
+///
+/// Three kinds because the menu now answers three kinds of thing, and an id
+/// that means "the user typed a name" must not be readable as one that means
+/// "the user clicked Rename" — the ids are distinct by construction and this
+/// is their exact inverse.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ContextChoice {
+    /// One of the menu's command rows was chosen.
+    Command(ContextCommand),
+    /// The Rename row's quick-entry field was committed. The caller pulls the
+    /// text the user typed and renames with it.
+    RenameCommit,
+    /// The candidate at this index of the list the menu was built from — the
+    /// quick candidates, in their ranked order — was chosen from the
+    /// "Open With…" submenu.
+    OpenWithCandidate(usize),
+}
+
+/// The choice the chosen row `item` names, or `None` for an id this menu never
+/// declared (fail closed — an outcome is never guessed at).
+///
+/// The exact inverse of the numbering [`context_menu`] assigns: the commands
+/// in [`CONTEXT_COMMANDS`] order, then the Rename row's field, then one per
+/// quick candidate. A candidate index is the candidate's position in the list
+/// the menu was *given*, not its position among the rows that fitted, so a
+/// candidate the plate could not seat shifts no other candidate's meaning.
 #[must_use]
-pub fn context_command_from_item(item: AppMenuItemId) -> Option<ContextCommand> {
-    CONTEXT_COMMANDS.get(item.index()).copied()
+pub fn context_choice_from_item(item: AppMenuItemId) -> Option<ContextChoice> {
+    let index = item.index();
+    if let Some(command) = CONTEXT_COMMANDS.get(index) {
+        return Some(ContextChoice::Command(*command));
+    }
+    match index.checked_sub(CONTEXT_COMMANDS.len())? {
+        0 => Some(ContextChoice::RenameCommit),
+        candidate => Some(ContextChoice::OpenWithCandidate(candidate - 1)),
+    }
+}
+
+/// The id the Rename row's quick-entry field answers with: the one past the
+/// commands.
+fn rename_commit_id() -> Result<AppMenuItemId, Errno> {
+    AppMenuItemId::for_index(CONTEXT_COMMANDS.len()).ok_or(Errno::OutOfRange)
+}
+
+/// The id the quick candidate at `index` answers with.
+fn candidate_id(index: usize) -> Result<AppMenuItemId, Errno> {
+    CONTEXT_COMMANDS
+        .len()
+        .checked_add(1)
+        .and_then(|at| at.checked_add(index))
+        .and_then(AppMenuItemId::for_index)
+        .ok_or(Errno::OutOfRange)
+}
+
+/// What the context menu's two quick actions are offered over: the selection's
+/// current name, and the applications that can open it.
+///
+/// Both are things the *caller* already holds — the browser's selected name,
+/// and a bundle scan it keeps warm on a worker — so building the menu reads no
+/// file and a right-click waits on nothing. Either may be empty, and an empty
+/// one simply offers no quick action: the Rename row then opens only the
+/// in-place editor, and the "Open With…" row carries no chevron and opens the
+/// chooser exactly as it always did.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ContextQuick<'a> {
+    /// The selected entry's current name, which the Rename row's field starts
+    /// out holding.
+    pub name: &'a str,
+    /// The applications that can open the selection, highest-ranked first and
+    /// already bounded to what a plate can hold
+    /// ([`quick_applications`](crate::open_with::quick_applications)).
+    pub candidates: &'a [&'a AppAssociation],
 }
 
 /// Build the row model a secondary press asks the desktop to open: one row per
-/// [`CONTEXT_COMMANDS`] entry, in order, under the root `title`.
+/// [`CONTEXT_COMMANDS`] entry, in order, under the root `title`, plus the two
+/// quick actions `quick` offers.
 ///
 /// A command the `model` reports inactionable is declared **disabled with its
 /// reason** rather than left out, so the menu's shape does not move with the
 /// selection and a row says why it cannot be chosen. Removal declares the
-/// destructive emphasis; nothing here declares a submenu or an attached
-/// window, so the chain this opens is one plate.
+/// destructive emphasis.
 ///
-/// The menu performs nothing — the caller dispatches the chosen command in its
-/// own capability-checked tail — so composing it grants no authority; the
+/// The Rename row additionally carries a **quick-entry field** pre-filled with
+/// the selection's name, and the "Open With…" row a **submenu** of the
+/// compatible applications, each naming the bundle its icon comes from. Both
+/// are offered only where the row itself is actionable, so a field can never
+/// commit a rename the model says cannot happen (fail closed). Command rows
+/// are pushed before candidate rows, so a long candidate list can never crowd
+/// a command off the plate; a candidate the plate's text budget cannot seat is
+/// left out of the submenu and stays reachable in the chooser, and one whose
+/// path will not fit keeps its row and loses only its picture.
+///
+/// The menu performs nothing — the caller dispatches the chosen row in its own
+/// capability-checked tail — so composing it grants no authority; the
 /// read-only picker opens no write context menu, so it builds none.
 ///
 /// # Errors
@@ -505,8 +584,13 @@ pub fn context_command_from_item(item: AppMenuItemId) -> Option<ContextCommand> 
 /// commands are fixed, so a refusal past the title can only mean those bounds
 /// changed under this menu; the caller reports it and opens nothing rather
 /// than showing a menu it could not describe.
-pub fn context_menu(model: ContextMenuModel, title: &str) -> Result<AppMenu, Errno> {
+pub fn context_menu(
+    model: ContextMenuModel,
+    title: &str,
+    quick: ContextQuick<'_>,
+) -> Result<AppMenu, Errno> {
     let mut menu = AppMenu::titled(AppMenuLabel::new(title)?);
+    let mut open_with_row = None;
     for (index, command) in CONTEXT_COMMANDS.iter().copied().enumerate() {
         if command.opens_group() {
             menu.push(AppMenuRow::Separator)?;
@@ -518,12 +602,62 @@ pub fn context_menu(model: ContextMenuModel, title: &str) -> Result<AppMenu, Err
             item = item.with_role(AppMenuRole::Destructive);
         }
         let reason = model.reason(command);
-        if !reason.is_empty() {
+        let enabled = reason.is_empty();
+        if !enabled {
             item = item.disabled().with_reason(AppMenuReason::new(reason)?);
         }
+        if command == ContextCommand::Rename && enabled && !quick.name.is_empty() {
+            item = item.with_entry(AppMenuEntry {
+                id: rename_commit_id()?,
+                initial: AppMenuEntryText::new(quick.name)?,
+            });
+        }
         menu.push(AppMenuRow::Item(item))?;
+        if command == ContextCommand::OpenWith && enabled && !quick.candidates.is_empty() {
+            open_with_row = Some(menu.len() - 1);
+        }
+    }
+    if let Some(parent) = open_with_row {
+        push_candidates(&mut menu, parent, quick.candidates)?;
     }
     Ok(menu)
+}
+
+/// Push the quick candidates under the "Open With…" row at `parent`.
+///
+/// Each row is admitted only if the menu's shared text block can still hold
+/// what it says, asked *before* the push rather than by pushing and swallowing
+/// the refusal — so which candidates the plate offers is decided rather than
+/// discovered. A row's bundle path is dropped before the row itself is, since a
+/// row with no picture still opens the right application.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shared bounds refuse for a reason other than space: a
+/// candidate name that is not admissible display text, or an id past the
+/// numbering.
+fn push_candidates(
+    menu: &mut AppMenu,
+    parent: usize,
+    candidates: &[&AppAssociation],
+) -> Result<(), Errno> {
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Ok(label) = AppMenuLabel::new(candidate.name()) else {
+            continue;
+        };
+        if menu.text_remaining() < label.as_str().len() {
+            break;
+        }
+        let mut item = AppMenuItem::new(candidate_id(index)?, label);
+        let path = candidate.bundle_path();
+        if menu.text_remaining() >= candidate.name().len() + path.len() {
+            if let Ok(bundle) = AppMenuBundle::new(path) {
+                item = item.with_icon_bundle(bundle);
+            }
+        }
+        menu.push_under(AppMenuRow::Item(item), parent)?;
+    }
+    Ok(())
 }
 
 /// The enable state of the file-manager context menu, taken from a [`Browser`]
