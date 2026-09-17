@@ -307,7 +307,7 @@ would change nothing.
 
 | Pane | What is missing | Prerequisite |
 |---|---|---|
-| Sound | no audio subsystem at all: no codec driver, no mixer, no stream API, no `CAP_AUDIO` | a new `plans/AUDIO.md`: driver, mixer service, `lib/abi` stream + volume vocabulary |
+| Sound | no audio subsystem at all: no codec driver, no mixer, no stream API, no audio capability | `plans/SOUND.md`: the audio driver class, the `audiod` mixer/router, and the `audio-v1` stream + volume vocabulary |
 | Bluetooth | no HCI transport, no host stack, no pairing store | a new `plans/BLUETOOTH.md` |
 | Printers & Scanners | no print spooler, no scan API, no driver class | a new `plans/PRINTING.md` |
 | Trackpad | no touchpad driver; `lib/hid` carries boot-mouse only | a multitouch HID driver under `plans/USB.md` |
