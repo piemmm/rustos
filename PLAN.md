@@ -4223,15 +4223,14 @@ transfer, landed in increments:
   write), **FM6a** (the activation decision), **FM6b's** and
   **FM7a's**/**FM7b's** pure engine models, **FM4b's pure chrome model** plus
   its **drawn clickable toolbar** (`Alt+←/→/↑`/`F5`), **FM8a** (the pure
-  properties view model), and **FM8b's drawn read-only properties panel**
-  (`render::draw_properties` — a shared `lib/controls::Panel` painting the
-  `properties_rows` fields, opened by `Alt+Enter` / dismissed by `Escape`,
-  reading its metadata with one capability-checked `fs_stat` under the user's
-  own identity) and its **drawn permission (mode) control** (nine clickable
-  owner/group/other `rwx` toggles overlaid inline on the panel's permissions
-  row via `render::draw_properties_editable`/`permission_cell_at`, committed
-  through `Browser::set_mode_selected` over `fs_set_mode` under the user's own
-  identity — the read-only picker never draws or resolves a toggle).
+  properties view model), and **FM8b's Properties surfaces** — the trusted
+  picker's read-only panel (`render::draw_properties`, a shared
+  `lib/controls::Panel` painting the `properties_rows` fields) and the file
+  manager's **Properties window** (`render::draw_properties_window`, opened by
+  `Alt+Enter` or the context menu, several at once, each pinned to its node by
+  path, read off the event loop), carrying the labelled permissions grid, the
+  `CAP_FS_CHOWN`-gated ownership control, and the extended-attribute list with
+  its `key = value` editor.
   The manager's chrome carries the location in the **window title** rather than
   a path bar: it opens on the icon grid, retitles over the window channel's
   `SetTitle` whenever it moves, distinguishes an empty folder from a full one by

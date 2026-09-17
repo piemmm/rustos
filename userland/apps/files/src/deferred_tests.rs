@@ -2,9 +2,12 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_browse::{ListingClient, Probe};
+use tairix_abi::fs::{FileId, FileStat};
+use tairix_abi::time::Time64;
+use tairix_abi::{Errno, NodeTimes};
+use tairix_browse::{EntryKind, ListingClient, Probe, Properties};
 
-use super::{FilesClient, Probes};
+use super::{FilesClient, Probes, PropertyJob, PropertyReads};
 
 fn path(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| String::from(*name)).collect()
@@ -99,6 +102,47 @@ fn an_empty_delivery_owes_no_repaint() {
     let _ = probes.ask(&path(&["a"]));
     let _ = probes.next_batch();
     assert!(!probes.deliver(Vec::new()));
+    assert!(
+        !probes.take_landed(),
+        "a delivery with no answers leaves nothing to adopt"
+    );
+}
+
+/// Regression: a delivered batch has to *tell the loop* it landed.
+///
+/// The worker probed correctly and woke the loop, but the desk recorded only
+/// the answers — so the wake found nothing to adopt, the loop re-parked, and
+/// every folder kept its empty cue until some unrelated gesture happened to
+/// repaint and latch the answers that had been sitting here all along.
+#[test]
+fn a_delivered_batch_owes_the_loop_one_adoption() {
+    let mut probes = Probes::new();
+    let folder = path(&["Users"]);
+    let _ = probes.ask(&folder);
+    let batch = probes.next_batch().expect("a batch");
+    assert!(probes.deliver(batch.into_iter().map(|f| (f, true)).collect()));
+
+    assert!(probes.take_landed(), "the delivery owes the loop a repaint");
+    assert!(
+        !probes.take_landed(),
+        "and owes exactly one: a second turn of the loop repaints nothing"
+    );
+    assert_eq!(
+        probes.ask(&folder),
+        (Probe::Ready(true), false),
+        "the adoption the repaint performs is what draws the cue"
+    );
+}
+
+/// A desk asked to stop owes no repaint: there is nothing left to draw it.
+#[test]
+fn stopping_drops_an_unconsumed_adoption() {
+    let mut probes = Probes::new();
+    let _ = probes.ask(&path(&["a"]));
+    let batch = probes.next_batch().expect("a batch");
+    assert!(probes.deliver(batch.into_iter().map(|f| (f, true)).collect()));
+    probes.stop();
+    assert!(!probes.take_landed());
 }
 
 /// A folder re-asked while its probe is in flight is answered by that probe,
@@ -153,4 +197,141 @@ fn stopping_records_nothing_and_hands_out_no_work() {
     assert_eq!(probes.next_batch(), None);
     assert_eq!(probes.ask(&path(&["b"])), (Probe::Pending, false));
     assert!(!probes.has_work());
+}
+
+/// A summary for the node at `name`, so an answer can be told from another's.
+fn summary(name: &str) -> Properties {
+    Properties::from_stat(
+        name,
+        EntryKind::File,
+        &FileStat {
+            kind: tairix_abi::fs::FileKind::Regular,
+            nlink: 1,
+            size: 0,
+            allocated: 0,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            id: FileId::NONE,
+            times: NodeTimes {
+                created: Time64::UNIX_EPOCH,
+                modified: Time64::UNIX_EPOCH,
+                accessed: Time64::UNIX_EPOCH,
+                changed: Time64::UNIX_EPOCH,
+            },
+        },
+    )
+}
+
+fn job(window: u64, path: &str) -> PropertyJob {
+    PropertyJob {
+        window,
+        path: String::from(path),
+        kind: EntryKind::File,
+    }
+}
+
+/// Several Properties windows are open at once, so one window's read must
+/// neither displace nor be answered into another's.
+#[test]
+fn two_properties_windows_are_answered_independently() {
+    let mut desk = PropertyReads::new();
+    assert!(desk.submit(job(1, "/a")));
+    assert!(desk.submit(job(2, "/b")));
+    assert!(desk.has_work());
+
+    let first = desk.next_job().expect("a read");
+    let second = desk.next_job().expect("a second read");
+    assert_eq!((first.window, second.window), (1, 2), "asked order, served");
+    assert!(!desk.has_work());
+
+    // Answered out of order, each lands in its own window's slot.
+    assert!(desk.deliver(second.window, Ok(summary("b"))));
+    assert!(desk.deliver(first.window, Ok(summary("a"))));
+    assert!(desk.take_landed());
+    assert_eq!(
+        desk.take(1)
+            .expect("window 1's answer")
+            .map(|p| p.name().into()),
+        Ok(String::from("a"))
+    );
+    assert_eq!(
+        desk.take(2)
+            .expect("window 2's answer")
+            .map(|p| p.name().into()),
+        Ok(String::from("b"))
+    );
+    assert!(desk.take(1).is_none(), "an answer is collected once");
+}
+
+/// A re-read follows a write the window just made, so the older answer
+/// describes a node that has since changed: showing it would undo the edit.
+#[test]
+fn a_re_read_supersedes_the_same_windows_outstanding_answer() {
+    let mut desk = PropertyReads::new();
+    assert!(desk.submit(job(7, "/a")));
+    let first = desk.next_job().expect("a read");
+    assert!(desk.deliver(first.window, Ok(summary("stale"))));
+
+    assert!(desk.submit(job(7, "/a")));
+    assert!(
+        desk.take(7).is_none(),
+        "the stale answer went with the request it superseded"
+    );
+    let again = desk.next_job().expect("the re-read");
+    assert!(desk.deliver(again.window, Ok(summary("fresh"))));
+    assert_eq!(
+        desk.take(7)
+            .expect("the fresh answer")
+            .map(|p| p.name().into()),
+        Ok(String::from("fresh"))
+    );
+    assert!(desk.next_job().is_none());
+}
+
+/// A refusal is an answer: the window states it rather than showing nothing.
+#[test]
+fn a_refused_read_is_delivered_as_the_reason_it_failed() {
+    let mut desk = PropertyReads::new();
+    assert!(desk.submit(job(3, "/gone")));
+    let read = desk.next_job().expect("a read");
+    assert!(desk.deliver(read.window, Err(Errno::NotFound)));
+    assert_eq!(desk.take(3), Some(Err(Errno::NotFound)));
+}
+
+/// A closed window's answer belongs to nobody — and a window id could be
+/// reused, so an in-flight answer must not land in whatever took its place.
+#[test]
+fn a_closed_windows_read_is_forgotten_and_its_answer_dropped() {
+    let mut desk = PropertyReads::new();
+    assert!(desk.submit(job(4, "/a")));
+    let read = desk.next_job().expect("a read");
+    desk.forget(4);
+    assert!(
+        !desk.deliver(read.window, Ok(summary("a"))),
+        "nothing owns the slot, so no repaint is owed"
+    );
+    assert!(desk.take(4).is_none());
+    assert!(!desk.take_landed());
+
+    // A request not yet started is simply dropped.
+    let mut desk = PropertyReads::new();
+    assert!(desk.submit(job(5, "/a")));
+    desk.forget(5);
+    assert!(!desk.has_work());
+    assert!(desk.next_job().is_none());
+}
+
+/// A stopping desk records nothing and offers nothing, so a parked worker
+/// leaves rather than finding fresh work on the way out.
+#[test]
+fn a_stopping_property_desk_hands_out_no_work() {
+    let mut desk = PropertyReads::new();
+    assert!(desk.submit(job(1, "/a")));
+    desk.stop();
+    assert!(!desk.has_work());
+    assert!(desk.next_job().is_none());
+    assert!(!desk.submit(job(2, "/b")));
+    assert!(desk.take(1).is_none());
+    assert!(!desk.take_landed());
 }

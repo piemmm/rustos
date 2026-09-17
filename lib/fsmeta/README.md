@@ -17,7 +17,13 @@ another and no conversion logic is duplicated (`AGENTS.md` §2.2).
   attributes bounded by the fixed security limits (`KEY_MAX`, `VALUE_MAX`,
   `ATTRS_PER_INODE`, `TOTAL_ATTR_BYTES`), with a length-prefixed,
   self-identifying `encode` / `decode` a filesystem driver writes into one
-  copy-on-write metadata block.
+  copy-on-write metadata block. It also carries the one *presentation* rule
+  every surface that shows or edits an attribute shares: `text_value` (is this
+  value text a surface can show and a typed line reproduce?), `display_value`
+  (text as it reads, anything else escaped `\xNN`, so nothing a hostile volume
+  stored reaches a terminal or a glyph run raw), and `parse_assignment` (the
+  `key = value` line grammar, validating the key through `AttrKey` so a
+  malformed one is refused before the syscall).
 - **`preset`** — exact, checked conversions between each foreign filesystem's
   native per-file fields and normalised attribute values: Acorn/RISC OS
   (filetype, load/exec, 40-bit centisecond datestamp), Amiga (`hsparwed`

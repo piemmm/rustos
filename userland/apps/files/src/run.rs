@@ -101,6 +101,7 @@ mod test_fs;
 #[cfg(freestanding)]
 mod program {
 
+    use alloc::boxed::Box;
     use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -126,23 +127,24 @@ mod program {
     };
     use tairix_browse::render::{
         build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_open_with_chooser,
-        draw_owner_control, draw_progress_dialog, draw_properties_editable, manager_tool_at,
-        open_with_action_at, open_with_row_at, open_with_scroll_pointer, open_with_visible_rows,
-        owner_editor_rect, owner_field_at, permission_cell_at, render_into, scroll_pointer,
-        OpenWithAction, OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        draw_progress_dialog, draw_properties_window, manager_tool_at, open_with_action_at,
+        open_with_row_at, open_with_scroll_pointer, open_with_visible_rows, render_into,
+        scroll_pointer, AttrAction, AttrView, OpenWithAction, OwnerField, PropertiesControls,
+        PropertiesFrame, PropertiesTarget, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         applications_for, association_from_appinfo, context_choice_from_item, context_menu,
         empty_trash_plan, paste_strategy, plan_paste, quick_applications, suggest_new_dir_name,
         trash_dest_path, trash_dir, trash_strategy, validate_new_name, Activation, AppAssociation,
-        Browser, BundleIntent, BundleSource, Clipboard, ClipboardOp, ContextChoice, ContextCommand,
-        ContextMenuModel, ContextQuick, CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction,
-        DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, Entry, EntryKind, Listing,
-        ListingDesk, ManagerChrome, ManagerTool, ManagerToolModel, OpenWithCandidate,
-        OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places, Probe, ProgressModel,
-        ProgressOp, Properties, RenameError, RtLinkReader, ToolbarBand, ToolbarCommand,
-        TrashStrategy, VfsDirectorySource, Volume, VolumeId, MANAGER_MENU_TITLE, MANAGER_TOOLS,
-        MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
+        Attribute, Attributes, Browser, BundleIntent, BundleSource, Clipboard, ClipboardOp,
+        ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor,
+        CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk,
+        DirectorySource, Entry, EntryKind, Listing, ListingDesk, ManagerChrome, ManagerTool,
+        ManagerToolModel, OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem,
+        PasteStrategy, Places, Probe, ProgressModel, ProgressOp, Properties, RenameError, RowList,
+        RtLinkReader, ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume,
+        VolumeId, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_SIZING,
+        WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -171,7 +173,7 @@ mod program {
     use crate::appbar;
     use crate::chrome::Chrome;
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
-    use crate::deferred::{FilesClient, Probes};
+    use crate::deferred::{FilesClient, Probes, PropertyJob, PropertyReads};
     use crate::gesture::{self, bundle_intent, AfterHandoff, PrimaryPress};
     use crate::icons::IconPipeline;
     use crate::listing::{self, ViewMark};
@@ -337,6 +339,37 @@ mod program {
         /// This window's channel-side state: its id, its shared frame region,
         /// and the layout both are shaped as.
         pane: WindowPane,
+        /// The title the session was last told. Kept so a frame retitles only
+        /// when what it names actually moves.
+        title: String,
+        /// The window-sized surface every frame is drawn into, held for the
+        /// life of the window: allocating and zeroing one per present would be
+        /// a whole-window pass of its own, and holding it is what makes a
+        /// clipped repaint sound — every pixel outside the clip is the one
+        /// already on screen.
+        surface: Surface,
+        /// What this window is showing.
+        kind: WindowKind,
+    }
+
+    /// What one of this process's windows is.
+    ///
+    /// The pane, surface and title above are every window's; this is the part
+    /// that differs. One list of windows rather than one per kind, so the
+    /// routing scan, the resize, the frame release, the present and the close
+    /// are each written once.
+    ///
+    /// Both payloads are boxed: they differ by a kilobyte, so a list sized for
+    /// the larger would carry that per window of the other kind.
+    enum WindowKind {
+        /// A directory listing.
+        Browser(Box<BrowserWindow>),
+        /// One node's Properties.
+        Properties(Box<PropertiesWindow>),
+    }
+
+    /// A browser window's own state.
+    struct BrowserWindow {
         /// The listing this window shows.
         browser: Browser<DeferredSource>,
         /// The overlays open over it.
@@ -348,21 +381,99 @@ mod program {
         /// Which of its own chrome bands this window is showing. Per window
         /// like the rail above, so one window's chrome is not another's.
         chrome: Chrome,
-        /// The title the session was last told. Kept so a frame retitles only
-        /// when the location actually moves.
-        title: String,
-        /// The window-sized surface every frame is drawn into, held for the
-        /// life of the window: allocating and zeroing one per present would be
-        /// a whole-window pass of its own, and holding it is what makes a
-        /// clipped repaint sound — every pixel outside the clip is the one
-        /// already on screen.
-        surface: Surface,
         /// This window's unanswered context-menu gesture, if one is up.
         ///
         /// The desktop mints one open id per gesture and never reuses it, so an
         /// answer that names anything else belongs to a gesture already settled
         /// and is not acted on.
         menu: Option<OpenMenuState>,
+    }
+
+    /// One node's Properties, in its own window.
+    ///
+    /// The node is held by *path*, not by a browser selection: several of these
+    /// are open at once and the listing behind them moves on, so a window
+    /// describes and writes to the node it was opened on and nothing else.
+    struct PropertiesWindow {
+        /// The node's absolute path, the one spelling every read and write of
+        /// it uses.
+        path: String,
+        /// What the listing called it, which decides how it is opened to be
+        /// described.
+        kind: EntryKind,
+        /// The spelling a link stores, shown as the alias field.
+        target: Option<String>,
+        /// What the read answered, or why there is nothing to show yet.
+        state: PropertiesState,
+        /// The attribute list's cursor, offset, and drawn bar.
+        rows: RowList,
+        /// The `key = value` attribute editor.
+        editor: TextField,
+        /// The open owning-id editor, when one is being typed into.
+        owner: Option<OwnerEditor>,
+        /// Whether the launching user holds `CAP_FS_CHOWN` — the one gate on
+        /// offering the ownership control (read once at start-up).
+        can_chown: bool,
+    }
+
+    /// What a Properties window has to show.
+    enum PropertiesState {
+        /// The read is in flight; the window says so rather than showing an
+        /// empty or invented summary.
+        Reading,
+        /// What the read answered.
+        Ready(Properties),
+        /// The read was refused, with the reason to state.
+        Refused(String),
+    }
+
+    impl PropertiesWindow {
+        /// What the current state draws as.
+        fn frame(&self) -> PropertiesFrame<'_> {
+            match &self.state {
+                PropertiesState::Reading => PropertiesFrame::Reading,
+                PropertiesState::Ready(props) => PropertiesFrame::Ready(props),
+                PropertiesState::Refused(reason) => PropertiesFrame::Refused(reason),
+            }
+        }
+
+        /// The node's summary, once the read has landed.
+        fn props(&self) -> Option<&Properties> {
+            match &self.state {
+                PropertiesState::Ready(props) => Some(props),
+                PropertiesState::Reading | PropertiesState::Refused(_) => None,
+            }
+        }
+
+        /// Where the attribute list is scrolled and which row the keyboard
+        /// acts on.
+        fn view(&self) -> AttrView {
+            AttrView {
+                offset: self.rows.offset(),
+                cursor: self.rows.cursor(),
+            }
+        }
+
+        /// The read to ask for, so a window refreshes through the same job it
+        /// opened with.
+        fn job(&self, window: u64) -> PropertyJob {
+            PropertyJob {
+                window,
+                path: self.path.clone(),
+                kind: self.kind,
+            }
+        }
+    }
+
+    impl OpenWindow {
+        /// The listing this window shows, or `None` when it shows something
+        /// else.
+        fn browser(&mut self) -> Option<&mut BrowserWindow> {
+            match &mut self.kind {
+                WindowKind::Browser(win) => Some(win),
+                WindowKind::Properties(_) => None,
+            }
+        }
     }
 
     /// One context-menu gesture in flight: the open the desktop minted for it,
@@ -414,22 +525,66 @@ mod program {
         let Some(damage) = present_damage(win.pane.mode(), repaint, damage) else {
             return Ok(());
         };
-        present_frame(
-            &mut win.browser,
-            &win.overlays,
-            &win.places,
-            win.chrome,
-            theme,
-            &mut FrameTarget {
-                client,
-                pane: &mut win.pane,
-                title: &mut win.title,
-                surface: &mut win.surface,
-                damage,
+        let mut target = FrameTarget {
+            client,
+            pane: &mut win.pane,
+            title: &mut win.title,
+            surface: &mut win.surface,
+            damage,
+        };
+        match &mut win.kind {
+            WindowKind::Browser(browser) => present_frame(
+                &mut browser.browser,
+                &browser.overlays,
+                &browser.places,
+                browser.chrome,
+                theme,
+                &mut target,
+                icons,
+                scale,
+            ),
+            WindowKind::Properties(props) => present_properties(props, theme, &mut target, scale),
+        }
+    }
+
+    /// Paint a Properties window's whole client and present it.
+    ///
+    /// The window's own title bar names the node, so the client is the fields,
+    /// the permissions grid and the attribute list; the read that fills them
+    /// happens on the reader, so this draws whatever has landed and the stated
+    /// reading or refusal notice until it does.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the present refuses.
+    fn present_properties<T: WindowTransport>(
+        win: &mut PropertiesWindow,
+        theme: &Theme,
+        target: &mut FrameTarget<'_, T>,
+        scale: Scale,
+    ) -> Result<(), Errno> {
+        let mode = *target.pane.mode();
+        let window = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let controls = PropertiesControls {
+            can_chown: win.can_chown,
+            owner: win.owner.as_ref().map(|ed| (ed.field, &ed.editor)),
+            attribute: &win.editor,
+            scrollbar: win.rows.scrollbar(),
+        };
+        let view = win.view();
+        let frame = win.frame();
+        let damage = target.damage;
+        let surface = &mut *target.surface;
+        surface.with_clip(
+            damage.x,
+            damage.y,
+            damage.width_px,
+            damage.height_px,
+            |surface| {
+                draw_properties_window(surface, frame, view, controls, scale, theme, window);
             },
-            icons,
-            scale,
-        )
+        );
+        target.pane.present(target.client, surface, damage)
     }
 
     /// Repaint and present the whole of `win`.
@@ -508,13 +663,15 @@ mod program {
         };
         Ok(OpenWindow {
             pane,
-            browser,
-            overlays: initial_overlays(),
-            places: places.clone(),
-            chrome: Chrome::HIDDEN,
             title,
             surface,
-            menu: None,
+            kind: WindowKind::Browser(Box::new(BrowserWindow {
+                browser,
+                overlays: initial_overlays(),
+                places: places.clone(),
+                chrome: Chrome::HIDDEN,
+                menu: None,
+            })),
         })
     }
 
@@ -529,11 +686,18 @@ mod program {
         windows: &mut alloc::vec::Vec<OpenWindow>,
         index: usize,
         client: &mut WindowClient<app::RtWindowTransport>,
+        reads: &Reads,
     ) {
         if index >= windows.len() {
             return;
         }
         let closed = windows.remove(index);
+        // A Properties window's outstanding read is dropped with it: the id
+        // could be handed to the next window, and an answer for a window that
+        // has gone belongs to nobody.
+        if matches!(closed.kind, WindowKind::Properties(_)) {
+            reads.forget_properties(closed.pane.id());
+        }
         let _ = closed.pane.close(client);
     }
 
@@ -662,6 +826,7 @@ mod program {
         installed: &RefCell<Vec<AppAssociation>>,
         event_endpoint: u64,
         role: Role,
+        can_chown: bool,
         event: &WindowEvent,
     ) -> Option<i32> {
         match route_app_bar_event(
@@ -684,37 +849,21 @@ mod program {
             .window_id()
             .and_then(|id| windows.iter().position(|win| win.pane.id() == id))?;
 
-        // The window manager resized (or maximized/restored) this window.
-        // Re-map its frame region at the new client size and repaint so the
-        // listing fills it; the browser lays out to the new viewport
-        // automatically. A refused or unallocatable resize keeps the current
-        // window rather than failing the app (fail closed).
-        //
-        // The reported size is adopted exactly: the declared minimum is the
-        // window manager's to hold, and an app that pushed back here would
-        // fight the drag frame by frame.
         if let WindowEvent::Resized {
             width_px,
             height_px,
             ..
         } = *event
         {
-            let win = &mut windows[index];
-            let new_mode = app::mode_for(width_px, height_px);
-            // The fresh surface is allocated before the session is asked and
-            // adopted only once the pane has taken the new region, so a
-            // refusal at either step leaves the window drawable at the size it
-            // already had. The surface holds none of the last frame's pixels,
-            // so the repaint that follows can only be a whole one.
-            if let Some(surface) = Surface::new(new_mode.width_px, new_mode.height_px) {
-                if win.pane.resize(client, &new_mode) {
-                    win.surface = surface;
-                    if present_whole(win, client, theme, icons, desktop.scale()).is_err() {
-                        return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
-                    }
-                }
-            }
-            return None;
+            return resize_window(
+                &mut windows[index],
+                client,
+                theme,
+                icons,
+                desktop.scale(),
+                width_px,
+                height_px,
+            );
         }
 
         // Nobody can see the window, so the session gave its copy of the pixels
@@ -727,17 +876,76 @@ mod program {
             return None;
         }
 
-        let win = &mut windows[index];
+        if matches!(windows[index].kind, WindowKind::Properties(_)) {
+            return route_properties_event(
+                windows,
+                index,
+                client,
+                theme,
+                icons,
+                reads,
+                desktop.scale(),
+                event,
+            );
+        }
+        route_browser_event(
+            windows,
+            index,
+            client,
+            desktop,
+            places,
+            theme,
+            icons,
+            launcher,
+            reads,
+            installed,
+            event_endpoint,
+            role,
+            can_chown,
+            event,
+        )
+    }
+
+    /// Route one event to the browser window at `index`.
+    ///
+    /// Its own path because a listing carries everything a Properties window
+    /// does not: the rail, the chrome bands, the overlays, and the gestures
+    /// that launch, copy, and open.
+    #[allow(clippy::too_many_arguments)] // The run's whole mutable state, threaded explicitly.
+    fn route_browser_event(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        index: usize,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        desktop: &mut Desktop,
+        places: &mut Places,
+        theme: &Theme,
+        icons: &RefCell<IconPipeline>,
+        launcher: &RefCell<Launcher>,
+        reads: &alloc::sync::Arc<Reads>,
+        installed: &RefCell<Vec<AppAssociation>>,
+        event_endpoint: u64,
+        role: Role,
+        can_chown: bool,
+        event: &WindowEvent,
+    ) -> Option<i32> {
+        let win = windows.get_mut(index)?;
+        let window_id = win.pane.id();
         // The chrome toggle is a window-level gesture like the refresh below,
         // not a listing key: it changes what the frame is laid out from, so it
         // is applied to the record before this round's canvas is built and the
         // whole window is repainted at the new layout.
         let chrome_toggled = chrome_toggle(win, event);
+        let WindowKind::Browser(state) = &win.kind else {
+            return None;
+        };
+        // The mode is copied rather than borrowed, so the round's canvas does
+        // not hold the pane while the gesture below takes the window.
+        let mode = *win.pane.mode();
         let canvas = Canvas {
             theme,
-            mode: win.pane.mode(),
+            mode: &mode,
             scale: desktop.scale(),
-            chrome: win.chrome,
+            chrome: state.chrome,
         };
         // The user asked this window to re-read what is there, so the rail
         // re-reads the mount table in the same gesture — and a component's
@@ -747,7 +955,7 @@ mod program {
         // under it. Read once and shared out, so the process's rail and the
         // window's can never disagree about what is mounted.
         if sidebar::is_refresh_request(
-            &win.browser,
+            &state.browser,
             canvas.scale,
             canvas.theme(),
             canvas.window(),
@@ -756,7 +964,9 @@ mod program {
         ) {
             let (home, volumes) = places_source();
             *places = Places::new(&home, &volumes);
-            sidebar::refresh_places(&mut win.places, &home, &volumes);
+            if let Some(state) = win.browser() {
+                sidebar::refresh_places(&mut state.places, &home, &volumes);
+            }
             if role == Role::Desktop {
                 declare_app_bar(client, event_endpoint, role, places);
             }
@@ -765,35 +975,130 @@ mod program {
         // and listing for the marks they move themselves, report into this
         // one, which is what the present is clipped to.
         let mut damage = damage::sink();
-        let window_id = win.pane.id();
         let popup = PopupLink::of(client, desktop, event_endpoint);
+        let mut properties = None;
+        let state = win.browser()?;
         let (repaint, close) = apply_event(
             &mut WindowState {
-                browser: &mut win.browser,
-                overlays: &mut win.overlays,
-                places: &mut win.places,
+                browser: &mut state.browser,
+                overlays: &mut state.overlays,
+                places: &mut state.places,
             },
             &mut Acts {
                 menu: MenuLink {
                     client,
                     window: window_id,
-                    open: &mut win.menu,
+                    open: &mut state.menu,
                 },
                 launcher,
                 reads,
                 installed,
                 popup,
+                properties: &mut properties,
             },
             canvas,
             event,
             &mut damage,
         );
         if close {
-            close_window(windows, index, client);
+            close_window(windows, index, client, reads);
             return None;
         }
         let repaint = merge(repaint, whole_if(chrome_toggled));
         if present_window(win, client, theme, icons, desktop.scale(), repaint, &damage).is_err() {
+            return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
+        }
+        // The window this round asked for, opened once its own window's borrow
+        // has ended.
+        if let Some(request) = properties {
+            open_properties(
+                request,
+                windows,
+                client,
+                desktop,
+                theme,
+                icons,
+                reads,
+                event_endpoint,
+                can_chown,
+            );
+        }
+        None
+    }
+
+    /// Adopt the client size the window manager gave this window.
+    ///
+    /// Re-maps the frame region at the new size and repaints whole, whatever
+    /// the window is showing: the browser lays out to the new viewport and a
+    /// Properties window re-places its bands.
+    ///
+    /// The reported size is adopted exactly — the declared minimum is the
+    /// window manager's to hold, and an app that pushed back here would fight
+    /// the drag frame by frame. The fresh surface is allocated before the
+    /// session is asked and adopted only once the pane has taken the new
+    /// region, so a refusal at either step leaves the window drawable at the
+    /// size it already had (fail closed). The surface holds none of the last
+    /// frame's pixels, so the repaint that follows can only be a whole one.
+    #[allow(clippy::too_many_arguments)] // The window, the frame, and the new size.
+    fn resize_window(
+        win: &mut OpenWindow,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        theme: &Theme,
+        icons: &RefCell<IconPipeline>,
+        scale: Scale,
+        width_px: u32,
+        height_px: u32,
+    ) -> Option<i32> {
+        let new_mode = app::mode_for(width_px, height_px);
+        let surface = Surface::new(new_mode.width_px, new_mode.height_px)?;
+        if !win.pane.resize(client, &new_mode) {
+            return None;
+        }
+        win.surface = surface;
+        if present_whole(win, client, theme, icons, scale).is_err() {
+            return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
+        }
+        None
+    }
+
+    /// Route one event to the Properties window at `index`.
+    ///
+    /// Its own path because a Properties window shares nothing with a listing
+    /// but the pane, the surface and the title: no rail, no chrome, no
+    /// overlays, and no listing to navigate.
+    #[allow(clippy::too_many_arguments)] // The window list, the frame, and the event.
+    fn route_properties_event(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        index: usize,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        theme: &Theme,
+        icons: &RefCell<IconPipeline>,
+        reads: &Reads,
+        scale: Scale,
+        event: &WindowEvent,
+    ) -> Option<i32> {
+        let win = windows.get_mut(index)?;
+        let window_id = win.pane.id();
+        let mode = *win.pane.mode();
+        let mut damage = damage::sink();
+        let WindowKind::Properties(props) = &mut win.kind else {
+            return None;
+        };
+        let (repaint, close) = apply_properties_event(
+            props,
+            window_id,
+            reads,
+            theme,
+            scale,
+            Rect::new(0, 0, mode.width_px, mode.height_px),
+            event,
+            &mut damage,
+        );
+        if close {
+            close_window(windows, index, client, reads);
+            return None;
+        }
+        if present_window(win, client, theme, icons, scale, repaint, &damage).is_err() {
             return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
         }
         None
@@ -815,9 +1120,12 @@ mod program {
         else {
             return false;
         };
-        match win.chrome.toggled_by(*key, *modifiers) {
+        let Some(state) = win.browser() else {
+            return false;
+        };
+        match state.chrome.toggled_by(*key, *modifiers) {
             Some(chrome) => {
-                win.chrome = chrome;
+                state.chrome = chrome;
                 true
             }
             None => false,
@@ -1384,6 +1692,9 @@ mod program {
         /// lends it as a borrow, which could not outlive a guard.
         artwork: ArtworkDesk,
         probes: Probes,
+        /// What the open Properties windows have asked to be described and
+        /// what has come back, keyed by window.
+        properties: PropertyReads,
         bundles: tairix_util::defer::JobDesk<(), Vec<AppAssociation>>,
         /// The user's home components and the mounted volumes the places rail
         /// is built from, re-read when the kernel says the mount table moved.
@@ -1403,6 +1714,8 @@ mod program {
         Artwork(ArtworkJob),
         /// Probe these folders' occupancy as one batch.
         Probe(Vec<Vec<String>>),
+        /// Describe one node for a Properties window.
+        Properties(PropertyJob),
         /// Walk the program stores for their declared file associations.
         Bundles,
         /// Re-read the home components and the mounted volumes.
@@ -1417,6 +1730,7 @@ mod program {
                     listings: ListingDesk::new(),
                     artwork: ArtworkDesk::new(),
                     probes: Probes::new(),
+                    properties: PropertyReads::new(),
                     bundles: tairix_util::defer::JobDesk::new(),
                     places: tairix_util::defer::JobDesk::new(),
                     stopping: false,
@@ -1470,6 +1784,10 @@ mod program {
                         let answers = probe_batch(&batch);
                         self.work.lock().probes.deliver(answers)
                     }
+                    Read::Properties(job) => {
+                        let described = describe_node(&job);
+                        self.work.lock().properties.deliver(job.window, described)
+                    }
                     Read::Bundles => {
                         let found = scan_bundles();
                         self.work.lock().bundles.deliver(found)
@@ -1489,6 +1807,13 @@ mod program {
         fn next_read(work: &mut Work) -> Option<Read> {
             if let Some((_, target)) = work.listings.next_job() {
                 return Some(Read::List(target));
+            }
+            // A node the user asked to be described comes before the icon
+            // decodes and folder cues: those are decoration a frame already
+            // draws without, and a Properties window shows nothing until its
+            // answer lands.
+            if let Some(job) = work.properties.next_job() {
+                return Some(Read::Properties(job));
             }
             if let Some(job) = work.artwork.next_job() {
                 return Some(Read::Artwork(job));
@@ -1598,6 +1923,46 @@ mod program {
             answer
         }
 
+        /// Ask for `job`'s node to be described, waking a worker for it.
+        ///
+        /// The window shows that it is reading until the answer lands: a node
+        /// is one `fs_stat` plus one call per attribute key, which on a
+        /// contended volume is not a frame.
+        fn want_properties(&self, job: PropertyJob) {
+            let submitted = {
+                let mut work = self.work.lock();
+                work.properties.submit(job)
+            };
+            if submitted {
+                self.signal.notify_one();
+            }
+        }
+
+        /// Take `window`'s landed description, if one has.
+        fn take_properties(&self, window: u64) -> Option<Result<Properties, Errno>> {
+            self.work.lock().properties.take(window)
+        }
+
+        /// Whether a description has landed since this was last asked.
+        fn take_properties_landed(&self) -> bool {
+            self.work.lock().properties.take_landed()
+        }
+
+        /// Forget a closed window's read, so its answer is not held for a
+        /// window that no longer exists.
+        fn forget_properties(&self, window: u64) {
+            self.work.lock().properties.forget(window);
+        }
+
+        /// Whether a probe batch has landed since this was last asked.
+        ///
+        /// The loop resolves the visible cues on a `true`, which is what turns
+        /// a worker's answers into drawn icons: a delivery nothing adopts
+        /// leaves every folder showing the cue it had before the probe.
+        fn take_probes_landed(&self) -> bool {
+            self.work.lock().probes.take_landed()
+        }
+
         /// Ask for the program stores to be walked, answering with what they
         /// declare when there is no worker to walk them elsewhere.
         fn want_bundles(&self) -> Option<Vec<AppAssociation>> {
@@ -1655,6 +2020,7 @@ mod program {
             // pixels do not outlive their window in reusable heap.
             work.artwork.stop();
             work.probes.stop();
+            work.properties.stop();
             work.bundles.stop();
             work.places.stop();
             drop(work);
@@ -1736,6 +2102,59 @@ mod program {
         let path = tairix_browse::vfs::absolute_path(components)?;
         let stream = list_directory(&path)?;
         tairix_browse::vfs::entries_from_dir_stream(&path, &stream, &mut RtLinkReader)
+    }
+
+    /// Describe the node `job` names: one `fs_stat` under the user's own
+    /// identity, plus its visible extended attributes.
+    ///
+    /// A link is described as *itself*, through a resolve-only `NO_FOLLOW`
+    /// handle: that is the only reading under which a link to a file can be
+    /// described at all, and it is what makes the permission string honestly
+    /// read `l` rather than the target's kind. `stat` needs only a live
+    /// handle, not an access bit.
+    fn describe_node(job: &PropertyJob) -> Result<Properties, Errno> {
+        let flags = match job.kind {
+            EntryKind::Link(_) => OpenFlags::NO_FOLLOW,
+            EntryKind::File => OpenFlags::READ,
+            EntryKind::Directory | EntryKind::Bundle => OpenFlags::DIRECTORY,
+        };
+        let stat = tairix_rt::File::open(job.path.as_bytes(), flags)
+            .and_then(|file| file.stat())
+            .map_err(Errno::from_syscall)?;
+        Ok(Properties::from_stat(path_leaf(&job.path), job.kind, &stat)
+            .with_attributes(read_attributes(&job.path)))
+    }
+
+    /// The visible extended attributes of the node at `path`.
+    ///
+    /// The kernel omits keys whose namespace the caller may not read, so this
+    /// only ever sees what it may show. A volume that stores no attributes is
+    /// stated as such rather than reported as a node with none, and a refused
+    /// listing states its reason — an empty list would be a claim the reader
+    /// could tell from neither.
+    ///
+    /// A value the node lost between the listing and the read is dropped
+    /// rather than shown as empty: the key is gone, which is what the next
+    /// read will say.
+    fn read_attributes(path: &str) -> Attributes {
+        let keys = match tairix_rt::fs_attr_keys(path.as_bytes()) {
+            Ok(keys) => keys,
+            Err(ret) => {
+                return match Errno::from_syscall(ret) {
+                    Errno::NotSupported => Attributes::Unsupported,
+                    errno => Attributes::Refused(errno),
+                }
+            }
+        };
+        Attributes::Visible(
+            keys.into_iter()
+                .filter_map(|key| {
+                    tairix_rt::fs_attr_value(path.as_bytes(), key.as_bytes())
+                        .ok()
+                        .map(|value| Attribute::new(key, value))
+                })
+                .collect(),
+        )
     }
 
     /// Probe every folder in `batch`, answering only for those the probe
@@ -2068,6 +2487,24 @@ mod program {
         installed: &'a RefCell<Vec<AppAssociation>>,
         /// What opening a popup of this window's own needs.
         popup: PopupLink,
+        /// Where a gesture records the Properties window it asked for.
+        ///
+        /// A window cannot be appended to the list the gesture's own window is
+        /// borrowed from, so the node is resolved here — while the listing
+        /// that named it is still in hand — and the window is opened once the
+        /// round's borrow has ended.
+        properties: &'a mut Option<PropertiesRequest>,
+    }
+
+    /// A Properties window a gesture asked for: the node it describes,
+    /// resolved from the listing that named it.
+    struct PropertiesRequest {
+        /// The node's absolute path.
+        path: String,
+        /// What the listing called it.
+        kind: EntryKind,
+        /// The spelling a link stores, if it is one.
+        target: Option<String>,
     }
 
     /// What a popup this app opens above one of its own windows is opened
@@ -2120,15 +2557,13 @@ mod program {
 
     /// The transient overlay state layered over the browser view, threaded
     /// through the event loop so the painted overlays and the state they
-    /// reflect stay in step. At most one of `rename`/`properties`/`delete` is
-    /// open at a time; `owner` is nested inside `properties`.
+    /// reflect stay in step. At most one of `rename`/`delete` is open at a
+    /// time. Properties is not among them: it is a window of its own, so
+    /// several nodes can be inspected at once and the listing stays usable
+    /// while they are.
     struct Overlays {
         /// The in-place rename editor, when open (`F2`).
         rename: Option<TextField>,
-        /// The Properties overlay, when open (`Alt+Enter`).
-        properties: Option<Properties>,
-        /// The inline owner/group id editor on the Properties overlay.
-        owner: Option<OwnerEditor>,
         /// The delete-confirmation dialog, when open (`Delete`).
         delete: Option<DeleteConfirm>,
         /// The "Open With…" application chooser, when open (chosen from the
@@ -2151,9 +2586,6 @@ mod program {
         /// pasted (its sources have moved), a `Copy` is kept so it can be
         /// pasted again elsewhere.
         clipboard: Option<Clipboard>,
-        /// Whether the launching user holds `CAP_FS_CHOWN` — the one gate on
-        /// offering the ownership control (read once at start-up).
-        can_chown: bool,
         /// The pointer double-click detector: a second quick primary press on
         /// the same item activates it, exactly as `Enter` does. It lives in the
         /// app (the engine is pointer-agnostic) and is reset whenever a press
@@ -2226,6 +2658,40 @@ mod program {
         fn window(&self) -> Rect {
             Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
         }
+
+        /// What the rail and toolbar leave of the window for the listing —
+        /// the one inset the paint lays out in and every hit-test inverts, so
+        /// a click lands on exactly the control the user saw.
+        fn viewport(&self, places: &Places) -> Rect {
+            tairix_browse::render::content_area(
+                self.window(),
+                self.scale,
+                self.theme,
+                self.chrome.rail(places),
+                self.chrome.toolbar,
+            )
+        }
+    }
+
+    /// Latch every folder cue `browser`'s visible rows now have an answer for,
+    /// reporting whether any of them moved.
+    ///
+    /// The one derivation of which rows are on screen, so the resolve a
+    /// delivered probe batch drives and the resolve a paint performs ask about
+    /// exactly the same folders.
+    fn resolve_visible_occupancy<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        places: &Places,
+        canvas: Canvas<'_>,
+    ) -> bool {
+        let range = tairix_browse::render::visible_range(
+            browser,
+            canvas.scale,
+            canvas.theme(),
+            canvas.viewport(places),
+            canvas.chrome.toolbar,
+        );
+        browser.resolve_occupancy(range)
     }
 
     /// Render the browser into the window's retained surface, clipped to
@@ -2239,10 +2705,6 @@ mod program {
     /// The window's title is the location it is showing, so the frame begins by
     /// retitling when — and only when — the browser has moved since the last
     /// one. A repaint that did not move sends nothing.
-    ///
-    /// The ownership control is drawn on the Properties overlay only where the
-    /// launching user holds `CAP_FS_CHOWN` (`overlays.can_chown`), so a session
-    /// that cannot use it is never shown it.
     ///
     /// The frame also resolves the folder-occupancy of exactly the entries it
     /// is about to draw, so an empty folder and a full one are drawn apart.
@@ -2266,9 +2728,6 @@ mod program {
         T: WindowTransport,
     {
         let rename = overlays.rename.as_ref();
-        let properties = overlays.properties.as_ref();
-        let owner = overlays.owner.as_ref();
-        let can_chown = overlays.can_chown;
         let mode = *target.pane.mode();
         let window = Rect::new(0, 0, mode.width_px, mode.height_px);
         // The rail owns the window's leading edge, so every overlay drawn over
@@ -2277,10 +2736,14 @@ mod program {
         // the rail it does not belong to.
         let rail = chrome.rail(places);
         let toolbar = chrome.toolbar;
-        let viewport = tairix_browse::render::content_area(window, scale, theme, rail, toolbar);
-        browser.resolve_occupancy(tairix_browse::render::visible_range(
-            browser, scale, theme, viewport, toolbar,
-        ));
+        let canvas = Canvas {
+            theme,
+            mode: &mode,
+            scale,
+            chrome,
+        };
+        let viewport = canvas.viewport(places);
+        resolve_visible_occupancy(browser, places, canvas);
         let browser = &*browser;
         // The title is the location, so it is sent only when the browser has
         // moved. A refused retitle leaves the remembered text alone rather than
@@ -2333,24 +2796,9 @@ mod program {
                         field.render(surface, bounds, scale, theme);
                     }
                 }
-                // With the Properties overlay open, draw it centered on top of
-                // the view (the shared drawn panel painting the
-                // already-authorised metadata). Rename and Properties are never
-                // open together.
-                if let Some(props) = properties {
-                    draw_properties_editable(surface, props, scale, theme, viewport);
-                    // Reassigning an owner is privileged, so the ownership
-                    // control is drawn only where the launching user holds
-                    // `CAP_FS_CHOWN` — never shown to a session that cannot use
-                    // it.
-                    if can_chown {
-                        let active = owner.map(|ed| (ed.field, &ed.editor));
-                        draw_owner_control(surface, props, scale, theme, viewport, active);
-                    }
-                }
-                // The delete-confirmation dialog is modal: drawn last, on top of
-                // the view, and never open together with the rename/Properties
-                // overlays.
+                // The delete-confirmation dialog is modal: drawn last, on top
+                // of the view, and never open together with the rename
+                // editor.
                 if let Some(confirm) = overlays.delete.as_ref() {
                     draw_delete_dialog(surface, &confirm.dialog, scale, theme, viewport);
                 }
@@ -2397,13 +2845,7 @@ mod program {
         // through the one shared inset the renderer paints with, so a click
         // lands on exactly the control the user saw.
         let toolbar = canvas.chrome.toolbar;
-        let viewport = tairix_browse::render::content_area(
-            window,
-            scale,
-            theme,
-            canvas.chrome.rail(places),
-            toolbar,
-        );
+        let viewport = canvas.viewport(places);
 
         // A close request closes *this* window whatever mode it is in; an open
         // rename edit or properties overlay is simply abandoned (nothing was
@@ -2452,11 +2894,10 @@ mod program {
             return (whole_if(changed), false);
         }
 
-        // A modal overlay (the Properties overlay, or the owner-id editor
-        // nested in it) owns the window while it is open; handle it and return.
-        if let Some((changed, close)) =
-            apply_modal_event(browser, overlays, scale, theme, viewport, event)
-        {
+        // The delete-confirmation dialog owns the window while it is up, so
+        // every event goes to it and none navigates the view behind it.
+        if overlays.delete.is_some() {
+            let (changed, close) = apply_delete_event(overlays, scale, theme, viewport, event);
             return (whole_if(changed), close);
         }
 
@@ -2537,7 +2978,7 @@ mod program {
                 key: KeyInput::Pressed { key, modifiers },
                 ..
             } => {
-                // Alt+Enter opens the Properties overlay, a plain Enter
+                // Alt+Enter opens a Properties window, a plain Enter
                 // activates the selection and Shift+Enter lists a bundle
                 // rather than running it — the keyboard spelling of the
                 // pointer's shift-double-click, so the two cannot diverge —
@@ -2546,7 +2987,7 @@ mod program {
                 // state); every other navigation-mode key is handled by the
                 // shared `apply_nav_key`.
                 if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
-                    whole(begin_properties(browser, &mut overlays.properties))
+                    whole(ask_properties(browser, acts.properties))
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
                     whole(activate(
                         browser,
@@ -2802,70 +3243,11 @@ mod program {
         }
     }
 
-    /// Handle one event while a modal overlay owns the window, returning
-    /// `Some(result)` when it consumed the event and `None` when no modal
-    /// overlay is open (so the caller falls through to rename / navigation).
-    ///
-    /// The owner-id editor is nested inside the Properties overlay, so it is
-    /// checked first: while it is open its keys commit or cancel the ownership
-    /// change. Otherwise the Properties overlay owns the window — `Escape`
-    /// dismisses it and a primary-button press routes to a permission toggle
-    /// or (for a `CAP_FS_CHOWN` holder) the owner control. Every other event
-    /// is swallowed so a keystroke never navigates the view behind the overlay.
-    fn apply_modal_event<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        overlays: &mut Overlays,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-        event: &WindowEvent,
-    ) -> Option<(bool, bool)> {
-        // The delete-confirmation dialog is the topmost modal: while it is up
-        // it owns the window, so it is handled before anything else.
-        if overlays.delete.is_some() {
-            return Some(apply_delete_event(overlays, scale, theme, viewport, event));
-        }
-        if overlays.owner.is_some() {
-            return Some(match event {
-                WindowEvent::Key {
-                    key: KeyInput::Pressed { key, modifiers },
-                    ..
-                } => apply_owner_edit_key(
-                    browser, overlays, *key, *modifiers, scale, theme, viewport,
-                ),
-                _ => (false, false),
-            });
-        }
-        if overlays.properties.is_some() {
-            return Some(match event {
-                WindowEvent::Key {
-                    key:
-                        KeyInput::Pressed {
-                            key: KeyValue::Named(NamedKeyCode::Escape),
-                            ..
-                        },
-                    ..
-                } => {
-                    overlays.properties = None;
-                    (true, false)
-                }
-                WindowEvent::Pointer { x, y, action, .. } => match press_point(*action, *x, *y) {
-                    Some(point) => {
-                        apply_properties_pointer(browser, overlays, scale, theme, viewport, point)
-                    }
-                    None => (false, false),
-                },
-                _ => (false, false),
-            });
-        }
-        None
-    }
-
-    /// Handle one key press in navigation mode (not renaming, not showing the
-    /// Properties overlay), reporting whether the view changed (it never asks
-    /// the app to close). Mirrors [`apply_rename_key`]'s shape; Alt+Enter
-    /// (Properties) and a plain Enter (activation, which needs the launcher)
-    /// are handled by the caller, which owns the overlay and launcher state.
+    /// Handle one key press in navigation mode (not renaming), reporting
+    /// whether the view changed (it never asks the app to close). Mirrors
+    /// [`apply_rename_key`]'s shape; Alt+Enter (Properties, which opens a
+    /// window) and a plain Enter (activation, which needs the launcher) are
+    /// handled by the caller, which owns the window list and launcher state.
     #[allow(clippy::too_many_arguments)] // The key, its context, and the round's report.
     fn apply_nav_key<S: DirectorySource>(
         browser: &mut Browser<S>,
@@ -4562,7 +4944,7 @@ mod program {
                 &mut overlays.operation,
                 ClipboardVerb::Paste,
             ),
-            ContextCommand::Properties => begin_properties(browser, &mut overlays.properties),
+            ContextCommand::Properties => ask_properties(browser, acts.properties),
             // The same modal-confirmed removal the `Delete` key opens: the menu
             // adds no authority — the confirmed walk is the user's own
             // permission-checked `fs_unlink`s.
@@ -4632,7 +5014,7 @@ mod program {
     ) -> Option<ChooserOverlay> {
         let screen = acts.popup.screen;
         let (w, h) = tairix_browse::render::open_with_chooser_extent(
-            chooser.candidates().len(),
+            &chooser,
             canvas.scale,
             canvas.theme(),
             screen,
@@ -5090,104 +5472,391 @@ mod program {
         (true, false)
     }
 
-    /// Open the Properties overlay for the selected item: name its path
-    /// through the shared spelling, read its metadata with one
-    /// capability-checked `fs_stat` under the user's own identity, and store
-    /// the display-ready [`Properties`] the overlay paints. With nothing
-    /// selected (an empty directory) it is a no-op.
+    /// Record a Properties window for the browser's selected node.
     ///
-    /// Showing properties is an incidental, refusable action: if the item can
-    /// no longer be named or its metadata cannot be read (it vanished, or is
-    /// unreadable), the refusal is stated on `stderr` and the overlay simply
-    /// stays closed — an answer, not a crash, and never a fabricated summary. A
-    /// directory or sealed bundle is opened with the directory flag, a regular
-    /// file read-only; `stat` needs only a live handle either way.
-    fn begin_properties<S: DirectorySource>(
+    /// The node is resolved here, from the listing that named it, so the
+    /// window the round opens afterwards describes exactly what was selected
+    /// however the listing moves on. With nothing selected (an empty
+    /// directory) it is a silent no-op; a node that can no longer be named
+    /// states the refusal and opens nothing.
+    fn ask_properties<S: DirectorySource>(
         browser: &Browser<S>,
-        properties: &mut Option<Properties>,
+        request: &mut Option<PropertiesRequest>,
     ) -> (bool, bool) {
-        // With nothing selected (an empty directory) it is a silent no-op.
-        if browser.selected_entry().is_none() {
+        let Some(entry) = browser.selected_entry() else {
             return (false, false);
-        }
-        if let Some(props) = stat_selected_properties(browser) {
-            *properties = Some(props);
-            (true, false)
-        } else {
-            io::write_stderr_line("files: properties unavailable for that item");
-            (false, false)
-        }
-    }
-
-    /// Read the selected item's metadata into a display-ready [`Properties`]:
-    /// name its path through the shared spelling and `fs_stat` it with one
-    /// capability-checked handle under the user's own identity (no new
-    /// capability). Returns `None` when there is no selection, the item can no
-    /// longer be named, or its metadata cannot be read — the caller decides
-    /// whether that is a silent no-op or a stated refusal. A directory or
-    /// sealed bundle is opened with the directory flag, a regular file
-    /// read-only; `stat` needs only a live handle either way.
-    ///
-    /// One definition shared by opening the overlay ([`begin_properties`]) and
-    /// refreshing it after a permission change, so the two cannot drift.
-    fn stat_selected_properties<S: DirectorySource>(browser: &Browser<S>) -> Option<Properties> {
-        let entry = browser.selected_entry()?;
+        };
         let kind = entry.kind();
-        let name = entry.name().to_string();
+        let target = entry.target().map(String::from);
         let Some(Ok(path)) = browser.selected_target_path() else {
-            return None;
+            report_error("that item's location could not be resolved; no window opened");
+            return (false, false);
         };
-        let flags = match kind {
-            // A link is described as *itself*, through a resolve-only
-            // `NO_FOLLOW` handle: that is the only reading under which a link
-            // to a file can be described at all, and it is what makes the
-            // permission string honestly read `l` rather than the target's
-            // kind. `stat` needs only a live handle, not an access bit.
-            EntryKind::Link(_) => OpenFlags::NO_FOLLOW,
-            EntryKind::File => OpenFlags::READ,
-            EntryKind::Directory | EntryKind::Bundle => OpenFlags::DIRECTORY,
-        };
-        let stat = tairix_rt::File::open(path.as_bytes(), flags)
-            .and_then(|file| file.stat())
-            .ok()?;
-        let properties = Properties::from_stat(name, kind, &stat);
-        // A link also shows where it points — the spelling it stores, which
-        // is what explains a broken one.
-        Some(match entry.target() {
-            Some(target) => properties.with_target(target),
-            None => properties,
-        })
+        *request = Some(PropertiesRequest { path, kind, target });
+        (false, false)
     }
 
-    /// Apply a primary-button press inside the open Properties overlay: if it
-    /// landed on one of the nine permission toggles, flip that `rwx` bit and
-    /// commit the new mode through the browser's own capability-checked
-    /// [`Browser::set_mode_selected`] over `fs_set_mode` under the user's own
-    /// identity (no new capability — the per-inode owner/mode/ACL model gates
-    /// it). A press elsewhere in the overlay changes nothing.
+    /// Open a Properties window on the node `request` names.
     ///
-    /// The toggle flips only its own `rwx` bit and preserves the current
-    /// setuid/setgid/sticky bits (the settable word masked by [`FS_MODE_MASK`],
-    /// dropping the non-settable file-type bits `fs_stat` also reports). On
-    /// success the overlay is re-stat'd so it reflects the applied mode; a VFS
-    /// refusal leaves the node's mode exactly as it was and states its reason
-    /// on `stderr` — an honest answer, never a crash or a fabricated success.
-    fn apply_permission_toggle<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        properties: &mut Option<Properties>,
-        scale: Scale,
+    /// The read leaves the loop: a node is one `fs_stat` plus one call per
+    /// extended-attribute key, which on a contended volume is a visible stall
+    /// rather than a frame. The window opens stating that it is reading and
+    /// adopts the summary when it lands.
+    ///
+    /// Several are open at once, each pinned to its own node by *path* — so
+    /// the listing behind them may move on, be reloaded, or be navigated away
+    /// from without any of them describing or writing to something else.
+    #[allow(clippy::too_many_arguments)] // The run's window state, threaded explicitly.
+    fn open_properties(
+        request: PropertiesRequest,
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        desktop: &Desktop,
         theme: &Theme,
-        viewport: Rect,
-        point: Point,
-    ) -> (bool, bool) {
-        let Some(bit) = permission_cell_at(viewport, scale, theme, point) else {
-            return (false, false);
+        icons: &RefCell<IconPipeline>,
+        reads: &Reads,
+        event_endpoint: u64,
+        can_chown: bool,
+    ) {
+        let PropertiesRequest { path, kind, target } = request;
+        let title = alloc::format!("{} — Properties", path_leaf(&path));
+        // The extent is already resolved at the desktop's density (the row
+        // pitch it counts is a physical one), so only the screen cap is left
+        // to apply — never a window larger than the display it appears on.
+        let (w, h) = tairix_browse::render::properties_window_extent(desktop.scale(), theme);
+        let screen = desktop.screen();
+        let mode = app::mode_for(w.min(screen.width), h.min(screen.height));
+        let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
+            report_error("window surface refused; no Properties window opened");
+            return;
         };
-        let Some(props) = properties.as_ref() else {
-            return (false, false);
+        let pane = match WindowPane::open(client, event_endpoint, &mode, &title, WIN_SIZING) {
+            Ok((pane, _)) => pane,
+            Err(err) => {
+                report_error(&alloc::format!("{err}; no Properties window opened"));
+                return;
+            }
         };
-        let new_mode = (props.mode() & FS_MODE_MASK) ^ bit;
-        match browser.set_mode_selected(new_mode, |path, mode| {
+        let mut win = OpenWindow {
+            pane,
+            title,
+            surface,
+            kind: WindowKind::Properties(Box::new(PropertiesWindow {
+                path,
+                kind,
+                target,
+                state: PropertiesState::Reading,
+                rows: RowList::new(0),
+                editor: attribute_editor(),
+                owner: None,
+                can_chown,
+            })),
+        };
+        if let WindowKind::Properties(props) = &win.kind {
+            reads.want_properties(props.job(win.pane.id()));
+        }
+        if present_whole(&mut win, client, theme, icons, desktop.scale()).is_err() {
+            reads.forget_properties(win.pane.id());
+            let _ = win.pane.close(client);
+            report_error("the Properties window could not be painted; it was closed again");
+            return;
+        }
+        windows.push(win);
+    }
+
+    /// A fresh, focused `key = value` editor.
+    ///
+    /// Focused from the start because it is the window's one text surface: a
+    /// user who clicks a row and types expects the typing to land there.
+    fn attribute_editor() -> TextField {
+        let mut editor = TextField::new()
+            .with_max_len(ATTR_LINE_MAX)
+            .with_placeholder(ATTR_EDITOR_HINT);
+        editor.set_focused(true);
+        editor
+    }
+
+    /// What the empty attribute editor prompts for.
+    const ATTR_EDITOR_HINT: &str = "namespace.name = value";
+
+    /// Most characters the attribute `key = value` line accepts.
+    ///
+    /// The kernel's own key and value bounds are what actually gate a write;
+    /// this only keeps the field from growing past what either could hold
+    /// together, so a line that cannot possibly be applied is not typed.
+    const ATTR_LINE_MAX: usize =
+        tairix_abi::FS_ATTR_KEY_MAX + tairix_abi::FS_ATTR_VALUE_MAX + " = ".len();
+
+    /// Adopt whatever the reader has answered for `win`, reporting whether the
+    /// window has something new to draw.
+    ///
+    /// The attribute list is re-sized to the answer, which clamps a cursor a
+    /// removal left past the end.
+    fn adopt_properties(win: &mut PropertiesWindow, answer: Result<Properties, Errno>) {
+        match answer {
+            Ok(props) => {
+                let props = match &win.target {
+                    Some(target) => props.with_target(target),
+                    None => props,
+                };
+                win.rows.resize(props.attributes().visible().len());
+                win.state = PropertiesState::Ready(props);
+            }
+            Err(err) => {
+                win.rows.resize(0);
+                win.state = PropertiesState::Refused(alloc::format!("could not be read: {err}"));
+            }
+        }
+    }
+
+    /// Handle one event delivered to a Properties window.
+    ///
+    /// `Escape` steps back out of whatever is open — the owning-id editor, then
+    /// a typed attribute line — and closes the window when neither is. The
+    /// arrow keys walk the attribute list; every other key reaches the editor
+    /// that has the focus. A press resolves through the one shared hit-test, so
+    /// it acts on exactly the control the user saw.
+    #[allow(clippy::too_many_arguments)] // The window, its geometry, and the event.
+    fn apply_properties_event(
+        win: &mut PropertiesWindow,
+        window_id: u64,
+        reads: &Reads,
+        theme: &Theme,
+        scale: Scale,
+        window: Rect,
+        event: &WindowEvent,
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
+        match event {
+            WindowEvent::CloseRequested { .. } => return (Repaint::Nothing, true),
+            WindowEvent::Key {
+                key: KeyInput::Pressed { key, modifiers },
+                ..
+            } => {
+                return apply_properties_key(
+                    win, window_id, reads, theme, scale, window, *key, *modifiers, damage,
+                )
+            }
+            WindowEvent::Pointer { x, y, action, .. } => {
+                return apply_properties_pointer(
+                    win, window_id, reads, theme, scale, window, *x, *y, *action, damage,
+                )
+            }
+            _ => {}
+        }
+        (Repaint::Nothing, false)
+    }
+
+    /// Feed one key press to a Properties window.
+    #[allow(clippy::too_many_arguments)] // The window, its geometry, and the key.
+    fn apply_properties_key(
+        win: &mut PropertiesWindow,
+        window_id: u64,
+        reads: &Reads,
+        theme: &Theme,
+        scale: Scale,
+        window: Rect,
+        key: KeyValue,
+        modifiers: AbiModifiers,
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
+        // The owning-id editor owns the keyboard while it is open: its keys
+        // commit or cancel the ownership change and none of them reaches the
+        // attribute line beneath it.
+        if let Some(field) = win.owner.as_ref().map(|ed| ed.field) {
+            let bounds = win
+                .props()
+                .and_then(|props| {
+                    tairix_browse::render::properties_owner_editor_rect(
+                        props, window, scale, theme, field,
+                    )
+                })
+                .unwrap_or(Rect::EMPTY);
+            let (editor_key, mods) = to_editor_key(key, modifiers);
+            let action = win
+                .owner
+                .as_mut()
+                .and_then(|ed| ed.editor.on_key(editor_key, mods, bounds, damage));
+            return match action {
+                Some(TextAction::Submitted) => commit_owner(win, window_id, reads),
+                Some(TextAction::Cancelled) => {
+                    win.owner = None;
+                    (Repaint::Whole, false)
+                }
+                Some(TextAction::Edited) => {
+                    if let Some(ed) = win.owner.as_mut() {
+                        let text = ed.editor.text().to_string();
+                        ed.editor.set_message(owner_id_message(&text));
+                    }
+                    (Repaint::Whole, false)
+                }
+                None => (Repaint::Nothing, false),
+            };
+        }
+        let visible = win.props().map_or(0, |props| {
+            tairix_browse::render::properties_attr_visible_rows(props, window, scale, theme)
+        });
+        match key {
+            KeyValue::Named(NamedKeyCode::Escape) => {
+                // The typed line is abandoned before the window is: a user
+                // half-way through an attribute has something to step back
+                // out of.
+                if win.editor.text().is_empty() {
+                    return (Repaint::Nothing, true);
+                }
+                win.editor = attribute_editor();
+                (Repaint::Whole, false)
+            }
+            KeyValue::Named(NamedKeyCode::Down | NamedKeyCode::Up) => {
+                let delta = if key == KeyValue::Named(NamedKeyCode::Down) {
+                    1
+                } else {
+                    -1
+                };
+                let moved = win.rows.step(delta);
+                let scrolled = win.rows.reveal(visible);
+                (whole_if(moved || scrolled), false)
+            }
+            _ => {
+                let bounds = win
+                    .props()
+                    .and_then(|props| {
+                        tairix_browse::render::properties_attr_editor_rect(
+                            props, window, scale, theme,
+                        )
+                    })
+                    .unwrap_or(Rect::EMPTY);
+                let (editor_key, mods) = to_editor_key(key, modifiers);
+                match win.editor.on_key(editor_key, mods, bounds, damage) {
+                    Some(TextAction::Submitted) => set_attribute(win, window_id, reads),
+                    Some(TextAction::Cancelled) => {
+                        win.editor = attribute_editor();
+                        (Repaint::Whole, false)
+                    }
+                    Some(TextAction::Edited) => (Repaint::Reported, false),
+                    None => (Repaint::Nothing, false),
+                }
+            }
+        }
+    }
+
+    /// Feed one pointer event to a Properties window.
+    #[allow(clippy::too_many_arguments)] // The window, its geometry, and the event.
+    fn apply_properties_pointer(
+        win: &mut PropertiesWindow,
+        window_id: u64,
+        reads: &Reads,
+        theme: &Theme,
+        scale: Scale,
+        window: Rect,
+        x: u32,
+        y: u32,
+        action: PointerAction,
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
+        let point = pointer_point(x, y);
+        // The scroll gutter owns a press that lands on it, so a drag on the
+        // bar moves the list instead of selecting a row beneath it.
+        let mut scrolled = None;
+        for input in pointer_input_events(action, point) {
+            let routed = match &win.state {
+                PropertiesState::Ready(props) => tairix_browse::render::properties_scroll_pointer(
+                    props,
+                    &mut win.rows,
+                    window,
+                    scale,
+                    theme,
+                    point,
+                    &input,
+                    damage,
+                ),
+                PropertiesState::Reading | PropertiesState::Refused(_) => None,
+            };
+            if let Some(moved) = routed {
+                scrolled = Some(scrolled.unwrap_or(false) || moved);
+            }
+        }
+        // The bar reported its own drawn state; an offset it actually moved
+        // draws every row somewhere new besides.
+        if let Some(moved) = scrolled {
+            return (reported_if(moved), false);
+        }
+        let Some(point) = press_point(action, x, y) else {
+            return (Repaint::Nothing, false);
+        };
+        let view = win.view();
+        let Some(target) = win.props().and_then(|props| {
+            tairix_browse::render::properties_hit(props, view, window, scale, theme, point)
+        }) else {
+            return (Repaint::Nothing, false);
+        };
+        match target {
+            PropertiesTarget::Permission(bit) => toggle_permission(win, window_id, reads, bit),
+            PropertiesTarget::Owner(field) => begin_owner_edit(win, field),
+            PropertiesTarget::Attribute(index) => (whole_if(select_attribute(win, index)), false),
+            PropertiesTarget::Editor => (Repaint::Nothing, false),
+            PropertiesTarget::Action(AttrAction::Set) => set_attribute(win, window_id, reads),
+            PropertiesTarget::Action(AttrAction::Remove) => remove_attribute(win, window_id, reads),
+        }
+    }
+
+    /// Make attribute row `index` current, loading it into the editor so a
+    /// value can be changed in place.
+    ///
+    /// A value whose bytes a typed line could not reproduce loads its key
+    /// alone and says so: offering the bytes back lossily would write
+    /// something other than what is stored.
+    fn select_attribute(win: &mut PropertiesWindow, index: usize) -> bool {
+        let moved = win.rows.select(index);
+        let Some(attr) = win
+            .props()
+            .and_then(|props| props.attributes().visible().get(index))
+        else {
+            return moved;
+        };
+        // A key the grammar allows but a typed line could not reproduce is
+        // offered back as nothing at all: the volume, not the kernel, decided
+        // those bytes.
+        let Some(key) = attr.key_text() else {
+            let _ = writeln!(
+                Stderr,
+                "files: {} has a key that cannot be edited as text",
+                attr.key_display()
+            );
+            return true;
+        };
+        let line = if let Some(text) = attr.text() {
+            alloc::format!("{key} = {text}")
+        } else {
+            let _ = writeln!(
+                Stderr,
+                "files: {key} holds bytes that cannot be edited as text; \
+                 its key is offered without them"
+            );
+            alloc::format!("{key} = ")
+        };
+        win.editor = attribute_editor().with_text(line);
+        true
+    }
+
+    /// Flip one `rwx` bit of the node's mode and commit it.
+    ///
+    /// The commit is the user's own permission-checked `fs_set_mode` under
+    /// their own identity (no new capability — the per-inode owner/mode/ACL
+    /// model gates it). The toggle preserves the current setuid/setgid/sticky
+    /// bits. A refusal states its reason and leaves the shown mode exactly as
+    /// it was; a success re-reads the node, so what the window shows is what
+    /// the kernel applied rather than what was asked for.
+    fn toggle_permission(
+        win: &mut PropertiesWindow,
+        window_id: u64,
+        reads: &Reads,
+        bit: u32,
+    ) -> (Repaint, bool) {
+        let Some(mode) = win.props().map(|props| props.mode() & FS_MODE_MASK) else {
+            return (Repaint::Nothing, false);
+        };
+        match tairix_browse::mode_edit::set_mode(&win.path, mode ^ bit, |path, mode| {
             let ret = tairix_rt::fs_set_mode(path.as_bytes(), mode);
             if ret == 0 {
                 Ok(())
@@ -5196,156 +5865,64 @@ mod program {
             }
         }) {
             Ok(()) => {
-                // Re-read the node so the overlay shows the applied mode; if the
-                // re-stat fails the commit still succeeded, so keep the panel.
-                if let Some(updated) = stat_selected_properties(browser) {
-                    *properties = Some(updated);
-                }
-                (true, false)
+                reads.want_properties(win.job(window_id));
+                (Repaint::Nothing, false)
             }
             Err(err) => {
                 let msg = err.message();
                 let _ = writeln!(Stderr, "files: {msg}");
-                (false, false)
+                (Repaint::Nothing, false)
             }
         }
     }
 
-    /// Route a primary-button press inside the open Properties overlay: a press
-    /// on one of the nine permission toggles commits a mode change
-    /// (`apply_permission_toggle`); otherwise, where the user holds
-    /// `CAP_FS_CHOWN`, a press on the owner or group value opens the inline id
-    /// editor for that field. A press elsewhere changes nothing (fail closed).
+    /// Open the inline id editor over the clicked owning value, pre-filled
+    /// with the current id and bounded to a `u32`'s ten digits.
     ///
-    /// The permission and owner cells sit on different rows, so a press
-    /// resolves to at most one of them; the permission row is checked first so
-    /// its (capability-free) toggles are never shadowed by the owner control.
-    fn apply_properties_pointer<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        overlays: &mut Overlays,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-        point: Point,
-    ) -> (bool, bool) {
-        if permission_cell_at(viewport, scale, theme, point).is_some() {
-            return apply_permission_toggle(
-                browser,
-                &mut overlays.properties,
-                scale,
-                theme,
-                viewport,
-                point,
-            );
+    /// The caller has already confirmed the press landed on that value; the
+    /// kernel still authorises the eventual commit under the user's own
+    /// identity (the editor holds no authority).
+    fn begin_owner_edit(win: &mut PropertiesWindow, field: OwnerField) -> (Repaint, bool) {
+        if !win.can_chown {
+            return (Repaint::Nothing, false);
         }
-        if overlays.can_chown {
-            if let Some(props) = overlays.properties.as_ref() {
-                if let Some(field) = owner_field_at(props, viewport, scale, theme, point) {
-                    return begin_owner_edit(props, &mut overlays.owner, field);
-                }
-            }
-        }
-        (false, false)
-    }
-
-    /// Open the inline id editor over the clicked owner or group value,
-    /// pre-filled with the current id and bounded to a `u32`'s ten digits.
-    ///
-    /// The caller has already confirmed the user holds `CAP_FS_CHOWN` and that
-    /// the press landed on `field`'s value; the kernel still authorises the
-    /// eventual commit under the user's own identity (the editor holds no
-    /// authority).
-    fn begin_owner_edit(
-        props: &Properties,
-        owner: &mut Option<OwnerEditor>,
-        field: OwnerField,
-    ) -> (bool, bool) {
-        let current = match field {
+        let Some(current) = win.props().map(|props| match field {
             OwnerField::Uid => props.uid(),
             OwnerField::Gid => props.gid(),
+        }) else {
+            return (Repaint::Nothing, false);
         };
         let mut editor = TextField::new()
             .with_text(current.to_string())
             .with_max_len(OWNER_ID_MAX_DIGITS);
         editor.set_focused(true);
-        *owner = Some(OwnerEditor { field, editor });
-        (true, false)
+        win.owner = Some(OwnerEditor { field, editor });
+        (Repaint::Whole, false)
     }
 
-    /// Feed one key to the open owner-id editor. A submit commits the reassigned
-    /// id through `fs_set_owner` (closing the editor and refreshing the panel on
-    /// success, or stating the refusal reason in the field and staying open); a
-    /// cancel abandons the edit; an edit repaints and live-validates the typed
-    /// id so a non-numeric or out-of-range value is flagged as the user types.
-    fn apply_owner_edit_key<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        overlays: &mut Overlays,
-        key: KeyValue,
-        modifiers: AbiModifiers,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-    ) -> (bool, bool) {
-        let (editor_key, mods) = to_editor_key(key, modifiers);
-        let Some(ed) = overlays.owner.as_mut() else {
-            return (false, false);
-        };
-        // The rectangle the shared owner control draws this editor at; a row
-        // that does not fit is drawn nowhere and so reports nothing.
-        let bounds = overlays
-            .properties
-            .as_ref()
-            .and_then(|props| owner_editor_rect(props, viewport, scale, theme, ed.field))
-            .unwrap_or(Rect::EMPTY);
-        let action = ed
-            .editor
-            .on_key(editor_key, mods, bounds, &mut damage::sink());
-        match action {
-            Some(TextAction::Submitted) => {
-                commit_owner_edit(browser, &mut overlays.properties, &mut overlays.owner)
-            }
-            Some(TextAction::Cancelled) => {
-                overlays.owner = None;
-                (true, false)
-            }
-            Some(TextAction::Edited) => {
-                let text = ed.editor.text().to_string();
-                ed.editor.set_message(owner_id_message(&text));
-                (true, false)
-            }
-            None => (false, false),
-        }
-    }
-
-    /// Commit the open owner-id editor: parse the typed value as a `u32` id and
-    /// apply it to the selected node through the browser's own
-    /// capability-checked [`Browser::set_owner_selected`] over `fs_set_owner`,
-    /// under the user's own identity. On success the editor closes and the
-    /// panel is re-stat'd to reflect the new owner; a non-numeric/out-of-range
-    /// value or a VFS refusal (including the missing-`CAP_FS_CHOWN` denial)
-    /// states its reason in the field and keeps the editor open — an honest
-    /// answer, never a silent or fabricated result.
-    fn commit_owner_edit<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        properties: &mut Option<Properties>,
-        owner: &mut Option<OwnerEditor>,
-    ) -> (bool, bool) {
-        let Some(ed) = owner.as_ref() else {
-            return (false, false);
+    /// Commit the open owning-id editor.
+    ///
+    /// A non-numeric or out-of-range value, or a VFS refusal (including the
+    /// missing-`CAP_FS_CHOWN` denial), states its reason in the field and
+    /// keeps the editor open — an honest answer, never a silent or fabricated
+    /// result. A success closes the editor and re-reads the node.
+    fn commit_owner(win: &mut PropertiesWindow, window_id: u64, reads: &Reads) -> (Repaint, bool) {
+        let Some(ed) = win.owner.as_ref() else {
+            return (Repaint::Nothing, false);
         };
         let field = ed.field;
         let text = ed.editor.text().to_string();
         let Ok(id) = text.parse::<u32>() else {
-            if let Some(ed) = owner.as_mut() {
+            if let Some(ed) = win.owner.as_mut() {
                 ed.editor.set_message(Some(String::from(OWNER_ID_HINT)));
             }
-            return (true, false);
+            return (Repaint::Whole, false);
         };
         let change = match field {
             OwnerField::Uid => OwnerChange::user(id),
             OwnerField::Gid => OwnerChange::group(id),
         };
-        match browser.set_owner_selected(change, |path, uid, gid| {
+        match tairix_browse::owner_edit::set_owner(&win.path, change, |path, uid, gid| {
             let ret = tairix_rt::fs_set_owner(path.as_bytes(), uid, gid);
             if ret == 0 {
                 Ok(())
@@ -5354,19 +5931,81 @@ mod program {
             }
         }) {
             Ok(()) => {
-                *owner = None;
-                if let Some(updated) = stat_selected_properties(browser) {
-                    *properties = Some(updated);
-                }
-                (true, false)
+                win.owner = None;
+                reads.want_properties(win.job(window_id));
+                (Repaint::Whole, false)
             }
             Err(err) => {
-                if let Some(ed) = owner.as_mut() {
+                if let Some(ed) = win.owner.as_mut() {
                     ed.editor.set_message(Some(String::from(err.message())));
                 }
-                (true, false)
+                (Repaint::Whole, false)
             }
         }
+    }
+
+    /// Apply the editor's `key = value` line to the node.
+    ///
+    /// The key is validated through the shared attribute-key grammar before
+    /// the call, so a malformed or unknown-namespace key is refused here
+    /// rather than travelling to the kernel to be refused there. The kernel
+    /// still owns the authorisation — write permission on the node, a writable
+    /// mount, the size bounds, and the privileged namespaces.
+    ///
+    /// A refusal states its reason in the editor's own message line — the
+    /// surface the user acted on — and leaves both the node and the typed line
+    /// alone; a kernel refusal reaches the log besides.
+    ///
+    /// A value can only be set as text, because a typed line is text; a value
+    /// already stored as other bytes is shown escaped and can be removed but
+    /// not retyped.
+    fn set_attribute(win: &mut PropertiesWindow, window_id: u64, reads: &Reads) -> (Repaint, bool) {
+        let line = win.editor.text().to_string();
+        let Ok((key, value)) = tairix_fsmeta::attr::parse_assignment(&line) else {
+            win.editor.set_message(Some(String::from(ATTR_EDITOR_HINT)));
+            return (Repaint::Whole, false);
+        };
+        let ret = tairix_rt::fs_attr_set(win.path.as_bytes(), key.as_bytes(), value.as_bytes());
+        if ret != 0 {
+            let errno = Errno::from_syscall(ret);
+            win.editor
+                .set_message(Some(alloc::format!("refused: {errno}")));
+            let _ = writeln!(Stderr, "files: {} could not be set: {errno}", key.as_str());
+            return (Repaint::Whole, false);
+        }
+        win.editor = attribute_editor();
+        reads.want_properties(win.job(window_id));
+        (Repaint::Whole, false)
+    }
+
+    /// Remove the attribute the cursor row names.
+    ///
+    /// The row is read rather than indexed, so a cursor a concurrent removal
+    /// left past the end removes nothing instead of somebody else's
+    /// attribute.
+    fn remove_attribute(
+        win: &mut PropertiesWindow,
+        window_id: u64,
+        reads: &Reads,
+    ) -> (Repaint, bool) {
+        let cursor = win.rows.cursor();
+        let Some((key, shown)) = win
+            .props()
+            .and_then(|props| props.attributes().visible().get(cursor))
+            .map(|attr| (String::from(attr.key()), attr.key_display()))
+        else {
+            return (Repaint::Nothing, false);
+        };
+        let ret = tairix_rt::fs_attr_remove(win.path.as_bytes(), key.as_bytes());
+        if ret != 0 {
+            let errno = Errno::from_syscall(ret);
+            win.editor
+                .set_message(Some(alloc::format!("refused: {errno}")));
+            let _ = writeln!(Stderr, "files: {shown} could not be removed: {errno}");
+            return (Repaint::Whole, false);
+        }
+        reads.want_properties(win.job(window_id));
+        (Repaint::Whole, false)
     }
 
     /// The live-validation message for a typed owner/group id, or `None` when
@@ -5532,24 +6171,26 @@ mod program {
 
     /// The transient overlay/clipboard state the event loop threads, all
     /// closed at start-up.
-    ///
-    /// `can_chown` is whether the launching user holds `CAP_FS_CHOWN` — read
-    /// once from the kernel-attested self-origin (a refused query fails closed
-    /// to "not held") — so the ownership control is offered only where it can
-    /// be used.
     fn initial_overlays() -> Overlays {
         Overlays {
             rename: None,
-            properties: None,
-            owner: None,
             delete: None,
             open_with: None,
             operation: None,
             clipboard: None,
-            can_chown: tairix_rt::self_origin()
-                .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN)),
             double_click: DoubleClickTracker::new(),
         }
+    }
+
+    /// Whether the launching user holds `CAP_FS_CHOWN`, read once from the
+    /// kernel-attested self-origin (a refused query fails closed to "not
+    /// held").
+    ///
+    /// A session that cannot reassign an owner is never shown the control; the
+    /// kernel authorises the change either way.
+    fn holds_chown() -> bool {
+        tairix_rt::self_origin()
+            .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN))
     }
 
     /// Render `files`'s own short help (`NAME` + `SYNOPSIS` + compact
@@ -5863,6 +6504,7 @@ mod program {
         // them all: the worker fills this and every quick offer and chooser
         // reads it, which is what keeps a right-click free of I/O.
         let installed: RefCell<Vec<AppAssociation>> = RefCell::new(Vec::new());
+        let can_chown = holds_chown();
 
         // --- The event loop: serve input, adopt what the reader answered,
         // repaint, and park only when there is nothing of either left. A dead
@@ -5895,14 +6537,13 @@ mod program {
             // finishes. Another window carries on: the drained event is routed
             // to whichever window it names, so only the operating window is
             // modal.
-            if let Some(busy) = windows
-                .iter()
-                .position(|win| win.overlays.operation.is_some())
-            {
+            if let Some(busy) = windows.iter_mut().position(|win| {
+                win.browser()
+                    .is_some_and(|state| state.overlays.operation.is_some())
+            }) {
                 let finished = windows[busy]
-                    .overlays
-                    .operation
-                    .as_mut()
+                    .browser()
+                    .and_then(|state| state.overlays.operation.as_mut())
                     .is_some_and(advance_operation);
                 if present_whole(
                     &mut windows[busy],
@@ -5920,8 +6561,10 @@ mod program {
                     // partial removal (a refusal or a cancel) is shown
                     // honestly; a failed re-list leaves the browser put (fail
                     // closed).
-                    windows[busy].overlays.operation = None;
-                    let _ = windows[busy].browser.refresh();
+                    if let Some(state) = windows[busy].browser() {
+                        state.overlays.operation = None;
+                        let _ = state.browser.refresh();
+                    }
                     // Reap any launched bundle that exited while the operation
                     // ran (the wait-set was not parked on during it).
                     launcher.borrow_mut().reap();
@@ -5952,14 +6595,17 @@ mod program {
                         adopt_desktop(&mut desktop, &mut themes, &desktop_moved);
                         if event.window_id() == Some(windows[busy].pane.id()) {
                             let win = &mut windows[busy];
+                            let WindowKind::Browser(state) = &win.kind else {
+                                continue;
+                            };
                             let canvas = Canvas {
                                 theme: themes.active(),
                                 mode: win.pane.mode(),
                                 scale: desktop.scale(),
-                                chrome: win.chrome,
+                                chrome: state.chrome,
                             };
                             match operation_control(
-                                canvas.chrome.rail(&win.places),
+                                canvas.chrome.rail(&state.places),
                                 canvas.scale,
                                 canvas.theme(),
                                 canvas.window(),
@@ -5967,12 +6613,15 @@ mod program {
                                 &event,
                             ) {
                                 OperationControl::Cancel => {
-                                    if let Some(operation) = win.overlays.operation.as_mut() {
+                                    if let Some(operation) = win
+                                        .browser()
+                                        .and_then(|state| state.overlays.operation.as_mut())
+                                    {
                                         operation.progress.request_cancel();
                                     }
                                 }
                                 OperationControl::Close => {
-                                    close_window(&mut windows, busy, &mut client);
+                                    close_window(&mut windows, busy, &mut client, &reads);
                                 }
                                 OperationControl::Ignore => {}
                             }
@@ -5988,6 +6637,7 @@ mod program {
                             &installed,
                             event_endpoint,
                             start.role,
+                            can_chown,
                             &event,
                         ) {
                             return code;
@@ -6039,12 +6689,19 @@ mod program {
                     if let Some((home, volumes)) = landed {
                         places = Places::new(&home, &volumes);
                         for win in &mut windows {
-                            sidebar::refresh_places(&mut win.places, &home, &volumes);
+                            if let Some(state) = win.browser() {
+                                sidebar::refresh_places(&mut state.places, &home, &volumes);
+                            }
                         }
                         if start.role == Role::Desktop {
                             declare_app_bar(&mut client, event_endpoint, start.role, &places);
                         }
+                        // Only a listing draws the rail, so only a listing is
+                        // repainted for it.
                         for win in &mut windows {
+                            if !matches!(win.kind, WindowKind::Browser(_)) {
+                                continue;
+                            }
                             if present_whole(
                                 win,
                                 &mut client,
@@ -6073,7 +6730,10 @@ mod program {
                     // asking every turn is free.
                     let mut resumed = false;
                     for win in &mut windows {
-                        match win.browser.resume() {
+                        let Some(state) = win.browser() else {
+                            continue;
+                        };
+                        match state.browser.resume() {
                             Ok(committed) => resumed |= committed,
                             Err(err) => {
                                 report_error(&alloc::format!("listing refused ({err})"));
@@ -6099,6 +6759,80 @@ mod program {
                             }
                         }
                         continue;
+                    }
+                    // A node's description the reader has answered, adopted
+                    // by the window that asked for it. Each window collects
+                    // its own answer, so one window's read never lands in
+                    // another.
+                    if reads.take_properties_landed() {
+                        let mut shown = false;
+                        for win in &mut windows {
+                            let id = win.pane.id();
+                            let WindowKind::Properties(props) = &mut win.kind else {
+                                continue;
+                            };
+                            let Some(answer) = reads.take_properties(id) else {
+                                continue;
+                            };
+                            adopt_properties(props, answer);
+                            shown = true;
+                            if present_whole(
+                                win,
+                                &mut client,
+                                themes.active(),
+                                &icons,
+                                desktop.scale(),
+                            )
+                            .is_err()
+                            {
+                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
+                        if shown {
+                            continue;
+                        }
+                    }
+                    // A folder-cue batch the reader has answered. The
+                    // answers are latched onto the entries here — the worker
+                    // only produced them — and a window whose icons moved is
+                    // presented. Without this the answers would sit on the
+                    // desk until some unrelated gesture repainted, which is
+                    // what left every folder drawn empty until it was clicked.
+                    if reads.take_probes_landed() {
+                        let mut shown = false;
+                        for win in &mut windows {
+                            let mode = *win.pane.mode();
+                            let Some(state) = win.browser() else {
+                                continue;
+                            };
+                            let canvas = Canvas {
+                                theme: themes.active(),
+                                mode: &mode,
+                                scale: desktop.scale(),
+                                chrome: state.chrome,
+                            };
+                            let places = &state.places;
+                            if !resolve_visible_occupancy(&mut state.browser, places, canvas) {
+                                continue;
+                            }
+                            shown = true;
+                            if present_whole(
+                                win,
+                                &mut client,
+                                themes.active(),
+                                &icons,
+                                desktop.scale(),
+                            )
+                            .is_err()
+                            {
+                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
+                        // A batch that answered nothing this window is showing
+                        // costs no frame, and the turn carries on to the park.
+                        if shown {
+                            continue;
+                        }
                     }
                     // The reader nudges on its drained queue, so what landed
                     // is a whole batch: one whole-window pass for it rather
@@ -6165,6 +6899,7 @@ mod program {
                 &installed,
                 event_endpoint,
                 start.role,
+                can_chown,
                 &event,
             ) {
                 return code;

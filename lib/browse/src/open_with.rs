@@ -43,10 +43,11 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::{mime_type_at, AppInfoHeader, Errno};
-use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
+use tairix_controls::scroll::{ScrollModel, ScrollRange};
 use tairix_controls::ScrollBar;
 
 use crate::media::{ancestry, media_for_name};
+use crate::rowlist::RowList;
 
 /// One installed application and the file types its signed `AppInfo` claims to
 /// open — a single "Open With…" candidate.
@@ -288,9 +289,10 @@ pub struct OpenWithChooser {
     candidates: Vec<OpenWithCandidate>,
     file_path: String,
     display_name: String,
-    selected: usize,
-    offset: u64,
-    bar: ScrollBar,
+    /// Which candidate is current and where the list is scrolled to — the one
+    /// shared row-list model, so the chooser's traversal and the Properties
+    /// window's attribute list reveal identically.
+    rows: RowList,
 }
 
 impl OpenWithChooser {
@@ -309,22 +311,18 @@ impl OpenWithChooser {
         if apps.is_empty() {
             return None;
         }
+        let candidates: Vec<OpenWithCandidate> = apps
+            .iter()
+            .map(|app| OpenWithCandidate {
+                name: app.name().to_string(),
+                bundle_path: app.bundle_path().to_string(),
+            })
+            .collect();
         Some(Self {
-            candidates: apps
-                .iter()
-                .map(|app| OpenWithCandidate {
-                    name: app.name().to_string(),
-                    bundle_path: app.bundle_path().to_string(),
-                })
-                .collect(),
+            rows: RowList::new(candidates.len()),
+            candidates,
             file_path: file_path.into(),
             display_name: display_name.into(),
-            selected: 0,
-            offset: 0,
-            bar: ScrollBar::new(
-                ScrollOrientation::Vertical,
-                ScrollModel::new(ScrollRange::EMPTY, 1, 1),
-            ),
         })
     }
 
@@ -337,7 +335,7 @@ impl OpenWithChooser {
     /// Which candidate is current.
     #[must_use]
     pub const fn selected(&self) -> usize {
-        self.selected
+        self.rows.cursor()
     }
 
     /// The current candidate — what activating the chooser launches.
@@ -347,7 +345,7 @@ impl OpenWithChooser {
     /// it, so an index that somehow left the list refuses instead of faulting.
     #[must_use]
     pub fn chosen(&self) -> Option<&OpenWithCandidate> {
-        self.candidates.get(self.selected)
+        self.candidates.get(self.rows.cursor())
     }
 
     /// The absolute path of the file the chosen application opens.
@@ -365,24 +363,19 @@ impl OpenWithChooser {
     /// The first candidate row the list shows.
     #[must_use]
     pub const fn offset(&self) -> u64 {
-        self.offset
+        self.rows.offset()
     }
 
     /// Make `index` current, clamped to the candidates, reporting whether the
     /// selection moved.
     pub fn select(&mut self, index: usize) -> bool {
-        let clamped = index.min(self.candidates.len().saturating_sub(1));
-        let moved = clamped != self.selected;
-        self.selected = clamped;
-        moved
+        self.rows.select(index)
     }
 
     /// Move the selection by `delta` rows (positive moves toward the end),
     /// stopping at either end, reporting whether it moved.
     pub fn step(&mut self, delta: i64) -> bool {
-        let from = i64::try_from(self.selected).unwrap_or(i64::MAX);
-        let to = from.saturating_add(delta).max(0);
-        self.select(usize::try_from(to).unwrap_or(usize::MAX))
+        self.rows.step(delta)
     }
 
     /// The scroll geometry for a list showing `visible` rows at a time, in row
@@ -390,35 +383,26 @@ impl OpenWithChooser {
     /// never exceed what the list holds.
     #[must_use]
     pub fn scroll_range(&self, visible: usize) -> ScrollRange {
-        ScrollRange::new(
-            u64::try_from(self.candidates.len()).unwrap_or(u64::MAX),
-            u64::try_from(visible).unwrap_or(u64::MAX),
-            self.offset,
-        )
+        self.rows.scroll_range(visible)
     }
 
     /// The scroll model the drawn bar and the wheel both move through: one row
     /// per line, one list per page.
     #[must_use]
     pub fn scroll_model(&self, visible: usize) -> ScrollModel {
-        let page = u64::try_from(visible.max(1)).unwrap_or(u64::MAX);
-        ScrollModel::new(self.scroll_range(visible), 1, page)
+        self.rows.scroll_model(visible)
     }
 
     /// Scroll so `offset` is the first visible row, clamped through
     /// [`scroll_range`](Self::scroll_range), reporting whether it moved.
     pub fn set_offset(&mut self, offset: u64, visible: usize) -> bool {
-        let clamped = self.scroll_range(visible).with_offset(offset).offset();
-        let moved = clamped != self.offset;
-        self.offset = clamped;
-        moved
+        self.rows.set_offset(offset, visible)
     }
 
     /// Scroll by `delta` rows (positive scrolls toward the end), clamped,
     /// reporting whether it moved.
     pub fn scroll_by(&mut self, delta: i64, visible: usize) -> bool {
-        let offset = self.scroll_model(visible).scroll_by(delta).offset();
-        self.set_offset(offset, visible)
+        self.rows.scroll_by(delta, visible)
     }
 
     /// Scroll the least that brings the current selection into a list showing
@@ -427,27 +411,18 @@ impl OpenWithChooser {
     /// The one rule keyboard traversal reveals through, so a selection can
     /// never sit outside the drawn list.
     pub fn reveal(&mut self, visible: usize) -> bool {
-        let rows = u64::try_from(visible.max(1)).unwrap_or(u64::MAX);
-        let selected = u64::try_from(self.selected).unwrap_or(u64::MAX);
-        let target = if selected < self.offset {
-            selected
-        } else if selected >= self.offset.saturating_add(rows) {
-            selected.saturating_sub(rows.saturating_sub(1))
-        } else {
-            self.offset
-        };
-        self.set_offset(target, visible)
+        self.rows.reveal(visible)
     }
 
     /// The chooser's own drawn scrollbar, carrying its live hover/drag state.
     #[must_use]
     pub const fn scrollbar(&self) -> &ScrollBar {
-        &self.bar
+        self.rows.scrollbar()
     }
 
     /// Mutable access to the drawn scrollbar, for the pointer routing that
     /// drives it.
     pub const fn scrollbar_mut(&mut self) -> &mut ScrollBar {
-        &mut self.bar
+        self.rows.scrollbar_mut()
     }
 }

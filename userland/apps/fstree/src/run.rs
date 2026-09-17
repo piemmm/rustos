@@ -260,49 +260,13 @@ mod program {
         }
 
         fn attr_list(&mut self, path: &str) -> Result<Vec<String>, Errno> {
-            // One key per call, the fs_readdir iteration shape: a return of
-            // 0 is end-of-list (a real key is never empty), a negative
-            // value the frozen errno. The kernel filters unreadable
-            // namespaces out, so the loop sees only what it may show.
-            let mut keys = Vec::new();
-            let mut buf = [0u8; tairix_abi::FS_ATTR_KEY_MAX];
-            for index in 0.. {
-                let ret = tairix_rt::fs_attr_list(path.as_bytes(), index, &mut buf);
-                if ret < 0 {
-                    return Err(Errno::from_syscall(ret));
-                }
-                let Ok(len) = usize::try_from(ret) else {
-                    return Err(Errno::OutOfRange);
-                };
-                if len == 0 {
-                    break;
-                }
-                // Keys are UTF-8 by the shared grammar; a malformed one
-                // from a hostile backing is refused, never lossily shown.
-                let Some(key) = buf.get(..len).and_then(|b| core::str::from_utf8(b).ok()) else {
-                    return Err(Errno::OutOfRange);
-                };
-                keys.push(String::from(key));
-            }
-            Ok(keys)
+            // The shared drain of the index iteration: the kernel filters
+            // unreadable namespaces out, so this sees only what it may show.
+            tairix_rt::fs_attr_keys(path.as_bytes()).map_err(Errno::from_syscall)
         }
 
         fn attr_get(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
-            // A stored value never exceeds the fixed bound, so one
-            // fixed-size read always fits and nothing is ever truncated.
-            let mut buf = alloc::vec![0u8; tairix_abi::FS_ATTR_VALUE_MAX];
-            let ret = tairix_rt::fs_attr_get(path.as_bytes(), key.as_bytes(), &mut buf);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            let Ok(len) = usize::try_from(ret) else {
-                return Err(Errno::OutOfRange);
-            };
-            if len > buf.len() {
-                return Err(Errno::OutOfRange);
-            }
-            buf.truncate(len);
-            Ok(buf)
+            tairix_rt::fs_attr_value(path.as_bytes(), key.as_bytes()).map_err(Errno::from_syscall)
         }
 
         fn attr_set(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {

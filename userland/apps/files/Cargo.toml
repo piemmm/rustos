@@ -95,6 +95,10 @@ tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = [
 # scan hands its work to the reader thread through, so walking three program
 # stores never happens on the loop that owes the window a frame.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The one extended-attribute key grammar: a Properties window validates a
+# typed `key = value` line through it, so a malformed key is refused here
+# rather than travelling to the kernel to be refused there.
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The window-frame pixel codec (`tairix_display::winframe`): the one
 # definition of the straight-alpha conversion between this program's own
 # surface and the shared frame the desktop session reads, so no app carries a

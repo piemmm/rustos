@@ -60,9 +60,10 @@ native), and tests.
 
 Out of scope (named so they are not assumed): implementing the ADFS/Amiga/Atari
 filesystem drivers themselves (separate plans); resource-fork *content* storage
-policy beyond "it is an extended attribute / named stream"; and any desktop UI
-for editing metadata (the WM/file-browser consume the ABI, they do not define
-it).
+policy beyond "it is an extended attribute / named stream"; and the *design* of
+any desktop UI for editing metadata — the file manager's Properties window and
+`fstree`'s attribute editor consume this ABI and are specified where they live
+(`plans/NEW-FILEMANAGER.md` FM8b), they do not define it here.
 
 ## 3. Non-negotiable invariants
 
@@ -424,10 +425,13 @@ recorded in `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
   fails closed with `MetadataNotRepresentable`; dropping happens only under an
   explicitly requested, documented lossy policy. None of these tools links
   `lib/fsmeta` yet.
-- **An attribute CLI.** No command app reads or writes attributes today;
-  `fstree`'s `a` editor is the only caller. A `getattr`/`setattr`-shaped pair
-  (or an option surface on an existing tool) over the capability-checked
-  syscalls, never a privileged bypass.
+- **An attribute CLI.** No command app reads or writes attributes today. The
+  graphical callers are `fstree`'s `a` editor and the file manager's Properties
+  window (`plans/NEW-FILEMANAGER.md` FM8b), both over the capability-checked
+  syscalls through the shared `lib/rt` drain (`fs_attr_keys`/`fs_attr_value`)
+  and the shared `lib/fsmeta::attr` display and `key = value` grammar. What is
+  missing is a `getattr`/`setattr`-shaped pair (or an option surface on an
+  existing tool), never a privileged bypass.
 - **Named streams (§4.4).** A fork-style payload above `VALUE_MAX` has no
   storage path yet, so `mac.resourcefork` cannot hold a real resource fork. The
   content path is the ordinary data pipeline addressed by a namespaced key — no

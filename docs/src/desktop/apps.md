@@ -1722,154 +1722,184 @@ directory's `d`, and a link labelled "Alias to folder" still shows `l`. The mode
 performs the one capability-checked `fs_stat` under the user's own identity and
 hands the result here, so the trusted picker composes the same view.
 
-### The drawn properties panel
+### The two drawn Properties surfaces
 
-The drawn overlay (`plans/NEW-FILEMANAGER.md` FM8b) paints that model as a
-shared `lib/controls` `Panel` centered over the current view, so it is one
-coherent themed surface rather than a browser-private box (`AGENTS.md` §2.2).
-`render::properties_rows` is the one definition of *which* fields appear and how
-each reads — Kind, Size (apparent plus on-disk), Permissions (symbolic plus
-octal), Owner, and the four timestamps — host-tested so the drawn panel and its
-tests can never disagree about the field set; `render::draw_properties` draws
-the panel titled with the node's name and lays those rows out as muted-label /
-solid-value columns, clipping so a window too small for the whole panel shows
-what fits rather than panicking (`AGENTS.md` §2.9). The panel reads only the
-already-authorised `Properties` and holds no authority.
+The model is drawn twice, by two different consumers, from one definition
+(`AGENTS.md` §2.2). `render::properties_rows` is the one definition of *which*
+fields appear and how each reads — Kind, a link's stored target, Size (apparent
+plus on-disk), Permissions (symbolic plus octal), Owner, and the four
+timestamps — derived from the closed `render::Field` vocabulary so the display
+order, each label, each value, and which fields a given node shows can never
+drift apart. The alias row appears only for a node that stores a target and
+carries the spelling the link holds verbatim, which is what explains a broken
+one.
 
-The `files.app` `Run` binary opens the overlay with **`Alt+Enter`** on the
-selected item: it names the item's path through the shared
-`Browser::selected_target_path` spelling and reads its metadata with one
-capability-checked `fs_stat` under the user's own identity (`fs_open` with the
-directory flag for a folder or sealed bundle, read-only for a file — `stat`
-needs only a live handle), then shows the panel. While the overlay is open it
-owns the window — **`Escape`** dismisses it and every other keystroke is
-swallowed rather than navigating the view behind it. Showing properties is an
-incidental, refusable action: if the item can no longer be named or its
-metadata cannot be read (it vanished, or is unreadable), the refusal is stated
-on `stderr` and the overlay stays closed — an answer, not a crash, and never a
-fabricated summary (`AGENTS.md` §2.24, §5.4).
+The **trusted file picker** draws `render::draw_properties`: a shared
+`lib/controls` `Panel` centered over its own view, titled with the node's name
+and laying those rows out as muted-label / solid-value columns, clipping so a
+window too small for the whole panel shows what fits rather than panicking
+(`AGENTS.md` §2.9). It reads only the already-authorised `Properties` and holds
+no authority.
+
+The **file manager's Properties is a window of its own**
+(`render::draw_properties_window`, opened at `render::properties_window_extent`
+and resizable thereafter). Several are open at once, each pinned to its node by
+*path*, so the listing behind them may be reloaded or navigated away from
+without any of them describing or writing to something else — and the listing
+stays usable while they are open, which an in-window modal could not offer. The
+client is the metadata fields, the labelled permissions grid, the ownership
+control and the extended-attribute list; there is no second panel header inside
+a window that already has a title bar.
+
+`files.app` opens one with **`Alt+Enter`** on the selection or the context
+menu's *Properties* row. The node is resolved from the listing that named it —
+its path through the shared `Browser::selected_target_path` spelling — and then
+**read off the event loop**: describing a node is one `fs_stat` plus one
+`fs_attr_get` per attribute key, which on a contended volume is a visible stall
+rather than a frame (`AGENTS.md` §28.1). The window states that it is reading
+until the answer lands, and states a refusal's reason if the node can no longer
+be named or described — an answer, not a crash, and never a fabricated summary
+(`AGENTS.md` §2.24, §5.4). `render::properties_hit` is the one hit-test over
+the whole client, so the precedence between its controls is stated once: the
+capability-free permission toggles resolve before the privileged ownership
+control, and a press on nothing resolves to nothing.
 
 ### Editing permissions
 
 The permission-edit *model* (`plans/NEW-FILEMANAGER.md` FM8b) is
-`lib/browse::mode_edit` plus `Browser::set_mode_selected`, host-proven ahead of
-the drawn permission control exactly as the properties view model landed ahead
-of the drawn panel. `validate_mode` fails closed on any bit above
-`tairix_abi::fs::FS_MODE_MASK` — the settable `rwx`/setuid/setgid/sticky word —
-refusing it rather than masking it into a lesser mode, so the mode committed is
-always exactly the one asked for and never silently a different one (`AGENTS.md`
-§2.24, §5.4). `Browser::set_mode_selected` names the selected node through the
-shared `Browser::selected_target_path` spelling, validates the mode *before*
-any syscall, and applies it through an injected `fs_set_mode` seam under the
-user's own identity — an ordinary permission-checked VFS call, no new
-capability (`AGENTS.md` §4, §5.3). A VFS refusal (the user does not own the
-node, a read-only mount, a lost race) leaves the node's mode exactly as it was
-and is surfaced as `ModeError::Refused` for an honest in-UI answer (`AGENTS.md`
-§2.24). The directory listing carries no mode, so a successful change re-reads
-nothing; the app re-stats the node to refresh the panel. The model reads
-nothing and holds no authority, so the trusted picker composes the same
-`Browser` and never calls the write path.
+`lib/browse::mode_edit`, host-proven ahead of the drawn permission control
+exactly as the properties view model landed ahead of the drawn panel.
+`validate_mode` fails closed on any bit above `tairix_abi::fs::FS_MODE_MASK` —
+the settable `rwx`/setuid/setgid/sticky word — refusing it rather than masking
+it into a lesser mode, so the mode committed is always exactly the one asked
+for and never silently a different one (`AGENTS.md` §2.24, §5.4). `set_mode`
+validates the mode *before* any syscall and applies it through an injected
+`fs_set_mode` seam under the user's own identity — an ordinary
+permission-checked VFS call, no new capability (`AGENTS.md` §4, §5.3). A VFS
+refusal (the user does not own the node, a read-only mount, a lost race) leaves
+the node's mode exactly as it was and is surfaced as `ModeError::Refused` for
+an honest in-UI answer (`AGENTS.md` §2.24). The model reads nothing and holds
+no authority, so the trusted picker never calls the write path.
 
 ### The drawn permission control
 
-The file manager's Properties overlay is *editable*: `render::draw_properties_editable`
-draws the metadata fields as the read-only `render::draw_properties` does, then
-below them a **labelled permissions grid** — `Read`/`Write`/`Exec` column
-headers over three `Owner`/`Group`/`Other` triad rows of clickable
-`lib/controls` `Checkbox` toggles reflecting the current mode. The grid replaces
-an earlier cramped single-row layout in which nine boxes were placed a single
-glyph apart (so they overlapped) with no label; each toggle now sits on a real
-grid pitch under its own row and column label. `render::PERMISSION_BITS` and
+Below the metadata fields the Properties window draws a **labelled permissions
+grid** — `Read`/`Write`/`Exec` column headers over three
+`Owner`/`Group`/`Other` triad rows of clickable `lib/controls` `Checkbox`
+toggles reflecting the current mode. `render::PERMISSION_BITS` and
 `permission_cells` are the one definition of which of the nine
-owner/group/other bits each toggle carries, and `render::permission_cell_at` is
-the mirror hit-test returning the bit a click flips (and nothing off a toggle,
-fail closed). The shared `render::PermGrid` geometry places the painted grid,
-its headers/row-labels, and the hit-test from one definition, so a click always
-lands on the box it depicts (§2.2). Only the write-capable file manager draws
-the editable overlay; the trusted read-only picker draws `draw_properties` and
-never resolves a toggle, so the write surface is separated from the picker by
-call site, not a runtime flag — the same discipline as the manager-only write
-tools (`AGENTS.md` §2.2). The editable popup is the taller
-`render::properties_editable_panel_rect` (the read-only picker keeps the
-shorter `properties_panel_rect`) so the grid has its own room; the browser
-window is resizable (see *Resizable window* below), so a user may enlarge it
-further, and the grid fails closed — drawing nothing rather than off-panel —
-only when the window is genuinely too small (§5.4).
+owner/group/other bits each toggle carries, and the `Permission` arm of
+`render::properties_hit` returns the bit a click flips (and nothing off a
+toggle, fail closed). The shared `render::PermGrid` geometry places the painted
+grid, its headers and row labels, and the hit-test from one definition, so a
+click always lands on the box it depicts (§2.2). Only the file manager's window
+draws it; the trusted read-only picker draws `draw_properties` and never
+resolves a toggle, so the write surface is separated from the picker by call
+site, not a runtime flag (`AGENTS.md` §2.2). The grid fails closed — drawing
+nothing rather than off-client — when the window is dragged too small (§5.4).
 
 A primary-button press on a toggle flips only that `rwx` bit — preserving the
 current setuid/setgid/sticky bits (the settable word masked by `FS_MODE_MASK`,
 dropping the non-settable file-type bits `fs_stat` also reports) — and commits
-the new mode through `Browser::set_mode_selected` over `fs_set_mode` under the
-user's own identity. On success the overlay is re-stat'd so it shows the
-applied mode; a refusal is stated on `stderr` and leaves the node's mode
-exactly as it was (`AGENTS.md` §2.24, §5.4). The setuid/setgid/sticky bits stay
-visible in the panel's octal and symbolic spelling and are edited through the
-`chmod` command — a deliberate scope boundary for a bloat-free panel, not an
-omission.
+the new mode over `fs_set_mode` under the user's own identity. On success the
+node is re-read, so what the window shows is what the kernel applied rather
+than what was asked for; a refusal is stated on `stderr` and leaves both the
+node's mode and the shown value exactly as they were (`AGENTS.md` §2.24,
+§5.4). The setuid/setgid/sticky bits stay visible in the octal and symbolic
+spelling and are edited through the `chmod` command — a deliberate scope
+boundary for a bloat-free surface, not an omission.
 
 ### Editing ownership
 
 The ownership-edit *model* (`plans/NEW-FILEMANAGER.md` FM8b) is
-`lib/browse::owner_edit` plus `Browser::set_owner_selected`, host-proven ahead
-of the drawn ownership control exactly as the permission-edit model landed
-ahead of its control. It is deliberately unlike the other write verbs (rename,
-mode, mkdir), which are the user's own §5.3-checked writes needing no new
-capability: reassigning a file's **owner** is a privileged operation, so it is
-gated by a dedicated capability, `CAP_FS_CHOWN` — the Unix `CAP_CHOWN`
-analogue, carried by the administrator ceiling and by nothing an ordinary
-session holds (`AGENTS.md` §5.2). The whole authority rule lives kernel-side in
-the secured VFS behind the new `fs_set_owner` syscall: reassigning the uid, or
-setting a group the caller is not a member of, requires `CAP_FS_CHOWN`;
-otherwise only the node's owner may change the group, and only to a group they
-already belong to (the unprivileged `chgrp`). Any successful change clears the
-set-user-ID bit (and the set-group-ID bit of a group-executable node — a
-set-group-ID directory keeps it), so a reassigned file can never carry a stale
-set-*id* escalation, the standard `chown(2)` safety behaviour.
+`lib/browse::owner_edit`, host-proven ahead of the drawn ownership control
+exactly as the permission-edit model landed ahead of its control. It is
+deliberately unlike the other write verbs (rename, mode, mkdir), which are the
+user's own per-inode-checked writes needing no new capability: reassigning a
+file's **owner** is a privileged operation, so it is gated by a dedicated
+capability, `CAP_FS_CHOWN` — the Unix `CAP_CHOWN` analogue, carried by the
+administrator ceiling and by nothing an ordinary session holds (`AGENTS.md`
+§5.2). The whole authority rule lives kernel-side in the secured VFS behind the
+`fs_set_owner` syscall: reassigning the uid, or setting a group the caller is
+not a member of, requires `CAP_FS_CHOWN`; otherwise only the node's owner may
+change the group, and only to a group they already belong to (the unprivileged
+`chgrp`). Any successful change clears the set-user-ID bit (and the
+set-group-ID bit of a group-executable node — a set-group-ID directory keeps
+it), so a reassigned file can never carry a stale set-*id* escalation, the
+standard `chown(2)` safety behaviour.
 
 The engine models none of that policy. `OwnerChange` names *what* to change —
 each of `uid`/`gid` is either `None` (leave unchanged) or `Some(id)` (set) —
 and `validate_owner` fails closed on a field set to the reserved
 `FS_OWNER_UNCHANGED` sentinel as an explicit target, refusing it before any
-syscall rather than misreading it as "unchanged". `Browser::set_owner_selected`
-names the selected node through the shared `Browser::selected_target_path`
-spelling, validates before any syscall, maps `None` onto the sentinel, and
-applies through an injected `fs_set_owner` seam under the user's own identity;
-a VFS refusal — including the `PermissionDenied` a caller without `CAP_FS_CHOWN`
-receives — leaves the ownership exactly as it was and is surfaced as
-`OwnerError::Refused` for an honest in-UI answer (`AGENTS.md` §2.24, §5.4). The
-listing carries no ownership, so a success re-reads nothing; the app re-stats
-the node to refresh the panel. The model holds no authority, so the trusted
-picker composes the same `Browser` and never calls the write path.
+syscall rather than misreading it as "unchanged". `set_owner` validates before
+any syscall, maps `None` onto the sentinel, and applies through an injected
+`fs_set_owner` seam under the user's own identity; a VFS refusal — including
+the `PermissionDenied` a caller without `CAP_FS_CHOWN` receives — leaves the
+ownership exactly as it was and is surfaced as `OwnerError::Refused` for an
+honest in-UI answer (`AGENTS.md` §2.24, §5.4). The model holds no authority, so
+the trusted picker never calls the write path.
 
 ### The drawn ownership control
 
-The file manager draws an editable ownership control on the Properties
-overlay's owner row, **but only where the launching user holds
-`CAP_FS_CHOWN`** — read once from the kernel-attested `self_origin` at
-start-up, so a session that cannot reassign ownership is never shown a control
-it cannot use (`AGENTS.md` §2.24). `render::draw_owner_control` overlays the
-uid and gid values of the read-only `render::draw_properties` owner row: an
-accent underline marks each value as clickable, and while one is being edited
-the shared `lib/controls` `TextField` is drawn over it. `render::OwnerField`
-and `render::owner_field_at` are the mirror hit-test resolving a click to
-exactly the uid or gid value it edits — measured from the same `uid N / gid N`
-spelling the panel draws, so the drawn control and the hit-test can never
-disagree (§2.2) — and a click off a value resolves nothing (fail closed, §5.4).
-Like the permission control, the write surface is separated by call site (only
-the file manager calls `draw_owner_control`; the trusted read-only picker never
-does), *and* additionally gated on the runtime capability, since owner
-reassignment is privileged.
+The Properties window draws an editable ownership control on its owner row,
+**but only where the launching user holds `CAP_FS_CHOWN`** — read once from the
+kernel-attested `self_origin` at start-up, so a session that cannot reassign
+ownership is never shown a control it cannot use (`AGENTS.md` §2.24). An accent
+underline marks each value as clickable, and while one is being edited the
+shared `lib/controls` `TextField` is drawn over it at
+`render::properties_owner_editor_rect`. `render::OwnerField` and the `Owner`
+arm of `render::properties_hit` resolve a click to exactly the uid or gid value
+it edits — measured from the same `uid N / gid N` spelling the fields draw, so
+the drawn control and the hit-test can never disagree (§2.2) — and a click off
+a value resolves nothing (fail closed, §5.4). Like the permission control the
+write surface is separated by call site, *and* additionally gated on the
+runtime capability, since owner reassignment is privileged.
 
-The `files.app` `Run` binary opens the inline id editor on a click, pre-filled
-with the current id and bounded to a `u32`'s ten digits, live-validates the
-typed value, and on `Enter` commits through `Browser::set_owner_selected` over
-`fs_set_owner` under the user's own identity (the kernel enforces `CAP_FS_CHOWN`
-and the group-membership rule); `Escape` cancels. A non-numeric or
-out-of-range id, or a VFS refusal — including the `PermissionDenied` a caller
-without `CAP_FS_CHOWN` receives — states its reason in the field and keeps the
-editor open, an honest answer rather than a silent or fabricated result
-(`AGENTS.md` §2.24, §5.4). On success the panel is re-stat'd so it reflects the
-new owner.
+The editor opens on a click pre-filled with the current id and bounded to a
+`u32`'s ten digits, live-validates the typed value, and on `Enter` commits over
+`fs_set_owner` under the user's own identity (the kernel enforces
+`CAP_FS_CHOWN` and the group-membership rule); `Escape` cancels. A non-numeric
+or out-of-range id, or a VFS refusal, states its reason in the field and keeps
+the editor open, an honest answer rather than a silent or fabricated result
+(`AGENTS.md` §2.24, §5.4). On success the node is re-read so the window
+reflects the new owner.
+
+### Extended attributes
+
+The Properties window lists the node's visible extended attributes (the ARXFS
+`namespace.name` store, `plans/ARXFS-METADATA.md`) beneath the permissions
+grid, and can set and remove them. The kernel omits keys whose namespace the
+caller may not read, so the window only ever sees what it may show: there is no
+privileged-namespace surface to build, and `system.*` / `trusted.*` are
+invisible rather than refused. Four states are distinguished rather than shown
+as one empty list — a volume that stores no attributes says so, a listing that
+was refused states its reason, a node that carries none says *none*, and the
+`Visible` set is drawn as selectable rows through the shared `RowList` scroll
+model.
+
+Values are opaque bytes, so every one is shown through the shared
+`tairix_fsmeta::attr::display_value` escaping (`\xNN` for anything that is not
+control-free UTF-8): nothing a volume stored reaches a surface raw. Clicking a
+row loads it into the `key = value` editor for editing in place — and a value
+whose bytes a typed line could not reproduce is offered back by key alone, with
+the reason stated, rather than lossily rewritten. *Set* applies the line and
+*Remove* deletes the cursor row's attribute, both through
+`fs_attr_set`/`fs_attr_remove` needing only the `CAP_FS_ACCESS` the app already
+holds — the real gate is the node's own write permission. The key is validated
+through the shared `tairix_fsmeta::attr::parse_assignment` grammar *before* the
+call, so a malformed or unknown-namespace key is refused in the app rather than
+travelling to the kernel to be refused there; the kernel still owns every
+authorisation (write permission, a writable mount, the fixed size bounds, the
+privileged namespaces). A refusal states its reason and leaves the shown value
+alone (`AGENTS.md` §2.24), and every applied change re-reads the node, so the
+window shows what the kernel stored rather than what was typed (`AGENTS.md`
+§28.4).
+
+The on-disk `AttrFlags` (`SYSTEM`, `NO_BACKUP`) are a deliberate, stated
+omission: no syscall surfaces them, so the window cannot show them and does not
+invent them. Named streams (a `mac.resourcefork`'s content) are likewise staged
+future work.
 
 ### Resizable window
 

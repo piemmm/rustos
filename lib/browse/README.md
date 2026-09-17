@@ -477,69 +477,89 @@ can never diverge in navigation semantics, listing policy, or look.
   ten-character permission string (the shared `tairix_abi::fs::mode_string`
   spelling, so it never disagrees with `ls -l`), the owning uid/gid, and the
   four `Time64` stamps rendered with `format_datetime` (blank when the backing
-  keeps none — no fabricated wall time). It reads nothing and holds no
-  authority: the app performs the one capability-checked `fs_stat` under the
-  user's own identity and hands the result here, so the read-only picker
-  builds the same view. The drawn overlay (FM8b) is the renderer's
-  `draw_properties`: a shared `lib/controls` `Panel` centered over the view
-  painting `properties_rows` (the one definition of which fields appear —
-  Kind, Size, Permissions, Owner, and the four stamps), which the files app
-  opens with `Alt+Enter` and dismisses with `Escape`. `Browser::selected_target_path`
-  is the shared spelling of the selected node's absolute path the `fs_stat`
-  acts on.
-- **Permission edit** (`mode_edit`, `Browser::set_mode_selected`,
-  `plans/NEW-FILEMANAGER.md` FM8b): the model of committing a new permission
-  mode to the selected node, host-proven ahead of the drawn permission
-  control. `validate_mode` fails closed on any bit above
-  `tairix_abi::fs::FS_MODE_MASK` (the settable `rwx`/setuid/setgid/sticky
-  word) — refused, never masked into a different mode, so the mode applied is
-  exactly the one asked for. `Browser::set_mode_selected` spells the selected
-  node's absolute path through the one shared `absolute_path`, validates the
-  mode before any syscall, and applies it through an injected `fs_set_mode`
+  keeps none — no fabricated wall time), the spelling a symbolic link stores,
+  and the node's extended attributes (`Attributes`: `Unread` when the consumer
+  never asked, `Unsupported` for a volume that stores none, `Refused` with the
+  reason, or the `Visible` set — four distinct facts, never one empty list).
+  It reads nothing and holds no authority: the app performs the one
+  capability-checked `fs_stat` under the user's own identity and hands the
+  result here, so the read-only picker builds the same view.
+  `Browser::selected_target_path` is the shared spelling of the selected
+  node's absolute path the `fs_stat` acts on. `render::properties_rows` is the
+  one definition of which fields appear and how each reads, derived from the
+  closed `Field` vocabulary so the display order, each label, each value, and
+  which fields a given node shows cannot drift apart — and so a surface can
+  place a control on a field's row without formatting every value to find out
+  where it is.
+- **Two Properties surfaces, one model.** The trusted read-only picker draws
+  `render::draw_properties`: a shared `lib/controls` `Panel` centered over the
+  view, taking the same `overlay_width` proportion as every other surface
+  drawn over a window. The file manager's is a **window** of its own
+  (`render::draw_properties_window`, sized by `properties_window_extent`), so
+  several nodes are inspected at once and the listing stays usable while they
+  are: the client is the fields, the labelled permissions grid, the ownership
+  control and the extended-attribute list, with no second panel header inside
+  a window that already has a title bar. `render::PropertiesFrame` is what it
+  draws — `Reading` while the read is in flight, `Refused` with the reason, or
+  `Ready` — because the read leaves the loop (one `fs_stat` plus one call per
+  attribute key) and an empty summary would be a claim the reader cannot
+  check. `render::properties_hit` is the one hit-test over the whole client,
+  so the precedence between the controls is stated once: the capability-free
+  permission toggles resolve before the privileged ownership control, and a
+  press on nothing resolves to nothing.
+- **Permission edit** (`mode_edit::set_mode`, `plans/NEW-FILEMANAGER.md`
+  FM8b): the model of committing a new permission mode to a named node,
+  host-proven ahead of the drawn permission control. `validate_mode` fails
+  closed on any bit above `tairix_abi::fs::FS_MODE_MASK` (the settable
+  `rwx`/setuid/setgid/sticky word) — refused, never masked into a different
+  mode, so the mode applied is exactly the one asked for. `set_mode` validates
+  before any syscall and applies the change through an injected `fs_set_mode`
   seam; a VFS refusal leaves the node's mode unchanged and is surfaced as
-  `ModeError::Refused`. The listing carries no mode, so a success re-reads
-  nothing (the app re-stats to refresh the Properties view). The change is the
-  caller's own permission-checked `fs_set_mode` (no new capability), so the
-  read-only picker composes the same `Browser` and never calls it. The drawn
-  control is a labelled permissions grid below the metadata fields:
+  `ModeError::Refused`. The change is the caller's own permission-checked
+  `fs_set_mode` (no new capability), so the read-only picker never calls it.
+  The drawn control is a labelled permissions grid below the metadata fields:
   `render::PERMISSION_BITS` / `permission_cells` are the one definition of the
-  nine owner/group/other `rwx` bits, `render::draw_properties_editable` draws
-  `Read`/`Write`/`Exec` column headers over three `Owner`/`Group`/`Other` triad
-  rows of clickable `lib/controls` `Checkbox`es (replacing an earlier cramped
-  single-row layout whose boxes overlapped and carried no label), the shared
-  `render::PermGrid` geometry places the painted grid and its hit-test from one
-  definition, and `render::permission_cell_at` returns the bit a click toggles
-  (fail closed off a toggle). Only the write-capable file manager draws the
-  editable overlay; the picker draws the read-only `draw_properties` and
-  never resolves a toggle (separated by call site, not a runtime flag). The
-  setuid/setgid/sticky bits stay in the octal/symbolic display and are edited
-  via `chmod` — a deliberate scope boundary, and a toggle preserves them.
-- **Ownership edit** (`owner_edit`, `Browser::set_owner_selected`,
-  `plans/NEW-FILEMANAGER.md` FM8b): the model of committing a new owning user
-  and/or group to the selected node (the `chown(2)` / `chgrp(2)` shape),
-  host-proven ahead of the drawn ownership control. Unlike rename, mode, and
-  mkdir — the user's own §5.3-checked writes — reassigning the owner is a
-  **privileged** operation: the kernel's secured VFS requires the dedicated
-  `CAP_FS_CHOWN` to change the uid or set a group the caller is not a member
-  of, and clears the set-*id* bits on any change. The engine models none of
-  that policy — it names *what* to change via `OwnerChange` (each field `None`
-  = unchanged, `Some(id)` = set), and `validate_owner` fails closed on a field
-  set to the reserved `FS_OWNER_UNCHANGED` sentinel as an explicit target.
-  `Browser::set_owner_selected` spells the selected node's absolute path
-  through the one shared `absolute_path`, validates before any syscall, maps
-  `None` onto the sentinel, and applies through an injected `fs_set_owner`
-  seam; a VFS refusal (including the missing-`CAP_FS_CHOWN` denial) leaves the
-  ownership unchanged and surfaces as `OwnerError::Refused`. The listing
-  carries no ownership, so a success re-reads nothing (the app re-stats to
-  refresh the Properties view). The model holds no authority, so the read-only
-  picker composes the same `Browser` and never calls it. The drawn control is
-  inline on the Properties owner row: `render::OwnerField` /
-  `render::owner_field_at` are the mirror hit-test resolving a click to the uid
-  or gid value it edits, and `render::draw_owner_control` underlines each value
-  as editable and draws the active `lib/controls` `TextField` over the one being
-  edited. Only the file manager calls it — and only where the launching user
-  holds `CAP_FS_CHOWN` (read from the kernel-attested `self_origin`), so a
-  session that cannot use it is never shown it.
+  nine owner/group/other `rwx` bits, and the window draws `Read`/`Write`/`Exec`
+  column headers over three `Owner`/`Group`/`Other` triad rows of clickable
+  `lib/controls` `Checkbox`es placed from the shared `PermGrid` geometry the
+  hit-test inverts. The setuid/setgid/sticky bits stay in the octal/symbolic
+  display and are edited via `chmod` — a deliberate scope boundary, and a
+  toggle preserves them.
+- **Ownership edit** (`owner_edit::set_owner`, `plans/NEW-FILEMANAGER.md`
+  FM8b): the model of committing a new owning user and/or group to a named
+  node (the `chown(2)` / `chgrp(2)` shape), host-proven ahead of the drawn
+  ownership control. Unlike rename, mode, and mkdir — the user's own
+  per-inode-checked writes — reassigning the owner is a **privileged**
+  operation: the kernel's secured VFS requires the dedicated `CAP_FS_CHOWN` to
+  change the uid or set a group the caller is not a member of, and clears the
+  set-*id* bits on any change. The engine models none of that policy — it
+  names *what* to change via `OwnerChange` (each field `None` = unchanged,
+  `Some(id)` = set), and `validate_owner` fails closed on a field set to the
+  reserved `FS_OWNER_UNCHANGED` sentinel as an explicit target. `set_owner`
+  validates before any syscall, maps `None` onto the sentinel, and applies
+  through an injected `fs_set_owner` seam; a VFS refusal (including the
+  missing-`CAP_FS_CHOWN` denial) leaves the ownership unchanged and surfaces
+  as `OwnerError::Refused`. The drawn control is inline on the Properties
+  owner row: `render::OwnerField` and the `Owner` arm of
+  `render::properties_hit` resolve a click to the uid or gid value it edits,
+  `render::properties_owner_editor_rect` is where the active `lib/controls`
+  `TextField` is drawn, and each value is underlined as editable. The control
+  is offered only where the launching user holds `CAP_FS_CHOWN` (read from the
+  kernel-attested `self_origin`), so a session that cannot use it is never
+  shown it.
+- **Extended attributes** (`properties::Attribute`, `render::AttrAction`,
+  `plans/ARXFS-METADATA.md`): the Properties window lists a node's visible
+  extended attributes as selectable rows and applies a typed
+  `key = value` line through `fs_attr_set` / `fs_attr_remove`. Keys are
+  validated through the shared `tairix_fsmeta::attr::parse_assignment` grammar
+  before the call, so a malformed or unknown-namespace key is refused in the
+  app rather than by the kernel; the kernel still owns every authorisation
+  (write permission on the node, a writable mount, the size bounds, the
+  privileged namespaces). Values are opaque bytes shown through the shared
+  `tairix_fsmeta::attr::display_value` escaping, so nothing a volume stored
+  reaches a surface raw, and a value whose bytes a typed line could not
+  reproduce is offered back by key alone. The list scrolls through the shared
+  `RowList`.
 - **Progress + cancel** (`progress`, `plans/NEW-FILEMANAGER.md` FM7b): the
   pure display + cancel *state* of a long file operation the file manager
   drives interleaved with its event loop. `ProgressModel` carries the
@@ -626,16 +646,15 @@ can never diverge in navigation semantics, listing policy, or look.
   themselves (`TableRow::cell_text_rect` for a list row's name cell,
   `IconTile::label_rect` for a tile's label band) so the in-place rename editor
   sits on the name rather than over the icon and the columns beside it.
-  `draw_properties` draws the FM8b Properties
+  `draw_properties` draws the read-only picker's Properties
   overlay — a centered `lib/controls` `Panel` painting `properties_rows` for
   the selected node's `Properties`, clipped so a too-small window shows what
-  fits rather than panicking. `draw_properties_editable` is the file manager's
-  variant, drawn in the taller `properties_editable_panel_rect`: the metadata
-  fields plus a labelled `Owner`/`Group`/`Other` × `Read`/`Write`/`Exec`
-  permissions grid of clickable toggles (`permission_cell_at` its hit-test, the
-  shared `PermGrid` geometry placing both);
-  `draw_owner_control` (`owner_field_at` its hit-test) likewise makes the owner
-  row's uid/gid values editable, drawn only for a `CAP_FS_CHOWN` holder.
+  fits rather than panicking. `draw_properties_window` is the file manager's
+  surface, laid out from its own window's client: the metadata fields, a
+  labelled `Owner`/`Group`/`Other` × `Read`/`Write`/`Exec` permissions grid of
+  clickable toggles, the uid/gid values editable for a `CAP_FS_CHOWN` holder,
+  and the extended-attribute list with its `key = value` editor — every one of
+  them placed and hit-tested through the one shared layout.
   When the chrome carries a places rail, `render` paints the rail down the
   leading edge first and lays everything else out inside `content_area`: the
   toolbar, the list or grid, and the scrollbar gutter are all

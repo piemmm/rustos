@@ -526,10 +526,17 @@ fn handle_attrs_overlay(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
             };
             // A text value pre-fills for in-place editing; a binary one
             // pre-fills the key alone — bytes that cannot round-trip
-            // through the line are never lossily offered back.
-            let input = match core::str::from_utf8(value) {
-                Ok(text) if text.chars().all(|c| !c.is_control()) => format!("{key}={text}"),
-                _ => format!("{key}="),
+            // through the line are never lossily offered back. A key that
+            // cannot round-trip either pre-fills nothing at all.
+            let Some(key) = tairix_fsmeta::attr::text_value(key.as_bytes()) else {
+                model.message = Some(String::from(
+                    "that attribute's key cannot be edited as text",
+                ));
+                return;
+            };
+            let input = match tairix_fsmeta::attr::text_value(value) {
+                Some(text) => format!("{key}={text}"),
+                None => format!("{key}="),
             };
             model.prompt = Some(Prompt::AttrEdit(AttrEditPrompt {
                 path: view.path.clone(),
@@ -572,16 +579,18 @@ fn handle_attr_edit_prompt(
             model.prompt = Some(Prompt::AttrEdit(prompt));
         }
         Event::Enter => {
-            let Some((key, value)) = prompt.input.split_once('=') else {
+            // The shared `key = value` grammar, which validates the key
+            // against the one namespace vocabulary: a malformed key is
+            // refused here rather than travelling to the kernel to be
+            // refused there.
+            let parsed = tairix_fsmeta::attr::parse_assignment(&prompt.input);
+            let Ok((key, value)) = parsed else {
                 model.message = Some(String::from(
-                    "attribute: key=value expected — nothing applied",
+                    "attribute: key=value expected, key as namespace.name — nothing applied",
                 ));
                 return;
             };
-            if key.is_empty() {
-                model.message = Some(String::from("attribute: empty key — nothing applied"));
-                return;
-            }
+            let key = key.as_str();
             match fs.attr_set(&prompt.path, key, value.as_bytes()) {
                 Ok(()) => {
                     model.message = Some(format!("attribute {key} set on {}", prompt.name));

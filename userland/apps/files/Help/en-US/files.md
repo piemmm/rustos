@@ -34,6 +34,16 @@ selection, `Enter` opens the selected directory, and `Backspace` goes
 up to the parent directory. `F5` re-reads both the listing and the places
 rail, which is how a newly attached volume appears.
 
+`Alt+Enter` opens a *Properties* window on the selected item, as does the
+right-click menu's *Properties* row. It is a window of its own, so several can
+be open at once and the listing stays usable while they are: it shows what the
+item is, its size, its timestamps, where an alias points, its permissions and
+owner, and the extended attributes the volume stores for it. Permissions,
+owner, and attributes can be changed there, each as an ordinary
+permission-checked write under your own identity — a refusal says why and
+changes nothing. Reassigning an owner needs the `CAP_FS_CHOWN` capability, so
+the control appears only for a session that holds it.
+
 The `directory` operand is treated as untrusted input: it must be an
 absolute path within the system's path length limit, and each of its
 components must be a real directory name — `.` and `..` are not, so a

@@ -411,6 +411,34 @@ impl ListRow {
         icon_slot_side(font, h)
     }
 
+    /// The bounds width at which this row draws its icon, label, and trailing
+    /// caption in full, given the row `height` it is laid out at.
+    ///
+    /// The inverse of [`render`](Self::render)'s own layout — the reserved
+    /// leading gutter and trailing bead band, the icon column, and the paddings
+    /// between them — exposed for the same reason [`icon_side`](Self::icon_side)
+    /// is: a surface sized to hold a row has to reserve exactly what the row
+    /// lays out, or the label it was widened for is elided anyway.
+    #[must_use]
+    pub fn width_for_content(&self, height: u32, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let icon = match self.icon {
+            Some(_) => icon_slot_side(font, height).saturating_add(pad),
+            None => 0,
+        };
+        let trailing = match &self.trailing {
+            Some(text) => font.text_width(text).saturating_add(pad),
+            None => 0,
+        };
+        font.text_width(&self.label)
+            .saturating_add(icon)
+            .saturating_add(trailing)
+            .saturating_add(rail_thickness(theme, scale).saturating_mul(2))
+            .saturating_add(pad.saturating_mul(3))
+            .saturating_add(bead_band(theme, scale, height))
+    }
+
     /// Paint the row into `surface` at `bounds` for the active theme.
     ///
     /// `artwork` is the entry's own icon, pre-rasterised by the owner (at
@@ -2888,6 +2916,20 @@ impl Panel {
         content
             .saturating_add(Self::header_height(scale, theme))
             .saturating_add(plate_border(theme, scale).saturating_mul(2))
+    }
+
+    /// The bounds width whose content rectangle is `content` pixels wide — the
+    /// exact inverse of [`content_rect`](Self::content_rect)'s horizontal
+    /// reservation, as [`height_for_content`](Self::height_for_content) is of
+    /// its vertical one.
+    ///
+    /// What a popup sized to what it draws asks: the surface has to be told how
+    /// much wider than its widest row the rim makes it, and taking that from
+    /// the same rim the forward query insets is what stops a row being elided
+    /// in a surface that was sized to hold it.
+    #[must_use]
+    pub fn width_for_content(content: u32, scale: Scale, theme: &Theme) -> u32 {
+        content.saturating_add(plate_border(theme, scale).saturating_mul(2))
     }
 
     /// The header action rectangles, right-aligned square buttons in the

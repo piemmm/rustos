@@ -1194,11 +1194,19 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
             > delete_dialog_rect(vp, Scale::ONE, &theme).height
     );
     // The chooser is its own popup, sized to its content, so what scales with
-    // the density is the extent it asks that popup to be.
-    assert!(
-        open_with_chooser_extent(3, hidpi, &theme, vp).1
-            > open_with_chooser_extent(3, Scale::ONE, &theme, vp).1
-    );
+    // the density is the extent it asks that popup to be — in both axes, since
+    // both are measured from what it draws.
+    {
+        use crate::open_with::{AppAssociation, OpenWithChooser};
+        let apps: alloc::vec::Vec<AppAssociation> = (0..3)
+            .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+            .collect();
+        let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
+        let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("three candidates");
+        let dense = open_with_chooser_extent(&chooser, hidpi, &theme, vp);
+        let plain = open_with_chooser_extent(&chooser, Scale::ONE, &theme, vp);
+        assert!(dense.0 > plain.0 && dense.1 > plain.1);
+    }
 
     // And the whole view still paints at the higher density.
     assert!(paint(
@@ -3314,9 +3322,8 @@ mod mkdir_model {
 
 // --- FM8b: the permission-edit model (validate + commit a new mode) --------
 //
-// The `mode_edit` model runs end to end over the `MockFs` fixture, so every
-// validation, transactional, and fail-closed branch of `set_mode_selected`
-// runs in `cargo test` without a kernel.
+// Every validation, transactional, and fail-closed branch of `set_mode` runs
+// in `cargo test` without a kernel.
 
 mod mode_edit_model {
     use core::cell::RefCell;
@@ -3326,37 +3333,24 @@ mod mode_edit_model {
     use tairix_abi::fs::FS_MODE_MASK;
     use tairix_abi::Errno;
 
-    use super::MockFs;
-    use crate::browser::Browser;
-    use crate::mode_edit::{validate_mode, ModeError};
+    use crate::mode_edit::{set_mode, validate_mode, ModeError};
 
     #[test]
-    fn commit_applies_the_mode_to_the_selected_node() {
-        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        // Sorted root order is [Apps, Storage, System, Users]; select Apps.
-        browser.select(0).expect("select Apps");
-
+    fn commit_applies_the_mode_to_the_named_node() {
         let seen = RefCell::new(None);
-        let result = browser.set_mode_selected(0o750, |path, mode| {
+        let result = set_mode("/Apps", 0o750, |path, mode| {
             *seen.borrow_mut() = Some((path.to_string(), mode));
             Ok(())
         });
 
         assert_eq!(result, Ok(()));
         assert_eq!(*seen.borrow(), Some(("/Apps".to_string(), 0o750)));
-        // The listing is unchanged: a mode change touches no `Entry` field.
-        assert_eq!(
-            super::names(&browser),
-            ["Apps", "Storage", "System", "Users"]
-        );
     }
 
     #[test]
     fn a_mode_carrying_a_bit_above_the_mask_is_refused_before_any_syscall() {
-        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
         // A file-type bit (above the 0o7777 permission word) is not settable.
-        let result = browser.set_mode_selected(FS_MODE_MASK + 1, |_, _| {
+        let result = set_mode("/Apps", FS_MODE_MASK + 1, |_, _| {
             panic!("the VFS must not be touched for an invalid mode");
         });
         assert_eq!(result, Err(ModeError::Invalid));
@@ -3364,28 +3358,8 @@ mod mode_edit_model {
 
     #[test]
     fn a_vfs_refusal_is_surfaced_and_the_node_is_unchanged() {
-        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
-        let result = browser.set_mode_selected(0o644, |_, _| Err(Errno::PermissionDenied));
+        let result = set_mode("/Apps", 0o644, |_, _| Err(Errno::PermissionDenied));
         assert_eq!(result, Err(ModeError::Refused(Errno::PermissionDenied)));
-        // The listing stands, exactly as before the refused change.
-        assert_eq!(
-            super::names(&browser),
-            ["Apps", "Storage", "System", "Users"]
-        );
-    }
-
-    #[test]
-    fn an_empty_directory_reports_no_selection() {
-        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        // Enter the empty /System/Fonts.
-        browser.open_index(2).expect("enter System");
-        browser
-            .open_index(0)
-            .expect("enter the empty Fonts directory");
-        assert_eq!(browser.selected_name(), None);
-        let result = browser.set_mode_selected(0o644, |_, _| panic!("nothing to change"));
-        assert_eq!(result, Err(ModeError::NoSelection));
     }
 
     #[test]
@@ -3403,9 +3377,7 @@ mod mode_edit_model {
     #[test]
     fn every_mode_error_has_a_nonempty_message() {
         for err in [
-            ModeError::NoSelection,
             ModeError::Invalid,
-            ModeError::Path(Errno::NotFound),
             ModeError::Refused(Errno::PermissionDenied),
         ] {
             assert!(!err.message().is_empty());
@@ -3415,8 +3387,7 @@ mod mode_edit_model {
 
 // --- FM8b: the ownership-edit model (validate + commit a new owner) --------
 //
-// The `owner_edit` model runs end to end over the `MockFs` fixture, so every
-// validation, transactional, and fail-closed branch of `set_owner_selected`
+// Every validation, transactional, and fail-closed branch of `set_owner`
 // runs in `cargo test` without a kernel. The authority rule itself
 // (`CAP_FS_CHOWN`, group membership, set-*id* strip) is the kernel's and is
 // proven in `kernel/core`; here the engine only names the change and surfaces
@@ -3430,17 +3401,13 @@ mod owner_edit_model {
     use tairix_abi::fs::FS_OWNER_UNCHANGED;
     use tairix_abi::Errno;
 
-    use super::MockFs;
-    use crate::browser::Browser;
-    use crate::owner_edit::{validate_owner, OwnerChange, OwnerError};
+    use crate::owner_edit::{set_owner, validate_owner, OwnerChange, OwnerError};
 
     #[test]
-    fn commit_applies_the_owner_to_the_selected_node() {
-        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
-
+    fn commit_applies_the_owner_to_the_named_node() {
         let seen = RefCell::new(None);
-        let result = browser.set_owner_selected(
+        let result = set_owner(
+            "/Apps",
             OwnerChange {
                 uid: Some(1000),
                 gid: Some(50),
@@ -3453,22 +3420,14 @@ mod owner_edit_model {
 
         assert_eq!(result, Ok(()));
         assert_eq!(*seen.borrow(), Some(("/Apps".to_string(), 1000, 50)));
-        // The listing is unchanged: an ownership change touches no `Entry`.
-        assert_eq!(
-            super::names(&browser),
-            ["Apps", "Storage", "System", "Users"]
-        );
     }
 
     #[test]
     fn an_unchanged_field_marshals_the_sentinel() {
-        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
-
         let seen = RefCell::new(None);
         // Group-only change: the uid field must reach the seam as the
         // reserved "unchanged" sentinel, never a fabricated id.
-        let result = browser.set_owner_selected(OwnerChange::group(7), |_, uid, gid| {
+        let result = set_owner("/Apps", OwnerChange::group(7), |_, uid, gid| {
             *seen.borrow_mut() = Some((uid, gid));
             Ok(())
         });
@@ -3478,43 +3437,22 @@ mod owner_edit_model {
 
     #[test]
     fn a_sentinel_target_is_refused_before_any_syscall() {
-        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
         // The reserved sentinel is not a real id: naming it as a target is
         // refused rather than misread as "leave unchanged".
-        let result =
-            browser.set_owner_selected(OwnerChange::user(FS_OWNER_UNCHANGED), |_, _, _| {
-                panic!("the VFS must not be touched for an invalid id");
-            });
+        let result = set_owner("/Apps", OwnerChange::user(FS_OWNER_UNCHANGED), |_, _, _| {
+            panic!("the VFS must not be touched for an invalid id");
+        });
         assert_eq!(result, Err(OwnerError::Invalid));
     }
 
     #[test]
     fn a_vfs_refusal_is_surfaced_and_the_node_is_unchanged() {
-        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
         // The missing-`CAP_FS_CHOWN` denial (or any VFS refusal) surfaces as
-        // `Refused`, leaving the listing exactly as it was.
-        let result = browser
-            .set_owner_selected(OwnerChange::user(0), |_, _, _| Err(Errno::PermissionDenied));
+        // `Refused`, leaving the node as it was.
+        let result = set_owner("/Apps", OwnerChange::user(0), |_, _, _| {
+            Err(Errno::PermissionDenied)
+        });
         assert_eq!(result, Err(OwnerError::Refused(Errno::PermissionDenied)));
-        assert_eq!(
-            super::names(&browser),
-            ["Apps", "Storage", "System", "Users"]
-        );
-    }
-
-    #[test]
-    fn an_empty_directory_reports_no_selection() {
-        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.open_index(2).expect("enter System");
-        browser
-            .open_index(0)
-            .expect("enter the empty Fonts directory");
-        assert_eq!(browser.selected_name(), None);
-        let result =
-            browser.set_owner_selected(OwnerChange::user(1), |_, _, _| panic!("nothing to change"));
-        assert_eq!(result, Err(OwnerError::NoSelection));
     }
 
     #[test]
@@ -3552,9 +3490,7 @@ mod owner_edit_model {
     #[test]
     fn every_owner_error_has_a_nonempty_message() {
         for err in [
-            OwnerError::NoSelection,
             OwnerError::Invalid,
-            OwnerError::Path(Errno::NotFound),
             OwnerError::Refused(Errno::PermissionDenied),
         ] {
             assert!(!err.message().is_empty());
@@ -5765,7 +5701,7 @@ fn the_open_with_chooser_draws_and_hit_tests_the_same_rows() {
 
     // The chooser is its own popup, so the viewport it draws and hit-tests in
     // is the extent it asked for.
-    let (w, h) = open_with_chooser_extent(apps.len(), Scale::ONE, &theme, screen);
+    let (w, h) = open_with_chooser_extent(&chooser, Scale::ONE, &theme, screen);
     let vp = Rect::new(0, 0, w, h);
     let visible = open_with_visible_rows(vp, Scale::ONE, &theme);
     assert_eq!(
@@ -5856,7 +5792,10 @@ fn the_open_with_chooser_is_sized_to_its_candidates_and_its_rows_agree() {
 
     let mut last = 0;
     for count in [1usize, 2, 3, OPEN_WITH_MAX_ROWS, OPEN_WITH_MAX_ROWS + 12] {
-        let (w, h) = open_with_chooser_extent(count, Scale::ONE, &theme, screen);
+        let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().take(count).collect();
+        let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("a candidate");
+        assert_eq!(chooser.candidates().len(), count);
+        let (w, h) = open_with_chooser_extent(&chooser, Scale::ONE, &theme, screen);
         let vp = Rect::new(0, 0, w, h);
         let shown = open_with_visible_rows(vp, Scale::ONE, &theme);
         assert_eq!(
@@ -5877,11 +5816,40 @@ fn the_open_with_chooser_is_sized_to_its_candidates_and_its_rows_agree() {
             );
         }
         last = h;
-        // And a chooser over that many candidates hit-tests inside it.
-        let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().take(count).collect();
-        let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("a candidate");
-        assert_eq!(chooser.candidates().len(), count);
+        // The width is its content's too, and never the letterbox proportion
+        // of a screen it is not drawn over: every candidate's row, the title,
+        // and the action band fit, and nothing else widens it.
+        assert!(
+            w < screen.width,
+            "{count} candidates: a chooser of short names is not four fifths of the display"
+        );
+        assert!(
+            w >= Scale::ONE.scale_length(200),
+            "{count} candidates: nor a sliver"
+        );
     }
+
+    // A candidate whose name is longer than the floor widens the popup to hold
+    // it; one that would outgrow the screen is clamped to it instead.
+    let long = AppAssociation::new(
+        "An Application With A Remarkably Long Display Name Indeed",
+        "/Apps/Long.app",
+        alloc::vec![],
+    );
+    let refs = alloc::vec![&long];
+    let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("one candidate");
+    let (wide, _) = open_with_chooser_extent(&chooser, Scale::ONE, &theme, screen);
+    let short = AppAssociation::new("A", "/Apps/A.app", alloc::vec![]);
+    let refs = alloc::vec![&short];
+    let brief = OpenWithChooser::new(&refs, "/f", "f").expect("one candidate");
+    let (narrow, _) = open_with_chooser_extent(&brief, Scale::ONE, &theme, screen);
+    assert!(wide > narrow, "the width is measured from what it draws");
+    let narrow_screen = Rect::new(0, 0, 120, 600);
+    let (clamped, _) = open_with_chooser_extent(&chooser, Scale::ONE, &theme, narrow_screen);
+    assert!(
+        clamped <= narrow_screen.width,
+        "a popup never asks to be wider than the screen"
+    );
 }
 
 /// The chooser's Open and Cancel actions are drawn and hit-tested through one
@@ -5899,7 +5867,7 @@ fn the_open_with_chooser_offers_open_and_cancel() {
     let app = AppAssociation::new("Viewer", "/Apps/Viewer.app", alloc::vec![]);
     let refs = alloc::vec![&app];
     let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("one candidate");
-    let (w, h) = open_with_chooser_extent(1, Scale::ONE, &theme, screen);
+    let (w, h) = open_with_chooser_extent(&chooser, Scale::ONE, &theme, screen);
     let vp = Rect::new(0, 0, w, h);
 
     // Both actions are reachable, and each resolves to itself.
@@ -6561,8 +6529,8 @@ fn properties_rows_lists_every_field_in_order_from_the_model() {
         &props_stat(FileKind::Regular, 0o644),
     );
     let rows = properties_rows(&props);
-    // Exactly the sized-for field count, and in the documented order.
-    assert_eq!(rows.len(), PROPERTY_ROW_COUNT);
+    // A file stores no target, so it shows no alias field.
+    assert_eq!(rows.len(), PROPERTY_ROW_COUNT - 1);
     let labels: Vec<&str> = rows.iter().map(|(label, _)| *label).collect();
     assert_eq!(
         labels,
@@ -6612,6 +6580,52 @@ fn properties_rows_reads_a_bundle_as_an_application_yet_a_directory_mode() {
         .clone();
     assert_eq!(kind, "Application");
     assert_eq!(perms, "drwxr-xr-x (0755)");
+}
+
+/// An alias says what it points at. Without the row a broken one gave a reader
+/// nothing to explain why it is broken, and a working one nothing to say where
+/// it goes.
+#[test]
+fn properties_rows_show_where_an_alias_points_and_only_for_an_alias() {
+    use crate::entry::LinkTarget;
+
+    let props = Properties::from_stat(
+        "Documents",
+        crate::entry::EntryKind::Link(LinkTarget::Directory),
+        &props_stat(FileKind::Symlink, 0o777),
+    )
+    .with_target("../Storage/docs");
+    let rows = properties_rows(&props);
+    assert_eq!(rows.len(), PROPERTY_ROW_COUNT);
+    let labels: Vec<&str> = rows.iter().map(|(label, _)| *label).collect();
+    assert_eq!(
+        labels.first().copied(),
+        Some("Kind"),
+        "the kind still leads"
+    );
+    assert_eq!(
+        labels.get(1).copied(),
+        Some("Alias to"),
+        "and the target reads beside it"
+    );
+    let target = rows
+        .iter()
+        .find(|(l, _)| *l == "Alias to")
+        .expect("the row");
+    assert_eq!(
+        target.1, "../Storage/docs",
+        "the spelling the link holds, verbatim"
+    );
+
+    // A link with no target attached shows no row rather than an empty one.
+    let unattached = Properties::from_stat(
+        "gone",
+        crate::entry::EntryKind::Link(LinkTarget::Dangling),
+        &props_stat(FileKind::Symlink, 0o777),
+    );
+    assert!(properties_rows(&unattached)
+        .iter()
+        .all(|(label, _)| *label != "Alias to"));
 }
 
 #[test]
@@ -6714,42 +6728,207 @@ fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
     assert_eq!(b2.selected_target_path(), None);
 }
 
-// --- FM8b: the drawn permission (mode) control ----------------------------
+// --- The Properties window: fields, toggles, ownership, attributes --------
 
+use crate::properties::{Attribute, Attributes};
 use crate::render::{
-    draw_properties_editable, permission_cell_at, permission_cells, permission_toggle_cells,
-    PERMISSION_BITS,
+    draw_properties_window, permission_cells, properties_attr_editor_rect,
+    properties_attr_visible_rows, properties_hit, properties_owner_editor_rect,
+    properties_window_extent, AttrAction, AttrView, OwnerField, PropertiesControls,
+    PropertiesFrame, PropertiesTarget, PERMISSION_BITS,
 };
+use crate::RowList;
+use tairix_controls::text::TextField;
 use tairix_geometry::Point;
 
-#[test]
-fn permission_toggle_cells_are_pairwise_non_overlapping() {
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 480);
-    let cells =
-        permission_toggle_cells(vp, Scale::ONE, &theme).expect("grid fits the default popup");
+/// The window the Properties surface is laid out in for these tests: the
+/// extent it actually opens at, so what is asserted is what a user sees.
+fn props_window() -> Rect {
+    let (w, h) = properties_window_extent(Scale::ONE, &Theme::dark());
+    Rect::new(0, 0, w, h)
+}
 
-    // Every checkbox is a legible, non-degenerate target.
-    for cell in &cells {
+/// A file with the attribute set a test needs.
+fn props_with(attributes: Attributes) -> Properties {
+    Properties::from_stat(
+        "notes.txt",
+        crate::entry::EntryKind::File,
+        &props_stat(FileKind::Regular, 0o644),
+    )
+    .with_attributes(attributes)
+}
+
+/// `count` attributes, keyed apart so a row can be told from its neighbours.
+fn some_attributes(count: usize) -> Attributes {
+    Attributes::Visible(
+        (0..count)
+            .map(|n| {
+                Attribute::new(
+                    alloc::format!("user.k{n}"),
+                    alloc::format!("value {n}").into_bytes(),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The controls a window with nothing being typed into draws.
+fn resting<'a>(bar: &'a RowList, editor: &'a TextField) -> PropertiesControls<'a> {
+    PropertiesControls {
+        can_chown: true,
+        owner: None,
+        attribute: editor,
+        scrollbar: bar.scrollbar(),
+    }
+}
+
+/// Every target the window resolves over its whole surface, in scan order.
+fn scan(props: &Properties, view: AttrView, window: Rect) -> Vec<(Point, PropertiesTarget)> {
+    let theme = Theme::dark();
+    let mut found = Vec::new();
+    for y in 0..i32::try_from(window.height).unwrap() {
+        for x in 0..i32::try_from(window.width).unwrap() {
+            let at = Point::new(x, y);
+            if let Some(target) = properties_hit(props, view, window, Scale::ONE, &theme, at) {
+                found.push((at, target));
+            }
+        }
+    }
+    found
+}
+
+/// One scan of the drawn window, asserting everything its geometry must get
+/// right at once.
+///
+/// Every point of the client is resolved, which is the only way to show that
+/// each control is reachable, that none overlaps another, and that a press on
+/// nothing resolves to nothing. It is one test rather than five because the
+/// scan is what costs — the font client memoises behind a process-wide lock,
+/// so five of these serialise against each other and each pays for the rest.
+#[test]
+fn the_window_resolves_every_control_it_draws_and_nothing_else() {
+    let props = props_with(some_attributes(3));
+    let window = props_window();
+    let theme = Theme::dark();
+    let field = properties_attr_editor_rect(&props, window, Scale::ONE, &theme).expect("a field");
+    assert!(properties_attr_visible_rows(&props, window, Scale::ONE, &theme) >= 3);
+
+    // Each permission toggle's bounding box, taken from the hit-test itself —
+    // so this measures the grid a user can actually press.
+    let mut toggles: BTreeMap<u32, (i32, i32, i32, i32)> = BTreeMap::new();
+    let mut owners: BTreeSet<OwnerField> = BTreeSet::new();
+    let mut rows: BTreeSet<usize> = BTreeSet::new();
+    let mut actions: BTreeSet<AttrAction> = BTreeSet::new();
+    let mut editor_points = 0usize;
+    for (at, target) in scan(&props, AttrView::default(), window) {
+        match target {
+            PropertiesTarget::Permission(bit) => {
+                assert!(PERMISSION_BITS.contains(&bit), "resolved a non-grid bit");
+                let cell = toggles.entry(bit).or_insert((at.x, at.y, at.x, at.y));
+                cell.0 = cell.0.min(at.x);
+                cell.1 = cell.1.min(at.y);
+                cell.2 = cell.2.max(at.x);
+                cell.3 = cell.3.max(at.y);
+            }
+            PropertiesTarget::Owner(which) => {
+                owners.insert(which);
+            }
+            PropertiesTarget::Attribute(index) => {
+                rows.insert(index);
+            }
+            PropertiesTarget::Action(action) => {
+                actions.insert(action);
+                assert!(
+                    at.x >= field.left() + i32::try_from(field.width).unwrap(),
+                    "an action button overlaps the editor it sits beside"
+                );
+            }
+            PropertiesTarget::Editor => editor_points += 1,
+        }
+    }
+
+    assert_eq!(
+        toggles.len(),
+        PERMISSION_BITS.len(),
+        "every settable bit has a reachable toggle"
+    );
+    for cell in toggles.values() {
         assert!(
-            cell.width >= 4 && cell.height >= 4,
+            cell.2 - cell.0 >= 3 && cell.3 - cell.1 >= 3,
             "checkbox too small to hit"
         );
     }
-
-    // No two checkboxes overlap — the defect this grid replaces crammed nine
-    // boxes one glyph apart, so they piled on top of one another. Half-open
-    // rectangles are disjoint when one ends at or before the other begins on
-    // either axis.
+    // The layout this replaced crammed nine boxes one glyph apart, so they
+    // piled on top of one another.
+    let cells: Vec<&(i32, i32, i32, i32)> = toggles.values().collect();
     for (i, a) in cells.iter().enumerate() {
         for b in &cells[i + 1..] {
-            let disjoint_x = a.left() + i32::try_from(a.width).unwrap() <= b.left()
-                || b.left() + i32::try_from(b.width).unwrap() <= a.left();
-            let disjoint_y = a.top() + i32::try_from(a.height).unwrap() <= b.top()
-                || b.top() + i32::try_from(b.height).unwrap() <= a.top();
+            let disjoint_x = a.2 < b.0 || b.2 < a.0;
+            let disjoint_y = a.3 < b.1 || b.3 < a.1;
             assert!(disjoint_x || disjoint_y, "permission checkboxes overlap");
         }
     }
+    assert_eq!(
+        owners,
+        [OwnerField::Uid, OwnerField::Gid].into_iter().collect(),
+        "both owning ids are reachable"
+    );
+    assert_eq!(rows, [0, 1, 2].into_iter().collect());
+    assert_eq!(
+        actions,
+        [AttrAction::Set, AttrAction::Remove].into_iter().collect(),
+        "a set the user cannot apply and a row they cannot remove are both dead ends"
+    );
+    assert!(editor_points > 0, "the field must be clickable to focus");
+
+    // A press outside the client resolves nothing.
+    assert_eq!(
+        properties_hit(
+            &props,
+            AttrView::default(),
+            window,
+            Scale::ONE,
+            &theme,
+            Point::new(-5, -5)
+        ),
+        None
+    );
+}
+
+/// Scrolled on, a row slot names a later attribute — the offset is what maps a
+/// pressed row to the attribute under it, and a slot past the end names none.
+#[test]
+fn a_scrolled_row_slot_names_the_attribute_under_it() {
+    let props = props_with(some_attributes(3));
+    let window = props_window();
+    let theme = Theme::dark();
+    let visible = properties_attr_visible_rows(&props, window, Scale::ONE, &theme);
+    assert!(visible >= 3);
+
+    // Probe down the rows' own column rather than scanning the client: the
+    // mapping under test is slot → index, not where the band sits.
+    let seen = |view: AttrView| -> Vec<usize> {
+        let mut found = Vec::new();
+        for y in 0..i32::try_from(window.height).unwrap() {
+            if let Some(PropertiesTarget::Attribute(index)) =
+                properties_hit(&props, view, window, Scale::ONE, &theme, Point::new(8, y))
+            {
+                if found.last() != Some(&index) {
+                    found.push(index);
+                }
+            }
+        }
+        found
+    };
+    assert_eq!(seen(AttrView::default()), vec![0, 1, 2]);
+    assert_eq!(
+        seen(AttrView {
+            offset: 1,
+            cursor: 1
+        }),
+        vec![1, 2],
+        "a slot past the end of the list resolves to nothing, never to a row that is not there"
+    );
 }
 
 #[test]
@@ -6789,154 +6968,306 @@ fn permission_cells_report_exactly_the_set_rwx_bits() {
 }
 
 #[test]
-fn draw_properties_editable_paints_the_toggles_without_panicking() {
+fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
+    let props = props_with(some_attributes(2));
+    let theme = Theme::dark();
+    // A window dragged smaller than any of its bands places no control off
+    // its own surface and offers no editor to type into.
+    let tiny = Rect::new(0, 0, 20, 16);
+    for y in 0..i32::try_from(tiny.height).unwrap() {
+        for x in 0..i32::try_from(tiny.width).unwrap() {
+            assert_eq!(
+                properties_hit(
+                    &props,
+                    AttrView::default(),
+                    tiny,
+                    Scale::ONE,
+                    &theme,
+                    Point::new(x, y)
+                ),
+                None
+            );
+        }
+    }
+    assert_eq!(
+        properties_attr_visible_rows(&props, tiny, Scale::ONE, &theme),
+        0
+    );
+    assert_eq!(
+        properties_attr_editor_rect(&props, tiny, Scale::ONE, &theme),
+        None
+    );
+    assert_eq!(
+        properties_owner_editor_rect(&props, tiny, Scale::ONE, &theme, OwnerField::Uid),
+        None
+    );
+}
+
+#[test]
+fn each_owning_id_carries_the_editor_it_opens_inside_the_client() {
+    let props = props_with(Attributes::Unsupported);
+    let window = props_window();
+    let theme = Theme::dark();
+    for field in [OwnerField::Uid, OwnerField::Gid] {
+        let rect = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, field)
+            .expect("the row fits the window it opens at");
+        assert!(rect.width > 0 && rect.height > 0);
+        assert!(rect.left() >= window.left());
+        assert!(
+            rect.left() + i32::try_from(rect.width).unwrap()
+                <= window.left() + i32::try_from(window.width).unwrap(),
+            "the editor never runs past the client it is drawn in"
+        );
+    }
+    // The gid value sits to the right of the uid it follows on the same row.
+    let uid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Uid)
+        .expect("uid");
+    let gid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Gid)
+        .expect("gid");
+    assert_eq!(uid.top(), gid.top());
+    assert!(gid.left() > uid.left());
+}
+
+/// An alias adds a field, so every band below it moves down exactly one row —
+/// and the editor, anchored to the foot of the client, does not move at all.
+#[test]
+fn the_bands_below_an_alias_row_move_down_by_exactly_one_row() {
+    use crate::entry::LinkTarget;
+
+    let theme = Theme::dark();
+    let window = props_window();
+    let pitch = i32::try_from(crate::render::row_height(Scale::ONE, &theme)).unwrap();
+    let link = Properties::from_stat(
+        "Documents",
+        crate::entry::EntryKind::Link(LinkTarget::Directory),
+        &props_stat(FileKind::Symlink, 0o777),
+    )
+    .with_target("/Storage/docs")
+    .with_attributes(Attributes::Unsupported);
+    let plain = props_with(Attributes::Unsupported);
+
+    let owner_row = |props: &Properties| -> i32 {
+        properties_owner_editor_rect(props, window, Scale::ONE, &theme, OwnerField::Uid)
+            .expect("the owner row fits")
+            .top()
+    };
+    assert_eq!(
+        owner_row(&link) - owner_row(&plain),
+        pitch,
+        "the alias row pushes the owner row down one line, not some other distance"
+    );
+    assert_eq!(
+        properties_attr_editor_rect(&link, window, Scale::ONE, &theme),
+        properties_attr_editor_rect(&plain, window, Scale::ONE, &theme),
+        "the editor is anchored to the foot of the client, so a field above it moves nothing"
+    );
+}
+
+#[test]
+fn a_window_paints_each_state_it_can_be_in_without_panicking() {
     use tairix_raster::Surface;
 
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 480);
-    let props = Properties::from_stat(
-        "notes.txt",
-        crate::entry::EntryKind::File,
-        &props_stat(FileKind::Regular, 0o644),
+    let window = props_window();
+    let bar = RowList::new(3);
+    let empty = TextField::new().with_placeholder("namespace.name = value");
+    let props = props_with(some_attributes(3));
+
+    let paint = |frame: PropertiesFrame<'_>, controls: PropertiesControls<'_>| {
+        let mut surface = Surface::new(window.width, window.height).expect("surface");
+        draw_properties_window(
+            &mut surface,
+            frame,
+            AttrView::default(),
+            controls,
+            Scale::ONE,
+            &theme,
+            window,
+        );
+        surface.pixels().to_vec()
+    };
+
+    let reading = paint(PropertiesFrame::Reading, resting(&bar, &empty));
+    let refused = paint(
+        PropertiesFrame::Refused("no such file"),
+        resting(&bar, &empty),
     );
-    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
-    let before = surface.pixels().to_vec();
-    draw_properties_editable(&mut surface, &props, Scale::ONE, &theme, vp);
-    assert_ne!(surface.pixels().to_vec(), before);
+    let ready = paint(PropertiesFrame::Ready(&props), resting(&bar, &empty));
+    assert_ne!(reading, refused, "a refusal states its own reason");
+    assert_ne!(ready, reading, "the fields replace the reading notice");
 
-    // A degenerate viewport draws nothing and does not panic.
-    let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_properties_editable(&mut tiny, &props, Scale::ONE, &theme, Rect::new(0, 0, 2, 2));
-}
-
-#[test]
-fn permission_cell_at_mirrors_every_checkbox_and_fails_closed_off_grid() {
-    let theme = Theme::dark();
-    // The editable Properties popup is tall enough to hold the metadata fields
-    // plus the labelled permissions grid at the default window height.
-    let vp = Rect::new(0, 0, 480, 480);
-
-    // Scanning the whole window, every bit the hit-test resolves is one of the
-    // nine settable bits, and all nine are reachable — so the drawn grid and
-    // the hit-test cover exactly the same nine distinct checkboxes.
-    let mut seen: BTreeSet<u32> = BTreeSet::new();
-    let mut y = 0;
-    while y < i32::try_from(vp.height).unwrap() {
-        let mut x = 0;
-        while x < i32::try_from(vp.width).unwrap() {
-            if let Some(bit) = permission_cell_at(vp, Scale::ONE, &theme, Point::new(x, y)) {
-                assert!(PERMISSION_BITS.contains(&bit), "resolved a non-grid bit");
-                seen.insert(bit);
-            }
-            x += 1;
-        }
-        y += 1;
-    }
-    let expected: BTreeSet<u32> = PERMISSION_BITS.iter().copied().collect();
-    assert_eq!(seen, expected);
-
-    // A click well outside the panel resolves nothing (fail closed).
-    assert_eq!(
-        permission_cell_at(vp, Scale::ONE, &theme, Point::new(-5, -5)),
-        None
-    );
-    // On a window too small for the grid, no cell resolves (fail closed).
-    let tiny = Rect::new(0, 0, 20, 16);
-    assert_eq!(
-        permission_cell_at(tiny, Scale::ONE, &theme, Point::new(5, 5)),
-        None
-    );
-}
-
-// --- FM8b: the drawn ownership control ------------------------------------
-
-use crate::render::{draw_owner_control, owner_field_at, OwnerField};
-use tairix_controls::text::TextField;
-
-#[test]
-fn owner_field_at_mirrors_the_two_value_cells_and_fails_closed_off_grid() {
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 320);
-    let props = Properties::from_stat(
-        "notes.txt",
-        crate::entry::EntryKind::File,
-        &props_stat(FileKind::Regular, 0o644),
+    // A volume with no attribute storage says so, which must read differently
+    // from a node that simply carries none.
+    let unsupported = props_with(Attributes::Unsupported);
+    let none = props_with(Attributes::Visible(Vec::new()));
+    assert_ne!(
+        paint(PropertiesFrame::Ready(&unsupported), resting(&bar, &empty)),
+        paint(PropertiesFrame::Ready(&none), resting(&bar, &empty))
     );
 
-    // Scanning the whole window, every field the hit-test resolves is one of
-    // the two owner values, and both are reachable — so the drawn underlines
-    // and the hit-test cover exactly the same two distinct cells.
-    let mut seen: BTreeSet<OwnerField> = BTreeSet::new();
-    let mut y = 0;
-    while y < i32::try_from(vp.height).unwrap() {
-        let mut x = 0;
-        while x < i32::try_from(vp.width).unwrap() {
-            if let Some(field) = owner_field_at(&props, vp, Scale::ONE, &theme, Point::new(x, y)) {
-                seen.insert(field);
-            }
-            x += 1;
-        }
-        y += 1;
-    }
-    assert_eq!(
-        seen,
-        [OwnerField::Uid, OwnerField::Gid].into_iter().collect()
-    );
-
-    // A click well outside the panel resolves nothing (fail closed).
-    assert_eq!(
-        owner_field_at(&props, vp, Scale::ONE, &theme, Point::new(-5, -5)),
-        None
-    );
-    // On a window too small for the owner row, no field resolves (fail closed).
-    let tiny = Rect::new(0, 0, 20, 16);
-    assert_eq!(
-        owner_field_at(&props, tiny, Scale::ONE, &theme, Point::new(5, 5)),
-        None
-    );
-}
-
-#[test]
-fn draw_owner_control_paints_the_affordances_and_editor_without_panicking() {
-    use tairix_raster::Surface;
-
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 320);
-    let props = Properties::from_stat(
-        "notes.txt",
-        crate::entry::EntryKind::File,
-        &props_stat(FileKind::Regular, 0o644),
-    );
-
-    // With no active editor the underlines mark both values as editable.
-    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
-    let before = surface.pixels().to_vec();
-    draw_owner_control(&mut surface, &props, Scale::ONE, &theme, vp, None);
-    assert_ne!(surface.pixels().to_vec(), before);
-
-    // With the uid field being edited the active field renders over its value.
+    // The live editors draw over the rows they belong to.
     let editor = TextField::new().with_text("1000");
-    let mut edited = Surface::new(vp.width, vp.height).expect("surface");
-    let before_edit = edited.pixels().to_vec();
-    draw_owner_control(
-        &mut edited,
-        &props,
-        Scale::ONE,
-        &theme,
-        vp,
-        Some((OwnerField::Uid, &editor)),
+    let owner_open = paint(
+        PropertiesFrame::Ready(&props),
+        PropertiesControls {
+            can_chown: true,
+            owner: Some((OwnerField::Uid, &editor)),
+            attribute: &empty,
+            scrollbar: bar.scrollbar(),
+        },
     );
-    assert_ne!(edited.pixels().to_vec(), before_edit);
+    assert_ne!(owner_open, ready);
+    let typed = TextField::new().with_text("user.note = hi");
+    let attr_open = paint(
+        PropertiesFrame::Ready(&props),
+        PropertiesControls {
+            can_chown: true,
+            owner: None,
+            attribute: &typed,
+            scrollbar: bar.scrollbar(),
+        },
+    );
+    assert_ne!(attr_open, ready);
 
-    // A degenerate viewport draws nothing and does not panic.
+    // A session without `CAP_FS_CHOWN` is never shown the control it could
+    // not use.
+    let no_chown = paint(
+        PropertiesFrame::Ready(&props),
+        PropertiesControls {
+            can_chown: false,
+            owner: None,
+            attribute: &empty,
+            scrollbar: bar.scrollbar(),
+        },
+    );
+    assert_ne!(no_chown, ready);
+
+    // A degenerate client draws nothing and does not panic.
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_owner_control(
+    draw_properties_window(
         &mut tiny,
-        &props,
+        PropertiesFrame::Ready(&props),
+        AttrView::default(),
+        resting(&bar, &empty),
         Scale::ONE,
         &theme,
         Rect::new(0, 0, 2, 2),
-        None,
+    );
+}
+
+/// A value from a volume is whatever somebody wrote there: control bytes
+/// reaching a surface are an escape sequence, and bytes that are not text at
+/// all are nothing a reader can check.
+#[test]
+fn an_attribute_value_is_shown_escaped_and_offered_back_only_when_it_round_trips() {
+    let text = Attribute::new("user.note", b"hello".to_vec());
+    assert_eq!(text.text(), Some("hello"));
+    assert_eq!(text.display(), "hello");
+
+    let binary = Attribute::new("acorn.filetype", vec![0xff, 0x0a]);
+    assert_eq!(binary.text(), None, "never offered back for editing");
+    assert_eq!(binary.display(), "\\xff\\x0a");
+
+    // The key grammar bans only `/` and NUL, so a corrupt or hostile volume
+    // can store one carrying an escape sequence. It is shown escaped and is
+    // never offered back for editing either.
+    let hostile = Attribute::new("user.a\u{1b}[31m", b"v".to_vec());
+    assert_eq!(hostile.key_text(), None);
+    assert_eq!(hostile.key_display(), "user.a\\x1b[31m");
+    assert_eq!(
+        hostile.key(),
+        "user.a\u{1b}[31m",
+        "the stored key is unchanged"
+    );
+    let plain = Attribute::new("user.note", b"v".to_vec());
+    assert_eq!(plain.key_text(), Some("user.note"));
+    assert_eq!(plain.key_display(), "user.note");
+}
+
+/// A node whose attributes were never read must not read as one that has
+/// none: the trusted picker never asks, and its panel says nothing about them.
+#[test]
+fn an_unread_attribute_set_claims_nothing() {
+    let props = Properties::from_stat(
+        "notes.txt",
+        crate::entry::EntryKind::File,
+        &props_stat(FileKind::Regular, 0o644),
+    );
+    assert_eq!(*props.attributes(), Attributes::Unread);
+    assert!(props.attributes().visible().is_empty());
+    assert_eq!(
+        *props_with(Attributes::Unsupported).attributes(),
+        Attributes::Unsupported
+    );
+}
+
+/// The window opens tall enough for every field and the head of the list, and
+/// scrolls the list rather than losing a field, whatever it is resized to.
+#[test]
+fn the_window_opens_sized_to_its_fields_and_scrolls_its_list() {
+    let theme = Theme::dark();
+    let (w, h) = properties_window_extent(Scale::ONE, &theme);
+    assert!(w > 0 && h > 0);
+    let window = Rect::new(0, 0, w, h);
+    let full = props_with(some_attributes(20));
+
+    // Every field, the grid, and the ownership control fit at the open size.
+    assert!(
+        properties_owner_editor_rect(&full, window, Scale::ONE, &theme, OwnerField::Gid).is_some()
+    );
+    let visible = properties_attr_visible_rows(&full, window, Scale::ONE, &theme);
+    assert!(
+        visible > 0 && visible < 20,
+        "a long list scrolls, {visible}"
+    );
+
+    // A hidpi window is proportionally larger, not the same pixel count.
+    let hidpi = Scale::from_dpi(192).expect("a valid scale");
+    let (hw, hh) = properties_window_extent(hidpi, &theme);
+    assert!(hw > w && hh > h, "the window is authored in logical pixels");
+}
+
+/// The gutter bar moves the same list the wheel and the rows do, through the
+/// one shared row-list model.
+#[test]
+fn a_drag_on_the_gutter_scrolls_the_attribute_list() {
+    use crate::render::properties_scroll_pointer;
+    use tairix_controls::damage;
+    use tairix_input::{InputEvent, PointerButton};
+
+    let theme = Theme::dark();
+    let window = props_window();
+    let props = props_with(some_attributes(40));
+    let visible = properties_attr_visible_rows(&props, window, Scale::ONE, &theme);
+    let mut rows = RowList::new(40);
+    let mut sink = damage::sink();
+
+    // A press somewhere down the gutter pages toward the end.
+    let gutter_x = i32::try_from(window.width).unwrap() - 2;
+    let mut moved = false;
+    for y in 0..i32::try_from(window.height).unwrap() {
+        let at = Point::new(gutter_x, y);
+        let taken = properties_scroll_pointer(
+            &props,
+            &mut rows,
+            window,
+            Scale::ONE,
+            &theme,
+            at,
+            &InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            },
+            &mut sink,
+        );
+        if taken == Some(true) && rows.offset() > 0 {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "the drawn bar must move the list it depicts");
+    assert!(
+        rows.offset() <= u64::try_from(40 - visible).unwrap(),
+        "and never past what the list holds"
     );
 }
 
@@ -7661,10 +7992,10 @@ mod occupancy {
     }
 
     /// Resolve occupancy for everything the browser would draw — what the app
-    /// does at the head of each frame.
-    fn resolve_visible<S: DirectorySource>(browser: &mut Browser<S>) {
+    /// does at the head of each frame — answering whether any cue moved.
+    fn resolve_visible<S: DirectorySource>(browser: &mut Browser<S>) -> bool {
         let range = visible_range(browser, Scale::ONE, &Theme::dark(), viewport(), BAND);
-        browser.resolve_occupancy(range);
+        browser.resolve_occupancy(range)
     }
 
     /// Render `browser` with no artwork, so every icon is the built-in glyph.
@@ -7836,6 +8167,67 @@ mod occupancy {
         assert_eq!(browser.entries()[0].occupancy(), Occupancy::Unprobed);
         resolve_visible(&mut browser);
         assert_eq!(browser.entries()[0].occupancy(), Occupancy::NonEmpty);
+    }
+
+    /// A deferring app repaints on the resolve that *adopts* an answer, so the
+    /// resolve has to say whether one moved: a delivery that answered nothing
+    /// the window is showing must not cost a frame.
+    /// A source whose probe is answered by somebody else, as the deferring
+    /// app's is.
+    struct Deferring {
+        answer: Rc<RefCell<Option<bool>>>,
+    }
+
+    impl DirectorySource for Deferring {
+        fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+            Ok(Listing::Ready(vec![Entry::directory("later")]))
+        }
+
+        fn has_children(&mut self, _components: &[String]) -> Result<Probe, Errno> {
+            Ok(match *self.answer.borrow() {
+                Some(occupied) => Probe::Ready(occupied),
+                None => Probe::Pending,
+            })
+        }
+    }
+
+    #[test]
+    fn a_resolve_reports_whether_any_cue_moved() {
+        let mut browser = Browser::open_root(empty_and_full()).expect("root");
+
+        assert!(
+            resolve_visible(&mut browser),
+            "the first resolve answers both folders"
+        );
+        assert!(
+            !resolve_visible(&mut browser),
+            "nothing is left unprobed, so nothing moved and no frame is owed"
+        );
+
+        // A refused probe is an answer too — it moves the entry off
+        // `Unprobed`, so it is adopted once and never asked again.
+        let mut refused = Browser::open_root(empty_and_full().refusing("/bb-full")).expect("root");
+        assert!(resolve_visible(&mut refused));
+        assert!(!resolve_visible(&mut refused));
+
+        // A source that answers elsewhere moves nothing until its answer
+        // lands, which is exactly the deferred app's case.
+        let answer = Rc::new(RefCell::new(None));
+        let mut deferred = Browser::open_root(Deferring {
+            answer: Rc::clone(&answer),
+        })
+        .expect("root");
+        assert!(
+            !resolve_visible(&mut deferred),
+            "a pending probe moves nothing, so a paint that only asked owes no second frame"
+        );
+        *answer.borrow_mut() = Some(true);
+        assert!(resolve_visible(&mut deferred));
+        assert_eq!(
+            icon_for_entry(&deferred.entries()[0], deferred.components()),
+            IconKind::FolderFilled
+        );
+        assert!(!resolve_visible(&mut deferred));
     }
 
     #[test]

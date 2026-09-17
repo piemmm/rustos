@@ -286,7 +286,7 @@ file can never carry a stale set-*id* escalation, and the covering mount must
 be writable. The dispatch gate is the coarse `CAP_FS_ACCESS` like the other
 path calls; the privileged per-inode check is deeper, in the VFS. It fails
 closed — a refused change leaves the node's ownership exactly as it was — and
-is audited. The `chown` command app and the file manager's Properties panel
+is audited. The `chown` command app and the file manager's Properties window
 are its callers.
 
 The `fs_attr_*` family (nos. 84–87) is the extended-attribute surface — the

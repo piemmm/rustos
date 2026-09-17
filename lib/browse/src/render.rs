@@ -63,7 +63,8 @@ use crate::media::{entry_icon_request, icon_for_entry};
 use crate::open_with::OpenWithChooser;
 use crate::places::{self, Place, Places};
 use crate::progress::ProgressModel;
-use crate::properties::Properties;
+use crate::properties::{Attributes, Properties};
+use crate::rowlist::RowList;
 use crate::source::DirectorySource;
 use crate::trash::DeleteDisposition;
 
@@ -1307,90 +1308,143 @@ fn view_layout_for<S: DirectorySource>(
     }
 }
 
-/// The number of label/value rows [`properties_rows`] produces — the field
-/// count the Properties overlay is sized to show.
-pub const PROPERTY_ROW_COUNT: usize = 8;
+/// The most label/value rows [`properties_rows`] can produce — the field count
+/// a surface sized for the fields must reserve room for.
+pub const PROPERTY_ROW_COUNT: usize = Field::ALL.len();
 
-/// The Properties overlay field labels, in display order. One definition so
-/// [`properties_rows`] and the inline permission-toggle placement agree on the
-/// label column width and which row is the permissions row.
-const PROPERTY_LABELS: [&str; PROPERTY_ROW_COUNT] = [
-    "Kind",
-    "Size",
-    "Permissions",
-    "Owner",
-    "Created",
-    "Modified",
-    "Accessed",
-    "Changed",
-];
-
-/// The labelled metadata fields the Properties overlay shows for `props`, in
-/// display order: kind, size (apparent + on-disk), permissions (symbolic +
-/// octal), owner, and the four timestamps.
+/// One metadata field a Properties surface shows.
 ///
-/// One definition so the drawn panel and its tests agree on exactly which
-/// fields appear and how each reads. Every value comes straight from the
-/// [`Properties`] model — itself taken straight from `fs_stat` — so a timestamp
-/// the backing does not keep renders blank rather than a fabricated wall time,
-/// and no field is invented.
-#[must_use]
-pub fn properties_rows(props: &Properties) -> Vec<(&'static str, String)> {
-    let mut size = props.size_display();
-    size.push_str(" (");
-    size.push_str(&props.allocated_display());
-    size.push_str(" on disk)");
-
-    let mut permissions = props.permissions();
-    permissions.push_str(" (");
-    permissions.push_str(&props.mode_octal());
-    permissions.push(')');
-
-    let owner = alloc::format!("uid {} / gid {}", props.uid(), props.gid());
-
-    let values = [
-        String::from(props.kind_label()),
-        size,
-        permissions,
-        owner,
-        props.created_display(),
-        props.modified_display(),
-        props.accessed_display(),
-        props.changed_display(),
-    ];
-    PROPERTY_LABELS.into_iter().zip(values).collect()
+/// A closed vocabulary rather than a label/value list, so the display order,
+/// each field's label, each field's value, and which fields a given node shows
+/// at all are one definition — and so a surface can place a control on a
+/// field's row without paying to format every value to find out where it is.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Field {
+    /// The human kind label.
+    Kind,
+    /// The spelling a symbolic link stores.
+    Alias,
+    /// Apparent size, with the on-disk allocation beside it.
+    Size,
+    /// The symbolic mode, with its octal spelling beside it.
+    Permissions,
+    /// The owning user and group ids.
+    Owner,
+    /// The four timestamps.
+    Created,
+    /// See [`Field::Created`].
+    Modified,
+    /// See [`Field::Created`].
+    Accessed,
+    /// See [`Field::Created`].
+    Changed,
 }
 
-/// The number of extra content rows the *editable* Properties popup reserves
-/// below the metadata fields for the labelled permissions grid: one blank
-/// separator row, one column-header row (Read / Write / Execute), and the
-/// three owner/group/other triad rows.
-const PERMISSION_GRID_ROWS: usize = 5;
+impl Field {
+    /// Every field, in display order.
+    const ALL: [Self; 9] = [
+        Self::Kind,
+        Self::Alias,
+        Self::Size,
+        Self::Permissions,
+        Self::Owner,
+        Self::Created,
+        Self::Modified,
+        Self::Accessed,
+        Self::Changed,
+    ];
 
-/// The centered bounds of a Properties popup [`Panel`] within `viewport`
-/// holding `content_rows` text rows (a title bar plus one line per row with a
-/// top and bottom margin), clamped to the window so a small window still
-/// yields a drawable — if clipped — panel rather than a panic.
+    /// The field's label.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Kind => "Kind",
+            Self::Alias => "Alias to",
+            Self::Size => "Size",
+            Self::Permissions => "Permissions",
+            Self::Owner => "Owner",
+            Self::Created => "Created",
+            Self::Modified => "Modified",
+            Self::Accessed => "Accessed",
+            Self::Changed => "Changed",
+        }
+    }
+
+    /// Whether this field has anything to say about `props`.
+    ///
+    /// Only the alias row is conditional: a node that stores no target has
+    /// nothing to put there, and an empty field would read as a broken link.
+    fn shown(self, props: &Properties) -> bool {
+        !matches!(self, Self::Alias) || props.target().is_some()
+    }
+
+    /// The field's value, straight from the model.
+    fn value(self, props: &Properties) -> String {
+        match self {
+            Self::Kind => String::from(props.kind_label()),
+            Self::Alias => String::from(props.target().unwrap_or_default()),
+            Self::Size => alloc::format!(
+                "{} ({} on disk)",
+                props.size_display(),
+                props.allocated_display()
+            ),
+            Self::Permissions => {
+                alloc::format!("{} ({})", props.permissions(), props.mode_octal())
+            }
+            Self::Owner => alloc::format!("uid {} / gid {}", props.uid(), props.gid()),
+            Self::Created => props.created_display(),
+            Self::Modified => props.modified_display(),
+            Self::Accessed => props.accessed_display(),
+            Self::Changed => props.changed_display(),
+        }
+    }
+
+    /// The fields `props` shows, in display order.
+    fn shown_in(props: &Properties) -> impl Iterator<Item = Self> + '_ {
+        Self::ALL.into_iter().filter(|field| field.shown(props))
+    }
+
+    /// Which drawn row `self` lands on for `props`, or `None` when the node
+    /// does not show it.
+    fn row(self, props: &Properties) -> Option<usize> {
+        Self::shown_in(props).position(|field| field == self)
+    }
+}
+
+/// The labelled metadata fields a Properties surface shows for `props`, in
+/// display order: kind, a link's stored target, size (apparent + on-disk),
+/// permissions (symbolic + octal), owner, and the four timestamps.
 ///
-/// One definition so the read-only and editable popups differ only in how many
-/// rows they reserve, never in how the panel is placed or clamped.
-fn properties_panel_rect_for(
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    content_rows: usize,
-) -> Rect {
+/// Every value comes straight from the [`Properties`] model — itself taken
+/// straight from `fs_stat` — so a timestamp the backing does not keep renders
+/// blank rather than a fabricated wall time, and no field is invented. The
+/// alias row appears only for a node that stores a target, and carries the
+/// spelling the link holds verbatim: that is what explains a broken one.
+#[must_use]
+pub fn properties_rows(props: &Properties) -> Vec<(&'static str, String)> {
+    Field::shown_in(props)
+        .map(|field| (field.label(), field.value(props)))
+        .collect()
+}
+
+/// The centered bounds of the read-only Properties popup [`Panel`] within
+/// `viewport`, sized to comfortably show the [`properties_rows`] fields (a
+/// title bar plus one line per field with a top and bottom margin) and clamped
+/// to the window so a small window still yields a drawable — if clipped —
+/// panel rather than a panic.
+///
+/// The trusted read-only picker draws this over the listing it is showing, so
+/// it takes the same four-fifths proportion as every other surface
+/// centred over a window. The file manager's *editable* Properties surface is
+/// a window of its own and is laid out from its own client area instead
+/// ([`draw_properties_window`]).
+#[must_use]
+pub fn properties_panel_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
     let line = row_height(scale, theme);
     let title = scale.scale_length(theme.metrics().title_bar_height).max(1);
-    let rows = u32::try_from(content_rows).unwrap_or(u32::MAX);
+    let rows = u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX);
     let content = line.saturating_mul(rows.saturating_add(2));
     let height = title.saturating_add(content).min(viewport.height.max(1));
-    let width = viewport
-        .width
-        .saturating_mul(4)
-        .checked_div(5)
-        .unwrap_or(viewport.width)
-        .clamp(1, viewport.width.max(1));
+    let width = overlay_width(viewport);
     let x = viewport
         .origin
         .x
@@ -1402,55 +1456,26 @@ fn properties_panel_rect_for(
     Rect::new(x, y, width, height)
 }
 
-/// The centered bounds of the read-only Properties popup [`Panel`] within
-/// `viewport`, sized to comfortably show the [`properties_rows`] fields (a
-/// title bar plus one line per field with a top and bottom margin) and clamped
-/// to the window.
-///
-/// The trusted read-only picker draws this. The file manager's *editable*
-/// popup uses the taller [`properties_editable_panel_rect`], which reserves
-/// extra rows below the fields for the labelled permissions grid.
-#[must_use]
-pub fn properties_panel_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
-    properties_panel_rect_for(viewport, scale, theme, PROPERTY_ROW_COUNT)
-}
-
-/// The centered bounds of the *editable* Properties popup [`Panel`] within
-/// `viewport`: the read-only panel grown by a few extra rows so the labelled
-/// owner/group/other × read/write/execute permissions grid has its own room
-/// below the metadata fields rather than being crammed onto — and overlapping
-/// — a single text row.
-///
-/// Only the write-capable file manager draws this; the read-only picker uses
-/// [`properties_panel_rect`] and never draws a permission toggle (the editable
-/// surface is separated by call site, the manager-only write-tool precedent).
-#[must_use]
-pub fn properties_editable_panel_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
-    properties_panel_rect_for(
-        viewport,
-        scale,
-        theme,
-        PROPERTY_ROW_COUNT + PERMISSION_GRID_ROWS,
-    )
-}
-
-/// The shared column geometry of the Properties overlay content area: the label
+/// The shared column geometry of a Properties surface's content area: the label
 /// column x, the value column x, and the per-row pitch. One definition so the
-/// drawn fields and the inline permission toggles line up exactly.
+/// drawn fields and the controls laid over them line up exactly.
 struct FieldLayout {
     /// Left x of the label column.
     left: i32,
     /// Left x of the value column (past the widest label plus a gap).
     value_x: i32,
+    /// Top y of the first field row — the origin every band below is measured
+    /// from, so nothing re-derives the content's own margin.
+    top: i32,
     /// Vertical pitch between successive rows.
     line: u32,
 }
 
 impl FieldLayout {
     fn resolve(content: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Self {
-        let label_col = PROPERTY_LABELS
-            .iter()
-            .map(|label| font.text_width(label))
+        let label_col = Field::ALL
+            .into_iter()
+            .map(|field| font.text_width(field.label()))
             .max()
             .unwrap_or(0);
         let pad = scale.scale_length(LABEL_PADDING);
@@ -1460,14 +1485,23 @@ impl FieldLayout {
         Self {
             left,
             value_x,
+            top: content
+                .top()
+                .saturating_add(to_i32(scale.scale_length(ROW_PADDING))),
             line: row_height(scale, theme),
         }
+    }
+
+    /// Top y of the row at `index`.
+    fn row_y(&self, index: u32) -> i32 {
+        self.top
+            .saturating_add(to_i32(self.line.saturating_mul(index)))
     }
 }
 
 /// Draw the [`properties_rows`] metadata fields as muted-label / solid-value
 /// rows within `content`, clipping at the content's bottom edge. Shared by the
-/// read-only and editable overlays so the fields read identically.
+/// read-only panel and the manager's window so the fields read identically.
 fn draw_property_fields(
     surface: &mut Surface,
     props: &Properties,
@@ -1479,9 +1513,7 @@ fn draw_property_fields(
     let palette = theme.palette();
     let layout = FieldLayout::resolve(content, scale, theme, font);
     let bottom = content.top().saturating_add(to_i32(content.height));
-    let mut y = content
-        .top()
-        .saturating_add(to_i32(scale.scale_length(ROW_PADDING)));
+    let mut y = layout.top;
     for (label, value) in &properties_rows(props) {
         if y >= bottom {
             break;
@@ -1498,37 +1530,14 @@ fn draw_property_fields(
     }
 }
 
-/// Draw the Properties [`Panel`] for `props` at `bounds`: a panel titled with
-/// the node's name, its labelled metadata fields drawn as muted-label /
-/// solid-value rows in the panel's content area.
-///
-/// The read-only and editable popups share this so the metadata reads
-/// identically and the panel is placed identically; the editable popup then
-/// draws the permissions grid over the room its taller `bounds` reserve. Every
-/// blit clips, so a window too small for the whole panel simply shows what fits
-/// rather than panicking. It reads only the already-authorised [`Properties`]
-/// and draws — it performs no I/O and holds no authority.
-fn draw_properties_at(
-    surface: &mut Surface,
-    props: &Properties,
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-    bounds: Rect,
-) {
-    let panel = Panel::new(props.name());
-    panel.render(surface, bounds, scale, theme);
-    let Some(content) = panel.content_rect(bounds, scale, theme) else {
-        return;
-    };
-    draw_property_fields(surface, props, content, scale, theme, font);
-}
-
-/// Draw the read-only Properties overlay for `props` centered in `viewport`.
+/// Draw the read-only Properties overlay for `props` centered in `viewport`: a
+/// panel titled with the node's name and its labelled metadata fields drawn as
+/// muted-label / solid-value rows in the panel's content area.
 ///
 /// The trusted read-only picker draws this. It reads only the already-
 /// authorised [`Properties`] and draws — it performs no I/O and holds no
-/// authority.
+/// authority. Every blit clips, so a window too small for the whole panel
+/// simply shows what fits rather than panicking.
 pub fn draw_properties(
     surface: &mut Surface,
     props: &Properties,
@@ -1537,28 +1546,27 @@ pub fn draw_properties(
     viewport: Rect,
 ) {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    draw_properties_at(
-        surface,
-        props,
-        scale,
-        theme,
-        font,
-        properties_panel_rect(viewport, scale, theme),
-    );
+    let bounds = properties_panel_rect(viewport, scale, theme);
+    let panel = Panel::new(props.name());
+    panel.render(surface, bounds, scale, theme);
+    let Some(content) = panel.content_rect(bounds, scale, theme) else {
+        return;
+    };
+    draw_property_fields(surface, props, content, scale, theme, font);
 }
 
 /// The nine settable owner/group/other × read/write/execute permission bits, in
-/// the left-to-right order the inline permission control lays them out (the
-/// owner triad, then group, then other) — the same order as the symbolic
-/// `rwxrwxrwx` spelling they sit over, so the drawn toggles and their hit-test
-/// share one definition of which cell carries which bit.
+/// the left-to-right order the permission control lays them out (the owner
+/// triad, then group, then other) — the same order as the symbolic `rwxrwxrwx`
+/// spelling they sit over, so the drawn toggles and their hit-test share one
+/// definition of which cell carries which bit.
 ///
 /// Only these nine `rwx` bits are offered as toggles — the familiar, legible
 /// permission set. The setuid/setgid/sticky bits stay visible in the
-/// Properties panel's octal and symbolic spelling and are edited through the
+/// Properties fields' octal and symbolic spelling and are edited through the
 /// `chmod` command: a deliberate scope boundary for a best-in-class,
-/// bloat-free panel, not an omission. Toggling a cell flips only its own `rwx`
-/// bit and preserves whatever the higher bits currently are.
+/// bloat-free surface, not an omission. Toggling a cell flips only its own
+/// `rwx` bit and preserves whatever the higher bits currently are.
 pub const PERMISSION_BITS: [u32; 9] = [
     0o400, 0o200, 0o100, // owner: read, write, execute
     0o040, 0o020, 0o010, // group: read, write, execute
@@ -1579,18 +1587,28 @@ pub const fn permission_cells(mode: u32) -> [bool; 9] {
     cells
 }
 
-/// The column headers of the permissions grid, left-to-right, matching the
-/// read/write/execute order of each triad in [`PERMISSION_BITS`].
+/// The permissions grid's column headers, over the read/write/execute columns.
 const PERMISSION_COLUMN_LABELS: [&str; 3] = ["Read", "Write", "Exec"];
 
-/// The row labels of the permissions grid, top-to-bottom, matching the
-/// owner/group/other triad order of [`PERMISSION_BITS`].
+/// The permissions grid's row labels, naming each `rwx` triad.
 const PERMISSION_ROW_LABELS: [&str; 3] = ["Owner", "Group", "Other"];
 
-/// The shared geometry of the editable Properties popup's labelled permissions
-/// grid: a column-header row (Read / Write / Execute) above three
-/// owner/group/other triad rows, each triad a leading row label followed by
-/// its three `rwx` checkboxes.
+/// The section label the extended attributes are listed under.
+const ATTR_SECTION_LABEL: &str = "Extended attributes";
+
+/// What the attributes section says in place of a list it has no rows for.
+const ATTR_UNSUPPORTED: &str = "not stored by this volume";
+
+/// What the attributes section says for a node that carries none.
+const ATTR_NONE: &str = "none";
+
+/// What the attributes section says when the listing itself was refused.
+const ATTR_REFUSED: &str = "could not be read";
+
+/// The shared geometry of a Properties surface's labelled permissions grid: a
+/// column-header row (Read / Write / Execute) above three owner/group/other
+/// triad rows, each triad a leading row label followed by its three `rwx`
+/// checkboxes.
 ///
 /// One definition so the painted grid, its headers and row labels, and the
 /// click hit-test all agree on where every cell sits — the checkboxes are laid
@@ -1635,23 +1653,225 @@ impl PermGrid {
     }
 }
 
-/// The editable Properties popup's permissions-grid geometry, or `None` when
-/// the grid does not fit the panel's content (a window too small) — so the
-/// painter and the hit-test both fail closed there rather than placing cells
-/// off the panel.
-fn perm_grid(viewport: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Option<PermGrid> {
-    let bounds = properties_editable_panel_rect(viewport, scale, theme);
-    let content = Panel::new(String::new()).content_rect(bounds, scale, theme)?;
-    let line = row_height(scale, theme);
+/// Which of the two owning ids the inline ownership control edits.
+///
+/// The owning user (`uid`) and group (`gid`) are the two independently
+/// editable values on a Properties surface's owner row; a click resolves to
+/// exactly one of them and the caller commits that one field.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum OwnerField {
+    /// The owning user id (`chown`).
+    Uid,
+    /// The owning group id (`chgrp`).
+    Gid,
+}
+
+/// The geometry of a Properties surface's owner row: the clickable bounds of
+/// the uid and gid values (`[uid, gid]`), each sized to the digits it shows,
+/// and the row pitch the active editor is sized from.
+struct OwnerRowGeom {
+    /// The uid value's cell and the gid value's cell, left-to-right.
+    cells: [Rect; 2],
+    /// The vertical pitch between rows — the height the inline editor uses so
+    /// it is tall enough to read while it overlays the value.
+    line: u32,
+}
+
+/// What a press on a Properties window resolves to.
+///
+/// One hit-test rather than one per control, so the precedence between them is
+/// stated once: the capability-free permission toggles are resolved before the
+/// privileged ownership control, and a press on nothing resolves to nothing —
+/// never to whichever control happens to be nearest (fail closed).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PropertiesTarget {
+    /// One of the nine permission toggles, by the `rwx` bit it flips.
+    Permission(u32),
+    /// An owning id's value, which only a holder of `CAP_FS_CHOWN` may edit.
+    Owner(OwnerField),
+    /// An attribute row, by its index in the visible set.
+    Attribute(usize),
+    /// The `key = value` editor's field.
+    Editor,
+    /// One of the attribute actions beneath the list.
+    Action(AttrAction),
+}
+
+/// What a press on the attributes action band asks for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum AttrAction {
+    /// Apply the editor's `key = value` line to the node.
+    Set,
+    /// Remove the attribute the cursor row names.
+    Remove,
+}
+
+/// The two attribute actions, in the order they are drawn.
+const ATTR_ACTIONS: [(AttrAction, &str); 2] =
+    [(AttrAction::Remove, "Remove"), (AttrAction::Set, "Set")];
+
+/// Where a Properties window's parts sit within its client area.
+///
+/// Resolved once from the node's own fields, so the painter and every
+/// hit-test read one answer: the metadata fields, the permissions grid and
+/// ownership control beneath them, and the extended-attribute list with its
+/// editor at the foot. Each band is [`None`] when the client leaves it no
+/// room, so a window dragged too small draws and resolves nothing there
+/// rather than placing a control off its own surface.
+struct PropertiesLayout {
+    /// The band the metadata fields are drawn in.
+    fields: Rect,
+    /// The permissions grid.
+    grid: Option<PermGrid>,
+    /// The owner row's two clickable id cells.
+    owner: Option<OwnerRowGeom>,
+    /// Top y of the attributes section label.
+    label_y: i32,
+    /// The band the attribute rows occupy, gutter included.
+    rows: Option<Rect>,
+    /// The editor's row, the actions band included.
+    editor: Option<Rect>,
+}
+
+/// The rows a Properties window reserves between the metadata fields and the
+/// permissions grid, and between the grid and the attributes section: one blank
+/// separator each, plus the grid's own column-header row.
+const PROPERTIES_GRID_ROWS: u32 = 5;
+
+impl PropertiesLayout {
+    /// Resolve every band of the window from its `content` (its whole client
+    /// area) and the node it is showing.
+    fn resolve(
+        props: &Properties,
+        content: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Self {
+        let layout = FieldLayout::resolve(content, scale, theme, font);
+        let line = layout.line.max(1);
+        let bottom = content.top().saturating_add(to_i32(content.height));
+        let field_rows = u32::try_from(Field::shown_in(props).count()).unwrap_or(u32::MAX);
+
+        // The editor claims the last full row of the client; everything above
+        // it is laid out from the top, so a window too short simply loses its
+        // lower bands rather than overlapping them.
+        let editor_top = bottom.saturating_sub(to_i32(line));
+        let grid = perm_grid(&layout, content, scale, font, field_rows);
+        let owner = owner_row_geom(props, &layout, content, font);
+        let label_y = layout.row_y(
+            field_rows
+                .saturating_add(PROPERTIES_GRID_ROWS)
+                .saturating_add(1),
+        );
+        let rows_top = label_y.saturating_add(to_i32(line));
+        let list = (rows_top.saturating_add(to_i32(line)) <= editor_top).then(|| {
+            let height = u32::try_from(editor_top.saturating_sub(rows_top)).unwrap_or(0);
+            Rect::new(content.left(), rows_top, content.width, height)
+        });
+        let editor = (editor_top >= rows_top).then(|| {
+            Rect::new(
+                content
+                    .left()
+                    .saturating_add(to_i32(scale.scale_length(LABEL_PADDING))),
+                editor_top,
+                content
+                    .width
+                    .saturating_sub(scale.scale_length(LABEL_PADDING).saturating_mul(2)),
+                line,
+            )
+        });
+        Self {
+            fields: content,
+            grid,
+            owner,
+            label_y,
+            rows: list,
+            editor,
+        }
+    }
+
+    /// How many attribute rows the list band shows.
+    fn visible_rows(&self, line: u32) -> usize {
+        match (self.rows, line) {
+            (Some(band), pitch) if pitch > 0 => (band.height / pitch) as usize,
+            _ => 0,
+        }
+    }
+
+    /// The rectangle attribute row `slot` is drawn in, the scroll gutter
+    /// excluded.
+    fn row_rect(&self, slot: usize, line: u32, gutter: u32) -> Option<Rect> {
+        let band = self.rows?;
+        let top = band.top().saturating_add(to_i32(
+            line.saturating_mul(u32::try_from(slot).unwrap_or(u32::MAX)),
+        ));
+        Some(Rect::new(
+            band.left(),
+            top,
+            band.width.saturating_sub(gutter),
+            line,
+        ))
+    }
+
+    /// The scroll gutter beside the attribute rows, or [`None`] when the band
+    /// is too narrow for one.
+    fn gutter_rect(&self, gutter: u32) -> Option<Rect> {
+        let band = self.rows?;
+        (gutter > 0).then(|| {
+            Rect::new(
+                band.left()
+                    .saturating_add(to_i32(band.width.saturating_sub(gutter))),
+                band.top(),
+                gutter,
+                band.height,
+            )
+        })
+    }
+
+    /// The editor's text field and the action buttons beside it, or [`None`]
+    /// when the row does not fit.
+    fn editor_parts(
+        &self,
+        scale: Scale,
+        font: BitmapFont,
+    ) -> Option<(Rect, [Rect; ATTR_ACTIONS.len()])> {
+        let row = self.editor?;
+        let pad = open_with_action_pad(scale, font);
+        let widths = ATTR_ACTIONS.map(|(_, label)| {
+            font.text_width(label)
+                .saturating_add(pad.saturating_mul(2))
+                .min(row.width)
+        });
+        let mut right = row.left().saturating_add(to_i32(row.width));
+        let mut rects = [Rect::EMPTY; ATTR_ACTIONS.len()];
+        for slot in (0..ATTR_ACTIONS.len()).rev() {
+            let left = right.saturating_sub(to_i32(widths[slot]));
+            rects[slot] = Rect::new(left, row.top(), widths[slot], row.height);
+            right = left.saturating_sub(to_i32(pad));
+        }
+        let field_width = u32::try_from(right.saturating_sub(row.left())).unwrap_or(0);
+        let field = Rect::new(row.left(), row.top(), field_width, row.height);
+        (field.width > 0).then_some((field, rects))
+    }
+}
+
+/// The permissions-grid geometry within `content`, or `None` when the grid
+/// does not fit — so the painter and the hit-test both fail closed there
+/// rather than placing cells off the surface.
+fn perm_grid(
+    layout: &FieldLayout,
+    content: Rect,
+    scale: Scale,
+    font: BitmapFont,
+    field_rows: u32,
+) -> Option<PermGrid> {
+    let line = layout.line.max(1);
     let box_side = font.glyph_height().max(1);
-    // The metadata fields occupy the first `PROPERTY_ROW_COUNT` rows from the
-    // top; the grid sits below a one-row blank separator, its column headers
-    // one row above the three triad rows.
-    let meta_rows = u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX);
-    let top = content
-        .top()
-        .saturating_add(to_i32(scale.scale_length(ROW_PADDING)));
-    let header_y = top.saturating_add(to_i32(line.saturating_mul(meta_rows.saturating_add(1))));
+    // The metadata fields occupy the rows above; the grid sits below a
+    // one-row blank separator, its column headers one row above the three
+    // triad rows.
+    let header_y = layout.row_y(field_rows.saturating_add(1));
     let first_row_y = header_y.saturating_add(to_i32(line));
     let last_row_bottom = first_row_y
         .saturating_add(to_i32(line.saturating_mul(2)))
@@ -1661,7 +1881,6 @@ fn perm_grid(viewport: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> O
         return None;
     }
     let pad = scale.scale_length(LABEL_PADDING);
-    let label_x = content.left().saturating_add(to_i32(pad));
     let row_label_w = PERMISSION_ROW_LABELS
         .iter()
         .map(|label| font.text_width(label))
@@ -1673,6 +1892,7 @@ fn perm_grid(viewport: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> O
         .max()
         .unwrap_or(0);
     let gap = font.text_width("  ").max(pad);
+    let label_x = layout.left;
     let cols_x = label_x.saturating_add(to_i32(row_label_w.saturating_add(gap)));
     let col_pitch = col_label_w.max(box_side).saturating_add(gap);
     Some(PermGrid {
@@ -1686,58 +1906,235 @@ fn perm_grid(viewport: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> O
     })
 }
 
-/// The nine clickable permission-toggle rects, in [`PERMISSION_BITS`] order,
-/// laid out on the labelled permissions grid. `None` when the grid does not fit
-/// the panel's content (a window too small), so the painter and the hit-test
-/// both fail closed there.
-pub(crate) fn permission_toggle_cells(
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-) -> Option<[Rect; 9]> {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    Some(perm_grid(viewport, scale, theme, font)?.cells())
+/// The owner row's geometry, or `None` when the row does not fit the content.
+///
+/// The cells are measured from the same `uid N / gid N` spelling
+/// [`properties_rows`] draws, on whichever row that spelling landed on, so a
+/// click lands exactly on the number it edits however many fields precede it.
+fn owner_row_geom(
+    props: &Properties,
+    layout: &FieldLayout,
+    content: Rect,
+    font: BitmapFont,
+) -> Option<OwnerRowGeom> {
+    let index = Field::Owner.row(props)?;
+    let glyph = font.glyph_height().max(1);
+    let row_index = u32::try_from(index).unwrap_or(u32::MAX);
+    let row_top = layout.row_y(row_index);
+    let content_bottom = content.top().saturating_add(to_i32(content.height));
+    if row_top.saturating_add(to_i32(glyph)) > content_bottom {
+        return None;
+    }
+    let uid_str = props.uid().to_string();
+    let gid_str = props.gid().to_string();
+    let uid_x = layout
+        .value_x
+        .saturating_add(to_i32(font.text_width("uid ")));
+    let uid_w = font.text_width(&uid_str).max(1);
+    let gid_x = uid_x
+        .saturating_add(to_i32(uid_w))
+        .saturating_add(to_i32(font.text_width(" / gid ")));
+    let gid_w = font.text_width(&gid_str).max(1);
+    Some(OwnerRowGeom {
+        cells: [
+            Rect::new(uid_x, row_top, uid_w, glyph),
+            Rect::new(gid_x, row_top, gid_w, glyph),
+        ],
+        line: layout.line,
+    })
 }
 
-/// Draw the editable Properties overlay for `props`: the metadata fields as in
-/// [`draw_properties`], drawn in the taller editable popup, plus the labelled
-/// permissions grid below them — read/write/execute column headers over three
-/// owner/group/other triad rows of clickable [`Checkbox`] toggles reflecting
-/// the current mode. The grid replaces the old cramped single-row layout, so
-/// the toggles never overlap and each reads under its own label.
+/// The width, in pixels, the active owner editor is drawn at — comfortably
+/// wider than a single number so a `u32` id (up to ten digits) is readable
+/// while typed.
+fn owner_editor_width(font: BitmapFont) -> u32 {
+    font.text_width("0000000000").max(1)
+}
+
+/// The rectangle the inline editor occupies over `field`'s value: the value's
+/// own origin, widened to the readable editor width but never past the
+/// content, and as tall as the row pitch.
+fn owner_editor_geom(
+    geom: &OwnerRowGeom,
+    field: OwnerField,
+    content: Rect,
+    font: BitmapFont,
+) -> Rect {
+    let cell = match field {
+        OwnerField::Uid => geom.cells[0],
+        OwnerField::Gid => geom.cells[1],
+    };
+    let right = content.left().saturating_add(to_i32(content.width));
+    let avail = u32::try_from(right.saturating_sub(cell.left()))
+        .unwrap_or(0)
+        .max(1);
+    let width = owner_editor_width(font).min(avail);
+    Rect::new(cell.left(), cell.top(), width, geom.line)
+}
+
+/// What a Properties window is showing right now.
 ///
-/// Only the write-capable file manager calls this; the trusted read-only picker
-/// calls [`draw_properties`] and never draws or resolves a permission toggle
-/// (the editable surface is separated by call site, not a runtime flag — the
-/// manager-only write-tool precedent). Every blit clips, so a window too small
-/// simply shows what fits rather than panicking. It reads only the
-/// already-authorised [`Properties`] and draws — the commit happens in the
-/// caller's own capability-checked
-/// [`Browser::set_mode_selected`](crate::Browser::set_mode_selected) tail, so
-/// this holds no authority.
-pub fn draw_properties_editable(
+/// The read a window is opened by leaves the loop (a node's metadata is one
+/// `fs_stat` and its attributes one call per key), so a window states that it
+/// is reading, or why it could not, rather than showing an empty or invented
+/// summary until the answer lands.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PropertiesFrame<'a> {
+    /// The read is in flight.
+    Reading,
+    /// The read was refused; the reason is stated on the surface.
+    Refused(&'a str),
+    /// The node's metadata and attributes, as the read found them.
+    Ready(&'a Properties),
+}
+
+/// How far the attribute list is scrolled and which of its rows the keyboard
+/// acts on — the drawn state the window's own [`RowList`] holds.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct AttrView {
+    /// The first visible attribute row.
+    pub offset: u64,
+    /// The row the keyboard and the Remove action act on.
+    pub cursor: usize,
+}
+
+/// The Properties window's default extent in physical pixels at `scale`: wide
+/// enough for the label and value columns and tall enough to show the metadata
+/// fields, the permissions grid, and the head of the attributes list.
+///
+/// A window, so the user may resize it; this is only what it opens at. The
+/// attribute list scrolls inside whatever it is given, so a shorter window
+/// loses rows from the list and never a field.
+#[must_use]
+pub fn properties_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
+    let line = row_height(scale, theme).max(1);
+    // Every field, the grid and its separators, the attributes label, a few
+    // rows of list, and the editor.
+    let rows = u32::try_from(PROPERTY_ROW_COUNT)
+        .unwrap_or(u32::MAX)
+        .saturating_add(PROPERTIES_GRID_ROWS)
+        .saturating_add(1)
+        .saturating_add(PROPERTIES_OPEN_ATTR_ROWS)
+        .saturating_add(1);
+    (
+        scale.scale_length(PROPERTIES_WINDOW_WIDTH).max(1),
+        line.saturating_mul(rows)
+            .saturating_add(scale.scale_length(ROW_PADDING).saturating_mul(2))
+            .max(1),
+    )
+}
+
+/// The Properties window's width when it opens, in logical pixels at the
+/// reference density: room for the label column, a value as long as a
+/// timestamp or a path, and the attribute rows beside their values.
+const PROPERTIES_WINDOW_WIDTH: u32 = 420;
+
+/// How many attribute rows the window opens tall enough to show. The list
+/// scrolls, so this is a starting size and not a bound on what a node may
+/// carry.
+const PROPERTIES_OPEN_ATTR_ROWS: u32 = 5;
+
+/// Draw a Properties window's whole client area for `frame`.
+///
+/// The window's own title bar names the node, so the client is the fields, the
+/// permissions grid, and the extended-attribute list — no second panel header
+/// inside a window that already has one. `view` places the attribute list;
+/// `editor` and `owner`, when present, are drawn over the rows they belong to.
+///
+/// It reads only the already-authorised [`Properties`] and draws: no I/O, no
+/// authority, and every blit clips, so a window dragged small shows what fits
+/// rather than panicking. The ownership control is drawn only when `owner` is
+/// supplied, which the caller does only where the launching user holds
+/// `CAP_FS_CHOWN` — a session that cannot reassign an owner is never shown the
+/// control.
+pub fn draw_properties_window(
     surface: &mut Surface,
-    props: &Properties,
+    frame: PropertiesFrame<'_>,
+    view: AttrView,
+    controls: PropertiesControls<'_>,
     scale: Scale,
     theme: &Theme,
-    viewport: Rect,
+    window: Rect,
 ) {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    draw_properties_at(
-        surface,
-        props,
-        scale,
-        theme,
-        font,
-        properties_editable_panel_rect(viewport, scale, theme),
+    let palette = theme.palette();
+    surface.fill_rect(
+        u32::try_from(window.left()).unwrap_or(0),
+        u32::try_from(window.top()).unwrap_or(0),
+        window.width,
+        window.height,
+        palette.surface.into(),
     );
-    let Some(grid) = perm_grid(viewport, scale, theme, font) else {
+    let left = window
+        .left()
+        .saturating_add(to_i32(scale.scale_length(LABEL_PADDING)));
+    let first_row = window
+        .top()
+        .saturating_add(to_i32(scale.scale_length(ROW_PADDING)));
+    let props = match frame {
+        PropertiesFrame::Reading => {
+            font.draw_text(
+                surface,
+                left,
+                first_row,
+                PROPERTIES_READING,
+                palette.on_surface_muted.into(),
+            );
+            return;
+        }
+        PropertiesFrame::Refused(reason) => {
+            font.draw_text(surface, left, first_row, reason, palette.on_surface.into());
+            return;
+        }
+        PropertiesFrame::Ready(props) => props,
+    };
+    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
+    let line = row_height(scale, theme).max(1);
+    draw_property_fields(surface, props, layout.fields, scale, theme, font);
+    draw_permission_grid(surface, props, &layout, scale, theme, font);
+    if let Some(geom) = layout.owner.as_ref() {
+        if controls.can_chown {
+            draw_owner_control(surface, geom, window, scale, theme, font, controls.owner);
+        }
+    }
+    draw_attribute_section(
+        surface, props, &layout, view, controls, scale, theme, font, line,
+    );
+}
+
+/// What the window says while its read is in flight.
+const PROPERTIES_READING: &str = "Reading…";
+
+/// The live editors a Properties window draws over its rows.
+#[derive(Copy, Clone)]
+pub struct PropertiesControls<'a> {
+    /// Whether the launching user holds `CAP_FS_CHOWN`, the one gate on
+    /// offering the ownership control at all.
+    pub can_chown: bool,
+    /// The open owning-id editor, when one is being typed into.
+    pub owner: Option<(OwnerField, &'a TextField)>,
+    /// The `key = value` attribute editor, which the window always has: it is
+    /// the one text surface the section is edited through.
+    pub attribute: &'a TextField,
+    /// The attribute list's own scrollbar, carrying its live hover/drag state.
+    pub scrollbar: &'a ScrollBar,
+}
+
+/// Draw the labelled permissions grid: read/write/execute column headers over
+/// three owner/group/other triad rows of [`Checkbox`] toggles reflecting the
+/// current mode.
+fn draw_permission_grid(
+    surface: &mut Surface,
+    props: &Properties,
+    layout: &PropertiesLayout,
+    scale: Scale,
+    theme: &Theme,
+    font: BitmapFont,
+) {
+    let Some(grid) = layout.grid.as_ref() else {
         return;
     };
     let palette = theme.palette();
-    // Column headers (Read / Write / Exec) above their checkbox columns, so
-    // each toggle reads under the access it grants rather than as an unlabelled
-    // box.
     for (bit, label) in PERMISSION_COLUMN_LABELS.iter().enumerate() {
         let x = grid.cols_x.saturating_add(to_i32(
             grid.col_pitch
@@ -1751,8 +2148,6 @@ pub fn draw_properties_editable(
             palette.on_surface_muted.into(),
         );
     }
-    // Each triad row: its Owner / Group / Other label, then the three `rwx`
-    // checkboxes reflecting the current mode.
     let states = permission_cells(props.mode());
     let label_dy = (to_i32(grid.box_side) - to_i32(font.glyph_height())).max(0) / 2;
     for (triad, row_label) in PERMISSION_ROW_LABELS.iter().enumerate() {
@@ -1779,217 +2174,145 @@ pub fn draw_properties_editable(
     }
 }
 
-/// The permission bit whose toggle the editable Properties overlay draws at
-/// window-local pixel `point`, or `None` when the click is not on a toggle.
+/// Draw the extended-attribute section: its label, then the node's attributes
+/// as selectable rows with the cursor row marked, the scroll bar beside them
+/// when the list is longer than the band shows, and the `key = value` editor
+/// with its Set and Remove actions at the foot.
 ///
-/// This mirrors [`draw_properties_editable`]'s placement through the shared
-/// `permission_toggle_cells` geometry, so a click toggles exactly the bit the
-/// user pressed. Only the file manager calls it — the caller flips the returned
-/// bit in the current mode and commits through its own capability-checked
-/// [`Browser::set_mode_selected`](crate::Browser::set_mode_selected). A click
-/// anywhere but a toggle returns `None`, changing nothing (fail closed).
-#[must_use]
-pub fn permission_cell_at(
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    point: Point,
-) -> Option<u32> {
-    let cells = permission_toggle_cells(viewport, scale, theme)?;
-    for (i, rect) in cells.iter().enumerate() {
-        let right = rect.left().saturating_add(to_i32(rect.width));
-        let bottom = rect.top().saturating_add(to_i32(rect.height));
-        if point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom {
-            return PERMISSION_BITS.get(i).copied();
-        }
-    }
-    None
-}
-
-/// The index of the "Owner" row within [`PROPERTY_LABELS`] — the row the file
-/// manager overlays with the inline uid/gid ownership control.
-const OWNER_ROW_INDEX: usize = 3;
-
-/// Which of the two owning ids the inline ownership control edits.
-///
-/// The owning user (`uid`) and group (`gid`) are the two independently
-/// editable values on the Properties overlay's owner row; a click resolves to
-/// exactly one of them ([`owner_field_at`]) and the caller commits that one
-/// field through
-/// [`Browser::set_owner_selected`](crate::Browser::set_owner_selected).
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum OwnerField {
-    /// The owning user id (`chown`).
-    Uid,
-    /// The owning group id (`chgrp`).
-    Gid,
-}
-
-/// The geometry of the Properties overlay's owner row: the clickable bounds of
-/// the uid and gid values (`[uid, gid]`), each sized to the digits it shows,
-/// and the row pitch the active editor is sized from.
-struct OwnerRowGeom {
-    /// The uid value's cell and the gid value's cell, left-to-right.
-    cells: [Rect; 2],
-    /// The vertical pitch between rows — the height the inline editor uses so
-    /// it is tall enough to read while it overlays the value.
-    line: u32,
-}
-
-/// The owner row's geometry, or `None` when the owner row does not fit the
-/// panel's content (a window too small) — so the painter and the hit-test both
-/// fail closed there rather than placing a control off the row.
-///
-/// The cells are measured from the same `uid N / gid N` spelling
-/// [`properties_rows`] draws, so a click lands exactly on the number it edits.
-fn owner_row_geom(
-    props: &Properties,
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-) -> Option<OwnerRowGeom> {
-    let bounds = properties_editable_panel_rect(viewport, scale, theme);
-    let content = Panel::new(String::new()).content_rect(bounds, scale, theme)?;
-    let layout = FieldLayout::resolve(content, scale, theme, font);
-    let glyph = font.glyph_height().max(1);
-    let row_index = u32::try_from(OWNER_ROW_INDEX).unwrap_or(u32::MAX);
-    let row_top = content
-        .top()
-        .saturating_add(to_i32(scale.scale_length(ROW_PADDING)))
-        .saturating_add(to_i32(layout.line.saturating_mul(row_index)));
-    let content_bottom = content.top().saturating_add(to_i32(content.height));
-    if row_top.saturating_add(to_i32(glyph)) > content_bottom {
-        return None;
-    }
-    let uid_str = props.uid().to_string();
-    let gid_str = props.gid().to_string();
-    let uid_x = layout
-        .value_x
-        .saturating_add(to_i32(font.text_width("uid ")));
-    let uid_w = font.text_width(&uid_str).max(1);
-    let gid_x = uid_x
-        .saturating_add(to_i32(uid_w))
-        .saturating_add(to_i32(font.text_width(" / gid ")));
-    let gid_w = font.text_width(&gid_str).max(1);
-    Some(OwnerRowGeom {
-        cells: [
-            Rect::new(uid_x, row_top, uid_w, glyph),
-            Rect::new(gid_x, row_top, gid_w, glyph),
-        ],
-        line: layout.line,
-    })
-}
-
-/// The owning-id field whose value the editable Properties overlay draws at
-/// window-local pixel `point`, or `None` when the click is not on a value.
-///
-/// This mirrors [`draw_owner_control`]'s placement through the shared
-/// `owner_row_geom`, so a click begins editing exactly the id the user pressed.
-/// Only the file manager — and only where the user holds `CAP_FS_CHOWN` — calls
-/// it; a click anywhere but a value returns `None`, changing nothing (fail
-/// closed).
-#[must_use]
-pub fn owner_field_at(
-    props: &Properties,
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    point: Point,
-) -> Option<OwnerField> {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let geom = owner_row_geom(props, viewport, scale, theme, font)?;
-    let fields = [OwnerField::Uid, OwnerField::Gid];
-    for (rect, field) in geom.cells.iter().zip(fields) {
-        let right = rect.left().saturating_add(to_i32(rect.width));
-        let bottom = rect.top().saturating_add(to_i32(rect.height));
-        if point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom {
-            return Some(field);
-        }
-    }
-    None
-}
-
-/// The width, in pixels, the active owner editor is drawn at — comfortably
-/// wider than a single number so a `u32` id (up to ten digits) is readable
-/// while typed.
-fn owner_editor_width(font: BitmapFont) -> u32 {
-    font.text_width("0000000000").max(1)
-}
-
-/// The rectangle the inline editor occupies over `field`'s value: the value's
-/// own origin, widened to the readable editor width but never past the window,
-/// and as tall as the row pitch.
-fn owner_editor_geom(
-    geom: &OwnerRowGeom,
-    field: OwnerField,
-    viewport: Rect,
-    font: BitmapFont,
-) -> Rect {
-    let cell = match field {
-        OwnerField::Uid => geom.cells[0],
-        OwnerField::Gid => geom.cells[1],
-    };
-    let left = u32::try_from(cell.left()).unwrap_or(0);
-    let avail = viewport.width.saturating_sub(left).max(1);
-    let width = owner_editor_width(font).min(avail);
-    Rect::new(cell.left(), cell.top(), width, geom.line)
-}
-
-/// Where the editable Properties overlay draws the active owner editor for
-/// `field`, or `None` when the owner row does not fit the panel.
-///
-/// The one placement [`draw_owner_control`] draws it at, published so the host
-/// feeding that editor keys can report the rectangle it repaints instead of
-/// re-deriving this layout.
-#[must_use]
-pub fn owner_editor_rect(
-    props: &Properties,
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    field: OwnerField,
-) -> Option<Rect> {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let geom = owner_row_geom(props, viewport, scale, theme, font)?;
-    Some(owner_editor_geom(&geom, field, viewport, font))
-}
-
-/// Draw the inline ownership control over the Properties overlay's owner row:
-/// an accent underline beneath the uid and gid values marking each as
-/// clickable to edit, and — when `editor` names a field being edited — the
-/// active [`TextField`] over that value.
-///
-/// Only the file manager, and only where the launching user holds
-/// `CAP_FS_CHOWN`, calls this: reassigning an owner is a privileged operation
-/// (unlike renaming or a mode change), so the control is offered only where it
-/// can be used, and a session without the capability is never shown a control
-/// it cannot use. The trusted read-only picker never calls it (the write
-/// surface is separated by call site, the manager-only write-tool precedent).
-/// Every blit clips, so a window too small simply shows what fits rather than
-/// panicking. It reads only the already-authorised [`Properties`] and draws —
-/// the commit happens in the caller's own capability-checked
-/// [`Browser::set_owner_selected`](crate::Browser::set_owner_selected) tail
-/// over `fs_set_owner`, so this holds no authority.
-pub fn draw_owner_control(
+/// A volume that stores no attributes says so, and a node that carries none
+/// says that instead — an empty list would be a claim the reader cannot tell
+/// apart from either.
+#[allow(clippy::too_many_arguments)] // The node, its layout, its live state, and the frame.
+fn draw_attribute_section(
     surface: &mut Surface,
     props: &Properties,
+    layout: &PropertiesLayout,
+    view: AttrView,
+    controls: PropertiesControls<'_>,
     scale: Scale,
     theme: &Theme,
-    viewport: Rect,
-    editor: Option<(OwnerField, &TextField)>,
+    font: BitmapFont,
+    line: u32,
 ) {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let Some(geom) = owner_row_geom(props, viewport, scale, theme, font) else {
+    let palette = theme.palette();
+    let left = layout
+        .fields
+        .left()
+        .saturating_add(to_i32(scale.scale_length(LABEL_PADDING)));
+    font.draw_text(
+        surface,
+        left,
+        layout.label_y,
+        ATTR_SECTION_LABEL,
+        palette.on_surface_muted.into(),
+    );
+    let attrs = props.attributes();
+    let note = match attrs {
+        Attributes::Unread | Attributes::Unsupported => Some(String::from(ATTR_UNSUPPORTED)),
+        Attributes::Refused(errno) => Some(alloc::format!("{ATTR_REFUSED} ({errno})")),
+        Attributes::Visible(list) if list.is_empty() => Some(String::from(ATTR_NONE)),
+        Attributes::Visible(_) => None,
+    };
+    if let Some(note) = note {
+        if let Some(band) = layout.rows {
+            font.draw_text(
+                surface,
+                left,
+                band.top(),
+                &note,
+                palette.on_surface_muted.into(),
+            );
+        }
+        draw_attribute_editor(surface, layout, controls, scale, theme, font);
+        return;
+    }
+    let list = attrs.visible();
+    let visible = layout.visible_rows(line);
+    let gutter = layout
+        .rows
+        .map_or(0, |band| gutter_width(scale, theme, band.width));
+    let first = usize::try_from(view.offset).unwrap_or(usize::MAX);
+    for slot in 0..visible {
+        let Some(index) = first.checked_add(slot) else {
+            break;
+        };
+        let Some(attr) = list.get(index) else {
+            break;
+        };
+        let Some(bounds) = layout.row_rect(slot, line, gutter) else {
+            break;
+        };
+        let mut row = ListRow::new(attr.key_display()).with_trailing(attr.display());
+        row.set_selected(index == view.cursor);
+        row.render(surface, bounds, scale, theme, None);
+    }
+    if visible < list.len() {
+        if let Some(gutter) = layout.gutter_rect(gutter) {
+            let mut bar: ScrollBar = *controls.scrollbar;
+            bar.set_model(ScrollModel::new(
+                ScrollRange::new(
+                    u64::try_from(list.len()).unwrap_or(u64::MAX),
+                    u64::try_from(visible).unwrap_or(u64::MAX),
+                    view.offset,
+                ),
+                1,
+                u64::try_from(visible.max(1)).unwrap_or(u64::MAX),
+            ));
+            bar.render(surface, gutter, scale, theme);
+        }
+    }
+    draw_attribute_editor(surface, layout, controls, scale, theme, font);
+}
+
+/// Draw the `key = value` editor and its Set / Remove actions.
+fn draw_attribute_editor(
+    surface: &mut Surface,
+    layout: &PropertiesLayout,
+    controls: PropertiesControls<'_>,
+    scale: Scale,
+    theme: &Theme,
+    font: BitmapFont,
+) {
+    let Some((field, actions)) = layout.editor_parts(scale, font) else {
         return;
     };
+    controls.attribute.render(surface, field, scale, theme);
+    for ((action, label), rect) in ATTR_ACTIONS.iter().zip(actions.iter()) {
+        let role = match action {
+            AttrAction::Set => ControlRole::Primary,
+            AttrAction::Remove => ControlRole::Destructive,
+        };
+        Button::new(ButtonContent::Label(String::from(*label)), role)
+            .render(surface, *rect, scale, theme);
+    }
+}
+
+/// Draw the inline ownership control over the owner row: an accent underline
+/// beneath the uid and gid values marking each as clickable to edit, and —
+/// when `editor` names a field being edited — the active [`TextField`] over
+/// that value.
+///
+/// Reassigning an owner is a privileged operation (unlike renaming or a mode
+/// change), so the caller draws this only where the launching user holds
+/// `CAP_FS_CHOWN`. It holds no authority itself: the commit is the caller's
+/// own capability-checked `fs_set_owner`.
+#[allow(clippy::too_many_arguments)] // The row, its content, and the frame.
+fn draw_owner_control(
+    surface: &mut Surface,
+    geom: &OwnerRowGeom,
+    content: Rect,
+    scale: Scale,
+    theme: &Theme,
+    font: BitmapFont,
+    editor: Option<(OwnerField, &TextField)>,
+) {
     let palette = theme.palette();
     let thickness = scale.scale_length(1).max(1);
     let fields = [OwnerField::Uid, OwnerField::Gid];
     for (rect, field) in geom.cells.iter().zip(fields) {
         if let Some((editing, text_field)) = editor {
             if editing == field {
-                let bounds = owner_editor_geom(&geom, field, viewport, font);
+                let bounds = owner_editor_geom(geom, field, content, font);
                 text_field.render(surface, bounds, scale, theme);
                 continue;
             }
@@ -2003,6 +2326,167 @@ pub fn draw_owner_control(
             palette.accent.into(),
         );
     }
+}
+
+/// What a press at window-local `point` on a Properties window showing `props`
+/// resolves to, or `None` when it is on nothing.
+///
+/// Mirrors [`draw_properties_window`]'s placement through the one shared
+/// layout, so a press acts on exactly the control the user saw. The
+/// capability-free permission toggles resolve before the privileged ownership
+/// control, so a session that may not reassign an owner can still toggle a
+/// mode bit on the same surface; a press on nothing changes nothing.
+#[must_use]
+pub fn properties_hit(
+    props: &Properties,
+    view: AttrView,
+    window: Rect,
+    scale: Scale,
+    theme: &Theme,
+    point: Point,
+) -> Option<PropertiesTarget> {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
+    let line = row_height(scale, theme).max(1);
+    if let Some(grid) = layout.grid.as_ref() {
+        for (index, rect) in grid.cells().iter().enumerate() {
+            if contains(*rect, point) {
+                return PERMISSION_BITS
+                    .get(index)
+                    .copied()
+                    .map(PropertiesTarget::Permission);
+            }
+        }
+    }
+    if let Some(geom) = layout.owner.as_ref() {
+        for (rect, field) in geom.cells.iter().zip([OwnerField::Uid, OwnerField::Gid]) {
+            if contains(*rect, point) {
+                return Some(PropertiesTarget::Owner(field));
+            }
+        }
+    }
+    if let Some((field, actions)) = layout.editor_parts(scale, font) {
+        for ((action, _), rect) in ATTR_ACTIONS.iter().zip(actions.iter()) {
+            if contains(*rect, point) {
+                return Some(PropertiesTarget::Action(*action));
+            }
+        }
+        if contains(field, point) {
+            return Some(PropertiesTarget::Editor);
+        }
+    }
+    let gutter = layout
+        .rows
+        .map_or(0, |band| gutter_width(scale, theme, band.width));
+    let visible = layout.visible_rows(line);
+    let first = usize::try_from(view.offset).unwrap_or(usize::MAX);
+    for slot in 0..visible {
+        let Some(bounds) = layout.row_rect(slot, line, gutter) else {
+            break;
+        };
+        if contains(bounds, point) {
+            let index = first.checked_add(slot)?;
+            return (index < props.attributes().visible().len())
+                .then_some(PropertiesTarget::Attribute(index));
+        }
+    }
+    None
+}
+
+/// Whether `point` lies inside `rect`, on the same half-open convention every
+/// other hit-test in this module uses.
+fn contains(rect: Rect, point: Point) -> bool {
+    let right = rect.left().saturating_add(to_i32(rect.width));
+    let bottom = rect.top().saturating_add(to_i32(rect.height));
+    point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom
+}
+
+/// How many attribute rows a Properties window of this size shows at once —
+/// the count its scroll offset is clamped against, so the drawn list and the
+/// list the wheel moves are one fact.
+#[must_use]
+pub fn properties_attr_visible_rows(
+    props: &Properties,
+    window: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> usize {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    PropertiesLayout::resolve(props, window, scale, theme, font)
+        .visible_rows(row_height(scale, theme).max(1))
+}
+
+/// Where the active owner editor for `field` is drawn, or `None` when the
+/// owner row does not fit.
+///
+/// The one placement [`draw_properties_window`] draws it at, published so the
+/// host feeding that editor keys reports the rectangle it repaints instead of
+/// re-deriving this layout.
+#[must_use]
+pub fn properties_owner_editor_rect(
+    props: &Properties,
+    window: Rect,
+    scale: Scale,
+    theme: &Theme,
+    field: OwnerField,
+) -> Option<Rect> {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
+    let geom = layout.owner.as_ref()?;
+    Some(owner_editor_geom(geom, field, window, font))
+}
+
+/// Where the `key = value` attribute editor's field is drawn, or `None` when
+/// the row does not fit.
+#[must_use]
+pub fn properties_attr_editor_rect(
+    props: &Properties,
+    window: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<Rect> {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
+    layout.editor_parts(scale, font).map(|(field, _)| field)
+}
+
+/// Route a pointer event over the attribute list's scroll gutter, moving
+/// `rows`.
+///
+/// `None` when the press was not the gutter's; otherwise whether the *offset*
+/// moved, so a caller repaints the rows it scrolled and leaves a bar that only
+/// changed its own look to the damage the bar itself reported.
+///
+/// The same routing the listing and the *Open With…* chooser use, so a drag on
+/// this bar behaves exactly as a drag on either of those.
+#[allow(clippy::too_many_arguments)] // The node, its list, the geometry, and the event.
+pub fn properties_scroll_pointer(
+    props: &Properties,
+    rows: &mut RowList,
+    window: Rect,
+    scale: Scale,
+    theme: &Theme,
+    point: Point,
+    event: &InputEvent,
+    damage: &mut Region,
+) -> Option<bool> {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
+    let line = row_height(scale, theme).max(1);
+    let band = layout.rows?;
+    let gutter_w = gutter_width(scale, theme, band.width);
+    let gutter = layout.gutter_rect(gutter_w)?;
+    let visible = layout.visible_rows(line);
+    let model = rows.scroll_model(visible);
+    let routed = {
+        let bar = rows.scrollbar_mut();
+        bar.set_model(model);
+        route_scroll_bar(bar, gutter, scale, theme, point, event, damage)?
+    };
+    Some(match routed {
+        ScrollRouted::ScrollTo { offset } => rows.set_offset(offset, visible),
+        ScrollRouted::Redrawn => false,
+    })
 }
 
 /// Saturating `u32` → `i32`.
@@ -2347,17 +2831,32 @@ fn open_with_wanted_rows(candidates: usize) -> u32 {
     u32::try_from(candidates.clamp(1, OPEN_WITH_MAX_ROWS)).unwrap_or(1)
 }
 
-/// The extent of the chooser's own popup window for `candidates` candidates,
-/// capped to the `screen` it must fit on.
+/// The narrowest the chooser is ever drawn, in logical pixels at the reference
+/// density — a panel narrower than this reads as a sliver whatever it holds.
+///
+/// A floor, not the width: the rule below widens it to whatever the longest
+/// candidate, the title, and the action buttons actually measure.
+const OPEN_WITH_MIN_WIDTH: u32 = 200;
+
+/// The extent of the chooser's own popup window for `chooser`, capped to the
+/// `screen` it must fit on.
 ///
 /// The popup **is** the chooser: the panel fills it, so the surface's own size
-/// is what decides how many rows are shown, and a one-candidate chooser is a
-/// one-row popup rather than a plate with seven rows of nothing. The width is
-/// the same centred-overlay proportion the manager's other modal surfaces
-/// take, so they read as a family.
+/// is what decides how many rows are shown and how much of each name reads. A
+/// one-candidate chooser is a one-row popup rather than a plate with seven rows
+/// of nothing, and a chooser of short names is a compact panel rather than a
+/// letterbox four fifths of the display wide — the manager's *centred* modal
+/// surfaces take that proportion because they are drawn over the listing; a
+/// surface in its own window is sized to what it draws.
+///
+/// Both extents are content-derived through the same inverses the panel lays
+/// its content out with, so nothing the chooser was widened or heightened for
+/// is elided or clipped: the widest candidate row, the title, and the whole
+/// action band each fit, floored at a stated logical width and clamped to the
+/// screen.
 #[must_use]
 pub fn open_with_chooser_extent(
-    candidates: usize,
+    chooser: &OpenWithChooser,
     scale: Scale,
     theme: &Theme,
     screen: Rect,
@@ -2367,13 +2866,51 @@ pub fn open_with_chooser_extent(
     // inverse rather than a second reckoning of its header and rim: a
     // difference of one border there costs the list a whole row once it is
     // divided by a row height.
-    let lines = open_with_wanted_rows(candidates).saturating_add(1);
+    let lines = open_with_wanted_rows(chooser.candidates().len()).saturating_add(1);
     let content = row_height(scale, theme).saturating_mul(lines);
     let height = Panel::height_for_content(content, scale, theme);
     (
-        overlay_width(screen),
+        open_with_chooser_width(chooser, scale, theme, screen),
         height.min(screen.height.max(1)).max(1),
     )
+}
+
+/// The chooser popup's width: the widest of what it must hold, floored at
+/// [`OPEN_WITH_MIN_WIDTH`] and clamped to `screen`.
+///
+/// Each candidate is measured as the [`ListRow`] it is drawn as — icon column,
+/// paddings and all — with the scroll gutter beside it, so a name the panel was
+/// widened for is not then elided by the row's own reservations.
+fn open_with_chooser_width(
+    chooser: &OpenWithChooser,
+    scale: Scale,
+    theme: &Theme,
+    screen: Rect,
+) -> u32 {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let row = row_height(scale, theme);
+    let rows = chooser
+        .candidates()
+        .iter()
+        .map(|candidate| {
+            ListRow::new(candidate.name())
+                .with_icon(IconKind::AppBundle)
+                .width_for_content(row, scale, theme)
+        })
+        .max()
+        .unwrap_or(0);
+    // The gutter is sized off the panel's own width, which is what this is
+    // computing; asking for it at the floor keeps the reservation stable
+    // instead of chasing its own answer.
+    let gutter = gutter_width(scale, theme, scale.scale_length(OPEN_WITH_MIN_WIDTH));
+    let title = font.text_width(&alloc::format!("Open {} with", chooser.display_name()));
+    let content = rows
+        .saturating_add(gutter)
+        .max(title)
+        .max(open_with_actions_width(scale, font));
+    Panel::width_for_content(content, scale, theme)
+        .max(scale.scale_length(OPEN_WITH_MIN_WIDTH))
+        .clamp(1, screen.width.max(1))
 }
 
 /// The chooser panel's bounds within its own popup `viewport`: the whole of
@@ -2491,7 +3028,8 @@ fn open_with_action_rects(
     if height == 0 || content.height < height {
         return None;
     }
-    let pad = font.text_width("  ").max(scale.scale_length(LABEL_PADDING));
+    let pad = open_with_action_pad(scale, font);
+    let widths = open_with_action_widths(scale, font);
     let top = content
         .top()
         .saturating_add(to_i32(content.height.saturating_sub(height)));
@@ -2499,16 +3037,38 @@ fn open_with_action_rects(
     let mut rects = [Rect::EMPTY; OPEN_WITH_ACTIONS.len()];
     // Laid out from the trailing edge back, so the primary action sits
     // furthest right whatever the labels measure.
-    for (slot, (_, label)) in OPEN_WITH_ACTIONS.iter().enumerate().rev() {
-        let width = font
-            .text_width(label)
-            .saturating_add(pad.saturating_mul(2))
-            .min(content.width);
+    for slot in (0..OPEN_WITH_ACTIONS.len()).rev() {
+        let width = widths[slot].min(content.width);
         let left = right.saturating_sub(to_i32(width));
         rects[slot] = Rect::new(left, top, width, height);
         right = left.saturating_sub(to_i32(pad));
     }
     Some(rects)
+}
+
+/// The gap the action band leaves around and between its buttons.
+fn open_with_action_pad(scale: Scale, font: BitmapFont) -> u32 {
+    font.text_width("  ").max(scale.scale_length(LABEL_PADDING))
+}
+
+/// Each action button's intrinsic width, in the order they are drawn — the one
+/// definition [`open_with_action_rects`] places and the chooser's own extent
+/// reserves room for, so the band can never be sized narrower than the buttons
+/// it must hold.
+fn open_with_action_widths(scale: Scale, font: BitmapFont) -> [u32; OPEN_WITH_ACTIONS.len()] {
+    let pad = open_with_action_pad(scale, font);
+    OPEN_WITH_ACTIONS.map(|(_, label)| font.text_width(label).saturating_add(pad.saturating_mul(2)))
+}
+
+/// The whole action band's intrinsic width: every button plus the gap between
+/// each pair and the one the trailing edge keeps.
+fn open_with_actions_width(scale: Scale, font: BitmapFont) -> u32 {
+    let pad = open_with_action_pad(scale, font);
+    open_with_action_widths(scale, font)
+        .into_iter()
+        .fold(pad, |total, width| {
+            total.saturating_add(width).saturating_add(pad)
+        })
 }
 
 /// Draw the "Open With…" `chooser` into its own popup `viewport`: a titled

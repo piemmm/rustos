@@ -553,32 +553,19 @@ fn render_attrs(model: &Model, window: &mut Window, body: u16, cols: u16) {
     for (line, (index, (key, value))) in
         (0..body.saturating_sub(4)).zip(view.entries.iter().enumerate())
     {
-        let text = format!("{key} = {}", display_value(value));
+        // Both halves are escaped: a key's grammar bans only `/` and NUL, so a
+        // corrupt or hostile volume can store one whose control bytes would
+        // reach the terminal as an escape sequence.
+        let text = format!(
+            "{} = {}",
+            tairix_fsmeta::attr::display_value(key.as_bytes()),
+            tairix_fsmeta::attr::display_value(value)
+        );
         if index == view.cursor {
             window.set_attributes(reverse);
         }
         let _ = window.move_add_str(Pos::new(line + 3, 1), truncate_to_width(&text, width));
         window.set_attributes(Attributes::PLAIN);
-    }
-}
-
-/// An attribute value's display form: printable text is shown as typed;
-/// anything else is escaped byte by byte (`\xNN`), never trusted raw onto
-/// the terminal.
-fn display_value(value: &[u8]) -> String {
-    match core::str::from_utf8(value) {
-        Ok(text) if text.chars().all(|c| !c.is_control()) => String::from(text),
-        _ => {
-            let mut out = String::new();
-            for byte in value {
-                if (0x20..=0x7e).contains(byte) {
-                    out.push(char::from(*byte));
-                } else {
-                    let _ = core::fmt::Write::write_fmt(&mut out, format_args!("\\x{byte:02x}"));
-                }
-            }
-            out
-        }
     }
 }
 

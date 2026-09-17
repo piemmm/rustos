@@ -8,7 +8,7 @@
 //! attributes needs only the file's own read/write permission or a dedicated
 //! capability the VFS enforces.
 
-use alloc::vec::Vec;
+use alloc::string::String;
 
 use crate::{MetadataError, KEY_MAX};
 
@@ -115,7 +115,7 @@ impl Namespace {
 /// `AttrKey` in hand is always well-formed and in-bounds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttrKey {
-    bytes: Vec<u8>,
+    text: String,
     namespace: Namespace,
 }
 
@@ -150,7 +150,7 @@ impl AttrKey {
         }
         let namespace = Namespace::from_name(name).ok_or(MetadataError::UnknownNamespace)?;
         Ok(AttrKey {
-            bytes: bytes.to_vec(),
+            text: String::from(text),
             namespace,
         })
     }
@@ -158,7 +158,14 @@ impl AttrKey {
     /// The key's full namespaced bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
+        self.text.as_bytes()
+    }
+
+    /// The key's full namespaced text. Valid UTF-8 by construction, so a
+    /// surface that shows or retypes a key needs no second decode.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.text
     }
 
     /// The key's namespace.

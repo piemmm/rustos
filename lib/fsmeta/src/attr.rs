@@ -291,6 +291,71 @@ impl AttrSet {
     }
 }
 
+/// An attribute value as displayable text, or `None` when its bytes are not
+/// text a surface can show or a typed line can round-trip.
+///
+/// A value is opaque bytes: it may be UTF-8 text, a packed foreign-metadata
+/// field, or anything a writer chose. Text here means valid UTF-8 with no
+/// control character, which is the only form that can be drawn as itself and
+/// retyped unchanged — so an editor offering a value back for editing offers
+/// only what it could faithfully reproduce, and never silently rewrites bytes
+/// it could not.
+#[must_use]
+pub fn text_value(value: &[u8]) -> Option<&str> {
+    match core::str::from_utf8(value) {
+        Ok(text) if !text.chars().any(char::is_control) => Some(text),
+        _ => None,
+    }
+}
+
+/// An attribute value's display form: [text](text_value) as it reads, and
+/// anything else escaped byte by byte as `\xNN`.
+///
+/// Values come from whoever wrote them, which on a mounted volume is not
+/// necessarily anybody trusted: control bytes reaching a terminal are escape
+/// sequences and reaching a glyph run are nothing anyone can read. Escaping is
+/// what lets every surface show the value it actually holds.
+#[must_use]
+pub fn display_value(value: &[u8]) -> alloc::string::String {
+    use core::fmt::Write;
+
+    if let Some(text) = text_value(value) {
+        return alloc::string::String::from(text);
+    }
+    let mut out = alloc::string::String::new();
+    for byte in value {
+        if (0x20..=0x7e).contains(byte) {
+            out.push(char::from(*byte));
+        } else {
+            let _ = write!(&mut out, "\\x{byte:02x}");
+        }
+    }
+    out
+}
+
+/// Split an `key = value` assignment line into its key and value.
+///
+/// The one grammar every surface that edits an attribute as a line of text
+/// reads, so a key accepted in one place is accepted in all. The split is at
+/// the *first* `=`, since a value may contain them; surrounding whitespace is
+/// trimmed from the key but the value is taken as typed apart from one
+/// optional space either side of the separator — a value's own leading or
+/// trailing spaces are its own, and silently trimming them would store
+/// something other than what was typed.
+///
+/// The key is validated through the shared [`AttrKey`] grammar, so a malformed
+/// or unknown-namespace key is refused here rather than by the kernel.
+///
+/// # Errors
+///
+/// [`MetadataError::MalformedKey`] when the line carries no `=` at all, and
+/// whatever [`AttrKey::parse`] refuses the key for.
+pub fn parse_assignment(line: &str) -> Result<(AttrKey, &str), MetadataError> {
+    let (key, value) = line.split_once('=').ok_or(MetadataError::MalformedKey)?;
+    let value = value.strip_prefix(' ').unwrap_or(value);
+    Ok((AttrKey::parse(key.trim().as_bytes())?, value))
+}
+
 fn read_u16(buf: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([buf[off], buf[off + 1]])
 }

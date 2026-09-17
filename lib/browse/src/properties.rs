@@ -20,12 +20,115 @@
 //! and the sizes use the same [`format_size`] the item view's column uses.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_abi::fs::{mode_string, FileKind, FileStat, FS_MODE_MASK};
 use tairix_abi::NodeTimes;
 
 use crate::entry::{EntryKind, LinkTarget};
 use crate::format::{format_datetime, format_size};
+
+/// One extended attribute of a node: its namespaced key and its opaque value.
+///
+/// The value is bytes, because that is what the store holds — text, a packed
+/// foreign-metadata field, or anything a writer chose. Rendering it is the
+/// shared [`tairix_fsmeta::attr::display_value`] escaping, so nothing a
+/// hostile volume stored reaches a surface raw.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Attribute {
+    key: String,
+    value: Vec<u8>,
+}
+
+impl Attribute {
+    /// One attribute as the backing reported it.
+    #[must_use]
+    pub fn new(key: impl Into<String>, value: Vec<u8>) -> Self {
+        Self {
+            key: key.into(),
+            value,
+        }
+    }
+
+    /// The attribute's namespaced key, exactly as the backing reported it.
+    ///
+    /// Use [`key_display`](Self::key_display) to *show* it: the key grammar
+    /// bans only `/` and NUL, so a corrupt or hostile volume can store one
+    /// carrying control bytes.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The key as displayable text, or [`None`] when it carries bytes a
+    /// surface cannot show and a typed line could not reproduce.
+    #[must_use]
+    pub fn key_text(&self) -> Option<&str> {
+        tairix_fsmeta::attr::text_value(self.key.as_bytes())
+    }
+
+    /// The key's display form: text as it reads, anything else escaped.
+    #[must_use]
+    pub fn key_display(&self) -> String {
+        tairix_fsmeta::attr::display_value(self.key.as_bytes())
+    }
+
+    /// The attribute's stored bytes.
+    #[must_use]
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+
+    /// The value as displayable text, or [`None`] when its bytes are not text
+    /// a surface can show or a typed line could reproduce.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        tairix_fsmeta::attr::text_value(&self.value)
+    }
+
+    /// The value's display form: text as it reads, anything else escaped.
+    #[must_use]
+    pub fn display(&self) -> String {
+        tairix_fsmeta::attr::display_value(&self.value)
+    }
+}
+
+/// What a Properties surface knows about a node's extended attributes.
+///
+/// States rather than a list, because "no attributes", "this volume has no
+/// attributes", "the listing was refused" and "nobody asked" are four
+/// different facts, and showing any of them as an empty list would be a claim
+/// the reader cannot check.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Attributes {
+    /// Never read: the consumer did not ask for them. The trusted read-only
+    /// picker's panel is this, and shows no attribute section at all.
+    #[default]
+    Unread,
+    /// The mounted format stores no extended attributes
+    /// ([`Errno::NotSupported`](tairix_abi::Errno::NotSupported)) — stated,
+    /// never shown as an empty set.
+    Unsupported,
+    /// The listing itself was refused; the reason is stated.
+    Refused(tairix_abi::Errno),
+    /// The attributes the caller may see, in the backing's stable order. Keys
+    /// in a namespace the caller may not read are absent because the kernel
+    /// omits them from the listing, so this is never a redacted view of a
+    /// longer one.
+    Visible(Vec<Attribute>),
+}
+
+impl Attributes {
+    /// The attributes to show, or an empty slice for either state that has
+    /// none to show.
+    #[must_use]
+    pub fn visible(&self) -> &[Attribute] {
+        match self {
+            Self::Visible(attrs) => attrs,
+            Self::Unread | Self::Unsupported | Self::Refused(_) => &[],
+        }
+    }
+}
 
 /// The display-ready summary of one node's metadata for the Properties panel.
 ///
@@ -47,6 +150,7 @@ pub struct Properties {
     uid: u32,
     gid: u32,
     times: NodeTimes,
+    attributes: Attributes,
 }
 
 impl Properties {
@@ -65,6 +169,7 @@ impl Properties {
             uid: stat.uid,
             gid: stat.gid,
             times: stat.times,
+            attributes: Attributes::Unread,
         }
     }
 
@@ -85,6 +190,23 @@ impl Properties {
     pub fn with_target(mut self, target: impl Into<String>) -> Self {
         self.target = Some(target.into());
         self
+    }
+
+    /// This summary with the node's extended attributes attached, as the
+    /// reader that asked for them found them.
+    ///
+    /// A consumer that never asks leaves them [`Attributes::Unread`], which is
+    /// what keeps a panel from claiming a node has none.
+    #[must_use]
+    pub fn with_attributes(mut self, attributes: Attributes) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
+    /// What this summary knows about the node's extended attributes.
+    #[must_use]
+    pub const fn attributes(&self) -> &Attributes {
+        &self.attributes
     }
 
     /// The node's browser kind.

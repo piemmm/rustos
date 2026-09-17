@@ -25,19 +25,50 @@ the `AGENTS.md`/`PLAN.md` language). A `lib/abi` change today is allowed;
 it requires regenerating the C header (`cargo xtask c-header --write`),
 which the drift guard enforces.
 
-## Status
+## Ledger
 
-`done` — FM1–FM13 plus a UI-polish increment are all landed. FM13 is the
+| # | Item | Status |
+|---|---|---|
+| FM1 | Richer entries: `Entry` metadata (`size`, `modified`), bundle/link kinds, and the stable shared sort | done |
+| FM2a | The list item view over `lib/controls` rows | done |
+| FM2b | The icon-grid view, the runtime view toggle, and the drawn `ScrollBar` | done |
+| FM3 | File-type icons: the one classifier, the grid-tile glyphs, and the empty/non-empty folder cue | done |
+| FM4a | The engine navigation model: bounded back/forward history and the `go_up`/`navigate_to` climb | done |
+| FM4b | The drawn chrome: the clickable toolbar and the context menu (the desktop's own plates) | done |
+| FM5 | In-place rename — the first write | done |
+| FM6a | The engine activation decision (descend / launch a bundle / open a file) | done |
+| FM6b | The app: launch a `.app`, open a file through CU6 delegation, and the *Open With…* chooser | done |
+| FM7a | The selection and clipboard model | done |
+| FM7b | Move, copy, paste, delete, new folder — with interleaved progress and cancel | done |
+| FM8a | The pure properties view model | done |
+| FM8b | The Properties surfaces: the picker's read-only panel and the manager's Properties window, with permission, ownership, and extended-attribute editing | done |
+| FM9-pre | Filesystem-mutation audit gates: `FsNodeMutated` / `FsMutationDenied`, the kernel-attested witness a vertical keys on | done |
+| FM9-a | New Folder + inline rename: the product half and the create's guest click-through | blocked: D98 — the rename commit and the toolbar gesture need an ordered typed-key-after-click script the harness cannot yet produce |
+| FM9-b | Open a file into the viewer via CU6 delegation, product and guest | done |
+| FM9-c | Delete with confirm: the product half and the right-click delivery in QEMU | blocked: D98 — the full delete click-through needs the same ordered script |
+| FM10 | Recoverable delete: the pure move-to-Trash model and the app-side verb with its QEMU witness | done |
+| FM11 | Emptying the Trash: the pure model, the app verb, the navigable Trash view, and the QEMU witness | done |
+| FM12 | Pointer activation gestures — four gestures reaching the one `activate` decision | done |
+| FM13 | The places / devices rail | done |
+| FM-polish | UI polish: the resizable/maximizable window, the labelled permissions grid, and plate-filling icon-only buttons | done |
+
+`plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
+order a typed key after a pointer click, so two guest click-throughs cannot be
+driven. Both product halves are landed and host-tested; only the guest witness
+is missing.
+
+## What the landed work guarantees
+
+FM13 is the
 places/devices rail; the grid view's file-class artwork it draws comes from
 `plans/ICONS.md`. **The UI-polish
-increment (latest)** makes the browser window **resizable/maximizable**
+increment** makes the browser window **resizable/maximizable**
 (`files.app` opens `resizable` and re-maps its zero-copy frame region on a
 `WindowEvent::Resized`, laying the shared renderer out to the new viewport;
 fail-closed re-map, min-size clamp), replaces the cramped, overlapping,
-unlabelled inline permission toggles with a **labelled permissions grid popup**
-(`render::PermGrid` — `Read`/`Write`/`Exec` × `Owner`/`Group`/`Other`, drawn in
-the taller `properties_editable_panel_rect`, with the default `WIN_HEIGHT`
-raised so it fits), and enlarges **icon-only buttons** to fill their plate. The
+unlabelled inline permission toggles with a **labelled permissions grid**
+(`render::PermGrid` — `Read`/`Write`/`Exec` × `Owner`/`Group`/`Other`), and
+enlarges **icon-only buttons** to fill their plate. The
 icon-only glyph is now sized from the plate (the smaller plate dimension inside
 its frame, less a margin proportional to the plate — `lib/controls`
 `icon_content_side`) instead of from the text inset (`control_inset`), which had
@@ -133,7 +164,7 @@ through the same interleaved progress/cancel runner a delete uses
 (`IconKind::Trash` / `IconKind::EmptyTrash`). Host-tested in `lib/browse`
 (`navigate_to` off-spine/no-op/fail-closed; the Empty Trash enable-gate
 hit-test) and `lib/icon`; the freestanding files app builds + lints clean.
-**FM11a (the pure empty-Trash model) is complete.** `lib/browse::trash::empty_trash_plan` turns the Trash
+**FM11a — the pure empty-Trash model.** `lib/browse::trash::empty_trash_plan` turns the Trash
 directory's `fs_readdir` listing into a `delete::DeletePlan` over its *contents*
 (never the Trash directory itself, so emptying leaves the now-empty folder in
 place), carried out by the same recursive `DeleteWalk` a permanent delete uses
@@ -148,14 +179,14 @@ identity), so composing it grants nothing and the read-only picker never builds
 one. Host-tested in `lib/browse` (contents-not-the-dir removal, empty=no-op,
 root-trash refusal, invalid-child refusal). Now justified rather than
 speculative: the move that fills the Trash (FM10) has landed, so the way back to
-a permanent removal is real surface (§2.4). **FM11c is complete**: the
+a permanent removal is real surface (§2.4). **FM11c's witness**: the
 end-to-end empty-Trash click-through on the aarch64 `autoload_input` QEMU
 vertical latches a new eleventh witness (`FsNodeMutated op=rmdir` under
 `Library/Trash`, gated after the FM10 move via the one-shot
 `FM11_TRASH_FILLED_MARKER`). **FM10 (recoverable delete:
-move to Trash) is complete.** FM10a landed the pure `lib/browse::trash` model
+move to Trash).** FM10a is the pure `lib/browse::trash` model
 (`trash_strategy` same-volume-move-vs-unlink + collision-safe `trash_dest_path`);
-**FM10b now lands the app-side Trash verb and its QEMU witness.** On a confirmed
+**FM10b is the app-side Trash verb and its QEMU witness.** On a confirmed
 delete the `files.app` `Run` binary resolves the user's home from the exported
 `HOME`, ensures the fixed `Library/Trash` subtree (shared `trash::trash_dir`),
 and — when Trash and every target share a volume — carries the removal out as a
@@ -216,14 +247,14 @@ the signed `AppInfo` MIME associations that resolve the viewer), and
 for a regular file; the app's own scrolled `OpenWithChooser` list offers the
 full `applications_for` result and launches the picked bundle through the same
 `DOCUMENT_ROLE_ARG`+`STDIN` hand-off, where the default open picks the first).
-**FM6b is complete. FM9-pre is landed** (the `FsNodeMutated`/
+**FM9-pre** (the `FsNodeMutated`/
 `FsMutationDenied` filesystem-mutation audit events every write syscall emits,
 a §5.4/§19.4 requirement in their own right and the robust serial witnesses a
 mutation vertical keys on). **FM9-b is now complete, app side and guest side.
 FM9-a and FM9-c are app-side only: their product halves are landed, and their
 guest click-throughs are partly delivered and partly blocked, as below.**
 
-**FM9-a — what is true.** The *product* half is landed: `render::selection_name_rect`
+**FM9-a — what is true.** The *product* half: `render::selection_name_rect`
 for rows, the forward `render::manager_tool_rect` over `Toolbar::tool_rect` for
 the New Folder tool, and the inline-rename commit. The *guest* half is
 `tests/integration/fsmutate_qemu_aarch64`, a
@@ -277,7 +308,7 @@ and the picker's listing is read on a worker (`Listing::Pending`) so no single
 read means "ready to click". Instead the session announces the fact itself —
 `PICKER_SHOWN`, one-shot per pick and only once `Browser::is_listing()` is
 false — the sibling of `MENU_SHOWN` for the other surface no channel reports.
-Closed as `plans/OPEN-DEFECTS.md` D94. **FM9-c (delete with confirm) is landed as
+Closed as `plans/OPEN-DEFECTS.md` D94. **FM9-c (delete with confirm) stands as
 product; its guest click-through is not** — no vertical drives a delete or a
 context menu, and it is blocked with FM9-a's remaining halves on
 `plans/OPEN-DEFECTS.md` D98. A clickable **Delete** joins the context menu (its
@@ -316,9 +347,9 @@ navigates by keyboard; the renderer-mirroring point hit-test
 FM2 was split (§2.19) into FM2a (the list item view) and FM2b (the icon-grid
 view, the runtime view toggle, and the drawn `ScrollBar`); both are done. FM4 is
 split the same way: **FM4a** (the engine navigation model — the bounded
-back/forward history) is done; **FM4b** paints that model as drawn
+back/forward history); **FM4b** paints that model as drawn
 chrome. Its **drawn clickable
-toolbar** is done — its commands (Back/Forward/Up/Refresh/ToggleView/
+toolbar** — its commands (Back/Forward/Up/Refresh/ToggleView/
 Sort) and their actions already exist, so it needs no speculative surface. The
 **drawn context menu is now done** — a secondary-button press paints the shared
 `ContextMenuModel` as a `lib/controls::Menu` routed to the existing
@@ -329,7 +360,7 @@ selection). New Folder stays off this menu — it is a *write* toolbar tool, not
 a menu command shared with the read-only picker.
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
-decision — descend / launch a bundle / open a file, host-proven) is done, and
+decision — descend / launch a bundle / open a file, host-proven), and
 so now is **FM6b's pure type→bundle "open with" association model** (the
 `lib/browse::open_with` module — the `BundleSource` enumeration seam and
 `applications_for` over the shared `lib/browse::media` content-type registry,
@@ -356,7 +387,7 @@ through the same funnel with no document. This supersedes the earlier
 fd_grant-after-spawn sketch. **The
 explicit "Open With…" chooser over the full `applications_for` result is now
 done too** — the default open picks the first association, the chooser lets the
-user pick any. See FM6b below. FM6b is complete.
+user pick any. See FM6b below.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -417,7 +448,9 @@ user pick any. See FM6b below. FM6b is complete.
   the shared theme (`lib/theme`) — a toolbar, one
   scrollable item view (list *or* icon-grid, a view toggle, not two
   code paths), a selection model, and a small honest set of operations.
-  No ribbon, no property-sheet sprawl, no modal-dialog maze. Every action
+  No ribbon, no modal-dialog maze: the one surface that is a window of its
+  own is Properties, because a user comparing two nodes needs two of them and
+  the listing must stay usable while they are open. Every action
   is discoverable from the toolbar/context-menu and has a keyboard
   equivalent. A feature earns its place or it is not built (§2.3).
 
@@ -448,9 +481,9 @@ is host-proven in `lib/browse` against injected sources exactly as the AW1
 model was; the app work (painting, click routing, spawn) rides the desktop
 autoload vertical the AW3/AW5 interaction contract already drives.
 
-### FM1 — richer entries: metadata, kinds, and a stable sort `[x]`
+### FM1 — richer entries: metadata, kinds, and a stable sort
 
-Done. `lib/browse::Entry` now carries `size: u64` and `modified: Time64`
+`lib/browse::Entry` now carries `size: u64` and `modified: Time64`
 alongside its name and kind, mapped straight from the existing `fs_readdir`
 `DirEntry` stream (no new syscall); a bad record still refuses the *whole*
 listing (§5.4). `EntryKind` gained a `Bundle` variant — a `<Name>.app`
@@ -473,9 +506,9 @@ Deliberately deferred to a later stage (not FM1): a `Symlink`/`Special`
 variant is added only when the VFS surfaces such a kind (a new variant, never
 overloading the existing ones).
 
-### FM2a — the list item view over `lib/controls` `[x]`
+### FM2a — the list item view over `lib/controls`
 
-Done. The ad-hoc row painter in `lib/browse::render` is replaced with a real
+The ad-hoc row painter in `lib/browse::render` is replaced with a real
 list item view built from the shared collection controls, so the manager and
 the trusted picker share one coherent, themed surface (§2.2, §17.4). No app-
 behaviour change: the `files.app`/picker `render` and `entry_index_at`
@@ -504,9 +537,9 @@ signatures are unchanged, so both get the new look for free.
   the mirroring hit-test at normal sizes, selection-anchored scroll, the
   `ScrollRange` offset clamp); the updated render selection-chrome assertion.
 
-### FM2b — the icon-grid view, the view toggle, and the drawn `ScrollBar` `[x]`
+### FM2b — the icon-grid view, the view toggle, and the drawn `ScrollBar`
 
-Done. The engine now owns a `ViewMode` (`List`/`Grid`) and a single scroll
+The engine now owns a `ViewMode` (`List`/`Grid`) and a single scroll
 offset, and both views land complete (§27) behind one `layout::ViewLayout`
 dispatch that the renderer and the pointer hit-test share (§2.2):
 
@@ -549,9 +582,9 @@ dispatch that the renderer and the pointer hit-test share (§2.2):
   FM2a `ListView` tests were updated to the explicit-offset API. Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md`.
 
-### FM3 — file-type icons `[x]`
+### FM3 — file-type icons
 
-Done. `lib/icon::IconKind` gained the file-manager kinds `Folder`,
+`lib/icon::IconKind` gained the file-manager kinds `Folder`,
 `FolderOpen`, `File` (generic), `AppBundle`, `Text`, `Image`, `Archive`, and
 `Executable`, each a built-in vector glyph on the shared 24-unit design grid
 resolved (like every kind) through the SVG-first theme-asset path, with
@@ -629,9 +662,9 @@ unknown/extensionless/dotfile/trailing-dot → generic, last-extension-wins).
 Docs: `docs/src/desktop/apps.md`,
 `plans/GUI-CONTROLS-DESIGN.md` §11.34, `lib/icon`/`lib/browse` README + rustdoc.
 
-#### Folder occupancy — an empty folder is not a full one `[x]`
+#### Folder occupancy — an empty folder is not a full one
 
-Done. A folder that holds something draws `IconKind::FolderFilled` (a new
+A folder that holds something draws `IconKind::FolderFilled` (a new
 built-in glyph plus the `folder-filled.svg` class master); an empty one keeps
 `Folder`. A directory's `size` is `0` and no VFS surface reports a child count,
 so occupancy is a separate read, and only a *known* answer changes the icon:
@@ -661,9 +694,9 @@ window) and `lib/icon` (the new glyph and its shipped master). Docs:
 `docs/src/desktop/apps.md`, `docs/src/desktop/icons.md`, `docs/src/lib/icon.md`,
 `lib/browse`/`lib/icon` README + rustdoc.
 
-### FM4a — the engine navigation model: history `[x]`
+### FM4a — the engine navigation model: history
 
-Done. The host-testable navigation *model* the FM4b chrome drives, added to
+The host-testable navigation *model* the FM4b chrome drives, added to
 `lib/browse::Browser` (§2.2 — the picker gets it for free):
 
 - **Navigation history**: a bounded back/forward stack (`go_back`/`go_forward`,
@@ -692,7 +725,7 @@ Done. The host-testable navigation *model* the FM4b chrome drives, added to
   test-only source accessor. Docs: `docs/src/desktop/apps.md`,
   `lib/browse/README.md`.
 
-### FM4b — the drawn chrome: toolbar, context menu `[x]`
+### FM4b — the drawn chrome: toolbar, context menu
 
 The app frame, entirely `lib/controls`/`lib/browse::render` widgets over the
 theme, painting the FM4a model. **A drawn surface lands with the action it
@@ -705,7 +738,7 @@ spelling of one fact (§2.2) and a row of listing the user does not get back.
 `chrome_height` is therefore the toolbar strip alone, and the item view starts
 directly beneath it.
 
-**The pure chrome model is done** (§2.19 — host-proven ahead of the drawn
+**The pure chrome model** (§2.19 — host-proven ahead of the drawn
 widgets, exactly as FM6a/FM6b/FM7a/FM7b's pure models landed): the
 `lib/browse::chrome` module. `ToolbarModel::for_browser` snapshots which
 `ToolbarCommand` (Back/Forward/Up/Refresh/ToggleView/Sort) is actionable —
@@ -717,7 +750,7 @@ Host-tested in `lib/browse` (toolbar enable/disable at root / after descend /
 after go-back, the active-view/sort report, and the `TOOLBAR_COMMANDS` order).
 Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-**The pure context-menu chrome model is done** (§2.19 — host-proven ahead of
+**The pure context-menu chrome model** (§2.19 — host-proven ahead of
 the drawn menu, exactly as `ToolbarModel` landed ahead of the drawn toolbar):
 `chrome::ContextMenuModel::for_browser(browser, has_clipboard)` +
 `ContextCommand` + `CONTEXT_COMMANDS`. It reports which right-click command is
@@ -735,7 +768,7 @@ With…, a bundle disables Open With…, a file enables it, Paste tracks the
 clipboard flag, and the `CONTEXT_COMMANDS` order/coverage). Docs:
 `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-**The drawn, clickable toolbar is done.** `render` paints `TOOLBAR_COMMANDS`
+**The drawn, clickable toolbar.** `render` paints `TOOLBAR_COMMANDS`
 as a `lib/controls::Toolbar` of themed `IconButton`s in the top strip (each
 glyph from the new `ToolbarCommand::icon()` — six new `lib/icon::IconKind`
 glyphs NavBack/NavForward/NavUp/Refresh/ViewToggle/Sort), each enabled or
@@ -760,7 +793,7 @@ conventional single-key accelerator, and a uniform keyboard path for every tool
 awaits the later toolbar keyboard-focus pass (the `lib/controls::Toolbar`
 `on_key` focus model), not invented chords now.
 
-**The New Folder tool is done** (its `fs_mkdir` action already exists, §2.4),
+**The New Folder tool** (its `fs_mkdir` action already exists, §2.4),
 and it exposed — and settled — a real design point: the drawn read-only
 toolbar (`chrome::ToolbarCommand` / `apply_command` / `render`) is composed by
 **both** the file manager *and* the trusted read-only picker, so a *write*
@@ -785,7 +818,7 @@ never resolves a write tool, and `suggest_new_dir_name` disambiguation) and
 `lib/icon` (the `NewFolder` glyph). Docs: `docs/src/desktop/apps.md`,
 `lib/browse`/`lib/icon` README + rustdoc.
 
-**The context menu is done, and it is the desktop's** (`plans/NEW-MENUS.md`
+**The context menu is the desktop's** (`plans/NEW-MENUS.md`
 M3.3). A secondary-button (right-click) press selects the item under the pointer
 (or clears the selection on empty space, so only the directory-scoped Paste is
 offered) and asks the one menu service to bring a chain up:
@@ -829,7 +862,7 @@ carrying a clickable-but-dead Open With… row would be speculative surface
 Folder join with the stages that first wire their behaviour. The drawn context
 menu therefore has no `planned` remainder.
 
-### FM5 — in-place rename `[x]`
+### FM5 — in-place rename
 
 Done — the first write operation, and the model for the rest. The edit is
 modelled in `lib/browse` (host-tested without a kernel); the `files.app` `Run`
@@ -870,9 +903,9 @@ binary supplies the inline text editor and the `fs_rename` seam.
   item. Docs: `docs/src/desktop/apps.md`, `lib/browse`/`lib/path`
   README + rustdoc.
 
-### FM6a — the engine activation decision `[x]`
+### FM6a — the engine activation decision
 
-Done. The pure dispatch-by-kind decision behind a double-click / `Enter`, the
+The pure dispatch-by-kind decision behind a double-click / `Enter`, the
 one primitive both the file manager and the trusted picker act on (§2.2). Added
 to `lib/browse` as the `activate` module (`Activation`) + `Browser::activate_selected`
 / `activate_index`:
@@ -897,13 +930,13 @@ to `lib/browse` as the `activate` module (`Activation`) + `Browser::activate_sel
   descent into an unreadable directory failing closed and staying put. Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-### FM6b — the app: launch `.app`, open a file, "Open With…" `[x]`
+### FM6b — the app: launch `.app`, open a file, "Open With…"
 
 Make items *do* something end-to-end — the defining first-class behaviour. The
 `files.app` `Run` binary acts on the FM6a decision; this stage needs the spawn
 and delegation wiring the pure engine model does not.
 
-**The pure association model is done** (§2.19): the `lib/browse::open_with`
+**The pure association model** (§2.19): the `lib/browse::open_with`
 module lands the type→bundle "open with" model host-proven ahead of the app
 wiring, exactly as FM6a landed the activation decision. `media_for_name`
 derives a file's content type from its filename extension through the one
@@ -925,7 +958,7 @@ and a specific declaration outranking a generic one). Docs:
 `docs/src/desktop/apps.md`,
 `lib/browse/README.md` + rustdoc.
 
-**The app-side bundle launch is done.** The `files.app` `Run` binary now
+**The app-side bundle launch.** The `files.app` `Run` binary now
 dispatches a plain `Enter` on the selection through the shared
 `Browser::activate_selected` (the one dispatch-by-kind decision the trusted
 picker also acts on, §2.2): `Descended` reveals the selection and repaints (as
@@ -986,7 +1019,7 @@ hand-off is the TAIRiX spelling of `viewer < file`, race-free at spawn:
   manager does this; the read-only picker composes the same `Browser` and never
   launches. Host-tested (`association_from_appinfo` valid / empty / fail-closed);
   the app wiring rides the FM9 vertical and builds clippy-clean cross-compiled.
-- **The viewer's inherited-document startup path is done**: `view.app`
+- **The viewer's inherited-document startup path**: `view.app`
   detects `DOCUMENT_ROLE_ARG` and reads its document from the inherited `STDIN`
   descriptor (titling its window from the leaf name), distinct from its
   interactive picker path (its standalone launch is unchanged). The wire now
@@ -1028,7 +1061,7 @@ now landed as **FM12** below (the shared `click::DoubleClickTracker` over the
 capability-free monotonic clock, driving the same `activate` dispatch `Enter`
 does).
 
-### FM7a — the selection + clipboard model `[x]`
+### FM7a — the selection + clipboard model
 
 Done (§2.19 — the pure model host-proven ahead of the app verbs, exactly as
 FM6a/FM6b's pure model landed). The two `lib/browse` modules the management
@@ -1063,11 +1096,11 @@ verbs are built on:
   descendant + sibling-prefix, and the error message). Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-### FM7b — move, copy, paste, delete, new folder `[x]`
+### FM7b — move, copy, paste, delete, new folder
 
 The core management verbs on top of the FM7a model.
 
-**The pure paste-execution model is done** (§2.19 — host-proven ahead of the
+**The pure paste-execution model** (§2.19 — host-proven ahead of the
 app verbs, exactly as FM6a/FM6b/FM7a's pure models landed): the
 `lib/browse::execute` module. `paste_strategy(op, source, dest)` makes the
 move-vs-copy decision from the clipboard op and the two items' `VolumeId`s (the
@@ -1085,7 +1118,7 @@ composing it grants nothing and the read-only picker never runs it. Host-tested
 completion, short-transfer advance, resume, resume/advance overrun, error
 message). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-**The pure new-folder model is done** (§2.19 — host-proven ahead of the drawn
+**The pure new-folder model** (§2.19 — host-proven ahead of the drawn
 New Folder tool, exactly as the paste-execution model landed ahead of the app
 verbs): the `lib/browse::mkdir` module (`MkdirError` + `validate_new_dir_name`)
 plus `Browser::create_directory`. `validate_new_dir_name` spells the typed name
@@ -1105,7 +1138,7 @@ put, create in an empty directory needs no selection, failed post-create
 re-list surfaced, `validate_new_dir_name` purity, every `MkdirError` message
 non-empty). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-**The pure delete model is done** (§2.19 — host-proven ahead of the app verb,
+**The pure delete model** (§2.19 — host-proven ahead of the app verb,
 exactly as the paste-execution and new-folder models landed): the
 `lib/browse::delete` module (`DeletePlan` + `DeleteTarget`) plus
 `Browser::plan_delete`. `plan_delete` captures the current multi-selection into
@@ -1127,7 +1160,7 @@ directory-backed, a files-only plan reporting no directories, and the
 fail-closed `DeletePlan::new` empty/root refusals). Docs:
 `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-**The pure recursive-delete *execution* model is done** (§2.19 — host-proven
+**The pure recursive-delete *execution* model** (§2.19 — host-proven
 ahead of the app verb, the delete-side analogue of the paste-side
 `execute::CopyCursor`): the `lib/browse::delete::DeleteWalk` driven cursor.
 `DeleteWalk::from_plan` begins a removal of a `DeletePlan`; `next_action` yields
@@ -1151,7 +1184,7 @@ multiple targets in listing order, the `TooDeep` bound, out-of-step fail-closed
 refusals leaving the walk put, and the interruption/resume holding its exact
 position). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-**The app-side Delete verb is done.** The `files.app` `Run` binary binds the
+**The app-side Delete verb.** The `files.app` `Run` binary binds the
 `Delete` key to a modal confirmation before any removal. `begin_delete` captures
 the selection with `Browser::plan_delete` (a no-op when nothing is selected —
 the plan is `None`, fail closed) and opens a `lib/controls::Dialog` built by the
@@ -1179,7 +1212,7 @@ full-window mirror + fail-closed) and `lib/controls` (`Dialog::action_rects`
 matching `on_pointer`'s geometry). Docs: `docs/src/desktop/apps.md`,
 `lib/browse`/`lib/controls` README + rustdoc.
 
-**The pure recursive-copy *walk* model is done** (§2.19 — host-proven ahead of
+**The pure recursive-copy *walk* model** (§2.19 — host-proven ahead of
 the app move/copy verbs, the copy-side analogue of the delete-side
 `delete::DeleteWalk`): the `lib/browse::execute::CopyWalk` driven cursor. Where
 `execute::CopyCursor` streams a single *file*, `CopyWalk` copies a whole *tree*:
@@ -1234,7 +1267,7 @@ the read-only picker never pastes. The engine models are host-tested in
 autoload vertical. Docs: `docs/src/desktop/apps.md`, `files.app` README +
 `run.rs` rustdoc.
 
-**Progress + cancel is done for both the Delete verb and copy/paste.** Neither
+**Progress + cancel covers both the Delete verb and copy/paste.** Neither
 interactive verb drives its walk to completion in one blocking pass: the
 confirmed work is handed to an interleaved **operation** the event loop advances
 a bounded slice at a time (`advance_operation`, up to `OPERATION_STEP_BUDGET`
@@ -1284,10 +1317,10 @@ mirror); the app-side drive interleaving (`advance_operation`/`advance_paste`)
 rides the FM9 autoload vertical. Docs: `docs/src/desktop/apps.md`, `lib/browse`
 README + rustdoc, `files.app` `run.rs` rustdoc.
 
-(**New Folder is done** — its drawn manager-only tool + `Ctrl+Shift+N` +
+(**New Folder** — its drawn manager-only tool + `Ctrl+Shift+N` +
 create-then-inline-rename wiring landed with FM4b's chrome; see that stage.)
 
-### FM8a — the properties view model `[x]`
+### FM8a — the properties view model
 
 Done (§2.19 — the pure model host-proven ahead of the drawn panel, exactly as
 FM6a/FM6b/FM7a/FM7b's pure models landed): the `lib/browse::properties` module.
@@ -1322,152 +1355,154 @@ epoch and renders blank, never a made-up `1970-01-01` wall time.
   higher-bit masking). Docs: `docs/src/desktop/apps.md`, `lib/browse`
   README + rustdoc, `tairix_abi::fs::mode_string` rustdoc.
 
-### FM8b — the drawn properties panel + permission editing `[x]`
+### FM8b — the drawn Properties window + permission/ownership editing
 
-Done. Split (§2.19) into the drawn read-only panel, the drawn permission (mode)
-control, the ownership-change model + its privileged kernel primitive, and the
-drawn ownership control — all landed.
+The read-only panel, the permission (mode) control, the ownership-change
+model with its privileged kernel primitive, the ownership control, and the
+extended-attribute list all landed.
 
-**The drawn Properties panel is done.** `render::draw_properties` paints the
-done FM8a `Properties` model as a shared `lib/controls` `Panel` centered over
-the view — name (title), kind, size + on-disk `allocated`, permissions
-(symbolic + octal), owner uid/gid, and the four `Time64` stamps — all straight
-from `fs_stat` (§21, 64-bit-native throughout), no fabricated fields.
-`render::properties_rows` is the one host-tested definition of which fields
-appear and how each reads, so the drawn panel and its tests never disagree
-(§2.2); the panel clips so a too-small window shows what fits rather than
-panicking (§2.9). The `files.app` `Run` binary opens the overlay with
-`Alt+Enter` on the selected item — spelling its path through the new public
-`Browser::selected_target_path` and reading its metadata with one
-capability-checked `fs_stat` under the user's own identity (**no new
-capability**) — and dismisses it with `Escape`; while open the overlay owns the
-window (keys do not navigate behind it). Showing properties is an incidental,
-refusable action: a stat the VFS refuses is stated on `stderr` and leaves the
-overlay closed — an answer, not a crash, never a fabricated summary (§2.24,
-§5.4). Host-tested in `lib/browse` (`properties_rows` field set/order + bundle
-labelling, `properties_panel_rect` centering/clamp, `draw_properties` paints /
-degenerate no-panic, and `selected_target_path` spelling + empty-directory
-`None`). Docs: `docs/src/desktop/apps.md`, `lib/browse` README + rustdoc.
+**Two surfaces, one model.** `render::properties_rows` is the one host-tested
+definition of which fields appear and how each reads — name, kind, a link's
+stored target, size + on-disk `allocated`, permissions (symbolic + octal),
+owner uid/gid, and the four `Time64` stamps, all straight from `fs_stat` (§21,
+64-bit-native throughout), no fabricated fields. It is derived from the closed
+`render::Field` vocabulary, so the display order, each label, each value, and
+which fields a given node shows cannot drift apart — and so a surface can place
+a control on a field's row without formatting every value to find out where it
+is. The alias row appears only for a node that stores a target.
 
-**The pure permission-edit model is done** (§2.19 — host-proven ahead of the
-drawn control, exactly as FM8a's properties model landed ahead of the drawn
-panel): the `lib/browse::mode_edit` module + `Browser::set_mode_selected`.
-`validate_mode` fails closed on any bit above `tairix_abi::fs::FS_MODE_MASK`
-(the settable `rwx`/setuid/setgid/sticky word) — refused, never masked into a
-different mode, so the mode committed is always exactly the one asked for.
-`set_mode_selected` names the selected node through the shared
-`Browser::selected_target_path` spelling, validates the mode *before* any
-syscall, and applies it through an injected `fs_set_mode` seam under the user's
-own identity (**no new capability**); a VFS refusal leaves the node's mode
-unchanged and surfaces as `ModeError::Refused` (§2.24, §5.4). The listing
-carries no mode, so a success re-reads nothing — the app re-stats to refresh
-the panel. The model holds no authority, so the read-only picker composes the
-same `Browser` and never calls it. Host-tested in `lib/browse` (commit applies
-the mode to the selected node's path, an out-of-mask mode refused before any
-syscall, a VFS refusal surfaced leaving the listing put, empty-directory
-`NoSelection`, `validate_mode` purity across the whole mask + above it, every
-`ModeError` message non-empty). Docs: `docs/src/desktop/apps.md`, `lib/browse`
-README + rustdoc.
+The **trusted read-only picker** draws `render::draw_properties`: a
+`lib/controls` `Panel` centred over its view at the shared `overlay_width`
+proportion, clipping so a too-small window shows what fits rather than
+panicking (§2.9).
 
-**The drawn permission (mode) control is done.** The Properties overlay is
-editable in the file manager: `render::draw_properties_editable` draws the
-metadata fields (as the read-only `render::draw_properties`) and, below them, a
-labelled permissions grid — `Read`/`Write`/`Exec` column headers over three
-`Owner`/`Group`/`Other` triad rows of clickable `lib/controls` `Checkbox`
-toggles reflecting the current mode. The grid is drawn in the taller
-`render::properties_editable_panel_rect` (the read-only picker keeps the shorter
-`render::properties_panel_rect`), and the shared `render::PermGrid` geometry
-places the painted grid, its headers/row-labels, and the hit-test from one
-definition (§2.2), so the toggles sit on a real grid pitch under their own
-labels — replacing the earlier cramped single-row layout whose nine boxes were
-a glyph apart (overlapping) with no label. `render::PERMISSION_BITS` /
-`permission_cells` are the one definition of which
-of the nine owner/group/other bits each toggle carries, and
-`render::permission_cell_at` is the mirror hit-test returning the bit a click
-flips (nothing off a toggle, fail closed). Only the write-capable file manager
-draws the editable overlay; the trusted read-only picker draws `draw_properties`
-and never resolves a toggle, so the write surface is separated by call site, not
-a runtime flag (the manager-only write-tool precedent, §2.2). The `files.app`
-`Run` binary routes an overlay primary-press through `permission_cell_at`, flips
-that `rwx` bit while preserving the current setuid/setgid/sticky bits (the
-settable word masked by `FS_MODE_MASK`), and commits through
-`Browser::set_mode_selected` over `fs_set_mode` under the user's own identity
-(**no new capability**); on success it re-stats to refresh the panel, and a VFS
-refusal is stated on `stderr` leaving the mode untouched (§2.24, §5.4). The
-setuid/setgid/sticky bits stay visible in the octal/symbolic display and are
-edited via `chmod` — a deliberate scope boundary, not an omission. Host-tested
-in `lib/browse` (`PERMISSION_BITS`/`permission_cells` mapping incl. high-bit
-independence, `draw_properties_editable` paints / degenerate no-panic, and the
-full-panel scan proving `permission_cell_at` mirrors exactly the nine distinct
-bits and fails closed off-grid). Docs: `docs/src/desktop/apps.md`, `lib/browse`
-README + rustdoc.
+**The file manager's Properties is a window of its own**
+(`render::draw_properties_window`, opened at
+`render::properties_window_extent`, resizable thereafter). Several are open at
+once, each pinned to its node by *path* — so the listing behind them may be
+reloaded or navigated away from without any of them describing or writing to
+something else — and the listing stays usable while they are open, which an
+in-window modal could not offer. Its client is the fields, the permissions
+grid, the ownership control and the extended-attribute list; no second panel
+header inside a window that already has a title bar. `files.app` opens one with
+`Alt+Enter` or the context menu's *Properties* row: the node is resolved from
+the listing that named it (`Browser::selected_target_path`), the window is
+appended once the round's borrow of its own window has ended, and the **read
+leaves the loop** — one `fs_stat` plus one `fs_attr_get` per attribute key is a
+stall, not a frame (§28.1). `render::PropertiesFrame` is what the window draws:
+`Reading` until the answer lands, `Refused` with the reason, or `Ready`.
+`render::properties_hit` is the one hit-test over the whole client, stating the
+precedence once — the capability-free permission toggles resolve before the
+privileged ownership control, and a press on nothing resolves to nothing.
 
-**The ownership-change model and its privileged kernel primitive are done.**
-Reassigning a file's *owner* is genuinely unlike the other write verbs (rename,
-mode, mkdir), which are the user's own §5.3-checked writes needing no new
-capability: it is a privilege operation, so it is gated by a new dedicated
-capability `CAP_FS_CHOWN` (id 39, the Unix `CAP_CHOWN` analogue), carried by
-the `ADMINISTRATIVE_SET` ceiling and by nothing an ordinary session holds
-(§5.2 — a new capability guarding a real class of authority, added with its
-live holder and enforcement point). The kernel primitive is the new
-`fs_set_owner` syscall (no. 96): the whole authority rule lives in the secured
-VFS (`DelegatedFs::set_owner` over the frozen driver `set_security`, so no
-driver-trait change) — reassigning the uid, or setting a gid the caller is not
-a member of, requires `CAP_FS_CHOWN`; otherwise only the node's owner may
+**Permissions.** `lib/browse::mode_edit::set_mode` is the pure, path-targeted
+model: `validate_mode` fails closed on any bit above `FS_MODE_MASK` (refused,
+never masked into a different mode), the validation runs *before* any syscall,
+and the change goes through an injected `fs_set_mode` seam under the user's own
+identity (**no new capability**); a refusal surfaces as `ModeError::Refused`
+leaving the mode untouched (§2.24, §5.4). The drawn control is a labelled grid
+below the fields — `Read`/`Write`/`Exec` headers over three
+`Owner`/`Group`/`Other` triad rows of `lib/controls` `Checkbox` toggles, placed
+and hit-tested from the one shared `render::PermGrid` geometry (§2.2).
+`render::PERMISSION_BITS`/`permission_cells` are the one definition of which
+bit each toggle carries. A press flips that `rwx` bit alone, preserving the
+setuid/setgid/sticky bits, and re-reads the node on success so the window shows
+what the kernel applied. Those higher bits stay visible in the octal/symbolic
+spelling and are edited via `chmod` — a deliberate scope boundary.
+
+**Ownership.** Reassigning a file's *owner* is genuinely unlike the other write
+verbs, so it is gated by the dedicated `CAP_FS_CHOWN` (id 39, the Unix
+`CAP_CHOWN` analogue), carried by the `ADMINISTRATIVE_SET` ceiling and by
+nothing an ordinary session holds (§5.2 — a capability guarding a real class of
+authority, added with its live holder and enforcement point). The kernel
+primitive is `fs_set_owner` (no. 96): the whole authority rule lives in the
+secured VFS (`DelegatedFs::set_owner` over the frozen driver `set_security`, so
+no driver-trait change) — reassigning the uid, or setting a gid the caller is
+not a member of, requires `CAP_FS_CHOWN`; otherwise only the node's owner may
 change the group, and only to a group they belong to (the unprivileged
 `chgrp`); any change strips the set-*id* bits (the `chown(2)` safety
 behaviour). Dispatch keeps the coarse `CAP_FS_ACCESS` gate; the privileged
 check is per-inode, in the VFS, under the caller's kernel-attested credential,
-and audited, fail closed (§5.4). Wired end to end: `lib/rt::fs_set_owner`, the
-C stub `tairix_sys_fs_set_owner`, and the generated `include/` header. The pure
-engine model is `lib/browse::owner_edit` (`OwnerChange`/`OwnerError`/
-`validate_owner`) + `Browser::set_owner_selected`: it names *what* to change
-(each field `None` = unchanged, `Some(id)` = set), refuses the reserved
-`FS_OWNER_UNCHANGED` sentinel as an explicit target before any syscall, spells
-the node through the shared `absolute_path`, and surfaces a VFS refusal
-(including the missing-`CAP_FS_CHOWN` denial) as `OwnerError::Refused` leaving
-the ownership untouched. The model holds no authority, so the read-only picker
-composes the same `Browser` and never calls it. Tested in `kernel/core`
-(privileged/unprivileged uid, member/non-member group, setid-strip, no-op,
-read-only, not-implemented), `kernel/syscall` (dispatch + `CAP_FS_ACCESS`
-gate), `lib/rt`/`lib/abi-sys` (marshalling), and `lib/browse` (the engine
-model). Docs: `docs/src/architecture/syscalls.md`, `docs/src/security/
-capabilities.md`, `docs/src/desktop/apps.md`, `lib/browse` README + rustdoc.
+audited, fail closed (§5.4). Wired end to end: `lib/rt::fs_set_owner`, the C
+stub `tairix_sys_fs_set_owner`, and the generated `include/` header. The engine
+model is `lib/browse::owner_edit::set_owner` (`OwnerChange`/`OwnerError`/
+`validate_owner`): it names *what* to change, refuses the reserved
+`FS_OWNER_UNCHANGED` sentinel as an explicit target before any syscall, and
+surfaces a refusal as `OwnerError::Refused` leaving the ownership untouched.
+The control is drawn only where the launching user holds `CAP_FS_CHOWN` (read
+once from the kernel-attested `self_origin`), so a session that cannot use it
+is never shown it (§2.24): an accent underline marks each value clickable, the
+`Owner` arm of `properties_hit` resolves a click to exactly the uid or gid it
+edits (measured from the same `uid N / gid N` spelling the fields draw), and
+the active `TextField` is drawn at `properties_owner_editor_rect`. A
+non-numeric or out-of-range id, or a VFS refusal, states its reason in the
+field and keeps the editor open.
 
-**The drawn ownership control is done.** The Properties overlay's owner row is
-editable in the file manager, but only where the launching user holds
-`CAP_FS_CHOWN` — read once from the kernel-attested `self_origin` at start-up,
-so a session that cannot reassign ownership is never shown a control it cannot
-use (§2.24). `render::draw_owner_control` overlays the uid and gid values of
-`render::draw_properties`' owner row: an accent underline marks each as
-clickable, and while one is being edited the shared `lib/controls` `TextField`
-is drawn over it. `render::OwnerField` + `render::owner_field_at` are the mirror
-hit-test resolving a click to exactly the uid or gid value it edits (measured
-from the same `uid N / gid N` spelling the panel draws, §2.2; nothing off a
-value, fail closed). Like the permission control, the write surface is
-separated by call site — only the file manager calls `draw_owner_control` (the
-trusted read-only picker never does) — *and* additionally gated on the runtime
-capability, since owner reassignment is privileged. The `files.app` `Run`
-binary opens the inline id editor on a click, pre-filled and bounded to a
-`u32`'s ten digits, live-validates the typed id, and on `Enter` commits through
-`Browser::set_owner_selected` over `fs_set_owner` under the user's own identity
-(the kernel enforces `CAP_FS_CHOWN` and the group-membership rule); `Escape`
-cancels. A non-numeric/out-of-range id or a VFS refusal (including the
-missing-`CAP_FS_CHOWN` denial) states its reason in the field and keeps the
-editor open — an honest answer, never a silent or fabricated result (§2.24,
-§5.4). On success the panel is re-stat'd to reflect the new owner. Host-tested
-in `lib/browse` (`owner_field_at` full-panel scan proving it mirrors exactly
-the two distinct value cells and fails closed off-grid / on a too-small window,
-and `draw_owner_control` painting the affordances and the active editor without
-panicking on a degenerate viewport). Docs: `docs/src/desktop/apps.md`,
+**Extended attributes** (the ARXFS `namespace.name` store,
+`plans/ARXFS-METADATA.md`). The window lists the node's *visible* attributes
+and can set and remove them. The kernel omits keys whose namespace the caller
+may not read, so there is no privileged-namespace surface to build and
+`system.*`/`trusted.*` are invisible rather than refused. Four states are
+distinguished rather than shown as one empty list (`properties::Attributes`):
+`Unread` (the picker never asks), `Unsupported` (the volume stores none),
+`Refused` (with the reason), and the `Visible` set — drawn as selectable rows
+through the shared `RowList` scroll model. Values are opaque bytes, escaped
+through `tairix_fsmeta::attr::display_value`, so nothing a volume stored
+reaches a surface raw; a value whose bytes a typed line could not reproduce is
+offered back by key alone with the reason stated, never lossily rewritten.
+*Set* applies the `key = value` line and *Remove* deletes the cursor row's
+attribute, through `fs_attr_set`/`fs_attr_remove` — needing only the
+`CAP_FS_ACCESS` the app holds, with the node's own write permission the real
+gate. The key is validated through the shared
+`tairix_fsmeta::attr::parse_assignment` grammar *before* the call, so a
+malformed key is refused in the app rather than by the kernel. Every applied
+change re-reads the node (§28.4). The on-disk `AttrFlags` (`SYSTEM`,
+`NO_BACKUP`) are a stated omission: no syscall surfaces them, so the window
+does not invent them; named streams are staged future work.
+
+**The deferred reads.** `PropertyReads` (`userland/apps/files/src/deferred.rs`)
+is keyed by *window*, because several are open at once and one window's read
+must not displace another's; a re-read of the same window supersedes its own
+outstanding one, since only the latest answer describes the node now. A closed
+window's read is forgotten and an answer for it dropped on delivery — a window
+id could be reused, and an answer for a window that has gone belongs to nobody.
+
+**Not yet off the loop:** the mode, owner and attribute *writes* are one
+syscall each on a discrete press, like every other write gesture in this app
+(rename, mkdir, delete, paste). Moving the app's write gestures to the worker
+is `plans/FIX-DESKTOP.md`'s staged work, not this increment's.
+
+**Remaining: a QEMU vertical for the window and the cue.** Two loop-level
+behaviours the host tests structurally cannot reach are covered only by the
+desk-level seam today — that a Properties window opens on the session and
+adopts its deferred answer, and that a delivered folder-cue batch reaches the
+screen with no input at all. Both want one vertical that opens a manager
+window on a folder holding a non-empty subfolder, gates on `WINDOW_SHOWN` as
+`filepick`/`handover` do, asserts the filled-folder cue appears unprompted,
+then opens a Properties window on a node with an attribute and photographs it.
+The existing `filepick`/`handover` verticals cover the `OpenWindow`/
+`WindowKind` split against regression in the meantime.
+
+Host-tested in `lib/browse` (the field set/order, the alias row and its
+absence, `properties_panel_rect` centring/clamp, one whole-client scan proving
+every permission toggle, both owning ids, each attribute row, the editor and
+both actions are reachable and pairwise apart, the slot→index mapping under a
+scroll, the bands moving exactly one row when an alias adds one, each drawn
+state differing, the gutter drag, and the extent scaling with density), in
+`userland/apps/files` (the property desk answering two windows independently, a
+re-read superseding its own answer, a refusal delivered as its reason, and a
+closed window's answer dropped), in `lib/fsmeta` (the value display and the
+assignment grammar), and in `kernel/core`/`kernel/syscall`/`lib/rt` for the
+`fs_set_owner` primitive. Docs: `docs/src/desktop/apps.md`,
+`docs/src/architecture/syscalls.md`, `docs/src/security/capabilities.md`,
 `lib/browse` README + rustdoc.
 
-### FM9 — the autoload QEMU vertical + docs (FM9-a done)
+### FM9 — the autoload QEMU vertical + docs
 
 FM9 is split (§2.19) so the vertical's robust, non-fragile gates exist before
 the click-through that keys on them is written.
 
-- **FM9-pre — filesystem-mutation audit gates `[x]` (done).** The write
+- **FM9-pre — filesystem-mutation audit gates.** The write
   syscalls the vertical must observe (`fs_mkdir`, `fs_unlink`, `fs_rename`,
   `fs_set_mode`, `fs_set_owner`) emitted **no** audit record, so there was no
   kernel-attested serial witness for a New-Folder / rename / delete step to
@@ -1508,12 +1543,10 @@ the click-through that keys on them is written.
   fully-gated landing appended **after** the AW4 terminal round trip (so the
   existing delivery counts 2/4/7/16 do not shift; each new stage adds its own
   kernel-attested PASS witness rather than re-deriving the terminal gates):
-  - **FM9-a — New Folder + inline-rename: product `[x]` (done); the create's
-    guest click-through `[x]` (done, by a different route); the rename commit
-    and the toolbar gesture `[ ]` (blocked, D98).** The product half is
-    landed — `render::selection_name_rect` for rows, the forward
+  - **FM9-a — New Folder + inline-rename.** The product half is
+    `render::selection_name_rect` for rows, the forward
     `render::manager_tool_rect` over `Toolbar::tool_rect` for the New Folder
-    tool, and the inline-rename commit — and is host-tested.
+    tool, and the inline-rename commit, all host-tested.
     The create's guest coverage is
     `tests/integration/fsmutate_qemu_aarch64`, which reaches it by pointer
     alone: it right-clicks bare wallpaper, so
@@ -1533,8 +1566,7 @@ the click-through that keys on them is written.
     cursor cannot express, and the toolbar tool is not even drawn until
     `Ctrl+F9` reveals the band (`Chrome::HIDDEN` is what a window opens with) —
     a key the character-based injection has no spelling for.
-  - **FM9-b — open a file into the viewer via CU6 delegation `[x]` (done,
-    product and guest).**
+  - **FM9-b — open a file into the viewer via CU6 delegation.**
     The trusted picker now opens at the user's home (`Browser::open_at` over
     the session's `HOME`, parsed with the shared
     `vfs::components_from_absolute_path`, falling back to `/`), and the shared
@@ -1560,10 +1592,7 @@ the click-through that keys on them is written.
     `fs_open` records can stand in: it emits 43 of them per run, 10 after a
     library launch, and the listing is read on a worker, so no single read
     means "there is a row to click".
-  - **FM9-c — delete with confirm — product `[x]` (done, host-tested);
-    right-click delivery in QEMU `[x]` (done, proven); the full delete
-    click-through `[ ]` (blocked, D98: no vertical drives a delete or a
-    context menu).** A
+  - **FM9-c — delete with confirm.** A
     clickable **Delete** joins the context menu (`ContextCommand::Delete`,
     enabled on any selection), routed through the app's
     `dispatch_context_command` to the *same* `begin_delete` the `Delete` key
@@ -1626,7 +1655,7 @@ cheaply" (§2.24). FM9 shipped delete as an irreversible recursive `fs_unlink`;
 FM10 makes it recoverable in the cheap case. Split (§2.19) into the pure engine
 model and the app wiring, exactly as FM6/FM7/FM8 were.
 
-- **FM10a — the pure move-to-Trash model `[x]` (done).** `lib/browse::trash`,
+- **FM10a — the pure move-to-Trash model.** `lib/browse::trash`,
   host-proven ahead of the app verb exactly as the pure delete/paste-execution
   models landed. `trash_strategy(item, trash)` makes the one recoverable-vs-
   irreversible decision from the item's and the user's Trash directory's
@@ -1649,7 +1678,7 @@ model and the app wiring, exactly as FM6/FM7/FM8 were.
   passthrough, extension-aware and whole-name and dotfile disambiguation,
   suffix-skipping over taken names, and each fail-closed refusal). Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
-- **FM10b — the app-side Trash verb + the QEMU witness `[x]` (done).** The
+- **FM10b — the app-side Trash verb + the QEMU witness.** The
   `files.app` `Run` binary, on a confirmed delete, decides one disposition for
   the whole plan (a selection lives in one directory, hence one volume): it
   resolves the user's home from the exported `HOME`, spells the fixed
@@ -1667,7 +1696,7 @@ model and the app wiring, exactly as FM6/FM7/FM8 were.
   destructive *Delete Permanently*, so the wording always matches what will
   happen (§2.24). The prerequisite — the desktop session forwarding the user
   environment (incl. `HOME`) to its launched apps (`spawn_app` → `spawn_with`);
-  plain `spawn` gave a child an empty environment — is done in the same change
+  plain `spawn` gave a child an empty environment — lands in the same change
   (§2.19). Rides the aarch64 `autoload_input` QEMU vertical: its tenth witness
   changed from `FsNodeMutated op=rmdir` to `op=rename` whose `to` is under
   `Library/Trash` (still gated after the FM9-b `fd_redeem`, so no earlier
@@ -1681,7 +1710,7 @@ Because the move that fills the Trash now exists, emptying it is real surface,
 not speculative (§2.4). Split (§2.19) into the pure engine model and the app
 wiring, exactly as FM6/FM7/FM8/FM10 were.
 
-- **FM11a — the pure empty-Trash model `[x]` (done).**
+- **FM11a — the pure empty-Trash model.**
   `lib/browse::trash::empty_trash_plan(trash_dir, children)`, host-proven ahead
   of the app verb exactly as the pure delete/paste/trash models landed. It turns
   an `fs_readdir` listing of the Trash directory into a `delete::DeletePlan`
@@ -1702,8 +1731,8 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   removal preserving listing order and directory-backed flags, empty=no-op
   `None`, root-trash refusal, invalid-child refusal across `""`/`.`/`..`/`a/b`/
   `a:b`). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
-- **FM11b — the app-side empty-Trash verb + the navigable Trash view `[x]`
-  (done).** Two manager-only toolbar tools join the `chrome::ManagerTool`
+- **FM11b — the app-side empty-Trash verb + the navigable Trash view.** Two
+  manager-only toolbar tools join the `chrome::ManagerTool`
   vocabulary (drawn only for the write-capable file manager, never the read-only
   picker), each carrying a new `lib/icon` built-in glyph (`IconKind::Trash` /
   `IconKind::EmptyTrash`, host-tested as the FM3 file-type glyphs were):
@@ -1732,7 +1761,7 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   Empty Trash tool disabled-vs-enabled hit-test gating) and the freestanding
   files app builds and lints clean. Docs: `docs/src/desktop/apps.md`,
   `lib/browse/README.md`, `lib/icon/README.md` + rustdoc.
-- **FM11c — the QEMU witness for the empty-Trash click-through `[x]` (done).**
+- **FM11c — the QEMU witness for the empty-Trash click-through.**
   Proves the Empty Trash verb end-to-end on the aarch64 `autoload_input` QEMU
   vertical with a new eleventh witness. After FM10b's move-to-Trash `op=rename`,
   the host runner clicks the **Go to Trash** tool (navigating the front files
@@ -1750,9 +1779,9 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   live beside the guest PASS gate (`FM11_TRASH_FILLED_MARKER` in the vertical
   crate's `lib.rs`), so the script and its observer cannot drift (§2.2).
 
-### FM12 — pointer activation gestures `[x]`
+### FM12 — pointer activation gestures
 
-Done. Three gestures and one menu row drive the one `activate` dispatch a
+Three gestures and one menu row drive the one `activate` dispatch a
 keyboard `Enter` uses, so pointer and keyboard can never open different things
 (§2.2):
 
@@ -1769,7 +1798,7 @@ and never reaches this app — a property of the design, not a gap
 (`plans/NEW-MENUS.md` D20). The verb it carried is a menu row instead:
 discoverable, and reachable from the keyboard as the gesture never was.
 
-- **The pure detector `[x]`.** `lib/browse::click::DoubleClickTracker` is the
+- **The pure detector.** `lib/browse::click::DoubleClickTracker` is the
   one host-proven rule that turns a stream of presses into single- and
   double-click gestures (`ClickKind`). `register(now_ns, index, button)` pairs a
   press with the previous one only when it lands on the **same** item with the
@@ -1783,13 +1812,13 @@ discoverable, and reachable from the keyboard as the gesture never was.
   so it is fully host-tested and the read-only picker can compose it for free
   (§2.2). `PointerButton` is re-exported from `lib/browse` because it is now
   part of that surface.
-- **The bundle intent `[x]`.** `lib/browse::BundleIntent` (`Launch` / `Browse`)
+- **The bundle intent.** `lib/browse::BundleIntent` (`Launch` / `Browse`)
   is what `activate_selected`/`activate_index` take: a bundle is both a program
   and a directory, so the caller names what the *gesture* meant while
   dispatch-by-kind stays in the engine. `Browse` descends by the entry's own
   name (through the link, when it is one) via the shared `descend_index`
   `open_index` already used, and returns `Descended`.
-- **The app's own gesture decisions `[x]`.** `files.app`'s `gesture` module is
+- **The app's own gesture decisions.** `files.app`'s `gesture` module is
   pure and host-tested, mirroring how `command` keeps the freestanding binary's
   decisions testable: `bundle_intent(shift)` (one spelling, so the pointer and
   `Shift+Enter` cannot diverge), `primary_press` (which resolves a press to
@@ -1798,7 +1827,7 @@ discoverable, and reachable from the keyboard as the gesture never was.
   hand-off closes the window). The secondary-press decision is gone with the
   gesture it resolved: a right-press asks the desktop for the menu and resets
   the tracker, so a click either side of it cannot pair.
-- **The app wiring `[x]`.** `apply_primary_press` is a thin router over those
+- **The app wiring.** `apply_primary_press` is a thin router over those
   decisions and `open_context_menu` is the secondary press's whole answer; the
   shift modifier arrives on the pointer event itself
   (`WindowEvent::Pointer`'s `modifiers`). Open and Close closes the window only
@@ -1809,13 +1838,13 @@ discoverable, and reachable from the keyboard as the gesture never was.
   costs one hit-test. Docs: `docs/src/desktop/apps.md`,
   `docs/src/desktop/menus.md`, `lib/browse/README.md` + rustdoc.
 
-### FM13 — the places / devices sidebar `[x]`
+### FM13 — the places / devices sidebar
 
-Done. The vertical shortcuts rail down the left of the manager's window that
+The vertical shortcuts rail down the left of the manager's window that
 `plans/desktop1.png` shows, listing the user's own places and every mounted
 volume with an icon matching the **real** storage medium.
 
-- **The model `[x]`.** `lib/browse::places` is pure: `Place`/`PlaceKind`/
+- **The model.** `lib/browse::places` is pure: `Place`/`PlaceKind`/
   `Volume`/`Places`, built from the caller's home components plus a list of
   volumes — never I/O. One deterministic order (Home, Desktop, Documents,
   Apps, System, a separation, then volumes sorted stably by label). A volume
@@ -1825,7 +1854,7 @@ volume with an icon matching the **real** storage medium.
   never fabricated. Interaction state (cursor, focus, hover, unavailable)
   lives on the model so every state the shared `ListRow` offers is
   reachable.
-- **The geometry `[x]`.** `layout::SidebarView` is the one definition of the
+- **The geometry.** `layout::SidebarView` is the one definition of the
   rail's width (derived from the theme/font metrics, clamped to a third of
   the window), its row rectangles, its separator, and the hit-test that
   inverts them — shared by paint and hit-test, never computed twice. The
@@ -1834,14 +1863,14 @@ volume with an icon matching the **real** storage medium.
   and fixed a latent defect: `ListView`/`GridView`'s `index_at` were not
   origin-aware while their rect builders were, so both now invert through
   one shared helper.
-- **The medium is data, not a guess `[x]`.** The app reads the ungated
+- **The medium is data, not a guess.** The app reads the ungated
   `MOUNT_LIST` sysinfo query through `lib/procinfo`, keeps the available
   mounts, and maps each record's `medium()` through
   `tairix_icon::disk_icon` — rotational, solid-state and removable to their
   shipped artwork, paravirtual **or unknown** to the generic drive glyph.
   Threading that medium from the block device through the kernel mount
   table onto the record is `plans/ICONS.md` I6.
-- **The behaviour `[x]`.** Pointer press focuses the rail and navigates;
+- **The behaviour.** Pointer press focuses the rail and navigates;
   Tab moves focus between rail and file view; arrows move the cursor
   (clamped) and Enter navigates; Escape leaves the rail; keys the rail must
   not steal (unfocused arrows, key releases, Ctrl+Tab) fall through. A
@@ -1849,7 +1878,7 @@ volume with an icon matching the **real** storage medium.
   unavailable, and leaves the browser exactly where it was. The routing is
   host-visible (`userland/apps/files/src/sidebar.rs`) and host-tested rather
   than stranded in the freestanding module.
-- **Refresh `[x]`.** The rail converges on the kernel's `Mounts` system
+- **Refresh.** The rail converges on the kernel's `Mounts` system
   notice (`plans/NOTICE.md`): an attach, a re-backing, or a removal wakes the
   manager, which re-reads the rail through its existing reader desk (the mount
   table comes from the System Information service, so it is never read on the

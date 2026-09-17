@@ -237,6 +237,14 @@ containing `:` stays reachable as `./name`, and `File::open_resource` remains
 the explicit constructor for a caller that has already classified its target
 (the shell's parsed redirection targets).
 
+`fs_attr_keys` and `fs_attr_value` are the shared drains of the
+extended-attribute reads: the first walks `fs_attr_list`'s index iteration to
+its end-of-list answer (refusing a key the backing spelled malformed rather
+than showing it lossily), the second reads one value into a buffer the fixed
+`FS_ATTR_VALUE_MAX` bound guarantees is large enough. Both consumers — the
+file manager's Properties window and `fstree`'s attribute editor — read through
+them, so no tool carries its own copy of the iteration rule.
+
 ## Raw syscall results (`Errno::from_syscall`)
 
 The low-level wrappers hand back the kernel's raw signed register, so a

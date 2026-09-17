@@ -4909,6 +4909,81 @@ pub fn fs_attr_remove(path: &[u8], key: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Every visible extended-attribute key of the file or directory at the
+/// absolute `path`, in the backing's stable order.
+///
+/// The one drain of [`fs_attr_list`]'s index iteration every consumer shares,
+/// so no tool re-derives the end-of-list rule: a return of `0` is the end (a
+/// stored key is never empty) and a negative value the frozen errno. Keys
+/// whose namespace the caller may not read never appear — the kernel omits
+/// them, so this sees only what it may show.
+///
+/// Keys are UTF-8 by the shared `lib/fsmeta` grammar; one that is not comes
+/// from a hostile or corrupt backing and is refused with `OutOfRange` rather
+/// than lossily shown.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of the failing `fs_attr_list` —
+/// `-NotSupported` on a mount whose format stores no attributes, which a
+/// caller states rather than reporting as an empty set — or `-OutOfRange` for
+/// a key the backing spelled malformed.
+pub fn fs_attr_keys(path: &[u8]) -> Result<alloc::vec::Vec<alloc::string::String>, i64> {
+    let out_of_range = -i64::from(tairix_abi::Errno::OutOfRange.as_i32());
+    let mut keys = alloc::vec::Vec::new();
+    let mut buf = [0u8; tairix_abi::FS_ATTR_KEY_MAX];
+    // Counted rather than ranged: the index saturates instead of overflowing,
+    // so the walk has no arithmetic panic on any answer the kernel could give.
+    let mut index = 0u64;
+    loop {
+        let ret = fs_attr_list(path, index, &mut buf);
+        if ret < 0 {
+            return Err(ret);
+        }
+        let Ok(len) = usize::try_from(ret) else {
+            return Err(out_of_range);
+        };
+        if len == 0 {
+            break;
+        }
+        let Some(key) = buf.get(..len).and_then(|b| core::str::from_utf8(b).ok()) else {
+            return Err(out_of_range);
+        };
+        keys.push(alloc::string::String::from(key));
+        index = index.saturating_add(1);
+    }
+    Ok(keys)
+}
+
+/// The value of extended attribute `key` on the file or directory at the
+/// absolute `path`, as the opaque bytes it is stored as (a value may be
+/// empty).
+///
+/// One fixed-size read always suffices and nothing is ever truncated: a stored
+/// value never exceeds [`tairix_abi::FS_ATTR_VALUE_MAX`], which is the bound
+/// the dispatcher itself enforces.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of the failing `fs_attr_get` —
+/// `-NoData` when the node carries no such attribute — or `-OutOfRange` for a
+/// backing that reports more bytes than it was handed room for.
+pub fn fs_attr_value(path: &[u8], key: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
+    let mut buf = alloc::vec![0u8; tairix_abi::FS_ATTR_VALUE_MAX];
+    let ret = fs_attr_get(path, key, &mut buf);
+    if ret < 0 {
+        return Err(ret);
+    }
+    let Ok(len) = usize::try_from(ret) else {
+        return Err(-i64::from(tairix_abi::Errno::OutOfRange.as_i32()));
+    };
+    if len > buf.len() {
+        return Err(-i64::from(tairix_abi::Errno::OutOfRange.as_i32()));
+    }
+    buf.truncate(len);
+    Ok(buf)
+}
+
 /// Change the calling process's working directory to `path`
 /// (`SyscallNumber::FS_CHDIR`).
 ///
@@ -5644,6 +5719,75 @@ mod tests {
     /// The negative register the kernel encodes `errno` as.
     fn refusal(errno: Errno) -> u64 {
         u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
+    }
+
+    #[test]
+    fn the_attribute_key_walk_marshals_the_path_and_index_and_ends_on_zero() {
+        // A node with no visible attributes: the first call answers
+        // end-of-list, which is what ends the walk.
+        seam::arm(0);
+        let keys = fs_attr_keys(b"/f").expect("an empty set is an answer");
+        assert!(keys.is_empty());
+        let (number, args) = seam::last_call().expect("exactly one trap");
+        assert_eq!(number, NUM_FS_ATTR_LIST);
+        assert_eq!(args[1], 2, "the path's length");
+        assert_eq!(args[2], 0, "the first index asked for");
+        assert_eq!(
+            args[4],
+            u64::try_from(tairix_abi::FS_ATTR_KEY_MAX).expect("fits"),
+            "a buffer the longest key always fits"
+        );
+    }
+
+    #[test]
+    fn a_volume_without_attribute_storage_refuses_the_walk_rather_than_answering_empty() {
+        // `NotSupported` is a different fact from "this node has none", and a
+        // caller states it rather than showing an empty set.
+        seam::arm(refusal(Errno::NotSupported));
+        assert_eq!(
+            fs_attr_keys(b"/f"),
+            Err(-i64::from(Errno::NotSupported.as_i32()))
+        );
+        seam::arm(refusal(Errno::PermissionDenied));
+        assert_eq!(
+            fs_attr_keys(b"/f"),
+            Err(-i64::from(Errno::PermissionDenied.as_i32()))
+        );
+    }
+
+    #[test]
+    fn an_attribute_value_read_marshals_both_names_and_is_sized_to_the_answer() {
+        seam::arm(3);
+        let value = fs_attr_value(b"/f", b"user.k").expect("a value");
+        assert_eq!(value.len(), 3, "sized to what the kernel reported");
+        let (number, args) = seam::last_call().expect("exactly one trap");
+        assert_eq!(number, NUM_FS_ATTR_GET);
+        assert_eq!(args[1], 2, "the path's length");
+        assert_eq!(args[3], 6, "the key's length");
+        assert_eq!(
+            args[5],
+            u64::try_from(tairix_abi::FS_ATTR_VALUE_MAX).expect("fits"),
+            "a buffer the largest stored value always fits"
+        );
+
+        // An empty value is a legitimate answer, not an absent attribute.
+        seam::arm(0);
+        assert_eq!(fs_attr_value(b"/f", b"user.k"), Ok(alloc::vec::Vec::new()));
+
+        // A backing that reports more bytes than it was handed room for is
+        // refused rather than trusted.
+        seam::arm(u64::try_from(tairix_abi::FS_ATTR_VALUE_MAX + 1).expect("fits"));
+        assert_eq!(
+            fs_attr_value(b"/f", b"user.k"),
+            Err(-i64::from(Errno::OutOfRange.as_i32()))
+        );
+
+        // And a refusal surfaces unchanged: no such attribute is an answer.
+        seam::arm(refusal(Errno::NoData));
+        assert_eq!(
+            fs_attr_value(b"/f", b"user.k"),
+            Err(-i64::from(Errno::NoData.as_i32()))
+        );
     }
 
     #[test]

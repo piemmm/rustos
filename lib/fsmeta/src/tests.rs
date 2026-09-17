@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::DriverError;
 use tairix_abi::time::Time64;
 
+use crate::attr;
 use crate::key::{AttrKey, Namespace, NamespaceAccess};
 use crate::preset::{acorn, amiga, atari, mac};
 use crate::{
@@ -536,6 +537,81 @@ fn acorn_datestamp_round_trips() {
         acorn::datestamp_from_value(b"00a1b2c3dg"),
         Err(MetadataError::NotRepresentable)
     );
+}
+
+// --- value display and the assignment grammar ----------------------------
+
+#[test]
+fn a_text_value_reads_as_itself_and_round_trips_a_typed_line() {
+    assert_eq!(attr::text_value(b"Hello, world"), Some("Hello, world"));
+    assert_eq!(attr::display_value(b"Hello, world"), "Hello, world");
+    // Empty is text: a stored attribute may legitimately hold no bytes.
+    assert_eq!(attr::text_value(b""), Some(""));
+    assert_eq!(attr::display_value(b""), "");
+    // Non-ASCII UTF-8 is still text.
+    assert_eq!(attr::text_value("café".as_bytes()), Some("café"));
+}
+
+#[test]
+fn a_value_a_surface_could_not_show_is_escaped_and_never_offered_back() {
+    // A control byte inside otherwise valid UTF-8: an escape sequence on a
+    // terminal and nothing at all in a glyph run.
+    assert_eq!(attr::text_value(b"a\x1b[31mb"), None);
+    assert_eq!(attr::display_value(b"a\x1b[31mb"), "a\\x1b[31mb");
+
+    // Bytes that are not UTF-8 at all.
+    assert_eq!(attr::text_value(&[0xff, 0xfe]), None);
+    assert_eq!(attr::display_value(&[0xff, 0xfe]), "\\xff\\xfe");
+
+    // A packed foreign-metadata field: printable bytes kept, the rest escaped.
+    assert_eq!(attr::display_value(b"FFF\x00\x00"), "FFF\\x00\\x00");
+    assert_eq!(attr::display_value(b"\n"), "\\x0a");
+}
+
+#[test]
+fn an_assignment_names_a_validated_key_and_takes_its_value_as_typed() {
+    let (key, value) = attr::parse_assignment("user.note = hello").expect("a well-formed line");
+    assert_eq!(key.as_bytes(), b"user.note");
+    assert_eq!(key.namespace(), Namespace::User);
+    assert_eq!(value, "hello");
+
+    // The split is at the first `=`; a value may hold more.
+    let (key, value) = attr::parse_assignment("user.expr=a=b").expect("a well-formed line");
+    assert_eq!(key.as_bytes(), b"user.expr");
+    assert_eq!(value, "a=b");
+
+    // An empty value is a legitimate assignment, not a malformed line.
+    let (_, value) = attr::parse_assignment("user.note=").expect("a well-formed line");
+    assert_eq!(value, "");
+
+    // Exactly one space after the separator is the separator's; anything
+    // further is the value's own.
+    let (_, value) = attr::parse_assignment("user.note =  padded ").expect("a well-formed line");
+    assert_eq!(value, " padded ");
+}
+
+#[test]
+fn an_assignment_fails_closed_on_a_key_the_kernel_would_refuse() {
+    assert_eq!(
+        attr::parse_assignment("no separator"),
+        Err(MetadataError::MalformedKey)
+    );
+    assert_eq!(
+        attr::parse_assignment("=value"),
+        Err(MetadataError::MalformedKey)
+    );
+    assert_eq!(
+        attr::parse_assignment("nodot=value"),
+        Err(MetadataError::MalformedKey)
+    );
+    assert_eq!(
+        attr::parse_assignment("nosuch.thing=value"),
+        Err(MetadataError::UnknownNamespace)
+    );
+    // A privileged namespace parses — the *kernel* is what refuses the write,
+    // and a surface that pre-judged it would be a second policy.
+    let (key, _) = attr::parse_assignment("system.thing=v").expect("a well-formed key");
+    assert_eq!(key.access(), NamespaceAccess::Privileged);
 }
 
 // --- helpers -------------------------------------------------------------
