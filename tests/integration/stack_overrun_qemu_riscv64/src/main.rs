@@ -241,9 +241,12 @@ mod kernel {
             fail("frame allocator", FAIL_SETUP);
         };
         let frames: &'static FrameAllocator = Box::leak(Box::new(frames));
-        let physmap: &'static DirectPhysMap = Box::leak(Box::new(DirectPhysMap::identity(
-            (IDENTITY_GIB as u64) << 30,
-        )));
+        // SAFETY: the boot code identity-maps this window and never unmaps it.
+        let Some(identity) = (unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) })
+        else {
+            fail("identity map addresses nothing", FAIL_SETUP);
+        };
+        let physmap: &'static DirectPhysMap = Box::leak(Box::new(identity));
         let tables: &'static FrameTableSource =
             Box::leak(Box::new(FrameTableSource::new(frames, physmap)));
 

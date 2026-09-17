@@ -551,8 +551,12 @@ fn a_full_span_window_serves_a_multi_device_enclosure_lazily() {
     const SLOTS_PER_REGION: usize = 32 + 2;
     // The scenario genuinely exceeds the former fixed 256-slot ceiling.
     const _: () = assert!(REGIONS * SLOTS_PER_REGION > 256);
-    let frames = fresh_frames(2048);
-    let sim = fresh_sim(2048);
+    // RAM sized from the scenario rather than a round number, with room for
+    // the buddy allocator to keep finding aligned 32-page blocks; the
+    // simulated window must cover every frame the allocator can hand out.
+    const USABLE_PAGES: usize = 2 * REGIONS * SLOTS_PER_REGION;
+    let frames = fresh_frames(USABLE_PAGES);
+    let sim = fresh_sim(USABLE_PAGES);
     let span_pages = (1usize << 30) / PAGE_SIZE;
     let mut pool = pool_with_capacity(&frames, &sim, span_pages);
     let mut bufs = alloc::vec::Vec::new();

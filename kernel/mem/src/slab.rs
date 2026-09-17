@@ -887,7 +887,7 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
-        #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+        #![proptest_config(tairix_fuzzseed::prop::config(256, 4))]
 
         /// (CWE-787): a single-byte corruption at *any* storage
         /// offset is either detected (guard) or lands in legal slot bytes,

@@ -38,9 +38,24 @@ finer per-command lines inside them. A measured warm run:
 | `loom` (the interleaving oracle over the sync primitives) | 10 s | one process per crate, concurrent |
 | `docs-check` (rustdoc + mdBook + link check) | 68 s | sequential |
 | `image` gate | 193 s over 319 spawns | sequential |
-| `miri` (the UB oracle over the hand-written `unsafe` cores and the three paging ports) | 287 s | one process per crate, concurrent; the aarch64 port sets the makespan |
 | `clippy` host + 11 target passes | 330 s | sequential |
 | `test --qemu` (host matrix + 168 guests + 3 fixture cross-compiles) | 417 s | guests concurrent, `nproc/3` weighted budget |
+| `miri` (the UB oracle over the hand-written `unsafe` cores, the three paging ports, and `kernel/mem`) | 1360 s | one process per crate, concurrent; `kernel/mem` sets the makespan |
+
+`miri` is now the pipeline's most expensive stage, and runs last for that
+reason. `kernel/mem` alone accounts for its whole makespan: interpreting the slab
+tier, the remap window's slot arithmetic and the DMA pool's direct-map slices
+means paying per-byte aliasing bookkeeping over every page those subsystems
+zero, which is most of what they do. The alternative was leaving that
+`unsafe` covered only by whoever remembered to run the oracle by hand. One
+`dma` test is excluded by name — a full-gigabyte window streaming thirteen
+32-page device regions costs four hours interpreted, and the `unsafe` it
+reaches is reached by the rest of its module; the registry carries that
+reason.
+
+Two figures in this table are Miri's, and Miri's clock is virtual: the
+`finished in …` line a test binary prints under the interpreter is **not**
+wall time and can exceed it severalfold. Measure the stage from outside.
 
 The order is that table, cheapest first, and it is maintained against
 *measured* cost rather than a guess about which gate usually trips. A cheap

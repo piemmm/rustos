@@ -1323,12 +1323,13 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
 mod tests {
     use super::{LiveSpace, LiveSpaceError, LiveUserSpace};
     use crate::anon::AnonError;
-    use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
     use crate::dma::DmaError;
     use crate::frame::{FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
     use crate::phys::SimPhysMap;
+    use crate::test_fixture::frame_backing;
     use crate::uaccess::{copy_in, copy_out};
     use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
+    use tairix_sync::Once;
 
     extern crate std;
     use std::boxed::Box;
@@ -1340,19 +1341,17 @@ mod tests {
     const SIM_BASE: u64 = 16 * PAGE_SIZE as u64;
     const SIM_BYTES: usize = 64 * PAGE_SIZE;
 
-    /// A `'static` frame allocator over the simulated usable window. Leaked so
-    /// the live space can hold the production `&'static FrameAllocator` shape
-    /// (the kernel allocator is a boot global); a test leak
-    /// is bounded by the process lifetime.
-    fn leaked_frames() -> &'static FrameAllocator {
-        let mut map = BootMemoryMap::new();
-        map.push(MemoryRegion {
-            kind: RegionKind::Usable,
-            start: PhysAddr::new(SIM_BASE),
-            length: SIM_BYTES as u64,
-        });
-        let alloc = FrameAllocator::new(&map).expect("usable window builds an allocator");
-        Box::leak(Box::new(alloc))
+    const SIM_PAGES: usize = SIM_BYTES / PAGE_SIZE;
+
+    /// A `'static` frame allocator over the simulated usable window, plus the
+    /// direct map over exactly those bytes. The live space holds the
+    /// production `&'static FrameAllocator` shape (the kernel allocator is a
+    /// boot global), so each expansion gets a cell of its own rather than a
+    /// leaked box the interpreter could not tell from a real leak.
+    macro_rules! backing {
+        () => {{
+            frame_backing!(SIM_BASE, SIM_PAGES)
+        }};
     }
 
     fn sim() -> SimPhysMap {
@@ -1409,28 +1408,31 @@ mod tests {
     const FILE_WINDOW_BASE: u64 = 0x3_0000_0000;
     const FILE_WINDOW_PAGES: usize = 64;
 
-    fn live() -> LiveSpace<HostPageTable, SimPhysMap> {
-        LiveSpace::new(
-            AddressSpace::new(HostPageTable::new()),
-            sim(),
-            leaked_frames(),
-            VirtAddr::new(MMIO_WINDOW_BASE),
-            MMIO_WINDOW_PAGES,
-            VirtAddr::new(ANON_WINDOW_BASE),
-            ANON_WINDOW_PAGES,
-            VirtAddr::new(DMA_WINDOW_BASE),
-            DMA_WINDOW_PAGES,
-            VirtAddr::new(SHARED_WINDOW_BASE),
-            SHARED_WINDOW_PAGES,
-            VirtAddr::new(FILE_WINDOW_BASE),
-            FILE_WINDOW_PAGES,
-        )
-        .expect("a page-aligned, non-zero window is valid")
+    macro_rules! live_space {
+        () => {{
+            let (frames, _simmap) = backing!();
+            LiveSpace::new(
+                AddressSpace::new(HostPageTable::new()),
+                sim(),
+                frames,
+                VirtAddr::new(MMIO_WINDOW_BASE),
+                MMIO_WINDOW_PAGES,
+                VirtAddr::new(ANON_WINDOW_BASE),
+                ANON_WINDOW_PAGES,
+                VirtAddr::new(DMA_WINDOW_BASE),
+                DMA_WINDOW_PAGES,
+                VirtAddr::new(SHARED_WINDOW_BASE),
+                SHARED_WINDOW_PAGES,
+                VirtAddr::new(FILE_WINDOW_BASE),
+                FILE_WINDOW_PAGES,
+            )
+            .expect("a page-aligned, non-zero window is valid")
+        }};
     }
 
     #[test]
     fn map_anonymous_returns_the_fixed_base_and_maps_zeroed_user_pages() {
-        let mut live = live();
+        let mut live = live_space!();
         let base = 0x4000;
         assert_eq!(live.map_anonymous(base, 3), Ok(base));
         assert_eq!(live.space().mapped_pages(), 3);
@@ -1445,7 +1447,7 @@ mod tests {
 
     #[test]
     fn unmap_anonymous_releases_the_whole_region() {
-        let mut live = live();
+        let mut live = live_space!();
         let base = 0x4000;
         live.map_anonymous(base, 4).expect("map");
         assert_eq!(live.space().mapped_pages(), 4);
@@ -1455,7 +1457,7 @@ mod tests {
 
     #[test]
     fn unmap_of_a_sparsely_resident_range_reclaims_only_the_resident_pages() {
-        let mut live = live();
+        let mut live = live_space!();
         let base = 0x4000;
         // A demand-paged region: two of the three pages ever faulted in (the
         // fault path backs one page at a time via `map_anonymous`), so the
@@ -1470,7 +1472,7 @@ mod tests {
 
     #[test]
     fn map_anonymous_rejects_a_misaligned_base() {
-        let mut live = live();
+        let mut live = live_space!();
         assert_eq!(
             live.map_anonymous(0x4001, 1),
             Err(LiveSpaceError::Anon(AnonError::Unaligned))
@@ -1479,7 +1481,7 @@ mod tests {
 
     #[test]
     fn map_device_window_returns_a_base_in_the_guarded_window() {
-        let mut live = live();
+        let mut live = live_space!();
         // A device window at an arbitrary physical base; the returned VA is
         // chosen by the guarded allocator inside the configured window.
         let va = live
@@ -1500,7 +1502,7 @@ mod tests {
 
     #[test]
     fn map_device_window_rejects_zero_length() {
-        let mut live = live();
+        let mut live = live_space!();
         assert!(matches!(
             live.map_device_window(0xFE98_0000, 0),
             Err(LiveSpaceError::Mmio(_))
@@ -1509,7 +1511,7 @@ mod tests {
 
     #[test]
     fn map_anonymous_placed_chooses_a_base_in_the_heap_window_and_zeroes_it() {
-        let mut live = live();
+        let mut live = live_space!();
         let base = live
             .map_anonymous_placed(2)
             .expect("the heap window has room");
@@ -1529,7 +1531,7 @@ mod tests {
 
     #[test]
     fn map_anonymous_placed_does_not_overlap_a_prior_placement() {
-        let mut live = live();
+        let mut live = live_space!();
         let a = live.map_anonymous_placed(3).expect("room");
         let b = live.map_anonymous_placed(2).expect("room");
         assert_ne!(a, b);
@@ -1542,7 +1544,7 @@ mod tests {
 
     #[test]
     fn unmap_releases_a_placement_for_reuse() {
-        let mut live = live();
+        let mut live = live_space!();
         let a = live.map_anonymous_placed(4).expect("room");
         live.unmap_anonymous(a, 4).expect("placed region unmaps");
         assert_eq!(live.space().mapped_pages(), 0);
@@ -1554,7 +1556,7 @@ mod tests {
 
     #[test]
     fn unmap_of_a_placed_range_releases_its_pages_and_no_others() {
-        let mut live = live();
+        let mut live = live_space!();
         let a = live.map_anonymous_placed(3).expect("room");
         // Part of a placement releases just those pages: the anonymous ABI
         // releases what the caller names, so a region grown over several
@@ -1585,7 +1587,7 @@ mod tests {
 
     #[test]
     fn reserve_anonymous_places_without_committing_and_faults_in_on_map() {
-        let mut live = live();
+        let mut live = live_space!();
         let base = live.reserve_anonymous(4).expect("the heap window has room");
         assert!(
             base >= ANON_WINDOW_BASE
@@ -1608,7 +1610,7 @@ mod tests {
 
     #[test]
     fn reserve_anonymous_at_validates_shape_and_commits_nothing() {
-        let mut live = live();
+        let mut live = live_space!();
         let base = 0x8000;
         assert_eq!(live.reserve_anonymous_at(base, 2), Ok(base));
         assert_eq!(live.space().mapped_pages(), 0, "FIXED reserve maps nothing");
@@ -1628,8 +1630,8 @@ mod tests {
         // no-overcommit guarantee), a fault-in converts one reserved page to
         // residency, and unmap returns the still-unbacked reservations — so
         // the committed tally is exactly balanced across the region's life.
-        let frames = leaked_frames();
-        let (mut live, _sim) = live_over(frames);
+        let (frames, simmap) = backing!();
+        let (mut live, _sim) = live_over(frames, simmap);
         assert_eq!(frames.committed_frames(), 0);
 
         let base = live.reserve_anonymous(4).expect("heap window has room");
@@ -1666,8 +1668,8 @@ mod tests {
         // must credit back only what was actually charged. Crediting the
         // untouched pages (the `mem_map` rule) would hand the pool budget it
         // never received and let the machine overcommit.
-        let frames = leaked_frames();
-        let (mut live, _sim) = live_over(frames);
+        let (frames, simmap) = backing!();
+        let (mut live, _sim) = live_over(frames, simmap);
         // An untouched `mem_map` reservation held alive across the release, so
         // an over-credit is *visible*: the global tally saturates at zero, so a
         // release that credited the six never-charged pages would silently read
@@ -1722,9 +1724,9 @@ mod tests {
         // return that reserved headroom to the global budget, or a
         // long-running system would leak commitment on every short-lived
         // process that reserved but never touched memory.
-        let frames = leaked_frames();
+        let (frames, simmap) = backing!();
         {
-            let (mut live, _sim) = live_over(frames);
+            let (mut live, _sim) = live_over(frames, simmap);
             live.reserve_anonymous(5).expect("heap window has room");
             assert_eq!(frames.committed_frames(), 5);
         }
@@ -1737,7 +1739,7 @@ mod tests {
 
     #[test]
     fn alloc_dma_maps_a_zeroed_coherent_buffer_in_the_dma_window() {
-        let mut live = live();
+        let mut live = live_space!();
         let mapping = live
             .alloc_dma(2 * PAGE_SIZE, 0)
             .expect("a free block exists");
@@ -1804,18 +1806,22 @@ mod tests {
             }
         }
 
-        let recorded: &'static Recorded = Box::leak(Box::new(Recorded {
-            calls: AtomicUsize::new(0),
-            last_phys: AtomicU64::new(0),
-            last_len: AtomicUsize::new(0),
-        }));
+        static RECORDED: Once<Recorded> = Once::new();
+        let (frames, _simmap) = backing!();
+        let recorded = RECORDED
+            .call_once_infallible(|| Recorded {
+                calls: AtomicUsize::new(0),
+                last_phys: AtomicU64::new(0),
+                last_len: AtomicUsize::new(0),
+            })
+            .expect("a fresh cell");
         let mut live = LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
             RecordingSim {
                 inner: sim(),
                 recorded,
             },
-            leaked_frames(),
+            frames,
             VirtAddr::new(MMIO_WINDOW_BASE),
             MMIO_WINDOW_PAGES,
             VirtAddr::new(ANON_WINDOW_BASE),
@@ -1858,7 +1864,7 @@ mod tests {
 
     #[test]
     fn alloc_dma_rejects_a_block_above_the_addressing_limit() {
-        let mut live = live();
+        let mut live = live_space!();
         // An addressing limit below the allocator's RAM window cannot be
         // satisfied by any block, so the carve is refused fail-closed and no
         // pages are mapped.
@@ -1875,7 +1881,7 @@ mod tests {
 
     #[test]
     fn alloc_dma_rejects_zero_length() {
-        let mut live = live();
+        let mut live = live_space!();
         assert_eq!(
             live.alloc_dma(0, 0),
             Err(LiveSpaceError::Dma(DmaError::ZeroSize))
@@ -1887,7 +1893,7 @@ mod tests {
         // Build the live space over a `'static` allocator we keep a handle to,
         // so we can observe the frame count before, during, and after the
         // space (and its DMA buffers) are torn down.
-        let frames = leaked_frames();
+        let (frames, _simmap) = backing!();
         let before = frames.free_frames();
         {
             let mut live = LiveSpace::new(
@@ -1927,9 +1933,8 @@ mod tests {
         // return *every* frame it owned — `FIXED` anonymous, placed
         // anonymous, and DMA alike — while leaving registry-owned shared
         // frames and device windows untouched, and scrub the freed bytes.
-        let frames = leaked_frames();
+        let (frames, simmap) = backing!();
         let before = frames.free_frames();
-        let simmap: &'static SimPhysMap = Box::leak(Box::new(sim()));
 
         // A stand-in shared-region frame owned by "the registry", mapped
         // into the space but never owned by it.
@@ -2019,7 +2024,7 @@ mod tests {
         // transfer, so many alloc/free cycles must leave the frame allocator
         // exactly as full as it started — never marching upward (the leak the
         // syscall exists to close).
-        let frames = leaked_frames();
+        let (frames, _simmap) = backing!();
         let before = frames.free_frames();
         let mut live = LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
@@ -2058,7 +2063,7 @@ mod tests {
 
     #[test]
     fn map_shared_maps_a_cacheable_region_in_its_window_and_unmaps_by_base() {
-        let mut live = live();
+        let mut live = live_space!();
         // A real frame reachable through the sim direct map; map_shared only
         // installs page-table entries (the registry owns/zeroes the frames).
         let phys = SIM_BASE;
@@ -2096,7 +2101,7 @@ mod tests {
 
     #[test]
     fn map_shared_chunks_maps_a_multi_block_region_into_one_window() {
-        let mut live = live();
+        let mut live = live_space!();
         // Two physically-disjoint blocks in the sim window become one flat
         // three-page shared window — the display frame ring a single buddy
         // block could not hold.
@@ -2135,9 +2140,9 @@ mod tests {
 
     #[test]
     fn a_file_region_reserves_faults_reads_back_and_releases_sparsely() {
-        let frames = leaked_frames();
+        let (frames, simmap) = backing!();
         let before = frames.free_frames();
-        let (mut live, simmap) = live_over(frames);
+        let (mut live, simmap) = live_over(frames, simmap);
         // Reserving draws pure address space: no frame moves.
         let base = live.reserve_file_region(4).expect("window has room");
         assert!(base >= FILE_WINDOW_BASE);
@@ -2174,7 +2179,7 @@ mod tests {
 
     #[test]
     fn a_fault_outside_any_reserved_file_region_is_refused() {
-        let mut live = live();
+        let mut live = live_space!();
         // Nothing reserved: any window address is refused.
         assert_eq!(
             live.map_file_page_at(FILE_WINDOW_BASE, &[1]),
@@ -2190,7 +2195,7 @@ mod tests {
 
     #[test]
     fn unmap_anonymous_refuses_a_file_region_base() {
-        let mut live = live();
+        let mut live = live_space!();
         let base = live.reserve_file_region(2).expect("room");
         live.map_file_page_at(base, &[7]).expect("fault");
         // The anonymous release path must not tear down (or even inspect)
@@ -2204,10 +2209,10 @@ mod tests {
 
     #[test]
     fn dropping_the_live_space_reclaims_resident_file_pages() {
-        let frames = leaked_frames();
+        let (frames, simmap) = backing!();
         let before = frames.free_frames();
         {
-            let (mut live, _sim) = live_over(frames);
+            let (mut live, _sim) = live_over(frames, simmap);
             let base = live.reserve_file_region(8).expect("room");
             live.map_file_page_at(base, &[1]).expect("fault");
             live.map_file_page_at(base + 5 * PAGE_SIZE as u64, &[2])
@@ -2225,8 +2230,8 @@ mod tests {
     /// space wrote through the same storage.
     fn live_over(
         frames: &'static FrameAllocator,
+        simmap: &'static SimPhysMap,
     ) -> (LiveSpace<HostPageTable, SharedSim>, &'static SimPhysMap) {
-        let simmap: &'static SimPhysMap = Box::leak(Box::new(sim()));
         let live = LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
             SharedSim(simmap),
@@ -2257,14 +2262,13 @@ mod tests {
 
     mod ramzip {
         use super::{SharedSim, ANON_WINDOW_BASE};
-        use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-        use crate::frame::{FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
+        use crate::frame::{FrameAllocator, MemoryClass, PAGE_SIZE};
         use crate::live::{LiveSpace, LiveUserSpace};
         use crate::phys::SimPhysMap;
         use crate::ramzip::{PageCandidate, Ramzip, RamzipCaps, RamzipFaultOutcome};
         use crate::seal::{EntropySource, SealError};
+        use crate::test_fixture::frame_backing;
         use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
-        use alloc::boxed::Box;
         use tairix_log::{Event, Sink};
         use tairix_reclaim::{MemoryPressure, PressureBand};
         use tairix_sync::SpinLock;
@@ -2299,26 +2303,26 @@ mod tests {
             )
         }
 
-        /// A live space over a fresh 512-frame allocator and a shared,
-        /// leaked physical map (so `copy_in` observes the same storage).
-        fn env() -> (
+        /// A live space over a fresh 512-frame allocator and the direct map
+        /// over the same RAM (so `copy_in` observes the same storage). One
+        /// cell per expansion, so no two concurrently-running tests share a
+        /// pool.
+        macro_rules! env {
+            () => {{
+                let (frames, simmap) = frame_backing!(0, FRAMES);
+                build_env(frames, simmap)
+            }};
+        }
+
+        fn build_env(
+            frames: &'static FrameAllocator,
+            simmap: &'static SimPhysMap,
+        ) -> (
             LiveSpace<HostPageTable, SharedSim>,
             &'static FrameAllocator,
             MemoryPressure,
             &'static SimPhysMap,
         ) {
-            let mut map = BootMemoryMap::new();
-            map.push(MemoryRegion {
-                kind: RegionKind::Usable,
-                start: PhysAddr::new(0),
-                length: (FRAMES * PAGE_SIZE) as u64,
-            });
-            let frames: &'static FrameAllocator =
-                Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
-            let simmap: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(
-                PhysAddr::new(0),
-                FRAMES * PAGE_SIZE,
-            )));
             let pressure = MemoryPressure::over(frames);
             let live = LiveSpace::new(
                 AddressSpace::new(HostPageTable::new()),
@@ -2348,8 +2352,10 @@ mod tests {
                 guard += 1;
                 assert!(guard <= FRAMES, "band {band:?} never reached");
             }
-            // Leak the held frames for the test's lifetime so the band stays.
-            core::mem::forget(held);
+            // The frames stay drawn because nothing frees them: `Frame` is a
+            // plain index with no drop glue, so the holding vector's own
+            // memory is returned while the band stays where it was pressed.
+            drop(held);
         }
 
         /// The tier entry count, read through the shared stats projection.
@@ -2359,7 +2365,7 @@ mod tests {
 
         #[test]
         fn reclaim_compresses_cold_placed_anonymous_pages_and_faults_them_back() {
-            let (mut live, frames, pressure, simmap) = env();
+            let (mut live, frames, pressure, simmap) = env!();
             let tier = tier();
             let sink = NullSink;
 
@@ -2413,7 +2419,7 @@ mod tests {
 
         #[test]
         fn reclaim_under_normal_pressure_compresses_nothing() {
-            let (mut live, _frames, pressure, _simmap) = env();
+            let (mut live, _frames, pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             live.map_anonymous_placed(4).expect("place anon region");
@@ -2438,7 +2444,7 @@ mod tests {
 
         #[test]
         fn only_placed_anonymous_pages_are_candidates() {
-            let (mut live, frames, pressure, _simmap) = env();
+            let (mut live, frames, pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             // A FIXED anonymous mapping outside every window is *not* a
@@ -2471,7 +2477,7 @@ mod tests {
 
         #[test]
         fn fault_in_with_no_entry_falls_through() {
-            let (mut live, _frames, _pressure, _simmap) = env();
+            let (mut live, _frames, _pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             // An address the tier has no entry for: the resolver falls
@@ -2484,7 +2490,7 @@ mod tests {
 
         #[test]
         fn reclaim_respects_the_want_budget() {
-            let (mut live, frames, pressure, _simmap) = env();
+            let (mut live, frames, pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             live.map_anonymous_placed(10).expect("place anon region");
@@ -2505,7 +2511,7 @@ mod tests {
 
         #[test]
         fn a_reclaim_and_fault_cycle_leaks_no_frames() {
-            let (mut live, frames, pressure, _simmap) = env();
+            let (mut live, frames, pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             let base = live.map_anonymous_placed(5).expect("place anon region");
@@ -2568,7 +2574,7 @@ mod tests {
 
         #[test]
         fn cluster_restores_contemporaneous_neighbours_after_a_comfortable_fault() {
-            let (mut live, frames, pressure, _simmap) = env();
+            let (mut live, frames, pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             // Six contiguous placed anonymous pages, all cold: compressed
@@ -2609,7 +2615,7 @@ mod tests {
 
         #[test]
         fn cluster_does_nothing_while_under_pressure() {
-            let (mut live, frames, pressure, _simmap) = env();
+            let (mut live, frames, pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             let base = live.map_anonymous_placed(4).expect("place anon region");
@@ -2636,7 +2642,7 @@ mod tests {
 
         #[test]
         fn warm_restores_near_recent_faults_only_with_evidence_and_comfort() {
-            let (mut live, frames, pressure, _simmap) = env();
+            let (mut live, frames, pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             let base = live.map_anonymous_placed(6).expect("place anon region");
@@ -2674,7 +2680,7 @@ mod tests {
 
         #[test]
         fn warm_stops_immediately_under_pressure() {
-            let (mut live, frames, pressure, _simmap) = env();
+            let (mut live, frames, pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             let base = live.map_anonymous_placed(4).expect("place anon region");
@@ -2703,7 +2709,7 @@ mod tests {
 
         #[test]
         fn cluster_and_warm_are_no_ops_on_an_empty_tier() {
-            let (mut live, _frames, pressure, _simmap) = env();
+            let (mut live, _frames, pressure, _simmap) = env!();
             let tier = tier();
             let sink = NullSink;
             // No entries and no faults: both restore nothing (fail closed)

@@ -79,11 +79,11 @@ impl FramePages {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
     use crate::frame::PhysAddr;
     use crate::phys::SimPhysMap;
-    use alloc::boxed::Box;
+    use crate::test_fixture::FrameBacking;
     use alloc::vec::Vec;
+    use tairix_sync::Once;
 
     /// Physical base of the simulated RAM window. Non-zero so a stray
     /// `phys == 0` would show up as "outside the map".
@@ -108,32 +108,44 @@ mod tests {
         }
     }
 
-    fn allocator(pages: usize) -> &'static FrameAllocator {
-        let mut map = BootMemoryMap::new();
-        map.push(MemoryRegion {
-            start: PhysAddr::new(RAM_BASE),
-            length: (pages * PAGE_SIZE) as u64,
-            kind: RegionKind::Usable,
-        });
-        Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")))
+    /// The cells a supply borrows beyond the shared frame backing.
+    struct SupplyCell {
+        backing: FrameBacking,
+        supply: Once<FramePages>,
     }
 
-    fn supply(pages: usize) -> (&'static FramePages, &'static FrameAllocator) {
-        let frames = allocator(pages);
-        let sim: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(
-            PhysAddr::new(RAM_BASE),
-            pages * PAGE_SIZE,
-        )));
-        let supply: &'static FramePages = Box::leak(Box::new(FramePages::new(
-            frames,
-            sim as &'static (dyn PhysMap + Sync),
-        )));
-        (supply, frames)
+    impl SupplyCell {
+        const fn new() -> Self {
+            Self {
+                backing: FrameBacking::new(),
+                supply: Once::new(),
+            }
+        }
+
+        fn build(&'static self, pages: usize) -> (&'static FramePages, &'static FrameAllocator) {
+            let (frames, sim) = self.backing.build(RAM_BASE, pages);
+            let supply = self
+                .supply
+                .call_once_infallible(|| {
+                    FramePages::new(frames, sim as &'static (dyn PhysMap + Sync))
+                })
+                .expect("a fresh cell");
+            (supply, frames)
+        }
+    }
+
+    /// One cell per expansion, so no two concurrently-running tests share a
+    /// frame pool.
+    macro_rules! supply {
+        ($pages:expr) => {{
+            static CELL: SupplyCell = SupplyCell::new();
+            CELL.build($pages)
+        }};
     }
 
     #[test]
     fn a_page_costs_exactly_one_frame_and_comes_back() {
-        let (supply, frames) = supply(USABLE_PAGES);
+        let (supply, frames) = supply!(USABLE_PAGES);
         let before = frames.free_frames();
         let page = supply.alloc().expect("a page");
         assert_eq!(
@@ -154,15 +166,15 @@ mod tests {
 
     #[test]
     fn pages_are_disjoint_and_exhaustion_fails_closed() {
-        let (supply, frames) = supply(USABLE_PAGES);
-        let mut pages = Vec::new();
+        let (supply, frames) = supply!(USABLE_PAGES);
+        let mut pages: Vec<NonNull<u8>> = Vec::new();
         while let Some(page) = supply.alloc() {
-            pages.push(page.as_ptr() as usize);
+            pages.push(page);
         }
         assert!(!pages.is_empty(), "the pool serves at least one page");
         assert_eq!(frames.free_frames(), 0, "the pool is drained");
 
-        let mut sorted = pages.clone();
+        let mut sorted: Vec<usize> = pages.iter().map(|p| p.addr().get()).collect();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), pages.len(), "no frame backs two pages");
@@ -170,19 +182,28 @@ mod tests {
         // Exhausted: `None`, never a panic.
         assert!(supply.alloc().is_none());
 
+        // The pages go back as the pointers they were handed out as, so the
+        // round trip is a derivation rather than an address rebuilt from an
+        // integer.
         for page in pages {
-            supply.free(NonNull::new(page as *mut u8).expect("non-null"));
+            supply.free(page);
         }
         assert!(frames.free_frames() > 0, "every page came back");
     }
 
     #[test]
     fn a_map_that_cannot_invert_is_refused_rather_than_leaked() {
-        let frames = allocator(USABLE_PAGES);
-        let one_way: &'static OneWayMap = Box::leak(Box::new(OneWayMap(SimPhysMap::new(
-            PhysAddr::new(RAM_BASE),
-            USABLE_PAGES * PAGE_SIZE,
-        ))));
+        static BACKING: FrameBacking = FrameBacking::new();
+        static ONE_WAY: Once<OneWayMap> = Once::new();
+        let (frames, _sim) = BACKING.build(RAM_BASE, USABLE_PAGES);
+        let one_way = ONE_WAY
+            .call_once_infallible(|| {
+                OneWayMap(SimPhysMap::new(
+                    PhysAddr::new(RAM_BASE),
+                    USABLE_PAGES * PAGE_SIZE,
+                ))
+            })
+            .expect("a fresh cell");
         let supply = FramePages::new(frames, one_way as &'static (dyn PhysMap + Sync));
         let before = frames.free_frames();
         assert!(
@@ -198,11 +219,13 @@ mod tests {
 
     #[test]
     fn freeing_an_address_the_supply_never_issued_frees_nothing() {
-        let (supply, frames) = supply(USABLE_PAGES);
+        let (supply, frames) = supply!(USABLE_PAGES);
         let page = supply.alloc().expect("a page");
         let before = frames.free_frames();
-        // Well outside the direct map's window.
-        supply.free(NonNull::new(PAGE_SIZE as *mut u8).expect("non-null"));
+        // A real pointer the test owns, so it is genuinely outside the
+        // direct map's window rather than an address minted from an integer.
+        let mut stranger = 0u8;
+        supply.free(NonNull::from(&mut stranger));
         assert_eq!(frames.free_frames(), before, "no frame was freed");
         supply.free(page);
     }

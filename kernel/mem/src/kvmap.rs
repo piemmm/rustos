@@ -315,10 +315,11 @@ mod tests {
     use super::*;
     use crate::vmm::HostPageTable;
     use alloc::vec::Vec;
+    use core::ptr::NonNull;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use tairix_arch_api::mmu::AddressSpace as HalAddressSpace;
+    use tairix_sync::Once;
 
-    const WINDOW_BASE: u64 = 0x80_0000_0000;
     const WINDOW_PAGES: usize = 64;
     const PAGE: u64 = PAGE_SIZE as u64;
 
@@ -349,26 +350,69 @@ mod tests {
         }
     }
 
-    fn remap(pages: usize) -> (KernelRemap<HostPageTable>, &'static CountingXtlb) {
-        remap_with_publish(pages, false)
+    /// The `'static` pieces one remap fixture borrows.
+    ///
+    /// `KernelRemap` takes a `&'static` shootdown port, and the window needs
+    /// memory a pointer can be *derived* from rather than an address minted
+    /// from an integer. Both live in cells the interpreter can account for;
+    /// a leaked `Box` it could not tell from a real leak.
+    struct RemapCell {
+        arena: Once<Vec<u8>>,
+        xtlb: Once<CountingXtlb>,
     }
 
-    /// [`remap`] over a port that declares whether an installation needs
-    /// the cross-CPU publish.
-    fn remap_with_publish(
-        pages: usize,
-        publish_remote: bool,
-    ) -> (KernelRemap<HostPageTable>, &'static CountingXtlb) {
-        let xtlb: &'static CountingXtlb =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(CountingXtlb {
-                publish_remote,
-                ..CountingXtlb::default()
-            }));
-        // SAFETY: the double stands in for a port that reserved this run;
-        // nothing here dereferences a window page, so the mint is the
-        // address arithmetic under test and nothing more.
-        let window = unsafe { KernelWindow::at_address(WINDOW_BASE, pages) }.expect("valid window");
-        (KernelRemap::new(window, HostPageTable::new(), xtlb), xtlb)
+    impl RemapCell {
+        const fn new() -> Self {
+            Self {
+                arena: Once::new(),
+                xtlb: Once::new(),
+            }
+        }
+
+        /// A remap over a `pages`-page window, on a port that declares
+        /// whether an installation needs the cross-CPU publish.
+        fn build(
+            &'static self,
+            pages: usize,
+            publish_remote: bool,
+        ) -> (KernelRemap<HostPageTable>, &'static CountingXtlb, u64) {
+            let arena = self
+                .arena
+                .call_once_infallible(|| alloc::vec![0u8; (pages + 1) * PAGE_SIZE])
+                .expect("a fresh cell");
+            let offset = arena.as_ptr().align_offset(PAGE_SIZE);
+            let root = NonNull::new(arena.as_ptr().wrapping_add(offset).cast_mut())
+                .expect("a live allocation is non-null");
+            // SAFETY: `root` is the page-aligned base of `pages` whole pages
+            // of `arena`, which this cell holds for the rest of the run.
+            let window = unsafe { KernelWindow::from_root(root, pages) }
+                .expect("the arena backs a representable window");
+            let xtlb = self
+                .xtlb
+                .call_once_infallible(|| CountingXtlb {
+                    publish_remote,
+                    ..CountingXtlb::default()
+                })
+                .expect("a fresh cell");
+            let base = window.base();
+            (
+                KernelRemap::new(window, HostPageTable::new(), xtlb),
+                xtlb,
+                base,
+            )
+        }
+    }
+
+    /// One cell per expansion, so no two concurrently-running tests share a
+    /// window.
+    macro_rules! remap {
+        ($pages:expr) => {
+            remap!($pages, false)
+        };
+        ($pages:expr, $publish:expr) => {{
+            static CELL: RemapCell = RemapCell::new();
+            CELL.build($pages, $publish)
+        }};
     }
 
     #[test]
@@ -376,8 +420,8 @@ mod tests {
         // A port whose ISA may cache the *absence* leaves a peer faulting
         // forever on a leaf the tables plainly hold, so the window's shared
         // sub-hierarchy owes it a fence over exactly the installed run.
-        let (map, xtlb) = remap_with_publish(WINDOW_PAGES, true);
-        map.map_chunk(WINDOW_BASE, Frame(0x200), 4).expect("maps");
+        let (map, xtlb, base) = remap!(WINDOW_PAGES, true);
+        map.map_chunk(base, Frame(0x200), 4).expect("maps");
         assert_eq!(xtlb.calls.load(Ordering::Relaxed), 1);
         assert_eq!(xtlb.pages.load(Ordering::Relaxed), 4);
     }
@@ -387,36 +431,32 @@ mod tests {
         // The undo path already synchronises the leaves it withdrew; a
         // failed chunk must not additionally publish a run it did not
         // install.
-        let (map, xtlb) = remap_with_publish(WINDOW_PAGES, true);
-        map.map_chunk(WINDOW_BASE, Frame(1), 1).expect("maps");
+        let (map, xtlb, base) = remap!(WINDOW_PAGES, true);
+        map.map_chunk(base, Frame(1), 1).expect("maps");
         let before = xtlb.calls.load(Ordering::Relaxed);
-        map.map_chunk(WINDOW_BASE, Frame(2), 1)
+        map.map_chunk(base, Frame(2), 1)
             .expect_err("already mapped");
         assert_eq!(xtlb.calls.load(Ordering::Relaxed), before);
     }
 
     #[test]
     fn a_chunk_maps_consecutive_pages_onto_consecutive_frames() {
-        let (map, _xtlb) = remap(WINDOW_PAGES);
-        map.map_chunk(WINDOW_BASE, Frame(0x200), 4).expect("maps");
+        let (map, _xtlb, base) = remap!(WINDOW_PAGES);
+        map.map_chunk(base, Frame(0x200), 4).expect("maps");
         for index in 0..4usize {
             assert_eq!(
-                map.translate(WINDOW_BASE + index as u64 * PAGE),
+                map.translate(base + index as u64 * PAGE),
                 Some(Frame(0x200 + index))
             );
         }
-        assert_eq!(map.translate(WINDOW_BASE + 4 * PAGE), None);
+        assert_eq!(map.translate(base + 4 * PAGE), None);
     }
 
     #[test]
     fn window_pages_are_writable_and_never_executable() {
-        let (map, _xtlb) = remap(WINDOW_PAGES);
-        map.map_chunk(WINDOW_BASE, Frame(1), 1).expect("maps");
-        let (_, flags) = map
-            .space
-            .lock()
-            .translate(WINDOW_BASE)
-            .expect("a live leaf");
+        let (map, _xtlb, base) = remap!(WINDOW_PAGES);
+        map.map_chunk(base, Frame(1), 1).expect("maps");
+        let (_, flags) = map.space.lock().translate(base).expect("a live leaf");
         assert!(flags.contains(PageFlags::READ));
         assert!(flags.contains(PageFlags::WRITE));
         assert!(!flags.contains(PageFlags::EXEC), "W^X");
@@ -425,66 +465,66 @@ mod tests {
 
     #[test]
     fn a_request_outside_the_window_is_refused() {
-        let (map, _xtlb) = remap(4);
-        let top = WINDOW_BASE + 4 * PAGE;
+        let (map, _xtlb, base) = remap!(4);
+        let top = base + 4 * PAGE;
         assert_eq!(
             map.map_chunk(top, Frame(1), 1),
             Err(RemapError::OutsideWindow)
         );
         assert_eq!(
-            map.map_chunk(WINDOW_BASE, Frame(1), 5),
+            map.map_chunk(base, Frame(1), 5),
             Err(RemapError::OutsideWindow),
             "a run overhanging the top is refused whole"
         );
         assert_eq!(
-            map.map_chunk(WINDOW_BASE - PAGE, Frame(1), 1),
+            map.map_chunk(base - PAGE, Frame(1), 1),
             Err(RemapError::OutsideWindow)
         );
         assert_eq!(
-            map.map_chunk(WINDOW_BASE + 1, Frame(1), 1),
+            map.map_chunk(base + 1, Frame(1), 1),
             Err(RemapError::Misaligned)
         );
         assert_eq!(
-            map.map_chunk(WINDOW_BASE, Frame(1), 0),
+            map.map_chunk(base, Frame(1), 0),
             Err(RemapError::ZeroLength)
         );
-        assert_eq!(map.translate(WINDOW_BASE), None, "nothing was mapped");
+        assert_eq!(map.translate(base), None, "nothing was mapped");
     }
 
     #[test]
     fn a_refused_leaf_rolls_the_whole_chunk_back() {
-        let (map, _xtlb) = remap(WINDOW_PAGES);
+        let (map, _xtlb, base) = remap!(WINDOW_PAGES);
         // Occupy the third page so the chunk's third leaf is refused.
-        map.map_chunk(WINDOW_BASE + 2 * PAGE, Frame(0x900), 1)
+        map.map_chunk(base + 2 * PAGE, Frame(0x900), 1)
             .expect("maps");
 
         assert_eq!(
-            map.map_chunk(WINDOW_BASE, Frame(0x100), 4),
+            map.map_chunk(base, Frame(0x100), 4),
             Err(RemapError::Map(MapError::AlreadyMapped))
         );
-        assert_eq!(map.translate(WINDOW_BASE), None);
-        assert_eq!(map.translate(WINDOW_BASE + PAGE), None);
+        assert_eq!(map.translate(base), None);
+        assert_eq!(map.translate(base + PAGE), None);
         assert_eq!(
-            map.translate(WINDOW_BASE + 2 * PAGE),
+            map.translate(base + 2 * PAGE),
             Some(Frame(0x900)),
             "the pre-existing leaf survived the rollback"
         );
-        assert_eq!(map.translate(WINDOW_BASE + 3 * PAGE), None);
+        assert_eq!(map.translate(base + 3 * PAGE), None);
     }
 
     #[test]
     fn teardown_recovers_every_frame_of_a_multi_chunk_run() {
-        let (map, _xtlb) = remap(WINDOW_PAGES);
+        let (map, _xtlb, base) = remap!(WINDOW_PAGES);
         // Three chunks of different sizes, as growth from a fragmented pool
         // produces.
-        map.map_chunk(WINDOW_BASE, Frame(0x40), 8).expect("maps");
-        map.map_chunk(WINDOW_BASE + 8 * PAGE, Frame(0x300), 4)
+        map.map_chunk(base, Frame(0x40), 8).expect("maps");
+        map.map_chunk(base + 8 * PAGE, Frame(0x300), 4)
             .expect("maps");
-        map.map_chunk(WINDOW_BASE + 12 * PAGE, Frame(0x11), 2)
+        map.map_chunk(base + 12 * PAGE, Frame(0x11), 2)
             .expect("maps");
 
         let mut recovered = Vec::new();
-        let count = map.unmap_run(WINDOW_BASE, 14, &mut |frame| recovered.push(frame));
+        let count = map.unmap_run(base, 14, &mut |frame| recovered.push(frame));
         assert_eq!(count, 14);
         let expected: Vec<Frame> = (0x40..0x48)
             .chain(0x300..0x304)
@@ -493,19 +533,19 @@ mod tests {
             .collect();
         assert_eq!(recovered, expected);
         for index in 0..14 {
-            assert_eq!(map.translate(WINDOW_BASE + index * PAGE), None);
+            assert_eq!(map.translate(base + index * PAGE), None);
         }
     }
 
     #[test]
     fn teardown_synchronises_every_page_it_recovers() {
-        let (map, xtlb) = remap(WINDOW_PAGES);
-        map.map_chunk(WINDOW_BASE, Frame(0x40), WINDOW_PAGES)
+        let (map, xtlb, base) = remap!(WINDOW_PAGES);
+        map.map_chunk(base, Frame(0x40), WINDOW_PAGES)
             .expect("maps");
         let before = xtlb.pages.load(Ordering::Relaxed);
 
         let mut recovered = 0;
-        map.unmap_run(WINDOW_BASE, WINDOW_PAGES, &mut |_| recovered += 1);
+        map.unmap_run(base, WINDOW_PAGES, &mut |_| recovered += 1);
         assert_eq!(recovered, WINDOW_PAGES);
         assert_eq!(
             xtlb.pages.load(Ordering::Relaxed) - before,
@@ -520,9 +560,9 @@ mod tests {
         // must cost no cross-CPU invalidation on a port that declares none:
         // doing it anyway made a many-chunk growth issue one whole-domain
         // TLB broadcast per chunk.
-        let (map, xtlb) = remap(WINDOW_PAGES);
-        map.map_chunk(WINDOW_BASE, Frame(0x40), 8).expect("maps");
-        map.map_chunk(WINDOW_BASE + 8 * PAGE, Frame(0x300), 8)
+        let (map, xtlb, base) = remap!(WINDOW_PAGES);
+        map.map_chunk(base, Frame(0x40), 8).expect("maps");
+        map.map_chunk(base + 8 * PAGE, Frame(0x300), 8)
             .expect("maps");
         assert_eq!(
             xtlb.calls.load(Ordering::Relaxed),
@@ -533,9 +573,9 @@ mod tests {
 
     #[test]
     fn tearing_down_an_unmapped_run_invalidates_nothing() {
-        let (map, xtlb) = remap(WINDOW_PAGES);
+        let (map, xtlb, base) = remap!(WINDOW_PAGES);
         let calls_before = xtlb.calls.load(Ordering::Relaxed);
-        assert_eq!(map.unmap_run(WINDOW_BASE, 8, &mut |_| {}), 0);
+        assert_eq!(map.unmap_run(base, 8, &mut |_| {}), 0);
         assert_eq!(
             xtlb.calls.load(Ordering::Relaxed),
             calls_before,
@@ -548,12 +588,11 @@ mod tests {
         // A run longer than one batch must still pay far fewer boundaries
         // than it has pages.
         let pages = TEARDOWN_BATCH * 3;
-        let (map, xtlb) = remap(pages);
-        map.map_chunk(WINDOW_BASE, Frame(0x1000), pages)
-            .expect("maps");
+        let (map, xtlb, base) = remap!(pages);
+        map.map_chunk(base, Frame(0x1000), pages).expect("maps");
         let calls_before = xtlb.calls.load(Ordering::Relaxed);
 
-        map.unmap_run(WINDOW_BASE, pages, &mut |_| {});
+        map.unmap_run(base, pages, &mut |_| {});
         assert_eq!(
             xtlb.calls.load(Ordering::Relaxed) - calls_before,
             3,
@@ -563,27 +602,26 @@ mod tests {
 
     #[test]
     fn teardown_skips_unmapped_pages_without_fabricating_a_frame() {
-        let (map, _xtlb) = remap(WINDOW_PAGES);
-        map.map_chunk(WINDOW_BASE, Frame(7), 1).expect("maps");
-        map.map_chunk(WINDOW_BASE + 3 * PAGE, Frame(9), 1)
-            .expect("maps");
+        let (map, _xtlb, base) = remap!(WINDOW_PAGES);
+        map.map_chunk(base, Frame(7), 1).expect("maps");
+        map.map_chunk(base + 3 * PAGE, Frame(9), 1).expect("maps");
 
         let mut recovered = Vec::new();
-        let count = map.unmap_run(WINDOW_BASE, 4, &mut |frame| recovered.push(frame));
+        let count = map.unmap_run(base, 4, &mut |frame| recovered.push(frame));
         assert_eq!(count, 2);
         assert_eq!(recovered, alloc::vec![Frame(7), Frame(9)]);
     }
 
     #[test]
     fn teardown_outside_the_window_recovers_nothing() {
-        let (map, xtlb) = remap(4);
+        let (map, xtlb, base) = remap!(4);
         let calls_before = xtlb.calls.load(Ordering::Relaxed);
         let mut recovered = 0;
         assert_eq!(
-            map.unmap_run(WINDOW_BASE + 4 * PAGE, 1, &mut |_| recovered += 1),
+            map.unmap_run(base + 4 * PAGE, 1, &mut |_| recovered += 1),
             0
         );
-        assert_eq!(map.unmap_run(WINDOW_BASE, 0, &mut |_| recovered += 1), 0);
+        assert_eq!(map.unmap_run(base, 0, &mut |_| recovered += 1), 0);
         assert_eq!(recovered, 0);
         assert_eq!(
             xtlb.calls.load(Ordering::Relaxed),
@@ -594,11 +632,11 @@ mod tests {
 
     #[test]
     fn translate_names_only_window_addresses() {
-        let (map, _xtlb) = remap(4);
-        map.map_chunk(WINDOW_BASE, Frame(5), 1).expect("maps");
-        assert_eq!(map.translate(WINDOW_BASE), Some(Frame(5)));
-        assert_eq!(map.translate(WINDOW_BASE - PAGE), None);
-        assert_eq!(map.translate(WINDOW_BASE + 4 * PAGE), None);
+        let (map, _xtlb, base) = remap!(4);
+        map.map_chunk(base, Frame(5), 1).expect("maps");
+        assert_eq!(map.translate(base), Some(Frame(5)));
+        assert_eq!(map.translate(base - PAGE), None);
+        assert_eq!(map.translate(base + 4 * PAGE), None);
         assert_eq!(map.window().pages(), 4);
     }
 
@@ -606,8 +644,8 @@ mod tests {
     fn the_map_is_shareable_across_cpus() {
         fn assert_sync<T: Sync>() {}
         assert_sync::<KernelRemap<HostPageTable>>();
-        let (map, _xtlb) = remap(4);
+        let (map, _xtlb, base) = remap!(4);
         let erased: &dyn KernelVirtMap = &map;
-        assert_eq!(erased.window().base(), WINDOW_BASE);
+        assert_eq!(erased.window().base(), base);
     }
 }

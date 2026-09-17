@@ -255,7 +255,9 @@ fn run_resume() -> ! {
     };
 
     let mut space = AddressSpace::new(arch_space);
-    let physmap = DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30);
+    // SAFETY: the boot code installs this direct map and never unmaps it.
+    let physmap = unsafe { DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30) }
+        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: PROGRAM_RXE,

@@ -533,13 +533,19 @@ fn security_change_is_seen_by_the_secured_vfs_permission_check() {
     );
 }
 
+/// Bytes a whole-document read test streams. Several chunks is what makes the
+/// run stitching and the one-driver-call-per-absent-run accounting
+/// observable; a wider document repeats the identical path and costs the
+/// interpreter every byte of it.
+const LARGE_DOCUMENT_BYTES: usize = if cfg!(miri) { 8 * CHUNK } else { 64 * 1024 };
+
 #[test]
 fn a_large_read_is_cached_and_repeats_without_driver_calls() {
     // Read size decides how a miss is *fetched*, never whether the bytes
     // are retained: a whole-document read — the shape every image,
     // bundle, and settings load has — is served from RAM on the repeat,
     // and its miss costs one driver call rather than one per page.
-    let contents = vec![0xA5u8; 64 * 1024];
+    let contents = vec![0xA5u8; LARGE_DOCUMENT_BYTES];
     let mut cache = fixture(&contents);
     let file = file_of(&mut cache);
 
@@ -569,7 +575,7 @@ fn a_partly_cached_large_read_fetches_only_the_missing_runs() {
     // Hits and fetches stitch together: a read spanning resident and
     // absent chunks asks the driver once per *contiguous absent run*,
     // and the answer is byte-exact across every boundary.
-    let contents: alloc::vec::Vec<u8> = (0..64 * 1024)
+    let contents: alloc::vec::Vec<u8> = (0..LARGE_DOCUMENT_BYTES)
         .map(|i| u8::try_from(i % 251).expect("bounded by the modulus"))
         .collect();
     let mut cache = fixture(&contents);
@@ -591,10 +597,16 @@ fn a_partly_cached_large_read_fetches_only_the_missing_runs() {
     );
 }
 
+/// Bytes the eviction sweep streams through the cache. Interpreted, a file a
+/// few multiples of the hard budget still drives several eviction passes over
+/// the identical admission path, and the byte copies a wider stream adds cost
+/// the interpreter everything and prove nothing further.
+const EVICTION_STREAM_BYTES: usize = if cfg!(miri) { 48 * 1024 } else { 200 * 1024 };
+
 #[test]
 fn eviction_honours_budget_and_hysteresis_and_takes_data_first() {
     // A budget small enough that a few chunks overflow it: hard = 16 KiB.
-    let contents = vec![0x5Au8; 200 * 1024];
+    let contents = vec![0x5Au8; EVICTION_STREAM_BYTES];
     let mut fs = RwMockFs::new();
     let root = fs.root();
     fs.create(root, b"big", NodeKind::RegularFile)

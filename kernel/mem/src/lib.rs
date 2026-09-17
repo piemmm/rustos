@@ -78,6 +78,8 @@ pub mod sensitive;
 pub mod slab;
 pub mod spawn;
 pub mod swap;
+#[cfg(all(test, not(loom)))]
+mod test_fixture;
 pub mod uaccess;
 pub mod vmm;
 

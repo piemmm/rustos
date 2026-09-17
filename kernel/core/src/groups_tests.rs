@@ -12,12 +12,12 @@ use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, Uid, UserRecord, UsersDb,
-    MIN_ITERATIONS,
 };
 
 use crate::fs::memfs::RwMockFs;
 use crate::fs::VfsError;
 use crate::groups::{build_identity_table, load_groups_db, GroupsLoadError};
+use crate::test_identity::shared_password;
 use crate::test_sink::TestSink;
 
 /// An in-memory root volume carrying `/System/Security/Groups` with the
@@ -63,10 +63,14 @@ fn valid_groups_text() -> String {
 }
 
 /// A user record naming `primary` and `supplementary` groups.
+///
+/// An active account must be login-shaped, so it carries the shared stored
+/// password rather than deriving its own: the identity-table build consults
+/// the identity half alone and never any password material.
 fn user(name: &str, uid: u32, primary: u32, supplementary: &[Gid]) -> UserRecord {
     let mut caps = CapabilitySet::empty();
     caps.insert(CapabilityId::PROC_SPAWN);
-    UserRecord::with_password(
+    UserRecord::new(
         Identity {
             username: name,
             uid: Uid(uid),
@@ -78,9 +82,7 @@ fn user(name: &str, uid: u32, primary: u32, supplementary: &[Gid]) -> UserRecord
             capabilities: caps,
             state: AccountState::Active,
         },
-        b"correct horse",
-        [0x42; 16],
-        MIN_ITERATIONS,
+        shared_password(),
     )
     .expect("valid record")
 }

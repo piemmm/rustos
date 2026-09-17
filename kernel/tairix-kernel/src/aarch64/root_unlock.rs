@@ -569,8 +569,12 @@ fn virtio_blk_unlock<'a>(
     // the sanctioned "kernel state is never freed" pattern
     // (`kernel/core/src/spawn.rs`) and uses only safe `Box::leak`, never an
     // `unsafe` lifetime cast.
+    // SAFETY: the boot identity map covers `identity_limit()` bytes of
+    // physical RAM in every translation root the kernel builds and is never
+    // torn down, so the window is live for as long as the map is used.
     let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        DirectPhysMap::identity(identity_limit()),
+        unsafe { DirectPhysMap::identity(identity_limit()) }
+            .ok_or("root-unlock: identity map addresses nothing")?,
     ));
     let gib = configured_identity_gigapages();
     // Two throwaway *bookkeeping* page tables (device access is via the
@@ -755,8 +759,12 @@ fn emmc2_unlock<'a>(
     // virtio path: the brought-up disk is shared for life by the two
     // independent tasks `finish_unlock` runs, so the `Emmc2`'s window backing
     // must outlive both frames (kernel state is never freed).
+    // SAFETY: the boot identity map covers `identity_limit()` bytes of
+    // physical RAM in every translation root the kernel builds and is never
+    // torn down, so the window is live for as long as the map is used.
     let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        DirectPhysMap::identity(identity_limit()),
+        unsafe { DirectPhysMap::identity(identity_limit()) }
+            .ok_or("root-unlock: identity map addresses nothing")?,
     ));
     let gib = configured_identity_gigapages();
     let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)

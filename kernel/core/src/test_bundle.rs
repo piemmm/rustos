@@ -26,6 +26,7 @@ use crate::test_sink::TestSink;
 
 extern crate std;
 use std::collections::{BTreeMap, BTreeSet};
+use tairix_sync::Once;
 
 /// The deterministic test signing seed; its derived public key is the trust
 /// anchor the tests pin.
@@ -535,7 +536,17 @@ pub(crate) fn gate_load(fs: &MemFs, anchor: [u8; 32]) -> Result<LoadedApp, AppEr
 
 /// A verified [`LoadedApp`] straight from the shared load gate, over the
 /// composed in-memory test bundle.
+///
+/// Verified once and shared: the gate's signature round is the same work on
+/// every call and the result is immutable behind its `Arc`, so a caller that
+/// only needs *a* verified app pays nothing. A test that needs two
+/// independent loads composes and gates the bundle itself.
 pub(crate) fn verified_app() -> Arc<LoadedApp> {
-    let (fs, anchor, _run) = composed_bundle(Vec::new());
-    Arc::new(gate_load(&fs, anchor).expect("the composed bundle verifies"))
+    static APP: Once<Arc<LoadedApp>> = Once::new();
+    APP.call_once_infallible(|| {
+        let (fs, anchor, _run) = composed_bundle(Vec::new());
+        Arc::new(gate_load(&fs, anchor).expect("the composed bundle verifies"))
+    })
+    .expect("a fresh cell")
+    .clone()
 }

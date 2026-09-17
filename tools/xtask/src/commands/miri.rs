@@ -47,6 +47,28 @@ pub enum Scope {
     AllTargets,
     /// The crate's `--lib` tests only, for the reason carried here.
     LibOnly(&'static str),
+    /// The crate's `--lib` tests bar the modules `skip` names, for the
+    /// reason carried here.
+    ///
+    /// Budget only: a skipped module carries no `unsafe` and passes when it
+    /// is run, so what the interpreter would spend on it buys nothing the
+    /// rest of the crate does not already prove. Skipping one that *reports*
+    /// undefined behaviour would be dodging a finding, which the charter
+    /// forbids.
+    LibExcept {
+        /// libtest `--skip` patterns.
+        skip: &'static [&'static str],
+        /// Why each skipped module costs the interpreter more than it tells
+        /// it.
+        reason: &'static str,
+    },
+}
+
+impl Scope {
+    /// Whether the run is confined to the crate's `--lib` target.
+    const fn is_lib_only(self) -> bool {
+        matches!(self, Self::LibOnly(_) | Self::LibExcept { .. })
+    }
 }
 
 /// One crate the oracle is pointed at.
@@ -104,6 +126,24 @@ pub const TARGETS: &[Target] = &[
                       pointers and site records live only under that feature",
         features: &["lock-diagnostics"],
         scope: Scope::AllTargets,
+    },
+    Target {
+        package: "tairix-kernel-mem",
+        description: "the slab tier's guarded storage, the remap window's slot arithmetic, the \
+                      DMA pool's direct-map slices, the bounded-pointer helpers, and the direct \
+                      physical map's provenance root",
+        features: &[],
+        scope: Scope::LibExcept {
+            skip: &["dma::tests::a_full_span_window_serves_a_multi_device_enclosure_lazily"],
+            reason: "that one test reserves a full gigabyte of window and streams thirteen \
+                     32-page device regions through it, zeroed on carve and volatile-cleared on \
+                     release; interpreted, the per-byte aliasing bookkeeping over that volume \
+                     costs four hours. It passes when run, and what it proves beyond the rest of \
+                     the module is slot *capacity* — the `unsafe` it reaches is the same \
+                     direct-map slice the other twenty-five dma tests reach. Its own integration \
+                     targets are excluded with it: the loom model does not build under the \
+                     interpreter and the fuzz harnesses are budgeted elsewhere",
+        },
     },
     Target {
         package: "tairix-arch-api",
@@ -254,11 +294,17 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 fn job_for(ctx: &Context, target: &Target, seed: Option<u64>, index: usize) -> Job {
     let mut cmd: Command = ctx.cargo();
     cmd.args(["miri", "test", "-p", target.package, "--locked"]);
-    if matches!(target.scope, Scope::LibOnly(_)) {
+    if target.scope.is_lib_only() {
         cmd.arg("--lib");
     }
     if !target.features.is_empty() {
         cmd.args(["--features", &target.features.join(",")]);
+    }
+    if let Scope::LibExcept { skip, .. } = target.scope {
+        cmd.arg("--");
+        for pattern in skip {
+            cmd.args(["--skip", pattern]);
+        }
     }
     let job_seed = seed::job_seed(seed, index);
     cmd.env(seed::FUZZ_SEED_ENV, job_seed.to_string());
@@ -272,6 +318,7 @@ fn job_for(ctx: &Context, target: &Target, seed: Option<u64>, index: usize) -> J
     let scope = match target.scope {
         Scope::AllTargets => "",
         Scope::LibOnly(_) => " --lib",
+        Scope::LibExcept { .. } => " --lib (part)",
     };
     let label = if target.features.is_empty() {
         format!("miri {}{scope} (seed {job_seed})", target.package)
@@ -351,12 +398,30 @@ mod tests {
     #[test]
     fn a_narrowed_scope_carries_its_reason() {
         for target in TARGETS {
-            if let Scope::LibOnly(reason) = target.scope {
+            let reason = match target.scope {
+                Scope::AllTargets => None,
+                Scope::LibOnly(reason) | Scope::LibExcept { reason, .. } => Some(reason),
+            };
+            if let Some(reason) = reason {
                 assert!(
                     !reason.trim().is_empty(),
-                    "{} is scoped to --lib with no reason",
+                    "{} is narrowed with no reason",
                     target.package
                 );
+            }
+            if let Scope::LibExcept { skip, .. } = target.scope {
+                assert!(
+                    !skip.is_empty(),
+                    "{} excludes nothing, so it is not a narrowed scope",
+                    target.package
+                );
+                for pattern in skip {
+                    assert!(
+                        !pattern.trim().is_empty(),
+                        "{} carries an empty skip pattern",
+                        target.package
+                    );
+                }
             }
         }
     }

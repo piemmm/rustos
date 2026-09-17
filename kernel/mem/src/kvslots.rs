@@ -529,43 +529,34 @@ impl SlotWindow {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-    use crate::frame::PhysAddr;
-    use crate::phys::SimPhysMap;
-    use alloc::boxed::Box;
+    use crate::test_fixture::frame_backing;
 
     const RAM_BASE: u64 = 0x40_0000;
 
-    /// Leak a frame allocator plus a matching simulated direct map over
-    /// `pages` of RAM — the host stand-in for the kernel globals these are
-    /// in production.
-    fn backing(pages: usize) -> (&'static FrameAllocator, &'static (dyn PhysMap + Sync)) {
-        let mut map = BootMemoryMap::new();
-        map.push(MemoryRegion {
-            start: PhysAddr::new(RAM_BASE),
-            length: (pages * PAGE_SIZE) as u64,
-            kind: RegionKind::Usable,
-        });
-        let frames: &'static FrameAllocator =
-            Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
-        let sim: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(
-            PhysAddr::new(RAM_BASE),
-            pages * PAGE_SIZE,
-        )));
-        (frames, sim)
+    /// A frame allocator plus a matching simulated direct map over `pages`
+    /// of RAM based at [`RAM_BASE`] — the host stand-in for the kernel
+    /// globals these are in production. One cell per expansion, so no two
+    /// concurrently-running tests share a pool.
+    macro_rules! backing {
+        ($pages:expr) => {{
+            let (frames, sim) = frame_backing!(RAM_BASE, $pages);
+            (frames, sim as &'static (dyn PhysMap + Sync))
+        }};
     }
 
-    fn window(capacity: usize) -> (SlotWindow, &'static FrameAllocator) {
-        let (frames, sim) = backing(64);
-        (
-            SlotWindow::new(capacity, frames, sim).expect("non-zero capacity"),
-            frames,
-        )
+    macro_rules! window {
+        ($capacity:expr) => {{
+            let (frames, sim) = backing!(64);
+            (
+                SlotWindow::new($capacity, frames, sim).expect("non-zero capacity"),
+                frames,
+            )
+        }};
     }
 
     #[test]
     fn new_refuses_an_empty_window() {
-        let (frames, sim) = backing(4);
+        let (frames, sim) = backing!(4);
         assert_eq!(
             SlotWindow::new(0, frames, sim).err(),
             Some(SlotError::ZeroLength)
@@ -574,7 +565,7 @@ mod tests {
 
     #[test]
     fn allocations_advance_the_cursor_without_overlapping() {
-        let (mut w, _frames) = window(32);
+        let (mut w, _frames) = window!(32);
         assert_eq!(w.allocate(4), Ok(0));
         assert_eq!(w.allocate(8), Ok(4));
         assert_eq!(w.allocate(1), Ok(12));
@@ -585,7 +576,7 @@ mod tests {
 
     #[test]
     fn allocate_refuses_zero_and_fails_closed_when_exhausted() {
-        let (mut w, _frames) = window(8);
+        let (mut w, _frames) = window!(8);
         assert_eq!(w.allocate(0), Err(SlotError::ZeroLength));
         assert_eq!(w.allocate(8), Ok(0));
         assert_eq!(w.allocate(1), Err(SlotError::WindowExhausted));
@@ -594,7 +585,7 @@ mod tests {
 
     #[test]
     fn allocate_refuses_a_request_larger_than_the_window() {
-        let (mut w, _frames) = window(4);
+        let (mut w, _frames) = window!(4);
         assert_eq!(w.allocate(5), Err(SlotError::WindowExhausted));
         assert_eq!(w.allocate(usize::MAX), Err(SlotError::WindowExhausted));
         assert_eq!(w.reserved(), 0);
@@ -602,7 +593,7 @@ mod tests {
 
     #[test]
     fn a_released_middle_run_is_reused_first_fit_and_split() {
-        let (mut w, _frames) = window(32);
+        let (mut w, _frames) = window!(32);
         let a = w.allocate(4).expect("fits");
         let b = w.allocate(8).expect("fits");
         let _c = w.allocate(4).expect("fits");
@@ -623,7 +614,7 @@ mod tests {
 
     #[test]
     fn releasing_around_a_free_run_coalesces_both_sides() {
-        let (mut w, _frames) = window(64);
+        let (mut w, _frames) = window!(64);
         let a = w.allocate(4).expect("fits");
         let b = w.allocate(4).expect("fits");
         let c = w.allocate(4).expect("fits");
@@ -640,7 +631,7 @@ mod tests {
 
     #[test]
     fn draining_the_window_retracts_the_cursor_and_frees_every_record() {
-        let (mut w, frames) = window(64);
+        let (mut w, frames) = window!(64);
         let free_before = frames.free_frames();
         let a = w.allocate(6).expect("fits");
         let b = w.allocate(6).expect("fits");
@@ -666,7 +657,7 @@ mod tests {
 
     #[test]
     fn releasing_the_tail_retracts_the_cursor_over_it() {
-        let (mut w, _frames) = window(64);
+        let (mut w, _frames) = window!(64);
         let a = w.allocate(4).expect("fits");
         let b = w.allocate(4).expect("fits");
         w.release(b, 4).expect("live");
@@ -679,7 +670,7 @@ mod tests {
 
     #[test]
     fn release_rejects_an_unknown_partial_or_repeated_run() {
-        let (mut w, _frames) = window(32);
+        let (mut w, _frames) = window!(32);
         let a = w.allocate(4).expect("fits");
         let _b = w.allocate(4).expect("fits");
         assert_eq!(w.release(a, 8), Err(SlotError::NotReserved), "too long");
@@ -700,7 +691,7 @@ mod tests {
 
     #[test]
     fn entry_records_are_recycled_rather_than_redrawn() {
-        let (mut w, frames) = window(4096);
+        let (mut w, frames) = window!(4096);
         let mut live = [0usize; 8];
         for slot in &mut live {
             *slot = w.allocate(2).expect("fits");
@@ -726,7 +717,7 @@ mod tests {
         // Every run needs its own record, so reserve more runs than a
         // single frame's records can describe.
         let runs = RECORDS_PER_FRAME + 4;
-        let (frames, sim) = backing(16);
+        let (frames, sim) = backing!(16);
         let mut w = SlotWindow::new(runs, frames, sim).expect("window");
         for _ in 0..runs {
             w.allocate(1).expect("fits");
@@ -755,7 +746,7 @@ mod tests {
     fn an_allocation_that_cannot_draw_a_record_fails_closed() {
         // A window far larger than the record supply, so the refusal is
         // about records and not about running out of address space.
-        let (frames, sim) = backing(2);
+        let (frames, sim) = backing!(2);
         let mut w = SlotWindow::new(8 * RECORDS_PER_FRAME, frames, sim).expect("window");
         exhaust_records(&mut w, frames);
 
@@ -774,7 +765,7 @@ mod tests {
 
     #[test]
     fn a_split_that_cannot_draw_a_record_leaves_the_free_run_intact() {
-        let (frames, sim) = backing(2);
+        let (frames, sim) = backing!(2);
         let mut w = SlotWindow::new(8 * RECORDS_PER_FRAME, frames, sim).expect("window");
         exhaust_records(&mut w, frames);
 

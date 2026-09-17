@@ -274,7 +274,9 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
     };
 
     let mut space = AddressSpace::new(arch);
-    let physmap = DirectPhysMap::identity(u64::from(u32::MAX) + 1); // 4 GiB
+    // SAFETY: the boot code identity-maps this window and never unmaps it.
+    let physmap = unsafe { DirectPhysMap::identity(u64::from(u32::MAX) + 1) }
+        .expect("the boot direct map addresses its window"); // 4 GiB
     let request = SpawnRequest {
         image: &image,
         image_bytes: PROGRAM_RXE,

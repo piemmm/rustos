@@ -92,18 +92,24 @@ pub struct ConfiguredPhysMap;
 impl ConfiguredPhysMap {
     /// The live map as a linear window, re-read so a caller can never
     /// hold a stale extent.
-    fn window() -> DirectPhysMap {
-        DirectPhysMap::new(paging::PHYSMAP_VMA_BASE, paging::physmap_bytes())
+    ///
+    /// `None` when the live map covers nothing a pointer could address, so
+    /// every consumer fails closed rather than reaching a fabricated one.
+    fn window() -> Option<DirectPhysMap> {
+        // SAFETY: the boot paging code installed this direct map in every
+        // translation root it builds and never tears it down, so the window
+        // is live for as long as the kernel runs.
+        unsafe { DirectPhysMap::new(paging::PHYSMAP_VMA_BASE, paging::physmap_bytes()) }
     }
 }
 
 impl PhysMap for ConfiguredPhysMap {
     fn translate(&self, phys: PhysAddr, len: usize) -> Option<NonNull<u8>> {
-        Self::window().translate(phys, len)
+        Self::window()?.translate(phys, len)
     }
 
     fn reverse(&self, virt: usize) -> Option<PhysAddr> {
-        Self::window().reverse(virt)
+        Self::window()?.reverse(virt)
     }
 
     fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {

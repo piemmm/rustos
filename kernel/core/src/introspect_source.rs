@@ -992,8 +992,12 @@ mod tests {
 
     /// A users cell holding one human account, mirroring the unlock's
     /// install of the on-disk half.
+    ///
+    /// The account carries the shared stored password rather than deriving
+    /// its own: the directory lists the identity half alone and never any
+    /// password material.
     fn human_db() -> LateUsersDb {
-        let record = tairix_users::UserRecord::with_password(
+        let record = tairix_users::UserRecord::new(
             tairix_users::Identity {
                 username: "root",
                 uid: tairix_users::Uid(1000),
@@ -1005,9 +1009,7 @@ mod tests {
                 capabilities: tairix_caps::CapabilitySet::empty(),
                 state: tairix_users::AccountState::Active,
             },
-            b"pw",
-            [0x42; 16],
-            tairix_users::MIN_ITERATIONS,
+            crate::test_identity::shared_password(),
         )
         .expect("valid record");
         let db = tairix_users::UsersDb::new(alloc::vec![record]).expect("valid db");

@@ -307,6 +307,27 @@ pub mod prop {
     use proptest::strategy::Strategy;
     use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
 
+    /// The [`Config`] a `proptest!` block runs under.
+    ///
+    /// Under the undefined-behaviour interpreter the sweep drops to
+    /// `interpreted` cases — one pass over each path is what exposes UB, and
+    /// the wide input search belongs to the ordinary run — and failure
+    /// persistence is off, because filing a counterexample wants the working
+    /// directory that isolation refuses. A counterexample found there is
+    /// reported, not filed.
+    #[must_use]
+    pub fn config(native: u32, interpreted: u32) -> Config {
+        Config {
+            cases: if cfg!(miri) { interpreted } else { native },
+            failure_persistence: if cfg!(miri) {
+                None
+            } else {
+                Config::default().failure_persistence
+            },
+            ..Config::default()
+        }
+    }
+
     /// Run `check` over programs drawn from `strategy`, panicking with the
     /// shrunk counterexample on the first failure.
     ///

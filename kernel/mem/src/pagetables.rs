@@ -145,38 +145,31 @@ impl PageTableFrames for FrameTableSource {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
     use crate::frame::FrameCount;
-    use crate::phys::SimPhysMap;
-    use alloc::boxed::Box;
+    use crate::test_fixture::frame_backing;
     use tairix_arch_api::frames::conformance;
+    use tairix_sync::Once;
 
     /// Physical base of the simulated RAM window. Non-zero so a stray
     /// `phys == 0` would be caught as "outside the map".
     const RAM_BASE: u64 = 0x10_0000;
     const USABLE_PAGES: usize = 8;
 
-    /// Leak a frame allocator + a direct map over `pages` of simulated
-    /// RAM based at [`RAM_BASE`], returning both as `'static`. Leaking is
-    /// the host stand-in for the kernel globals these are in production.
-    fn fresh_source() -> (&'static FrameTableSource, &'static FrameAllocator) {
-        let mut map = BootMemoryMap::new();
-        map.push(MemoryRegion {
-            start: PhysAddr::new(RAM_BASE),
-            length: (USABLE_PAGES * PAGE_SIZE) as u64,
-            kind: RegionKind::Usable,
-        });
-        let frames: &'static FrameAllocator =
-            Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
-        let sim: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(
-            PhysAddr::new(RAM_BASE),
-            USABLE_PAGES * PAGE_SIZE,
-        )));
-        let source: &'static FrameTableSource = Box::leak(Box::new(FrameTableSource::new(
-            frames,
-            sim as &'static (dyn PhysMap + Sync),
-        )));
-        (source, frames)
+    /// A frame source over a direct map of [`USABLE_PAGES`] of simulated
+    /// RAM based at [`RAM_BASE`] — the host stand-in for the kernel globals
+    /// these are in production. One cell per expansion, so no two
+    /// concurrently-running tests share a pool.
+    macro_rules! fresh_source {
+        () => {{
+            static SOURCE: Once<FrameTableSource> = Once::new();
+            let (frames, sim) = frame_backing!(RAM_BASE, USABLE_PAGES);
+            let source = SOURCE
+                .call_once_infallible(|| {
+                    FrameTableSource::new(frames, sim as &'static (dyn PhysMap + Sync))
+                })
+                .expect("a fresh cell");
+            (source, frames)
+        }};
     }
 
     /// The production source is shared, immutably, by every CPU's spawn
@@ -190,7 +183,7 @@ mod tests {
 
     #[test]
     fn alloc_table_draws_a_zeroed_frame_from_the_allocator() {
-        let (source, frames) = fresh_source();
+        let (source, frames) = fresh_source!();
         let before: FrameCount = frames.free_frames();
 
         let table = source.alloc_table().expect("a frame");
@@ -209,7 +202,7 @@ mod tests {
 
     #[test]
     fn passes_frames_conformance_over_the_allocator() {
-        let (source, _frames) = fresh_source();
+        let (source, _frames) = fresh_source!();
         // The allocator can hand out every usable page before failing
         // closed, so the conformance capacity is the usable-page count.
         conformance::run_all(source, USABLE_PAGES);
@@ -217,7 +210,7 @@ mod tests {
 
     #[test]
     fn distinct_tables_do_not_alias() {
-        let (source, _frames) = fresh_source();
+        let (source, _frames) = fresh_source!();
         let a = source.alloc_table().expect("first");
         let a_phys = a.phys;
         a.entries[0] = 0xA5A5_A5A5;
@@ -228,7 +221,7 @@ mod tests {
 
     #[test]
     fn exhausted_allocator_fails_closed() {
-        let (source, _frames) = fresh_source();
+        let (source, _frames) = fresh_source!();
         for _ in 0..USABLE_PAGES {
             assert!(source.alloc_table().is_some());
         }
@@ -240,7 +233,7 @@ mod tests {
 
     #[test]
     fn free_table_returns_the_frame_to_the_allocator_for_reuse() {
-        let (source, frames) = fresh_source();
+        let (source, frames) = fresh_source!();
         let before = frames.free_frames();
 
         let table = source.alloc_table().expect("a frame");
@@ -265,7 +258,7 @@ mod tests {
 
     #[test]
     fn free_table_after_exhaustion_makes_alloc_succeed_again() {
-        let (source, _frames) = fresh_source();
+        let (source, _frames) = fresh_source!();
         let mut last_phys = 0;
         for _ in 0..USABLE_PAGES {
             last_phys = source.alloc_table().expect("a frame").phys;
@@ -281,7 +274,7 @@ mod tests {
 
     #[test]
     fn free_table_twice_is_refused_without_effect() {
-        let (source, frames) = fresh_source();
+        let (source, frames) = fresh_source!();
         let table = source.alloc_table().expect("a frame");
         let phys = table.phys;
         source.free_table(phys);

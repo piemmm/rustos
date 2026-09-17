@@ -33,3 +33,9 @@ loom = "0.7"
 
 [dev-dependencies]
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
+# The one definition of how a `proptest!` block behaves under the UB
+# interpreter: the narrowed sweep and the disabled failure persistence
+# isolation refuses. Test scaffolding only — never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = [
+    "proptest",
+] }

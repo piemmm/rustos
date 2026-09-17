@@ -1135,6 +1135,31 @@ fn stage(label: &str, run: impl FnOnce() -> Result<(), String>) -> Result<(), St
     outcome
 }
 
+/// One pipeline stage: the label it reports under and the step it runs.
+type CiStage<'a> = (&'a str, &'a dyn Fn() -> Result<(), String>);
+
+/// Every stage `run_ci` runs, in order.
+///
+/// Declared separately from the calls so a stage cannot go missing unnoticed:
+/// [`run_ci`] records each label it runs and refuses to report success unless
+/// the record matches this roster exactly. A reordering that dropped the UB
+/// oracle once left the pipeline green with nothing interpreting any
+/// `unsafe` at all.
+const CI_STAGES: &[&str] = &[
+    "fmt --check",
+    "static gates",
+    "deny",
+    "proptest --once",
+    "crypto-constant-time",
+    "fuzz --once",
+    "loom",
+    "docs-check",
+    "image",
+    "clippy",
+    "test --qemu",
+    "miri",
+];
+
 fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate and evidence-based: every stage is
     // cheaper than the one after it, so a failing PR fails as early as its
@@ -1153,66 +1178,85 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // `fmt --check` is the very first, cheapest gate and streams `cargo fmt`
     // output live, so it stays a sequential fail-fast step rather than joining
     // the concurrent group below.
-    stage("fmt --check", || run_fmt(ctx, &[]))?;
-    // The deterministic, non-compiling gates run concurrently as one group:
-    // they still gate every compile-heavy stage below (fail-fast preserved),
-    // and their wall-clock costs overlap instead of summing.
-    stage("static gates", || run_static_gates(ctx))?;
-    // `cargo deny check` reads `Cargo.lock` and the advisory database and
-    // compiles nothing, so it is a static gate in all but its streaming
-    // output — which is why it runs sequentially rather than joining the
-    // concurrent group above. At a measured second it belongs beside them.
-    stage("deny", || run_deny(ctx))?;
-    // Bronze: the per-PR stateful-model gate, one iteration with a fresh
-    // logged seed. Seconds, and fails closed on a counterexample, hang, or
-    // invariant failure; the wall-clock coverage is `cargo xtask proptest
-    // --soak`, outside `ci`. (Silver's exhaustive model check is already in
-    // the concurrent static-gate group above.)
-    stage("proptest --once", || {
-        run_proptest(ctx, &[OsString::from("--once")])
-    })?;
-    // `lib/crypto`'s unit tests re-run under release optimisation: the
-    // constant-time guarantee is one the optimiser can break, so the debug
-    // profile the main test phase uses does not cover it.
-    stage("crypto-constant-time", || run_crypto_constant_time(ctx))?;
-    // The per-PR fuzz gate: each in-tree harness for one iteration with a
-    // fresh logged seed. The wall-clock coverage is `cargo xtask fuzz
-    // --soak`, run outside `ci`.
-    stage("fuzz --once", || run_fuzz(ctx, &[OsString::from("--once")]))?;
-    // The interleaving oracle over the synchronisation primitives. The test
-    // matrix runs whichever ordering the host scheduler happened to pick;
-    // only the model checker covers the ones it did not.
-    stage("loom", || loom::run(ctx, &[]))?;
-    // docs-check needs only a doc build, never the multi-target test matrix,
-    // and a broken intra-doc link or a denied rustdoc warning is cheap to
-    // surface.
-    stage("docs-check", || run_docs_check(ctx, &[]))?;
-    // Every shippable image profile is built on every PR, so an
-    // image-breaking change (kernel link, firmware manifest, root-volume
-    // layout, profile seeding) can never land green. The gate only proves the
-    // image *builds* — it ships nothing — so there is no untested-artefact
-    // risk to weigh against its cost, and at a quarter of the test matrix's
-    // wall clock it belongs ahead of it rather than behind.
-    stage("image", || run_image_gate(ctx))?;
-    // The undefined-behaviour oracle over the crates with a hand-written
-    // `unsafe` core. A green test suite says what the code computes; only an
-    // interpreter says whether a raw pointer stayed in bounds. It finds the
-    // class of defect the matrix structurally cannot.
-    stage("miri", || miri::run(ctx, &[]))?;
-    stage("clippy", || run_clippy(ctx, &[]))?;
-    // The whole test matrix, exactly once — on a developer machine and a CI
-    // runner alike. The flake-hunting repetition lives in the time-limited
-    // soaks (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`.
-    // The host pass runs in a freshly-seeded order (`--shuffle`) so an
-    // order-dependent suite fails the gate rather than passing on the
-    // harness's alphabetical accident; the seed is in the step's label. Last
-    // because it is by far the most expensive stage.
-    stage("test --qemu", || {
-        run_test(
-            ctx,
-            &[OsString::from("--qemu"), OsString::from("--shuffle")],
-        )
-    })?;
+    // The pipeline is driven from this table, and its labels are checked
+    // against `CI_STAGES` before a single stage runs: a stage dropped while
+    // reordering cannot leave the gate green with nothing having run it.
+    let pipeline: [CiStage<'_>; CI_STAGES.len()] = [
+        ("fmt --check", &|| run_fmt(ctx, &[])),
+        // The deterministic, non-compiling gates run concurrently as one group:
+        // they still gate every compile-heavy stage below (fail-fast preserved),
+        // and their wall-clock costs overlap instead of summing.
+        ("static gates", &|| run_static_gates(ctx)),
+        // `cargo deny check` reads `Cargo.lock` and the advisory database and
+        // compiles nothing, so it is a static gate in all but its streaming
+        // output — which is why it runs sequentially rather than joining the
+        // concurrent group above. At a measured second it belongs beside them.
+        ("deny", &|| run_deny(ctx)),
+        // Bronze: the per-PR stateful-model gate, one iteration with a fresh
+        // logged seed. Seconds, and fails closed on a counterexample, hang, or
+        // invariant failure; the wall-clock coverage is `cargo xtask proptest
+        // --soak`, outside `ci`. (Silver's exhaustive model check is already in
+        // the concurrent static-gate group above.)
+        ("proptest --once", &|| {
+            run_proptest(ctx, &[OsString::from("--once")])
+        }),
+        // `lib/crypto`'s unit tests re-run under release optimisation: the
+        // constant-time guarantee is one the optimiser can break, so the debug
+        // profile the main test phase uses does not cover it.
+        ("crypto-constant-time", &|| run_crypto_constant_time(ctx)),
+        // The per-PR fuzz gate: each in-tree harness for one iteration with a
+        // fresh logged seed. The wall-clock coverage is `cargo xtask fuzz
+        // --soak`, run outside `ci`.
+        ("fuzz --once", &|| {
+            run_fuzz(ctx, &[OsString::from("--once")])
+        }),
+        // The interleaving oracle over the synchronisation primitives. The test
+        // matrix runs whichever ordering the host scheduler happened to pick;
+        // only the model checker covers the ones it did not.
+        ("loom", &|| loom::run(ctx, &[])),
+        // docs-check needs only a doc build, never the multi-target test matrix,
+        // and a broken intra-doc link or a denied rustdoc warning is cheap to
+        // surface.
+        ("docs-check", &|| run_docs_check(ctx, &[])),
+        // Every shippable image profile is built on every PR, so an
+        // image-breaking change (kernel link, firmware manifest, root-volume
+        // layout, profile seeding) can never land green. The gate only proves the
+        // image *builds* — it ships nothing — so there is no untested-artefact
+        // risk to weigh against its cost, and at a quarter of the test matrix's
+        // wall clock it belongs ahead of it rather than behind.
+        ("image", &|| run_image_gate(ctx)),
+        ("clippy", &|| run_clippy(ctx, &[])),
+        // The whole test matrix, exactly once — on a developer machine and a CI
+        // runner alike. The flake-hunting repetition lives in the time-limited
+        // soaks (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`.
+        // The host pass runs in a freshly-seeded order (`--shuffle`) so an
+        // order-dependent suite fails the gate rather than passing on the
+        // harness's alphabetical accident; the seed is in the step's label.
+        ("test --qemu", &|| {
+            run_test(
+                ctx,
+                &[OsString::from("--qemu"), OsString::from("--shuffle")],
+            )
+        }),
+        // The undefined-behaviour oracle over the crates with a hand-written
+        // `unsafe` core. A green test suite says what the code computes; only an
+        // interpreter says whether a raw pointer stayed in bounds. It finds the
+        // class of defect the matrix structurally cannot. Last because enrolling
+        // `kernel/mem` made it the most expensive stage: every page those
+        // subsystems zero is paid for a byte at a time, so a cheaper stage placed
+        // behind it would make each of its own failures wait out the interpreter
+        // for nothing.
+        ("miri", &|| miri::run(ctx, &[])),
+    ];
+    let labels: Vec<&str> = pipeline.iter().map(|(label, _)| *label).collect();
+    if labels != CI_STAGES {
+        return Err(format!(
+            "ci pipeline is {labels:?}, not the declared {CI_STAGES:?}"
+        ));
+    }
+    for (label, step) in pipeline {
+        stage(label, step)?;
+    }
     Ok(())
 }
 
@@ -2012,11 +2056,37 @@ mod tests {
     use super::{
         cargo_subcommand_available, dir_size, format_bytes, host_order_args, kernel_build_profile,
         kernel_diag_feature_args, parse_run_args, parse_test_options, Command, RunBudget,
-        DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, TEST_SOAK_SECS,
+        CI_STAGES, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, TEST_SOAK_SECS,
     };
     use crate::Context;
     use std::ffi::OsString;
     use std::time::Duration;
+
+    /// Both oracles must be in the pipeline, and each stage named once.
+    ///
+    /// A reordering once dropped the `miri` call while keeping its comment,
+    /// so `ci` passed with nothing interpreting any `unsafe`; `run_ci` now
+    /// refuses to start unless its table matches this roster, and the roster
+    /// itself is held to naming the oracles.
+    #[test]
+    fn the_pipeline_roster_names_both_oracles_exactly_once() {
+        for oracle in ["miri", "loom"] {
+            assert_eq!(
+                CI_STAGES.iter().filter(|s| **s == oracle).count(),
+                1,
+                "{oracle} must appear in the pipeline exactly once"
+            );
+        }
+        let mut seen = CI_STAGES.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), CI_STAGES.len(), "a stage is named twice");
+        assert_eq!(
+            CI_STAGES.last(),
+            Some(&"miri"),
+            "the most expensive stage runs last"
+        );
+    }
 
     /// `clean` is a first-class, parseable subcommand listed in the closed
     /// command set, so `cargo xtask clean` reaches `run_clean` and the

@@ -316,7 +316,9 @@ fn drive_lifecycle(block: &[u8], phys_base: u64) {
     grants.insert(CapabilityId::MMIO_MAP);
     grants.insert(CapabilityId::DRV_LOAD);
     let caller = TaskCapabilities::derive(TASK, UserId(0), grants, grants, &SERIAL_SINK);
-    let phys = DirectPhysMap::identity(IDENTITY_LIMIT);
+    // SAFETY: the boot code identity-maps this window and never unmaps it.
+    let phys = unsafe { DirectPhysMap::identity(IDENTITY_LIMIT) }
+        .expect("the boot direct map addresses its window");
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),

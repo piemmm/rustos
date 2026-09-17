@@ -316,7 +316,9 @@ where
     let Ok(frames) = FrameAllocator::new(&dma_map) else {
         env.fail("frame allocator build");
     };
-    let phys = DirectPhysMap::identity(IDENTITY_LIMIT);
+    // SAFETY: the boot code identity-maps this window and never unmaps it.
+    let phys = unsafe { DirectPhysMap::identity(IDENTITY_LIMIT) }
+        .expect("the boot direct map addresses its window");
 
     // 3. Bus-driver task capability context.
     let mut grants = CapabilitySet::empty();

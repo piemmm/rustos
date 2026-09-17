@@ -165,6 +165,10 @@ pub(crate) mod test_bundle;
 // publication first.
 #[cfg(test)]
 pub(crate) mod test_boot;
+// Shared host-test identity material: the one stored password every fixture
+// that models a login-capable account carries, derived once for the process.
+#[cfg(test)]
+pub(crate) mod test_identity;
 // Shared host-test fixture for the reclaimable-cache pressure gauge (a
 // controllable free-memory source plus per-band readings), used by the
 // filesystem-cache, launch-cache, and cross-cache integration suites so

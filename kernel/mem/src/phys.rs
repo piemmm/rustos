@@ -28,7 +28,7 @@
 
 use core::ptr::NonNull;
 
-use crate::frame::PhysAddr;
+use crate::frame::{PhysAddr, PAGE_SIZE};
 
 /// Translates a device-visible [`PhysAddr`] into a CPU pointer valid
 /// for `len` bytes within the kernel's direct physical map.
@@ -94,52 +94,158 @@ pub trait PhysMap {
 }
 
 /// The kernel's direct physical map: physical `p` is reachable at the
-/// virtual address `p + offset`, for every `p` in `[0, limit)`.
+/// virtual address `p + offset`, for every `p` in `[base, limit)`.
 ///
 /// `offset == 0` describes an identity map (what the identity-linked
 /// `aarch64` and `riscv64` ports carry); a non-zero `offset` describes a
 /// kernel-half direct map (what `x86_64` installs).
+///
+/// # A pointer, not an address
+///
+/// The map carries a *pointer* to the first byte it addresses. Its window
+/// is not a Rust allocation — it exists because the port wrote page tables
+/// for it — so the layer that knows that fact mints the pointer once
+/// ([`Self::new`]) and every translation is derived from it. A `translate`
+/// that rebuilt a pointer from a physical address per call would hand the
+/// compiler one it believes aliases nothing, licensing it to reorder or
+/// elide the DMA-visible writes the pool and the loader make through it,
+/// and no interpreter could check the result.
 #[derive(Debug, Clone, Copy)]
 pub struct DirectPhysMap {
-    offset: u64,
+    root: NonNull<u8>,
+    base: u64,
     limit: u64,
 }
 
+// SAFETY: `root` addresses the direct map the port installed in every
+// translation root it builds, so it resolves identically on whichever CPU
+// the holder runs. The descriptor is immutable and hands out no exclusive
+// access, so sharing one grants nothing the bare offset it replaced did not.
+unsafe impl Send for DirectPhysMap {}
+// SAFETY: as `Send` above.
+unsafe impl Sync for DirectPhysMap {}
+
 impl DirectPhysMap {
-    /// Build a direct map where physical `p` is reachable at
-    /// `p + offset`, valid for physical addresses below `limit`.
+    /// Lowest physical address a map at `offset` can hand out a pointer
+    /// for.
+    ///
+    /// Zero for a windowed map. An identity window's alias of physical
+    /// zero is the null pointer, which names nothing, so an identity map
+    /// addresses from its second page — the same page the frame allocator
+    /// permanently reserves for this reason.
     #[must_use]
-    pub const fn new(offset: u64, limit: u64) -> Self {
-        Self { offset, limit }
+    pub const fn addressable_base(offset: u64) -> u64 {
+        if offset == 0 {
+            PAGE_SIZE as u64
+        } else {
+            0
+        }
+    }
+
+    /// Whether a map at `offset` covering physical `[0, limit)` is one this
+    /// kernel can hold: at least one addressable page, and every byte of it
+    /// reachable by a pointer.
+    ///
+    /// Checked where the map is *declared* rather than at each translate,
+    /// so a window no pointer could address is refused up front instead of
+    /// silently failing every caller later.
+    #[must_use]
+    pub const fn is_representable(offset: u64, limit: u64) -> bool {
+        let base = Self::addressable_base(offset);
+        if limit <= base {
+            return false;
+        }
+        let Some(top) = offset.checked_add(limit) else {
+            return false;
+        };
+        // `usize as u64` is lossless on every target, so the comparison
+        // needs no checked conversion.
+        top - 1 <= usize::MAX as u64
+    }
+
+    /// Build a direct map where physical `p` is reachable at `p + offset`,
+    /// valid for physical addresses below `limit`, minting the pointer its
+    /// translations derive from.
+    ///
+    /// Returns `None` — never a truncated or wrapped window — unless
+    /// [`Self::is_representable`] accepts the extent.
+    ///
+    /// # Safety
+    ///
+    /// The caller must have installed a direct map of physical
+    /// `[0, limit)` at `[offset, offset + limit)` in every translation
+    /// root it builds, and must keep it live for as long as the map is
+    /// used, so every derived pointer names the physical byte it claims.
+    #[must_use]
+    pub unsafe fn new(offset: u64, limit: u64) -> Option<Self> {
+        if !Self::is_representable(offset, limit) {
+            return None;
+        }
+        let base = Self::addressable_base(offset);
+        let addr = usize::try_from(offset.checked_add(base)?).ok()?;
+        // The one int-to-pointer step in the chain, stated where the fact
+        // that this window exists is known rather than re-derived by each
+        // translate.
+        let root = NonNull::new(core::ptr::with_exposed_provenance_mut::<u8>(addr))?;
+        Some(Self { root, base, limit })
     }
 
     /// Build an identity direct map (`offset == 0`) covering
     /// `[0, limit)` — the shape an identity-linked port carries.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::new`], with `offset == 0`.
     #[must_use]
-    pub const fn identity(limit: u64) -> Self {
-        Self::new(0, limit)
+    pub unsafe fn identity(limit: u64) -> Option<Self> {
+        // SAFETY: the caller's obligation, forwarded unchanged.
+        unsafe { Self::new(0, limit) }
+    }
+
+    /// Build a map over memory the caller already holds a pointer to, so a
+    /// host test can drive a direct-map consumer with no port under it.
+    ///
+    /// `root` stands for physical `base`; the map addresses
+    /// `[base, limit)`.
+    ///
+    /// # Safety
+    ///
+    /// `root` must be valid for reads and writes across `limit - base`
+    /// bytes for as long as the map is used.
+    #[cfg(any(test, feature = "host-tests"))]
+    #[must_use]
+    pub unsafe fn from_root(root: NonNull<u8>, base: u64, limit: u64) -> Option<Self> {
+        if limit <= base || usize::try_from(limit - base).is_err() {
+            return None;
+        }
+        Some(Self { root, base, limit })
     }
 }
 
 impl PhysMap for DirectPhysMap {
     fn translate(&self, phys: PhysAddr, len: usize) -> Option<NonNull<u8>> {
-        let base = phys.as_u64();
-        let len_u64 = u64::try_from(len).ok()?;
-        let end = base.checked_add(len_u64)?;
+        let start = phys.as_u64();
+        if start < self.base {
+            return None;
+        }
+        let end = start.checked_add(u64::try_from(len).ok()?)?;
         if end > self.limit {
             return None;
         }
-        let virt = base.checked_add(self.offset)?;
-        let addr = usize::try_from(virt).ok()?;
-        NonNull::new(addr as *mut u8)
+        let rel = usize::try_from(start - self.base).ok()?;
+        // SAFETY: `rel` is below `limit - base`, which the constructor
+        // proved the root is valid across, so the step lands inside the
+        // window the port installed.
+        Some(unsafe { self.root.byte_add(rel) })
     }
 
     fn reverse(&self, virt: usize) -> Option<PhysAddr> {
-        let virt = u64::try_from(virt).ok()?;
-        let phys = virt.checked_sub(self.offset)?;
-        // Only addresses inside the mapped window `[offset, offset + limit)`
-        // invert to a physical address this map covers; anything else fails
-        // closed rather than yielding a bogus frame.
+        // Invert `translate`: how far past the root an address sits is how
+        // far past `base` its physical address sits. Only addresses inside
+        // the window invert; anything else fails closed rather than
+        // yielding a bogus frame.
+        let rel = u64::try_from(virt.checked_sub(self.root.addr().get())?).ok()?;
+        let phys = self.base.checked_add(rel)?;
         if phys >= self.limit {
             return None;
         }
@@ -265,40 +371,94 @@ impl PhysMap for SimPhysMap {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::frame::PAGE_SIZE;
 
-    #[test]
-    fn direct_identity_round_trips_low_address() {
-        let map = DirectPhysMap::identity(0x1_0000_0000);
-        let p = map
-            .translate(PhysAddr::new(0x1000), 0x1000)
-            .expect("mapped");
-        assert_eq!(p.as_ptr() as u64, 0x1000);
+    /// A host stand-in for the window a port installs: real memory the map
+    /// can be rooted in, so a translation is a derivation the interpreter
+    /// can follow rather than a pointer minted from an integer.
+    fn rooted(base: u64, pages: usize) -> (DirectPhysMap, alloc::vec::Vec<u8>) {
+        let mut backing = alloc::vec![0u8; pages * PAGE_SIZE];
+        let root = NonNull::new(backing.as_mut_ptr()).expect("non-null backing");
+        let limit = base + (pages * PAGE_SIZE) as u64;
+        // SAFETY: `root` owns `pages * PAGE_SIZE` bytes and `backing`
+        // outlives every use the caller makes of the returned map.
+        let map = unsafe { DirectPhysMap::from_root(root, base, limit) }.expect("rooted map");
+        (map, backing)
     }
 
-    /// Physical address zero translates to the null pointer under an
-    /// identity map, which [`NonNull`] cannot represent: the translate
-    /// fails closed. This is the hazard the frame allocator's permanent
-    /// zero-page reservation defends against — a zero frame handed to the
-    /// page-table source would be returned and re-drawn forever.
     #[test]
-    fn direct_identity_rejects_the_null_translation() {
-        let map = DirectPhysMap::identity(0x1_0000_0000);
+    fn direct_translate_derives_the_offset_from_its_root() {
+        let (map, backing) = rooted(0, 4);
+        let p = map
+            .translate(PhysAddr::new(PAGE_SIZE as u64), PAGE_SIZE)
+            .expect("mapped");
+        assert_eq!(
+            p.addr().get() - backing.as_ptr() as usize,
+            PAGE_SIZE,
+            "the pointer sits one page past the root"
+        );
+    }
+
+    /// The window's bytes are writable *through the very pointer*
+    /// `translate` returned — the property an address-only assertion could
+    /// never make.
+    #[test]
+    fn direct_translate_addresses_writable_window_bytes() {
+        let (map, mut backing) = rooted(0, 2);
+        let p = map.translate(PhysAddr::new(8), 4).expect("mapped");
+        // SAFETY: the translate proved `[8, 12)` is inside the window, and
+        // `backing` is not otherwise borrowed across the write.
+        unsafe { p.write_bytes(0xC3, 4) };
+        assert_eq!(&backing[8..12], &[0xC3; 4]);
+        backing[0] = 0;
+    }
+
+    /// An identity map's alias of physical zero is the null pointer, so the
+    /// map addresses from its second page. This is the hazard the frame
+    /// allocator's permanent zero-page reservation defends against — a zero
+    /// frame handed to the page-table source would be returned and re-drawn
+    /// forever.
+    #[test]
+    fn an_identity_map_does_not_address_physical_page_zero() {
+        assert_eq!(DirectPhysMap::addressable_base(0), PAGE_SIZE as u64);
+        assert_eq!(DirectPhysMap::addressable_base(0x1_0000_0000), 0);
+        let (map, _backing) = rooted(PAGE_SIZE as u64, 2);
         assert!(map.translate(PhysAddr::new(0), PAGE_SIZE).is_none());
+        assert!(map
+            .translate(PhysAddr::new(PAGE_SIZE as u64 - 1), 1)
+            .is_none());
+    }
+
+    /// An extent no pointer could address is refused where the map is
+    /// declared, not silently at every translate.
+    #[test]
+    fn an_unrepresentable_extent_is_refused_at_declaration() {
+        assert!(DirectPhysMap::is_representable(
+            0x1_0000_0000,
+            0x2_0000_0000
+        ));
+        assert!(DirectPhysMap::is_representable(0, 2 * PAGE_SIZE as u64));
+        // An identity map covering only the page it cannot address.
+        assert!(!DirectPhysMap::is_representable(0, PAGE_SIZE as u64));
+        assert!(!DirectPhysMap::is_representable(0, 0));
+        // The window's exclusive top must not wrap.
+        assert!(!DirectPhysMap::is_representable(u64::MAX - 0xFFF, 0x2000));
+        // A zero-span or unrepresentable root is refused too.
+        let mut byte = 0u8;
+        let root = NonNull::from(&mut byte);
+        // SAFETY: the constructor is expected to refuse both extents before
+        // it can derive anything from `root`.
+        unsafe {
+            assert!(DirectPhysMap::from_root(root, 4, 4).is_none());
+            assert!(DirectPhysMap::from_root(root, 4, 3).is_none());
+        }
     }
 
     #[test]
     fn direct_rejects_range_past_limit() {
-        let map = DirectPhysMap::identity(0x2000);
-        assert!(map.translate(PhysAddr::new(0x1000), 0x1001).is_none());
-        assert!(map.translate(PhysAddr::new(0x2000), 1).is_none());
-    }
-
-    #[test]
-    fn direct_offset_shifts_pointer() {
-        let map = DirectPhysMap::new(0x1_0000_0000, 0x2_0000_0000);
-        let p = map.translate(PhysAddr::new(0x4000), 8).expect("mapped");
-        assert_eq!(p.as_ptr() as u64, 0x1_0000_4000);
+        let (map, _backing) = rooted(0, 2);
+        let limit = 2 * PAGE_SIZE as u64;
+        assert!(map.translate(PhysAddr::new(limit - 1), 2).is_none());
+        assert!(map.translate(PhysAddr::new(limit), 1).is_none());
     }
 
     #[test]
@@ -307,15 +467,13 @@ mod tests {
         // frame allocator by recovering its physical base from its virtual
         // base: `reverse` must invert `translate` exactly, and fail closed
         // outside the mapped window.
-        let map = DirectPhysMap::new(0x1_0000_0000, 0x2_0000_0000);
-        let phys = PhysAddr::new(0x4000);
-        let virt = map.translate(phys, 8).expect("mapped").as_ptr() as usize;
+        let (map, _backing) = rooted(0, 4);
+        let phys = PhysAddr::new(2 * PAGE_SIZE as u64);
+        let virt = map.translate(phys, 8).expect("mapped").addr().get();
         assert_eq!(map.reverse(virt), Some(phys));
-        // Below the offset and past the window both fail closed.
-        assert!(map.reverse(0xFFF).is_none());
-        assert!(map
-            .reverse(usize::try_from(0x1_0000_0000u64 + 0x2_0000_0000u64).unwrap())
-            .is_none());
+        // Below the root and past the window both fail closed.
+        assert!(map.reverse(virt - 2 * PAGE_SIZE - 1).is_none());
+        assert!(map.reverse(virt + 2 * PAGE_SIZE).is_none());
     }
 
     #[test]

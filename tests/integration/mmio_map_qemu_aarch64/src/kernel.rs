@@ -519,7 +519,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     unsafe { arch.switch() };
 
     let mut space = AddressSpace::new(arch);
-    let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
+    // SAFETY: the boot code identity-maps this window and never unmaps it.
+    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }
+        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: PROGRAM_RXE,
@@ -557,9 +559,13 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // active address space (`plans/PI.md` 5d-0-ii (b′)/(c)). The device-window
     // region sits 1 GiB above the image bias and the anonymous-heap window
     // 2 GiB above; the anonymous frame allocator backs the placed `mem_map`.
+    // SAFETY: the boot code identity-maps this window and never unmaps it.
+    let Some(identity) = (unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }) else {
+        qemu_exit::exit_failure(FAIL_LIVE_BUILD);
+    };
     let Ok(live) = LiveSpace::new(
         space,
-        DirectPhysMap::identity((IDENTITY_GIB as u64) << 30),
+        identity,
         leaked_anon_frames(),
         VirtAddr::new(MMIO_WINDOW_BASE),
         MMIO_WINDOW_PAGES,

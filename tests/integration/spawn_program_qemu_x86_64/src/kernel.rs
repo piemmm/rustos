@@ -238,7 +238,9 @@ fn run_round_trip() -> ! {
     // surface (`mmu::AddressSpace` + `tlb::TlbShootdown`) directly, so the
     // `kernel/mem` façade drives it with no per-test adapter (the Stage W5b-2 wiring removed the old `PageTableOps` shim).
     let mut space = AddressSpace::new(arch);
-    let physmap = DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30);
+    // SAFETY: the boot code installs this direct map and never unmaps it.
+    let physmap = unsafe { DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30) }
+        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: PROGRAM_RXE,

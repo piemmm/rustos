@@ -222,11 +222,17 @@ mod tests {
         ));
     }
 
+    /// Draws the uniqueness sweep takes. Interpreted, the same counter
+    /// arithmetic and the same set insertion run a few dozen times: the wide
+    /// search for a repeat belongs to the native run, the interpreted one is
+    /// looking for undefined behaviour and one pass over the path exposes it.
+    const UNIQUENESS_DRAWS: u32 = if cfg!(miri) { 64 } else { 10_000 };
+
     #[test]
     fn nonces_are_unique_across_many_draws() {
         let mut sequence = NonceSequence::new(&mut CountingEntropy { next: 7 }).expect("sequence");
         let mut seen = BTreeSet::new();
-        for _ in 0..10_000 {
+        for _ in 0..UNIQUENESS_DRAWS {
             let nonce = sequence.next_nonce().expect("nonce");
             assert!(seen.insert(nonce), "nonce repeated");
         }

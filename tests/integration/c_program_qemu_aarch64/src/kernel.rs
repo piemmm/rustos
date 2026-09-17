@@ -235,7 +235,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // surface (`mmu::AddressSpace` + `tlb::TlbShootdown`) directly, so the
     // `kernel/mem` façade drives it with no per-test adapter (the Stage W5b-2 wiring removed the old `PageTableOps` shim).
     let mut space = AddressSpace::new(arch);
-    let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
+    // SAFETY: the boot code identity-maps this window and never unmaps it.
+    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) }
+        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: PROGRAM_RXE,

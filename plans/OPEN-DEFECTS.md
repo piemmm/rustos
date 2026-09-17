@@ -49,7 +49,7 @@ table normalises all three to **closed**. 28 open, 105 closed, 133 total.
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
-| D123 | `kernel/core` and `kernel/mem` are not under the UB oracle | the window-address (D123) and stack-reader (D128) questions are both **answered**: `kheap::`/`kstack::` and `panic::` interpret clean with the leak checker on. What is left for `kernel/core` is the 1097 s-vs-287 s budget alone (`groups::`, `fs::fscache`, `appspawn::` — no `unsafe` between them), re-measured against `4dbe8d79e`; `kernel/mem` still needs the same root treatment for `DirectPhysMap` plus per-test extent scaling — see the section |
+| D123 | `kernel/core` is not under the UB oracle | `kernel/mem` is **closed** — enrolled and green (1207 s, 0 leaks) once `DirectPhysMap` gained a provenance root, every leaked fixture became a `Once` cell, `slab`'s proptest stopped wanting a cwd, and the sample-sized sweeps were scaled; one 4-hour `dma` test is skipped by name, which made `miri` the pipeline's most expensive stage. `kernel/core` is **not** budget-bound as previously recorded: 577 test-side `Box::leak` sites across ~40 fixture types had never been seen, because every whole-crate run aborted on provenance before the leak check ran — see the section |
 | D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
 | D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
 | D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static; `kernel/sched/api::park` would need one too. Distinct from D123, which is the UB oracle |
@@ -7607,108 +7607,110 @@ assertion used to be, so a reader does not mistake the gap for an oversight.
 run above covers it). Only the D123 enrolment would keep it that way
 automatically; until then it is a developer's obligation.
 
-## D123 — `kernel/core` and `kernel/mem` are not under the UB oracle (OPEN, window question answered)
+## D123 — `kernel/core` is not under the UB oracle (OPEN; `kernel/mem` closed)
 
 **Why it matters.** `cargo xtask ci`'s miri stage interprets only the crates in
-`tools/xtask/src/commands/miri.rs`'s `TARGETS`. Three crates carrying
-load-bearing `unsafe` were outside it: the kthread raw-pointer protocol
-(`kernel/core`), the slab and page-table allocators (`kernel/mem`), and the
-kernel heap allocator itself (`lib/kalloc`). A green gate says nothing about
+`tools/xtask/src/commands/miri.rs`'s `TARGETS`. A green gate says nothing about
 an unenrolled crate, so every fix to its `unsafe` rests on a developer
-remembering to run the oracle by hand.
+remembering to run the oracle by hand. `lib/kalloc` closed as D126; the window
+address and the stack reader closed as the `kheap`/`kstack` and D128 work.
 
-**`lib/kalloc` is done (D126)** — enrolled, and green in 62 s. The two that
-remain are below.
-
-**The `kheap` window-address question is answered: the window carries a
-provenance root.** This was the defect's first question and it was a design
-call, not a filter. The framing "back the harness with a real host allocation,
-or accept that these tests cannot be interpreted" was a false pair: a real
-allocation alone changes nothing, because `addr as *mut u8` and
-`with_exposed_provenance_mut` are both refused under
-`-Zmiri-strict-provenance` whatever the address. The pointer has to be
-*derived*, which means something must hold a root to derive it from.
-
-`tairix_arch_api::mmu::KernelWindow` now holds `NonNull<u8>` rather than a
-`u64` base. `at_address` is the single int-to-pointer mint, called only by the
-three ports' `reserve_kernel_window` — the one layer that knows the pages
-exist because it wrote their page tables — and `page_ptr` is the only
-derivation. That closed a duplication as well as the oracle gap: `kheap::grow`
-spelled the step `addr as *mut u8` and `kstack::alloc` spelled it
-`with_exposed_provenance_mut`, two copies of one operation, each also carrying
-its own `usize::try_from` fail-closed check. The representability check now
-sits in the constructor (`is_representable`, which the ports assert at build
-time), so a window no pointer could address is refused when it is *declared*
-rather than at first use, and the address a consumer hands the page tables is
-read back off the pointer it writes through, so the two cannot drift.
-
-`from_root` (behind the HAL's new `host-tests` feature) is how a host test
-roots a window in memory it owns. So the harness's window is now real memory:
-the fixtures moved off `Box::leak` into one cell of per-expansion `static`s —
-a leaked box and a real leak are the same thing to the interpreter, where a
-static-reachable allocation is neither — and the tests gained what they could
-never assert before, that a grown region is writable *through the very
-pointer* `grow` returned.
+**`kernel/mem` is enrolled and green.** `Scope::LibExcept`, with one skip.
 
 ```
-MIRIFLAGS=-Zmiri-strict-provenance cargo miri test -p tairix-kernel-core --lib -- kheap:: kstack::
-test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 1687 filtered out; finished in 41.28s
+cargo miri test -p tairix-kernel-mem --lib --features host-tests \
+  -- --skip dma::tests::a_full_span_window_serves_a_multi_device_enclosure_lazily
+test result: ok. 463 passed; 0 failed; 1 filtered out
+1207 s wall, 0 leaks
 ```
 
-Before, the same run aborted at `kheap.rs`'s cast. The three large assembly
-tests scale their extent under `cfg!(miri)` (`LARGE_RUN_PAGES`,
-`ROOMY_WINDOW_PAGES`): the native run keeps the full `MAX_ORDER` pool, and the
-interpreted one drives the identical chunk loop and the identical pointer
-derivation at a fraction of the pages, because a 32 MiB pool and a 64 MiB
-window per test is beyond the interpreter's budget and neither path varies
-with the chunk count.
+Four things had to change before it could be:
 
-**D128 is closed too — the stack reader now derives.** The whole-crate run's
-next abort after `kheap` was `panic.rs`'s `RawStackReader`, the same defect
-class one subsystem over. Its section carries the fix, including why the root
-belongs to the reader rather than to `StackBounds` (the shared `walk` serves
-a second reader whose addresses are in a *foreign* address space and are
-never host pointers at all).
+* **`DirectPhysMap::translate` minted a pointer per call.** The map now holds
+  the root for the region the MMU established (`NonNull<u8>`), derives every
+  translation from it, and hoists the representability check into the
+  constructor, so a window no pointer could address is refused where it is
+  *declared*. `new`/`identity` are `unsafe` and fallible — the obligation sits
+  where the fact is known — and `from_root` roots a host test in memory it
+  owns. An identity window's alias of physical zero is the null pointer, so
+  such a map addresses from its second page, which is what `translate` already
+  refused and the frame allocator's permanent zero-page reservation defends.
+  ~40 guest-kernel call sites carry the `unsafe` and fail closed.
+* **Every leaked fixture became accountable.** `framepages`, `pagetables`,
+  `kvslots`, `live` and `ramzip::tier` shared one `Once`-cell backing
+  (`kernel/mem/src/test_fixture.rs`, reached through `frame_backing!` so each
+  expansion gets its own pool); `kvmap` rebased onto `KernelWindow::from_root`
+  over real memory, which also retired an `at_address` mint a host test could
+  not interpret. `live::press_to` ended with `core::mem::forget(held)` to "leak
+  the held frames so the band stays" — `Frame` is a plain index with no drop
+  glue, so that held nothing and leaked only the vector.
+* **`slab`'s proptest wanted the working directory.** Filing a counterexample
+  needs a cwd isolation refuses. `lib/sync` had solved this locally, so the
+  rule moved into `tairix_fuzzseed::prop::config(native, interpreted)` and both
+  call sites read it.
+* **Sweeps were scaled where the extent is a sample, not an assertion.**
+  `seal`'s nonce uniqueness (89 s → 3 s) and `ramzip::tier`'s three
+  `bench_evidence_*` round trips, whose printed latency is explicitly "not a
+  guarantee".
 
-**Still blocking `kernel/core`: the budget, alone.** Measured on a
-whole-crate run (`--lib`, `appspawn::` excluded) **before `4dbe8d79e`**,
-which grew `waitq.rs` by 507 lines and `sleeplock.rs` by 187 — so both the
-831-test count and the figure below have moved and need re-measuring before
-they are relied on.
+**What must not be scaled, learned the hard way.**
+`ramzip::tier::band_cap_is_enforced_and_escalation_is_deterministic` looked like
+slack at 50 pages. The cap is charged against *compressed* footprint, so
+reaching the two pages it allows takes that many compressible pages: scaled to
+six, the refusal never came and the assertion failed. It passed natively the
+whole time — only the interpreted run could catch it. The count is the
+assertion, as with `driver_store::the_driver_count_is_bounded` and `pty`'s
+`PIPE_CAPACITY`.
 
-* **1097 s against a 287 s stage makespan.** The stage runs one process per
-  crate concurrently, so its cost is its slowest job; enrolling this crate as
-  it stands would quadruple the stage. What dominates is *not* the `unsafe`
-  core: five `groups::` identity-table tests at ~204 s each and
-  `fs::fscache`'s eviction test at 139 s, which need the same `cfg!(miri)`
-  extent scaling `lib/collections` and now `kheap` use. `appspawn`'s 15
-  ed25519 bundle-signature tests (20–58 s each, not one line of `unsafe`) are
-  a legitimate budget exclusion, and expressing it needs the `Scope::LibExcept`
-  registry variant a previous session built and reverted — correctly, because
-  an enrolment that fails the gate cannot ship and the variant then had no
-  consumer.
-  - `driver_store::the_driver_count_is_bounded` (22 s) must **not** be scaled:
-    its extent is `MAX_STORE_DRIVERS + 5`, which *is* the assertion. A
-    containment bound is not a sweep.
+**The one skip, and why it is budget rather than a dodge.**
+`dma::…a_full_span_window_serves_a_multi_device_enclosure_lazily` reserves a
+full gigabyte of window and streams thirteen 32-page device regions through it,
+zeroed on carve and volatile-cleared on release. Interpreted, the per-byte
+aliasing bookkeeping over that volume costs **four hours** — 91% of the crate.
+The DMA pool itself is not at fault and no defect was found there: `SlotWindow::new`
+is `const fn` O(1), `DmaWindowMap::new` starts `slot_used: Vec::new()`,
+`ensure_slots` grows only to the chosen run, and `find_free_run` terminates at
+the bookkeeping end because an unrecorded slot reads free — nothing is
+proportional to the 262 144-slot span, so the test's own lazy-bookkeeping claim
+holds. The cost is the byte volume, which is the realistic-enclosure part of the
+scenario rather than the property under test. It passes when run, and all four
+`unsafe` sites in `dma.rs` are on the alloc/free/bytes paths the other 25 tests
+in the module reach.
 
-**Still blocking `kernel/mem`.** ~2.7 h interpreted whole (37 of ~330 tests in
-18 min before it was stopped), and one design item now named rather than
-open: **`DirectPhysMap::translate` mints a pointer per call** from a physical
-address, so the crate's own tests cannot be interpreted however the extents
-are scaled. The answer is the one D126 and the window took — the map holds the
-root for the region the MMU established and derives each translation from it,
-which is what the sibling `SimPhysMap` already does correctly
-(`storage.as_ptr()`, provenance intact). Beyond that it needs per-test
-`cfg!(miri)` extent scaling: unlike `kernel/core` it cannot be narrowed by
-module, because the expensive tests *are* the `unsafe` ones — `dma`, `anon`
-and `live` map and zero thousands of pages each, and
-`dma::…a_full_span_window_serves_a_multi_device_enclosure_lazily` alone does
-not finish in minutes.
+**Miri's clock is virtual — measure the stage from outside.** The
+`finished in …` line a test binary prints under the interpreter is not wall
+time and can exceed it severalfold (`live` reported 267 s against 79 s real;
+`dma` reported 702 s against 14 584 s). Every per-module figure taken from that
+line is fiction.
 
-**Done when:** both remaining crates are in `TARGETS`, the stage still fits
-its makespan, and the run is green. An exclusion list is legitimate only for a
-module that carries no `unsafe` and passes when run — budget, never a dodged
-finding.
+**The stage cost is now `kernel/mem`.** 1360 s against the former 287 s
+makespan, which makes `miri` the pipeline's most expensive stage; it moved to
+last so a cheaper stage's failure does not wait out the interpreter.
+`docs/src/contributing.md` carries the measured figure and the reason.
+
+**Still open: `kernel/core`, and the blocker is not the budget.** The previous
+record said "what is left is the 1097 s-vs-287 s budget alone". That is wrong.
+Every whole-crate run aborted on a fatal provenance error *before* the leak
+check could run, so the leak surface had never been seen:
+
+* **577 test-side `Box::leak` sites** across ~40 fixture types (`TestSink` ×79,
+  `RwLock` ×50, `ProgramRegistry` ×34, `RecordingFs` ×31, `StaticHwTree` ×22, …),
+  plus 70 production ones whose design is "kernel state is never freed".
+  `launch_cache::` alone reports 172 leak errors. Making these accountable is
+  D128's `panic::` campaign (493 leaks, one module) repeated crate-wide; several
+  of the consumers take `&'static` only because production holds them in
+  statics, so relaxing those bounds is part of it.
+* **The budget half is largely done.** Fixture crypto nobody asserted on was the
+  cost: `groups::` ×5 and `introspect_source::` paid a PBKDF2 the identity build
+  never reads (1227 s), `launch_cache::` re-verified the same bundle signature
+  per test (831 s → 121 s, now verified once and shared), and `fs::fscache`'s
+  eviction stream and large-document reads were scaled (291 s).
+  `appspawn::`'s 15 ed25519 tests carry no `unsafe` and are a legitimate
+  `LibExcept` skip when the crate is enrolled.
+
+**Done when:** `kernel/core` is in `TARGETS` and green. An exclusion is
+legitimate only for a module that carries no `unsafe` and passes when run —
+budget, never a dodged finding.
 
 ## D126 — the kernel heap allocator threaded its free list and slab pages through integers (FIXED)
 
@@ -7837,11 +7839,8 @@ stack image by indexing its own `Vec` after taking the region also had to
 plant *through* the region instead — reborrowing the slice retires the root,
 which Stacked Borrows caught and which is the discipline under test.
 
-**Still not enrolled.** `kernel/core` remains outside `miri`'s `TARGETS`:
-D123's budget half (1097 s against a 287 s stage makespan, dominated by
-`groups::` and `fs::fscache`, neither carrying `unsafe`) is untouched by this
-change. The baseline also moved under `4dbe8d79e`, so it needs re-measuring
-before it is relied on.
+**Still not enrolled.** `kernel/core` remains outside `miri`'s `TARGETS`; its
+remaining blocker is the leak surface D123 now records, not the budget.
 
 ## D133 — a task can grow another task's pending-delegation table without bound (OPEN)
 

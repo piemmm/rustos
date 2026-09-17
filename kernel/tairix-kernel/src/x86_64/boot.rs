@@ -1252,7 +1252,13 @@ where
     // the direct physical map; if that context cannot be built the
     // interrupt-driven functions are left undiscovered rather than granted a
     // line that never delivers (fail closed).
-    let phys = DirectPhysMap::new(paging::PHYSMAP_VMA_BASE, paging::physmap_bytes());
+    // SAFETY: the boot paging code installed this direct map in every
+    // translation root it builds and never tears it down.
+    let Some(phys) =
+        (unsafe { DirectPhysMap::new(paging::PHYSMAP_VMA_BASE, paging::physmap_bytes()) })
+    else {
+        return;
+    };
     let Some(mmio_space) = ArchAddressSpace::new_bookkeeping_identity_32mib(&MSI_PROBE_PT_POOL)
     else {
         return;

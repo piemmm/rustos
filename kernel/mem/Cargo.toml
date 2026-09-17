@@ -96,9 +96,15 @@ loom = "0.7"
 # tamper hooks; a self-referencing dev-dependency enables the feature for
 # tests only, mirroring `lib/fdt` and `kernel/sched/*`.
 tairix-kernel-mem = { path = ".", version = "=0.0.0", features = ["host-tests"] }
+# The remap tests root their window in memory they own, which needs the HAL's
+# `KernelWindow::from_root`; production mints the window from the address the
+# port wrote page tables for.
+tairix-arch-api = { path = "../arch/api", version = "=0.0.0", features = ["host-tests"] }
 # The fuzz harness draws its inputs through the shared seed/budget
 # seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at
 # the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
 # never in a TAIRiX build.
-tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0", features = [
+    "proptest",
+] }
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }

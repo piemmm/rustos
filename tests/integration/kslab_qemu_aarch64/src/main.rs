@@ -365,9 +365,12 @@ mod kernel {
             fail("frame allocator over the pool");
         };
         let frames: &'static FrameAllocator = Box::leak(Box::new(allocator));
-        let physmap: &'static DirectPhysMap = Box::leak(Box::new(DirectPhysMap::identity(
-            (IDENTITY_GIB as u64) << 30,
-        )));
+        // SAFETY: the boot code identity-maps this window and never unmaps it.
+        let Some(identity) = (unsafe { DirectPhysMap::identity((IDENTITY_GIB as u64) << 30) })
+        else {
+            fail("identity map addresses nothing");
+        };
+        let physmap: &'static DirectPhysMap = Box::leak(Box::new(identity));
         let source: &'static PageOnlySource = Box::leak(Box::new(PageOnlySource {
             pages: FramePages::new(frames, physmap as &'static (dyn PhysMap + Sync)),
         }));

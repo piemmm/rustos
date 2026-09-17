@@ -334,7 +334,9 @@ fn build_user_space(pool: &'static paging::PageTablePool, rxe: &'static [u8]) ->
     unsafe { arch.switch() };
 
     let mut space = AddressSpace::new(arch);
-    let physmap = DirectPhysMap::identity((IDENTITY_GIGABYTES as u64) << 30);
+    // SAFETY: the boot code identity-maps this window and never unmaps it.
+    let physmap = unsafe { DirectPhysMap::identity((IDENTITY_GIGABYTES as u64) << 30) }
+        .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image: &image,
         image_bytes: rxe,

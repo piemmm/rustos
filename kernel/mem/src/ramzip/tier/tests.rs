@@ -9,14 +9,39 @@ use super::*;
 extern crate std;
 use std::vec::Vec;
 
-use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use crate::frame::{Frame, MemoryClass};
 use crate::phys::SimPhysMap;
 use crate::ramzip::PageKind;
+use crate::test_fixture::frame_backing;
 use crate::vmm::{HostPageTable, VirtAddr};
 
 /// Backing frames for the default test machine (512 × 4 KiB = 2 MiB).
 const TOTAL_FRAMES: usize = 512;
+
+/// Pages any sweep below drives when interpreted.
+///
+/// Each page costs a pseudo-random fill, an LZ pass and an AEAD seal, which
+/// the interpreter pays byte by byte. What the sweeps assert — the footprint
+/// bound, the move-only ledger, the frame balance, a cluster with neighbours
+/// to restore, a cap that refuses rather than grows — holds at a handful;
+/// the wider runs are what make the *latency estimate* representative, and
+/// an interpreted latency is not a number anyone reads.
+const INTERPRETED_SWEEP_PAGES: u64 = 6;
+
+/// Sample size of a round-trip latency estimate.
+const BENCH_PAGES: u64 = if cfg!(miri) {
+    INTERPRETED_SWEEP_PAGES
+} else {
+    48
+};
+
+/// A contiguous run, long enough that a fault in its middle has neighbours
+/// to cluster around.
+const CLUSTER_RUN_PAGES: u64 = if cfg!(miri) {
+    INTERPRETED_SWEEP_PAGES
+} else {
+    16
+};
 
 /// The address-space id every test uses.
 const SPACE: u64 = 1;
@@ -48,24 +73,25 @@ struct Env {
     held: Vec<Frame>,
 }
 
-impl Env {
-    fn new() -> Self {
-        Self::with_total_frames(TOTAL_FRAMES)
-    }
+/// A harness over its own frame pool, in a cell per expansion so no two
+/// concurrently-running tests share one.
+macro_rules! env {
+    () => {
+        env!(TOTAL_FRAMES)
+    };
+    ($total:expr) => {{
+        let (frames, _sim) = frame_backing!(0, $total);
+        Env::with_total_frames(frames, $total)
+    }};
+}
 
+impl Env {
     /// A test machine with `total` backing frames, so a benchmark can
     /// represent both a small (Pi-class) and a larger (desktop) RAM
     /// profile from the one harness.
-    fn with_total_frames(total: usize) -> Self {
-        let mut map = BootMemoryMap::new();
-        map.push(MemoryRegion {
-            start: crate::frame::PhysAddr::new(0),
-            length: (total * PAGE_SIZE) as u64,
-            kind: RegionKind::Usable,
-        });
-        let frames: &'static FrameAllocator = std::boxed::Box::leak(std::boxed::Box::new(
-            FrameAllocator::new(&map).expect("allocator"),
-        ));
+    /// `frames` is the pool a caller built in a cell of its own; `total` is
+    /// its frame count, which sizes the direct map over the same RAM.
+    fn with_total_frames(frames: &'static FrameAllocator, total: usize) -> Self {
         let pressure = MemoryPressure::over(frames);
         Self {
             frames,
@@ -224,7 +250,7 @@ fn try_fault(env: &mut Env, ramzip: &mut Ramzip, page: Page) -> Result<(), Fault
 
 #[test]
 fn near_zero_idle_cost_and_no_eager_reservation() {
-    let env = Env::new();
+    let env = env!();
     let before = env.frames.free_frames();
     let ramzip = tier(&env);
     // Construction allocated no frames and accounts for nothing: the
@@ -237,7 +263,7 @@ fn near_zero_idle_cost_and_no_eager_reservation() {
 
 #[test]
 fn purge_space_drops_entries_and_rebalances_the_ledger() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     env.press_to(PressureBand::Moderate);
     // Compress three anonymous pages of SPACE into the tier.
@@ -265,7 +291,7 @@ fn purge_space_drops_entries_and_rebalances_the_ledger() {
 
 #[test]
 fn compress_and_fault_round_trip_restores_exact_bytes_and_flags() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let page = env.map_page(10, 7);
     let original = env.page_bytes(page);
@@ -294,7 +320,7 @@ fn compress_and_fault_round_trip_restores_exact_bytes_and_flags() {
 
 #[test]
 fn compression_frees_the_frame_and_scrubs_it() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let page = env.map_page(11, 9);
     let (frame, _) = env.space.translate(page).expect("mapped");
@@ -311,7 +337,7 @@ fn compression_frees_the_frame_and_scrubs_it() {
 
 #[test]
 fn handoff_gate_refuses_outside_moderate_and_severe() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let page = env.map_page(12, 3);
     // Normal pressure: never compress.
@@ -340,7 +366,7 @@ fn handoff_gate_refuses_outside_moderate_and_severe() {
 
 #[test]
 fn ineligible_candidates_are_refused_with_the_reason() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let page = env.map_page(13, 3);
     env.press_to(PressureBand::Moderate);
@@ -359,7 +385,7 @@ fn ineligible_candidates_are_refused_with_the_reason() {
 
 #[test]
 fn unmapped_page_is_refused() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     env.press_to(PressureBand::Moderate);
     assert_eq!(
@@ -370,7 +396,7 @@ fn unmapped_page_is_refused() {
 
 #[test]
 fn device_flagged_mapping_is_refused_in_depth() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let frame = env.frames.alloc(MemoryClass::Compressed).expect("frame");
     let page = page_at(14);
@@ -390,7 +416,7 @@ fn device_flagged_mapping_is_refused_in_depth() {
 
 #[test]
 fn incompressible_page_is_refused_and_stays_mapped() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let frame = env.frames.alloc(MemoryClass::Compressed).expect("frame");
     let page = page_at(15);
@@ -416,11 +442,14 @@ fn incompressible_page_is_refused_and_stays_mapped() {
 
 #[test]
 fn band_cap_is_enforced_and_escalation_is_deterministic() {
-    let mut env = Env::new();
+    let mut env = env!();
     // A machine so small the hard cap is two pages. Each page belongs
     // to a distinct task so the fair-share bound (half the cap) never
     // fires first; the cap must be the refusal that stops growth.
     let mut ramzip = tier_with_caps(RamzipCaps::from_physical(32 * 1024));
+    // Not scalable: the cap is charged against *compressed* footprint, so
+    // reaching the two pages it allows takes this many compressible pages.
+    // The count is the assertion.
     let pages: Vec<Page> = (20..70).map(|n| env.map_page(n, 1)).collect();
     env.press_to(PressureBand::Moderate);
     let mut refusal = None;
@@ -464,7 +493,7 @@ fn band_cap_is_enforced_and_escalation_is_deterministic() {
 
 #[test]
 fn per_task_share_is_enforced_per_owner() {
-    let mut env = Env::new();
+    let mut env = env!();
     // Hard cap two pages, share (half) one page: one entry per task.
     let mut ramzip = tier_with_caps(RamzipCaps::from_physical(32 * 1024));
     let first = env.map_page(22, 1);
@@ -483,7 +512,7 @@ fn per_task_share_is_enforced_per_owner() {
 
 #[test]
 fn reserve_floor_refuses_compression_but_not_restore() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let early = env.map_page(30, 5);
     env.press_to(PressureBand::Moderate);
@@ -509,7 +538,7 @@ fn reserve_floor_refuses_compression_but_not_restore() {
 
 #[test]
 fn fault_on_missing_or_mapped_page_is_typed() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     assert_eq!(
         try_fault(&mut env, &mut ramzip, page_at(40)),
@@ -524,7 +553,7 @@ fn fault_on_missing_or_mapped_page_is_typed() {
 
 #[test]
 fn tampered_entry_fails_closed_with_audit_and_no_plaintext() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let page = env.map_page(50, 8);
     env.press_to(PressureBand::Moderate);
@@ -553,7 +582,7 @@ fn tampered_entry_fails_closed_with_audit_and_no_plaintext() {
 
 #[test]
 fn truncated_entry_metadata_fails_closed_as_corrupt() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let page = env.map_page(51, 8);
     env.press_to(PressureBand::Moderate);
@@ -575,7 +604,7 @@ fn truncated_entry_metadata_fails_closed_as_corrupt() {
 
 #[test]
 fn repeated_cycles_leak_no_frames_and_no_metadata() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let page = env.map_page(60, 2);
     let baseline = env.frames.free_frames();
@@ -593,7 +622,7 @@ fn repeated_cycles_leak_no_frames_and_no_metadata() {
 
 #[test]
 fn thrashing_task_is_detected_and_refused() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let page = env.map_page(70, 1);
     env.press_to(PressureBand::Moderate);
@@ -618,7 +647,7 @@ fn thrashing_task_is_detected_and_refused() {
 
 #[test]
 fn cluster_restores_only_nearby_contemporaneous_entries() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let pages: Vec<Page> = (100..105).map(|n| env.map_page(n, 1)).collect();
     let far = env.map_page(200, 9);
@@ -645,7 +674,7 @@ fn cluster_restores_only_nearby_contemporaneous_entries() {
 
 #[test]
 fn cluster_does_nothing_under_pressure() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let a = env.map_page(110, 1);
     let b = env.map_page(111, 2);
@@ -663,7 +692,7 @@ fn cluster_does_nothing_under_pressure() {
 
 #[test]
 fn warm_step_restores_near_recent_faults_only_when_comfortable() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let pages: Vec<Page> = (120..126).map(|n| env.map_page(n, 3)).collect();
     env.press_to(PressureBand::Moderate);
@@ -702,7 +731,7 @@ fn warm_step_restores_near_recent_faults_only_when_comfortable() {
 
 #[test]
 fn warm_step_stops_immediately_under_pressure() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let a = env.map_page(130, 1);
     let b = env.map_page(131, 2);
@@ -736,7 +765,7 @@ fn entry_metadata_fits_the_accounted_bound() {
 
 #[test]
 fn counters_track_attempts_and_acceptances() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let page = env.map_page(140, 4);
     // One refusal at normal pressure, one acceptance at moderate.
@@ -805,9 +834,9 @@ fn map_incompressible_page(env: &mut Env, page_number: u64) -> Page {
 
 #[test]
 fn bench_evidence_memory_saved_and_move_only_round_trip() {
-    const PAGES: u64 = 48;
+    const PAGES: u64 = BENCH_PAGES;
 
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
     let pages: Vec<Page> = (300..300 + PAGES).map(|n| env.map_page(n, 0x30)).collect();
     // Free count with the pages mapped: compress-out frees each frame and
@@ -869,9 +898,9 @@ fn bench_evidence_larger_ram_profile_round_trip() {
     // Pi-class default, so the estimate covers both ends of the range
     // the plan asks for (section 19).
     const FRAMES: usize = 1024;
-    const PAGES: u64 = 48;
+    const PAGES: u64 = BENCH_PAGES;
 
-    let mut env = Env::with_total_frames(FRAMES);
+    let mut env = env!(FRAMES);
     let mut ramzip = tier(&env);
     let pages: Vec<Page> = (600..600 + PAGES).map(|n| env.map_page(n, 0x50)).collect();
 
@@ -898,11 +927,13 @@ fn bench_evidence_larger_ram_profile_round_trip() {
 
 #[test]
 fn bench_evidence_cluster_severe_and_incompressible_cost() {
-    let mut env = Env::new();
+    let mut env = env!();
     let mut ramzip = tier(&env);
 
     // A contiguous run so fault clustering has neighbours to restore.
-    let pages: Vec<Page> = (400..416).map(|n| env.map_page(n, 0x22)).collect();
+    let pages: Vec<Page> = (400..400 + CLUSTER_RUN_PAGES)
+        .map(|n| env.map_page(n, 0x22))
+        .collect();
     env.press_to(PressureBand::Moderate);
     assert_eq!(
         compress_run(&mut env, &mut ramzip, &pages),
@@ -932,7 +963,9 @@ fn bench_evidence_cluster_severe_and_incompressible_cost() {
     // CPU cost under severe pressure (the emergency-growth band): compress
     // a fresh batch there. Severe raises the cap toward the hard cap, so a
     // small run is admitted.
-    let severe_pages: Vec<Page> = (440..456).map(|n| env.map_page(n, 0x33)).collect();
+    let severe_pages: Vec<Page> = (440..440 + CLUSTER_RUN_PAGES)
+        .map(|n| env.map_page(n, 0x33))
+        .collect();
     env.press_to(PressureBand::Severe);
     let started = std::time::Instant::now();
     let severe_accepted = compress_run(&mut env, &mut ramzip, &severe_pages);

@@ -81,24 +81,8 @@ fn run(ops: &[Op]) {
     }
 }
 
-/// Cases per run. The interpreter is orders of magnitude slower than native
-/// and is here to find undefined behaviour, not to widen the search: one pass
-/// over each path already exposes that, and the wide sweep belongs to the
-/// ordinary run.
-#[cfg(miri)]
-const CASES: u32 = 4;
-#[cfg(not(miri))]
-const CASES: u32 = 256;
-
 proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: CASES,
-        // Persisting a failing case wants the working directory, which Miri's
-        // isolation refuses. A counterexample found here is reported, not
-        // filed.
-        failure_persistence: if cfg!(miri) { None } else { ProptestConfig::default().failure_persistence },
-        .. ProptestConfig::default()
-    })]
+    #![proptest_config(tairix_fuzzseed::prop::config(256, 4))]
 
     #[test]
     fn rwlock_fairness_invariant_holds(ops in proptest::collection::vec(op_strategy(), 0..32)) {
