@@ -653,17 +653,49 @@ Choosing **Open With…** resolves the file's absolute path (the one shared
 candidate list over `RtBundleSource`, and — when at least one application claims
 the type — opens an `OpenWithChooser` in **its own popup window** above the
 manager's, sized to the candidates it actually holds (never a fixed eight rows'
-worth of empty plate) and carrying **Open** and **Cancel** so the way out is
-drawn rather than guessed. It holds one `ListRow` per candidate in ranked order
-with the current one selected, drawn by `render::draw_open_with_chooser`. The
-list is reached in full however long it is: by wheel, by the
-drawn scrollbar's drag (which routes through the very rule the listing's bar
-does, so the two cannot behave differently), and by Up/Down/Home/End with the
-selection revealed. `Enter`, or a primary press on a row resolved through
+worth of empty plate).
+
+The popup opens with the same `render::Identity` band the Properties window
+does, naming and picturing the file being opened — so the question the chooser
+is asking is on the surface rather than in a title. Below it sits one `ListRow`
+per candidate in ranked order, each drawing **that application's own icon**
+through the shared artwork cache (the chooser previously resolved through
+`NoArtwork`, so every candidate wore the same generic bundle glyph and the user
+chose between names). The candidate a plain *Open* would have used carries a
+trailing **Default** mark, because the chooser exists to override exactly that
+choice. **Open** and **Cancel** sit on a control-height band at the foot, so
+the way out is drawn rather than guessed.
+
+The list is reached in full however long it is: by wheel, by the drawn
+scrollbar's drag (which routes through the very rule the listing's bar does, so
+the two cannot behave differently), and by Up/Down/Home/End with the selection
+revealed. A **single** primary press on a row resolved through
 `render::open_with_row_at` (which mirrors the draw's placement, so paint and
-click cannot disagree, `AGENTS.md` §2.2), launches the chosen candidate through
-the **same** `DOCUMENT_ROLE_ARG` + `STDIN` hand-off the default open uses;
-`Escape` or a press off the rows dismisses it and launches nothing.
+click cannot disagree, `AGENTS.md` §2.2) *picks* that candidate; a
+**double-click**, `Enter`, or the **Open** button launches it through the
+**same** `DOCUMENT_ROLE_ARG` + `STDIN` hand-off the default open uses. The
+pairing is the shared `DoubleClickTracker` the listing behind it uses, so a
+double-click means one thing on both surfaces. Picking and opening are separate
+acts deliberately: a press that launched at once left the Open button with
+nothing to do and spawned an application on a mis-click, with no chance to look
+at the choice. `Escape`, the **Cancel** button, or the window manager asking
+the popup to close dismisses it and launches nothing; a press on the panel's
+own plate picks nothing and leaves the chooser standing.
+
+**The popup is a window, so its events are addressed to its own id.** The
+session focuses a popup when it opens, so every key and click for the chooser
+arrives naming the popup rather than the manager window that holds it.
+`files.app` resolves an event's window through the shared, host-tested
+`route::addressee`, which reports both *which* window an id belongs to and
+*which of its two surfaces* was named — matching a window's own id before any
+popup's, so a live window's events can never be diverted. Getting either half
+wrong is silent: an id matched against the window list alone resolves to
+nothing, so every event for the chooser was dropped and the popup sat on screen
+inert; matching it to its owner without distinguishing the two would resize,
+release, or close the manager window on an event the popup was sent. The
+chooser's events never reach the listing behind it either — routing this
+window's coordinates against the popup's own viewport could land on the Open
+button and launch something the user never picked.
 
 A file no installed application claims is stated fail-loud on `stderr` and opens
 nothing — an honest "no application" answer, never an empty chooser
@@ -682,12 +714,18 @@ drift apart (`AGENTS.md` §2.2):
   spelling is simply not one the registry knows (`None`, never a free-form
   string at a draw or association site).
 - `media_for_name(name)` maps a filename extension to its type,
-  ASCII-case-insensitively and without allocating; `media_for_entry(entry,
-  parent)` classifies a listed entry — `inode/directory` for a directory
-  whatever its name, `application/x-tairix-service` for a `<Name>.app` listed
-  from the system service store and `application/x-tairix-app` elsewhere, and
-  the extension's type for a regular file, falling closed to
-  `application/octet-stream`.
+  ASCII-case-insensitively and without allocating; `media_for_named(name, kind,
+  service_store)` classifies a node known only by its name and kind —
+  `inode/directory` for a directory whatever its name,
+  `application/x-tairix-service` for a `<Name>.app` in the system service store
+  and `application/x-tairix-app` elsewhere, and the extension's type for a
+  regular file, falling closed to `application/octet-stream`; a link classifies
+  as what it *names*, and a dangling one as the generic type.
+  `media_for_entry(entry, parent)` is that same rule for a listed entry, whose
+  parent directory is what answers the service-store question. A surface
+  describing *one* node — the Properties window's identity band — has only the
+  name and kind, so it classifies through the same definition rather than
+  growing a private copy.
 - `MediaType::icon` is the glyph the type draws. That mapping is deliberately
   many-to-one and is the *only* part of the registry allowed to be: several
   distinct types share `IconKind::Text`. Two types are never merged because
@@ -1736,20 +1774,48 @@ one.
 
 The **trusted file picker** draws `render::draw_properties`: a shared
 `lib/controls` `Panel` centered over its own view, titled with the node's name
-and laying those rows out as muted-label / solid-value columns, clipping so a
-window too small for the whole panel shows what fits rather than panicking
-(`AGENTS.md` §2.9). It reads only the already-authorised `Properties` and holds
-no authority.
+and laying every field it shows out as a `lib/controls` `FactList` — muted
+label, right-aligned value, separated rows — clipping so a window too small for
+the whole panel shows what fits rather than panicking (`AGENTS.md` §2.9). It is
+the same fact-row helper the file manager's own General section draws, so
+neither surface carries its own idea of what a label/value row looks like
+(§2.2). It reads only the already-authorised `Properties` and holds no
+authority.
 
 The **file manager's Properties is a window of its own**
 (`render::draw_properties_window`, opened at `render::properties_window_extent`
 and resizable thereafter). Several are open at once, each pinned to its node by
 *path*, so the listing behind them may be reloaded or navigated away from
 without any of them describing or writing to something else — and the listing
-stays usable while they are open, which an in-window modal could not offer. The
-client is the metadata fields, the labelled permissions grid, the ownership
-control and the extended-attribute list; there is no second panel header inside
-a window that already has a title bar.
+stays usable while they are open, which an in-window modal could not offer.
+
+The client is three bands: an **identity band** naming the subject, a **section
+strip**, and the selected section's **body**. There is no second panel header
+inside a window that already has a title bar.
+
+- The identity band (`render::Identity`, `render::draw_identity`) draws the
+  node's own artwork at 48 logical pixels beside its name in the
+  `TextRole::ItemTitle` face, with a muted line stating what it is and how big.
+  The artwork resolves through the shared icon cache and the same
+  `media_for_named` classifier the listing types its rows with, so a node is
+  pictured identically in both places, and it is resolved from the *name*
+  alone, so the picture does not change under the reader when the read lands.
+  The band is shared with the "Open With…" chooser rather than written twice
+  (§2.2).
+- The section strip is a `lib/controls` `Tabs` over the closed
+  `render::PropertiesTab` vocabulary: **General** (the metadata facts),
+  **Permissions** (the mode bits and the owning ids), **Attributes** (the
+  extended-attribute store). Which section a field belongs to is the one
+  `render::Field::tab` definition, so the strip, the body and the hit-test
+  cannot disagree. `Left`/`Right` walk the strip without wrapping past either
+  end, so every section is reachable with no pointer.
+
+The three-band frame is resolved from the **client alone**, never from the
+node, so which fields a node happens to show can no longer move a control
+under the pointer: the single-column layout this replaced pushed every band
+below an alias row down a line, so the same click meant different things on a
+link and on a plain file. Each section gets the whole body, which is what
+removes the crowding that made nine permission checkboxes sit a glyph apart.
 
 `files.app` opens one with **`Alt+Enter`** on the selection or the context
 menu's *Properties* row. The node is resolved from the listing that named it —
@@ -1762,7 +1828,21 @@ be named or described — an answer, not a crash, and never a fabricated summary
 (`AGENTS.md` §2.24, §5.4). `render::properties_hit` is the one hit-test over
 the whole client, so the precedence between its controls is stated once: the
 capability-free permission toggles resolve before the privileged ownership
-control, and a press on nothing resolves to nothing.
+control, and a press on nothing resolves to nothing. It resolves the strip
+before the body it selects, and then only the controls the **selected** section
+actually drew — so a press can never reach a toggle on a section the user is
+not looking at. It takes the same `can_chown` gate the draw took, so a session
+that may not reassign an owner resolves nothing on an ownership cell rather
+than opening an editor whose commit could only be refused — the hit-test
+previously resolved that cell whatever the capability, so a session without it
+could click where the undrawn control sat (the kernel always enforced the
+write, so this was a fail-open UI rather than an escalation).
+
+The keyboard is scoped the same way, through the host-tested
+`route::properties_key`: `Left`/`Right` walk the strip from any section,
+`Escape` closes the window, and everything else belongs to the **attributes**
+section's list and editor — so no key reaches a control the selected section
+does not draw.
 
 ### Editing permissions
 
@@ -1783,10 +1863,13 @@ no authority, so the trusted picker never calls the write path.
 
 ### The drawn permission control
 
-Below the metadata fields the Properties window draws a **labelled permissions
-grid** — `Read`/`Write`/`Exec` column headers over three
+The Permissions section draws the node's symbolic and octal mode, then a
+**labelled permissions grid** — `Read`/`Write`/`Exec` column headers over three
 `Owner`/`Group`/`Other` triad rows of clickable `lib/controls` `Checkbox`
-toggles reflecting the current mode. `render::PERMISSION_BITS` and
+toggles reflecting the current mode. Each cell is exactly the box the checkbox
+draws (`Checkbox::glyph_side`, the control's own published render geometry
+rather than a font metric guessed at from outside), centred under its column
+header on a control-height row pitch. `render::PERMISSION_BITS` and
 `permission_cells` are the one definition of which of the nine
 owner/group/other bits each toggle carries, and the `Permission` arm of
 `render::properties_hit` returns the bit a click flips (and nothing off a
@@ -1842,19 +1925,26 @@ the trusted picker never calls the write path.
 
 ### The drawn ownership control
 
-The Properties window draws an editable ownership control on its owner row,
-**but only where the launching user holds `CAP_FS_CHOWN`** — read once from the
-kernel-attested `self_origin` at start-up, so a session that cannot reassign
-ownership is never shown a control it cannot use (`AGENTS.md` §2.24). An accent
-underline marks each value as clickable, and while one is being edited the
-shared `lib/controls` `TextField` is drawn over it at
-`render::properties_owner_editor_rect`. `render::OwnerField` and the `Owner`
-arm of `render::properties_hit` resolve a click to exactly the uid or gid value
-it edits — measured from the same `uid N / gid N` spelling the fields draw, so
-the drawn control and the hit-test can never disagree (§2.2) — and a click off
-a value resolves nothing (fail closed, §5.4). Like the permission control the
-write surface is separated by call site, *and* additionally gated on the
-runtime capability, since owner reassignment is privileged.
+Beneath the grid the Permissions section draws an **Owner** row and a **Group**
+row, each labelled and carrying its id in a control-height cell. Where the
+launching user holds `CAP_FS_CHOWN` — read once from the kernel-attested
+`self_origin` at start-up — the cell is a pressable plate, so it reads as "press
+to change this"; where they do not, the id is a plain value and no control is
+offered at all, since a session that cannot reassign ownership should not be
+shown one (`AGENTS.md` §2.24). While one is being edited the shared
+`lib/controls` `TextField` is drawn over it at
+`render::properties_owner_editor_rect`. The plate matters: an *idle text field*
+draws like the live one over it, so a reader could not tell whether their keys
+were landing.
+
+`render::OwnerField` and the `Owner` arm of `render::properties_hit` resolve a
+click to exactly the uid or gid cell it edits — one definition placing the
+drawn cell and the hit-test (§2.2) — and a click off a cell resolves nothing
+(fail closed, §5.4). Like the permission control the write surface is separated
+by call site, *and* additionally gated on the runtime capability, since owner
+reassignment is privileged. Switching section abandons a half-typed id: the
+editor belongs to the section it is drawn in, and one left open behind a
+section the user cannot see would take their next keystroke.
 
 The editor opens on a click pre-filled with the current id and bounded to a
 `u32`'s ten digits, live-validates the typed value, and on `Enter` commits over
@@ -1867,9 +1957,11 @@ reflects the new owner.
 
 ### Extended attributes
 
-The Properties window lists the node's visible extended attributes (the ARXFS
-`namespace.name` store, `plans/ARXFS-METADATA.md`) beneath the permissions
-grid, and can set and remove them. The kernel omits keys whose namespace the
+The Attributes section lists the node's visible extended attributes (the ARXFS
+`namespace.name` store, `plans/ARXFS-METADATA.md`) and can set and remove them.
+The section is named by its own tab, so it carries no heading of its own; its
+`key = value` editor and the *Set* / *Remove* buttons beside it sit on a
+control-height band at the foot. The kernel omits keys whose namespace the
 caller may not read, so the window only ever sees what it may show: there is no
 privileged-namespace surface to build, and `system.*` / `trusted.*` are
 invisible rather than refused. Four states are distinguished rather than shown

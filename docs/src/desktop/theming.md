@@ -171,6 +171,20 @@ bundles, under a stable `ThemeId`:
   (`title_bar_height`, `frame_inset`, `title_hue_reach`,
   `resize_grabber_extent`, `resize_edge_grab`, `resize_corner_grab`,
   `hit_slop`).
+  - `control_inset` is the room a control plate keeps for a **line of type**,
+    `10` logical pixels in both themes: the label's horizontal budget is the
+    plate less the frame border and this inset either side, so text stays clear
+    of the rounded corners. It is *not* a vertical budget — it exceeds what the
+    theme's own `control_height` can spare around an 18px glyph — and charging
+    it vertically withheld a plate's whole content rather than clipping it, so
+    every button laid out on a text row pitch drew as an empty plate (the
+    Properties and "Open With…" windows). The vertical budget is the plate less
+    the frame it must not overlap; the content is centred in it and the surface
+    clips, which is what every other blit in the crate does. It was also
+    sizing the glyph of an *icon-and-label* plate: on the 28px control plate
+    that left a 6px glyph beside 18px type — the same "tiny icon" defect
+    `icon_content_side` had already fixed for icon-*only* plates, still present
+    in this arm. The glyph is now the height of the type beside it.
   - `taskbar_margin` is how far the taskbar stands off the screen edges it
     faces, `5` logical pixels in both themes. The bar floats: the margin
     applies to the three sides facing a screen edge — for a bottom bar the

@@ -228,7 +228,14 @@ impl Properties {
     /// nothing reachable.
     #[must_use]
     pub const fn kind_label(&self) -> &'static str {
-        match self.kind {
+        Self::kind_label_for(self.kind)
+    }
+
+    /// [`kind_label`](Self::kind_label) for a `kind` alone — what a surface
+    /// naming a node *before* its read has landed has to go on.
+    #[must_use]
+    pub const fn kind_label_for(kind: EntryKind) -> &'static str {
+        match kind {
             EntryKind::Directory => "Folder",
             EntryKind::File => "File",
             EntryKind::Bundle => "Application",

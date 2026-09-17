@@ -423,21 +423,29 @@ pub fn media_for_name(name: &str) -> Option<MediaType> {
 /// extension is unrecognised (or absent) — fail closed to the generic type.
 #[must_use]
 pub fn media_for_entry(entry: &Entry, parent: &[String]) -> MediaType {
-    // A link classifies as what it *names*: a shortcut to a folder is drawn
-    // and opened as a folder. A link that resolves to nothing has no content
-    // type at all, so it falls closed to the generic one.
-    match entry.kind().resolved() {
+    media_for_named(entry.name(), entry.kind(), is_system_service_store(parent))
+}
+
+/// The media type of a node known only by its `name` and `kind` — what a
+/// surface describing *one* node has, as against a listing that knows the
+/// directory each row came out of.
+///
+/// The same classification [`media_for_entry`] applies, so a node is typed
+/// identically whether it is reached as a listed row or as the subject of its
+/// own window. `service_store` says whether a bundle was found in the system
+/// service store, which only a caller that knows the parent can answer; a
+/// caller that does not passes `false` and a bundle types as an application.
+///
+/// A link classifies as what it *names*: a shortcut to a folder is typed and
+/// opened as a folder. A link that resolves to nothing has no content type at
+/// all, so it falls closed to the generic one.
+#[must_use]
+pub fn media_for_named(name: &str, kind: EntryKind, service_store: bool) -> MediaType {
+    match kind.resolved() {
         Some(EntryKind::Directory) => MediaType::InodeDirectory,
-        Some(EntryKind::Bundle) => {
-            if is_system_service_store(parent) {
-                MediaType::TairixService
-            } else {
-                MediaType::TairixApp
-            }
-        }
-        Some(EntryKind::File) => {
-            media_for_name(entry.name()).unwrap_or(MediaType::ApplicationOctetStream)
-        }
+        Some(EntryKind::Bundle) if service_store => MediaType::TairixService,
+        Some(EntryKind::Bundle) => MediaType::TairixApp,
+        Some(EntryKind::File) => media_for_name(name).unwrap_or(MediaType::ApplicationOctetStream),
         // `resolved` never yields a link, and a dangling one yields nothing.
         Some(EntryKind::Link(_)) | None => MediaType::ApplicationOctetStream,
     }

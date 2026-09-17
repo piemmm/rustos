@@ -497,3 +497,23 @@ fn hover_and_value_each_change_a_selector_render() {
     let switched = Toggle::new("Wi-Fi", true);
     assert_ne!(resting, switched, "the value's thumb position is visible");
 }
+
+#[test]
+fn the_published_checkbox_glyph_side_is_the_box_the_render_draws() {
+    let theme = Theme::dark();
+    let side = Checkbox::glyph_side(Scale::ONE, &theme);
+    let clear = Color::TRANSPARENT.premultiply();
+    // A cell sized to the published side is filled by the box: its leading
+    // column inks, and the column just past it does not.
+    let mut surface = Surface::new(side + 4, side).expect("surface");
+    Checkbox::new("", SelectionState::Selected).render(
+        &mut surface,
+        Rect::new(0, 0, side, side),
+        Scale::ONE,
+        &theme,
+    );
+    let inked = |x: u32| (0..side).any(|y| surface.get(x, y) != Some(clear));
+    assert!(inked(0), "the box starts at the cell's leading edge");
+    assert!(inked(side - 1), "and reaches its trailing edge");
+    assert!(!inked(side), "nothing is drawn past the published side");
+}

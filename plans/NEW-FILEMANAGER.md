@@ -51,6 +51,7 @@ which the drift guard enforces.
 | FM12 | Pointer activation gestures — four gestures reaching the one `activate` decision | done |
 | FM13 | The places / devices rail | done |
 | FM-polish | UI polish: the resizable/maximizable window, the labelled permissions grid, and plate-filling icon-only buttons | done |
+| FM-dialogs | The two popup surfaces made first class: the sectioned Properties window, the working "Open With…" chooser, and the control-plate label fix beneath both | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -78,6 +79,84 @@ button across the desktop benefits. Host tests: the `lib/browse`
 permission-grid non-overlap regression + updated hit-test scan, and the
 `lib/controls` `icon_only_glyph_fills_the_plate_not_the_text_inset` regression;
 freestanding app builds + lints clean.
+
+**FM-dialogs — the two popup surfaces.** Three defects, one of them shared
+with every other surface on the desktop.
+
+*The empty buttons.* `lib/controls`' plate content was charged `control_inset`
+as a **vertical** budget and withheld entirely when the plate was shorter than
+twice it. That threshold is 22px at the reference density, which is exactly
+`render::row_height` — so every button in both dialogs, laid out on the text
+row pitch, drew as a bare plate with no label at all. The inset is a
+*horizontal* text budget (it exceeds what the theme's own `control_height` can
+spare vertically); the vertical budget is now the plate less the frame, with
+the content centred and clipped like every other blit. Both dialogs also now
+reserve `control_height` for their action bands, not a text row pitch, through
+the one shared `render::control_height`.
+
+That same budget was sizing the glyph of an *icon-and-label* plate, which on
+the 28px control plate left a 6px glyph beside 18px type — the "tiny icon"
+defect `icon_content_side` had already fixed for icon-*only* plates, still
+present in this arm and fixed by the same change. Every surface with an
+icon-and-label button benefits; the regression test measures the glyph by
+differencing two icons under one label, since differencing against a
+label-only plate moves the label and measures that instead.
+
+*The inert chooser.* `files.app`'s `route_event` resolved an event's window id
+against its window list alone. The chooser is a popup pane held inside the
+browser window's overlays, not a list member, so **every** key, click, scroll
+and redraw addressed to it was dropped — the popup opened, painted once, and
+never responded again. The session focuses a popup when it opens, so those
+events do arrive naming the popup. Resolution now goes through the pure,
+host-tested `route::addressee`, which reports the window *and which of its two
+surfaces* was named: a popup's events go to the chooser, and never to its owner
+(an undistinguished match would have resized, released or closed the manager
+window instead). The reciprocal interception in `apply_event` — which fed the
+*parent* window's events to the chooser — is gone: it resolved parent-local
+coordinates against the popup's viewport, which could land on Open and launch
+an application the user never picked.
+
+*Two more defects the review found.* `properties_hit` resolved the ownership
+cell with **no** `can_chown` gate while the draw only drew the control when the
+capability was held — so a session without `CAP_FS_CHOWN` could click where the
+undrawn value sat and open an editor for a change the kernel could only refuse.
+The hit-test now takes the same gate the draw took, so it resolves exactly what
+was painted (the kernel always enforced the write, so this was a fail-open UI,
+not an escalation). And sectioning the window left the *attribute* keyboard
+live on every section — typing on General filled a field the user could not
+see, an arrow moved an invisible cursor and paid for a repaint, and `Escape`
+cleared a hidden line instead of closing the window. `route::properties_key`
+is now the one host-tested statement of which part of the window a key acts on.
+
+*The design.* Both windows now open with one shared identity band
+(`render::Identity` / `draw_identity`) — the node's own artwork at 48 logical
+pixels, its name in `TextRole::ItemTitle`, and a muted detail line — so the
+subject of a window is named once at the top rather than as a row among its
+fields, and neither surface carries its own copy. Properties is then a
+`lib/controls` `Tabs` strip over the closed `render::PropertiesTab`
+vocabulary (General / Permissions / Attributes) and the selected section's
+body; `render::Field::tab` is the one definition of which section a field
+belongs to, and `Left`/`Right` walk the strip. The frame is resolved from the
+**client alone**, never the node, so an alias row no longer moves every band
+below it — the same click meant different things on a link and a plain file.
+The permissions matrix sizes each cell from `Checkbox::glyph_side` (the
+control's own published render geometry) on a control-height pitch, and
+ownership is two labelled rows whose editable cell is a pressable plate — an
+idle `TextField` drew identically to the live editor over it, so a reader could
+not tell whether their keys were landing. The metadata rows are a
+`lib/controls` `FactList` in both the window's General section and the trusted
+picker's panel, which deleted the hand-rolled two-column `FieldLayout`. The
+chooser draws each candidate's **own** application icon (it resolved through
+`NoArtwork`, so every row wore the same generic glyph), marks the candidate a
+plain *Open* would have used, and takes a single press as a *pick* with a
+double-click, `Enter` or **Open** as the activation — a press that launched at
+once left the Open button with nothing to do and spawned an application on a
+mis-click.
+
+Still a single `key = value` line rather than separate key and value fields:
+the shared `tairix_fsmeta::attr::parse_assignment` grammar backs it and the
+placeholder states the spelling, so the split is a refinement rather than a
+defect, and is not smuggled into this change.
 
 **Chrome layout, the default view, and the modal cancel rect.** The command
 toolbar is *window* chrome: its band spans the full window width

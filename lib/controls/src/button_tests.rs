@@ -86,6 +86,82 @@ const RELEASE: InputEvent = InputEvent::PointerReleased {
 // --- Measurement --------------------------------------------------------
 
 #[test]
+fn a_plate_shorter_than_twice_the_text_inset_still_draws_its_label() {
+    let theme = Theme::dark();
+    let font = font();
+    let border = crate::paint::plate_border(&theme, Scale::ONE);
+    let inset = Scale::ONE.scale_length(theme.metrics().control_inset);
+    let label = premul(theme.palette().on_surface);
+    // The height the vertical budget used to demand before any content was
+    // drawn. It exceeds a plate sized to hold exactly one line of type, so
+    // charging it vertically withheld the label from every plate laid out on
+    // a text row pitch.
+    let demanded = 2 * (border + inset);
+    let line_plate = font.glyph_height() + 2 * border;
+    assert!(demanded > line_plate);
+
+    for h in [line_plate, demanded - 1, demanded] {
+        let mut surface = Surface::new(W, h).expect("surface");
+        Button::labelled("Open").render(&mut surface, Rect::new(0, 0, W, h), Scale::ONE, &theme);
+        assert!(
+            has_pixel(&surface, label),
+            "a {h}px plate must still ink its label"
+        );
+    }
+}
+
+/// An icon-and-label plate draws its glyph at the height of the type beside
+/// it, not squeezed to whatever the *text inset* left vertically — the same
+/// "tiny icon" defect `icon_content_side` fixed for icon-only plates, which
+/// the shared vertical budget had left in this arm.
+///
+/// Measured by rendering the same label under two different glyphs: the group
+/// measures identically either way, so the label lands in the same place and
+/// every differing row belongs to the glyph's own box. Differencing against a
+/// *label-only* plate would not do — adding a glyph widens the centred group
+/// and moves the label, so the label's own rows would dominate.
+#[test]
+fn an_icon_and_label_glyph_is_sized_to_the_type_beside_it() {
+    let theme = Theme::dark();
+    let font = font();
+    let with = |icon: IconKind| {
+        render(
+            &Button::new(
+                ButtonContent::IconLabel {
+                    icon,
+                    label: "Pause".into(),
+                },
+                ControlRole::Neutral,
+            ),
+            &theme,
+        )
+    };
+    let (one, two) = (with(IconKind::Pause), with(IconKind::Folder));
+    let rows: alloc::vec::Vec<u32> = (0..H)
+        .filter(|&y| (0..W).any(|x| one.get(x, y) != two.get(x, y)))
+        .collect();
+    let (first, last) = (
+        *rows.first().expect("the two glyphs differ somewhere"),
+        *rows.last().expect("the two glyphs differ somewhere"),
+    );
+    // Two dissimilar glyphs in an 18px box differ across most of it. The old
+    // vertical budget left a 6px box on this 28px plate, whose glyphs differed
+    // across four rows.
+    let band = last - first + 1;
+    assert!(
+        band > font.glyph_height() / 2,
+        "a {band}px glyph band beside {}px type is the squeezed-icon defect",
+        font.glyph_height()
+    );
+    // Centred on the plate, like the type it sits beside.
+    let centre = i64::from(first) + i64::from(band) / 2;
+    assert!(
+        (centre - i64::from(H) / 2).abs() <= 2,
+        "the glyph is not centred on the plate"
+    );
+}
+
+#[test]
 fn idle_button_paints_plate_and_rounds_its_corners() {
     let theme = Theme::dark();
     let surface = render(&Button::labelled("OK"), &theme);

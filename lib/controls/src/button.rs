@@ -289,7 +289,13 @@ fn paint_content(
     let pad = scale.scale_length(theme.metrics().control_inset);
     let edge = border.saturating_add(pad);
     let avail_w = w.saturating_sub(edge.saturating_mul(2));
-    let avail_h = h.saturating_sub(edge.saturating_mul(2));
+    // `control_inset` is a *horizontal* text inset — room for a line of type
+    // clear of the rounded corners. Vertically the content is centred and the
+    // surface clips it, so the only thing it must stay off is the frame
+    // itself: the inset is not satisfiable vertically even at the theme's own
+    // `control_height`, and charging it here silently deleted the whole label
+    // on any plate shorter than twice it.
+    let avail_h = h.saturating_sub(border.saturating_mul(2));
     if avail_w == 0 || avail_h == 0 {
         return;
     }

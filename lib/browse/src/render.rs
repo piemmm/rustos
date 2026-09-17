@@ -26,11 +26,11 @@
 //! above it or the scrollbar gutter beside it whatever it draws inside its own
 //! rectangle.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_controls::button::{Button, ButtonContent};
+use tairix_controls::button::{Button, ButtonContent, ContentAlign};
 use tairix_controls::decision::Dialog;
 use tairix_controls::scroll::{ScrollModel, ScrollRange};
 use tairix_controls::state::{
@@ -39,10 +39,10 @@ use tairix_controls::state::{
 use tairix_controls::text::TextField;
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    Checkbox, IconButton, IconTile, ListRow, Panel, ScrollAction, ScrollBar, ScrollPart, TableCell,
-    TableRow, Toolbar,
+    paint_icon_slot, Checkbox, Fact, FactList, IconButton, IconTile, ListRow, Panel, ScrollAction,
+    ScrollBar, ScrollPart, Tab, TableCell, TableRow, Tabs, Toolbar, FULL_COLOUR,
 };
-use tairix_font::BitmapFont;
+use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, PointerButton};
@@ -59,7 +59,7 @@ use crate::format::{format_date, format_size};
 use crate::layout::{
     GridFill, GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode,
 };
-use crate::media::{entry_icon_request, icon_for_entry};
+use crate::media::{entry_icon_request, icon_for_entry, media_for_name, MediaType};
 use crate::open_with::OpenWithChooser;
 use crate::places::{self, Place, Places};
 use crate::progress::ProgressModel;
@@ -1369,6 +1369,24 @@ impl Field {
         }
     }
 
+    /// The window section this field is shown in.
+    ///
+    /// Kind and size also head the identity band, but the band states them
+    /// briefly to say *what the window is about*; the General section is where
+    /// the full values are read.
+    const fn tab(self) -> PropertiesTab {
+        match self {
+            Self::Kind
+            | Self::Alias
+            | Self::Size
+            | Self::Created
+            | Self::Modified
+            | Self::Accessed
+            | Self::Changed => PropertiesTab::General,
+            Self::Permissions | Self::Owner => PropertiesTab::Permissions,
+        }
+    }
+
     /// Whether this field has anything to say about `props`.
     ///
     /// Only the alias row is conditional: a node that stores no target has
@@ -1398,15 +1416,17 @@ impl Field {
         }
     }
 
-    /// The fields `props` shows, in display order.
-    fn shown_in(props: &Properties) -> impl Iterator<Item = Self> + '_ {
-        Self::ALL.into_iter().filter(|field| field.shown(props))
+    /// The fields `props` shows in `tab`, in display order.
+    fn shown_in(props: &Properties, tab: PropertiesTab) -> impl Iterator<Item = Self> + '_ {
+        Self::ALL
+            .into_iter()
+            .filter(move |field| field.tab() == tab && field.shown(props))
     }
 
-    /// Which drawn row `self` lands on for `props`, or `None` when the node
-    /// does not show it.
-    fn row(self, props: &Properties) -> Option<usize> {
-        Self::shown_in(props).position(|field| field == self)
+    /// Every field `props` shows, in display order, whichever section each
+    /// appears in — what a surface with no sections of its own draws.
+    fn all_shown(props: &Properties) -> impl Iterator<Item = Self> + '_ {
+        Self::ALL.into_iter().filter(|field| field.shown(props))
     }
 }
 
@@ -1421,7 +1441,7 @@ impl Field {
 /// spelling the link holds verbatim: that is what explains a broken one.
 #[must_use]
 pub fn properties_rows(props: &Properties) -> Vec<(&'static str, String)> {
-    Field::shown_in(props)
+    Field::all_shown(props)
         .map(|field| (field.label(), field.value(props)))
         .collect()
 }
@@ -1456,83 +1476,13 @@ pub fn properties_panel_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rec
     Rect::new(x, y, width, height)
 }
 
-/// The shared column geometry of a Properties surface's content area: the label
-/// column x, the value column x, and the per-row pitch. One definition so the
-/// drawn fields and the controls laid over them line up exactly.
-struct FieldLayout {
-    /// Left x of the label column.
-    left: i32,
-    /// Left x of the value column (past the widest label plus a gap).
-    value_x: i32,
-    /// Top y of the first field row — the origin every band below is measured
-    /// from, so nothing re-derives the content's own margin.
-    top: i32,
-    /// Vertical pitch between successive rows.
-    line: u32,
-}
-
-impl FieldLayout {
-    fn resolve(content: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Self {
-        let label_col = Field::ALL
-            .into_iter()
-            .map(|field| font.text_width(field.label()))
-            .max()
-            .unwrap_or(0);
-        let pad = scale.scale_length(LABEL_PADDING);
-        let gap = font.text_width("  ").max(pad);
-        let left = content.left().saturating_add(to_i32(pad));
-        let value_x = left.saturating_add(to_i32(label_col.saturating_add(gap)));
-        Self {
-            left,
-            value_x,
-            top: content
-                .top()
-                .saturating_add(to_i32(scale.scale_length(ROW_PADDING))),
-            line: row_height(scale, theme),
-        }
-    }
-
-    /// Top y of the row at `index`.
-    fn row_y(&self, index: u32) -> i32 {
-        self.top
-            .saturating_add(to_i32(self.line.saturating_mul(index)))
-    }
-}
-
-/// Draw the [`properties_rows`] metadata fields as muted-label / solid-value
-/// rows within `content`, clipping at the content's bottom edge. Shared by the
-/// read-only panel and the manager's window so the fields read identically.
-fn draw_property_fields(
-    surface: &mut Surface,
-    props: &Properties,
-    content: Rect,
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-) {
-    let palette = theme.palette();
-    let layout = FieldLayout::resolve(content, scale, theme, font);
-    let bottom = content.top().saturating_add(to_i32(content.height));
-    let mut y = layout.top;
-    for (label, value) in &properties_rows(props) {
-        if y >= bottom {
-            break;
-        }
-        font.draw_text(
-            surface,
-            layout.left,
-            y,
-            label,
-            palette.on_surface_muted.into(),
-        );
-        font.draw_text(surface, layout.value_x, y, value, palette.on_surface.into());
-        y = y.saturating_add(to_i32(layout.line));
-    }
-}
-
 /// Draw the read-only Properties overlay for `props` centered in `viewport`: a
-/// panel titled with the node's name and its labelled metadata fields drawn as
-/// muted-label / solid-value rows in the panel's content area.
+/// panel titled with the node's name and every metadata field it shows as a
+/// [`FactList`] in the panel's content area.
+///
+/// The same fact rows the file manager's own window draws in its General
+/// section, so the two surfaces read identically and neither carries its own
+/// idea of what a label/value row looks like.
 ///
 /// The trusted read-only picker draws this. It reads only the already-
 /// authorised [`Properties`] and draws — it performs no I/O and holds no
@@ -1545,14 +1495,46 @@ pub fn draw_properties(
     theme: &Theme,
     viewport: Rect,
 ) {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let bounds = properties_panel_rect(viewport, scale, theme);
     let panel = Panel::new(props.name());
     panel.render(surface, bounds, scale, theme);
     let Some(content) = panel.content_rect(bounds, scale, theme) else {
         return;
     };
-    draw_property_fields(surface, props, content, scale, theme, font);
+    draw_fact_rows(
+        surface,
+        Field::all_shown(props),
+        props,
+        content,
+        scale,
+        theme,
+    );
+}
+
+/// Draw `fields` as a [`FactList`] inset within `content` — the one definition
+/// both Properties surfaces lay their metadata out with.
+fn draw_fact_rows(
+    surface: &mut Surface,
+    fields: impl Iterator<Item = Field>,
+    props: &Properties,
+    content: Rect,
+    scale: Scale,
+    theme: &Theme,
+) {
+    let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    let bounds = Rect::new(
+        content.left().saturating_add(to_i32(pad)),
+        content.top().saturating_add(to_i32(pad)),
+        content.width.saturating_sub(pad.saturating_mul(2)),
+        content.height.saturating_sub(pad.min(content.height)),
+    );
+    FactList::new(
+        fields
+            .map(|field| Fact::new(field.label(), field.value(props)))
+            .collect(),
+    )
+    .with_separators(true)
+    .render(surface, bounds, scale, theme);
 }
 
 /// The nine settable owner/group/other × read/write/execute permission bits, in
@@ -1593,9 +1575,6 @@ const PERMISSION_COLUMN_LABELS: [&str; 3] = ["Read", "Write", "Exec"];
 /// The permissions grid's row labels, naming each `rwx` triad.
 const PERMISSION_ROW_LABELS: [&str; 3] = ["Owner", "Group", "Other"];
 
-/// The section label the extended attributes are listed under.
-const ATTR_SECTION_LABEL: &str = "Extended attributes";
-
 /// What the attributes section says in place of a list it has no rows for.
 const ATTR_UNSUPPORTED: &str = "not stored by this volume";
 
@@ -1605,15 +1584,155 @@ const ATTR_NONE: &str = "none";
 /// What the attributes section says when the listing itself was refused.
 const ATTR_REFUSED: &str = "could not be read";
 
+/// The pixel height of a control plate at `scale`: the theme's own control
+/// height, never a text row pitch.
+///
+/// A plate laid out on the row pitch a line of *type* occupies is too short
+/// for the control it draws, and the label ends up crowding the frame it is
+/// meant to stay clear of. Every action band in this module reserves its
+/// buttons this height, so a button in a dialog is the same object as a button
+/// on a toolbar.
+fn control_height(scale: Scale, theme: &Theme) -> u32 {
+    scale.scale_length(theme.metrics().control_height).max(1)
+}
+
+/// The logical side of the artwork an identity band draws, at the reference
+/// density.
+///
+/// Large enough that a file-class picture reads as a picture rather than as a
+/// list glyph, which is the point of naming a window's subject once at the top
+/// instead of as one row among its fields.
+const IDENTITY_ART: u32 = 48;
+
+/// What a window's identity band says about the node it is about.
+///
+/// Both of the file manager's own windows open with one of these, so the
+/// subject of a Properties window and the subject of an "Open With…" chooser
+/// are named, pictured and laid out by one definition rather than two.
+#[derive(Copy, Clone)]
+pub struct Identity<'a> {
+    /// The leaf name, drawn large.
+    pub name: &'a str,
+    /// The muted line beneath it — what the thing is, and how big.
+    pub detail: &'a str,
+    /// The request the band's artwork resolves through.
+    pub art: IconRequest<'a>,
+}
+
+/// The height an identity band occupies at `scale`: its artwork, or its two
+/// lines of text, whichever is taller, plus the padding around them.
+#[must_use]
+pub fn identity_height(scale: Scale, theme: &Theme) -> u32 {
+    let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    let title = BitmapFont::for_role(theme.fonts(), TextRole::ItemTitle, scale).glyph_height();
+    let body = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale).glyph_height();
+    let text = title
+        .saturating_add(body)
+        .saturating_add(scale.scale_length(ROW_PADDING));
+    scale
+        .scale_length(IDENTITY_ART)
+        .max(text)
+        .saturating_add(pad.saturating_mul(2))
+        .max(1)
+}
+
+/// Draw the identity band for `identity` across `bounds`: the node's own
+/// artwork, its name, and the muted detail line, closed by a hairline that
+/// separates it from whatever the window puts below.
+///
+/// The artwork resolves through the caller's cache like every other picture in
+/// this module, so the band costs one cached lookup and falls back to the
+/// built-in glyph when nothing of the thing's own will serve.
+fn draw_identity(
+    surface: &mut Surface,
+    identity: Identity<'_>,
+    scale: Scale,
+    theme: &Theme,
+    bounds: Rect,
+    artwork: &mut dyn IconArtwork,
+) {
+    let palette = theme.palette();
+    let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    let side = scale
+        .scale_length(IDENTITY_ART)
+        .min(bounds.height.saturating_sub(pad.min(bounds.height)))
+        .max(1);
+    let art_x = bounds.left().saturating_add(to_i32(pad));
+    let art_y = bounds
+        .top()
+        .saturating_add(to_i32(bounds.height.saturating_sub(side) / 2));
+    let picture = artwork.artwork(identity.art, side);
+    paint_icon_slot(
+        surface,
+        (
+            u32::try_from(art_x).unwrap_or(0),
+            u32::try_from(art_y).unwrap_or(0),
+            side,
+        ),
+        identity.art.icon_kind(),
+        palette.on_surface.into(),
+        picture,
+        FULL_COLOUR,
+    );
+
+    let title = BitmapFont::for_role(theme.fonts(), TextRole::ItemTitle, scale);
+    let body = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let text_x = art_x
+        .saturating_add(to_i32(side))
+        .saturating_add(to_i32(scale.scale_length(theme.metrics().control_gap)));
+    let budget = u32::try_from(
+        bounds
+            .left()
+            .saturating_add(to_i32(bounds.width))
+            .saturating_sub(text_x)
+            .saturating_sub(to_i32(pad)),
+    )
+    .unwrap_or(0);
+    let gap = scale.scale_length(ROW_PADDING);
+    let block = title
+        .glyph_height()
+        .saturating_add(gap)
+        .saturating_add(body.glyph_height());
+    let name_y = bounds
+        .top()
+        .saturating_add(to_i32(bounds.height.saturating_sub(block) / 2));
+    let (name, elided) = title.elide_to_width(identity.name, budget);
+    let pen = title.draw_text(surface, text_x, name_y, name, palette.on_surface.into());
+    if elided {
+        title.draw_text(surface, pen, name_y, ELLIPSIS, palette.on_surface.into());
+    }
+    body.draw_text(
+        surface,
+        text_x,
+        name_y.saturating_add(to_i32(title.glyph_height().saturating_add(gap))),
+        body.truncate_to_width(identity.detail, budget),
+        palette.on_surface_muted.into(),
+    );
+
+    let rule = scale.scale_length(theme.metrics().border_thickness).max(1);
+    surface.fill_rect(
+        u32::try_from(bounds.left()).unwrap_or(0),
+        u32::try_from(
+            bounds
+                .top()
+                .saturating_add(to_i32(bounds.height.saturating_sub(rule))),
+        )
+        .unwrap_or(0),
+        bounds.width,
+        rule,
+        palette.border.into(),
+    );
+}
+
 /// The shared geometry of a Properties surface's labelled permissions grid: a
-/// column-header row (Read / Write / Execute) above three owner/group/other
-/// triad rows, each triad a leading row label followed by its three `rwx`
+/// column-header row (Read / Write / Exec) above three owner/group/other triad
+/// rows, each triad a leading row label followed by its three `rwx`
 /// checkboxes.
 ///
 /// One definition so the painted grid, its headers and row labels, and the
-/// click hit-test all agree on where every cell sits — the checkboxes are laid
-/// out on a real grid pitch (never crammed one glyph apart), so they no longer
-/// overlap and each column and row reads under its own label.
+/// click hit-test all agree on where every cell sits. Each cell is exactly the
+/// box [`Checkbox`] draws, on a control-height row pitch, so a toggle is the
+/// same object here as anywhere else on the desktop.
 struct PermGrid {
     /// Left x of the row-label column (Owner / Group / Other).
     label_x: i32,
@@ -1638,12 +1757,16 @@ impl PermGrid {
     fn cell(&self, index: usize) -> Rect {
         let triad = u32::try_from(index / 3).unwrap_or(0);
         let bit = u32::try_from(index % 3).unwrap_or(0);
+        // Centred under its column header, which is what makes the matrix
+        // read as a matrix rather than as three ragged rows of boxes.
         let x = self
             .cols_x
-            .saturating_add(to_i32(self.col_pitch.saturating_mul(bit)));
+            .saturating_add(to_i32(self.col_pitch.saturating_mul(bit)))
+            .saturating_add(to_i32(self.col_pitch.saturating_sub(self.box_side) / 2));
         let y = self
             .first_row_y
-            .saturating_add(to_i32(self.row_line.saturating_mul(triad)));
+            .saturating_add(to_i32(self.row_line.saturating_mul(triad)))
+            .saturating_add(to_i32(self.row_line.saturating_sub(self.box_side) / 2));
         Rect::new(x, y, self.box_side, self.box_side)
     }
 
@@ -1651,13 +1774,30 @@ impl PermGrid {
     fn cells(&self) -> [Rect; 9] {
         core::array::from_fn(|i| self.cell(i))
     }
+
+    /// The y the triad row at `triad` draws its label at, given a `glyph`-tall
+    /// face — centred against the row's own pitch like the boxes beside it.
+    fn label_y(&self, triad: usize, glyph: u32) -> i32 {
+        self.first_row_y
+            .saturating_add(to_i32(
+                self.row_line
+                    .saturating_mul(u32::try_from(triad).unwrap_or(0)),
+            ))
+            .saturating_add(to_i32(self.row_line.saturating_sub(glyph) / 2))
+    }
+
+    /// The bottom edge of the last triad row.
+    fn bottom(&self) -> i32 {
+        self.first_row_y
+            .saturating_add(to_i32(self.row_line.saturating_mul(3)))
+    }
 }
 
 /// Which of the two owning ids the inline ownership control edits.
 ///
 /// The owning user (`uid`) and group (`gid`) are the two independently
-/// editable values on a Properties surface's owner row; a click resolves to
-/// exactly one of them and the caller commits that one field.
+/// editable values on a Properties surface's ownership rows; a click resolves
+/// to exactly one of them and the caller commits that one field.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum OwnerField {
     /// The owning user id (`chown`).
@@ -1666,28 +1806,121 @@ pub enum OwnerField {
     Gid,
 }
 
-/// The geometry of a Properties surface's owner row: the clickable bounds of
-/// the uid and gid values (`[uid, gid]`), each sized to the digits it shows,
-/// and the row pitch the active editor is sized from.
-struct OwnerRowGeom {
-    /// The uid value's cell and the gid value's cell, left-to-right.
+impl OwnerField {
+    /// Both fields, in the order their rows are drawn.
+    const BOTH: [Self; 2] = [Self::Uid, Self::Gid];
+
+    /// The row's label.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Uid => "Owner",
+            Self::Gid => "Group",
+        }
+    }
+
+    /// The id this field currently names on `props`.
+    const fn id(self, props: &Properties) -> u32 {
+        match self {
+            Self::Uid => props.uid(),
+            Self::Gid => props.gid(),
+        }
+    }
+}
+
+/// The ownership rows' geometry: a labelled row per owning id, each with the
+/// value cell a click starts editing.
+///
+/// The cells are full control plates on the control-height pitch rather than
+/// glyph-tall spans measured out of a formatted string, so a click lands on an
+/// obvious target and the active editor fills exactly the cell it replaces.
+struct OwnerRows {
+    /// The uid row's value cell, then the gid row's.
     cells: [Rect; 2],
-    /// The vertical pitch between rows — the height the inline editor uses so
-    /// it is tall enough to read while it overlays the value.
+    /// Left x of the row labels.
+    label_x: i32,
+    /// The row pitch, which is also each cell's height.
     line: u32,
+}
+
+impl OwnerRows {
+    /// The y the row at `slot` draws its label at for a `glyph`-tall face.
+    fn label_y(&self, slot: usize, glyph: u32) -> i32 {
+        self.cells.get(slot).map_or(0, |cell| {
+            cell.top()
+                .saturating_add(to_i32(self.line.saturating_sub(glyph) / 2))
+        })
+    }
+}
+
+/// Which section of a Properties window is on show.
+///
+/// A closed vocabulary: the window's tab strip, the body it draws, and the
+/// hit-test that routes a press into that body all read this one enumeration,
+/// so a press can never be resolved against a section the user is not looking
+/// at.
+#[derive(Copy, Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub enum PropertiesTab {
+    /// The node's metadata: what it is, how big, and when it changed.
+    #[default]
+    General,
+    /// The mode bits and the owning ids.
+    Permissions,
+    /// The extended-attribute store.
+    Attributes,
+}
+
+impl PropertiesTab {
+    /// Every section, in the order the tab strip draws them.
+    pub const ALL: [Self; 3] = [Self::General, Self::Permissions, Self::Attributes];
+
+    /// The section's tab label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Permissions => "Permissions",
+            Self::Attributes => "Attributes",
+        }
+    }
+
+    /// The section at `index` in [`Self::ALL`], or `None` past the end.
+    #[must_use]
+    pub fn at(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
+    /// This section's own index in the tab strip.
+    #[must_use]
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    /// The section `steps` away from this one, clamped at either end so a
+    /// keyboard walk never wraps past the strip.
+    #[must_use]
+    pub fn stepped(self, steps: i32) -> Self {
+        let last = Self::ALL.len().saturating_sub(1);
+        let target = i64::from(i32::try_from(self.index()).unwrap_or(0)) + i64::from(steps);
+        let clamped = target.clamp(0, i64::try_from(last).unwrap_or(0));
+        Self::at(usize::try_from(clamped).unwrap_or(0)).unwrap_or(Self::General)
+    }
 }
 
 /// What a press on a Properties window resolves to.
 ///
 /// One hit-test rather than one per control, so the precedence between them is
-/// stated once: the capability-free permission toggles are resolved before the
-/// privileged ownership control, and a press on nothing resolves to nothing —
-/// never to whichever control happens to be nearest (fail closed).
+/// stated once: the tab strip is resolved before the body it selects, the
+/// capability-free permission toggles before the privileged ownership control,
+/// and a press on nothing resolves to nothing — never to whichever control
+/// happens to be nearest (fail closed).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PropertiesTarget {
+    /// A tab in the strip, by the section it selects.
+    Tab(PropertiesTab),
     /// One of the nine permission toggles, by the `rwx` bit it flips.
     Permission(u32),
-    /// An owning id's value, which only a holder of `CAP_FS_CHOWN` may edit.
+    /// An owning id's value cell, which only a holder of `CAP_FS_CHOWN` may
+    /// edit.
     Owner(OwnerField),
     /// An attribute row, by its index in the visible set.
     Attribute(usize),
@@ -1710,85 +1943,209 @@ pub enum AttrAction {
 const ATTR_ACTIONS: [(AttrAction, &str); 2] =
     [(AttrAction::Remove, "Remove"), (AttrAction::Set, "Set")];
 
-/// Where a Properties window's parts sit within its client area.
+/// Where a Properties window's three bands sit within its client area: the
+/// identity band naming the node, the tab strip selecting a section, and the
+/// body that section draws into.
 ///
-/// Resolved once from the node's own fields, so the painter and every
-/// hit-test read one answer: the metadata fields, the permissions grid and
-/// ownership control beneath them, and the extended-attribute list with its
-/// editor at the foot. Each band is [`None`] when the client leaves it no
-/// room, so a window dragged too small draws and resolves nothing there
-/// rather than placing a control off its own surface.
+/// Resolved once from the client alone — not from the node — so switching
+/// section or adopting a fresh read never moves the frame under the pointer.
+/// The body is [`None`] when the client leaves none, so a window dragged tiny
+/// draws and resolves nothing there rather than placing controls off its own
+/// surface.
 struct PropertiesLayout {
-    /// The band the metadata fields are drawn in.
-    fields: Rect,
-    /// The permissions grid.
-    grid: Option<PermGrid>,
-    /// The owner row's two clickable id cells.
-    owner: Option<OwnerRowGeom>,
-    /// Top y of the attributes section label.
-    label_y: i32,
-    /// The band the attribute rows occupy, gutter included.
-    rows: Option<Rect>,
-    /// The editor's row, the actions band included.
-    editor: Option<Rect>,
+    /// The identity band across the top.
+    identity: Rect,
+    /// The tab strip below it.
+    tabs: Rect,
+    /// What the selected section draws into.
+    body: Option<Rect>,
 }
 
-/// The rows a Properties window reserves between the metadata fields and the
-/// permissions grid, and between the grid and the attributes section: one blank
-/// separator each, plus the grid's own column-header row.
-const PROPERTIES_GRID_ROWS: u32 = 5;
-
 impl PropertiesLayout {
-    /// Resolve every band of the window from its `content` (its whole client
-    /// area) and the node it is showing.
-    fn resolve(
-        props: &Properties,
-        content: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) -> Self {
-        let layout = FieldLayout::resolve(content, scale, theme, font);
-        let line = layout.line.max(1);
-        let bottom = content.top().saturating_add(to_i32(content.height));
-        let field_rows = u32::try_from(Field::shown_in(props).count()).unwrap_or(u32::MAX);
-
-        // The editor claims the last full row of the client; everything above
-        // it is laid out from the top, so a window too short simply loses its
-        // lower bands rather than overlapping them.
-        let editor_top = bottom.saturating_sub(to_i32(line));
-        let grid = perm_grid(&layout, content, scale, font, field_rows);
-        let owner = owner_row_geom(props, &layout, content, font);
-        let label_y = layout.row_y(
-            field_rows
-                .saturating_add(PROPERTIES_GRID_ROWS)
-                .saturating_add(1),
+    /// Resolve the window's bands from its `content` (its whole client area).
+    fn resolve(content: Rect, scale: Scale, theme: &Theme) -> Self {
+        let head = identity_height(scale, theme).min(content.height);
+        let strip = tab_strip_height(scale, theme).min(content.height.saturating_sub(head));
+        let identity = Rect::new(content.left(), content.top(), content.width, head);
+        let tabs = Rect::new(
+            content.left(),
+            content.top().saturating_add(to_i32(head)),
+            content.width,
+            strip,
         );
-        let rows_top = label_y.saturating_add(to_i32(line));
-        let list = (rows_top.saturating_add(to_i32(line)) <= editor_top).then(|| {
-            let height = u32::try_from(editor_top.saturating_sub(rows_top)).unwrap_or(0);
-            Rect::new(content.left(), rows_top, content.width, height)
-        });
-        let editor = (editor_top >= rows_top).then(|| {
+        let used = head.saturating_add(strip);
+        let height = content.height.saturating_sub(used);
+        let body = (height > 0).then(|| {
             Rect::new(
-                content
-                    .left()
-                    .saturating_add(to_i32(scale.scale_length(LABEL_PADDING))),
-                editor_top,
-                content
-                    .width
-                    .saturating_sub(scale.scale_length(LABEL_PADDING).saturating_mul(2)),
-                line,
+                content.left(),
+                content.top().saturating_add(to_i32(used)),
+                content.width,
+                height,
             )
         });
         Self {
-            fields: content,
-            grid,
-            owner,
-            label_y,
-            rows: list,
-            editor,
+            identity,
+            tabs,
+            body,
         }
+    }
+}
+
+/// The permissions section's geometry within its body.
+struct PermsLayout {
+    /// The symbolic + octal mode line above the grid.
+    mode: Rect,
+    /// The nine-cell `rwx` matrix, or `None` when the body is too short.
+    grid: Option<PermGrid>,
+    /// The ownership rows beneath it, or `None` when they do not fit.
+    owner: Option<OwnerRows>,
+}
+
+impl PermsLayout {
+    /// Resolve the section from `body`.
+    fn resolve(body: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Self {
+        let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+        let line = control_height(scale, theme);
+        let left = body.left().saturating_add(to_i32(pad));
+        let bottom = body.top().saturating_add(to_i32(body.height));
+        let mode = Rect::new(
+            left,
+            body.top().saturating_add(to_i32(pad)),
+            body.width,
+            line,
+        );
+
+        let box_side = Checkbox::glyph_side(scale, theme);
+        let header_y = mode.top().saturating_add(to_i32(line));
+        let first_row_y = header_y.saturating_add(to_i32(line));
+        let gap = scale
+            .scale_length(theme.metrics().control_gap)
+            .max(font.text_width(" "));
+        // Wide enough for the triad labels *and* the ownership labels below
+        // them, so the value columns of the two groups line up.
+        let row_label_w = PERMISSION_ROW_LABELS
+            .iter()
+            .copied()
+            .chain(OwnerField::BOTH.into_iter().map(OwnerField::label))
+            .map(|label| font.text_width(label))
+            .max()
+            .unwrap_or(0);
+        let col_label_w = PERMISSION_COLUMN_LABELS
+            .iter()
+            .map(|label| font.text_width(label))
+            .max()
+            .unwrap_or(0);
+        let cols_x = left.saturating_add(to_i32(row_label_w.saturating_add(gap)));
+        let col_pitch = col_label_w.max(box_side).saturating_add(gap);
+        let grid = PermGrid {
+            label_x: left,
+            cols_x,
+            col_pitch,
+            box_side,
+            header_y,
+            first_row_y,
+            row_line: line,
+        };
+        let grid = (grid.bottom() <= bottom).then_some(grid);
+
+        // The ownership rows sit below the grid, past a blank separator row.
+        let owner_top = grid.as_ref().map_or(first_row_y, |grid| {
+            grid.bottom().saturating_add(to_i32(line))
+        });
+        let value_x = cols_x;
+        let value_w = u32::try_from(
+            body.left()
+                .saturating_add(to_i32(body.width.saturating_sub(pad)))
+                .saturating_sub(value_x),
+        )
+        .unwrap_or(0)
+        .min(owner_cell_width(scale, font));
+        let rows = OwnerRows {
+            cells: core::array::from_fn(|slot| {
+                Rect::new(
+                    value_x,
+                    owner_top.saturating_add(to_i32(
+                        line.saturating_mul(u32::try_from(slot).unwrap_or(0)),
+                    )),
+                    value_w,
+                    line,
+                )
+            }),
+            label_x: left,
+            line,
+        };
+        let fits =
+            value_w > 0 && owner_top.saturating_add(to_i32(line.saturating_mul(2))) <= bottom;
+        Self {
+            mode,
+            grid,
+            owner: fits.then_some(rows),
+        }
+    }
+}
+
+/// The width an ownership value cell is drawn at: room for the widest id a
+/// `u32` can hold, so the cell does not resize as the value it shows changes.
+fn owner_cell_width(scale: Scale, font: BitmapFont) -> u32 {
+    font.text_width("0000000000")
+        .saturating_add(scale.scale_length(LABEL_PADDING).saturating_mul(4))
+        .max(1)
+}
+
+/// The attributes section's geometry within its body: the list band, the
+/// `key = value` editor at the foot, and the action buttons beside it.
+struct AttrsLayout {
+    /// The band the attribute rows occupy, gutter included.
+    rows: Option<Rect>,
+    /// The editor's text field.
+    editor: Rect,
+    /// The action buttons, in [`ATTR_ACTIONS`] order.
+    actions: [Rect; ATTR_ACTIONS.len()],
+}
+
+impl AttrsLayout {
+    /// Resolve the section from `body`, or `None` when it leaves no room for
+    /// the editor the section is edited through.
+    fn resolve(body: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Option<Self> {
+        let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+        let plate = control_height(scale, theme);
+        let left = body.left().saturating_add(to_i32(pad));
+        let width = body.width.saturating_sub(pad.saturating_mul(2));
+        if width == 0 || body.height <= plate {
+            return None;
+        }
+        let bottom = body.top().saturating_add(to_i32(body.height));
+        let editor_top = bottom
+            .saturating_sub(to_i32(plate))
+            .saturating_sub(to_i32(pad));
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        let mut right = left.saturating_add(to_i32(width));
+        let mut actions = [Rect::EMPTY; ATTR_ACTIONS.len()];
+        for slot in (0..ATTR_ACTIONS.len()).rev() {
+            let button = action_button_width(ATTR_ACTIONS[slot].1, scale, theme, font).min(width);
+            let x = right.saturating_sub(to_i32(button));
+            actions[slot] = Rect::new(x, editor_top, button, plate);
+            right = x.saturating_sub(to_i32(gap));
+        }
+        let editor_w = u32::try_from(right.saturating_sub(left)).unwrap_or(0);
+        if editor_w == 0 {
+            return None;
+        }
+        let editor = Rect::new(left, editor_top, editor_w, plate);
+        let rows_top = body.top().saturating_add(to_i32(pad));
+        let list_h = u32::try_from(
+            editor_top
+                .saturating_sub(to_i32(pad))
+                .saturating_sub(rows_top),
+        )
+        .unwrap_or(0);
+        let rows =
+            (list_h >= row_height(scale, theme)).then(|| Rect::new(left, rows_top, width, list_h));
+        Some(Self {
+            rows,
+            editor,
+            actions,
+        })
     }
 
     /// How many attribute rows the list band shows.
@@ -1828,148 +2185,39 @@ impl PropertiesLayout {
             )
         })
     }
-
-    /// The editor's text field and the action buttons beside it, or [`None`]
-    /// when the row does not fit.
-    fn editor_parts(
-        &self,
-        scale: Scale,
-        font: BitmapFont,
-    ) -> Option<(Rect, [Rect; ATTR_ACTIONS.len()])> {
-        let row = self.editor?;
-        let pad = open_with_action_pad(scale, font);
-        let widths = ATTR_ACTIONS.map(|(_, label)| {
-            font.text_width(label)
-                .saturating_add(pad.saturating_mul(2))
-                .min(row.width)
-        });
-        let mut right = row.left().saturating_add(to_i32(row.width));
-        let mut rects = [Rect::EMPTY; ATTR_ACTIONS.len()];
-        for slot in (0..ATTR_ACTIONS.len()).rev() {
-            let left = right.saturating_sub(to_i32(widths[slot]));
-            rects[slot] = Rect::new(left, row.top(), widths[slot], row.height);
-            right = left.saturating_sub(to_i32(pad));
-        }
-        let field_width = u32::try_from(right.saturating_sub(row.left())).unwrap_or(0);
-        let field = Rect::new(row.left(), row.top(), field_width, row.height);
-        (field.width > 0).then_some((field, rects))
-    }
 }
 
-/// The permissions-grid geometry within `content`, or `None` when the grid
-/// does not fit — so the painter and the hit-test both fail closed there
-/// rather than placing cells off the surface.
-fn perm_grid(
-    layout: &FieldLayout,
-    content: Rect,
-    scale: Scale,
-    font: BitmapFont,
-    field_rows: u32,
-) -> Option<PermGrid> {
-    let line = layout.line.max(1);
-    let box_side = font.glyph_height().max(1);
-    // The metadata fields occupy the rows above; the grid sits below a
-    // one-row blank separator, its column headers one row above the three
-    // triad rows.
-    let header_y = layout.row_y(field_rows.saturating_add(1));
-    let first_row_y = header_y.saturating_add(to_i32(line));
-    let last_row_bottom = first_row_y
-        .saturating_add(to_i32(line.saturating_mul(2)))
-        .saturating_add(to_i32(box_side));
-    let content_bottom = content.top().saturating_add(to_i32(content.height));
-    if last_row_bottom > content_bottom {
-        return None;
-    }
-    let pad = scale.scale_length(LABEL_PADDING);
-    let row_label_w = PERMISSION_ROW_LABELS
-        .iter()
-        .map(|label| font.text_width(label))
-        .max()
-        .unwrap_or(0);
-    let col_label_w = PERMISSION_COLUMN_LABELS
-        .iter()
-        .map(|label| font.text_width(label))
-        .max()
-        .unwrap_or(0);
-    let gap = font.text_width("  ").max(pad);
-    let label_x = layout.left;
-    let cols_x = label_x.saturating_add(to_i32(row_label_w.saturating_add(gap)));
-    let col_pitch = col_label_w.max(box_side).saturating_add(gap);
-    Some(PermGrid {
-        label_x,
-        cols_x,
-        col_pitch,
-        box_side,
-        header_y,
-        first_row_y,
-        row_line: line,
-    })
+/// The intrinsic width of an action button carrying `label`: the label plus
+/// the theme's own text inset either side, floored so a short word still gets
+/// a pressable plate.
+fn action_button_width(label: &str, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    let inset = scale.scale_length(theme.metrics().control_inset);
+    font.text_width(label)
+        .saturating_add(inset.saturating_mul(2))
+        .max(control_height(scale, theme).saturating_mul(2))
 }
 
-/// The owner row's geometry, or `None` when the row does not fit the content.
-///
-/// The cells are measured from the same `uid N / gid N` spelling
-/// [`properties_rows`] draws, on whichever row that spelling landed on, so a
-/// click lands exactly on the number it edits however many fields precede it.
-fn owner_row_geom(
-    props: &Properties,
-    layout: &FieldLayout,
-    content: Rect,
-    font: BitmapFont,
-) -> Option<OwnerRowGeom> {
-    let index = Field::Owner.row(props)?;
-    let glyph = font.glyph_height().max(1);
-    let row_index = u32::try_from(index).unwrap_or(u32::MAX);
-    let row_top = layout.row_y(row_index);
-    let content_bottom = content.top().saturating_add(to_i32(content.height));
-    if row_top.saturating_add(to_i32(glyph)) > content_bottom {
-        return None;
-    }
-    let uid_str = props.uid().to_string();
-    let gid_str = props.gid().to_string();
-    let uid_x = layout
-        .value_x
-        .saturating_add(to_i32(font.text_width("uid ")));
-    let uid_w = font.text_width(&uid_str).max(1);
-    let gid_x = uid_x
-        .saturating_add(to_i32(uid_w))
-        .saturating_add(to_i32(font.text_width(" / gid ")));
-    let gid_w = font.text_width(&gid_str).max(1);
-    Some(OwnerRowGeom {
-        cells: [
-            Rect::new(uid_x, row_top, uid_w, glyph),
-            Rect::new(gid_x, row_top, gid_w, glyph),
-        ],
-        line: layout.line,
-    })
+/// The height a tab strip occupies.
+fn tab_strip_height(scale: Scale, theme: &Theme) -> u32 {
+    Tabs::new(
+        PropertiesTab::ALL
+            .iter()
+            .map(|tab| Tab::new(tab.label()))
+            .collect(),
+    )
+    .measured_height(scale, theme)
 }
 
-/// The width, in pixels, the active owner editor is drawn at — comfortably
-/// wider than a single number so a `u32` id (up to ten digits) is readable
-/// while typed.
-fn owner_editor_width(font: BitmapFont) -> u32 {
-    font.text_width("0000000000").max(1)
-}
-
-/// The rectangle the inline editor occupies over `field`'s value: the value's
-/// own origin, widened to the readable editor width but never past the
-/// content, and as tall as the row pitch.
-fn owner_editor_geom(
-    geom: &OwnerRowGeom,
-    field: OwnerField,
-    content: Rect,
-    font: BitmapFont,
-) -> Rect {
-    let cell = match field {
-        OwnerField::Uid => geom.cells[0],
-        OwnerField::Gid => geom.cells[1],
-    };
-    let right = content.left().saturating_add(to_i32(content.width));
-    let avail = u32::try_from(right.saturating_sub(cell.left()))
-        .unwrap_or(0)
-        .max(1);
-    let width = owner_editor_width(font).min(avail);
-    Rect::new(cell.left(), cell.top(), width, geom.line)
+/// The tab strip a Properties window draws, with `selected` current.
+fn properties_tabs(selected: PropertiesTab) -> Tabs {
+    let mut tabs = Tabs::new(
+        PropertiesTab::ALL
+            .iter()
+            .map(|tab| Tab::new(tab.label()))
+            .collect(),
+    );
+    tabs.adopt_selected(selected.index());
+    tabs
 }
 
 /// What a Properties window is showing right now.
@@ -1998,36 +2246,59 @@ pub struct AttrView {
     pub cursor: usize,
 }
 
+/// Everything a Properties window is currently *showing*, as opposed to what
+/// it is showing it *about*: which section is selected and where the attribute
+/// list stands.
+///
+/// One value threaded through the draw and every hit-test, so the section a
+/// press is resolved against is always the section that was painted.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct PropertiesView {
+    /// The selected section.
+    pub tab: PropertiesTab,
+    /// The attribute list's own scroll and cursor.
+    pub attrs: AttrView,
+}
+
 /// The Properties window's default extent in physical pixels at `scale`: wide
-/// enough for the label and value columns and tall enough to show the metadata
-/// fields, the permissions grid, and the head of the attributes list.
+/// enough for the label and value columns, and tall enough to show the
+/// identity band, the tab strip, and the tallest section's whole content.
 ///
 /// A window, so the user may resize it; this is only what it opens at. The
-/// attribute list scrolls inside whatever it is given, so a shorter window
-/// loses rows from the list and never a field.
+/// height is taken from the section that needs the most, so no section opens
+/// already clipped.
 #[must_use]
 pub fn properties_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
-    let line = row_height(scale, theme).max(1);
-    // Every field, the grid and its separators, the attributes label, a few
-    // rows of list, and the editor.
-    let rows = u32::try_from(PROPERTY_ROW_COUNT)
-        .unwrap_or(u32::MAX)
-        .saturating_add(PROPERTIES_GRID_ROWS)
-        .saturating_add(1)
-        .saturating_add(PROPERTIES_OPEN_ATTR_ROWS)
-        .saturating_add(1);
+    let line = control_height(scale, theme).max(1);
+    let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    // General: every metadata field the section can show, as fact rows.
+    let general = FactList::row_height(scale, theme)
+        .saturating_mul(u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX));
+    // Permissions: the mode line, the grid's header and three triads, a
+    // separator, and the two ownership rows.
+    let permissions = line.saturating_mul(8);
+    // Attributes: a few rows of list plus the editor band.
+    let attributes = row_height(scale, theme)
+        .saturating_mul(PROPERTIES_OPEN_ATTR_ROWS)
+        .saturating_add(line)
+        .saturating_add(pad.saturating_mul(2));
+    let body = general
+        .max(permissions)
+        .max(attributes)
+        .saturating_add(pad.saturating_mul(2));
     (
         scale.scale_length(PROPERTIES_WINDOW_WIDTH).max(1),
-        line.saturating_mul(rows)
-            .saturating_add(scale.scale_length(ROW_PADDING).saturating_mul(2))
+        identity_height(scale, theme)
+            .saturating_add(tab_strip_height(scale, theme))
+            .saturating_add(body)
             .max(1),
     )
 }
 
 /// The Properties window's width when it opens, in logical pixels at the
 /// reference density: room for the label column, a value as long as a
-/// timestamp or a path, and the attribute rows beside their values.
-const PROPERTIES_WINDOW_WIDTH: u32 = 420;
+/// timestamp or a path, and the identity band's name beside its artwork.
+const PROPERTIES_WINDOW_WIDTH: u32 = 460;
 
 /// How many attribute rows the window opens tall enough to show. The list
 /// scrolls, so this is a starting size and not a bound on what a node may
@@ -2036,25 +2307,27 @@ const PROPERTIES_OPEN_ATTR_ROWS: u32 = 5;
 
 /// Draw a Properties window's whole client area for `frame`.
 ///
-/// The window's own title bar names the node, so the client is the fields, the
-/// permissions grid, and the extended-attribute list — no second panel header
-/// inside a window that already has one. `view` places the attribute list;
-/// `editor` and `owner`, when present, are drawn over the rows they belong to.
+/// The window is an identity band naming the node, a tab strip, and the
+/// selected section's body — no second panel header inside a window that
+/// already has a title bar. `view` says which section is current and where the
+/// attribute list stands; `controls` carries the live editors the sections draw
+/// over their rows.
 ///
 /// It reads only the already-authorised [`Properties`] and draws: no I/O, no
 /// authority, and every blit clips, so a window dragged small shows what fits
-/// rather than panicking. The ownership control is drawn only when `owner` is
-/// supplied, which the caller does only where the launching user holds
-/// `CAP_FS_CHOWN` — a session that cannot reassign an owner is never shown the
-/// control.
+/// rather than panicking. The ownership control is editable only when
+/// `controls.can_chown`, which the caller sets only where the launching user
+/// holds `CAP_FS_CHOWN`.
+#[allow(clippy::too_many_arguments)] // The node, what it shows, its live controls, and the frame.
 pub fn draw_properties_window(
     surface: &mut Surface,
     frame: PropertiesFrame<'_>,
-    view: AttrView,
+    view: PropertiesView,
     controls: PropertiesControls<'_>,
     scale: Scale,
     theme: &Theme,
     window: Rect,
+    artwork: &mut dyn IconArtwork,
 ) {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let palette = theme.palette();
@@ -2065,51 +2338,79 @@ pub fn draw_properties_window(
         window.height,
         palette.surface.into(),
     );
-    let left = window
-        .left()
-        .saturating_add(to_i32(scale.scale_length(LABEL_PADDING)));
-    let first_row = window
-        .top()
-        .saturating_add(to_i32(scale.scale_length(ROW_PADDING)));
+    let layout = PropertiesLayout::resolve(window, scale, theme);
+    draw_identity(
+        surface,
+        controls.identity,
+        scale,
+        theme,
+        layout.identity,
+        artwork,
+    );
+
+    // A window that has nothing to describe yet says so where its body would
+    // be, and draws no tab strip: there is nothing to choose between.
     let props = match frame {
         PropertiesFrame::Reading => {
-            font.draw_text(
-                surface,
-                left,
-                first_row,
-                PROPERTIES_READING,
-                palette.on_surface_muted.into(),
-            );
+            draw_body_note(surface, &layout, PROPERTIES_READING, scale, theme, font);
             return;
         }
         PropertiesFrame::Refused(reason) => {
-            font.draw_text(surface, left, first_row, reason, palette.on_surface.into());
+            draw_body_note(surface, &layout, reason, scale, theme, font);
             return;
         }
         PropertiesFrame::Ready(props) => props,
     };
-    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
-    let line = row_height(scale, theme).max(1);
-    draw_property_fields(surface, props, layout.fields, scale, theme, font);
-    draw_permission_grid(surface, props, &layout, scale, theme, font);
-    if let Some(geom) = layout.owner.as_ref() {
-        if controls.can_chown {
-            draw_owner_control(surface, geom, window, scale, theme, font, controls.owner);
+    properties_tabs(view.tab).render(surface, layout.tabs, scale, theme);
+    let Some(body) = layout.body else {
+        return;
+    };
+    match view.tab {
+        PropertiesTab::General => draw_general_section(surface, props, body, scale, theme),
+        PropertiesTab::Permissions => {
+            draw_permissions_section(surface, props, body, controls, scale, theme, font);
+        }
+        PropertiesTab::Attributes => {
+            draw_attributes_section(
+                surface, props, body, view.attrs, controls, scale, theme, font,
+            );
         }
     }
-    draw_attribute_section(
-        surface, props, &layout, view, controls, scale, theme, font, line,
+}
+
+/// State a window's body as one muted line, for a window with nothing to
+/// section yet.
+fn draw_body_note(
+    surface: &mut Surface,
+    layout: &PropertiesLayout,
+    note: &str,
+    scale: Scale,
+    theme: &Theme,
+    font: BitmapFont,
+) {
+    let Some(body) = layout.body else {
+        return;
+    };
+    let pad = to_i32(scale.scale_length(LABEL_PADDING).saturating_mul(2));
+    font.draw_text(
+        surface,
+        body.left().saturating_add(pad),
+        body.top().saturating_add(pad),
+        font.truncate_to_width(note, body.width),
+        theme.palette().on_surface_muted.into(),
     );
 }
 
 /// What the window says while its read is in flight.
 const PROPERTIES_READING: &str = "Reading…";
 
-/// The live editors a Properties window draws over its rows.
+/// The live editors and identity a Properties window draws over its rows.
 #[derive(Copy, Clone)]
 pub struct PropertiesControls<'a> {
+    /// What the identity band names and pictures.
+    pub identity: Identity<'a>,
     /// Whether the launching user holds `CAP_FS_CHOWN`, the one gate on
-    /// offering the ownership control at all.
+    /// offering an editable ownership control at all.
     pub can_chown: bool,
     /// The open owning-id editor, when one is being typed into.
     pub owner: Option<(OwnerField, &'a TextField)>,
@@ -2120,92 +2421,185 @@ pub struct PropertiesControls<'a> {
     pub scrollbar: &'a ScrollBar,
 }
 
-/// Draw the labelled permissions grid: read/write/execute column headers over
-/// three owner/group/other triad rows of [`Checkbox`] toggles reflecting the
-/// current mode.
-fn draw_permission_grid(
+/// Draw the General section: the node's metadata as a [`FactList`].
+///
+/// Every value comes straight from the [`Properties`] model, so a timestamp
+/// the backing does not keep renders blank rather than a fabricated wall time.
+fn draw_general_section(
     surface: &mut Surface,
     props: &Properties,
-    layout: &PropertiesLayout,
+    body: Rect,
+    scale: Scale,
+    theme: &Theme,
+) {
+    draw_fact_rows(
+        surface,
+        Field::shown_in(props, PropertiesTab::General),
+        props,
+        body,
+        scale,
+        theme,
+    );
+}
+
+/// Draw the Permissions section: the symbolic mode line, the labelled `rwx`
+/// matrix, and the two ownership rows.
+fn draw_permissions_section(
+    surface: &mut Surface,
+    props: &Properties,
+    body: Rect,
+    controls: PropertiesControls<'_>,
     scale: Scale,
     theme: &Theme,
     font: BitmapFont,
 ) {
-    let Some(grid) = layout.grid.as_ref() else {
-        return;
-    };
+    let layout = PermsLayout::resolve(body, scale, theme, font);
     let palette = theme.palette();
-    for (bit, label) in PERMISSION_COLUMN_LABELS.iter().enumerate() {
-        let x = grid.cols_x.saturating_add(to_i32(
-            grid.col_pitch
-                .saturating_mul(u32::try_from(bit).unwrap_or(0)),
-        ));
-        font.draw_text(
-            surface,
-            x,
-            grid.header_y,
-            label,
-            palette.on_surface_muted.into(),
-        );
+    let glyph = font.glyph_height();
+    let mode_y = layout
+        .mode
+        .top()
+        .saturating_add(to_i32(layout.mode.height.saturating_sub(glyph) / 2));
+    font.draw_text(
+        surface,
+        layout.mode.left(),
+        mode_y,
+        &alloc::format!("{} ({})", props.permissions(), props.mode_octal()),
+        palette.on_surface.into(),
+    );
+
+    if let Some(grid) = layout.grid.as_ref() {
+        for (bit, label) in PERMISSION_COLUMN_LABELS.iter().enumerate() {
+            let cell = grid.cell(bit);
+            let width = font.text_width(label);
+            // Centred over its own column of boxes.
+            let x = cell
+                .left()
+                .saturating_add(to_i32(grid.box_side) / 2)
+                .saturating_sub(to_i32(width) / 2);
+            font.draw_text(
+                surface,
+                x,
+                grid.header_y
+                    .saturating_add(to_i32(grid.row_line.saturating_sub(glyph) / 2)),
+                label,
+                palette.on_surface_muted.into(),
+            );
+        }
+        let states = permission_cells(props.mode());
+        for (triad, row_label) in PERMISSION_ROW_LABELS.iter().enumerate() {
+            font.draw_text(
+                surface,
+                grid.label_x,
+                grid.label_y(triad, glyph),
+                row_label,
+                palette.on_surface.into(),
+            );
+            for bit in 0..3 {
+                let index = triad * 3 + bit;
+                let selection = if states[index] {
+                    SelectionState::Selected
+                } else {
+                    SelectionState::Unselected
+                };
+                Checkbox::new(String::new(), selection).render(
+                    surface,
+                    grid.cell(index),
+                    scale,
+                    theme,
+                );
+            }
+        }
     }
-    let states = permission_cells(props.mode());
-    let label_dy = (to_i32(grid.box_side) - to_i32(font.glyph_height())).max(0) / 2;
-    for (triad, row_label) in PERMISSION_ROW_LABELS.iter().enumerate() {
-        let row_y = grid.first_row_y.saturating_add(to_i32(
-            grid.row_line
-                .saturating_mul(u32::try_from(triad).unwrap_or(0)),
-        ));
+
+    if let Some(rows) = layout.owner.as_ref() {
+        draw_owner_rows(surface, props, rows, controls, scale, theme, font);
+    }
+}
+
+/// Draw the two ownership rows: each labelled, its id in a cell, and — where
+/// the launching user may reassign it — that cell drawn as an editable field
+/// with the active editor over whichever one is being typed into.
+///
+/// Reassigning an owner is privileged (unlike renaming or a mode change), so a
+/// session without `CAP_FS_CHOWN` reads its ids as plain values rather than
+/// being shown a control it may not use. It holds no authority itself: the
+/// commit is the caller's own capability-checked `fs_set_owner`.
+fn draw_owner_rows(
+    surface: &mut Surface,
+    props: &Properties,
+    rows: &OwnerRows,
+    controls: PropertiesControls<'_>,
+    scale: Scale,
+    theme: &Theme,
+    font: BitmapFont,
+) {
+    let palette = theme.palette();
+    let glyph = font.glyph_height();
+    for (slot, field) in OwnerField::BOTH.into_iter().enumerate() {
+        let Some(cell) = rows.cells.get(slot).copied() else {
+            continue;
+        };
         font.draw_text(
             surface,
-            grid.label_x,
-            row_y.saturating_add(label_dy),
-            row_label,
+            rows.label_x,
+            rows.label_y(slot, glyph),
+            field.label(),
             palette.on_surface.into(),
         );
-        for bit in 0..3 {
-            let index = triad * 3 + bit;
-            let selection = if states[index] {
-                SelectionState::Selected
-            } else {
-                SelectionState::Unselected
-            };
-            Checkbox::new(String::new(), selection).render(surface, grid.cell(index), scale, theme);
+        let editing = controls
+            .owner
+            .filter(|(open, _)| *open == field)
+            .map(|(_, editor)| editor);
+        let value = alloc::format!("{}", field.id(props));
+        match editing {
+            Some(editor) => editor.render(surface, cell, scale, theme),
+            // A plate rather than an idle text field: a field nobody is
+            // typing into draws like the live one over it, so the reader
+            // cannot tell whether their keys are landing. A button says
+            // "press to change this" and cannot be mistaken for the caret.
+            None if controls.can_chown => {
+                Button::new(ButtonContent::Label(value), ControlRole::Neutral)
+                    .aligned(ContentAlign::Leading)
+                    .render(surface, cell, scale, theme);
+            }
+            None => {
+                font.draw_text(
+                    surface,
+                    cell.left(),
+                    rows.label_y(slot, glyph),
+                    &value,
+                    palette.on_surface.into(),
+                );
+            }
         }
     }
 }
 
-/// Draw the extended-attribute section: its label, then the node's attributes
-/// as selectable rows with the cursor row marked, the scroll bar beside them
-/// when the list is longer than the band shows, and the `key = value` editor
-/// with its Set and Remove actions at the foot.
+/// Draw the extended-attribute section: the node's attributes as selectable
+/// rows with the cursor row marked, the scroll bar beside them when the list
+/// is longer than the band shows, and the `key = value` editor with its Set
+/// and Remove actions at the foot.
 ///
 /// A volume that stores no attributes says so, and a node that carries none
 /// says that instead — an empty list would be a claim the reader cannot tell
 /// apart from either.
-#[allow(clippy::too_many_arguments)] // The node, its layout, its live state, and the frame.
-fn draw_attribute_section(
+#[allow(clippy::too_many_arguments)] // The node, its body, its live state, and the frame.
+fn draw_attributes_section(
     surface: &mut Surface,
     props: &Properties,
-    layout: &PropertiesLayout,
+    body: Rect,
     view: AttrView,
     controls: PropertiesControls<'_>,
     scale: Scale,
     theme: &Theme,
     font: BitmapFont,
-    line: u32,
 ) {
+    let Some(layout) = AttrsLayout::resolve(body, scale, theme, font) else {
+        return;
+    };
     let palette = theme.palette();
-    let left = layout
-        .fields
-        .left()
-        .saturating_add(to_i32(scale.scale_length(LABEL_PADDING)));
-    font.draw_text(
-        surface,
-        left,
-        layout.label_y,
-        ATTR_SECTION_LABEL,
-        palette.on_surface_muted.into(),
-    );
+    let line = row_height(scale, theme).max(1);
     let attrs = props.attributes();
     let note = match attrs {
         Attributes::Unread | Attributes::Unsupported => Some(String::from(ATTR_UNSUPPORTED)),
@@ -2217,67 +2611,53 @@ fn draw_attribute_section(
         if let Some(band) = layout.rows {
             font.draw_text(
                 surface,
-                left,
+                band.left(),
                 band.top(),
-                &note,
+                font.truncate_to_width(&note, band.width),
                 palette.on_surface_muted.into(),
             );
         }
-        draw_attribute_editor(surface, layout, controls, scale, theme, font);
-        return;
-    }
-    let list = attrs.visible();
-    let visible = layout.visible_rows(line);
-    let gutter = layout
-        .rows
-        .map_or(0, |band| gutter_width(scale, theme, band.width));
-    let first = usize::try_from(view.offset).unwrap_or(usize::MAX);
-    for slot in 0..visible {
-        let Some(index) = first.checked_add(slot) else {
-            break;
-        };
-        let Some(attr) = list.get(index) else {
-            break;
-        };
-        let Some(bounds) = layout.row_rect(slot, line, gutter) else {
-            break;
-        };
-        let mut row = ListRow::new(attr.key_display()).with_trailing(attr.display());
-        row.set_selected(index == view.cursor);
-        row.render(surface, bounds, scale, theme, None);
-    }
-    if visible < list.len() {
-        if let Some(gutter) = layout.gutter_rect(gutter) {
-            let mut bar: ScrollBar = *controls.scrollbar;
-            bar.set_model(ScrollModel::new(
-                ScrollRange::new(
-                    u64::try_from(list.len()).unwrap_or(u64::MAX),
-                    u64::try_from(visible).unwrap_or(u64::MAX),
-                    view.offset,
-                ),
-                1,
-                u64::try_from(visible.max(1)).unwrap_or(u64::MAX),
-            ));
-            bar.render(surface, gutter, scale, theme);
+    } else {
+        let list = attrs.visible();
+        let visible = layout.visible_rows(line);
+        let gutter = layout
+            .rows
+            .map_or(0, |band| gutter_width(scale, theme, band.width));
+        let first = usize::try_from(view.offset).unwrap_or(usize::MAX);
+        for slot in 0..visible {
+            let Some(index) = first.checked_add(slot) else {
+                break;
+            };
+            let Some(attr) = list.get(index) else {
+                break;
+            };
+            let Some(bounds) = layout.row_rect(slot, line, gutter) else {
+                break;
+            };
+            let mut row = ListRow::new(attr.key_display()).with_trailing(attr.display());
+            row.set_selected(index == view.cursor);
+            row.render(surface, bounds, scale, theme, None);
+        }
+        if visible < list.len() {
+            if let Some(gutter) = layout.gutter_rect(gutter) {
+                let mut bar: ScrollBar = *controls.scrollbar;
+                bar.set_model(ScrollModel::new(
+                    ScrollRange::new(
+                        u64::try_from(list.len()).unwrap_or(u64::MAX),
+                        u64::try_from(visible).unwrap_or(u64::MAX),
+                        view.offset,
+                    ),
+                    1,
+                    u64::try_from(visible.max(1)).unwrap_or(u64::MAX),
+                ));
+                bar.render(surface, gutter, scale, theme);
+            }
         }
     }
-    draw_attribute_editor(surface, layout, controls, scale, theme, font);
-}
-
-/// Draw the `key = value` editor and its Set / Remove actions.
-fn draw_attribute_editor(
-    surface: &mut Surface,
-    layout: &PropertiesLayout,
-    controls: PropertiesControls<'_>,
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-) {
-    let Some((field, actions)) = layout.editor_parts(scale, font) else {
-        return;
-    };
-    controls.attribute.render(surface, field, scale, theme);
-    for ((action, label), rect) in ATTR_ACTIONS.iter().zip(actions.iter()) {
+    controls
+        .attribute
+        .render(surface, layout.editor, scale, theme);
+    for ((action, label), rect) in ATTR_ACTIONS.iter().zip(layout.actions.iter()) {
         let role = match action {
             AttrAction::Set => ControlRole::Primary,
             AttrAction::Remove => ControlRole::Destructive,
@@ -2287,110 +2667,85 @@ fn draw_attribute_editor(
     }
 }
 
-/// Draw the inline ownership control over the owner row: an accent underline
-/// beneath the uid and gid values marking each as clickable to edit, and —
-/// when `editor` names a field being edited — the active [`TextField`] over
-/// that value.
-///
-/// Reassigning an owner is a privileged operation (unlike renaming or a mode
-/// change), so the caller draws this only where the launching user holds
-/// `CAP_FS_CHOWN`. It holds no authority itself: the commit is the caller's
-/// own capability-checked `fs_set_owner`.
-#[allow(clippy::too_many_arguments)] // The row, its content, and the frame.
-fn draw_owner_control(
-    surface: &mut Surface,
-    geom: &OwnerRowGeom,
-    content: Rect,
-    scale: Scale,
-    theme: &Theme,
-    font: BitmapFont,
-    editor: Option<(OwnerField, &TextField)>,
-) {
-    let palette = theme.palette();
-    let thickness = scale.scale_length(1).max(1);
-    let fields = [OwnerField::Uid, OwnerField::Gid];
-    for (rect, field) in geom.cells.iter().zip(fields) {
-        if let Some((editing, text_field)) = editor {
-            if editing == field {
-                let bounds = owner_editor_geom(geom, field, content, font);
-                text_field.render(surface, bounds, scale, theme);
-                continue;
-            }
-        }
-        let underline_y = rect.top().saturating_add(to_i32(rect.height));
-        surface.fill_rect(
-            u32::try_from(rect.left()).unwrap_or(0),
-            u32::try_from(underline_y).unwrap_or(0),
-            rect.width,
-            thickness,
-            palette.accent.into(),
-        );
-    }
-}
-
 /// What a press at window-local `point` on a Properties window showing `props`
 /// resolves to, or `None` when it is on nothing.
 ///
 /// Mirrors [`draw_properties_window`]'s placement through the one shared
-/// layout, so a press acts on exactly the control the user saw. The
+/// layout, so a press acts on exactly the control the user saw: the tab strip
+/// first, then only the controls the selected section actually drew. The
 /// capability-free permission toggles resolve before the privileged ownership
 /// control, so a session that may not reassign an owner can still toggle a
 /// mode bit on the same surface; a press on nothing changes nothing.
+///
+/// `can_chown` is the same gate the draw took, so the hit-test resolves
+/// exactly the controls that were painted.
 #[must_use]
 pub fn properties_hit(
     props: &Properties,
-    view: AttrView,
+    view: PropertiesView,
+    can_chown: bool,
     window: Rect,
     scale: Scale,
     theme: &Theme,
     point: Point,
 ) -> Option<PropertiesTarget> {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
-    let line = row_height(scale, theme).max(1);
-    if let Some(grid) = layout.grid.as_ref() {
-        for (index, rect) in grid.cells().iter().enumerate() {
-            if contains(*rect, point) {
-                return PERMISSION_BITS
-                    .get(index)
-                    .copied()
-                    .map(PropertiesTarget::Permission);
+    let layout = PropertiesLayout::resolve(window, scale, theme);
+    if let Some(index) = properties_tabs(view.tab).tab_at(layout.tabs, scale, theme, point) {
+        return PropertiesTab::at(index).map(PropertiesTarget::Tab);
+    }
+    let body = layout.body?;
+    match view.tab {
+        PropertiesTab::General => None,
+        PropertiesTab::Permissions => {
+            let perms = PermsLayout::resolve(body, scale, theme, font);
+            if let Some(grid) = perms.grid.as_ref() {
+                for (index, rect) in grid.cells().iter().enumerate() {
+                    if contains(*rect, point) {
+                        return PERMISSION_BITS
+                            .get(index)
+                            .copied()
+                            .map(PropertiesTarget::Permission);
+                    }
+                }
             }
+            // A session that may not reassign an owner was drawn plain
+            // values, so a press on one resolves to nothing rather than
+            // opening an editor whose commit could only be refused.
+            let rows = perms.owner.as_ref().filter(|_| can_chown)?;
+            rows.cells
+                .iter()
+                .zip(OwnerField::BOTH)
+                .find(|(rect, _)| contains(**rect, point))
+                .map(|(_, field)| PropertiesTarget::Owner(field))
         }
-    }
-    if let Some(geom) = layout.owner.as_ref() {
-        for (rect, field) in geom.cells.iter().zip([OwnerField::Uid, OwnerField::Gid]) {
-            if contains(*rect, point) {
-                return Some(PropertiesTarget::Owner(field));
+        PropertiesTab::Attributes => {
+            let attrs = AttrsLayout::resolve(body, scale, theme, font)?;
+            for ((action, _), rect) in ATTR_ACTIONS.iter().zip(attrs.actions.iter()) {
+                if contains(*rect, point) {
+                    return Some(PropertiesTarget::Action(*action));
+                }
             }
-        }
-    }
-    if let Some((field, actions)) = layout.editor_parts(scale, font) {
-        for ((action, _), rect) in ATTR_ACTIONS.iter().zip(actions.iter()) {
-            if contains(*rect, point) {
-                return Some(PropertiesTarget::Action(*action));
+            if contains(attrs.editor, point) {
+                return Some(PropertiesTarget::Editor);
             }
-        }
-        if contains(field, point) {
-            return Some(PropertiesTarget::Editor);
-        }
-    }
-    let gutter = layout
-        .rows
-        .map_or(0, |band| gutter_width(scale, theme, band.width));
-    let visible = layout.visible_rows(line);
-    let first = usize::try_from(view.offset).unwrap_or(usize::MAX);
-    for slot in 0..visible {
-        let Some(bounds) = layout.row_rect(slot, line, gutter) else {
-            break;
-        };
-        if contains(bounds, point) {
-            let index = first.checked_add(slot)?;
-            return (index < props.attributes().visible().len())
-                .then_some(PropertiesTarget::Attribute(index));
+            let line = row_height(scale, theme).max(1);
+            let gutter = attrs
+                .rows
+                .map_or(0, |band| gutter_width(scale, theme, band.width));
+            let visible = attrs.visible_rows(line);
+            let first = usize::try_from(view.attrs.offset).unwrap_or(usize::MAX);
+            (0..visible).find_map(|slot| {
+                let bounds = attrs.row_rect(slot, line, gutter)?;
+                if !contains(bounds, point) {
+                    return None;
+                }
+                let index = first.checked_add(slot)?;
+                (index < props.attributes().visible().len())
+                    .then_some(PropertiesTarget::Attribute(index))
+            })
         }
     }
-    None
 }
 
 /// Whether `point` lies inside `rect`, on the same half-open convention every
@@ -2405,49 +2760,43 @@ fn contains(rect: Rect, point: Point) -> bool {
 /// the count its scroll offset is clamped against, so the drawn list and the
 /// list the wheel moves are one fact.
 #[must_use]
-pub fn properties_attr_visible_rows(
-    props: &Properties,
-    window: Rect,
-    scale: Scale,
-    theme: &Theme,
-) -> usize {
+pub fn properties_attr_visible_rows(window: Rect, scale: Scale, theme: &Theme) -> usize {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    PropertiesLayout::resolve(props, window, scale, theme, font)
-        .visible_rows(row_height(scale, theme).max(1))
+    let Some(body) = PropertiesLayout::resolve(window, scale, theme).body else {
+        return 0;
+    };
+    AttrsLayout::resolve(body, scale, theme, font).map_or(0, |attrs| {
+        attrs.visible_rows(row_height(scale, theme).max(1))
+    })
 }
 
 /// Where the active owner editor for `field` is drawn, or `None` when the
-/// owner row does not fit.
+/// ownership rows do not fit.
 ///
 /// The one placement [`draw_properties_window`] draws it at, published so the
 /// host feeding that editor keys reports the rectangle it repaints instead of
 /// re-deriving this layout.
 #[must_use]
 pub fn properties_owner_editor_rect(
-    props: &Properties,
     window: Rect,
     scale: Scale,
     theme: &Theme,
     field: OwnerField,
 ) -> Option<Rect> {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
-    let geom = layout.owner.as_ref()?;
-    Some(owner_editor_geom(geom, field, window, font))
+    let body = PropertiesLayout::resolve(window, scale, theme).body?;
+    let rows = PermsLayout::resolve(body, scale, theme, font).owner?;
+    let slot = OwnerField::BOTH.iter().position(|f| *f == field)?;
+    rows.cells.get(slot).copied()
 }
 
 /// Where the `key = value` attribute editor's field is drawn, or `None` when
-/// the row does not fit.
+/// the section does not fit.
 #[must_use]
-pub fn properties_attr_editor_rect(
-    props: &Properties,
-    window: Rect,
-    scale: Scale,
-    theme: &Theme,
-) -> Option<Rect> {
+pub fn properties_attr_editor_rect(window: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
-    layout.editor_parts(scale, font).map(|(field, _)| field)
+    let body = PropertiesLayout::resolve(window, scale, theme).body?;
+    AttrsLayout::resolve(body, scale, theme, font).map(|attrs| attrs.editor)
 }
 
 /// Route a pointer event over the attribute list's scroll gutter, moving
@@ -2459,9 +2808,8 @@ pub fn properties_attr_editor_rect(
 ///
 /// The same routing the listing and the *Open With…* chooser use, so a drag on
 /// this bar behaves exactly as a drag on either of those.
-#[allow(clippy::too_many_arguments)] // The node, its list, the geometry, and the event.
+#[allow(clippy::too_many_arguments)] // The list, the geometry, and the event.
 pub fn properties_scroll_pointer(
-    props: &Properties,
     rows: &mut RowList,
     window: Rect,
     scale: Scale,
@@ -2471,7 +2819,8 @@ pub fn properties_scroll_pointer(
     damage: &mut Region,
 ) -> Option<bool> {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let layout = PropertiesLayout::resolve(props, window, scale, theme, font);
+    let body = PropertiesLayout::resolve(window, scale, theme).body?;
+    let layout = AttrsLayout::resolve(body, scale, theme, font)?;
     let line = row_height(scale, theme).max(1);
     let band = layout.rows?;
     let gutter_w = gutter_width(scale, theme, band.width);
@@ -2851,9 +3200,9 @@ const OPEN_WITH_MIN_WIDTH: u32 = 200;
 ///
 /// Both extents are content-derived through the same inverses the panel lays
 /// its content out with, so nothing the chooser was widened or heightened for
-/// is elided or clipped: the widest candidate row, the title, and the whole
-/// action band each fit, floored at a stated logical width and clamped to the
-/// screen.
+/// is elided or clipped: the identity band naming the file, the widest
+/// candidate row, and the whole action band each fit, floored at a stated
+/// logical width and clamped to the screen.
 #[must_use]
 pub fn open_with_chooser_extent(
     chooser: &OpenWithChooser,
@@ -2861,13 +3210,15 @@ pub fn open_with_chooser_extent(
     theme: &Theme,
     screen: Rect,
 ) -> (u32, u32) {
-    // One line for the actions beneath the list, which the panel's content
-    // holds along with the rows. The height comes from the panel's own
-    // inverse rather than a second reckoning of its header and rim: a
+    let rows =
+        row_height(scale, theme).saturating_mul(open_with_wanted_rows(chooser.candidates().len()));
+    // The identity band and the action band come from the same inverses the
+    // panel lays them out with rather than a second reckoning of its rim: a
     // difference of one border there costs the list a whole row once it is
     // divided by a row height.
-    let lines = open_with_wanted_rows(chooser.candidates().len()).saturating_add(1);
-    let content = row_height(scale, theme).saturating_mul(lines);
+    let content = rows
+        .saturating_add(identity_height(scale, theme))
+        .saturating_add(open_with_action_band(scale, theme));
     let height = Panel::height_for_content(content, scale, theme);
     (
         open_with_chooser_width(chooser, scale, theme, screen),
@@ -2895,6 +3246,7 @@ fn open_with_chooser_width(
         .map(|candidate| {
             ListRow::new(candidate.name())
                 .with_icon(IconKind::AppBundle)
+                .with_trailing(OPEN_WITH_DEFAULT_MARK)
                 .width_for_content(row, scale, theme)
         })
         .max()
@@ -2903,15 +3255,26 @@ fn open_with_chooser_width(
     // computing; asking for it at the floor keeps the reservation stable
     // instead of chasing its own answer.
     let gutter = gutter_width(scale, theme, scale.scale_length(OPEN_WITH_MIN_WIDTH));
-    let title = font.text_width(&alloc::format!("Open {} with", chooser.display_name()));
+    let title = BitmapFont::for_role(theme.fonts(), TextRole::ItemTitle, scale)
+        .text_width(chooser.display_name())
+        .saturating_add(scale.scale_length(IDENTITY_ART))
+        .saturating_add(scale.scale_length(theme.metrics().control_gap))
+        .saturating_add(scale.scale_length(LABEL_PADDING).saturating_mul(4));
     let content = rows
         .saturating_add(gutter)
         .max(title)
-        .max(open_with_actions_width(scale, font));
+        .max(open_with_actions_width(scale, theme, font));
     Panel::width_for_content(content, scale, theme)
         .max(scale.scale_length(OPEN_WITH_MIN_WIDTH))
         .clamp(1, screen.width.max(1))
 }
+
+/// The trailing mark on the candidate a plain *Open* would have used.
+///
+/// The chooser is reached to override that choice, so which application would
+/// have been picked anyway is the one thing the list must say — otherwise the
+/// user is choosing between names with no idea which is the status quo.
+const OPEN_WITH_DEFAULT_MARK: &str = "Default";
 
 /// The chooser panel's bounds within its own popup `viewport`: the whole of
 /// it.
@@ -2944,20 +3307,42 @@ pub fn open_with_visible_rows(viewport: Rect, scale: Scale, theme: &Theme) -> us
     (content.height / row) as usize
 }
 
-/// The chooser panel's whole content area — the rows, the scroll gutter, and
-/// the action band beneath them.
+/// The chooser panel's whole content area — the identity band, the rows, the
+/// scroll gutter, and the action band beneath them.
 fn open_with_content_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
     let bounds = open_with_chooser_rect(viewport);
     Panel::new(String::new()).content_rect(bounds, scale, theme)
 }
 
-/// The part of the content the candidate list occupies: everything above the
-/// action band.
+/// The identity band across the top of the chooser's content, naming the file
+/// being opened.
+fn open_with_identity_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    let content = open_with_content_rect(viewport, scale, theme)?;
+    let height = identity_height(scale, theme).min(content.height);
+    (height > 0).then(|| Rect::new(content.left(), content.top(), content.width, height))
+}
+
+/// The part of the content the candidate list occupies: between the identity
+/// band and the action band.
 fn open_with_list_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
     let content = open_with_content_rect(viewport, scale, theme)?;
-    let actions = row_height(scale, theme).min(content.height);
-    let height = content.height.saturating_sub(actions);
-    (height > 0).then(|| Rect::new(content.left(), content.top(), content.width, height))
+    let head = identity_height(scale, theme).min(content.height);
+    let actions = open_with_action_band(scale, theme).min(content.height.saturating_sub(head));
+    let height = content.height.saturating_sub(head).saturating_sub(actions);
+    (height > 0).then(|| {
+        Rect::new(
+            content.left(),
+            content.top().saturating_add(to_i32(head)),
+            content.width,
+            height,
+        )
+    })
+}
+
+/// The height the chooser's action band occupies: a control plate plus the
+/// padding that keeps it off the list above and the panel's rim below.
+fn open_with_action_band(scale: Scale, theme: &Theme) -> u32 {
+    control_height(scale, theme).saturating_add(scale.scale_length(LABEL_PADDING).saturating_mul(4))
 }
 
 /// The window-local rectangle the chooser's list draws its row at `slot` (a
@@ -3014,9 +3399,13 @@ const OPEN_WITH_ACTIONS: [(OpenWithAction, &str); 2] = [
 /// edge last — the one definition [`draw_open_with_chooser`] paints and
 /// [`open_with_action_at`] hit-tests.
 ///
+/// Each button is a full control plate, on the theme's own control height
+/// rather than a text row pitch, so it is the same object as a button anywhere
+/// else on the desktop.
+///
 /// `None` when the popup leaves no band, which draws and resolves nothing
 /// (fail closed): a chooser with no visible Open button is closed with Escape
-/// or by choosing a row, never left with a hidden action.
+/// or by activating a row, never left with a hidden action.
 fn open_with_action_rects(
     viewport: Rect,
     scale: Scale,
@@ -3024,63 +3413,76 @@ fn open_with_action_rects(
     font: BitmapFont,
 ) -> Option<[Rect; OPEN_WITH_ACTIONS.len()]> {
     let content = open_with_content_rect(viewport, scale, theme)?;
-    let height = row_height(scale, theme);
-    if height == 0 || content.height < height {
+    let band = open_with_action_band(scale, theme);
+    let plate = control_height(scale, theme);
+    if plate == 0 || content.height < band {
         return None;
     }
-    let pad = open_with_action_pad(scale, font);
-    let widths = open_with_action_widths(scale, font);
+    let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+    let widths = open_with_action_widths(scale, theme, font);
+    // Seated on the band's own baseline, with the padding the band reserved
+    // kept clear beneath it.
     let top = content
         .top()
-        .saturating_add(to_i32(content.height.saturating_sub(height)));
-    let mut right = content.left().saturating_add(to_i32(content.width));
+        .saturating_add(to_i32(content.height.saturating_sub(band)))
+        .saturating_add(to_i32(pad));
+    let mut right = content
+        .left()
+        .saturating_add(to_i32(content.width.saturating_sub(pad)));
     let mut rects = [Rect::EMPTY; OPEN_WITH_ACTIONS.len()];
     // Laid out from the trailing edge back, so the primary action sits
     // furthest right whatever the labels measure.
     for slot in (0..OPEN_WITH_ACTIONS.len()).rev() {
         let width = widths[slot].min(content.width);
         let left = right.saturating_sub(to_i32(width));
-        rects[slot] = Rect::new(left, top, width, height);
-        right = left.saturating_sub(to_i32(pad));
+        rects[slot] = Rect::new(left, top, width, plate);
+        right = left.saturating_sub(to_i32(gap));
     }
     Some(rects)
-}
-
-/// The gap the action band leaves around and between its buttons.
-fn open_with_action_pad(scale: Scale, font: BitmapFont) -> u32 {
-    font.text_width("  ").max(scale.scale_length(LABEL_PADDING))
 }
 
 /// Each action button's intrinsic width, in the order they are drawn — the one
 /// definition [`open_with_action_rects`] places and the chooser's own extent
 /// reserves room for, so the band can never be sized narrower than the buttons
 /// it must hold.
-fn open_with_action_widths(scale: Scale, font: BitmapFont) -> [u32; OPEN_WITH_ACTIONS.len()] {
-    let pad = open_with_action_pad(scale, font);
-    OPEN_WITH_ACTIONS.map(|(_, label)| font.text_width(label).saturating_add(pad.saturating_mul(2)))
+fn open_with_action_widths(
+    scale: Scale,
+    theme: &Theme,
+    font: BitmapFont,
+) -> [u32; OPEN_WITH_ACTIONS.len()] {
+    OPEN_WITH_ACTIONS.map(|(_, label)| action_button_width(label, scale, theme, font))
 }
 
-/// The whole action band's intrinsic width: every button plus the gap between
-/// each pair and the one the trailing edge keeps.
-fn open_with_actions_width(scale: Scale, font: BitmapFont) -> u32 {
-    let pad = open_with_action_pad(scale, font);
-    open_with_action_widths(scale, font)
+/// The whole action band's intrinsic width: every button, the gap between each
+/// pair, and the padding the trailing and leading edges keep.
+fn open_with_actions_width(scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+    let buttons = open_with_action_widths(scale, theme, font)
         .into_iter()
-        .fold(pad, |total, width| {
-            total.saturating_add(width).saturating_add(pad)
-        })
+        .fold(0u32, u32::saturating_add);
+    buttons
+        .saturating_add(
+            gap.saturating_mul(
+                u32::try_from(OPEN_WITH_ACTIONS.len().saturating_sub(1)).unwrap_or(0),
+            ),
+        )
+        .saturating_add(pad.saturating_mul(2))
 }
 
-/// Draw the "Open With…" `chooser` into its own popup `viewport`: a titled
-/// panel naming the file, one [`ListRow`] per visible candidate with the
-/// current one selected, the scrollbar beside them when the list is longer
-/// than the panel shows, and the Open/Cancel actions beneath.
+/// Draw the "Open With…" `chooser` into its own popup `viewport`: a panel
+/// opening with the identity band that names the file, one [`ListRow`] per
+/// visible candidate with the current one selected and the default one marked,
+/// the scrollbar beside them when the list is longer than the panel shows, and
+/// the Open/Cancel actions beneath.
 ///
 /// Each candidate's row draws its application's own icon where `artwork`
 /// resolves one and the built-in bundle glyph otherwise, exactly as a grid
-/// tile does. It reads only the passed-in chooser and draws — no I/O, no
-/// authority — and every blit clips, so a popup too small for the panel simply
-/// shows what fits.
+/// tile does — so the user picks between applications they recognise rather
+/// than between nine identical glyphs. It reads only the passed-in chooser and
+/// draws — no I/O, no authority — and every blit clips, so a popup too small
+/// for the panel simply shows what fits.
 pub fn draw_open_with_chooser(
     surface: &mut Surface,
     chooser: &OpenWithChooser,
@@ -3090,19 +3492,42 @@ pub fn draw_open_with_chooser(
     artwork: &mut dyn IconArtwork,
 ) {
     let bounds = open_with_chooser_rect(viewport);
-    let panel = Panel::new(alloc::format!("Open {} with", chooser.display_name()));
-    panel.render(surface, bounds, scale, theme);
+    Panel::new(String::new()).render(surface, bounds, scale, theme);
+    if let Some(band) = open_with_identity_rect(viewport, scale, theme) {
+        draw_identity(
+            surface,
+            Identity {
+                name: chooser.display_name(),
+                detail: OPEN_WITH_PROMPT,
+                // Fail closed to the generic type when the name carries no
+                // recognised extension, exactly as a listed entry does.
+                art: IconRequest::kind(
+                    media_for_name(chooser.display_name())
+                        .unwrap_or(MediaType::ApplicationOctetStream)
+                        .icon(),
+                ),
+            },
+            scale,
+            theme,
+            band,
+            artwork,
+        );
+    }
     let Some(content) = open_with_list_rect(viewport, scale, theme) else {
         return;
     };
     let visible = open_with_visible_rows(viewport, scale, theme);
     let first = usize::try_from(chooser.offset()).unwrap_or(usize::MAX);
     for slot in 0..visible {
-        let Some(candidate) = chooser.candidates().get(first.saturating_add(slot)) else {
+        let index = first.saturating_add(slot);
+        let Some(candidate) = chooser.candidates().get(index) else {
             break;
         };
         let mut row = ListRow::new(candidate.name()).with_icon(IconKind::AppBundle);
-        row.set_selected(first.saturating_add(slot) == chooser.selected());
+        if index == OPEN_WITH_DEFAULT_INDEX {
+            row = row.with_trailing(OPEN_WITH_DEFAULT_MARK);
+        }
+        row.set_selected(index == chooser.selected());
         let bounds = open_with_row_rect(content, scale, theme, slot);
         let side = row.icon_side(bounds, scale, theme);
         let art = artwork.artwork(
@@ -3123,6 +3548,13 @@ pub fn draw_open_with_chooser(
         }
     }
 }
+
+/// What the chooser's identity band says beneath the file's name.
+const OPEN_WITH_PROMPT: &str = "Choose an application to open this with";
+
+/// The candidate a plain *Open* would have used: the first, because
+/// `applications_for` ranks the most specific claim first.
+const OPEN_WITH_DEFAULT_INDEX: usize = 0;
 
 /// Build one of the chooser's action buttons: Open is the primary action and
 /// is offered only while a candidate is current, Cancel is always available.
@@ -3169,8 +3601,8 @@ pub fn open_with_action_at(
 
 /// The candidate index the drawn `chooser` resolves popup-local pixel `point`
 /// to, or `None` when the press is not on a candidate row — off the panel, on
-/// its title band, in the scroll gutter, on the action band, or past the last
-/// row (fail closed).
+/// its identity band, in the scroll gutter, on the action band, or past the
+/// last row (fail closed).
 ///
 /// It mirrors [`draw_open_with_chooser`]'s geometry through the one private
 /// list rectangle they share, so a press resolves to exactly the row the user

@@ -92,8 +92,11 @@ pub mod icons;
 pub mod listing;
 pub mod location;
 pub mod operation;
+pub mod route;
 pub mod sidebar;
 
+#[cfg(test)]
+mod route_tests;
 #[cfg(test)]
 mod test_fs;
 
@@ -109,6 +112,7 @@ mod program {
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
+    use crate::route;
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::fs::{FileKind, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX};
     use tairix_abi::input::{
@@ -129,8 +133,9 @@ mod program {
         build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_open_with_chooser,
         draw_progress_dialog, draw_properties_window, manager_tool_at, open_with_action_at,
         open_with_row_at, open_with_scroll_pointer, open_with_visible_rows, render_into,
-        scroll_pointer, AttrAction, AttrView, OpenWithAction, OwnerField, PropertiesControls,
-        PropertiesFrame, PropertiesTarget, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        scroll_pointer, AttrAction, AttrView, Identity, OpenWithAction, OwnerField,
+        PropertiesControls, PropertiesFrame, PropertiesTab, PropertiesTarget, PropertiesView,
+        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         applications_for, association_from_appinfo, context_choice_from_item, context_menu,
@@ -153,9 +158,9 @@ mod program {
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
-        ArtworkReader, ArtworkResolver, InlineArtwork, NoArtwork, Resolved, MAX_ARTWORK_BYTES,
+        ArtworkReader, ArtworkResolver, IconRequest, InlineArtwork, Resolved, MAX_ARTWORK_BYTES,
     };
-    use tairix_input::{DoubleClickTracker, Key, Modifiers, NamedKey};
+    use tairix_input::{ClickKind, DoubleClickTracker, Key, Modifiers, NamedKey, PointerButton};
     use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_raster::Surface;
     use tairix_rt::io::{self, Stderr, Stdout, Write};
@@ -352,6 +357,24 @@ mod program {
         kind: WindowKind,
     }
 
+    impl OpenWindow {
+        /// The id of the popup this window currently holds, if any.
+        ///
+        /// A popup is a window in its own right, so the session addresses its
+        /// events to the popup's own id; only the window that opened it knows
+        /// the two belong together.
+        fn popup_id(&self) -> Option<u64> {
+            match &self.kind {
+                WindowKind::Browser(browser) => browser
+                    .overlays
+                    .open_with
+                    .as_ref()
+                    .map(|chooser| chooser.pane.id()),
+                WindowKind::Properties(_) => None,
+            }
+        }
+    }
+
     /// What one of this process's windows is.
     ///
     /// The pane, surface and title above are every window's; this is the part
@@ -411,6 +434,11 @@ mod program {
         editor: TextField,
         /// The open owning-id editor, when one is being typed into.
         owner: Option<OwnerEditor>,
+        /// Which section is on show.
+        tab: PropertiesTab,
+        /// What the identity band says beneath the name. Held rather than
+        /// formatted per frame, and refreshed when a read lands.
+        detail: String,
         /// Whether the launching user holds `CAP_FS_CHOWN` — the one gate on
         /// offering the ownership control (read once at start-up).
         can_chown: bool,
@@ -445,12 +473,46 @@ mod program {
             }
         }
 
-        /// Where the attribute list is scrolled and which row the keyboard
-        /// acts on.
-        fn view(&self) -> AttrView {
-            AttrView {
-                offset: self.rows.offset(),
-                cursor: self.rows.cursor(),
+        /// Which section is on show, and where its attribute list stands.
+        fn view(&self) -> PropertiesView {
+            PropertiesView {
+                tab: self.tab,
+                attrs: AttrView {
+                    offset: self.rows.offset(),
+                    cursor: self.rows.cursor(),
+                },
+            }
+        }
+
+        /// What the identity band names and pictures: the node's own leaf
+        /// name, what it is, and the artwork its content type resolves to.
+        ///
+        /// The artwork comes from the same classifier the listing draws its
+        /// rows with, so a node is pictured identically in both places, and it
+        /// is resolved from the name alone — so the picture does not change
+        /// under the reader when the read lands.
+        fn identity(&self) -> Identity<'_> {
+            Identity {
+                name: path_leaf(&self.path),
+                detail: &self.detail,
+                art: IconRequest::kind(
+                    tairix_browse::media::media_for_named(path_leaf(&self.path), self.kind, false)
+                        .icon(),
+                ),
+            }
+        }
+
+        /// The one-line summary the identity band carries beneath the name:
+        /// what the node is, and how big, once the read can say.
+        ///
+        /// Held rather than formatted per frame: a paint re-deriving a string
+        /// is work a frame does not owe.
+        fn detail_for(kind: EntryKind, props: Option<&Properties>) -> String {
+            match props {
+                Some(props) => {
+                    alloc::format!("{} · {}", props.kind_label(), props.size_display())
+                }
+                None => String::from(Properties::kind_label_for(kind)),
             }
         }
 
@@ -543,16 +605,18 @@ mod program {
                 icons,
                 scale,
             ),
-            WindowKind::Properties(props) => present_properties(props, theme, &mut target, scale),
+            WindowKind::Properties(props) => {
+                present_properties(props, theme, &mut target, icons, scale)
+            }
         }
     }
 
     /// Paint a Properties window's whole client and present it.
     ///
-    /// The window's own title bar names the node, so the client is the fields,
-    /// the permissions grid and the attribute list; the read that fills them
-    /// happens on the reader, so this draws whatever has landed and the stated
-    /// reading or refusal notice until it does.
+    /// The window's own title bar names the node, so the client is the
+    /// identity band, the section strip and the selected section; the read
+    /// that fills them happens on the reader, so this draws whatever has
+    /// landed and the stated reading or refusal notice until it does.
     ///
     /// # Errors
     ///
@@ -561,11 +625,13 @@ mod program {
         win: &mut PropertiesWindow,
         theme: &Theme,
         target: &mut FrameTarget<'_, T>,
+        icons: &RefCell<IconPipeline>,
         scale: Scale,
     ) -> Result<(), Errno> {
         let mode = *target.pane.mode();
         let window = Rect::new(0, 0, mode.width_px, mode.height_px);
         let controls = PropertiesControls {
+            identity: win.identity(),
             can_chown: win.can_chown,
             owner: win.owner.as_ref().map(|ed| (ed.field, &ed.editor)),
             attribute: &win.editor,
@@ -581,7 +647,17 @@ mod program {
             damage.width_px,
             damage.height_px,
             |surface| {
-                draw_properties_window(surface, frame, view, controls, scale, theme, window);
+                let mut pipeline = icons.borrow_mut();
+                draw_properties_window(
+                    surface,
+                    frame,
+                    view,
+                    controls,
+                    scale,
+                    theme,
+                    window,
+                    &mut pipeline.source(),
+                );
             },
         );
         target.pane.present(target.client, surface, damage)
@@ -811,8 +887,14 @@ mod program {
     ///
     /// The icon bar's own outcomes are resolved first
     /// ([`route_app_bar_event`]). Everything else is window-scoped: an id no
-    /// live window carries is a window that has just closed, and the event has
-    /// nowhere to land.
+    /// live window — *or popup a window holds* — carries is a window that has
+    /// just closed, and the event has nowhere to land.
+    ///
+    /// A popup is a window of its own with its own id, so resolving ids
+    /// against the window list alone dropped every key and every click
+    /// delivered to the "Open With…" chooser, leaving it on screen and inert.
+    /// A popup's events resolve to the window that owns it, which then routes
+    /// them to the overlay.
     #[allow(clippy::too_many_arguments)] // The run's whole mutable state, threaded explicitly.
     fn route_event(
         windows: &mut alloc::vec::Vec<OpenWindow>,
@@ -845,9 +927,21 @@ mod program {
             BarRouted::Ends(code) => return Some(code),
             BarRouted::NotMine => {}
         }
-        let index = event
-            .window_id()
-            .and_then(|id| windows.iter().position(|win| win.pane.id() == id))?;
+        let window_id = event.window_id()?;
+        let addressed: Vec<(u64, Option<u64>)> = windows
+            .iter()
+            .map(|win| (win.pane.id(), win.popup_id()))
+            .collect();
+        let (index, surface) = route::addressee(addressed, window_id)?;
+
+        // An event addressed to a held popup is the popup's, not its owner's:
+        // routing it on would resize the parent's surface, release the
+        // parent's frames, or close the parent outright.
+        if surface == route::Addressed::Popup {
+            return route_popup_event(
+                windows, index, client, desktop, launcher, icons, theme, event,
+            );
+        }
 
         if let WindowEvent::Resized {
             width_px,
@@ -904,6 +998,55 @@ mod program {
             can_chown,
             event,
         )
+    }
+
+    /// Route one event delivered to a window's own held popup — the
+    /// "Open With…" chooser.
+    ///
+    /// The chooser owns the whole event: it is a window of its own, so its
+    /// close request closes *it*, its released content releases *its* region,
+    /// and its keys and clicks never reach the listing behind it.
+    #[allow(clippy::too_many_arguments)] // The window, its popup, and the event.
+    fn route_popup_event(
+        windows: &mut [OpenWindow],
+        index: usize,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        desktop: &mut Desktop,
+        launcher: &RefCell<Launcher>,
+        icons: &RefCell<IconPipeline>,
+        theme: &Theme,
+        event: &WindowEvent,
+    ) -> Option<i32> {
+        let win = windows.get_mut(index)?;
+        let mode = *win.pane.mode();
+        let WindowKind::Browser(state) = &mut win.kind else {
+            return None;
+        };
+        let canvas = Canvas {
+            theme,
+            mode: &mode,
+            scale: desktop.scale(),
+            chrome: state.chrome,
+        };
+        let mut damage = damage::sink();
+        let repaint = apply_chooser_event(
+            &mut state.overlays,
+            launcher,
+            client,
+            canvas,
+            event,
+            &mut damage,
+        );
+        // The popup paints itself; the window behind it owes nothing, so a
+        // round that changed only the chooser presents only the chooser.
+        if repaint {
+            if let Some(overlay) = state.overlays.open_with.as_mut() {
+                if present_chooser(overlay, client, canvas, icons).is_err() {
+                    report_error("the chooser present was refused");
+                }
+            }
+        }
+        None
     }
 
     /// Route one event to the browser window at `index`.
@@ -994,6 +1137,7 @@ mod program {
                 reads,
                 installed,
                 popup,
+                icons,
                 properties: &mut properties,
             },
             canvas,
@@ -2487,6 +2631,9 @@ mod program {
         installed: &'a RefCell<Vec<AppAssociation>>,
         /// What opening a popup of this window's own needs.
         popup: PopupLink,
+        /// The artwork cache the chooser draws each candidate's own icon
+        /// through, shared with every other surface this process paints.
+        icons: &'a RefCell<IconPipeline>,
         /// Where a gesture records the Properties window it asked for.
         ///
         /// A window cannot be appended to the list the gesture's own window is
@@ -2602,6 +2749,10 @@ mod program {
     struct ChooserOverlay {
         /// What the user is picking from.
         chooser: OpenWithChooser,
+        /// Pairs the presses that make a double-click an activation, keyed on
+        /// the row — the same shared tracker the listing behind it uses, so a
+        /// double-click means one thing on both surfaces.
+        clicks: DoubleClickTracker,
         /// The popup's channel-side state.
         pane: WindowPane,
         /// The surface every frame of it is drawn into.
@@ -2879,21 +3030,14 @@ mod program {
             return (whole_if(changed), close);
         }
 
-        // The "Open With…" chooser owns input while open (the context-menu row
-        // that opens it has already concluded the chain) and needs the launcher
-        // to hand the chosen application its file.
-        if overlays.open_with.is_some() {
-            let changed = apply_chooser_event(
-                overlays,
-                acts.launcher,
-                acts.menu.client,
-                canvas,
-                event,
-                damage,
-            );
-            return (whole_if(changed), false);
-        }
-
+        // The "Open With…" chooser is not handled here. It is a window of its
+        // own and takes the keyboard when it opens, so the session addresses
+        // its events to the popup's own id and the run routes them there
+        // (`route_popup_event`). Feeding this window's events to it would
+        // resolve *this* window's coordinates against the popup's viewport,
+        // which could land on the chooser's Open button and launch something
+        // the user never picked.
+        //
         // The delete-confirmation dialog owns the window while it is up, so
         // every event goes to it and none navigates the view behind it.
         if overlays.delete.is_some() {
@@ -5054,10 +5198,11 @@ mod program {
         };
         let mut overlay = ChooserOverlay {
             chooser,
+            clicks: DoubleClickTracker::new(),
             pane,
             surface,
         };
-        if present_chooser(&mut overlay, acts.menu.client, canvas).is_err() {
+        if present_chooser(&mut overlay, acts.menu.client, canvas, acts.icons).is_err() {
             report_error("the chooser present was refused; not shown");
             let _ = overlay.pane.close(acts.menu.client);
             return None;
@@ -5081,18 +5226,22 @@ mod program {
         overlay: &mut ChooserOverlay,
         client: &mut WindowClient<app::RtWindowTransport>,
         canvas: Canvas<'_>,
+        icons: &RefCell<IconPipeline>,
     ) -> Result<(), Errno> {
         let mode = *overlay.pane.mode();
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
         let surface = &mut overlay.surface;
-        draw_open_with_chooser(
-            surface,
-            &overlay.chooser,
-            canvas.scale,
-            canvas.theme(),
-            viewport,
-            &mut NoArtwork,
-        );
+        {
+            let mut pipeline = icons.borrow_mut();
+            draw_open_with_chooser(
+                surface,
+                &overlay.chooser,
+                canvas.scale,
+                canvas.theme(),
+                viewport,
+                &mut pipeline.source(),
+            );
+        }
         overlay
             .pane
             .present(client, surface, DamageRect::full(&mode))
@@ -5169,52 +5318,93 @@ mod program {
                 _ => false,
             },
             WindowEvent::Scrolled { dy, .. } => overlay.chooser.scroll_by(i64::from(*dy), visible),
-            WindowEvent::Pointer { x, y, action, .. } => {
-                let point = pointer_point(*x, *y);
-                // The gutter owns a press that lands on it, so dragging the
-                // thumb scrolls the list instead of resolving to a row.
-                let mut scrolled = None;
-                for input in pointer_input_events(*action, point) {
-                    if let Some(repaint) = open_with_scroll_pointer(
-                        &mut overlay.chooser,
-                        scale,
-                        theme,
-                        viewport,
-                        point,
-                        &input,
-                        damage,
-                    ) {
-                        scrolled = Some(scrolled.unwrap_or(false) || repaint);
-                    }
-                }
-                if let Some(repaint) = scrolled {
-                    return repaint;
-                }
-                let Some(point) = press_point(*action, *x, *y) else {
-                    return false;
-                };
-                if let Some(action) =
-                    open_with_action_at(&overlay.chooser, viewport, scale, theme, point)
-                {
-                    match action {
-                        OpenWithAction::Open => launch_open_with(overlays, launcher, client),
-                        OpenWithAction::Cancel => overlays.set_chooser(client, None),
-                    }
-                    return false;
-                }
-                match open_with_row_at(&overlay.chooser, viewport, scale, theme, point) {
-                    Some(index) => {
-                        overlay.chooser.select(index);
-                        launch_open_with(overlays, launcher, client);
-                        false
-                    }
-                    // A press on the panel's own plate selects nothing and
-                    // launches nothing; the chooser is left standing.
-                    None => false,
-                }
-            }
+            WindowEvent::Pointer { x, y, action, .. } => apply_chooser_pointer(
+                overlays,
+                launcher,
+                client,
+                canvas,
+                (*x, *y, *action),
+                damage,
+            ),
             _ => false,
         }
+    }
+
+    /// Route one pointer event over the chooser's popup.
+    ///
+    /// The scroll gutter owns a press that lands on it, so dragging the thumb
+    /// scrolls the list instead of resolving to a row. A press then resolves
+    /// against the action band, then the candidate rows, and a press on the
+    /// panel's own plate resolves to nothing.
+    fn apply_chooser_pointer(
+        overlays: &mut Overlays,
+        launcher: &RefCell<Launcher>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        canvas: Canvas<'_>,
+        pointer: (u32, u32, PointerAction),
+        damage: &mut Region,
+    ) -> bool {
+        let (x, y, action) = pointer;
+        let scale = canvas.scale;
+        let theme = canvas.theme();
+        let Some(overlay) = overlays.open_with.as_mut() else {
+            return false;
+        };
+        let mode = *overlay.pane.mode();
+        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let point = pointer_point(x, y);
+        let mut scrolled = None;
+        for input in pointer_input_events(action, point) {
+            if let Some(repaint) = open_with_scroll_pointer(
+                &mut overlay.chooser,
+                scale,
+                theme,
+                viewport,
+                point,
+                &input,
+                damage,
+            ) {
+                scrolled = Some(scrolled.unwrap_or(false) || repaint);
+            }
+        }
+        if let Some(repaint) = scrolled {
+            return repaint;
+        }
+        let Some(point) = press_point(action, x, y) else {
+            return false;
+        };
+        if let Some(action) = open_with_action_at(&overlay.chooser, viewport, scale, theme, point) {
+            match action {
+                OpenWithAction::Open => launch_open_with(overlays, launcher, client),
+                OpenWithAction::Cancel => overlays.set_chooser(client, None),
+            }
+            return false;
+        }
+        // A press on the panel's own plate or identity band picks nothing and
+        // launches nothing; the chooser is left standing, and the run of
+        // presses is broken so a click through it and back is never read as a
+        // double.
+        let Some(index) = open_with_row_at(&overlay.chooser, viewport, scale, theme, point) else {
+            overlay.clicks.reset();
+            return false;
+        };
+        let moved = overlay.chooser.select(index);
+        // A single press picks; opening is a second, deliberate act — a
+        // double-click, Enter, or the Open button. A press that launched at
+        // once left the Open button with nothing to do and spawned an
+        // application on a mis-click, with no chance to look at the choice.
+        // The pairing is the same shared tracker the listing behind it uses,
+        // so a double-click means one thing.
+        let subject = u64::try_from(index).unwrap_or(u64::MAX);
+        if overlay
+            .clicks
+            .register(tairix_rt::clock_get(), subject, PointerButton::Primary)
+            == ClickKind::Double
+        {
+            launch_open_with(overlays, launcher, client);
+            return false;
+        }
+        moved
     }
 
     /// Hand the chooser's file to its current candidate and close the chooser.
@@ -5549,6 +5739,8 @@ mod program {
                 rows: RowList::new(0),
                 editor: attribute_editor(),
                 owner: None,
+                tab: PropertiesTab::default(),
+                detail: PropertiesWindow::detail_for(kind, None),
                 can_chown,
             })),
         };
@@ -5600,10 +5792,12 @@ mod program {
                     None => props,
                 };
                 win.rows.resize(props.attributes().visible().len());
+                win.detail = PropertiesWindow::detail_for(win.kind, Some(&props));
                 win.state = PropertiesState::Ready(props);
             }
             Err(err) => {
                 win.rows.resize(0);
+                win.detail = PropertiesWindow::detail_for(win.kind, None);
                 win.state = PropertiesState::Refused(alloc::format!("could not be read: {err}"));
             }
         }
@@ -5611,11 +5805,13 @@ mod program {
 
     /// Handle one event delivered to a Properties window.
     ///
-    /// `Escape` steps back out of whatever is open — the owning-id editor, then
-    /// a typed attribute line — and closes the window when neither is. The
-    /// arrow keys walk the attribute list; every other key reaches the editor
-    /// that has the focus. A press resolves through the one shared hit-test, so
-    /// it acts on exactly the control the user saw.
+    /// `Left`/`Right` walk the section strip. `Escape` steps back out of
+    /// whatever is open — the owning-id editor, then a typed attribute line —
+    /// and closes the window when neither is. The rest of the keyboard belongs
+    /// to the attributes section: its arrow keys walk the list and every other
+    /// key reaches its editor, so no key reaches a control the selected
+    /// section does not draw. A press resolves through the one shared
+    /// hit-test, so it acts on exactly the control the user saw.
     #[allow(clippy::too_many_arguments)] // The window, its geometry, and the event.
     fn apply_properties_event(
         win: &mut PropertiesWindow,
@@ -5664,14 +5860,9 @@ mod program {
         // commit or cancel the ownership change and none of them reaches the
         // attribute line beneath it.
         if let Some(field) = win.owner.as_ref().map(|ed| ed.field) {
-            let bounds = win
-                .props()
-                .and_then(|props| {
-                    tairix_browse::render::properties_owner_editor_rect(
-                        props, window, scale, theme, field,
-                    )
-                })
-                .unwrap_or(Rect::EMPTY);
+            let bounds =
+                tairix_browse::render::properties_owner_editor_rect(window, scale, theme, field)
+                    .unwrap_or(Rect::EMPTY);
             let (editor_key, mods) = to_editor_key(key, modifiers);
             let action = win
                 .owner
@@ -5693,9 +5884,15 @@ mod program {
                 None => (Repaint::Nothing, false),
             };
         }
-        let visible = win.props().map_or(0, |props| {
-            tairix_browse::render::properties_attr_visible_rows(props, window, scale, theme)
-        });
+        match route::properties_key(win.tab, key) {
+            route::PropertiesKey::Section(steps) => {
+                return (whole_if(show_section(win, win.tab.stepped(steps))), false)
+            }
+            route::PropertiesKey::Close => return (Repaint::Nothing, true),
+            route::PropertiesKey::Ignored => return (Repaint::Nothing, false),
+            route::PropertiesKey::Attributes => {}
+        }
+        let visible = tairix_browse::render::properties_attr_visible_rows(window, scale, theme);
         match key {
             KeyValue::Named(NamedKeyCode::Escape) => {
                 // The typed line is abandoned before the window is: a user
@@ -5718,14 +5915,9 @@ mod program {
                 (whole_if(moved || scrolled), false)
             }
             _ => {
-                let bounds = win
-                    .props()
-                    .and_then(|props| {
-                        tairix_browse::render::properties_attr_editor_rect(
-                            props, window, scale, theme,
-                        )
-                    })
-                    .unwrap_or(Rect::EMPTY);
+                let bounds =
+                    tairix_browse::render::properties_attr_editor_rect(window, scale, theme)
+                        .unwrap_or(Rect::EMPTY);
                 let (editor_key, mods) = to_editor_key(key, modifiers);
                 match win.editor.on_key(editor_key, mods, bounds, damage) {
                     Some(TextAction::Submitted) => set_attribute(win, window_id, reads),
@@ -5759,18 +5951,21 @@ mod program {
         // bar moves the list instead of selecting a row beneath it.
         let mut scrolled = None;
         for input in pointer_input_events(action, point) {
-            let routed = match &win.state {
-                PropertiesState::Ready(props) => tairix_browse::render::properties_scroll_pointer(
-                    props,
-                    &mut win.rows,
-                    window,
-                    scale,
-                    theme,
-                    point,
-                    &input,
-                    damage,
-                ),
-                PropertiesState::Reading | PropertiesState::Refused(_) => None,
+            // Only the attributes section draws a list to scroll, and only a
+            // landed read fills one.
+            let routed = match (&win.state, win.tab) {
+                (PropertiesState::Ready(_), PropertiesTab::Attributes) => {
+                    tairix_browse::render::properties_scroll_pointer(
+                        &mut win.rows,
+                        window,
+                        scale,
+                        theme,
+                        point,
+                        &input,
+                        damage,
+                    )
+                }
+                _ => None,
             };
             if let Some(moved) = routed {
                 scrolled = Some(scrolled.unwrap_or(false) || moved);
@@ -5785,12 +5980,16 @@ mod program {
             return (Repaint::Nothing, false);
         };
         let view = win.view();
+        let can_chown = win.can_chown;
         let Some(target) = win.props().and_then(|props| {
-            tairix_browse::render::properties_hit(props, view, window, scale, theme, point)
+            tairix_browse::render::properties_hit(
+                props, view, can_chown, window, scale, theme, point,
+            )
         }) else {
             return (Repaint::Nothing, false);
         };
         match target {
+            PropertiesTarget::Tab(tab) => (whole_if(show_section(win, tab)), false),
             PropertiesTarget::Permission(bit) => toggle_permission(win, window_id, reads, bit),
             PropertiesTarget::Owner(field) => begin_owner_edit(win, field),
             PropertiesTarget::Attribute(index) => (whole_if(select_attribute(win, index)), false),
@@ -5798,6 +5997,20 @@ mod program {
             PropertiesTarget::Action(AttrAction::Set) => set_attribute(win, window_id, reads),
             PropertiesTarget::Action(AttrAction::Remove) => remove_attribute(win, window_id, reads),
         }
+    }
+
+    /// Show `tab`, reporting whether the window changed section.
+    ///
+    /// Switching away from a half-typed ownership id abandons it: the editor
+    /// belongs to the section it is drawn in, and one left open behind a tab
+    /// the user cannot see would take their next keystroke.
+    fn show_section(win: &mut PropertiesWindow, tab: PropertiesTab) -> bool {
+        if win.tab == tab {
+            return false;
+        }
+        win.tab = tab;
+        win.owner = None;
+        true
     }
 
     /// Make attribute row `index` current, loading it into the editor so a

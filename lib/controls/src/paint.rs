@@ -504,7 +504,7 @@ pub(crate) fn icon_slot_side(font: BitmapFont, content_height: u32) -> u32 {
 /// The `saturation` at which [`paint_icon_slot`] draws artwork exactly as its
 /// owner cached it — the identity value of
 /// [`Pixel::desaturate`](tairix_raster::Pixel::desaturate).
-pub(crate) const FULL_COLOUR: u8 = 255;
+pub const FULL_COLOUR: u8 = 255;
 
 /// Paint a content icon into the `(x, y, side)` square `slot` from the
 /// `picture` its owner resolved: shipped artwork as it is, or a built-in glyph
@@ -537,7 +537,7 @@ pub(crate) const FULL_COLOUR: u8 = 255;
 /// what the artwork identifies is not the thing in hand — an unfocused
 /// window's title bar. It does not touch a glyph: that takes `tint` from the
 /// control's own state and has no application colour in it to reduce.
-pub(crate) fn paint_icon_slot(
+pub fn paint_icon_slot(
     surface: &mut Surface,
     slot: (u32, u32, u32),
     kind: IconKind,

@@ -540,6 +540,18 @@ impl Checkbox {
         self.core.state.focus.focused = focused;
     }
 
+    /// The pixel side of the square box a checkbox draws at the leading edge
+    /// of its bounds.
+    ///
+    /// This is the render geometry itself, exposed so an owner laying bare
+    /// checkboxes out on a grid — a permissions matrix, say — sizes each cell
+    /// to exactly the box [`Self::render`] will place in it, rather than
+    /// guessing from a font metric and leaving the box adrift in its cell.
+    #[must_use]
+    pub fn glyph_side(scale: Scale, theme: &Theme) -> u32 {
+        scale.scale_length(theme.metrics().selector_extent).max(1)
+    }
+
     /// The value a checkbox activation requests: checked, unless it is already
     /// checked (then unchecked). A mixed checkbox resolves to checked.
     fn next_on(&self) -> bool {
