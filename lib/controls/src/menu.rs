@@ -5,7 +5,7 @@
 //! A menu is a *pinned command plate*, not floating ornament: an elevated
 //! `surface_raised` plate with a Signal Rim, carrying a column of row controls.
 //! Each [`MenuItem`] is a row with a label and an optional leading icon,
-//! trailing shortcut, submenu marker, and reason. The [`Menu`] owns keyboard
+//! trailing shortcut, and submenu marker. The [`Menu`] owns keyboard
 //! navigation (Up/Down move the current row, Enter/Space activate it, Escape
 //! dismisses), pointer hover/click, and emits a typed [`MenuAction`]; it
 //! performs no privileged work — the owner enforces authority. Every colour,
@@ -25,16 +25,16 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::{glyph_mask, IconKind};
+use tairix_icon::{glyph_mask, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Palette, Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    draw_outline, ground_fill, heavy_contrast, inset, paint_bead, paint_chevron,
+    draw_outline, ground_fill, heavy_contrast, inset, paint_bead, paint_chevron, paint_icon_slot,
     paint_surface_plate, plate_border, resolve_bead, role_font, surface_rect, text_plate_height,
-    to_i32, withheld, BeadShape, ChevronDir, ChromeLayer,
+    to_i32, withheld, BeadShape, ChevronDir, ChromeLayer, FULL_COLOUR,
 };
 use crate::record::FactList;
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
@@ -42,15 +42,26 @@ use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvarian
 /// The outcome of feeding input to a [`Menu`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MenuAction {
-    /// The item at `index` was activated and its command should be dispatched.
+    /// The item at `index` was activated: clicked, or entered with
+    /// Enter/Space.
+    ///
+    /// Reported for **every** actionable row, chevron or not. A row may
+    /// legitimately act *and* open a child — the file manager's Rename row
+    /// does: clicking it opens an in-place editor while its child offers a
+    /// field to type in — so what a click on a chevroned row means is the
+    /// owner's to decide, not this control's. The [`Menu`] owns rows and
+    /// chevrons; it does not own what a chevron implies.
     Activated {
         /// The zero-based index of the activated row.
         index: usize,
     },
-    /// The submenu owned by the item at `index` should be opened (the row is a
-    /// submenu parent and was activated or entered from its edge).
+    /// The child of the item at `index` should be opened, because the
+    /// keyboard walked *into* it (Right from its parent row).
+    ///
+    /// The one gesture that means "open the child" and nothing else; a click
+    /// and Enter both report [`Activated`](Self::Activated).
     OpenSubmenu {
-        /// The zero-based index of the submenu-parent row.
+        /// The zero-based index of the row whose child to open.
         index: usize,
     },
     /// The menu should be dismissed without activating anything (Escape).
@@ -229,7 +240,7 @@ pub enum MenuMark {
 }
 
 /// One row of a menu (spec §11.10): a label with an optional leading icon,
-/// trailing shortcut, submenu marker, and — for a disabled row — a reason.
+/// trailing shortcut, and submenu marker.
 ///
 /// A [`ControlRole::Destructive`] item draws a danger rail on its own row only.
 /// A denied item keeps its slot and shows an Authority Mark rather than looking
@@ -247,9 +258,9 @@ pub struct MenuItem {
     label: String,
     shortcut: Option<String>,
     icon: Option<IconKind>,
+    artwork: Option<Surface>,
     mark: MenuMark,
     submenu: bool,
-    reason: Option<String>,
     role: ControlRole,
     state: ControlState,
     group_break: bool,
@@ -263,9 +274,9 @@ impl MenuItem {
             label: label.into(),
             shortcut: None,
             icon: None,
+            artwork: None,
             mark: MenuMark::None,
             submenu: false,
-            reason: None,
             role: ControlRole::Neutral,
             state: ControlState::idle(),
             group_break: false,
@@ -286,6 +297,39 @@ impl MenuItem {
         self
     }
 
+    /// This item drawing already-rasterised `artwork` in its icon column,
+    /// in place of a glyph.
+    ///
+    /// Finished pixels, resolved by whoever owns the icon cache: a row whose
+    /// picture identifies a *particular* thing — the application a menu row
+    /// would open a file with — cannot be drawn from the built-in glyph
+    /// vocabulary, and a control never decodes an image itself. A glyph mask
+    /// is deliberately not storable here: it takes its colour from the
+    /// control that draws it, so it is resolved at paint time through
+    /// [`with_icon`](Self::with_icon) instead.
+    #[must_use]
+    pub fn with_artwork(mut self, artwork: Surface) -> Self {
+        self.artwork = Some(artwork);
+        self
+    }
+
+    /// This item drawing no artwork, falling back to its glyph or mark.
+    ///
+    /// The mirror of [`with_artwork`](Self::with_artwork), so an owner whose
+    /// cache could no longer keep a picture takes it back rather than leaving
+    /// a stale one on screen.
+    #[must_use]
+    pub fn without_artwork(mut self) -> Self {
+        self.artwork = None;
+        self
+    }
+
+    /// The rasterised artwork this row draws, if it was given any.
+    #[must_use]
+    pub const fn artwork(&self) -> Option<&Surface> {
+        self.artwork.as_ref()
+    }
+
     /// This item drawing `mark` in its leading icon column.
     ///
     /// A row states either an icon or a mark, never both: they share the one
@@ -300,14 +344,6 @@ impl MenuItem {
     #[must_use]
     pub fn with_submenu(mut self, submenu: bool) -> Self {
         self.submenu = submenu;
-        self
-    }
-
-    /// This item with a concise reason shown when it is disabled and current
-    /// (spec §11.10). The reason is user-facing text, never a secret.
-    #[must_use]
-    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
-        self.reason = Some(reason.into());
         self
     }
 
@@ -341,12 +377,6 @@ impl MenuItem {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
-    }
-
-    /// The item's disabled-row reason, if one was set.
-    #[must_use]
-    pub fn reason(&self) -> Option<&str> {
-        self.reason.as_deref()
     }
 
     /// The item's role.
@@ -388,6 +418,18 @@ impl MenuItem {
     /// Whether activating this row (by pointer or keyboard) will dispatch.
     fn is_actionable(&self) -> bool {
         self.state.is_actionable()
+    }
+
+    /// The side, in physical pixels, of the leading column a row `h` pixels
+    /// tall reserves for an icon, a mark or artwork.
+    ///
+    /// The one derivation: [`Self::paint_content`] draws into it and
+    /// [`Menu::icon_side`] reports it, so an owner rasterising artwork for a
+    /// row asks for exactly the pixels the row will draw.
+    fn icon_side(h: u32, scale: Scale, theme: &Theme) -> u32 {
+        role_font(theme, scale, TextRole::Body)
+            .glyph_height()
+            .min(h.saturating_sub(plate_border(theme, scale).saturating_mul(2)))
     }
 
     /// The emphasis colour this row's highlight must be drawn in rather than a
@@ -509,31 +551,45 @@ impl MenuItem {
         let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
         let left = x.saturating_add(border).saturating_add(pad);
         let mut cursor = left;
-        let icon_slot = glyph_h.min(h.saturating_sub(border.saturating_mul(2)));
+        let icon_slot = Self::icon_side(h, scale, theme);
 
-        // Leading icon or mark (both optional, and mutually exclusive: they
-        // share the one column). The column is reserved even for a row with
-        // neither, so a menu's labels line up (text stability, spec §14).
+        // Leading artwork, icon or mark (all optional, and mutually exclusive:
+        // they share the one column). The column is reserved even for a row
+        // with none of them, so a menu's labels line up (text stability,
+        // spec §14).
         if icon_slot > 0 {
-            if let Some(kind) = self.icon {
-                if let Some(mask) = glyph_mask(kind, icon_slot) {
-                    let iy = to_i32(y) + (to_i32(h) - to_i32(icon_slot)).max(0) / 2;
-                    surface.blit_tinted(to_i32(cursor), iy, &mask, Color::from(label_color));
-                }
-            } else {
-                let my = y + (h.saturating_sub(icon_slot)) / 2;
-                paint_menu_mark(
+            let iy = y + (h.saturating_sub(icon_slot)) / 2;
+            match (self.artwork.as_ref(), self.icon) {
+                (Some(art), _) => paint_icon_slot(
                     surface,
-                    (cursor, my, icon_slot),
+                    (cursor, iy, icon_slot),
+                    IconKind::AppBundle,
+                    Color::from(label_color),
+                    Some(IconPicture::Artwork(art)),
+                    FULL_COLOUR,
+                ),
+                (None, Some(kind)) => {
+                    if let Some(mask) = glyph_mask(kind, icon_slot) {
+                        surface.blit_tinted(
+                            to_i32(cursor),
+                            to_i32(iy),
+                            &mask,
+                            Color::from(label_color),
+                        );
+                    }
+                }
+                (None, None) => paint_menu_mark(
+                    surface,
+                    (cursor, iy, icon_slot),
                     self.mark,
                     Color::from(label_color),
-                );
+                ),
             }
         }
         cursor = cursor.saturating_add(icon_slot).saturating_add(pad);
 
         // Trailing region: the submenu chevron sits at the far edge; the
-        // shortcut (or a disabled row's reason) sits just inside it.
+        // shortcut sits just inside it.
         let right = x
             .saturating_add(w)
             .saturating_sub(border)
@@ -556,14 +612,11 @@ impl MenuItem {
             }
         }
 
-        // The caption: a disabled current row shows its reason; otherwise the
-        // shortcut. Both are muted and right-aligned inside the trailing edge.
-        let caption = if disposition == ControlDisposition::DisabledByState && current {
-            self.reason.as_deref().or(self.shortcut.as_deref())
-        } else {
-            self.shortcut.as_deref()
-        };
-        if let Some(text) = caption {
+        // The caption is the accelerator and nothing else, muted and
+        // right-aligned inside the trailing edge. Why a row is unavailable is
+        // the seat's tooltip to answer on dwell, never text that widens every
+        // plate that carries it.
+        if let Some(text) = self.shortcut.as_deref() {
             if trailing > cursor {
                 let budget = trailing - cursor;
                 let fitted = font.truncate_to_width(text, budget);
@@ -623,8 +676,8 @@ struct RowBand {
 /// current row and a primary click activates it. Every activation is a typed
 /// [`MenuAction`] the owner dispatches; the menu enforces no authority. A
 /// non-actionable row (disabled, denied, pending, failed-closed) can be
-/// highlighted — so its reason and Authority Mark are legible — but never
-/// activates (fail closed).
+/// highlighted — so its Authority Mark is legible and the seat can explain it
+/// on dwell — but never activates (fail closed).
 ///
 /// Equal menus draw the same pixels, so a host may use `==` as its repaint
 /// gate: the rows, the highlighted row, and whether that highlight came from
@@ -738,6 +791,16 @@ impl Menu {
         text_plate_height(theme, scale, TextRole::Body)
     }
 
+    /// The side, in physical pixels, an owner must rasterise a row's artwork
+    /// at ([`MenuItem::with_artwork`]).
+    ///
+    /// The row's own leading column, so a picture resolved for it lands in
+    /// the slot rather than being centred inside a larger one.
+    #[must_use]
+    pub fn icon_side(scale: Scale, theme: &Theme) -> u32 {
+        MenuItem::icon_side(Self::row_height(scale, theme), scale, theme)
+    }
+
     /// The scaled height of the band a group divider occupies: the rule with
     /// a gap either side, so groups read as separated bands rather than a
     /// hairline crowded between two labels.
@@ -817,11 +880,7 @@ impl Menu {
         let mut widest = 0;
         for item in &self.items {
             let label_w = font.text_width(&item.label);
-            let caption = item
-                .shortcut
-                .as_deref()
-                .or(item.reason.as_deref())
-                .map_or(0, |c| font.text_width(c));
+            let caption = item.shortcut.as_deref().map_or(0, |c| font.text_width(c));
             let chevron = if item.submenu { font.glyph_height() } else { 0 };
             let w = border
                 .saturating_add(pad)
@@ -1012,18 +1071,20 @@ impl Menu {
         }
     }
 
-    /// The typed action for activating (or opening) the current row, if it is
-    /// actionable; `None` for a non-actionable row (fail closed).
+    /// The typed action for activating the current row, if it is actionable;
+    /// `None` for a non-actionable row (fail closed).
+    ///
+    /// A chevroned row is no exception: a row may act *and* have a child, so
+    /// telling the two apart is the owner's, over a model that knows which
+    /// rows carry a command. The keyboard's Right key is the gesture that
+    /// means only "open the child", and it is reported as such by its own
+    /// arm.
     fn activate(&self, index: usize) -> Option<MenuAction> {
         let item = self.items.get(index)?;
         if !item.is_actionable() {
             return None;
         }
-        if item.submenu {
-            Some(MenuAction::OpenSubmenu { index })
-        } else {
-            Some(MenuAction::Activated { index })
-        }
+        Some(MenuAction::Activated { index })
     }
 
     /// Move the highlight to `next`, `keyboard` when the keyboard put it there,
@@ -1100,8 +1161,8 @@ impl Menu {
     }
 
     /// Feed a key event: Up/Down move the current row (wrapping), Home/End jump
-    /// to the ends, Right/Enter/Space activate (opening a submenu parent), and
-    /// Escape dismisses.
+    /// to the ends, Enter/Space activate the current row, Right walks into its
+    /// child, and Escape dismisses.
     ///
     /// A moved highlight reports the two rows it moved between; the keys that
     /// only activate or dismiss report nothing, because the menu itself draws
@@ -1197,6 +1258,14 @@ pub enum ChainChild {
     /// bundle's signed manifest before the chain opened, so an application
     /// cannot state an identity that is not its own.
     Info(FactList),
+    /// The desktop's own one-line text field, pre-filled with this text and
+    /// answering the carried id when it is committed.
+    ///
+    /// A *presentation* child like the information panel — the desktop draws
+    /// it and owns the keyboard while it is up — that additionally has an
+    /// answer of its own, which is why it carries an id the row's own does
+    /// not shadow.
+    Entry(AppMenuItemId, String),
 }
 
 /// One row of the model a menu chain renders.
@@ -1214,6 +1283,14 @@ pub struct ChainRow {
     id: Option<AppMenuItemId>,
     /// What this row opens.
     child: ChainChild,
+    /// The application bundle whose icon this row draws, if it named one.
+    /// The path is the *request*, not the picture: whoever owns the icon
+    /// cache resolves it and sets the artwork on the drawn row.
+    bundle: Option<String>,
+    /// Why this row cannot be chosen, for the seat to show as a tip on dwell.
+    /// Never drawn on the row: help text beside a label widens every plate
+    /// that carries it, whether or not anyone reads it.
+    tip: Option<String>,
     /// Everything the shared row control draws.
     item: MenuItem,
 }
@@ -1226,6 +1303,8 @@ impl ChainRow {
             parent: None,
             id: Some(id),
             child: ChainChild::None,
+            bundle: None,
+            tip: None,
             item,
         }
     }
@@ -1237,6 +1316,8 @@ impl ChainRow {
             parent: None,
             id: None,
             child: ChainChild::Submenu,
+            bundle: None,
+            tip: None,
             item: item.with_submenu(true),
         }
     }
@@ -1248,8 +1329,40 @@ impl ChainRow {
             parent: None,
             id: None,
             child: ChainChild::Info(facts),
+            bundle: None,
+            tip: None,
             item: item.with_submenu(true),
         }
+    }
+
+    /// A chooseable row whose child is the desktop's own text field,
+    /// pre-filled with `initial` and answering `entry` when committed.
+    ///
+    /// Both answers are live: choosing the row answers `id`, committing its
+    /// field answers `entry`. The two ids are distinct by the model's own
+    /// rule, so an owner reading one back can never mistake it for the other.
+    #[must_use]
+    pub fn entry(
+        id: AppMenuItemId,
+        entry: AppMenuItemId,
+        initial: impl Into<String>,
+        item: MenuItem,
+    ) -> Self {
+        Self {
+            parent: None,
+            id: Some(id),
+            child: ChainChild::Entry(entry, initial.into()),
+            bundle: None,
+            tip: None,
+            item: item.with_submenu(true),
+        }
+    }
+
+    /// This row's drawn form, for an owner that has to set something on it
+    /// after the model was built — the artwork a picture-bearing row's
+    /// icon resolves to.
+    pub const fn drawn_mut(&mut self) -> &mut MenuItem {
+        &mut self.item
     }
 
     /// This row filed under the plate row `parent` opens.
@@ -1287,6 +1400,49 @@ impl ChainRow {
     #[must_use]
     pub fn grouped(mut self) -> Self {
         self.item = self.item.with_group_break(true);
+        self
+    }
+
+    /// This row whose icon comes from the application bundle at `path`.
+    #[must_use]
+    pub fn from_bundle(mut self, path: impl Into<String>) -> Self {
+        self.bundle = Some(path.into());
+        self
+    }
+
+    /// This row explaining, on dwell, why it cannot be chosen.
+    ///
+    /// The text the seat shows as a tip beside the row. It is never drawn on
+    /// the row itself: a caption beside every disabled label is what made
+    /// plates as wide as their longest excuse.
+    #[must_use]
+    pub fn explained(mut self, why: impl Into<String>) -> Self {
+        self.tip = Some(why.into());
+        self
+    }
+
+    /// Why this row cannot be chosen, for the seat to show on dwell.
+    #[must_use]
+    pub fn tip(&self) -> Option<&str> {
+        self.tip.as_deref()
+    }
+
+    /// The bundle this row wants its icon resolved from, if it named one.
+    #[must_use]
+    pub fn icon_bundle(&self) -> Option<&str> {
+        self.bundle.as_deref()
+    }
+
+    /// This row additionally opening the plate holding the rows filed under
+    /// it, keeping whatever answer it already had.
+    ///
+    /// A submenu is a relationship between rows rather than a row kind, so a
+    /// chooseable row becomes a plate's parent by having children — which is
+    /// how one row both acts when chosen and opens on arrival.
+    #[must_use]
+    fn opening_a_plate(mut self) -> Self {
+        self.child = ChainChild::Submenu;
+        self.item = self.item.with_submenu(true);
         self
     }
 }
@@ -1332,6 +1488,12 @@ impl ChainModel {
         &self.rows
     }
 
+    /// The model's rows, for an owner that has to set something on one after
+    /// the model was built — the artwork a picture-bearing row resolves to.
+    pub fn rows_mut(&mut self) -> &mut [ChainRow] {
+        &mut self.rows
+    }
+
     /// Decode an application's wire menu into the model a chain renders,
     /// titled `title`.
     ///
@@ -1347,9 +1509,16 @@ impl ChainModel {
     /// row of its own, so a separator inside a submenu draws the divider it
     /// draws on the root plate, and no index the chain reports is a rule
     /// nothing can be chosen on.
+    ///
+    /// A declared row that other rows name as their parent opens their plate
+    /// and draws the chevron for it, whether it is a plain submenu row or a
+    /// chooseable one — which is what lets a row both act and open. The parent
+    /// set is therefore read *before* any row is built, because a parent is
+    /// declared before its children but learns it is one only from them.
     #[must_use]
     pub fn from_app_menu(title: &str, menu: &AppMenu, identity: Option<&FactList>) -> Self {
         let mut model = Self::new(title);
+        let parents: Vec<usize> = menu.rows().filter_map(|(_, parent)| parent).collect();
         // A declared row's index is what its children name, and a folded
         // separator takes no index here, so the two spaces are mapped rather
         // than assumed equal.
@@ -1357,14 +1526,15 @@ impl ChainModel {
         // One pending break per plate: a separator ending the root plate must
         // not put a divider above the first row of a submenu.
         let mut pending: Vec<(Option<usize>, bool)> = Vec::new();
-        for (row, declared_parent) in menu.rows() {
+        for (declared, (row, declared_parent)) in menu.rows().enumerate() {
             let parent = declared_parent.and_then(|at| mapped.get(at).copied().flatten());
             if matches!(row, AppMenuRowView::Separator) {
                 mapped.push(None);
                 set_pending(&mut pending, parent, true);
                 continue;
             }
-            let Some(mut built) = wire_row(row, identity) else {
+            let opens_children = parents.contains(&declared);
+            let Some(mut built) = wire_row(row, identity, opens_children) else {
                 mapped.push(None);
                 continue;
             };
@@ -1400,7 +1570,11 @@ fn take_pending(pending: &mut [(Option<usize>, bool)], parent: Option<usize>) ->
 /// One declared row as a chain's own row, or `None` for a row that renders
 /// nothing (a separator, which the caller folds, or an information row on a
 /// chain whose owner attested no identity).
-fn wire_row(row: AppMenuRowView<'_>, identity: Option<&FactList>) -> Option<ChainRow> {
+fn wire_row(
+    row: AppMenuRowView<'_>,
+    identity: Option<&FactList>,
+    opens_children: bool,
+) -> Option<ChainRow> {
     match row {
         AppMenuRowView::Separator => None,
         AppMenuRowView::Item(item) => {
@@ -1411,10 +1585,20 @@ fn wire_row(row: AppMenuRowView<'_>, identity: Option<&FactList>) -> Option<Chai
             if !item.shortcut.is_empty() {
                 built = built.with_shortcut(item.shortcut);
             }
-            if !item.reason.is_empty() {
-                built = built.with_reason(item.reason);
+            // A declared field *is* the row's child, and the model forbids a
+            // row holding both, so the two cases cannot overlap.
+            let mut row = match item.entry {
+                Some(entry) => ChainRow::entry(item.id, entry.id, entry.initial, built),
+                None if opens_children => ChainRow::item(item.id, built).opening_a_plate(),
+                None => ChainRow::item(item.id, built),
+            };
+            if !item.icon_bundle.is_empty() {
+                row = row.from_bundle(item.icon_bundle);
             }
-            Some(ChainRow::item(item.id, built))
+            if !item.reason.is_empty() {
+                row = row.explained(item.reason);
+            }
+            Some(row)
         }
         AppMenuRowView::Submenu { label, enabled } => Some(ChainRow::submenu(
             MenuItem::new(label).with_state(ControlState::default().with_enabled(enabled)),

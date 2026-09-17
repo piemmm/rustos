@@ -33,6 +33,14 @@ use crate::edge::Edge;
 use crate::input::TaskbarResponse;
 use crate::system::{self, SystemPermits};
 
+/// One row a bar menu's own table produced: its position in that table, what
+/// the row draws, and why it cannot be chosen.
+///
+/// The reason is the seat's tooltip text, shown on dwell — never drawn beside
+/// the label, which is what used to make a plate as wide as its longest
+/// excuse.
+pub(crate) type BarMenuRow = (usize, MenuItem, Option<&'static str>);
+
 /// Which of the bar's menus a chain belongs to, and what a chosen row of it
 /// acts on.
 ///
@@ -199,13 +207,17 @@ pub(crate) fn clock_menu(permits: &ClockPermits) -> ChainModel {
 ///
 /// The one place the bar's three own menus turn a table position into a row
 /// id, so the numbering and [`MenuSubject::chosen`]'s inverse cannot drift.
-fn rows_from(title: &str, rows: alloc::vec::Vec<(usize, MenuItem)>) -> ChainModel {
+fn rows_from(title: &str, rows: alloc::vec::Vec<BarMenuRow>) -> ChainModel {
     let mut model = ChainModel::new(title);
-    for (index, item) in rows {
+    for (index, item, why) in rows {
         let Some(id) = AppMenuItemId::for_index(index) else {
             continue;
         };
-        model.push(ChainRow::item(id, item));
+        let row = ChainRow::item(id, item);
+        model.push(match why {
+            Some(why) => row.explained(why),
+            None => row,
+        });
     }
     model
 }

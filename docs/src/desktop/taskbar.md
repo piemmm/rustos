@@ -771,7 +771,8 @@ Four subjects ask for one:
   declared over the window channel — and nothing at all when it declared none,
   so the bar never invents one on an application's behalf. Every declared row
   is stated in declaration order with the enablement, mark, accelerator
-  caption, disabled-row reason and role it asked for; a declared separator opens
+  caption and role it asked for, and its refusal reason as the seat's tip on
+  dwell rather than a caption beside the label; a declared separator opens
   the group its next row begins rather than becoming a choosable row; a declared
   `Submenu` row's own rows become its child plate. Choosing a row answers
   `AppMenuChosen { app, item }`, which the session relays back to the declaring

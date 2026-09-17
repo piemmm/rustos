@@ -2093,7 +2093,10 @@ mod program {
                                 );
                             }
                         }
-                        MenuOutcome::Dismissed => {}
+                        // This menu declares no quick-entry field, so a
+                        // committed one answers a row it never asked for and
+                        // is dropped rather than guessed at.
+                        MenuOutcome::Entered(_) | MenuOutcome::Dismissed => {}
                         MenuOutcome::Refused(reason) => {
                             report(&alloc::format!("the desktop showed no menu ({reason:?})"));
                         }

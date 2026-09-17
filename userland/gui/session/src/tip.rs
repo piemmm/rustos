@@ -34,6 +34,7 @@ use tairix_controls::{plate_rect, PlatePlacement, PlateSide, Tooltip};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
+use tairix_wm::WindowId;
 
 /// How long the pointer must rest inside a declared region before its tooltip
 /// appears, in monotonic nanoseconds.
@@ -52,7 +53,28 @@ pub const TOOLTIP_DWELL_NS: u64 = 600_000_000;
 /// that says the tip is *about* the thing rather than in it.
 const TOOLTIP_GAP: u32 = 4;
 
-/// One window's declaration: the region and the line.
+/// Who a declaration belongs to.
+///
+/// Two namespaces reach this map and they must not be able to collide: an
+/// application's window-channel id, and the desktop's own menu chain. A
+/// channel id that happened to equal a chain's key would otherwise answer one
+/// pointer with the other's line.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum TipSource {
+    /// An application's window, by the compositor window presenting it. Its
+    /// region is that window's own client pixels.
+    ///
+    /// Resolved from the channel id at declaration, where the session's
+    /// window map is at hand, so placing a tip later needs only the
+    /// compositor.
+    Window(WindowId),
+    /// The seat's menu chain, explaining the row the pointer rests on. Its
+    /// region is already in screen pixels, because the chain's plates are the
+    /// desktop's own surfaces and it knows where it put them.
+    Chain,
+}
+
+/// One declaration: the region and the line.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Declared {
     region: WindowRegion,
@@ -63,8 +85,19 @@ struct Declared {
 /// and when its tip is due.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Dwell {
-    window: u64,
+    window: TipSource,
     due_ns: u64,
+}
+
+/// Where the pointer was last reported, and when it arrived there.
+///
+/// The rest, not the event: a tip is due `TOOLTIP_DWELL_NS` after the pointer
+/// *stopped*, so a declaration that appears later under a still pointer is
+/// already part-way through its wait rather than starting a fresh one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct AtRest {
+    at: Point,
+    since_ns: u64,
 }
 
 /// The seat's tooltip: at most one declaration per window, at most one dwell,
@@ -73,10 +106,14 @@ struct Dwell {
 pub struct SeatTooltip {
     /// What each window has declared. A window holds at most one, so a second
     /// declaration replaces the first rather than joining it.
-    declared: BTreeMap<u64, Declared>,
+    declared: BTreeMap<TipSource, Declared>,
     dwell: Option<Dwell>,
-    /// The window whose tip is on screen, if one is.
-    shown: Option<u64>,
+    /// Where the pointer has been resting, so a declaration that lands under
+    /// a still pointer can arm its own dwell — nothing else will, because a
+    /// pointer that has stopped produces no further sample.
+    rest: Option<AtRest>,
+    /// The source whose tip is on screen, if one is.
+    shown: Option<TipSource>,
 }
 
 impl SeatTooltip {
@@ -86,30 +123,51 @@ impl SeatTooltip {
         Self::default()
     }
 
-    /// Record `window`'s declaration, replacing any it had made before.
+    /// Record `window`'s declaration, replacing any it had made before, with
+    /// `origin` naming where that source's regions begin on screen.
     ///
     /// Empty `text` withdraws it — one operation, so there is no second
     /// "hide" to fall out of step with — and takes a tip already on screen
     /// down with it. Answers whether anything on screen changed.
-    pub fn declare(&mut self, window: u64, region: WindowRegion, text: &str) -> bool {
+    ///
+    /// **A declaration identical to the one held is not a new one** and does
+    /// nothing at all: a surface re-presenting an unchanged row would
+    /// otherwise restart the rest on every frame, so a tip that is due would
+    /// never fall due.
+    ///
+    /// A *changed* declaration arms its own dwell when the pointer is already
+    /// resting inside it, because the pointer that would have armed it has
+    /// stopped and will send no further sample. `origin` of `None` is a source
+    /// the seat cannot place, so its region resolves nowhere and is never
+    /// hovered — fail closed rather than anchoring a plate somewhere invented.
+    pub fn declare(
+        &mut self,
+        window: TipSource,
+        region: WindowRegion,
+        text: &str,
+        origin: Option<Point>,
+    ) -> bool {
         if text.is_empty() {
             return self.withdraw(window);
         }
-        self.declared.insert(
-            window,
-            Declared {
-                region,
-                text: String::from(text),
-            },
-        );
+        let declared = Declared {
+            region,
+            text: String::from(text),
+        };
+        if self.declared.get(&window) == Some(&declared) {
+            return false;
+        }
+        self.declared.insert(window, declared);
         // A region that moved under a shown tip no longer explains what the
-        // tip is beside, so the tip goes and the dwell starts again.
-        self.clear_for(window)
+        // tip is beside, so the tip goes and the rest is counted again.
+        let changed = self.clear_for(window);
+        self.arm_under(window, region, origin);
+        changed
     }
 
     /// Withdraw `window`'s declaration. Answers whether anything on screen
     /// changed.
-    pub fn withdraw(&mut self, window: u64) -> bool {
+    pub fn withdraw(&mut self, window: TipSource) -> bool {
         self.declared.remove(&window);
         self.clear_for(window)
     }
@@ -119,7 +177,7 @@ impl SeatTooltip {
     ///
     /// The owner died or the window closed, so nothing it declared can still
     /// be true.
-    pub fn forget(&mut self, window: u64) -> bool {
+    pub fn forget(&mut self, window: TipSource) -> bool {
         self.withdraw(window)
     }
 
@@ -131,6 +189,10 @@ impl SeatTooltip {
     /// tip, and all of them mean the user has moved on from asking.
     pub fn dismiss(&mut self) -> bool {
         self.dwell = None;
+        // The rest is spent with it: the user has moved on from asking, so a
+        // declaration landing under the same still pointer must not pop a tip
+        // straight back up with no wait at all.
+        self.rest = None;
         self.shown.take().is_some()
     }
 
@@ -144,8 +206,21 @@ impl SeatTooltip {
     /// Answers whether anything on screen changed.
     pub fn pointer_moved<F>(&mut self, at: Point, now_ns: u64, client_origin: F) -> bool
     where
-        F: Fn(u64) -> Option<Point>,
+        F: Fn(TipSource) -> Option<Point>,
     {
+        // A stationary hand still produces samples, so the rest begins when
+        // the pointer last actually moved.
+        let rest = match self.rest {
+            Some(rest) if rest.at == at => rest,
+            _ => {
+                let rest = AtRest {
+                    at,
+                    since_ns: now_ns,
+                };
+                self.rest = Some(rest);
+                rest
+            }
+        };
         let Some(window) = self.window_under(at, &client_origin) else {
             self.dwell = None;
             return self.shown.take().is_some();
@@ -159,7 +234,7 @@ impl SeatTooltip {
         if self.dwell.map(|dwell| dwell.window) != Some(window) {
             self.dwell = Some(Dwell {
                 window,
-                due_ns: now_ns.saturating_add(TOOLTIP_DWELL_NS),
+                due_ns: due_ns(rest),
             });
         }
         changed
@@ -200,7 +275,7 @@ impl SeatTooltip {
 
     /// The window whose tip is on screen, if one is.
     #[must_use]
-    pub const fn shown(&self) -> Option<u64> {
+    pub const fn shown(&self) -> Option<TipSource> {
         self.shown
     }
 
@@ -212,7 +287,7 @@ impl SeatTooltip {
 
     /// The text `window` declared, if it holds a declaration.
     #[must_use]
-    pub fn text(&self, window: u64) -> Option<&str> {
+    pub fn text(&self, window: TipSource) -> Option<&str> {
         self.declared.get(&window).map(|d| d.text.as_str())
     }
 
@@ -232,7 +307,7 @@ impl SeatTooltip {
         client_origin: F,
     ) -> Option<(Tooltip, Rect)>
     where
-        F: Fn(u64) -> Option<Point>,
+        F: Fn(TipSource) -> Option<Point>,
     {
         let window = self.shown?;
         let declared = self.declared.get(&window)?;
@@ -274,9 +349,9 @@ impl SeatTooltip {
     /// inside two windows' regions at once resolves to the lowest window id —
     /// which is why the caller hands in only the origin of the window the seat
     /// says the pointer is actually over.
-    fn window_under<F>(&self, at: Point, client_origin: &F) -> Option<u64>
+    fn window_under<F>(&self, at: Point, client_origin: &F) -> Option<TipSource>
     where
-        F: Fn(u64) -> Option<Point>,
+        F: Fn(TipSource) -> Option<Point>,
     {
         self.declared.iter().find_map(|(&window, declared)| {
             let origin = client_origin(window)?;
@@ -286,9 +361,30 @@ impl SeatTooltip {
         })
     }
 
+    /// Arm a dwell for `window` when the pointer is already resting inside the
+    /// region it has just declared.
+    ///
+    /// Only for this source's own region: another source's running dwell is
+    /// left alone, and the next pointer sample resolves an overlap through
+    /// [`Self::window_under`] as always.
+    fn arm_under(&mut self, window: TipSource, region: WindowRegion, origin: Option<Point>) {
+        if self.dwell.is_some_and(|dwell| dwell.window != window) {
+            return;
+        }
+        let (Some(rest), Some(origin)) = (self.rest, origin) else {
+            return;
+        };
+        if screen_region(region, origin).contains(rest.at) {
+            self.dwell = Some(Dwell {
+                window,
+                due_ns: due_ns(rest),
+            });
+        }
+    }
+
     /// Clear a dwell or tip belonging to `window`, answering whether anything
     /// on screen changed.
-    fn clear_for(&mut self, window: u64) -> bool {
+    fn clear_for(&mut self, window: TipSource) -> bool {
         if self.dwell.map(|dwell| dwell.window) == Some(window) {
             self.dwell = None;
         }
@@ -298,6 +394,11 @@ impl SeatTooltip {
         }
         false
     }
+}
+
+/// When a tip becomes due for a pointer that stopped at `rest`.
+const fn due_ns(rest: AtRest) -> u64 {
+    rest.since_ns.saturating_add(TOOLTIP_DWELL_NS)
 }
 
 /// A window-local region resolved to screen space against its client

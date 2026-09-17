@@ -236,6 +236,26 @@ pub const APP_MENU_SHORTCUT_MAX: usize = 24;
 /// so the bound is a clause rather than a sentence.
 pub const APP_MENU_REASON_MAX: usize = 64;
 
+/// Maximum encoded length, in bytes, of the text a menu row's quick-entry
+/// field starts out holding, and so of the text a commit answers with
+/// ([`AppMenuEntry`]).
+///
+/// The field's purpose is a filesystem name — the one thing a menu row asks
+/// the user to type — so it carries the filesystem's own component bound
+/// rather than a second figure beside it.
+pub const APP_MENU_ENTRY_MAX: usize = crate::FS_NAME_MAX;
+
+/// Maximum encoded length, in bytes, of the bundle path a menu row names as
+/// the source of its icon ([`AppMenuItem::with_icon_bundle`]).
+///
+/// A **format** bound on untrusted input, and the widest a row record's
+/// one-byte length can state. It is a program-store prefix, the folders the
+/// bundle is filed under, and `<Name>.app`; a path longer than this keeps its
+/// row and loses only its picture, which degrades to the built-in glyph. The
+/// whole model still has to fit [`APP_MENU_TEXT_BYTES`], so a menu asking for
+/// many pictures is bounded by that rather than by this.
+pub const APP_MENU_BUNDLE_MAX: usize = 255;
+
 /// A validated menu row label: bounded UTF-8 with no control characters,
 /// over the shared [`BoundedText`] validator.
 ///
@@ -254,8 +274,51 @@ pub type AppMenuLabel = BoundedText<0, APP_MENU_LABEL_MAX>;
 /// own cosmetic defect, never an input path.
 pub type AppMenuShortcut = BoundedText<0, APP_MENU_SHORTCUT_MAX>;
 
-/// A validated disabled-row reason, over the shared validator.
+/// A validated reason a row cannot be chosen, over the shared validator.
+///
+/// Display text like a label, shown as the seat's tooltip on dwell rather
+/// than drawn on the row.
 pub type AppMenuReason = BoundedText<0, APP_MENU_REASON_MAX>;
+
+/// The text a quick-entry field starts out holding, over the shared
+/// validator.
+///
+/// Display text the desktop puts in a field for the user to edit, never a
+/// credential: it is refused rather than sanitised if it is not admissible.
+pub type AppMenuEntryText = BoundedText<0, APP_MENU_ENTRY_MAX>;
+
+/// The bundle path a row names as the source of its icon, over the shared
+/// validator.
+///
+/// A path the **desktop** resolves an icon from, never one it opens: the
+/// artwork tier reads the bundle's own signed manifest and draws only the
+/// icon that manifest declares, so a row naming a path that is not a bundle
+/// resolves to nothing and the row draws the built-in glyph.
+pub type AppMenuBundle = BoundedText<0, APP_MENU_BUNDLE_MAX>;
+
+/// A menu row's quick-entry field: one line of text the desktop puts in a
+/// child surface of the row, pre-filled and ready to edit.
+///
+/// The child is the desktop's own surface, exactly as the information panel
+/// is: the application declares that the field exists and what it starts out
+/// holding, and the desktop draws it, owns the keyboard while it is up, and
+/// answers a commit with [`MenuOutcome::Entered`] naming this `id`.
+///
+/// **The id is the entry's own, not the row's.** A row may be chooseable
+/// *and* carry an entry — the file manager's Rename row is: clicking it opens
+/// an in-place editor, and typing in its child commits a name — so the two
+/// answers have to be told apart by the id alone rather than by what the
+/// application guesses the user did.
+///
+/// There is deliberately **no masked or secret field**: a menu row cannot be
+/// a password prompt, because the model has no way to say so.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AppMenuEntry {
+    /// The id a commit answers with; never the row's own.
+    pub id: AppMenuItemId,
+    /// What the field starts out holding. Empty is legitimate.
+    pub initial: AppMenuEntryText,
+}
 
 /// The mark an [`AppMenuItem`] draws beside its label.
 ///
@@ -370,6 +433,8 @@ pub struct AppMenuItem {
     shortcut: AppMenuShortcut,
     reason: AppMenuReason,
     role: AppMenuRole,
+    entry: Option<AppMenuEntry>,
+    icon_bundle: AppMenuBundle,
 }
 
 impl AppMenuItem {
@@ -384,6 +449,8 @@ impl AppMenuItem {
             shortcut: AppMenuShortcut::EMPTY,
             reason: AppMenuReason::EMPTY,
             role: AppMenuRole::Neutral,
+            entry: None,
+            icon_bundle: AppMenuBundle::EMPTY,
         }
     }
 
@@ -408,8 +475,12 @@ impl AppMenuItem {
         self
     }
 
-    /// This row stating why it cannot be chosen, shown while it is disabled
-    /// and current.
+    /// This row stating why it cannot be chosen, which the desktop shows as
+    /// the seat's tooltip when the pointer rests on the row.
+    ///
+    /// Never drawn beside the label: a caption there sized every plate to its
+    /// longest excuse. An application declares the text rather than a tooltip
+    /// region, because the plate is the desktop's own surface.
     #[must_use]
     pub const fn with_reason(mut self, reason: AppMenuReason) -> Self {
         self.reason = reason;
@@ -422,6 +493,29 @@ impl AppMenuItem {
         self.role = role;
         self
     }
+
+    /// This row opening a desktop-drawn quick-entry field as its child.
+    ///
+    /// The row stays chooseable: choosing it answers its own id, and
+    /// committing the field answers `entry`'s. A row may carry an entry or
+    /// declare children, never both — the entry *is* its child — and pushing
+    /// a row under one is refused.
+    #[must_use]
+    pub const fn with_entry(mut self, entry: AppMenuEntry) -> Self {
+        self.entry = Some(entry);
+        self
+    }
+
+    /// This row drawing the icon of the application bundle at `bundle`.
+    ///
+    /// The desktop resolves the picture from that bundle's own signed
+    /// manifest through the artwork cache every other slot draws through, so
+    /// an unresolvable path costs the row its picture and nothing else.
+    #[must_use]
+    pub const fn with_icon_bundle(mut self, bundle: AppMenuBundle) -> Self {
+        self.icon_bundle = bundle;
+        self
+    }
 }
 
 /// One row of a menu, as an application builds it.
@@ -430,6 +524,15 @@ impl AppMenuItem {
 /// mean anything is unrepresentable: only an [`Item`](Self::Item) carries an
 /// id, and only the session-rendered [`Info`](Self::Info) row has content
 /// the application does not describe.
+// An `Item` carries its own validated text inline — a name to pre-fill a
+// quick-entry field with, and a bundle path to draw an icon from — so it
+// dwarfs the kinds that carry a label or nothing. The same trade `WindowRequest`
+// makes: this is a `Copy`, allocation-free builder in a crate that must work
+// before there is a heap, so boxing to equalise the variants would force an
+// allocation into it and drop `Copy`. A row is transient — pushing it interns
+// its text into the menu's one shared block and drops the row — so the size is
+// paid on the stack for the length of one call, never held per row.
+#[allow(clippy::large_enum_variant)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AppMenuRow {
     /// A chooseable row. Choosing it delivers
@@ -476,6 +579,21 @@ pub struct AppMenuItemView<'a> {
     pub reason: &'a str,
     /// The emphasis the row draws with.
     pub role: AppMenuRole,
+    /// The quick-entry field this row opens as its child, if it declares
+    /// one.
+    pub entry: Option<AppMenuEntryView<'a>>,
+    /// The bundle whose icon the row draws, empty when it names none.
+    pub icon_bundle: &'a str,
+}
+
+/// A declared quick-entry field as a built menu reports it: the id a commit
+/// answers with, and the initial text borrowed from the menu that holds it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AppMenuEntryView<'a> {
+    /// The id a commit answers with.
+    pub id: AppMenuItemId,
+    /// What the field starts out holding.
+    pub initial: &'a str,
 }
 
 /// One row of a built menu, with its text borrowed from the menu
@@ -544,16 +662,36 @@ struct RowRecord {
     mark: AppMenuMark,
     role: AppMenuRole,
     parent: u8,
-    /// Where this row's label, shortcut and reason lie, in that order,
-    /// within the menu's text block. Follows from the rows before it, so it
-    /// is stored but never encoded.
+    /// Where this row's label, shortcut, reason, entry text and icon-bundle
+    /// path lie, in that order, within the menu's text block. Follows from
+    /// the rows before it, so it is stored but never encoded.
     text_at: u16,
     label_len: u8,
     shortcut_len: u8,
     reason_len: u8,
+    entry_len: u8,
+    bundle_len: u8,
+    /// The id a commit of this row's quick-entry field answers with; zero
+    /// when the row declares no field, which is what makes the field
+    /// optional with no second flag to fall out of step with it.
+    entry_id: u16,
 }
 
 impl RowRecord {
+    /// Whether a row may name this one as its parent.
+    ///
+    /// A submenu row is one by definition; a chooseable row becomes one by
+    /// having children, which is what lets a row act *and* open a plate. A
+    /// row whose child is its own quick-entry field already has one, so it
+    /// cannot hold a plate too.
+    const fn opens_a_plate(&self) -> bool {
+        match self.kind {
+            RowKind::Submenu => true,
+            RowKind::Item(_) => self.entry_id == 0,
+            RowKind::Separator | RowKind::Info => false,
+        }
+    }
+
     /// The record an unfilled slot holds.
     const VACANT: Self = Self {
         kind: RowKind::Separator,
@@ -565,6 +703,9 @@ impl RowRecord {
         label_len: 0,
         shortcut_len: 0,
         reason_len: 0,
+        entry_len: 0,
+        bundle_len: 0,
+        entry_id: 0,
     };
 }
 
@@ -572,7 +713,7 @@ impl RowRecord {
 /// the root plate or inside the plate an earlier [`AppMenuRow::Submenu`]
 /// opens.
 ///
-/// Every row's text — label, accelerator caption and disabled-row reason —
+/// Every row's text — label, accelerator caption and refusal reason —
 /// lives in one bounded text block rather than a widest-case buffer per row,
 /// so the model's size is what its rows actually say
 /// ([`APP_MENU_TEXT_BYTES`]) and not the product of its bounds. Build with
@@ -645,24 +786,31 @@ impl AppMenu {
     ///   [`AppMenuRow::Info`], an id an earlier row already states, a
     ///   labelled row with no label).
     pub fn push(&mut self, row: AppMenuRow) -> Result<(), Errno> {
-        self.push_row(row, None)
+        self.push_row(&row, None)
     }
 
     /// Append `row` inside the plate opened by the row at `parent` (0-based,
     /// as [`Self::rows`] reports it).
     ///
+    /// `parent` may be an [`AppMenuRow::Submenu`] — a row that only opens a
+    /// plate — or an [`AppMenuRow::Item`], which then both acts when chosen
+    /// and opens a plate on arrival. A submenu is therefore a *relationship*
+    /// between rows rather than a row kind, and the kind is what a parent with
+    /// no command of its own is for.
+    ///
     /// # Errors
     ///
     /// As [`Self::push`], plus [`Errno::OutOfRange`] when `parent` does not
-    /// name an earlier [`AppMenuRow::Submenu`], when `row` is an
-    /// [`AppMenuRow::Info`] row (which is always top-level), or when `row`
-    /// would open a plate past [`APP_MENU_MAX_DEPTH`].
+    /// name an earlier row that may hold a plate (a later row, a separator,
+    /// an information row, or an item whose child is its own quick-entry
+    /// field), when `row` is an [`AppMenuRow::Info`] row (which is always
+    /// top-level), or when `row` would sit past [`APP_MENU_MAX_DEPTH`].
     pub fn push_under(&mut self, row: AppMenuRow, parent: usize) -> Result<(), Errno> {
         let parent = u8::try_from(parent).map_err(|_| Errno::OutOfRange)?;
         if parent == PARENT_NONE {
             return Err(Errno::OutOfRange);
         }
-        self.push_row(row, Some(parent))
+        self.push_row(&row, Some(parent))
     }
 
     /// The rows in declaration order, each with the 0-based index of the
@@ -695,6 +843,8 @@ impl AppMenu {
         let shortcut_at = at.saturating_add(usize::from(record.label_len));
         let shortcut = self.text_field(shortcut_at, record.shortcut_len);
         let reason_at = shortcut_at.saturating_add(usize::from(record.shortcut_len));
+        let entry_at = reason_at.saturating_add(usize::from(record.reason_len));
+        let bundle_at = entry_at.saturating_add(usize::from(record.entry_len));
         match record.kind {
             RowKind::Item(id) => AppMenuRowView::Item(AppMenuItemView {
                 id,
@@ -704,6 +854,13 @@ impl AppMenu {
                 shortcut,
                 reason: self.text_field(reason_at, record.reason_len),
                 role: record.role,
+                entry: AppMenuItemId::new(record.entry_id)
+                    .ok()
+                    .map(|id| AppMenuEntryView {
+                        id,
+                        initial: self.text_field(entry_at, record.entry_len),
+                    }),
+                icon_bundle: self.text_field(bundle_at, record.bundle_len),
             }),
             RowKind::Separator => AppMenuRowView::Separator,
             RowKind::Submenu => AppMenuRowView::Submenu {
@@ -728,22 +885,29 @@ impl AppMenu {
 
     /// The shared append: validate `row` against the rows already held,
     /// intern its text, and record it with its parent.
-    fn push_row(&mut self, row: AppMenuRow, parent: Option<u8>) -> Result<(), Errno> {
+    fn push_row(&mut self, row: &AppMenuRow, parent: Option<u8>) -> Result<(), Errno> {
         let at = usize::from(self.len);
         if at == APP_MENU_MAX_TOTAL_ROWS {
             return Err(Errno::NoSpace);
         }
-        self.check_shape(&row, parent, at)?;
+        self.check_shape(row, parent, at)?;
         let mut record = RowRecord {
             parent: parent.unwrap_or(PARENT_NONE),
             ..RowRecord::VACANT
         };
-        let (label, shortcut, reason) = match row {
+        let mut entry_text = AppMenuEntryText::EMPTY;
+        let mut bundle = AppMenuBundle::EMPTY;
+        let (label, shortcut, reason) = match *row {
             AppMenuRow::Item(item) => {
                 record.enabled = item.enabled;
                 record.mark = item.mark;
                 record.kind = RowKind::Item(item.id);
                 record.role = item.role;
+                if let Some(entry) = item.entry {
+                    record.entry_id = entry.id.get();
+                    entry_text = entry.initial;
+                }
+                bundle = item.icon_bundle;
                 (item.label, item.shortcut, item.reason)
             }
             AppMenuRow::Separator => (
@@ -770,7 +934,9 @@ impl AppMenu {
         let text_at = usize::from(self.text_len);
         let needed = usize::from(label.len_byte())
             + usize::from(shortcut.len_byte())
-            + usize::from(reason.len_byte());
+            + usize::from(reason.len_byte())
+            + usize::from(entry_text.len_byte())
+            + usize::from(bundle.len_byte());
         let end = text_at.saturating_add(needed);
         if end > APP_MENU_TEXT_BYTES {
             return Err(Errno::NoSpace);
@@ -780,6 +946,8 @@ impl AppMenu {
             &label.raw_bytes()[..usize::from(label.len_byte())],
             &shortcut.raw_bytes()[..usize::from(shortcut.len_byte())],
             &reason.raw_bytes()[..usize::from(reason.len_byte())],
+            &entry_text.raw_bytes()[..usize::from(entry_text.len_byte())],
+            &bundle.raw_bytes()[..usize::from(bundle.len_byte())],
         ] {
             self.text[cursor..cursor + field.len()].copy_from_slice(field);
             cursor += field.len();
@@ -788,6 +956,8 @@ impl AppMenu {
         record.label_len = label.len_byte();
         record.shortcut_len = shortcut.len_byte();
         record.reason_len = reason.len_byte();
+        record.entry_len = entry_text.len_byte();
+        record.bundle_len = bundle.len_byte();
         self.rows[at] = record;
         self.text_len = u16::try_from(end).map_err(|_| Errno::NoSpace)?;
         self.len = self.len.saturating_add(1);
@@ -802,12 +972,19 @@ impl AppMenu {
             None => 1,
             Some(parent) => {
                 let parent = usize::from(parent);
-                if parent >= at || self.rows[parent].kind != RowKind::Submenu {
+                if parent >= at || !self.rows[parent].opens_a_plate() {
                     return Err(Errno::OutOfRange);
                 }
                 self.depth_of(parent).saturating_add(1)
             }
         };
+        // A row deeper than the bound would sit on a plate no chain opens.
+        // A parent that is itself an item is checked here rather than at its
+        // own push, because whether it has children is not known until they
+        // arrive.
+        if depth > APP_MENU_MAX_DEPTH {
+            return Err(Errno::OutOfRange);
+        }
         let plate = parent.unwrap_or(PARENT_NONE);
         if self.rows[..at]
             .iter()
@@ -817,18 +994,7 @@ impl AppMenu {
         {
             return Err(Errno::NoSpace);
         }
-        let states_id = match row {
-            AppMenuRow::Item(item) => Some(item.id),
-            AppMenuRow::Separator | AppMenuRow::Submenu { .. } | AppMenuRow::Info => None,
-        };
-        if let Some(id) = states_id {
-            if self.rows[..at]
-                .iter()
-                .any(|held| held.kind.wire_id() == id.get())
-            {
-                return Err(Errno::OutOfRange);
-            }
-        }
+        self.check_ids(row, at)?;
         match row {
             AppMenuRow::Item(item) => {
                 if item.label.is_empty() {
@@ -854,6 +1020,42 @@ impl AppMenu {
             }
         }
         Ok(())
+    }
+
+    /// Whether every id `row` states is free: an outcome names a row by id,
+    /// so a menu in which two answers spell the same thing is refused.
+    ///
+    /// A chooseable row may state two — its own and its quick-entry field's —
+    /// which is what lets "the user clicked Rename" and "the user typed a
+    /// name" be told apart, so both are checked against each other and
+    /// against every id already held.
+    fn check_ids(&self, row: &AppMenuRow, at: usize) -> Result<(), Errno> {
+        let states = match row {
+            AppMenuRow::Item(item) => [item.id.get(), item.entry.map_or(0, |e| e.id.get())],
+            AppMenuRow::Separator | AppMenuRow::Submenu { .. } | AppMenuRow::Info => [0, 0],
+        };
+        if states[0] != 0 && states[0] == states[1] {
+            return Err(Errno::OutOfRange);
+        }
+        for id in states.into_iter().filter(|&id| id != 0) {
+            if self.rows[..at]
+                .iter()
+                .any(|held| held.kind.wire_id() == id || held.entry_id == id)
+            {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        Ok(())
+    }
+
+    /// How many bytes of the menu's shared text block are still free.
+    ///
+    /// What a builder whose rows come from the machine — the installed
+    /// applications a submenu offers — reads to decide whether the next row
+    /// fits, rather than pushing it and swallowing the refusal.
+    #[must_use]
+    pub const fn text_remaining(&self) -> usize {
+        APP_MENU_TEXT_BYTES - self.text_len as usize
     }
 
     /// How many plates deep the already-validated row at `index` sits.
@@ -1107,6 +1309,15 @@ pub enum MenuOutcome {
     /// The user chose the row carrying this id. The session never
     /// interprets an id, and never sends one the opened menu did not carry.
     Chosen(AppMenuItemId),
+    /// The user committed the quick-entry field carrying this id
+    /// ([`AppMenuEntry`]). The text itself is pulled with
+    /// [`WindowRequest::TakeMenuText`], because it is wider than the fixed
+    /// event frame.
+    ///
+    /// Its own answer rather than a [`Chosen`](Self::Chosen) of the row's id,
+    /// so an application whose row is chooseable *and* carries a field knows
+    /// which of the two the user did without inferring it.
+    Entered(AppMenuItemId),
     /// The chain closed without a choice: pressed outside, dismissed with
     /// Escape, displaced by another open, or ended with the seat or the
     /// owning window.
@@ -1121,6 +1332,8 @@ const MENU_OUTCOME_CHOSEN: u16 = 1;
 const MENU_OUTCOME_DISMISSED: u16 = 2;
 /// Wire discriminant of [`MenuOutcome::Refused`].
 const MENU_OUTCOME_REFUSED: u16 = 3;
+/// Wire discriminant of [`MenuOutcome::Entered`].
+const MENU_OUTCOME_ENTERED: u16 = 4;
 
 /// A validated window title: bounded UTF-8 with no control characters.
 ///
@@ -1531,6 +1744,29 @@ pub enum WindowRequest {
         /// The rows to open, and the title of the root plate's band.
         menu: AppMenu,
     },
+    /// Take the text the user committed into the quick-entry field of the
+    /// chain opened as `open_id` on the caller's own window `window_id`.
+    ///
+    /// The answer to a [`MenuOutcome::Entered`], for the same reason
+    /// [`Self::TakeOpenTarget`] answers a wake: an event is one fixed
+    /// 40-byte frame and a filesystem name is wider than that, so widening
+    /// the frame to carry text would tax every event on the channel. The
+    /// narrow answer says *which field was committed* and the text is pulled.
+    ///
+    /// **One text, taken once.** The session holds exactly one committed text
+    /// per window, and the next open on that window clears it, so a commit
+    /// left unpulled can never answer a later gesture. A pull naming another
+    /// window's open, or one that has already been taken, answers empty.
+    ///
+    /// It carries no capability: the window the caller already owns is the
+    /// scope, and ownership is the kernel-attested identity of the in-flight
+    /// caller — exactly as [`Self::OpenMenu`].
+    TakeMenuText {
+        /// The caller's own window the chain belonged to.
+        window_id: u64,
+        /// The open whose commit is being pulled, from that open's reply.
+        open_id: u64,
+    },
     /// Take the next target queued for this **application** to open, if any.
     ///
     /// The answer to a [`WindowEvent::OpenRequested`] wake: that event says
@@ -1648,6 +1884,8 @@ const OP_TAKE_OPEN_TARGET: u16 = 15;
 const OP_SET_TOOLTIP: u16 = 16;
 /// Wire operation discriminant of [`WindowRequest::HandOverLaunch`].
 const OP_HAND_OVER_LAUNCH: u16 = 17;
+/// Wire operation discriminant of [`WindowRequest::TakeMenuText`].
+const OP_TAKE_MENU_TEXT: u16 = 18;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -1686,6 +1924,10 @@ const SET_BACKDROP_BLUR_WIRE_LEN: usize = 18;
 /// Encoded size of a [`WindowRequest::QueryDesktop`]: the header alone —
 /// the one request that names no window and carries no operand.
 const QUERY_DESKTOP_WIRE_LEN: usize = REQUEST_HEADER_LEN;
+
+/// Encoded size of a [`WindowRequest::TakeMenuText`]: the header, the window
+/// the chain belonged to, and the open whose commit is being pulled.
+const TAKE_MENU_TEXT_WIRE_LEN: usize = REQUEST_HEADER_LEN + 16;
 
 /// Encoded size of a [`WindowRequest::TakeOpenTarget`]: the header alone.
 /// The queue it pulls from is the calling application's, whose identity the
@@ -1781,20 +2023,28 @@ const APP_BAR_ROWS_OFFSET: usize = APP_BAR_TEXT_LEN_OFFSET + 2;
 /// The text itself is not here — it lies in the declaration's one trailing
 /// text block, in row order — so a row costs what it says rather than the
 /// widest label, caption and reason it could have said.
-const APP_MENU_ROW_WIRE_LEN: usize = APP_MENU_ROW_ID_OFFSET + 2;
+const APP_MENU_ROW_WIRE_LEN: usize = APP_MENU_ROW_ENTRY_ID_OFFSET + 2;
 /// Byte offset, within one row record, of its flag byte.
 const APP_MENU_ROW_FLAGS_OFFSET: usize = 1;
-/// Byte offset, within one row record, of the 0-based index of the submenu
-/// row whose plate it is on ([`PARENT_NONE`] on the root plate).
+/// Byte offset, within one row record, of the 0-based index of the row whose
+/// plate it is on ([`PARENT_NONE`] on the root plate).
 const APP_MENU_ROW_PARENT_OFFSET: usize = 2;
 /// Byte offset, within one row record, of its label's length.
 const APP_MENU_ROW_LABEL_LEN_OFFSET: usize = 3;
 /// Byte offset, within one row record, of its accelerator caption's length.
 const APP_MENU_ROW_SHORTCUT_LEN_OFFSET: usize = 4;
-/// Byte offset, within one row record, of its disabled-row reason's length.
+/// Byte offset, within one row record, of its refusal reason's length.
 const APP_MENU_ROW_REASON_LEN_OFFSET: usize = 5;
+/// Byte offset, within one row record, of its quick-entry field's initial
+/// text length.
+const APP_MENU_ROW_ENTRY_LEN_OFFSET: usize = 6;
+/// Byte offset, within one row record, of its icon bundle path's length.
+const APP_MENU_ROW_BUNDLE_LEN_OFFSET: usize = 7;
 /// Byte offset, within one row record, of its item id.
-const APP_MENU_ROW_ID_OFFSET: usize = 6;
+const APP_MENU_ROW_ID_OFFSET: usize = 8;
+/// Byte offset, within one row record, of the id a commit of its quick-entry
+/// field answers with (zero when it declares no field).
+const APP_MENU_ROW_ENTRY_ID_OFFSET: usize = APP_MENU_ROW_ID_OFFSET + 2;
 
 /// Encoded size of the menu block a request carries: one fixed-width record
 /// per declared row, then those rows' text in row order.
@@ -1911,6 +2161,7 @@ impl WindowRequest {
             Self::Present { .. } => PRESENT_WIRE_LEN,
             Self::Close { .. } | Self::PickFile { .. } => WINDOW_ID_WIRE_LEN,
             Self::TakeOpenTarget => TAKE_OPEN_TARGET_WIRE_LEN,
+            Self::TakeMenuText { .. } => TAKE_MENU_TEXT_WIRE_LEN,
             Self::HandOverLaunch {
                 ref run_path,
                 ref document,
@@ -1997,6 +2248,7 @@ impl WindowRequest {
             Self::SetAppBar(_) => OP_SET_APP_BAR,
             Self::OpenMenu { .. } => OP_OPEN_MENU,
             Self::TakeOpenTarget => OP_TAKE_OPEN_TARGET,
+            Self::TakeMenuText { .. } => OP_TAKE_MENU_TEXT,
             Self::HandOverLaunch { .. } => OP_HAND_OVER_LAUNCH,
             Self::SetTooltip { .. } => OP_SET_TOOLTIP,
         }
@@ -2022,6 +2274,10 @@ impl WindowRequest {
             }
             Self::Close { window_id } | Self::PickFile { window_id } => {
                 put_u64(out, 8, window_id);
+            }
+            Self::TakeMenuText { window_id, open_id } => {
+                put_u64(out, 8, window_id);
+                put_u64(out, 16, open_id);
             }
             Self::HandOverLaunch {
                 ref run_path,
@@ -2228,6 +2484,12 @@ impl WindowRequest {
                 exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN)?;
                 Ok(Self::TakeOpenTarget)
             }
+            OP_TAKE_MENU_TEXT => {
+                exact_len(bytes, TAKE_MENU_TEXT_WIRE_LEN)?;
+                let window_id = nonzero_id(read_u64(bytes, 8))?;
+                let open_id = nonzero_id(read_u64(bytes, 16))?;
+                Ok(Self::TakeMenuText { window_id, open_id })
+            }
             OP_HAND_OVER_LAUNCH => read_hand_over(bytes),
             OP_SET_TOOLTIP => read_set_tooltip(bytes),
             OP_SET_APP_BAR => read_app_bar(bytes),
@@ -2394,10 +2656,17 @@ fn write_menu_block(out: &mut [u8], at: usize, menu: &AppMenu) -> usize {
         out[record_at + APP_MENU_ROW_LABEL_LEN_OFFSET] = record.label_len;
         out[record_at + APP_MENU_ROW_SHORTCUT_LEN_OFFSET] = record.shortcut_len;
         out[record_at + APP_MENU_ROW_REASON_LEN_OFFSET] = record.reason_len;
+        out[record_at + APP_MENU_ROW_ENTRY_LEN_OFFSET] = record.entry_len;
+        out[record_at + APP_MENU_ROW_BUNDLE_LEN_OFFSET] = record.bundle_len;
         put_u16(
             out,
             record_at + APP_MENU_ROW_ID_OFFSET,
             record.kind.wire_id(),
+        );
+        put_u16(
+            out,
+            record_at + APP_MENU_ROW_ENTRY_ID_OFFSET,
+            record.entry_id,
         );
     }
     let len = usize::from(menu.text_len);
@@ -2433,7 +2702,7 @@ fn read_menu_block(
         let record_at = at + index * APP_MENU_ROW_WIRE_LEN;
         let record = &bytes[record_at..record_at + APP_MENU_ROW_WIRE_LEN];
         let (row, parent) = read_app_menu_row(record, text, &mut cursor)?;
-        menu.push_row(row, parent)?;
+        menu.push_row(&row, parent)?;
     }
     if cursor != text_len {
         return Err(Errno::LengthOutOfRange);
@@ -2573,6 +2842,7 @@ fn read_app_menu_row(
         parent => Some(parent),
     };
     let id = read_u16(record, APP_MENU_ROW_ID_OFFSET);
+    let entry_id = read_u16(record, APP_MENU_ROW_ENTRY_ID_OFFSET);
     let label = read_app_menu_text::<0, APP_MENU_LABEL_MAX>(
         text,
         cursor,
@@ -2588,26 +2858,50 @@ fn read_app_menu_row(
         cursor,
         record[APP_MENU_ROW_REASON_LEN_OFFSET],
     )?;
-    // A row that opens a child draws a chevron where an item draws its
-    // caption, and opens rather than acting, so it states none of an item's
-    // emphasis.
-    let opens_a_child = shortcut.is_empty()
+    let initial = read_app_menu_text::<0, APP_MENU_ENTRY_MAX>(
+        text,
+        cursor,
+        record[APP_MENU_ROW_ENTRY_LEN_OFFSET],
+    )?;
+    let bundle = read_app_menu_text::<0, APP_MENU_BUNDLE_MAX>(
+        text,
+        cursor,
+        record[APP_MENU_ROW_BUNDLE_LEN_OFFSET],
+    )?;
+    // Only a chooseable row states any of this, so a row of another kind
+    // carrying it is refused rather than read with the extra silently
+    // dropped.
+    let item_only = shortcut.is_empty()
         && reason.is_empty()
+        && initial.is_empty()
+        && bundle.is_empty()
+        && entry_id == 0
         && mark == AppMenuMark::None
         && role == AppMenuRole::Neutral;
-    let bare = opens_a_child && label.is_empty() && !enabled && id == 0;
+    let bare = item_only && label.is_empty() && !enabled && id == 0;
     let row = match record[0] {
         APP_MENU_KIND_ITEM => {
-            let item = AppMenuItem::new(AppMenuItemId::new(id)?, label)
+            let mut item = AppMenuItem::new(AppMenuItemId::new(id)?, label)
                 .with_mark(mark)
                 .with_shortcut(shortcut)
                 .with_reason(reason)
-                .with_role(role);
+                .with_role(role)
+                .with_icon_bundle(bundle);
+            if entry_id != 0 {
+                item = item.with_entry(AppMenuEntry {
+                    id: AppMenuItemId::new(entry_id)?,
+                    initial,
+                });
+            } else if !initial.is_empty() {
+                // Initial text with no id to answer with names a field
+                // nothing could commit.
+                return Err(Errno::OutOfRange);
+            }
             AppMenuRow::Item(if enabled { item } else { item.disabled() })
         }
         // A submenu draws a chevron where an item draws its caption, and
         // opens rather than acting, so it states neither and has no id.
-        APP_MENU_KIND_SUBMENU if opens_a_child && id == 0 => AppMenuRow::Submenu { label, enabled },
+        APP_MENU_KIND_SUBMENU if item_only && id == 0 => AppMenuRow::Submenu { label, enabled },
         APP_MENU_KIND_SEPARATOR if bare => AppMenuRow::Separator,
         APP_MENU_KIND_INFO if bare => AppMenuRow::Info,
         // A known kind whose guard failed and an unknown one are the same
@@ -3040,6 +3334,109 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
         OPEN_TARGET_KIND_PATH if grant == 0 && len != 0 => Ok(Some(OpenTarget::Path(text))),
         OPEN_TARGET_KIND_DOCUMENT if grant != 0 => {
             Ok(Some(OpenTarget::Document { name: text, grant }))
+        }
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
+/// Encoded length of the longest [`WindowRequest::TakeMenuText`] reply: a
+/// status word, the "is there a text at all" kind, its length, then the
+/// widest text a quick-entry field admits.
+///
+/// The frame is *variable* length on the wire
+/// ([`encode_menu_text_reply`] writes only what the answer holds), so the
+/// empty answer costs eight bytes rather than the widest name. Both sides
+/// hold their buffer once for the life of the connection.
+pub const WINDOW_MENU_TEXT_REPLY_MAX: usize = MENU_TEXT_REPLY_TEXT_OFFSET + APP_MENU_ENTRY_MAX;
+
+/// Byte offset of the kind word in a [`WindowRequest::TakeMenuText`] reply.
+const MENU_TEXT_REPLY_KIND_OFFSET: usize = 4;
+/// Byte offset of the text's length.
+const MENU_TEXT_REPLY_LEN_OFFSET: usize = MENU_TEXT_REPLY_KIND_OFFSET + 2;
+/// Byte offset of the text's bytes.
+const MENU_TEXT_REPLY_TEXT_OFFSET: usize = MENU_TEXT_REPLY_LEN_OFFSET + 2;
+
+/// Wire kind of "no text is held for that open".
+const MENU_TEXT_KIND_EMPTY: u16 = 0;
+/// Wire kind of "this is the committed text".
+const MENU_TEXT_KIND_TEXT: u16 = 1;
+
+/// Encode a [`WindowRequest::TakeMenuText`] outcome into `out`, answering the
+/// number of bytes written.
+///
+/// `Ok(None)` is "nothing held for that open", which is the honest answer
+/// rather than an error: a stale pull, a pull for another window's open, or a
+/// second pull of a text already taken. It is a *distinct* answer from an
+/// empty committed text, so a puller can never read "there is nothing" as
+/// "the user typed nothing".
+///
+/// A refusal is the shared status frame, so a client issues one receive
+/// whatever the answer.
+#[must_use]
+pub fn encode_menu_text_reply(
+    out: &mut [u8; WINDOW_MENU_TEXT_REPLY_MAX],
+    result: Result<Option<&str>, Errno>,
+) -> usize {
+    *out = [0u8; WINDOW_MENU_TEXT_REPLY_MAX];
+    let refuse = |out: &mut [u8; WINDOW_MENU_TEXT_REPLY_MAX], err: Errno| {
+        out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+        4
+    };
+    let text = match result {
+        Err(err) => return refuse(out, err),
+        Ok(None) => {
+            put_u16(out, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_KIND_EMPTY);
+            return MENU_TEXT_REPLY_TEXT_OFFSET;
+        }
+        Ok(Some(text)) => text,
+    };
+    if text.len() > APP_MENU_ENTRY_MAX {
+        return refuse(out, Errno::LengthOutOfRange);
+    }
+    put_u16(out, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_KIND_TEXT);
+    #[allow(clippy::cast_possible_truncation)] // Bounded above by APP_MENU_ENTRY_MAX.
+    put_u16(out, MENU_TEXT_REPLY_LEN_OFFSET, text.len() as u16);
+    out[MENU_TEXT_REPLY_TEXT_OFFSET..MENU_TEXT_REPLY_TEXT_OFFSET + text.len()]
+        .copy_from_slice(text.as_bytes());
+    MENU_TEXT_REPLY_TEXT_OFFSET + text.len()
+}
+
+/// Decode a [`WindowRequest::TakeMenuText`] reply.
+///
+/// `Ok(None)` is "nothing held for that open". The text is validated exactly
+/// as the field that produced it was — bounded, well-formed UTF-8, no control
+/// characters — so a session that answered something a field could not have
+/// held is refused rather than read.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame too short to hold its own header.
+/// * [`Errno::OutOfRange`] for an unknown kind, a length stated by the empty
+///   answer, or text that is not admissible.
+/// * [`Errno::LengthOutOfRange`] for a length past the frame or past
+///   [`APP_MENU_ENTRY_MAX`].
+pub fn decode_menu_text_reply(bytes: &[u8]) -> Result<Option<&str>, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < MENU_TEXT_REPLY_TEXT_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let kind = read_u16(bytes, MENU_TEXT_REPLY_KIND_OFFSET);
+    let len = usize::from(read_u16(bytes, MENU_TEXT_REPLY_LEN_OFFSET));
+    if len > APP_MENU_ENTRY_MAX || MENU_TEXT_REPLY_TEXT_OFFSET + len > bytes.len() {
+        return Err(Errno::LengthOutOfRange);
+    }
+    match kind {
+        MENU_TEXT_KIND_EMPTY if len == 0 => Ok(None),
+        MENU_TEXT_KIND_TEXT => {
+            let text = core::str::from_utf8(&bytes[MENU_TEXT_REPLY_TEXT_OFFSET..][..len])
+                .map_err(|_| Errno::OutOfRange)?;
+            if text.chars().any(char::is_control) {
+                return Err(Errno::OutOfRange);
+            }
+            Ok(Some(text))
         }
         _ => Err(Errno::OutOfRange),
     }
@@ -3581,6 +3978,7 @@ impl WindowEvent {
                 put_u64(&mut out, 16, open_id);
                 let (kind, item, refusal) = match outcome {
                     MenuOutcome::Chosen(item) => (MENU_OUTCOME_CHOSEN, item.get(), 0),
+                    MenuOutcome::Entered(entry) => (MENU_OUTCOME_ENTERED, entry.get(), 0),
                     MenuOutcome::Dismissed => (MENU_OUTCOME_DISMISSED, 0, 0),
                     MenuOutcome::Refused(refusal) => (MENU_OUTCOME_REFUSED, 0, refusal.as_u16()),
                 };
@@ -3798,6 +4196,7 @@ fn read_menu_outcome(bytes: &[u8]) -> Result<MenuOutcome, Errno> {
     let refusal = read_u16(bytes, MENU_CLOSED_REFUSAL_OFFSET);
     match read_u16(bytes, MENU_CLOSED_OUTCOME_OFFSET) {
         MENU_OUTCOME_CHOSEN if refusal == 0 => Ok(MenuOutcome::Chosen(AppMenuItemId::new(item)?)),
+        MENU_OUTCOME_ENTERED if refusal == 0 => Ok(MenuOutcome::Entered(AppMenuItemId::new(item)?)),
         MENU_OUTCOME_DISMISSED if item == 0 && refusal == 0 => Ok(MenuOutcome::Dismissed),
         MENU_OUTCOME_REFUSED if item == 0 => {
             Ok(MenuOutcome::Refused(MenuRefusal::from_u16(refusal)?))
@@ -3819,33 +4218,37 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 mod tests {
     use super::{
         app_bar_wire_len, decode_create_reply, decode_desktop_reply, decode_hand_over_reply,
-        decode_minted_id_reply, decode_open_target_reply, encode_create_reply,
-        encode_desktop_reply, encode_hand_over_reply, encode_minted_id_reply,
-        encode_open_target_reply, hand_over_wire_len, open_menu_wire_len, put_i32, put_u16,
-        put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel,
-        AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut,
-        BundleRunPath, DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, MenuRefusal,
-        OpenTarget, PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest,
-        WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
-        APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_KIND_SEPARATOR,
-        APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
-        APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_FLAGS_OFFSET,
-        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
-        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN,
-        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET,
-        CREATE_MIN_WIDTH_OFFSET, CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
+        decode_menu_text_reply, decode_minted_id_reply, decode_open_target_reply,
+        encode_create_reply, encode_desktop_reply, encode_hand_over_reply, encode_menu_text_reply,
+        encode_minted_id_reply, encode_open_target_reply, hand_over_wire_len, open_menu_wire_len,
+        put_i32, put_u16, put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuBundle,
+        AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
+        AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath,
+        DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, MenuRefusal, OpenTarget,
+        PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing,
+        WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
+        APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
+        APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
+        APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
+        APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
+        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
+        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
+        APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
+        CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN,
         DESKTOP_REPLY_SERVER_OFFSET, HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN,
         HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX,
         MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
-        MENU_CLOSED_WIRE_END, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
-        OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET,
-        PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET,
-        SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET,
-        SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
+        MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, OPEN_MENU_ANCHOR_OFFSET,
+        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
+        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PRESENT_WIRE_LEN,
+        REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
+        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
+        SET_TOOLTIP_WIRE_LEN, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
         WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_FRAMES,
-        WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_REQUEST_MAGIC,
-        WINDOW_TITLE_MAX,
+        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+        WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -4543,6 +4946,7 @@ mod tests {
     fn menu_outcomes_round_trip_and_fail_closed() {
         let outcomes = [
             MenuOutcome::Chosen(AppMenuItemId::new(7).expect("a valid id")),
+            MenuOutcome::Entered(AppMenuItemId::new(9).expect("a valid id")),
             MenuOutcome::Dismissed,
             MenuOutcome::Refused(MenuRefusal::NoDisplay),
             MenuOutcome::Refused(MenuRefusal::SeatBusy),
@@ -4576,7 +4980,7 @@ mod tests {
 
         // An outcome discriminant outside the closed set, and a refusal
         // reason outside its own, are refused rather than guessed at.
-        for kind in [0, 4, u16::MAX] {
+        for kind in [0, 5, u16::MAX] {
             let mut unknown = base;
             put_u16(&mut unknown, MENU_CLOSED_OUTCOME_OFFSET, kind);
             assert_eq!(WindowEvent::from_bytes(&unknown), Err(Errno::OutOfRange));
@@ -4594,7 +4998,14 @@ mod tests {
         let mut idless = base;
         put_u16(&mut idless, MENU_CLOSED_ITEM_OFFSET, 0);
         assert_eq!(WindowEvent::from_bytes(&idless), Err(Errno::OutOfRange));
-        for (kind, item, refusal) in [(1, 7, 1), (2, 7, 0), (2, 0, 1), (3, 7, 1)] {
+        for (kind, item, refusal) in [
+            (1, 7, 1),
+            (2, 7, 0),
+            (2, 0, 1),
+            (3, 7, 1),
+            (4, 7, 1),
+            (4, 0, 0),
+        ] {
             let mut crossed = base;
             put_u16(&mut crossed, MENU_CLOSED_OUTCOME_OFFSET, kind);
             put_u16(&mut crossed, MENU_CLOSED_ITEM_OFFSET, item);
@@ -4749,6 +5160,263 @@ mod tests {
         }
     }
 
+    /// A row may be chooseable *and* open a plate, and a chooseable row may
+    /// carry a quick-entry field and name the bundle its icon comes from —
+    /// all of it surviving the wire unchanged.
+    ///
+    /// The ids are what make the two answers a dual row can give
+    /// distinguishable, so the entry's id is checked to be its own rather
+    /// than the row's.
+    #[test]
+    fn a_row_carries_an_entry_a_bundle_and_children_of_its_own() {
+        let mut menu = AppMenu::titled(label("Files"));
+        menu.push(AppMenuRow::Item(
+            AppMenuItem::new(AppMenuItemId::new(1).expect("a valid id"), label("Rename"))
+                .with_shortcut(AppMenuShortcut::new("F2").expect("a valid caption"))
+                .with_entry(AppMenuEntry {
+                    id: AppMenuItemId::new(90).expect("a valid id"),
+                    initial: AppMenuEntryText::new("report.txt").expect("a valid name"),
+                }),
+        ))
+        .expect("room for the rename row");
+        menu.push(AppMenuRow::Item(AppMenuItem::new(
+            AppMenuItemId::new(2).expect("a valid id"),
+            label("Open With\u{2026}"),
+        )))
+        .expect("room for the chooser row");
+        menu.push_under(
+            AppMenuRow::Item(
+                AppMenuItem::new(AppMenuItemId::new(50).expect("a valid id"), label("View"))
+                    .with_icon_bundle(
+                        AppMenuBundle::new("/System/Applications/view.app").expect("a valid path"),
+                    ),
+            ),
+            1,
+        )
+        .expect("a candidate under the chooser row");
+
+        let Ok(WindowRequest::OpenMenu { menu: back, .. }) =
+            WindowRequest::from_bytes(&opening(&menu).frame())
+        else {
+            panic!("the open decodes");
+        };
+        let row = |at: usize| back.rows().nth(at).expect("a declared row").0;
+        let AppMenuRowView::Item(rename) = row(0) else {
+            panic!("the first row is an item");
+        };
+        let entry = rename.entry.expect("the rename row carries a field");
+        assert_eq!(rename.id.get(), 1, "the row keeps its own id");
+        assert_eq!(entry.id.get(), 90, "and the field carries its own");
+        assert_eq!(entry.initial, "report.txt");
+        assert_eq!(rename.shortcut, "F2", "beside the caption it already had");
+        assert_eq!(rename.icon_bundle, "");
+
+        let AppMenuRowView::Item(candidate) = row(2) else {
+            panic!("the candidate is an item");
+        };
+        assert_eq!(candidate.icon_bundle, "/System/Applications/view.app");
+        assert!(candidate.entry.is_none());
+        assert_eq!(
+            back.rows().nth(2).expect("a declared row").1,
+            Some(1),
+            "filed under the chooser row, which is an item"
+        );
+    }
+
+    /// The shapes a dual row must not have: two answers spelling the same
+    /// id, a second child beside a quick-entry field, and a field with no id
+    /// to answer with.
+    #[test]
+    fn a_dual_row_refuses_an_ambiguous_shape() {
+        let entry = |id: u16, initial: &str| AppMenuEntry {
+            id: AppMenuItemId::new(id).expect("a valid id"),
+            initial: AppMenuEntryText::new(initial).expect("a valid name"),
+        };
+        let renaming = |row: u16, field: u16| {
+            AppMenuRow::Item(
+                AppMenuItem::new(
+                    AppMenuItemId::new(row).expect("a valid id"),
+                    label("Rename"),
+                )
+                .with_entry(entry(field, "x")),
+            )
+        };
+
+        // A row's own id and its field's must differ, or one outcome could
+        // mean either.
+        let mut menu = AppMenu::EMPTY;
+        assert_eq!(menu.push(renaming(7, 7)), Err(Errno::OutOfRange));
+
+        // And neither may repeat an id already held, whichever slot holds
+        // it.
+        menu.push(renaming(1, 90)).expect("the rename row");
+        assert_eq!(menu.push(item(90, "Clash")), Err(Errno::OutOfRange));
+        assert_eq!(menu.push(renaming(2, 1)), Err(Errno::OutOfRange));
+
+        // A field *is* the row's child, so the row cannot hold a plate too.
+        assert_eq!(menu.push_under(item(3, "Row"), 0), Err(Errno::OutOfRange));
+
+        // Initial text with no id names a field nothing could commit, so a
+        // frame carrying it is refused even though a builder cannot make
+        // one.
+        let mut plain = AppMenu::titled(label("Files"));
+        plain.push(item(1, "Rename")).expect("the row");
+        let mut frame = opening(&plain).frame();
+        let record = OPEN_MENU_ROWS_OFFSET;
+        frame[record + APP_MENU_ROW_ENTRY_LEN_OFFSET] = 1;
+        assert_eq!(
+            WindowRequest::from_bytes(&frame),
+            Err(Errno::LengthOutOfRange),
+            "the claimed byte is past the text block the frame states"
+        );
+    }
+
+    /// Committed text is pulled rather than delivered, so the pull names the
+    /// open it answers and the reply carries the text.
+    #[test]
+    fn taking_menu_text_names_its_open_and_answers_once() {
+        let request = WindowRequest::TakeMenuText {
+            window_id: 3,
+            open_id: 11,
+        };
+        assert_eq!(request.wire_len(), TAKE_MENU_TEXT_WIRE_LEN);
+        let frame = request.frame();
+        assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+
+        // Neither id may be zero: one names no window and the other no open.
+        for at in [8, 16] {
+            let mut nameless = frame;
+            put_u64(&mut nameless, at, 0);
+            assert_eq!(WindowRequest::from_bytes(&nameless), Err(Errno::OutOfRange));
+        }
+        // A frame one byte either side of the operation's own length is
+        // truncation and a smuggled field.
+        assert_eq!(
+            WindowRequest::from_bytes(&frame[..TAKE_MENU_TEXT_WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut smuggled = [0u8; TAKE_MENU_TEXT_WIRE_LEN + 1];
+        smuggled[..TAKE_MENU_TEXT_WIRE_LEN].copy_from_slice(&frame);
+        assert_eq!(WindowRequest::from_bytes(&smuggled), Err(Errno::BadMagic));
+    }
+
+    /// The pulled-text reply: the text, the honest "nothing held", and a
+    /// refusal — each told apart from the others.
+    #[test]
+    fn the_menu_text_reply_round_trips_and_fails_closed() {
+        let mut out = [0u8; WINDOW_MENU_TEXT_REPLY_MAX];
+        let len = encode_menu_text_reply(&mut out, Ok(Some("report.txt")));
+        assert_eq!(decode_menu_text_reply(&out[..len]), Ok(Some("report.txt")));
+        assert!(
+            len < WINDOW_MENU_TEXT_REPLY_MAX,
+            "a short answer costs its own bytes, not the widest name's"
+        );
+
+        // "Nothing held" and "the user typed nothing" are different answers.
+        let len = encode_menu_text_reply(&mut out, Ok(None));
+        assert_eq!(decode_menu_text_reply(&out[..len]), Ok(None));
+        let len = encode_menu_text_reply(&mut out, Ok(Some("")));
+        assert_eq!(decode_menu_text_reply(&out[..len]), Ok(Some("")));
+
+        let len = encode_menu_text_reply(&mut out, Err(Errno::PermissionDenied));
+        assert_eq!(
+            decode_menu_text_reply(&out[..len]),
+            Err(Errno::PermissionDenied)
+        );
+
+        // The widest field a commit can hold still fits, and one byte more
+        // is refused rather than truncated.
+        let widest = "n".repeat(APP_MENU_ENTRY_MAX);
+        let len = encode_menu_text_reply(&mut out, Ok(Some(&widest)));
+        assert_eq!(len, WINDOW_MENU_TEXT_REPLY_MAX);
+        assert_eq!(
+            decode_menu_text_reply(&out[..len]),
+            Ok(Some(widest.as_str()))
+        );
+        let over = "n".repeat(APP_MENU_ENTRY_MAX + 1);
+        let len = encode_menu_text_reply(&mut out, Ok(Some(&over)));
+        assert_eq!(
+            decode_menu_text_reply(&out[..len]),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // A reply whose length runs past its own frame, an unknown kind, an
+        // empty answer claiming a length, and text no field could have held
+        // are each refused.
+        let len = encode_menu_text_reply(&mut out, Ok(Some("ab")));
+        let mut lying = out;
+        put_u16(&mut lying, MENU_TEXT_REPLY_LEN_OFFSET, 200);
+        assert_eq!(
+            decode_menu_text_reply(&lying[..len]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut unknown = out;
+        put_u16(&mut unknown, MENU_TEXT_REPLY_KIND_OFFSET, 9);
+        assert_eq!(
+            decode_menu_text_reply(&unknown[..len]),
+            Err(Errno::OutOfRange)
+        );
+        let mut counted = out;
+        put_u16(
+            &mut counted,
+            MENU_TEXT_REPLY_KIND_OFFSET,
+            MENU_TEXT_KIND_EMPTY,
+        );
+        assert_eq!(
+            decode_menu_text_reply(&counted[..len]),
+            Err(Errno::OutOfRange)
+        );
+        let mut control = out;
+        control[MENU_TEXT_REPLY_TEXT_OFFSET] = b'\n';
+        assert_eq!(
+            decode_menu_text_reply(&control[..len]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    /// A builder whose rows come from the machine asks how much text is left
+    /// rather than pushing and swallowing the refusal.
+    #[test]
+    fn a_menu_states_the_text_it_has_left() {
+        let mut menu = AppMenu::EMPTY;
+        assert_eq!(menu.text_remaining(), APP_MENU_TEXT_BYTES);
+        menu.push(item(1, "Rename")).expect("the row");
+        assert_eq!(menu.text_remaining(), APP_MENU_TEXT_BYTES - "Rename".len());
+        // What is left is exactly what a further row may say: a row one byte
+        // wider than the remainder is refused, and one exactly that wide
+        // fits.
+        let mut filled = AppMenu::EMPTY;
+        let wide = |id: u16| {
+            AppMenuRow::Item(
+                AppMenuItem::new(
+                    AppMenuItemId::new(id).expect("a valid id"),
+                    label(&"n".repeat(APP_MENU_LABEL_MAX)),
+                )
+                .with_reason(
+                    AppMenuReason::new(&"r".repeat(APP_MENU_REASON_MAX)).expect("a valid reason"),
+                ),
+            )
+        };
+        let mut id = 1u16;
+        while filled.text_remaining() >= APP_MENU_LABEL_MAX + APP_MENU_REASON_MAX {
+            filled.push(wide(id)).expect("room while the block has it");
+            id += 1;
+        }
+        let left = filled.text_remaining();
+        assert!(left > 0, "the block does not divide evenly by a wide row");
+        let saying = |bytes: usize| {
+            AppMenuRow::Item(
+                AppMenuItem::new(AppMenuItemId::new(id).expect("a valid id"), label("n"))
+                    .with_reason(AppMenuReason::new(&"r".repeat(bytes)).expect("a valid reason")),
+            )
+        };
+        assert_eq!(filled.push(saying(left)), Err(Errno::NoSpace));
+        filled
+            .push(saying(left - 1))
+            .expect("exactly what is left fits");
+        assert_eq!(filled.text_remaining(), 0);
+    }
+
     /// A submenu may hold a submenu, down to the depth bound and no further.
     ///
     /// The one-level model refused a nested submenu outright, so a chain
@@ -4826,9 +5494,14 @@ mod tests {
         menu.push(AppMenuRow::Info).expect("the Info row");
         assert_eq!(menu.push(AppMenuRow::Info), Err(Errno::OutOfRange));
 
-        // A parent must name an earlier submenu row, and the Info row is
-        // always top-level.
-        assert_eq!(menu.push_under(item(2, "Row"), 0), Err(Errno::OutOfRange));
+        // A parent must name an *earlier* row that can hold a plate. The
+        // Info row cannot, nor can a separator, and the Info row is always
+        // top-level whoever names it.
+        let info_row = menu.len() - 1;
+        assert_eq!(
+            menu.push_under(item(2, "Row"), info_row),
+            Err(Errno::OutOfRange)
+        );
         assert_eq!(menu.push_under(item(2, "Row"), 9), Err(Errno::OutOfRange));
         menu.push(AppMenuRow::Submenu {
             label: label("Plate"),

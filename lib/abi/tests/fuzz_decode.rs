@@ -85,11 +85,12 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_minted_id_reply,
-    decode_open_target_reply, AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId,
-    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
-    BundleRunPath, DocumentName, HandOverDocument, MenuOutcome, MenuRefusal, TooltipText,
-    WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
+    decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_menu_text_reply,
+    decode_minted_id_reply, decode_open_target_reply, AppBar, AppBarClick, AppMenu, AppMenuBundle,
+    AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
+    AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, BundleRunPath, DocumentName,
+    HandOverDocument, MenuOutcome, MenuRefusal, TooltipText, WindowEvent, WindowRegion,
+    WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
@@ -646,6 +647,7 @@ fn exercise_window_ipc(bytes: &[u8]) {
     let _ = decode_desktop_reply(bytes);
     let _ = decode_minted_id_reply(bytes);
     let _ = decode_open_target_reply(bytes);
+    let _ = decode_menu_text_reply(bytes);
     let _ = decode_hand_over_reply(bytes);
 }
 
@@ -1424,6 +1426,10 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             )),
         },
         WindowRequest::TakeOpenTarget,
+        WindowRequest::TakeMenuText {
+            window_id: 3,
+            open_id: 11,
+        },
         // Both hand-over shapes: a bare launch, and one carrying a document,
         // so a flip lands on the grant handle and on each length prefix.
         WindowRequest::HandOverLaunch {
@@ -1510,6 +1516,41 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
         .with_role(AppMenuRole::Destructive),
     ))
     .expect("room for Quit");
+    // A row that both acts and opens a desktop-drawn field, so a flip lands
+    // on the entry id and on the field's own text length.
+    menu.push(AppMenuRow::Item(
+        AppMenuItem::new(
+            AppMenuItemId::new(4).expect("a valid id"),
+            AppMenuLabel::new("Rename").expect("a valid label"),
+        )
+        .with_entry(AppMenuEntry {
+            id: AppMenuItemId::new(90).expect("a valid id"),
+            initial: AppMenuEntryText::new("report.txt").expect("a valid name"),
+        }),
+    ))
+    .expect("room for the rename row");
+    // A chooseable row that is *also* a plate's parent, with a child naming
+    // the bundle its icon comes from: the two shapes a submenu-as-relationship
+    // introduces.
+    menu.push(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(5).expect("a valid id"),
+        AppMenuLabel::new("Open With\u{2026}").expect("a valid label"),
+    )))
+    .expect("room for the chooser row");
+    let chooser = menu.len() - 1;
+    menu.push_under(
+        AppMenuRow::Item(
+            AppMenuItem::new(
+                AppMenuItemId::new(6).expect("a valid id"),
+                AppMenuLabel::new("View").expect("a valid label"),
+            )
+            .with_icon_bundle(
+                AppMenuBundle::new("/System/Applications/view.app").expect("a valid path"),
+            ),
+        ),
+        chooser,
+    )
+    .expect("a candidate under it");
     menu
 }
 
@@ -1573,6 +1614,7 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
 fn structured_menu_outcome_inputs_with_corrupted_fields_never_panic() {
     let outcomes = [
         MenuOutcome::Chosen(AppMenuItemId::new(7).expect("a valid id")),
+        MenuOutcome::Entered(AppMenuItemId::new(90).expect("a valid id")),
         MenuOutcome::Dismissed,
         MenuOutcome::Refused(MenuRefusal::NoDisplay),
         MenuOutcome::Refused(MenuRefusal::SeatBusy),

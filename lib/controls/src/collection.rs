@@ -646,55 +646,38 @@ impl TableCell {
         picture: Option<IconPicture<'_>>,
     ) {
         let CellContext {
-            scale,
             theme,
             font,
             row_disposition,
+            ..
         } = *row;
-        let (x, y, w, h) = rect;
+        let (_, y, w, h) = rect;
         if w == 0 || h == 0 {
             return;
         }
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let disposition = self
             .state
             .map_or(row_disposition, ControlState::disposition);
         let fg = foreground(theme, disposition);
         let text_y = centred_text_y(font, y, h);
+        let layout = self.layout(rect, row);
 
-        let mut right = x.saturating_add(w).saturating_sub(pad);
         // A cell-specific Signal Bead at the trailing edge (only for a cell
         // that carries its own state, spec §11.14).
-        if let Some(state) = self.state {
-            if let Some((color, shape)) = resolve_bead(theme, state) {
-                let size = scale.scale_length(theme.metrics().bead_size).max(3).min(h);
-                if size > 0 && right > x.saturating_add(size) {
-                    let bx = right.saturating_sub(size);
-                    let by = y + (h.saturating_sub(size)) / 2;
-                    paint_bead(surface, bx, by, size, color, shape);
-                    right = bx.saturating_sub(pad);
-                }
+        if let Some((bx, by, size)) = layout.bead {
+            if let Some((color, shape)) = self.state.and_then(|state| resolve_bead(theme, state)) {
+                paint_bead(surface, bx, by, size, color, shape);
             }
         }
-
-        let mut left = x.saturating_add(pad);
         // The leading identity icon, on a fixed slot ahead of the text
-        // regardless of the cell's own alignment (spec §11.14). A column too
-        // narrow to hold the icon and still leave the padding gap before
-        // whatever follows it simply omits the icon; the text then keeps the
-        // full budget rather than a truncated icon overlapping it.
-        if let Some(kind) = self.icon {
-            let side = Self::icon_side(font, h);
-            if side > 0 && right > left.saturating_add(side).saturating_add(pad) {
-                let iy = y + (h.saturating_sub(side)) / 2;
-                paint_icon_slot(surface, (left, iy, side), kind, fg, picture, FULL_COLOUR);
-                left = left.saturating_add(side).saturating_add(pad);
-            }
+        // regardless of the cell's own alignment (spec §11.14).
+        if let (Some(slot), Some(kind)) = (layout.icon, self.icon) {
+            paint_icon_slot(surface, slot, kind, fg, picture, FULL_COLOUR);
         }
 
-        if right <= left {
+        let Some((left, right)) = layout.text else {
             return;
-        }
+        };
         let budget = right - left;
         let fitted = font.truncate_to_width(&self.text, budget);
         let tw = font.text_width(fitted);
@@ -705,6 +688,59 @@ impl TableCell {
         };
         font.draw_text(surface, tx, text_y, fitted, fg);
     }
+
+    /// Where this cell's bead, icon and text go inside the column rectangle
+    /// `rect`.
+    ///
+    /// The one derivation of that geometry: [`Self::paint`] draws from it and
+    /// [`TableRow::cell_text_rect`] reports its text span, so an overlay laid
+    /// over a cell's text cannot disagree with where the text was drawn. A
+    /// column too narrow to hold the icon and still leave the padding gap
+    /// before whatever follows it seats no icon; the text then keeps the full
+    /// budget rather than a truncated icon overlapping it.
+    fn layout(&self, rect: (u32, u32, u32, u32), row: &CellContext<'_>) -> CellLayout {
+        let CellContext {
+            scale, theme, font, ..
+        } = *row;
+        let (x, y, w, h) = rect;
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let mut right = x.saturating_add(w).saturating_sub(pad);
+        let mut layout = CellLayout {
+            bead: None,
+            icon: None,
+            text: None,
+        };
+        if self
+            .state
+            .and_then(|state| resolve_bead(theme, state))
+            .is_some()
+        {
+            let size = scale.scale_length(theme.metrics().bead_size).max(3).min(h);
+            if size > 0 && right > x.saturating_add(size) {
+                let bx = right.saturating_sub(size);
+                layout.bead = Some((bx, y + (h.saturating_sub(size)) / 2, size));
+                right = bx.saturating_sub(pad);
+            }
+        }
+        let mut left = x.saturating_add(pad);
+        if self.icon.is_some() {
+            let side = Self::icon_side(font, h);
+            if side > 0 && right > left.saturating_add(side).saturating_add(pad) {
+                layout.icon = Some((left, y + (h.saturating_sub(side)) / 2, side));
+                left = left.saturating_add(side).saturating_add(pad);
+            }
+        }
+        layout.text = (right > left).then_some((left, right));
+        layout
+    }
+}
+
+/// Where one [`TableCell`]'s bead, icon and text are laid out inside its
+/// column, each `None` when the column cannot seat it.
+struct CellLayout {
+    bead: Option<(u32, u32, u32)>,
+    icon: Option<(u32, u32, u32)>,
+    text: Option<(u32, u32)>,
 }
 
 /// One row of a table: a set of column-aligned [`TableCell`]s sharing one row
@@ -928,6 +964,51 @@ impl TableRow {
             .into_iter()
             .map(|(cx, cw)| Rect::new(to_i32(cx), to_i32(y), cw, h))
             .collect()
+    }
+
+    /// The rectangle cell `index`'s **text** is drawn in at `bounds` — inside
+    /// its column, past the leading icon and the trailing bead — or `None`
+    /// when the row seats no such cell or the column leaves the text no room.
+    ///
+    /// [`Self::cell_rects`] reports whole columns; this reports the span the
+    /// glyphs actually occupy, which is what an overlay laid *over* a cell's
+    /// text needs: the file manager's in-place rename field sits over the
+    /// name, not over the row's icon and size and date columns. Both read the
+    /// same layout [`Self::render`] paints from, so the field cannot land
+    /// somewhere the text is not.
+    #[must_use]
+    pub fn cell_text_rect(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        columns: &[u32],
+        index: usize,
+    ) -> Option<Rect> {
+        let column = self
+            .cell_rects(bounds, scale, theme, columns)
+            .get(index)
+            .copied()?;
+        let cell = self.cells.get(index)?;
+        let context = CellContext {
+            scale,
+            theme,
+            font: role_font(theme, scale, TextRole::Body),
+            row_disposition: self.state.disposition(),
+        };
+        let rect = (
+            u32::try_from(column.left()).ok()?,
+            u32::try_from(column.top()).ok()?,
+            column.width,
+            column.height,
+        );
+        let (left, right) = cell.layout(rect, &context).text?;
+        Some(Rect::new(
+            to_i32(left),
+            column.top(),
+            right.saturating_sub(left),
+            column.height,
+        ))
     }
 
     /// Feed a pointer event, given the row's `bounds`; a completed primary
@@ -2326,6 +2407,26 @@ impl IconTile {
         .map_or(0, |band| band.lines)
     }
 
+    /// The rectangle a tile occupying `bounds` draws its **name** in: the
+    /// column each line is centred in, from the first line's top down to the
+    /// last line the band holds. `None` when the tile draws no name at all.
+    ///
+    /// The drawn geometry itself, so an overlay laid over a tile's name — the
+    /// file manager's in-place rename field — lands on the label rather than
+    /// over the picture above it.
+    #[must_use]
+    pub fn label_rect(bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let font = role_font(theme, scale, TextRole::Body);
+        let band = Self::label_band(bounds, scale, theme, font)?;
+        let lines = u32::try_from(band.lines).unwrap_or(u32::MAX);
+        Some(Rect::new(
+            to_i32(band.left),
+            to_i32(band.top),
+            band.right.saturating_sub(band.left),
+            font.line_height().saturating_mul(lines),
+        ))
+    }
+
     /// Paint the tile's name under its picture: wrapped over as many whole
     /// lines as the band holds, each centred, the last elided when the name
     /// runs past them. A band with no room for a whole line draws nothing
@@ -2770,6 +2871,23 @@ impl Panel {
             return None;
         }
         Some(Rect::new(to_i32(ix), to_i32(iy + hh), iw, ch))
+    }
+
+    /// The bounds height whose content rectangle is `content` pixels tall —
+    /// the exact inverse of [`content_rect`](Self::content_rect)'s vertical
+    /// reservation.
+    ///
+    /// What a surface *sized to its content* asks. A popup window that is
+    /// nothing but one of these panels has to be told how much taller than its
+    /// content to be, and taking it from the same header and rim the forward
+    /// query reserves is what stops the two disagreeing by a border — which
+    /// costs the content a whole row once the difference is divided by a row
+    /// height.
+    #[must_use]
+    pub fn height_for_content(content: u32, scale: Scale, theme: &Theme) -> u32 {
+        content
+            .saturating_add(Self::header_height(scale, theme))
+            .saturating_add(plate_border(theme, scale).saturating_mul(2))
     }
 
     /// The header action rectangles, right-aligned square buttons in the

@@ -23,11 +23,12 @@ use tairix_abi::input::{
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_minted_id_reply,
-    decode_open_target_reply, AppBar, AppMenu, BundleRunPath, HandOverDocument, HandOverOutcome,
-    OpenTarget, PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
-    WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
-    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+    decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_menu_text_reply,
+    decode_minted_id_reply, decode_open_target_reply, AppBar, AppMenu, BundleRunPath,
+    HandOverDocument, HandOverOutcome, OpenTarget, PointerAction, TooltipText, WindowEvent,
+    WindowRegion, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+    WINDOW_OPEN_TARGET_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
@@ -58,6 +59,18 @@ pub enum Target {
 /// High tag of an app's event-mailbox endpoint id (see
 /// [`event_endpoint_for`]).
 const EVENT_ENDPOINT_TAG: u64 = 0xE117_0000_0000_0000;
+
+/// Widest reply any *pull* answers with, and so the one buffer every pull is
+/// answered into ([`WindowClient::pull_reply`]).
+///
+/// Derived from the pulls the channel has rather than from whichever is
+/// widest today, so a pull whose reply outgrew the buffer could not slip
+/// past.
+const PULL_REPLY_MAX: usize = if WINDOW_OPEN_TARGET_REPLY_MAX > WINDOW_MENU_TEXT_REPLY_MAX {
+    WINDOW_OPEN_TARGET_REPLY_MAX
+} else {
+    WINDOW_MENU_TEXT_REPLY_MAX
+};
 
 /// Why a round of input repaints, which is what decides the rectangle it
 /// presents (see [`present_damage`]).
@@ -334,11 +347,13 @@ pub struct WindowClient<T: WindowTransport> {
     /// — the hottest operation and one of the shortest — the whole of the
     /// widest one's clearing.
     frame: [u8; WindowRequest::MAX_WIRE_LEN],
-    /// The scratch an open-target pull is answered into, held once for the
-    /// same reason [`Self::frame`] is: the reply carries a path, so a per-call
-    /// array would put four kibibytes of clearing on a path that only runs
-    /// when the user opens something.
-    target_reply: [u8; WINDOW_OPEN_TARGET_REPLY_MAX],
+    /// The scratch every *pull* is answered into — an open target, a menu
+    /// chain's committed text — held once for the same reason [`Self::frame`]
+    /// is: the widest of them carries a path, so a per-call array would put
+    /// four kibibytes of clearing on a path that only runs when the user
+    /// opens something. One buffer rather than one per pull, since no two are
+    /// in flight at once.
+    pull_reply: [u8; PULL_REPLY_MAX],
     /// The serving session's attested identity, as the last reply that
     /// carried it stated. `None` until one has.
     session: Option<ProcId>,
@@ -351,7 +366,7 @@ impl<T: WindowTransport> WindowClient<T> {
             transport,
             presented: Vec::new(),
             frame: [0; WindowRequest::MAX_WIRE_LEN],
-            target_reply: [0; WINDOW_OPEN_TARGET_REPLY_MAX],
+            pull_reply: [0; PULL_REPLY_MAX],
             session: None,
         }
     }
@@ -744,13 +759,13 @@ impl<T: WindowTransport> WindowClient<T> {
         let len = request.encode(&mut self.frame)?;
         let n = self
             .transport
-            .call(&self.frame[..len], &mut self.target_reply)?;
+            .call(&self.frame[..len], &mut self.pull_reply)?;
         let text = |bytes: &[u8]| -> Result<String, Errno> {
             Ok(String::from(
                 core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?,
             ))
         };
-        match decode_open_target_reply(&self.target_reply[..n])? {
+        match decode_open_target_reply(&self.pull_reply[..n])? {
             None => Ok(None),
             Some(OpenTarget::Path(path)) => Ok(Some(Target::Path(text(path)?))),
             Some(OpenTarget::Document { name, grant }) => Ok(Some(Target::Document {
@@ -758,6 +773,38 @@ impl<T: WindowTransport> WindowClient<T> {
                 grant,
             })),
         }
+    }
+
+    /// Take the text the user committed into the quick-entry field of the
+    /// chain this window opened as `open_id`, or `None` when the session
+    /// holds none for it.
+    ///
+    /// The answer to a [`MenuOutcome::Entered`](tairix_abi::window_ipc::MenuOutcome::Entered):
+    /// that outcome names *which field* was committed, and the text is pulled
+    /// because an event is one fixed frame and a name is wider than that.
+    ///
+    /// **Taken once.** A second pull of the same commit answers `None`, and so
+    /// does a pull naming an open the session is no longer holding a text for
+    /// — the next open on this window clears it — so a stale pull can never
+    /// return a name the user typed into an earlier gesture.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such live window owned by this client.
+    /// * [`Errno::NotSupported`] — the session serves no menu chains.
+    /// * Any transport refusal, or a malformed reply (fail closed, never a
+    ///   guessed name).
+    pub fn take_menu_text(
+        &mut self,
+        window_id: u64,
+        open_id: u64,
+    ) -> Result<Option<String>, Errno> {
+        let request = WindowRequest::TakeMenuText { window_id, open_id };
+        let len = request.encode(&mut self.frame)?;
+        let n = self
+            .transport
+            .call(&self.frame[..len], &mut self.pull_reply)?;
+        Ok(decode_menu_text_reply(&self.pull_reply[..n])?.map(String::from))
     }
 
     /// Ask the session to reach the live instance of the bundle whose entry

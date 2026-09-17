@@ -36,7 +36,8 @@ use tairix_util::secret::wipe;
 use crate::damage;
 use crate::paint::{
     ground_fill, paint_bead, paint_filled_circle, paint_plate, plate_border, resolve_bead,
-    resolve_frame, role_font, surface_rect, to_i32, withheld, ChromeLayer, PlateStyle,
+    resolve_frame, role_font, surface_rect, text_plate_height, to_i32, withheld, ChromeLayer,
+    PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, ValidationState,
@@ -1234,6 +1235,18 @@ impl TextField {
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
         self.core.message = Some(message.into());
         self
+    }
+
+    /// The height one line of field occupies at `scale`: the shared
+    /// text-plate height every one-line control takes.
+    ///
+    /// Exposed because a field is not always laid out by a panel that already
+    /// knows this — a menu chain's own entry surface sizes itself to one, and
+    /// the file manager grows an item's name band to it so an in-place editor
+    /// is legible over a short row.
+    #[must_use]
+    pub fn height(scale: Scale, theme: &Theme) -> u32 {
+        text_plate_height(theme, scale, TextRole::Body)
     }
 
     /// The field's current text.

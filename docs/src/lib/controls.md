@@ -97,8 +97,13 @@ all read one piece of arithmetic rather than each deriving its own.
 
 `ChainModel` is the one *model* a menu is built as: a plate title and a
 parent-indexed list of `ChainRow`s, each carrying the id an outcome names, what
-the row opens (nothing, a submenu, or the desktop's information panel), and the
-`MenuItem` that draws it. A desktop surface builds one in process; an
+the row opens (nothing, a submenu, the desktop's information panel, or its
+quick-entry field), why the row cannot be chosen (`ChainRow::explained` — the
+seat shows it as a tooltip on dwell; a `MenuItem` has no way to carry it and
+measures none, because a caption beside every disabled label made a plate as
+wide as its longest excuse), and the `MenuItem` that draws it. The two are independent:
+a row may carry an id *and* a child, so clicking it answers while arriving on
+it opens. A desktop surface builds one in process; an
 application's bounded wire declaration decodes into one
 (`ChainModel::from_app_menu`), which is why the model lives here rather than with
 the chain that renders it — its clients are not all in the process that owns the

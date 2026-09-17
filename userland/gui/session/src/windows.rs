@@ -955,7 +955,28 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         }
     }
 
+    fn tooltip_declared(
+        &mut self,
+        window_id: u64,
+        region: WindowRegion,
+        text: &str,
+    ) -> Result<(), Errno> {
+        // The window is the caller's own — the engine resolved ownership from
+        // the attested caller before this — so the seat holds what it says
+        // about it and the dwell decides when to show it. Resolved to the
+        // compositor window here, where the map is at hand, so placing the
+        // plate later needs only the screen.
+        let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
+        self.shell
+            .declare_tooltip(wm, region, text, self.compositor);
+        Ok(())
+    }
+
     fn window_closed(&mut self, window_id: u64) {
+        // Nothing a dead window declared can still be true.
+        if let Some(wm) = self.windows.wm_id(window_id) {
+            self.shell.forget_tooltip(wm);
+        }
         // A chain is scoped by the window that asked for it, so the window
         // going means the chain goes; its answer is queued for the session's
         // one delivery point.

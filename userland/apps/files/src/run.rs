@@ -119,29 +119,30 @@ mod program {
         WindowRegion,
     };
     use tairix_abi::{
-        load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, SpawnAttach, UnlinkFlags,
-        WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
-        INSTALLED_APP_STORE, STDIN, STD_STREAM_COUNT, SYSTEM_APPLICATION_STORE,
+        load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, SpawnAttach,
+        UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX,
+        DOCUMENT_ROLE_ARG, INSTALLED_APP_STORE, STDIN, STD_STREAM_COUNT, SYSTEM_APPLICATION_STORE,
         SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_browse::render::{
         build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_open_with_chooser,
         draw_owner_control, draw_progress_dialog, draw_properties_editable, manager_tool_at,
-        open_with_row_at, open_with_scroll_pointer, open_with_visible_rows, owner_editor_rect,
-        owner_field_at, permission_cell_at, render_into, scroll_pointer, OwnerField,
-        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        open_with_action_at, open_with_row_at, open_with_scroll_pointer, open_with_visible_rows,
+        owner_editor_rect, owner_field_at, permission_cell_at, render_into, scroll_pointer,
+        OpenWithAction, OwnerField, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        applications_for, association_from_appinfo, context_command_from_item, context_menu,
-        empty_trash_plan, paste_strategy, plan_paste, suggest_new_dir_name, trash_dest_path,
-        trash_dir, trash_strategy, validate_new_name, Activation, AppAssociation, Browser,
-        BundleIntent, BundleSource, Clipboard, ClipboardOp, ContextCommand, ContextMenuModel,
-        CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan,
-        DeleteWalk, DirectorySource, Entry, EntryKind, Listing, ListingDesk, ManagerChrome,
-        ManagerTool, ManagerToolModel, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy,
-        Places, Probe, ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader,
-        ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
-        MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
+        applications_for, association_from_appinfo, context_choice_from_item, context_menu,
+        empty_trash_plan, paste_strategy, plan_paste, quick_applications, suggest_new_dir_name,
+        trash_dest_path, trash_dir, trash_strategy, validate_new_name, Activation, AppAssociation,
+        Browser, BundleIntent, BundleSource, Clipboard, ClipboardOp, ContextChoice, ContextCommand,
+        ContextMenuModel, ContextQuick, CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction,
+        DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, Entry, EntryKind, Listing,
+        ListingDesk, ManagerChrome, ManagerTool, ManagerToolModel, OpenWithCandidate,
+        OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places, Probe, ProgressModel,
+        ProgressOp, Properties, RenameError, RtLinkReader, ToolbarBand, ToolbarCommand,
+        TrashStrategy, VfsDirectorySource, Volume, VolumeId, MANAGER_MENU_TITLE, MANAGER_TOOLS,
+        MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -150,7 +151,7 @@ mod program {
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
-        ArtworkReader, ArtworkResolver, InlineArtwork, Resolved, MAX_ARTWORK_BYTES,
+        ArtworkReader, ArtworkResolver, InlineArtwork, NoArtwork, Resolved, MAX_ARTWORK_BYTES,
     };
     use tairix_input::{DoubleClickTracker, Key, Modifiers, NamedKey};
     use tairix_procinfo::{IpcTransport, WalkStep};
@@ -356,12 +357,31 @@ mod program {
         /// clipped repaint sound — every pixel outside the clip is the one
         /// already on screen.
         surface: Surface,
-        /// The open id of this window's unanswered context menu, if one is up.
+        /// This window's unanswered context-menu gesture, if one is up.
         ///
-        /// The desktop mints one per gesture and never reuses it, so an answer
-        /// that names anything else belongs to a gesture already settled and is
-        /// not acted on.
-        menu: Option<u64>,
+        /// The desktop mints one open id per gesture and never reuses it, so an
+        /// answer that names anything else belongs to a gesture already settled
+        /// and is not acted on.
+        menu: Option<OpenMenuState>,
+    }
+
+    /// One context-menu gesture in flight: the open the desktop minted for it,
+    /// and what the rows it built were built *from*.
+    ///
+    /// The quick context is remembered rather than re-derived when the answer
+    /// arrives, because an answer names a candidate by its position in the list
+    /// the *rows* came from. Re-deriving it would read the program stores again
+    /// and could rank them differently, so a chosen row would launch an
+    /// application the user never saw.
+    struct OpenMenuState {
+        /// The session-minted id this gesture's one answer names.
+        open_id: u64,
+        /// The file the menu was opened on, by the same spelling every open
+        /// uses — `None` where the selection was not a file with candidates.
+        target: Option<PendingChooser>,
+        /// The applications the "Open With…" submenu offered, in the order its
+        /// ids number them.
+        candidates: Vec<OpenWithCandidate>,
     }
 
     /// Paint `win`'s current state and present it.
@@ -639,6 +659,7 @@ mod program {
         icons: &RefCell<IconPipeline>,
         launcher: &RefCell<Launcher>,
         reads: &alloc::sync::Arc<Reads>,
+        installed: &RefCell<Vec<AppAssociation>>,
         event_endpoint: u64,
         role: Role,
         event: &WindowEvent,
@@ -745,6 +766,7 @@ mod program {
         // one, which is what the present is clipped to.
         let mut damage = damage::sink();
         let window_id = win.pane.id();
+        let popup = PopupLink::of(client, desktop, event_endpoint);
         let (repaint, close) = apply_event(
             &mut WindowState {
                 browser: &mut win.browser,
@@ -759,6 +781,8 @@ mod program {
                 },
                 launcher,
                 reads,
+                installed,
+                popup,
             },
             canvas,
             event,
@@ -2012,8 +2036,8 @@ mod program {
         client: &'a mut WindowClient<app::RtWindowTransport>,
         /// The session's id for the window the chain belongs to.
         window: u64,
-        /// The open id of this window's unanswered menu, if one is up.
-        open: &'a mut Option<u64>,
+        /// This window's unanswered menu gesture, if one is up.
+        open: &'a mut Option<OpenMenuState>,
     }
 
     /// The window's own mutable state one event round may change.
@@ -2038,6 +2062,51 @@ mod program {
         launcher: &'a RefCell<Launcher>,
         /// The reader every deferred read is asked for through.
         reads: &'a Reads,
+        /// The program-store scan the quick offers are built from, held for
+        /// the process: the stores are the same for every window, so one scan
+        /// serves them all.
+        installed: &'a RefCell<Vec<AppAssociation>>,
+        /// What opening a popup of this window's own needs.
+        popup: PopupLink,
+    }
+
+    /// What a popup this app opens above one of its own windows is opened
+    /// against: the seat's screen, the session it must be served by, and where
+    /// the popup's events come back.
+    ///
+    /// A popup is sized against the *screen* rather than its parent — a chooser
+    /// sized to its candidates must not be shrunk by a narrow window — and its
+    /// events arrive on the same mailbox the parent's do, addressed by the
+    /// popup's own window id.
+    #[derive(Copy, Clone)]
+    struct PopupLink {
+        /// The seat's screen rectangle, at its own origin.
+        screen: Rect,
+        /// The serving session's attested identity, which every popup's
+        /// create reply must match. Absent until the desktop has answered a
+        /// query, so a popup asked for before then is refused rather than
+        /// opened against an unattested server.
+        server: Option<ProcId>,
+        /// The app's own event mailbox endpoint.
+        event_endpoint: u64,
+    }
+
+    impl PopupLink {
+        /// The context a popup opened during this round is opened against.
+        ///
+        /// Read before the round borrows the client, because a popup's create
+        /// reply is checked against the session that served its parent.
+        fn of(
+            client: &WindowClient<app::RtWindowTransport>,
+            desktop: &Desktop,
+            event_endpoint: u64,
+        ) -> Self {
+            Self {
+                screen: desktop.screen(),
+                server: client.session(),
+                event_endpoint,
+            }
+        }
     }
 
     /// What an "Open With…" chooser needs once the bundle scan answers: the
@@ -2065,21 +2134,13 @@ mod program {
         /// The "Open With…" application chooser, when open (chosen from the
         /// context menu on a regular file).
         ///
-        /// A chooser, not a menu: the candidates are as many as the
+        /// A chooser in its own **popup window**, not a menu and not an overlay
+        /// drawn inside the listing: the candidate set is as long as the
         /// applications a user has installed, which no menu plate can promise
-        /// to hold, so this window draws a scrolled list of its own
-        /// (`plans/NEW-MENUS.md` §6, decision 2). The right-click menu itself
-        /// is the desktop's chain and appears nowhere here.
-        open_with: Option<OpenWithChooser>,
-        /// The file the "Open With…" chooser is being built for, while the
-        /// installed bundles are still being read.
-        ///
-        /// The candidates are the declared associations of every bundle in
-        /// three program stores, which is one manifest read per installed
-        /// application — far more than a frame's worth, and it used to happen
-        /// on the very click that asked. So the click records what it asked
-        /// about here and the chooser opens when the scan lands.
-        pending_open_with: Option<PendingChooser>,
+        /// to hold, and a panel sized to its own candidates cannot be one that
+        /// borrows this window's extent. The right-click menu itself is the
+        /// desktop's chain and appears nowhere here.
+        open_with: Option<ChooserOverlay>,
         /// The running long file operation (a recursive delete), when one is in
         /// progress. While it is set the event loop drives it interleaved with
         /// input rather than parking, showing progress and honouring a cancel.
@@ -2099,6 +2160,39 @@ mod program {
         /// lands on chrome rather than an item, so a click through the toolbar
         /// or the places rail never pairs across it.
         double_click: DoubleClickTracker,
+    }
+
+    /// The "Open With…" chooser and the popup window it is drawn in.
+    ///
+    /// The surface is held for the popup's life for the same reason a window's
+    /// is: allocating and zeroing one per present would be a whole-surface
+    /// pass of its own.
+    struct ChooserOverlay {
+        /// What the user is picking from.
+        chooser: OpenWithChooser,
+        /// The popup's channel-side state.
+        pane: WindowPane,
+        /// The surface every frame of it is drawn into.
+        surface: Surface,
+    }
+
+    impl Overlays {
+        /// Put `next` in place of whatever chooser was open, closing the old
+        /// popup.
+        ///
+        /// An assignment that found one already there would otherwise drop it
+        /// without closing it, leaving a session-side popup window on screen
+        /// with nothing owning it. Going through here makes that unable to
+        /// happen by construction rather than by inspection.
+        fn set_chooser(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            next: Option<ChooserOverlay>,
+        ) {
+            if let Some(previous) = core::mem::replace(&mut self.open_with, next) {
+                let _ = previous.pane.close(client);
+            }
+        }
     }
 
     /// How the window is drawn at this moment: the active theme, the
@@ -2228,11 +2322,12 @@ mod program {
                         &mut pipeline.source(),
                     );
                 }
-                // In rename mode, overlay the inline editor exactly over the
-                // selected item's row through the shared selection geometry, so
-                // the field sits on the item the user is renaming.
+                // In rename mode, overlay the inline editor on the selected
+                // item's *name* through the shared geometry the views draw it
+                // at, so the field covers what is being edited and not the
+                // icon or the columns beside it.
                 if let Some(field) = rename {
-                    if let Some(bounds) = tairix_browse::render::selection_rect(
+                    if let Some(bounds) = tairix_browse::render::selection_name_rect(
                         browser, scale, theme, viewport, toolbar,
                     ) {
                         field.render(surface, bounds, scale, theme);
@@ -2259,13 +2354,11 @@ mod program {
                 if let Some(confirm) = overlays.delete.as_ref() {
                     draw_delete_dialog(surface, &confirm.dialog, scale, theme, viewport);
                 }
-                // The "Open With…" chooser is modal and draws on top of the
-                // view. The right-click menu is not drawn here at all — its
-                // plates are the desktop's own surfaces, so this window never
-                // paints a menu pixel.
-                if let Some(chooser) = overlays.open_with.as_ref() {
-                    draw_open_with_chooser(surface, chooser, scale, theme, viewport);
-                }
+                // The "Open With…" chooser is not drawn here: it has its own
+                // popup window, painted by `present_chooser`. Neither is the
+                // right-click menu — its plates are the desktop's own
+                // surfaces, so this window paints no menu pixel either.
+                //
                 // A running long operation's progress + cancel panel is modal:
                 // drawn last so it is topmost while the walk runs interleaved
                 // with input.
@@ -2331,22 +2424,16 @@ mod program {
             open_id, outcome, ..
         } = *event
         {
-            if *acts.menu.open != Some(open_id) {
+            if acts.menu.open.as_ref().map(|open| open.open_id) != Some(open_id) {
                 return (Repaint::Nothing, false);
             }
-            *acts.menu.open = None;
-            let (changed, close) = apply_menu_outcome(
-                browser,
-                overlays,
-                acts.launcher,
-                acts.menu.client,
-                acts.reads,
-                scale,
-                theme,
-                viewport,
-                toolbar,
-                outcome,
-            );
+            // Taken, so a second answer for one gesture — or an answer acting
+            // on a gesture whose own context has gone — reaches nothing.
+            let Some(gesture) = acts.menu.open.take() else {
+                return (Repaint::Nothing, false);
+            };
+            let (changed, close) =
+                apply_menu_outcome(browser, overlays, acts, &gesture, canvas, viewport, outcome);
             return (whole_if(changed), close);
         }
 
@@ -2354,17 +2441,15 @@ mod program {
         // that opens it has already concluded the chain) and needs the launcher
         // to hand the chosen application its file.
         if overlays.open_with.is_some() {
-            let (changed, close) = apply_open_with_event(
+            let changed = apply_chooser_event(
                 overlays,
                 acts.launcher,
                 acts.menu.client,
-                scale,
-                theme,
-                viewport,
+                canvas,
                 event,
                 damage,
             );
-            return (whole_if(changed), close);
+            return (whole_if(changed), false);
         }
 
         // A modal overlay (the Properties overlay, or the owner-id editor
@@ -2695,6 +2780,8 @@ mod program {
                 browser,
                 overlays,
                 &mut acts.menu,
+                acts.reads,
+                acts.installed,
                 point,
                 hit,
             ));
@@ -4169,6 +4256,8 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         menu: &mut MenuLink<'_>,
+        reads: &Reads,
+        installed: &RefCell<Vec<AppAssociation>>,
         point: Point,
         index: Option<usize>,
     ) -> (bool, bool) {
@@ -4179,14 +4268,38 @@ mod program {
             }
             None => browser.clear_selection(),
         }
+        // Keep the scan warm rather than reading here: the submenu is built
+        // from the answer that has already landed, so a right-click performs
+        // no I/O at all, and asking again now is what has the next one
+        // current.
+        adopt_bundles(reads, installed);
         let model = ContextMenuModel::for_browser(browser, overlays.clipboard.is_some());
-        let rows = match context_menu(model, tairix_browse::MANAGER_MENU_TITLE) {
+        let target = open_with_target(browser);
+        let held = installed.borrow();
+        let ranked = target
+            .as_ref()
+            .map(|file| applications_for(&file.name, &held))
+            .unwrap_or_default();
+        let quick = quick_applications(&ranked);
+        let rows = match context_menu(
+            model,
+            MANAGER_MENU_TITLE,
+            ContextQuick {
+                name: browser.selected_name().unwrap_or_default(),
+                candidates: &quick,
+            },
+        ) {
             Ok(rows) => rows,
             Err(err) => {
                 report_error(&alloc::format!("menu model refused ({err}); not shown"));
                 return (true, false);
             }
         };
+        let candidates: Vec<OpenWithCandidate> = quick
+            .iter()
+            .map(|app| OpenWithCandidate::new(app.name(), app.bundle_path()))
+            .collect();
+        drop(held);
         let anchor = match WindowRegion::new(point.x, point.y, 0, 0) {
             Ok(anchor) => anchor,
             Err(err) => {
@@ -4195,12 +4308,54 @@ mod program {
             }
         };
         match menu.client.open_menu(menu.window, anchor, &rows) {
-            Ok(open_id) => *menu.open = Some(open_id),
+            Ok(open_id) => {
+                *menu.open = Some(OpenMenuState {
+                    open_id,
+                    target,
+                    candidates,
+                });
+            }
             Err(err) => report_error(&alloc::format!("menu refused ({err}); not shown")),
         }
         // The selection moved whether or not a chain came up, so the listing is
         // repainted either way.
         (true, false)
+    }
+
+    /// Take whatever the bundle scan has answered into `installed`, and ask for
+    /// it again so the next read is current.
+    ///
+    /// The scan walks three program stores and reads one manifest per installed
+    /// application, which is far more than a frame's worth of work, so it runs
+    /// on the reader and every consumer reads the answer that has already
+    /// landed. A machine that granted no reader answers here, on this thread,
+    /// exactly as it always did.
+    fn adopt_bundles(reads: &Reads, installed: &RefCell<Vec<AppAssociation>>) {
+        if let Some(found) = reads.take_bundles() {
+            *installed.borrow_mut() = found;
+        }
+        if let Some(found) = reads.want_bundles() {
+            *installed.borrow_mut() = found;
+        }
+    }
+
+    /// The selected entry as an "Open With…" target — its absolute path and
+    /// leaf name — or `None` when the selection is not a regular file, or
+    /// cannot be named.
+    ///
+    /// A directory descends and a bundle launches itself, so neither has an
+    /// application to choose; a selection that cannot be spelled is no target
+    /// rather than a fabricated one (fail closed).
+    fn open_with_target<S: DirectorySource>(browser: &Browser<S>) -> Option<PendingChooser> {
+        let entry = browser.selected_entry()?;
+        if entry.kind().resolved() != Some(EntryKind::File) {
+            return None;
+        }
+        let name = entry.name().to_string();
+        let Some(Ok(path)) = browser.selected_target_path() else {
+            return None;
+        };
+        Some(PendingChooser { path, name })
     }
 
     /// Act on the one outcome the desktop owes this window's open.
@@ -4209,26 +4364,48 @@ mod program {
     /// refusal is stated on `stderr` and the window carries on. A row id this
     /// window never declared names no command and is dropped (fail closed —
     /// an outcome is never guessed at).
-    #[allow(clippy::too_many_arguments)] // The window's state, its geometry, and the outcome.
     fn apply_menu_outcome<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        launcher: &RefCell<Launcher>,
-        client: &mut WindowClient<app::RtWindowTransport>,
-        reads: &Reads,
-        scale: Scale,
-        theme: &Theme,
+        acts: &mut Acts<'_>,
+        gesture: &OpenMenuState,
+        canvas: Canvas<'_>,
         viewport: Rect,
-        toolbar: ToolbarBand,
         outcome: MenuOutcome,
     ) -> (bool, bool) {
+        let scale = canvas.scale;
+        let theme = canvas.theme();
+        let toolbar = canvas.chrome.toolbar;
+        let window = acts.menu.window;
         match outcome {
-            MenuOutcome::Chosen(item) => match context_command_from_item(item) {
-                Some(command) => dispatch_context_command(
-                    browser, overlays, launcher, client, reads, scale, theme, viewport, toolbar,
-                    command,
+            MenuOutcome::Chosen(item) => match context_choice_from_item(item) {
+                Some(ContextChoice::Command(command)) => {
+                    dispatch_context_command(browser, overlays, acts, canvas, viewport, command)
+                }
+                Some(ContextChoice::OpenWithCandidate(index)) => {
+                    launch_candidate(gesture, index, acts.launcher, acts.menu.client)
+                }
+                // A commit answers `Entered`, so a *chosen* row that reads
+                // back as one is an answer this menu never declared that way
+                // (fail closed — an outcome is never guessed at).
+                Some(ContextChoice::RenameCommit) | None => (false, false),
+            },
+            // The field's text is wider than the event frame, so the answer
+            // names the field and the text is pulled. It renames through the
+            // very path `F2` drives, so a name typed in the menu and one typed
+            // in place cannot come to mean different things.
+            MenuOutcome::Entered(item) => match context_choice_from_item(item) {
+                Some(ContextChoice::RenameCommit) => commit_menu_rename(
+                    browser,
+                    acts.menu.client,
+                    window,
+                    gesture,
+                    scale,
+                    theme,
+                    viewport,
+                    toolbar,
                 ),
-                None => (false, false),
+                _ => (false, false),
             },
             MenuOutcome::Dismissed => (false, false),
             MenuOutcome::Refused(reason) => {
@@ -4236,6 +4413,84 @@ mod program {
                 (false, false)
             }
         }
+    }
+
+    /// Pull the name the user typed into the context menu's Rename field and
+    /// rename the selection to it.
+    ///
+    /// The text is pulled rather than delivered because an event is one fixed
+    /// frame and a name is wider than that; the session holds exactly one per
+    /// window and hands it over once. Nothing held is an honest answer that
+    /// renames nothing — a stale pull, or a commit the session could not keep
+    /// — and the rename itself is [`Browser::rename_selected`], the same
+    /// permission-checked `fs_rename` under the user's own identity that `F2`
+    /// runs, so a refusal is stated and the listing is untouched.
+    #[allow(clippy::too_many_arguments)] // The window's identity, its geometry, and the gesture.
+    fn commit_menu_rename<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        window: u64,
+        gesture: &OpenMenuState,
+        scale: Scale,
+        theme: &Theme,
+        viewport: Rect,
+        toolbar: ToolbarBand,
+    ) -> (bool, bool) {
+        let name = match client.take_menu_text(window, gesture.open_id) {
+            Ok(Some(name)) => name,
+            Ok(None) => return (false, false),
+            Err(err) => {
+                report_error(&alloc::format!("typed name refused ({err})"));
+                return (false, false);
+            }
+        };
+        match browser.rename_selected(&name, |from, to| {
+            let ret = tairix_rt::fs_rename(from.as_bytes(), to.as_bytes());
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(Errno::from_syscall(ret))
+            }
+        }) {
+            Ok(()) | Err(RenameError::Unchanged) => {
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
+                (true, false)
+            }
+            Err(err) => {
+                let msg = err.message();
+                let _ = writeln!(Stderr, "files: {msg}");
+                (false, false)
+            }
+        }
+    }
+
+    /// Hand the file the menu was opened on to the candidate application the
+    /// submenu's chosen row names.
+    ///
+    /// The same [`Launcher::launch_viewer`] hand-off the chooser and the
+    /// default open use: the file is opened read-only in this app's own table
+    /// and wired onto the child's `STDIN`, so the application reads it holding
+    /// no filesystem capability of its own. An index or a target the gesture
+    /// does not carry opens nothing (fail closed).
+    fn launch_candidate(
+        gesture: &OpenMenuState,
+        index: usize,
+        launcher: &RefCell<Launcher>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+    ) -> (bool, bool) {
+        let Some(candidate) = gesture.candidates.get(index) else {
+            return (false, false);
+        };
+        let Some(target) = gesture.target.as_ref() else {
+            return (false, false);
+        };
+        launcher.borrow_mut().launch_viewer(
+            client,
+            candidate.bundle_path(),
+            &target.path,
+            &target.name,
+        );
+        (false, false)
     }
 
     /// Run the verb a chosen [`ContextCommand`] names, over the exact same app
@@ -4246,20 +4501,20 @@ mod program {
     fn dispatch_context_command<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        launcher: &RefCell<Launcher>,
-        client: &mut WindowClient<app::RtWindowTransport>,
-        reads: &Reads,
-        scale: Scale,
-        theme: &Theme,
+        acts: &mut Acts<'_>,
+        canvas: Canvas<'_>,
         viewport: Rect,
-        toolbar: ToolbarBand,
         command: ContextCommand,
     ) -> (bool, bool) {
+        let scale = canvas.scale;
+        let theme = canvas.theme();
+        let toolbar = canvas.chrome.toolbar;
+        let launcher = acts.launcher;
         match command {
             ContextCommand::Open => activate(
                 browser,
                 launcher,
-                client,
+                acts.menu.client,
                 scale,
                 theme,
                 viewport,
@@ -4272,7 +4527,7 @@ mod program {
             ContextCommand::OpenAndClose => activate(
                 browser,
                 launcher,
-                client,
+                acts.menu.client,
                 scale,
                 theme,
                 viewport,
@@ -4280,7 +4535,7 @@ mod program {
                 BundleIntent::Launch,
                 AfterHandoff::CloseWindow,
             ),
-            ContextCommand::OpenWith => begin_open_with(browser, overlays, reads),
+            ContextCommand::OpenWith => begin_open_with(browser, overlays, acts, canvas),
             ContextCommand::Rename => begin_rename(
                 browser,
                 &mut overlays.rename,
@@ -4315,179 +4570,268 @@ mod program {
         }
     }
 
-    /// Open the "Open With…" application chooser for the selected regular file.
+    /// Open the "Open With…" application chooser for the selected regular
+    /// file, in its own popup window above this one.
     ///
     /// The chooser is offered only for a regular file — a directory descends
     /// and a bundle launches itself, so neither has an application to pick (the
     /// context-menu model already disables the command otherwise; this guards
-    /// it again, fail closed). The candidate applications are the installed
-    /// bundles whose declared associations claim the file's type
-    /// ([`RtBundleSource`] + [`applications_for`], keyed off the leaf name,
-    /// never a hard-coded viewer). Enumerating them is a read of three program
-    /// stores, so it happens *here* — when the user asks — rather than on every
-    /// right-click, which is why the candidates are a chooser of this window's
-    /// own and not rows of the desktop's menu.
+    /// it again, fail closed). The candidates are the installed bundles whose
+    /// declared associations claim the file's type ([`applications_for`] over
+    /// the scan the reader keeps warm, keyed off the leaf name, never a
+    /// hard-coded viewer), so opening it reads nothing here.
     ///
-    /// When no installed application claims the file the refusal is stated
-    /// fail-loud on `stderr` and nothing is opened — an honest answer, never an
-    /// empty chooser or a fabricated open. The chooser itself launches nothing:
-    /// a chosen row runs the same capability-checked hand-off the default open
-    /// uses ([`apply_open_with_event`]).
+    /// It is a **popup window**, not an overlay drawn inside the listing: the
+    /// panel is sized to its own candidates, and a surface sized to its content
+    /// cannot be one that borrows another window's extent. When no installed
+    /// application claims the file the refusal is stated fail-loud on `stderr`
+    /// and nothing is opened — an honest answer, never an empty chooser or a
+    /// fabricated open.
     fn begin_open_with<S: DirectorySource>(
         browser: &Browser<S>,
         overlays: &mut Overlays,
-        reads: &Reads,
+        acts: &mut Acts<'_>,
+        canvas: Canvas<'_>,
     ) -> (bool, bool) {
-        let Some(entry) = browser.selected_entry() else {
+        let Some(target) = open_with_target(browser) else {
             return (false, false);
         };
-        if entry.kind().resolved() != Some(EntryKind::File) {
-            return (false, false);
-        }
-        let name = entry.name().to_string();
-        // The selection must still name a valid absolute path (the same
-        // spelling every open/stat uses); a name that cannot be spelled is a
-        // stated refusal, not a fabricated open.
-        let Some(Ok(file_path)) = browser.selected_target_path() else {
-            report_error(&alloc::format!("could not locate {name}"));
+        adopt_bundles(acts.reads, acts.installed);
+        let held = acts.installed.borrow();
+        let apps = applications_for(&target.name, &held);
+        let chooser = OpenWithChooser::new(&apps, &target.path, &target.name);
+        drop(held);
+        let Some(chooser) = chooser else {
+            report_error(&alloc::format!("no application to open {}", target.name));
             return (false, false);
         };
-        // Ask for the installed bundles rather than reading them here: three
-        // program stores and one manifest per application is not a frame's
-        // worth of work. The chooser opens when the scan lands, or at once when
-        // the machine granted no reader to do it elsewhere.
-        overlays.pending_open_with = Some(PendingChooser {
-            path: file_path,
-            name,
-        });
-        match reads.want_bundles() {
-            Some(installed) => (settle_open_with(overlays, &installed), false),
-            None => (false, false),
+        let opened = open_chooser_pane(acts, canvas, chooser);
+        if let Some(overlay) = opened {
+            overlays.set_chooser(acts.menu.client, Some(overlay));
         }
+        (false, false)
     }
 
-    /// Open the chooser the last "Open With…" asked for, now that the
-    /// installed bundles are known, answering whether the window changed.
+    /// Open `chooser`'s own popup above the window `canvas` describes, drawn
+    /// once.
     ///
-    /// A file with no installed application that claims its type is an honest
-    /// refusal stated on `stderr` and opens nothing — never an empty chooser.
-    /// A pending request that has since been dismissed (the user pressed
-    /// Escape, or asked about something else) opens nothing either.
-    fn settle_open_with(overlays: &mut Overlays, installed: &[AppAssociation]) -> bool {
-        let Some(pending) = overlays.pending_open_with.take() else {
-            return false;
+    /// The popup is exactly the size the chooser wants — its panel sized to the
+    /// candidates it holds, measured against the *screen* rather than the
+    /// parent window, so a long list is not shrunk by a narrow file-manager
+    /// window — centred over the parent's client. A window smaller than the
+    /// popup therefore yields a negative offset, which is a legitimate request:
+    /// the session resolves it against the parent's screen position and clamps
+    /// the whole popup on screen.
+    ///
+    /// `None` — with the reason already on `stderr` — opens nothing: a refusal
+    /// shows no chooser and the window carries on.
+    fn open_chooser_pane(
+        acts: &mut Acts<'_>,
+        canvas: Canvas<'_>,
+        chooser: OpenWithChooser,
+    ) -> Option<ChooserOverlay> {
+        let screen = acts.popup.screen;
+        let (w, h) = tairix_browse::render::open_with_chooser_extent(
+            chooser.candidates().len(),
+            canvas.scale,
+            canvas.theme(),
+            screen,
+        );
+        let extent = (w.min(screen.width.max(1)), h.min(screen.height.max(1)));
+        if extent.0 == 0 || extent.1 == 0 {
+            report_error("the chooser has no drawable extent; not shown");
+            return None;
+        }
+        let parent = canvas.window();
+        let offset = (
+            centre_offset(parent.width, extent.0),
+            centre_offset(parent.height, extent.1),
+        );
+        let mode = app::mode_for(extent.0, extent.1);
+        let Some(surface) = Surface::new(extent.0, extent.1) else {
+            report_error("the chooser surface was refused; not shown");
+            return None;
         };
-        let apps = applications_for(&pending.name, installed);
-        let Some(chooser) = OpenWithChooser::new(&apps, &pending.path, &pending.name) else {
-            report_error(&alloc::format!("no application to open {}", pending.name));
-            return false;
+        let Some(server) = acts.popup.server else {
+            report_error("the serving session is unknown; the chooser was not shown");
+            return None;
         };
-        overlays.open_with = Some(chooser);
-        true
+        let pane = match WindowPane::open_popup(
+            acts.menu.client,
+            acts.menu.window,
+            server,
+            acts.popup.event_endpoint,
+            &mode,
+            offset,
+        ) {
+            Ok(pane) => pane,
+            Err(err) => {
+                report_error(&alloc::format!("{err}; the chooser was not shown"));
+                return None;
+            }
+        };
+        let mut overlay = ChooserOverlay {
+            chooser,
+            pane,
+            surface,
+        };
+        if present_chooser(&mut overlay, acts.menu.client, canvas).is_err() {
+            report_error("the chooser present was refused; not shown");
+            let _ = overlay.pane.close(acts.menu.client);
+            return None;
+        }
+        Some(overlay)
     }
 
-    /// Handle one event while the "Open With…" chooser owns the window.
+    /// The offset that centres an `inner` extent within an `outer` one,
+    /// negative when the inner extent is the larger of the two.
+    fn centre_offset(outer: u32, inner: u32) -> i32 {
+        // Display extents halved stay far inside `i32`; a mode that says
+        // otherwise centres at the origin rather than wrapping.
+        i32::try_from((i64::from(outer) - i64::from(inner)) / 2).unwrap_or(0)
+    }
+
+    /// Paint the chooser popup whole and present it.
     ///
-    /// `Escape` dismisses it. Up/Down/Home/End move the current candidate and
-    /// scroll the least that keeps it in view; `Enter` hands the file to it. A
-    /// primary press on a candidate row does the same, the scroll gutter owns a
-    /// press that lands on it, and a press anywhere else dismisses the chooser
-    /// (fail closed — a press off the rows never launches). A wheel scrolls the
-    /// list. Every other event leaves the chooser open.
+    /// The panel fills the popup, so there is nothing of the surface a partial
+    /// present could leave standing: every round draws all of it.
+    fn present_chooser(
+        overlay: &mut ChooserOverlay,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        canvas: Canvas<'_>,
+    ) -> Result<(), Errno> {
+        let mode = *overlay.pane.mode();
+        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let surface = &mut overlay.surface;
+        draw_open_with_chooser(
+            surface,
+            &overlay.chooser,
+            canvas.scale,
+            canvas.theme(),
+            viewport,
+            &mut NoArtwork,
+        );
+        overlay
+            .pane
+            .present(client, surface, DamageRect::full(&mode))
+    }
+
+    /// Handle one event delivered to the "Open With…" chooser's own popup.
+    ///
+    /// `Escape` dismisses it, as does the Cancel action and the window manager
+    /// asking the popup to close. Up/Down/Home/End move the current candidate
+    /// and scroll the least that keeps it in view; `Enter`, the Open action, or
+    /// a primary press on a candidate row hands the file over. The scroll
+    /// gutter owns a press that lands on it, and a press on nothing resolves to
+    /// nothing — a chooser in its own window is not dismissed by a click inside
+    /// itself.
     ///
     /// The hand-off is the same [`Launcher::launch_viewer`] the default open
     /// uses: the file opened read-only in the manager's own table and wired
     /// onto the child's `STDIN`, so the application reads it with no filesystem
     /// capability of its own.
-    #[allow(clippy::too_many_arguments)] // The chooser's whole surround, threaded explicitly.
-    fn apply_open_with_event(
+    fn apply_chooser_event(
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
         client: &mut WindowClient<app::RtWindowTransport>,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
+        canvas: Canvas<'_>,
         event: &WindowEvent,
         damage: &mut Region,
-    ) -> (bool, bool) {
+    ) -> bool {
+        let scale = canvas.scale;
+        let theme = canvas.theme();
+        let Some(overlay) = overlays.open_with.as_mut() else {
+            return false;
+        };
+        let mode = *overlay.pane.mode();
+        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
         let visible = open_with_visible_rows(viewport, scale, theme);
         match event {
+            WindowEvent::CloseRequested { .. } => {
+                overlays.set_chooser(client, None);
+                false
+            }
+            WindowEvent::ContentReleased { .. } => {
+                overlay.pane.release_frames();
+                false
+            }
+            WindowEvent::RedrawRequested { .. } => true,
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, .. },
                 ..
-            } => {
-                let Some(chooser) = overlays.open_with.as_mut() else {
-                    return (false, false);
-                };
-                match key {
-                    KeyValue::Named(NamedKeyCode::Escape) => {
-                        overlays.open_with = None;
-                        (true, false)
-                    }
-                    KeyValue::Named(NamedKeyCode::Enter) => {
-                        launch_open_with(overlays, launcher, client);
-                        (true, false)
-                    }
-                    KeyValue::Named(NamedKeyCode::Up) => {
-                        let moved = chooser.step(-1);
-                        (chooser.reveal(visible) || moved, false)
-                    }
-                    KeyValue::Named(NamedKeyCode::Down) => {
-                        let moved = chooser.step(1);
-                        (chooser.reveal(visible) || moved, false)
-                    }
-                    KeyValue::Named(NamedKeyCode::Home) => {
-                        let moved = chooser.select(0);
-                        (chooser.reveal(visible) || moved, false)
-                    }
-                    KeyValue::Named(NamedKeyCode::End) => {
-                        let moved = chooser.select(usize::MAX);
-                        (chooser.reveal(visible) || moved, false)
-                    }
-                    _ => (false, false),
+            } => match key {
+                KeyValue::Named(NamedKeyCode::Escape) => {
+                    overlays.set_chooser(client, None);
+                    false
                 }
-            }
-            WindowEvent::Scrolled { dy, .. } => {
-                let Some(chooser) = overlays.open_with.as_mut() else {
-                    return (false, false);
-                };
-                (chooser.scroll_by(i64::from(*dy), visible), false)
-            }
+                KeyValue::Named(NamedKeyCode::Enter) => {
+                    launch_open_with(overlays, launcher, client);
+                    false
+                }
+                KeyValue::Named(NamedKeyCode::Up) => {
+                    let moved = overlay.chooser.step(-1);
+                    overlay.chooser.reveal(visible) || moved
+                }
+                KeyValue::Named(NamedKeyCode::Down) => {
+                    let moved = overlay.chooser.step(1);
+                    overlay.chooser.reveal(visible) || moved
+                }
+                KeyValue::Named(NamedKeyCode::Home) => {
+                    let moved = overlay.chooser.select(0);
+                    overlay.chooser.reveal(visible) || moved
+                }
+                KeyValue::Named(NamedKeyCode::End) => {
+                    let moved = overlay.chooser.select(usize::MAX);
+                    overlay.chooser.reveal(visible) || moved
+                }
+                _ => false,
+            },
+            WindowEvent::Scrolled { dy, .. } => overlay.chooser.scroll_by(i64::from(*dy), visible),
             WindowEvent::Pointer { x, y, action, .. } => {
                 let point = pointer_point(*x, *y);
                 // The gutter owns a press that lands on it, so dragging the
-                // thumb scrolls the list instead of dismissing the chooser.
-                if let Some(chooser) = overlays.open_with.as_mut() {
-                    let mut scrolled = None;
-                    for input in pointer_input_events(*action, point) {
-                        if let Some(repaint) = open_with_scroll_pointer(
-                            chooser, scale, theme, viewport, point, &input, damage,
-                        ) {
-                            scrolled = Some(scrolled.unwrap_or(false) || repaint);
-                        }
+                // thumb scrolls the list instead of resolving to a row.
+                let mut scrolled = None;
+                for input in pointer_input_events(*action, point) {
+                    if let Some(repaint) = open_with_scroll_pointer(
+                        &mut overlay.chooser,
+                        scale,
+                        theme,
+                        viewport,
+                        point,
+                        &input,
+                        damage,
+                    ) {
+                        scrolled = Some(scrolled.unwrap_or(false) || repaint);
                     }
-                    if let Some(repaint) = scrolled {
-                        return (repaint, false);
-                    }
+                }
+                if let Some(repaint) = scrolled {
+                    return repaint;
                 }
                 let Some(point) = press_point(*action, *x, *y) else {
-                    return (false, false);
+                    return false;
                 };
-                let Some(chooser) = overlays.open_with.as_mut() else {
-                    return (false, false);
-                };
-                match open_with_row_at(chooser, viewport, scale, theme, point) {
-                    Some(index) => {
-                        chooser.select(index);
-                        launch_open_with(overlays, launcher, client);
+                if let Some(action) =
+                    open_with_action_at(&overlay.chooser, viewport, scale, theme, point)
+                {
+                    match action {
+                        OpenWithAction::Open => launch_open_with(overlays, launcher, client),
+                        OpenWithAction::Cancel => overlays.set_chooser(client, None),
                     }
-                    // A press off the rows closes the chooser and launches
-                    // nothing.
-                    None => overlays.open_with = None,
+                    return false;
                 }
-                (true, false)
+                match open_with_row_at(&overlay.chooser, viewport, scale, theme, point) {
+                    Some(index) => {
+                        overlay.chooser.select(index);
+                        launch_open_with(overlays, launcher, client);
+                        false
+                    }
+                    // A press on the panel's own plate selects nothing and
+                    // launches nothing; the chooser is left standing.
+                    None => false,
+                }
             }
-            _ => (false, false),
+            _ => false,
         }
     }
 
@@ -4500,15 +4844,16 @@ mod program {
         launcher: &RefCell<Launcher>,
         client: &mut WindowClient<app::RtWindowTransport>,
     ) {
-        let Some(chooser) = overlays.open_with.take() else {
+        let Some(overlay) = overlays.open_with.take() else {
             return;
         };
-        if let Some(candidate) = chooser.chosen() {
+        let _ = overlay.pane.close(client);
+        if let Some(candidate) = overlay.chooser.chosen() {
             launcher.borrow_mut().launch_viewer(
                 client,
                 candidate.bundle_path(),
-                chooser.file_path(),
-                chooser.display_name(),
+                overlay.chooser.file_path(),
+                overlay.chooser.display_name(),
             );
         }
     }
@@ -5051,8 +5396,10 @@ mod program {
         modifiers: AbiModifiers,
     ) -> (bool, bool) {
         let (editor_key, mods) = to_editor_key(key, modifiers);
+        // The rectangle the editor is *drawn* at, so a caret the key moves
+        // lands where its glyphs are.
         let bounds =
-            tairix_browse::render::selection_rect(browser, scale, theme, viewport, toolbar)
+            tairix_browse::render::selection_name_rect(browser, scale, theme, viewport, toolbar)
                 .unwrap_or(Rect::EMPTY);
         let action = match rename.as_mut() {
             Some(field) => field.on_key(editor_key, mods, bounds, &mut damage::sink()),
@@ -5197,7 +5544,6 @@ mod program {
             owner: None,
             delete: None,
             open_with: None,
-            pending_open_with: None,
             operation: None,
             clipboard: None,
             can_chown: tairix_rt::self_origin()
@@ -5513,6 +5859,10 @@ mod program {
         // activation path below (which spawns one), so a launch and its reap
         // agree on the same in-flight set.
         let launcher = RefCell::new(Launcher::new());
+        // The program stores are the same for every window, so one scan serves
+        // them all: the worker fills this and every quick offer and chooser
+        // reads it, which is what keeps a right-click free of I/O.
+        let installed: RefCell<Vec<AppAssociation>> = RefCell::new(Vec::new());
 
         // --- The event loop: serve input, adopt what the reader answered,
         // repaint, and park only when there is nothing of either left. A dead
@@ -5635,6 +5985,7 @@ mod program {
                             &icons,
                             &launcher,
                             &reads,
+                            &installed,
                             event_endpoint,
                             start.role,
                             &event,
@@ -5708,21 +6059,19 @@ mod program {
                         }
                         continue;
                     }
-                    // A bundle scan the reader has answered opens the
-                    // chooser the click asked for. Collected before the
-                    // listings so the chooser appears on the very frame the
-                    // scan landed on.
-                    let mut resumed = false;
-                    if let Some(installed) = reads.take_bundles() {
-                        for win in &mut windows {
-                            resumed |= settle_open_with(&mut win.overlays, &installed);
-                        }
+                    // A bundle scan the reader has answered is taken into the
+                    // one store every window's quick offers and chooser are
+                    // built from, so the next gesture reads an answer that has
+                    // already landed rather than waiting on a disk.
+                    if let Some(found) = reads.take_bundles() {
+                        *installed.borrow_mut() = found;
                     }
                     // A listing the reader has answered is adopted here: the
                     // browser holds the navigation it could not complete, and
                     // resuming it is what turns the answer into entries. It
                     // costs a taken `Option` when nothing is pending, so
                     // asking every turn is free.
+                    let mut resumed = false;
                     for win in &mut windows {
                         match win.browser.resume() {
                             Ok(committed) => resumed |= committed,
@@ -5813,6 +6162,7 @@ mod program {
                 &icons,
                 &launcher,
                 &reads,
+                &installed,
                 event_endpoint,
                 start.role,
                 &event,

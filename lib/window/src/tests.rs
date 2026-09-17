@@ -19,8 +19,8 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
     AppMenuRowView, DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, MenuRefusal,
-    PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest, HAND_OVER_RUN_PATH_MAX,
-    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
+    HAND_OVER_RUN_PATH_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -2196,6 +2196,122 @@ fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
         .open_menu(window, anchor, &menu)
         .expect("a fresh open is accepted");
     assert_ne!(again, open, "an open id is never reused");
+}
+
+/// The text the user committed into a chain's quick-entry field is held for
+/// the owning window alone, answered once, and cleared by the next open.
+///
+/// The commit is pulled rather than delivered because an event is one fixed
+/// frame and a name is wider than that, so the rules that make an outcome
+/// unmistakable have to hold for the pull too.
+#[test]
+fn committed_menu_text_is_owner_bound_taken_once_and_cleared_by_the_next_open() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let other = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
+    let menu = sample_open_menu();
+    let anchor = sample_menu_anchor();
+    let open = client
+        .open_menu(window, anchor, &menu)
+        .expect("the open is accepted");
+
+    // With nothing recorded the pull answers the honest empty rather than a
+    // fabricated name.
+    assert_eq!(client.take_menu_text(window, open), Ok(None));
+
+    // A text may only be recorded against the open that window is still
+    // waiting on: any other names a gesture whose answer has gone.
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .record_menu_text(window, open + 1, "stale.txt"),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .record_menu_text(other, open, "elsewhere.txt"),
+        Err(Errno::OutOfRange)
+    );
+    // And never wider than a field can hold.
+    let over = "n".repeat(APP_MENU_ENTRY_MAX + 1);
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .record_menu_text(window, open, &over),
+        Err(Errno::LengthOutOfRange)
+    );
+
+    loopback
+        .borrow_mut()
+        .server
+        .record_menu_text(window, open, "report.txt")
+        .expect("the commit is recorded against its own open");
+
+    // A window the caller does not own answers exactly like one that never
+    // existed, and reads nothing.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.take_menu_text(window, open),
+        Err(Errno::NotFound),
+        "a foreign pull is refused"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    // A pull naming another open answers nothing and leaves the held text
+    // for the pull that names it.
+    assert_eq!(client.take_menu_text(window, open + 1), Ok(None));
+    assert_eq!(
+        client.take_menu_text(window, open),
+        Ok(Some(String::from("report.txt")))
+    );
+    // Taken once: two readers cannot both act on one commit.
+    assert_eq!(client.take_menu_text(window, open), Ok(None));
+
+    // A commit the application never pulled belongs to the gesture that is
+    // over, so the next open on that window clears it.
+    let mut sink = QueueSink::default();
+    deliver(
+        &loopback,
+        &mut sink,
+        &WindowEvent::MenuClosed {
+            window_id: window,
+            open_id: open,
+            outcome: MenuOutcome::Entered(AppMenuItemId::new(90).expect("a valid id")),
+        },
+    )
+    .expect("the outcome delivers");
+    let again = client
+        .open_menu(window, anchor, &menu)
+        .expect("a fresh open is accepted");
+    loopback
+        .borrow_mut()
+        .server
+        .record_menu_text(window, again, "unpulled.txt")
+        .expect("recorded against the fresh open");
+    deliver(
+        &loopback,
+        &mut sink,
+        &WindowEvent::MenuClosed {
+            window_id: window,
+            open_id: again,
+            outcome: MenuOutcome::Dismissed,
+        },
+    )
+    .expect("the outcome delivers");
+    let third = client
+        .open_menu(window, anchor, &menu)
+        .expect("a third open is accepted");
+    assert_eq!(
+        client.take_menu_text(window, again),
+        Ok(None),
+        "the next open cleared the commit nobody pulled"
+    );
+    assert_eq!(client.take_menu_text(window, third), Ok(None));
 }
 
 /// Two windows each hold their own open, and each answer reaches only its

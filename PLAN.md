@@ -4258,7 +4258,7 @@ transfer, landed in increments:
   FM9-a is landed**: the aarch64 `autoload_input` QEMU vertical now appends,
   after the AW4 terminal round trip, a New-Folder + inline-rename click-through
   that descends into `/Users/root` by layout-reconstructed pointer clicks
-  (`render::selection_rect` for rows, the new forward `render::manager_tool_rect`
+  (`render::selection_name_rect` for rows, the new forward `render::manager_tool_rect`
   over the new `Toolbar::tool_rect` for the New Folder tool, offset by the WM's
   `WindowFrame::insets` client inset) and seat-keyboard `Enter`s, creating and
   naming a folder; the guest PASS gate latches two new `FsNodeMutated`

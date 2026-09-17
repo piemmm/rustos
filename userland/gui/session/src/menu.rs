@@ -3,9 +3,12 @@
 //!
 //! A chain is a root plate and the descendants open beneath it. A **plate** is
 //! a title band over a column of rows: the shared [`TitleBar`] seating no
-//! commands, and the shared [`Menu`]. A **child** is either a submenu — more
-//! rows from the same model — or the session's own information panel, which
-//! hangs where a submenu hangs and dies with the chain.
+//! commands, and the shared [`Menu`]. A **child** is a submenu — more rows from
+//! the same model — or one of the two surfaces the session draws itself: the
+//! information panel, and the quick-entry field that owns the keyboard and
+//! answers with the text it was given. All three hang where a submenu hangs and
+//! die with the chain. A row may carry a command *and* a child, so clicking it
+//! answers while arriving on it opens.
 //!
 //! The application describes and the desktop decides. A client hands over a
 //! model and an anchor; everything after that — titling, placement, drawing,
@@ -21,18 +24,20 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal};
+use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal, APP_MENU_ENTRY_MAX};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
-    plate_rect, ChainChild, ChainModel, FactList, Menu, MenuAction, PlatePlacement, TitleBar,
-    TitleBarEvent,
+    plate_rect, ChainChild, ChainModel, FactList, Menu, MenuAction, PlatePlacement, TextAction,
+    TextField, TitleBar, TitleBarEvent,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_taskbar::MenuSubject;
 
+use tairix_icon::{ArtworkCache, ArtworkResolver, IconKind, IconPicture, IconRequest};
+
 use crate::windows::seat_menu_refusal;
 use tairix_theme::Theme;
-use tairix_wm::{ChromeEpoch, InputEvent, Key, NamedKey};
+use tairix_wm::{ChromeEpoch, InputEvent, Key, Modifiers, NamedKey};
 
 /// Who asked for the chain, and therefore where its one answer goes.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,10 +63,17 @@ pub enum ChainOwner {
 }
 
 /// How a chain ended.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChainOutcome {
     /// A row was chosen.
     Chosen(AppMenuItemId),
+    /// A row's quick-entry field was committed, carrying the field's own id
+    /// and the text the user typed.
+    ///
+    /// Its own outcome rather than a [`Chosen`](Self::Chosen), because a row
+    /// may be chooseable *and* carry a field: the two ids are what tell one
+    /// from the other without the owner inferring anything.
+    Entered(AppMenuItemId, String),
     /// The chain closed without a choice.
     Dismissed,
     /// No chain was brought up at all, for a reason about the **seat** rather
@@ -87,6 +99,22 @@ pub enum ChainAction {
     Closed,
 }
 
+/// One row of the open chain that wants a picture, and the pixel side it must
+/// be rasterised at.
+///
+/// A row *names* the bundle its icon comes from; resolving it is the
+/// session's, because only the session owns an icon cache and a sandboxed
+/// decoder. A paint reads nothing, so the answer is set before the next one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChainIconWant {
+    /// The model row asking, as [`MenuChain::set_row_artwork`] names it.
+    pub row: usize,
+    /// The side, in physical pixels, the picture must be rasterised at.
+    pub side: u32,
+    /// The application bundle the picture comes from.
+    pub bundle: String,
+}
+
 /// One surface the chain occupies on screen.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChainSurface {
@@ -105,6 +133,8 @@ pub enum SurfaceKind {
     Plate(usize),
     /// The session-drawn information panel.
     Info,
+    /// The session-drawn quick-entry field.
+    Entry,
 }
 
 /// One plate of the open chain.
@@ -145,6 +175,32 @@ struct InfoPanel {
     rect: Rect,
     /// What of the panel the session has still to paint. It states facts that
     /// never change, so after its first paint it owes nothing.
+    repaint: Repaint,
+}
+
+/// Logical width of the quick-entry surface at the reference density: wide
+/// enough for a filesystem name at a glance without dwarfing the plate it
+/// hangs off.
+const ENTRY_SURFACE_WIDTH: u32 = 240;
+
+/// The desktop's own quick-entry surface, hanging where a submenu's plate
+/// would.
+///
+/// The field is the session's, so an application never sees a keystroke inside
+/// desktop chrome: it declares that a field exists and what it starts out
+/// holding, and the one answer it gets back is the committed text.
+#[derive(Clone, Debug)]
+struct EntrySurface {
+    /// The id a commit answers with — the field's own, never its row's.
+    id: AppMenuItemId,
+    /// The band, seating no commands, titled from the row the field hangs
+    /// off so the surface reads as part of the chain.
+    band: TitleBar,
+    /// The field itself.
+    field: TextField,
+    /// Where it sits, in screen pixels.
+    rect: Rect,
+    /// What of the surface the session has still to paint.
     repaint: Repaint,
 }
 
@@ -206,6 +262,13 @@ struct OpenChain {
     plates: Vec<Plate>,
     /// The information panel hanging off the deepest plate, if one is open.
     info: Option<InfoPanel>,
+    /// The quick-entry surface hanging off the deepest plate, if one is open.
+    ///
+    /// Its own field rather than a variant beside `info`, because the two
+    /// differ in what they *are* — one states facts and claims a press
+    /// harmlessly, the other owns the keyboard and answers — and a chain
+    /// never has both: opening either closes whatever the plate had.
+    entry: Option<EntrySurface>,
     /// Where the root plate opens, in screen pixels.
     placement: PlatePlacement,
     drag: Option<Drag>,
@@ -317,6 +380,7 @@ impl MenuChain {
             model,
             plates: alloc::vec![root],
             info: None,
+            entry: None,
             placement,
             drag: None,
             outcome: None,
@@ -365,6 +429,13 @@ impl MenuChain {
                 repaint: panel.repaint.clone(),
             });
         }
+        if let Some(entry) = chain.entry.as_ref() {
+            out.push(ChainSurface {
+                rect: entry.rect,
+                kind: SurfaceKind::Entry,
+                repaint: entry.repaint.clone(),
+            });
+        }
         out
     }
 
@@ -383,9 +454,86 @@ impl MenuChain {
                 chain.plates.get_mut(depth).map(|plate| &mut plate.repaint)
             }
             SurfaceKind::Info => chain.info.as_mut().map(|panel| &mut panel.repaint),
+            SurfaceKind::Entry => chain.entry.as_mut().map(|entry| &mut entry.repaint),
         };
         if let Some(owed) = owed {
             *owed = Repaint::clean();
+        }
+    }
+
+    /// Every row of the open chain that names a bundle its icon comes from,
+    /// and the side each must be rasterised at.
+    ///
+    /// Only rows on a plate that is actually up are reported, so a submenu
+    /// nobody opened decodes nothing, and a row already holding a picture of
+    /// the right side is left out, so asking before each present costs a
+    /// comparison rather than a decode.
+    #[must_use]
+    pub fn icon_wants(&self, geom: &ChainGeometry<'_>) -> Vec<ChainIconWant> {
+        let Some(chain) = self.open.as_ref() else {
+            return Vec::new();
+        };
+        let side = Menu::icon_side(geom.scale, geom.theme);
+        let mut wants = Vec::new();
+        for plate in &chain.plates {
+            for &row in &plate.rows {
+                let Some(entry) = chain.model.rows().get(row) else {
+                    continue;
+                };
+                let Some(bundle) = entry.icon_bundle() else {
+                    continue;
+                };
+                if entry
+                    .drawn()
+                    .artwork()
+                    .is_some_and(|art| art.width() == side)
+                {
+                    continue;
+                }
+                wants.push(ChainIconWant {
+                    row,
+                    side,
+                    bundle: bundle.to_string(),
+                });
+            }
+        }
+        wants
+    }
+
+    /// Give model row `row` the picture the session resolved for it, or take
+    /// the one it had when nothing resolved.
+    ///
+    /// Set on the model *and* on whichever open plate draws that row: the
+    /// model is what a plate rebuilt at the same depth is built from, so a
+    /// picture survives a submenu closing and reopening without a second
+    /// decode.
+    /// Borrowed rather than owned: the picture is copied into the model and
+    /// into each plate that draws the row, so taking it by value would buy a
+    /// third copy the caller then drops.
+    pub fn set_row_artwork(&mut self, row: usize, art: Option<&tairix_raster::Surface>) {
+        let Some(chain) = self.open.as_mut() else {
+            return;
+        };
+        if let Some(entry) = chain.model.rows_mut().get_mut(row) {
+            match art {
+                Some(art) => {
+                    *entry.drawn_mut() = entry.drawn().clone().with_artwork(art.clone());
+                }
+                None => *entry.drawn_mut() = entry.drawn().clone().without_artwork(),
+            }
+        }
+        for plate in &mut chain.plates {
+            let Some(at) = plate.rows.iter().position(|&held| held == row) else {
+                continue;
+            };
+            if let Some(item) = plate.menu.items_mut().get_mut(at) {
+                let drawn = item.clone();
+                *item = match art {
+                    Some(art) => drawn.with_artwork(art.clone()),
+                    None => drawn.without_artwork(),
+                };
+                plate.repaint = Repaint::Whole;
+            }
         }
     }
 
@@ -397,6 +545,27 @@ impl MenuChain {
     #[must_use]
     pub fn row_rect(&self, depth: usize, row: usize, geom: &ChainGeometry<'_>) -> Option<Rect> {
         row_rect(self.open.as_ref()?.plates.get(depth)?, row, geom)
+    }
+
+    /// The screen rectangle and text of the row the pointer rests on, when
+    /// that row explains why it cannot be chosen.
+    ///
+    /// The chain places its own plates, so it answers in screen pixels. An
+    /// explanation is shown as the seat's tip on dwell and is never drawn on
+    /// the row: a caption beside every disabled label is what made a plate as
+    /// wide as its longest excuse.
+    #[must_use]
+    pub fn hovered_tip(&self, geom: &ChainGeometry<'_>) -> Option<(Rect, &str)> {
+        let chain = self.open.as_ref()?;
+        // The deepest plate is the one the pointer is working in; an ancestor
+        // keeps its highlight to show the path, not the pointer.
+        let depth = chain.plates.len().checked_sub(1)?;
+        let plate = chain.plates.get(depth)?;
+        let index = plate.menu.current()?;
+        let &model_row = plate.rows.get(index)?;
+        let tip = chain.model.rows().get(model_row)?.tip()?;
+        let rect = row_rect(plate, index, geom)?;
+        Some((rect, tip))
     }
 
     /// Paint the surface `kind` into `surface`, whose extent is that
@@ -417,6 +586,7 @@ impl MenuChain {
         match kind {
             SurfaceKind::Plate(depth) => self.render_plate(depth, surface, geom),
             SurfaceKind::Info => self.render_info(surface, geom),
+            SurfaceKind::Entry => self.render_entry(surface, geom),
         }
     }
 
@@ -474,6 +644,30 @@ impl MenuChain {
         let local = Rect::new(0, 0, panel.rect.width, panel.rect.height);
         lay_plate(surface, (local.width, local.height), geom);
         panel.facts.render(surface, local, geom.scale, geom.theme);
+    }
+
+    /// Paint the quick-entry surface: the band over the field, on the same
+    /// floating ground every plate stands on.
+    fn render_entry(&self, surface: &mut tairix_raster::Surface, geom: &ChainGeometry<'_>) {
+        let Some(entry) = self.open.as_ref().and_then(|chain| chain.entry.as_ref()) else {
+            return;
+        };
+        let local = Rect::new(0, 0, entry.rect.width, entry.rect.height);
+        let band_h = TitleBar::band_height(geom.scale, geom.theme).min(local.height);
+        lay_plate(surface, (local.width, local.height), geom);
+        entry.band.render(
+            surface,
+            Rect::new(0, 0, local.width, band_h),
+            geom.scale,
+            geom.theme,
+            None,
+        );
+        entry.field.render(
+            surface,
+            entry_field_rect(local, band_h, geom),
+            geom.scale,
+            geom.theme,
+        );
     }
 
     /// Close the chain, answering its owner `Dismissed`.
@@ -565,6 +759,30 @@ impl MenuChain {
             }
         }
         acted
+    }
+}
+
+/// Resolve the pictures the open chain's rows asked for, through the
+/// session's one artwork cache.
+///
+/// The identical request a taskbar slot makes for an application's icon, so a
+/// candidate row and that application's slot draw the same picture from the
+/// same cache. The artwork tier reads and validates the bundle's own *signed*
+/// manifest, so nothing outside a bundle's declared icon is ever read and an
+/// unresolvable path resolves to nothing — the row then draws the built-in
+/// glyph rather than blanking.
+pub fn resolve_chain_icons(
+    chain: &mut MenuChain,
+    geom: &ChainGeometry<'_>,
+    resolver: &mut dyn ArtworkResolver,
+    cache: &mut ArtworkCache,
+) {
+    for want in chain.icon_wants(geom) {
+        let request = IconRequest::bundle(IconKind::AppBundle, &want.bundle);
+        let art = cache
+            .artwork(resolver, request, want.side)
+            .and_then(IconPicture::artwork);
+        chain.set_row_artwork(want.row, art);
     }
 }
 
@@ -665,6 +883,16 @@ impl OpenChain {
                 panel.rect = rect;
             }
         }
+        if let Some((width, height)) = self
+            .entry
+            .as_ref()
+            .map(|entry| (entry.rect.width, entry.rect.height))
+        {
+            let rect = self.hang(width, height, geom);
+            if let Some(entry) = self.entry.as_mut() {
+                entry.rect = rect;
+            }
+        }
     }
 
     /// The region a child of the plate at `depth` is placed against: that
@@ -700,6 +928,10 @@ impl OpenChain {
     fn truncate_to(&mut self, depth: usize) {
         self.plates.truncate(depth + 1);
         self.info = None;
+        // A field the user never committed answers nothing: the text is the
+        // commit, so closing the surface discards it rather than reporting a
+        // half-typed name.
+        self.entry = None;
         if let Some(plate) = self.plates.get_mut(depth) {
             plate.open_row = None;
         }
@@ -710,6 +942,13 @@ impl OpenChain {
     fn surface_at(&self, pointer: Point) -> Option<Hit> {
         if self.info.as_ref().is_some_and(|p| p.rect.contains(pointer)) {
             return Some(Hit::Info);
+        }
+        if self
+            .entry
+            .as_ref()
+            .is_some_and(|e| e.rect.contains(pointer))
+        {
+            return Some(Hit::Entry);
         }
         self.plates
             .iter()
@@ -738,6 +977,8 @@ impl OpenChain {
             // The information panel states facts and offers no action, so a
             // pointer over it is claimed and does nothing.
             (_, Some(Hit::Info) | None) => ChainAction::Consumed,
+            // The field is a control, so a press in it positions its caret.
+            (_, Some(Hit::Entry)) => self.entry_pointer(event, geom),
             (_, Some(Hit::Plate(depth))) => self.plate_pointer(depth, event, pointer, geom),
         }
     }
@@ -774,7 +1015,7 @@ impl OpenChain {
         let over = plate.menu.row_at(rows, geom.scale, geom.theme, pointer);
         self.mark_plate(depth, &damage);
         match acted {
-            Some(MenuAction::Activated { index }) => self.choose(depth, index),
+            Some(MenuAction::Activated { index }) => self.choose(depth, index, geom),
             // A click on a row that opens a child keeps its child open
             // rather than acting: the child is what the row is for.
             Some(MenuAction::OpenSubmenu { index }) => self.arrive(depth, Some(index), geom),
@@ -965,6 +1206,11 @@ impl OpenChain {
             return ChainAction::Consumed;
         }
         let child = entry.child().clone();
+        // A field's band is titled from the row it hangs off, taken before
+        // the model borrow ends — and only for the child that wants one, so
+        // an ordinary arrival allocates nothing.
+        let entry_title =
+            matches!(child, ChainChild::Entry(..)).then(|| entry.drawn().label().to_string());
         // Whether anything was actually taken down, which is what tells a
         // no-child arrival from one that closed a plate.
         let closed = self.plates.len() > depth + 1 || self.info.is_some();
@@ -1010,11 +1256,93 @@ impl OpenChain {
                 });
                 ChainAction::Redraw
             }
+            ChainChild::Entry(id, initial) => {
+                let (width, height) = entry_extent(geom);
+                let mut band = TitleBar::plate();
+                band.set_title(&entry_title.unwrap_or_default());
+                let mut field = TextField::new()
+                    .with_text(&initial)
+                    .with_max_len(APP_MENU_ENTRY_MAX);
+                field.set_focused(true);
+                self.entry = Some(EntrySurface {
+                    id,
+                    band,
+                    field,
+                    rect: self.hang(width, height, geom),
+                    repaint: Repaint::Whole,
+                });
+                ChainAction::Redraw
+            }
         }
     }
 
-    /// A row of the plate at `depth` was chosen.
-    fn choose(&mut self, depth: usize, index: usize) -> ChainAction {
+    /// Route a pointer event that landed on the quick-entry surface.
+    ///
+    /// Everything goes to the field, so a press inside it positions its caret
+    /// rather than dismissing the chain. The band above it titles the surface
+    /// and does not drag it: where a plate is placed by the user, a child of a
+    /// row is placed by the chain against the row it hangs off — the same rule
+    /// the information panel is placed by — so there is nothing for a press on
+    /// it to move.
+    fn entry_pointer(&mut self, event: &InputEvent, geom: &ChainGeometry<'_>) -> ChainAction {
+        let Some(entry) = self.entry.as_mut() else {
+            return ChainAction::Consumed;
+        };
+        let band_h = TitleBar::band_height(geom.scale, geom.theme).min(entry.rect.height);
+        let field = entry_field_rect(entry.rect, band_h, geom);
+        let mut damage = damage::sink();
+        let acted = entry
+            .field
+            .on_pointer(event, field, geom.scale, geom.theme, &mut damage);
+        let origin = entry.rect.origin;
+        if !damage.is_empty() {
+            for rect in damage.rects() {
+                entry.repaint.add(Rect::new(
+                    rect.left().saturating_sub(origin.x),
+                    rect.top().saturating_sub(origin.y),
+                    rect.width,
+                    rect.height,
+                ));
+            }
+        }
+        match acted {
+            Some(action) => self.entry_action(action),
+            None if damage.is_empty() => ChainAction::Consumed,
+            None => ChainAction::Redraw,
+        }
+    }
+
+    /// Apply what the quick-entry field reported.
+    ///
+    /// A commit is the chain's answer: the text *is* the outcome, so it ends
+    /// the chain rather than leaving a surface up that has already said
+    /// everything it had to say. A cancel closes the field alone, so Escape
+    /// gets out of it before it gets out of the chain.
+    fn entry_action(&mut self, action: TextAction) -> ChainAction {
+        let Some(entry) = self.entry.as_ref() else {
+            return ChainAction::Consumed;
+        };
+        match action {
+            TextAction::Submitted => {
+                let answer = ChainOutcome::Entered(entry.id, entry.field.text().to_string());
+                self.closing(answer)
+            }
+            TextAction::Cancelled => {
+                self.entry = None;
+                ChainAction::Redraw
+            }
+            TextAction::Edited => ChainAction::Redraw,
+        }
+    }
+
+    /// A row of the plate at `depth` was activated.
+    ///
+    /// A row carrying an id answers the chain with it; one that carries none
+    /// is a row whose whole purpose is its child, so activating it opens or
+    /// keeps that child. That split is the model's to make, which is why the
+    /// shared control reports every activation and never guesses what a
+    /// chevron implies.
+    fn choose(&mut self, depth: usize, index: usize, geom: &ChainGeometry<'_>) -> ChainAction {
         let Some(&model_row) = self.plates.get(depth).and_then(|p| p.rows.get(index)) else {
             return ChainAction::Consumed;
         };
@@ -1024,14 +1352,21 @@ impl OpenChain {
         match entry.id() {
             Some(id) => self.closing(ChainOutcome::Chosen(id)),
             // A submenu and the information row name no id, so there is
-            // nothing for choosing one to answer: it opens or keeps its child.
-            None => ChainAction::Consumed,
+            // nothing for choosing one to answer: activating one opens or
+            // keeps the child it is for.
+            None => self.arrive(depth, Some(index), geom),
         }
     }
 
     /// Route a key. Traversal is the service's, not any application's.
     fn on_key(&mut self, key: Key, geom: &ChainGeometry<'_>) -> ChainAction {
         let deepest = self.plates.len().saturating_sub(1);
+        // An open field owns the keyboard: a menu's traversal keys are text
+        // in a field, and the field's own Escape closes it before the chain's
+        // would dismiss the whole chain.
+        if self.entry.is_some() {
+            return self.entry_key(key, geom);
+        }
         // Escape closes the deepest open child first, so repeated Escape
         // always gets the user out.
         if key == Key::Named(NamedKey::Escape) {
@@ -1067,7 +1402,7 @@ impl OpenChain {
             .on_key(key, rows, geom.scale, geom.theme, &mut damage);
         self.mark_plate(deepest, &damage);
         match acted {
-            Some(MenuAction::Activated { index }) => self.choose(deepest, index),
+            Some(MenuAction::Activated { index }) => self.choose(deepest, index, geom),
             Some(MenuAction::OpenSubmenu { index }) => self.arrive(deepest, Some(index), geom),
             Some(MenuAction::Dismissed) => self.closing(ChainOutcome::Dismissed),
             None => {
@@ -1077,6 +1412,41 @@ impl OpenChain {
                     ChainAction::Redraw
                 }
             }
+        }
+    }
+}
+
+impl OpenChain {
+    /// Route a key into the open quick-entry field.
+    ///
+    /// Everything reaches the field, so a name containing `h` is typed rather
+    /// than moving a highlight. The field's own commit and cancel are the two
+    /// that mean anything to the chain.
+    fn entry_key(&mut self, key: Key, geom: &ChainGeometry<'_>) -> ChainAction {
+        let Some(entry) = self.entry.as_mut() else {
+            return ChainAction::Consumed;
+        };
+        let band_h = TitleBar::band_height(geom.scale, geom.theme).min(entry.rect.height);
+        let field = entry_field_rect(entry.rect, band_h, geom);
+        let mut damage = damage::sink();
+        // The chain owns the seat's keyboard and reports no modifier state of
+        // its own, so a key reaches the field as an unmodified one.
+        let acted = entry
+            .field
+            .on_key(key, Modifiers::default(), field, &mut damage);
+        let origin = entry.rect.origin;
+        for rect in damage.rects() {
+            entry.repaint.add(Rect::new(
+                rect.left().saturating_sub(origin.x),
+                rect.top().saturating_sub(origin.y),
+                rect.width,
+                rect.height,
+            ));
+        }
+        match acted {
+            Some(action) => self.entry_action(action),
+            None if damage.is_empty() => ChainAction::Consumed,
+            None => ChainAction::Redraw,
         }
     }
 }
@@ -1097,6 +1467,8 @@ enum Hit {
     Plate(usize),
     /// The information panel hanging off the deepest plate.
     Info,
+    /// The quick-entry surface hanging off the deepest plate.
+    Entry,
 }
 
 /// Build the plate holding the rows filed under `opener` (`None` for the
@@ -1172,6 +1544,45 @@ fn lay_plate(surface: &mut tairix_raster::Surface, size: (u32, u32), geom: &Chai
             tairix_controls::ChromeLayer::Ground,
         ),
     );
+}
+
+/// The quick-entry surface's extent: its band over one line of field.
+fn entry_extent(geom: &ChainGeometry<'_>) -> (u32, u32) {
+    let pad = geom
+        .scale
+        .scale_length(geom.theme.metrics().control_inset)
+        .max(1);
+    let width = geom.scale.scale_length(ENTRY_SURFACE_WIDTH).max(1);
+    let height = TitleBar::band_height(geom.scale, geom.theme)
+        .saturating_add(TextField::height(geom.scale, geom.theme))
+        .saturating_add(pad.saturating_mul(2))
+        .max(1);
+    (width, height)
+}
+
+/// Where the field sits inside an entry surface whose own rectangle is
+/// `surface` and whose band is `band_h` tall: inset from the plate's edges,
+/// below the band.
+///
+/// It insets from `surface`'s own origin, so the answer is in whatever space
+/// `surface` was given in — the paint asks in the surface's local pixels and
+/// the input routes ask in screen pixels, off one definition, so a caret
+/// cannot land where the glyphs are not.
+fn entry_field_rect(surface: Rect, band_h: u32, geom: &ChainGeometry<'_>) -> Rect {
+    let pad = geom
+        .scale
+        .scale_length(geom.theme.metrics().control_inset)
+        .max(1);
+    Rect::new(
+        surface.left().saturating_add_unsigned(pad),
+        surface
+            .top()
+            .saturating_add_unsigned(band_h.saturating_add(pad)),
+        surface.width.saturating_sub(pad.saturating_mul(2)),
+        surface
+            .height
+            .saturating_sub(band_h.saturating_add(pad.saturating_mul(2))),
+    )
 }
 
 /// A plate's preferred extent: the band over the rows, never narrower than a

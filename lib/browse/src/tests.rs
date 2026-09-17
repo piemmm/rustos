@@ -455,7 +455,7 @@ fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
 #[test]
 fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
     use crate::render::{
-        chrome_height, content_area, row_height, selection_rect, sidebar_view, toolbar_height,
+        chrome_height, content_area, entry_rect, row_height, sidebar_view, toolbar_height,
     };
 
     let theme = Theme::dark();
@@ -479,8 +479,7 @@ fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select(0).expect("select the first entry");
     let area = content_area(window, Scale::ONE, &theme, Some(&places), BAND);
-    let listing =
-        selection_rect(&browser, Scale::ONE, &theme, area, BAND).expect("first row drawn");
+    let listing = entry_rect(&browser, Scale::ONE, &theme, area, BAND, 0).expect("first row drawn");
     assert_eq!(
         listing.origin.y,
         i32::try_from(chrome_height(Scale::ONE, &theme, BAND)).expect("chrome")
@@ -1151,7 +1150,7 @@ fn render_into_a_tiny_viewport_does_not_panic() {
 #[test]
 fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     use crate::render::{
-        chrome_height, delete_dialog_rect, grid_metrics, open_with_chooser_rect,
+        chrome_height, delete_dialog_rect, grid_metrics, open_with_chooser_extent,
         properties_panel_rect, row_height, scrollbar_bounds, sidebar_view, toolbar_height,
     };
 
@@ -1194,9 +1193,11 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
         delete_dialog_rect(vp, hidpi, &theme).height
             > delete_dialog_rect(vp, Scale::ONE, &theme).height
     );
+    // The chooser is its own popup, sized to its content, so what scales with
+    // the density is the extent it asks that popup to be.
     assert!(
-        open_with_chooser_rect(vp, hidpi, &theme).height
-            > open_with_chooser_rect(vp, Scale::ONE, &theme).height
+        open_with_chooser_extent(3, hidpi, &theme, vp).1
+            > open_with_chooser_extent(3, Scale::ONE, &theme, vp).1
     );
 
     // And the whole view still paints at the higher density.
@@ -2096,7 +2097,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
 
 #[test]
 fn the_grid_view_renders_and_hit_tests_the_first_tile() {
-    use crate::render::{entry_index_at, selection_rect};
+    use crate::render::{entry_index_at, entry_rect};
     use tairix_geometry::Point;
 
     let theme = Theme::dark();
@@ -2117,8 +2118,8 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
 
     // The row shares its leftover width out between its tiles, so the first
     // tile is asked where it is rather than assumed to hug the window's edge.
-    let first = selection_rect(&browser, Scale::ONE, &theme, vp, BAND)
-        .expect("the first tile is on screen");
+    let first =
+        entry_rect(&browser, Scale::ONE, &theme, vp, BAND, 0).expect("the first tile is on screen");
     assert!(
         first.left() > 0,
         "the shared-out width reaches the row's leading end: {first:?}"
@@ -3057,24 +3058,97 @@ mod rename_model {
     }
 
     #[test]
-    fn selection_rect_locates_the_selected_row_and_is_none_when_empty() {
+    fn entry_rect_locates_a_drawn_row_and_is_none_when_the_view_seats_nothing() {
         let theme = Theme::dark();
         let viewport = Rect::new(0, 0, 200, 200);
 
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(1).expect("select second entry");
-        let rect = crate::render::selection_rect(&browser, Scale::ONE, &theme, viewport, BAND)
-            .expect("a selected row has a rectangle");
+        let rect = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+            .expect("a drawn row has a rectangle");
         // It lies within the window and below the one-row path-bar header.
         let header = crate::render::row_height(Scale::ONE, &theme);
         assert!(rect.origin.y >= i32::try_from(header).unwrap());
         assert!(rect.width > 0 && rect.height > 0);
 
-        // The empty /System/Fonts has no selection, hence no rectangle.
+        // The empty /System/Fonts seats no entry, hence no rectangle.
         browser.open_index(2).expect("enter System");
         browser.open_index(0).expect("enter Fonts");
         assert_eq!(
-            crate::render::selection_rect(&browser, Scale::ONE, &theme, viewport, BAND),
+            crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 0),
+            None
+        );
+    }
+
+    /// The in-place rename field goes over the item's **name**, in both views
+    /// — not over the whole row (icon, name, size and date) or the whole tile
+    /// (picture above the label).
+    ///
+    /// Regression: the editor was drawn at the item rectangle, so in the list
+    /// view it covered the icon and both trailing columns and in the icon view
+    /// it covered the picture.
+    #[test]
+    fn the_rename_field_sits_over_the_name_in_both_views() {
+        use crate::layout::ViewMode;
+
+        let theme = Theme::dark();
+        let viewport = Rect::new(0, 0, 400, 300);
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(1).expect("select the second entry");
+
+        for view in [ViewMode::List, ViewMode::Grid] {
+            browser.set_view_mode(view);
+            let item = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+                .expect("the selected item is drawn");
+            let name =
+                crate::render::selection_name_rect(&browser, Scale::ONE, &theme, viewport, BAND)
+                    .expect("and so is its name");
+            assert!(!name.is_empty(), "{view:?}: the field has somewhere to go");
+            assert_eq!(
+                name.intersection(&item),
+                name,
+                "{view:?}: the field stays inside the item it is renaming"
+            );
+            assert!(
+                name.width < item.width || name.height < item.height,
+                "{view:?}: the name is a part of the item, not the whole of it: \
+                 {name:?} of {item:?}"
+            );
+        }
+
+        // In the list view the name is the leading cell, so the field starts
+        // past the icon and stops well before the size and date columns.
+        browser.set_view_mode(ViewMode::List);
+        let item = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+            .expect("the row");
+        let name = crate::render::selection_name_rect(&browser, Scale::ONE, &theme, viewport, BAND)
+            .expect("the name cell");
+        assert!(
+            name.left() > item.left(),
+            "the row's icon is not under the field"
+        );
+        assert!(
+            name.right() < item.right(),
+            "and neither are the size and date columns"
+        );
+
+        // In the icon view the name is the label band, so the field is below
+        // the picture.
+        browser.set_view_mode(ViewMode::Grid);
+        let tile = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+            .expect("the tile");
+        let label =
+            crate::render::selection_name_rect(&browser, Scale::ONE, &theme, viewport, BAND)
+                .expect("the label band");
+        assert!(
+            label.top() > tile.top(),
+            "the tile's picture is not under the field"
+        );
+
+        // Nothing selected, nothing to edit.
+        browser.open_index(2).expect("enter System");
+        browser.open_index(0).expect("enter the empty Fonts");
+        assert_eq!(
+            crate::render::selection_name_rect(&browser, Scale::ONE, &theme, viewport, BAND),
             None
         );
     }
@@ -5320,28 +5394,38 @@ fn context_commands_list_covers_every_variant_once() {
 
 #[test]
 fn the_context_menu_row_ids_are_the_inverse_of_the_command_list() {
-    use crate::chrome::{context_command_from_item, CONTEXT_COMMANDS};
+    use crate::chrome::{context_choice_from_item, ContextChoice, CONTEXT_COMMANDS};
     use tairix_abi::window_ipc::AppMenuItemId;
 
-    // A row's id is its command's position in CONTEXT_COMMANDS, one-based, so
-    // reading a chosen row back is the exact inverse of numbering it and no
-    // second table can drift. An id past the list names no command (fail
-    // closed) rather than resolving to a neighbour.
+    // The numbering runs: the commands in CONTEXT_COMMANDS order, then the
+    // Rename row's own quick-entry field, then one id per quick candidate.
+    // Reading a chosen row back is the exact inverse of numbering it, so no
+    // second table can drift and the three kinds of answer can never be
+    // mistaken for one another.
+    let id = |index: usize| {
+        AppMenuItemId::new(u16::try_from(index + 1).expect("a small index")).expect("non-zero")
+    };
     for (index, &command) in CONTEXT_COMMANDS.iter().enumerate() {
-        let raw = u16::try_from(index + 1).expect("a small index");
-        let id = AppMenuItemId::new(raw).expect("a non-zero id");
-        assert_eq!(context_command_from_item(id), Some(command));
+        assert_eq!(
+            context_choice_from_item(id(index)),
+            Some(ContextChoice::Command(command))
+        );
     }
-    let past = u16::try_from(CONTEXT_COMMANDS.len() + 1).expect("a small index");
     assert_eq!(
-        context_command_from_item(AppMenuItemId::new(past).expect("non-zero")),
-        None
+        context_choice_from_item(id(CONTEXT_COMMANDS.len())),
+        Some(ContextChoice::RenameCommit)
     );
+    for candidate in 0..4 {
+        assert_eq!(
+            context_choice_from_item(id(CONTEXT_COMMANDS.len() + 1 + candidate)),
+            Some(ContextChoice::OpenWithCandidate(candidate))
+        );
+    }
 }
 
 #[test]
 fn the_context_menu_declares_one_row_per_command_with_its_label_and_caption() {
-    use crate::chrome::{context_menu, ContextMenuModel, CONTEXT_COMMANDS};
+    use crate::chrome::{context_menu, ContextMenuModel, ContextQuick, CONTEXT_COMMANDS};
     use tairix_abi::window_ipc::AppMenuRowView;
 
     // The desktop draws the menu, so what this asserts is the *declaration*:
@@ -5352,7 +5436,8 @@ fn the_context_menu_declares_one_row_per_command_with_its_label_and_caption() {
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
     let model = ContextMenuModel::for_browser(&browser, true);
-    let menu = context_menu(model, "Files").expect("the fixed rows fit the bounds");
+    let menu = context_menu(model, "Files", ContextQuick::default())
+        .expect("the fixed rows fit the bounds");
     assert_eq!(menu.title(), "Files");
 
     let items: alloc::vec::Vec<_> = menu
@@ -5371,7 +5456,9 @@ fn the_context_menu_declares_one_row_per_command_with_its_label_and_caption() {
 
 #[test]
 fn a_declared_context_row_is_disabled_with_its_reason_never_left_out() {
-    use crate::chrome::{context_menu, ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
+    use crate::chrome::{
+        context_menu, ContextCommand, ContextMenuModel, ContextQuick, CONTEXT_COMMANDS,
+    };
     use tairix_abi::window_ipc::AppMenuRowView;
 
     // An empty directory makes every selection-scoped command inactionable.
@@ -5384,7 +5471,8 @@ fn a_declared_context_row_is_disabled_with_its_reason_never_left_out() {
     assert_eq!(browser.selected_name(), None);
 
     let model = ContextMenuModel::for_browser(&browser, false);
-    let menu = context_menu(model, "Files").expect("the fixed rows fit the bounds");
+    let menu = context_menu(model, "Files", ContextQuick::default())
+        .expect("the fixed rows fit the bounds");
     let items: alloc::vec::Vec<_> = menu
         .rows()
         .filter_map(|(row, _parent)| match row {
@@ -5451,9 +5539,78 @@ fn the_context_menu_reason_distinguishes_why_a_row_cannot_act() {
     }
 }
 
+/// A declared reason is tip text: the decoded row states it for the seat to
+/// show on dwell, and the drawn row carries none of it.
+///
+/// The reported defect was the other half of that — every reason drawn beside
+/// its label, so this menu was as wide as "only a file opens with an
+/// application".
+#[test]
+fn a_declared_context_reason_reaches_a_tip_and_never_the_drawn_row() {
+    use crate::chrome::{context_menu, ContextCommand, ContextMenuModel, ContextQuick};
+    use tairix_controls::{ChainModel, Menu};
+    use tairix_geometry::Scale;
+    use tairix_theme::Theme;
+
+    let browser = Browser::open_root(activation_source()).expect("root");
+    assert_eq!(browser.selected_name(), Some("Docs"), "a directory");
+    let model = ContextMenuModel::for_browser(&browser, false);
+    let refused = model.reason(ContextCommand::OpenWith);
+    assert!(!refused.is_empty(), "the directory refuses Open With…");
+
+    let wire = context_menu(model, "Files", ContextQuick::default())
+        .expect("the fixed rows fit the bounds");
+    let decoded = ChainModel::from_app_menu("Files", &wire, None);
+    let row = decoded
+        .rows()
+        .iter()
+        .find(|row| row.drawn().label() == ContextCommand::OpenWith.label())
+        .expect("the Open With… row is declared, not left out");
+
+    assert_eq!(row.tip(), Some(refused), "the row still says why, as a tip");
+    assert!(
+        ContextCommand::OpenWith.shortcut().is_empty(),
+        "the row advertises no accelerator, so its drawn form is bare"
+    );
+    assert_eq!(
+        row.drawn(),
+        &tairix_controls::MenuItem::new(ContextCommand::OpenWith.label())
+            .with_state(tairix_controls::ControlState::default().with_enabled(false)),
+        "the drawn row is the label and the refusal, with no reason on it"
+    );
+
+    // And the plate is the width of its labels: no reason is measured into it.
+    let theme = Theme::dark();
+    let drawn = Menu::new(
+        decoded
+            .rows()
+            .iter()
+            .map(|row| row.drawn().clone())
+            .collect::<alloc::vec::Vec<_>>(),
+    );
+    let widest_label = decoded
+        .rows()
+        .iter()
+        .map(|row| row.drawn().label().len())
+        .max()
+        .expect("rows");
+    assert!(
+        widest_label >= ContextCommand::Open.label().len(),
+        "the widest label is a label, not an excuse"
+    );
+    assert!(
+        drawn.preferred_width(Scale::ONE, &theme)
+            < Menu::new(alloc::vec![tairix_controls::MenuItem::new(refused)])
+                .preferred_width(Scale::ONE, &theme),
+        "a plate carrying no reason is narrower than one reason would make it"
+    );
+}
+
 #[test]
 fn only_removal_declares_the_destructive_emphasis() {
-    use crate::chrome::{context_menu, ContextCommand, ContextMenuModel, CONTEXT_COMMANDS};
+    use crate::chrome::{
+        context_menu, ContextCommand, ContextMenuModel, ContextQuick, CONTEXT_COMMANDS,
+    };
     use tairix_abi::window_ipc::{AppMenuRole, AppMenuRowView};
 
     // Emphasis is a property of the command, not of whether it is actionable,
@@ -5461,8 +5618,12 @@ fn only_removal_declares_the_destructive_emphasis() {
     // verb destroys something wears the destructive role.
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
-    let menu = context_menu(ContextMenuModel::for_browser(&browser, true), "Files")
-        .expect("the fixed rows fit the bounds");
+    let menu = context_menu(
+        ContextMenuModel::for_browser(&browser, true),
+        "Files",
+        ContextQuick::default(),
+    )
+    .expect("the fixed rows fit the bounds");
     let roles: alloc::vec::Vec<_> = menu
         .rows()
         .filter_map(|(row, _parent)| match row {
@@ -5482,7 +5643,7 @@ fn only_removal_declares_the_destructive_emphasis() {
 
 #[test]
 fn a_context_menu_title_the_bounds_refuse_opens_nothing() {
-    use crate::chrome::{context_menu, ContextMenuModel};
+    use crate::chrome::{context_menu, ContextMenuModel, ContextQuick};
     use tairix_abi::window_ipc::APP_MENU_LABEL_MAX;
 
     // The title is untrusted display text bounded exactly as a row label is, so
@@ -5491,8 +5652,8 @@ fn a_context_menu_title_the_bounds_refuse_opens_nothing() {
     let browser = Browser::open_root(activation_source()).expect("root");
     let model = ContextMenuModel::for_browser(&browser, false);
     let over_long = "F".repeat(APP_MENU_LABEL_MAX + 1);
-    assert!(context_menu(model, &over_long).is_err());
-    assert!(context_menu(model, "Files").is_ok());
+    assert!(context_menu(model, &over_long, ContextQuick::default()).is_err());
+    assert!(context_menu(model, "Files", ContextQuick::default()).is_ok());
 }
 
 #[test]
@@ -5585,29 +5746,35 @@ fn the_open_with_scroll_clamps_and_reveals_the_selection() {
 fn the_open_with_chooser_draws_and_hit_tests_the_same_rows() {
     use crate::open_with::{AppAssociation, OpenWithChooser};
     use crate::render::{
-        draw_open_with_chooser, open_with_chooser_rect, open_with_row_at, open_with_visible_rows,
+        draw_open_with_chooser, open_with_chooser_extent, open_with_chooser_rect, open_with_row_at,
+        open_with_visible_rows, OPEN_WITH_MAX_ROWS,
     };
+    use tairix_icon::NoArtwork;
 
     // Paint and press resolve through one placement, so a click lands on
     // exactly the row the user saw — including after a scroll, where the row at
     // a given position on screen is a *different* candidate. A press off the
     // rows resolves to nothing (fail closed).
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 480);
+    let screen = Rect::new(0, 0, 480, 480);
     let apps: alloc::vec::Vec<AppAssociation> = (0..20)
         .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
         .collect();
     let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
     let mut chooser = OpenWithChooser::new(&refs, "/f", "f").expect("twenty candidates");
 
+    // The chooser is its own popup, so the viewport it draws and hit-tests in
+    // is the extent it asked for.
+    let (w, h) = open_with_chooser_extent(apps.len(), Scale::ONE, &theme, screen);
+    let vp = Rect::new(0, 0, w, h);
     let visible = open_with_visible_rows(vp, Scale::ONE, &theme);
-    assert!(visible > 0, "a 480x480 window shows rows");
-    assert!(
-        visible < apps.len(),
-        "the panel is a fixed shape, so a long list scrolls inside it"
+    assert_eq!(
+        visible, OPEN_WITH_MAX_ROWS,
+        "a list longer than the bound fills the popup the bound sizes"
     );
+    assert!(visible < apps.len(), "and a longer list scrolls inside it");
 
-    let bounds = open_with_chooser_rect(vp, Scale::ONE, &theme);
+    let bounds = open_with_chooser_rect(vp);
     // Probe down the panel's own column until a row answers, so this asserts
     // the slot → candidate mapping rather than re-deriving the band's height.
     let topmost = |chooser: &OpenWithChooser| {
@@ -5650,7 +5817,14 @@ fn the_open_with_chooser_draws_and_hit_tests_the_same_rows() {
     // Drawing is clip-safe: a viewport with no room for the panel paints
     // nothing rather than faulting.
     let mut surface = Surface::new(480, 480).expect("surface");
-    draw_open_with_chooser(&mut surface, &chooser, Scale::ONE, &theme, vp);
+    draw_open_with_chooser(
+        &mut surface,
+        &chooser,
+        Scale::ONE,
+        &theme,
+        vp,
+        &mut NoArtwork,
+    );
     let mut tiny = Surface::new(8, 8).expect("surface");
     draw_open_with_chooser(
         &mut tiny,
@@ -5658,6 +5832,214 @@ fn the_open_with_chooser_draws_and_hit_tests_the_same_rows() {
         Scale::ONE,
         &theme,
         Rect::new(0, 0, 8, 8),
+        &mut NoArtwork,
+    );
+}
+
+/// The popup is sized to its content: a chooser with one candidate is one row
+/// tall, not eight, and whatever it is sized to is what its list shows.
+///
+/// Regression: the chooser was always eight rows tall and 80% of the window
+/// wide however many candidates there were, while the row count was derived
+/// independently from the content height — so the sizing and the list
+/// disagreed and a single candidate got a plate of dead space.
+#[test]
+fn the_open_with_chooser_is_sized_to_its_candidates_and_its_rows_agree() {
+    use crate::open_with::{AppAssociation, OpenWithChooser};
+    use crate::render::{open_with_chooser_extent, open_with_visible_rows, OPEN_WITH_MAX_ROWS};
+
+    let theme = Theme::dark();
+    let screen = Rect::new(0, 0, 800, 600);
+    let apps: alloc::vec::Vec<AppAssociation> = (0..20)
+        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+        .collect();
+
+    let mut last = 0;
+    for count in [1usize, 2, 3, OPEN_WITH_MAX_ROWS, OPEN_WITH_MAX_ROWS + 12] {
+        let (w, h) = open_with_chooser_extent(count, Scale::ONE, &theme, screen);
+        let vp = Rect::new(0, 0, w, h);
+        let shown = open_with_visible_rows(vp, Scale::ONE, &theme);
+        assert_eq!(
+            shown,
+            count.min(OPEN_WITH_MAX_ROWS),
+            "{count} candidates: the popup shows exactly what its extent was sized for"
+        );
+        // Growing the list grows the popup, up to the bound.
+        if count <= OPEN_WITH_MAX_ROWS {
+            assert!(
+                h > last,
+                "{count} candidates: a shorter list is a shorter popup"
+            );
+        } else {
+            assert_eq!(
+                h, last,
+                "past the bound the popup stops growing and scrolls"
+            );
+        }
+        last = h;
+        // And a chooser over that many candidates hit-tests inside it.
+        let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().take(count).collect();
+        let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("a candidate");
+        assert_eq!(chooser.candidates().len(), count);
+    }
+}
+
+/// The chooser's Open and Cancel actions are drawn and hit-tested through one
+/// definition, and Open with no current candidate resolves to nothing.
+#[test]
+fn the_open_with_chooser_offers_open_and_cancel() {
+    use crate::open_with::{AppAssociation, OpenWithChooser};
+    use crate::render::{
+        open_with_action_at, open_with_chooser_extent, open_with_row_at, OpenWithAction,
+    };
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let screen = Rect::new(0, 0, 800, 600);
+    let app = AppAssociation::new("Viewer", "/Apps/Viewer.app", alloc::vec![]);
+    let refs = alloc::vec![&app];
+    let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("one candidate");
+    let (w, h) = open_with_chooser_extent(1, Scale::ONE, &theme, screen);
+    let vp = Rect::new(0, 0, w, h);
+
+    // Both actions are reachable, and each resolves to itself.
+    let found: alloc::vec::Vec<OpenWithAction> = (vp.top()..vp.bottom())
+        .flat_map(|y| (vp.left()..vp.right()).map(move |x| Point::new(x, y)))
+        .filter_map(|at| open_with_action_at(&chooser, vp, Scale::ONE, &theme, at))
+        .collect();
+    assert!(
+        found.contains(&OpenWithAction::Open) && found.contains(&OpenWithAction::Cancel),
+        "a chooser that cannot be left by a button is one Escape away from being stuck"
+    );
+
+    // The action band is not a candidate row, so a press on Open never also
+    // selects a row.
+    let on_open = (vp.top()..vp.bottom())
+        .flat_map(|y| (vp.left()..vp.right()).map(move |x| Point::new(x, y)))
+        .find(|at| {
+            open_with_action_at(&chooser, vp, Scale::ONE, &theme, *at) == Some(OpenWithAction::Open)
+        })
+        .expect("Open is drawn");
+    assert_eq!(
+        open_with_row_at(&chooser, vp, Scale::ONE, &theme, on_open),
+        None
+    );
+}
+
+/// The quick submenu offers the highest-ranked candidates a plate can hold,
+/// and the complete chooser still holds the rest.
+#[test]
+fn the_quick_open_with_candidates_are_the_top_of_the_ranked_list() {
+    use crate::open_with::{quick_applications, AppAssociation, OPEN_WITH_QUICK_MAX};
+
+    let apps: alloc::vec::Vec<AppAssociation> = (0..OPEN_WITH_QUICK_MAX + 5)
+        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+        .collect();
+    let ranked: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
+    let quick = quick_applications(&ranked);
+    assert_eq!(quick.len(), OPEN_WITH_QUICK_MAX, "bounded by the plate");
+    let names: alloc::vec::Vec<&str> = quick.iter().map(|app| app.name()).collect();
+    assert_eq!(
+        names,
+        ranked
+            .iter()
+            .take(OPEN_WITH_QUICK_MAX)
+            .map(|app| app.name())
+            .collect::<alloc::vec::Vec<&str>>(),
+        "in the ranked order, so the first row is the best match"
+    );
+    // A shorter list is offered whole, and an empty one offers nothing.
+    let two: alloc::vec::Vec<&AppAssociation> = apps.iter().take(2).collect();
+    assert_eq!(quick_applications(&two).len(), 2);
+    assert!(quick_applications(&[]).is_empty());
+}
+
+/// The Rename row carries a pre-filled field and the "Open With…" row carries
+/// the candidates, each only where its own row is actionable.
+#[test]
+fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
+    use crate::chrome::{
+        context_menu, ContextCommand, ContextMenuModel, ContextQuick, CONTEXT_COMMANDS,
+    };
+    use crate::open_with::AppAssociation;
+    use tairix_abi::window_ipc::AppMenuRowView;
+
+    let viewer = AppAssociation::new("Viewer", "/Apps/Viewer.app", alloc::vec![]);
+    let candidates = alloc::vec![&viewer];
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    let model = ContextMenuModel::for_browser(&browser, true);
+    let quick = ContextQuick {
+        name: "notes.txt",
+        candidates: &candidates,
+    };
+    let menu = context_menu(model, "Files", quick).expect("the rows fit");
+
+    let rows: alloc::vec::Vec<(AppMenuRowView<'_>, Option<usize>)> = menu.rows().collect();
+    let rename = rows
+        .iter()
+        .find_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) if item.label == ContextCommand::Rename.label() => {
+                Some(*item)
+            }
+            _ => None,
+        })
+        .expect("the Rename row");
+    let field = rename.entry.expect("it carries a field");
+    assert_eq!(
+        field.initial, "notes.txt",
+        "pre-filled with the current name"
+    );
+    assert_ne!(field.id, rename.id, "and answering an id of its own");
+
+    // The candidate is filed under the Open With… row, carries its bundle,
+    // and the commands all come first.
+    let open_with = rows
+        .iter()
+        .position(|(row, _)| {
+            matches!(row, AppMenuRowView::Item(item) if item.label == ContextCommand::OpenWith.label())
+        })
+        .expect("the Open With… row");
+    let (candidate, parent) = rows
+        .iter()
+        .find(|(row, _)| matches!(row, AppMenuRowView::Item(item) if item.label == "Viewer"))
+        .expect("the candidate row");
+    assert_eq!(*parent, Some(open_with));
+    let AppMenuRowView::Item(candidate) = candidate else {
+        panic!("the candidate is an item");
+    };
+    assert_eq!(candidate.icon_bundle, "/Apps/Viewer.app");
+    let last_command = rows
+        .iter()
+        .rposition(|(row, _)| {
+            matches!(row, AppMenuRowView::Item(item)
+                if CONTEXT_COMMANDS.iter().any(|c| c.label() == item.label))
+        })
+        .expect("a command row");
+    assert!(
+        rows.iter().position(
+            |(row, _)| matches!(row, AppMenuRowView::Item(item) if item.label == "Viewer")
+        ) > Some(last_command),
+        "every command is pushed before any candidate, so a long list crowds none off the plate"
+    );
+
+    // An empty directory makes both rows inactionable, so neither quick
+    // action is offered — a field could not commit a rename that cannot
+    // happen, and a submenu could not open a file that is not selected.
+    let mut empty = Browser::open_root(MockFs::fixture()).expect("root");
+    empty.open_index(2).expect("enter System");
+    empty.open_index(0).expect("enter the empty Fonts");
+    let menu = context_menu(ContextMenuModel::for_browser(&empty, false), "Files", quick)
+        .expect("the rows fit");
+    assert!(
+        menu.rows().all(|(row, parent)| {
+            parent.is_none()
+                && match row {
+                    AppMenuRowView::Item(item) => item.entry.is_none(),
+                    _ => true,
+                }
+        }),
+        "no field and no submenu where no row can act"
     );
 }
 

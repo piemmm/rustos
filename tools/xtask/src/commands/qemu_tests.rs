@@ -10962,9 +10962,23 @@ fn reconstruct_manager_item_menu(
         .map_err(|err| format!("{what}: entry {index} cannot be selected: {err:?}"))?;
     // The app holds no clipboard, so the model is the one a freshly opened
     // window offers over a selected regular file: `Open` enabled and first.
+    //
+    // The quick actions carry the selection's name — which the app takes from
+    // the same browser — and no candidate applications. The candidate list is
+    // a bundle scan the app keeps warm on a worker, and the host cannot
+    // observe whether it has landed, so reconstructing one would assert a
+    // plate the guest may not be drawing. Leaving it empty takes the
+    // *narrowest* plate the guest can draw, which shares its left edge and
+    // row bands with every wider one; `aiming_inside_the_row_whatever_the`
+    // `candidates_add` pins that the point this returns stays inside the real
+    // row.
     let wire = tairix_browse::context_menu(
         tairix_browse::ContextMenuModel::for_browser(&browser, false),
         tairix_browse::MANAGER_MENU_TITLE,
+        tairix_browse::ContextQuick {
+            name,
+            candidates: &[],
+        },
     )
     .map_err(|err| format!("{what}: the manager's context menu is invalid: {err:?}"))?;
     // No information row is declared, so the attested identity a chain would
@@ -12896,6 +12910,105 @@ mod tests {
             rows[0], rows[1],
             "both manager windows' Open rows reconstruct to one point",
         );
+    }
+
+    /// The MIME claims an association is built from.
+    fn alloc_vec_of(claims: &[&str]) -> Vec<String> {
+        claims.iter().map(|c| String::from(*c)).collect()
+    }
+
+    /// The *Open* row's aim stays inside the row the guest actually draws,
+    /// whatever the quick-action candidates add to the plate.
+    ///
+    /// The reconstruction states no candidate applications, because the host
+    /// cannot observe whether the app's warm bundle scan has landed. The
+    /// guest's plate is therefore the reconstruction's or **wider** — a
+    /// candidate submenu puts a chevron on the "Open With…" row, and nothing
+    /// a quick action adds can make a plate narrower. This pins that the
+    /// wider plate still contains the point the script clicks, so the aim
+    /// cannot drift onto the plate's edge or off it.
+    #[test]
+    fn the_open_rows_aim_stays_inside_the_row_whatever_the_candidates_add() {
+        use super::{
+            planted_entry_index, planted_home_browser, reconstruct_manager_item_menu,
+            reconstruction_chain_geometry, HANDOVER_FIRST_MANAGER_WINDOW,
+            HANDOVER_SECOND_MANAGER_WINDOW,
+        };
+        use tairix_desktop_session::menu::{ChainOwner, MenuChain};
+        use tairix_geometry::Rect;
+
+        let theme = tairix_theme::Theme::dark();
+        let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
+        let name = core::str::from_utf8(picture).expect("a planted name is UTF-8");
+        let floating = tairix_theme::Theme::dark().floating();
+        let geom = reconstruction_chain_geometry(&floating);
+
+        // The app's own candidate for this picture: the viewer, which the
+        // script launches and which claims it.
+        let viewer = tairix_browse::AppAssociation::new(
+            "View",
+            "/System/Applications/view.app",
+            alloc_vec_of(&["image/png"]),
+        );
+
+        for slot in [
+            HANDOVER_FIRST_MANAGER_WINDOW,
+            HANDOVER_SECOND_MANAGER_WINDOW,
+        ] {
+            let (press, aim) = reconstruct_manager_item_menu(&theme, slot, picture, "test")
+                .unwrap_or_else(|e| panic!("slot {slot} reconstructs: {e}"));
+
+            // The same plate the guest draws once its scan has landed.
+            let mut browser = planted_home_browser("test").expect("the planted home opens");
+            browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+            let index = planted_entry_index(&browser, name, "test").expect("the picture is listed");
+            browser.select(index).expect("the picture selects");
+            let candidates: [&tairix_browse::AppAssociation; 1] = [&viewer];
+            let declared = tairix_browse::context_menu(
+                tairix_browse::ContextMenuModel::for_browser(&browser, false),
+                tairix_browse::MANAGER_MENU_TITLE,
+                tairix_browse::ContextQuick {
+                    name,
+                    candidates: &candidates,
+                },
+            )
+            .expect("the manager's context menu is valid");
+            let model =
+                tairix_controls::ChainModel::from_app_menu(declared.title(), &declared, None);
+            // The candidate really reached the plate, so this is a wider plate
+            // than the reconstruction's rather than the same one twice.
+            assert!(
+                model.rows().iter().any(|row| row.drawn().label()
+                    == tairix_browse::ContextCommand::OpenWith.label()
+                    && row.drawn().is_submenu()),
+                "the viewer candidate put no submenu on the Open With… row",
+            );
+            let row = model
+                .rows()
+                .iter()
+                .position(|row| row.drawn().label() == tairix_browse::ContextCommand::Open.label())
+                .expect("the menu has an Open row");
+            let mut chain = MenuChain::new();
+            chain
+                .open(
+                    ChainOwner::Backdrop,
+                    model,
+                    tairix_desktop_session::windows::window_menu_placement(Rect::new(
+                        press.x, press.y, 0, 0,
+                    )),
+                    &geom,
+                )
+                .expect("the wider menu opens");
+            let drawn = chain
+                .row_rect(0, row, &geom)
+                .expect("the Open row lays out on the wider plate");
+
+            assert!(
+                drawn.contains(aim),
+                "slot {slot}: the aim {aim:?} falls outside the Open row {drawn:?} \
+                 the guest draws once its candidate scan has landed",
+            );
+        }
     }
 
     /// The viewer's window covers the first manager window's item area, which
