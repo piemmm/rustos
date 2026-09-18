@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 
-use crate::theme::{Appearance, Theme, ThemeId};
+use crate::theme::{Accessibility, Appearance, Theme, ThemeId};
 
 /// Why a registry mutation was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -25,27 +25,48 @@ pub enum ThemeError {
     DuplicateId(ThemeId),
 }
 
-/// The set of available themes plus the active selection.
+/// The set of available themes, the active selection, and the accessibility
+/// axes laid over it.
 ///
 /// The two built-in themes are held in a fixed-size array so the registry
 /// is provably never empty: [`active`](Self::active) can always return a
 /// theme without an `unwrap` or an out-of-bounds index.
+///
+/// [`active`](Self::active) answers the *drawn* theme — the selected one
+/// with [`Accessibility`] applied — because every consumer wants the theme
+/// as it is on screen and none of them should have to remember to apply the
+/// axes itself. The adjusted theme is derived once, whenever the selection
+/// or the axes move, rather than per call: `active` is read on every paint
+/// and every hit test, and re-deriving a metric table there would put the
+/// axis arithmetic on the hot path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThemeRegistry {
     builtins: [Theme; 2],
     custom: Vec<Theme>,
     active: ThemeId,
+    axes: Accessibility,
+    /// The selected theme with [`axes`](Self::accessibility) applied: what
+    /// [`active`](Self::active) answers.
+    drawn: Theme,
 }
 
 impl ThemeRegistry {
     /// A registry holding the built-in dark and light themes, with the
-    /// dark theme active (TAIRiX's default).
+    /// built-in of the default [`Appearance`] active.
     #[must_use]
     pub fn with_builtins() -> Self {
+        let builtins = [Theme::dark(), Theme::light()];
+        let active = Self::builtin_for(Appearance::default());
+        let drawn = match builtins.iter().find(|theme| theme.id() == active) {
+            Some(theme) => theme.clone(),
+            None => builtins[0].clone(),
+        };
         Self {
-            builtins: [Theme::dark(), Theme::light()],
+            builtins,
             custom: Vec::new(),
-            active: ThemeId::DARK,
+            active,
+            axes: Accessibility::default(),
+            drawn,
         }
     }
 
@@ -74,7 +95,40 @@ impl ThemeRegistry {
             return Err(ThemeError::UnknownTheme(id));
         }
         self.active = id;
+        self.redraw();
         Ok(())
+    }
+
+    /// Lay `axes` over whichever theme is active, returning whether they
+    /// changed.
+    ///
+    /// This is the runtime contrast / density / reduced-motion control's
+    /// primitive, and the counterpart of
+    /// [`set_appearance`](Self::set_appearance): the axes belong to the
+    /// desktop rather than to a theme, so they survive a theme switch and a
+    /// custom theme gets them too.
+    pub fn set_accessibility(&mut self, axes: Accessibility) -> bool {
+        if self.axes == axes {
+            return false;
+        }
+        self.axes = axes;
+        self.redraw();
+        true
+    }
+
+    /// The accessibility axes laid over the active theme.
+    #[must_use]
+    pub const fn accessibility(&self) -> Accessibility {
+        self.axes
+    }
+
+    /// Re-derive the drawn theme from the selection and the axes.
+    fn redraw(&mut self) {
+        let selected = match self.get(self.active) {
+            Some(theme) => theme,
+            None => &self.builtins[0],
+        };
+        self.drawn = selected.clone().with_axes(self.axes);
     }
 
     /// The id of the active theme.
@@ -95,6 +149,7 @@ impl ThemeRegistry {
     pub fn set_appearance(&mut self, appearance: Appearance) -> ThemeId {
         let id = Self::builtin_for(appearance);
         self.active = id;
+        self.redraw();
         id
     }
 
@@ -121,14 +176,24 @@ impl ThemeRegistry {
         }
     }
 
-    /// The active theme.
+    /// The active theme **as it is drawn**: the selected one with the
+    /// accessibility axes applied.
     ///
-    /// Never fails: the active id always names a registered theme (the
-    /// built-ins are always present and [`set_active`](Self::set_active)
-    /// rejects unknown ids), and the fallback to the first built-in keeps
-    /// the method total even if a future change broke that invariant.
+    /// Never fails, and never needs to: the drawn theme is derived and held
+    /// whenever the selection or the axes move, so there is nothing here to
+    /// look up or fall back from.
     #[must_use]
-    pub fn active(&self) -> &Theme {
+    pub const fn active(&self) -> &Theme {
+        &self.drawn
+    }
+
+    /// The active theme as it was *registered*, with no accessibility axes
+    /// applied.
+    ///
+    /// What a surface that is editing the axes reads, so it shows what the
+    /// theme declares rather than what the current axes already did to it.
+    #[must_use]
+    pub fn selected(&self) -> &Theme {
         match self.get(self.active) {
             Some(theme) => theme,
             None => &self.builtins[0],

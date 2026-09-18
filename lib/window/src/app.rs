@@ -34,7 +34,7 @@ use tairix_abi::window_ipc::{LayerDepth, WindowEvent, WindowSizing, WINDOW_ENDPO
 use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
 use tairix_display::{winframe, SERIAL};
 use tairix_raster::Surface;
-use tairix_theme::ThemeRegistry;
+use tairix_theme::{Accessibility, ThemeRegistry};
 
 use crate::client::{WindowClient, WindowTransport};
 use crate::desktop::Desktop;
@@ -357,6 +357,7 @@ pub fn bring_up_desktop<T: WindowTransport>(
         .map_err(|err| ShellError::new(EXIT_NO_WINDOW, "cannot draw this desktop", err))?;
     let mut themes = ThemeRegistry::with_builtins();
     themes.set_appearance(desktop.appearance());
+    themes.set_accessibility(Accessibility::of(&desktop.info()));
     Ok((desktop, themes))
 }
 
@@ -366,7 +367,8 @@ pub fn bring_up_desktop<T: WindowTransport>(
 ///
 /// What a [`Wake::DesktopChanged`] owes, and the exact pair
 /// [`bring_up_desktop`] establishes at start-up, so an application follows a
-/// light/dark switch with the same one call it opened with. The read is a
+/// light/dark switch — or a contrast, density or motion change — with the
+/// same one call it opened with. The read is a
 /// plain syscall rather than a call to the session, so it costs no IPC round
 /// trip on the loop that owes the user a frame; the answer is `false` when the
 /// published state equals the one already held, so a wake with nothing in it
@@ -398,6 +400,7 @@ pub fn adopt_desktop(desktop: &mut Desktop, themes: &mut ThemeRegistry) -> Resul
         return Ok(false);
     }
     themes.set_appearance(desktop.appearance());
+    themes.set_accessibility(Accessibility::of(&desktop.info()));
     Ok(true)
 }
 

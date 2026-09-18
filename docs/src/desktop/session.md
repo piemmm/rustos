@@ -413,7 +413,7 @@ picked up without a restart.
 
 ### The pinboard settings live on the desktop model
 
-`Desktop<S>` owns the user's `tairix_wallpaper::PinboardSettings` — the
+`Desktop<S>` owns the user's `tairix_wallpaper::DesktopSettings` — the
 wallpaper and its fit, the backdrop colour, the icon arrangement, and the sort
 order (`plans/PINBOARD.md` §2) — as the **single** copy inside the session:
 `DesktopShell` reads them back out of the desktop (`Desktop::settings`) rather
@@ -425,11 +425,22 @@ An edit arrives through `Desktop::apply_settings`, which reports what the edit
 asks for instead of making the caller guess: `None` means the settings were
 already in force and there is nothing to do at all, and otherwise the layer must
 be repainted — that is what a change *is* — while the returned `PinboardChange`
-names the further work on top of it (`relayout` when the arrangement moved,
-`relist` when the sort order changed, `wallpaper` when the image or its fit
-changed). Changing the sort order therefore never decodes a wallpaper, changing
-the wallpaper never re-reads the folder, and a new backdrop colour costs one
-repaint.
+names the further work on top of it. It has two halves, because they are two
+different embedders' jobs. `BackdropWork` is the desktop layer's own
+(`relayout` when the arrangement moved, `relist` when the sort order changed,
+`wallpaper` when the image or its fit changed), and `AppearanceWork` reaches
+past it: `theme` when the appearance, contrast, density or motion moved, and
+`scale` when the interface scale did. Changing the sort order therefore never
+decodes a wallpaper, changing the wallpaper never re-reads the folder, never
+re-themes, and a new backdrop colour costs one repaint.
+
+`adopt_appearance` is the one place the appearance half is put into effect —
+the theme registry, the output's density, and the republish every open
+application converges on. Bring-up drives it too, from the very same
+function, so the desktop a user logs in to and the desktop they get from
+changing a setting are drawn by one piece of code: a stored `appearance =
+light` that nothing read at start-up would be a desktop coming up in a
+setting the user did not choose.
 
 The settings' own vocabulary is deliberately *not* the file browser's:
 `IconSort` is bridged to `lib/browse`'s `SortMode` by one small function in
@@ -710,6 +721,8 @@ disagree:
   own surfaces, but an app's window is the app's pixels, so without the publish
   the desktop would
   switch and every open window would stay in the appearance just left behind.
+  So does an adopted settings change, which is the other way the desktop's
+  appearance moves — see below.
 
 A desktop the record cannot describe is reported on `stderr` and nothing is
 sent; each application keeps the last state it was given. See
@@ -1728,8 +1741,8 @@ folder about 150 times a second, waking the compositor on every completion
   exactly where it used to be. Slower under load, never wrong.
 - **A settings change is published off the loop, and adopted only once it
   landed.** Both routes into the desktop's settings — a row chosen from the
-  backdrop menu, and an `Apply` from the wallpaper chooser — submit to the
-  settings worker and adopt nothing. The worker publishes to the desktop's own
+  backdrop menu, and an `Apply` from the wallpaper chooser or the Settings
+  application — submit to the settings worker and adopt nothing. The worker publishes to the desktop's own
   app-data scope and answers with what the store then holds; the serve loop
   adopts *that* on the wake it nudges, and re-lays-out, re-lists, and re-prepares
   the wallpaper only for the change the answer actually names. So the adopted

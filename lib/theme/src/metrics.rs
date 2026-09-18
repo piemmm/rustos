@@ -13,6 +13,8 @@
 //! time, so the same theme stays a comfortable physical size across panel
 //! densities.
 
+use crate::motion::Density;
+
 /// Corner radii and border thickness, in logical pixels at the reference
 /// density (scaled to physical pixels by `tairix_geometry::Scale`).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -187,4 +189,66 @@ pub struct Metrics {
     /// thinner the wider the window gets. Logical pixels like every other
     /// metric, so the fade covers the same apparent distance at any density.
     pub title_hue_reach: u32,
+}
+
+/// How much of a [`Density::Normal`] spacing metric each density keeps, as a
+/// percentage.
+///
+/// One step either side of normal, applied to the same three metrics, so the
+/// axis is a single number per density rather than three hand-tuned tables
+/// that could disagree about which way "compact" goes.
+const fn spacing_percent(density: Density) -> u32 {
+    match density {
+        Density::Compact => 85,
+        Density::Normal => 100,
+        Density::Comfortable => 120,
+    }
+}
+
+/// `value` scaled by `percent`, rounded to nearest and never below one
+/// logical pixel.
+///
+/// A spacing metric that rounded to zero would collapse a control into its
+/// own label, so the floor is part of the conversion rather than left to
+/// each reader.
+const fn scaled(value: u32, percent: u32) -> u32 {
+    let scaled = value.saturating_mul(percent).saturating_add(50) / 100;
+    if scaled == 0 {
+        1
+    } else {
+        scaled
+    }
+}
+
+impl Metrics {
+    /// These metrics at `density`.
+    ///
+    /// Density is the *spacing* axis, so it moves exactly the three lengths
+    /// that decide how much room a control takes: its standard height (which
+    /// is also the minimum interactive target,
+    /// [`control_height`](Self::control_height)), the padding inside it
+    /// ([`control_inset`](Self::control_inset)), and the gap between adjacent
+    /// controls ([`control_gap`](Self::control_gap)). Every Reactive Alloy
+    /// control resolves its anatomy from those, so one derived table changes
+    /// the whole desktop's density without a second code path anywhere.
+    ///
+    /// Nothing else moves, and that is the point: corner radii, border and
+    /// instrument thicknesses, selector and bead extents, and the window
+    /// furniture are what a control *is*, not how much room it is given.
+    /// Scaling them would make a compact desktop draw different-looking
+    /// controls rather than closer-packed ones, and would change the meaning
+    /// of a state — which density must never do.
+    ///
+    /// Derived rather than authored per density so a theme declares one
+    /// table and a density cannot silently diverge from it.
+    #[must_use]
+    pub const fn at_density(self, density: Density) -> Self {
+        let percent = spacing_percent(density);
+        Self {
+            control_height: scaled(self.control_height, percent),
+            control_inset: scaled(self.control_inset, percent),
+            control_gap: scaled(self.control_gap, percent),
+            ..self
+        }
+    }
 }

@@ -2,15 +2,18 @@
 
 Stability tier: **experimental**.
 
-The desktop pinboard wallpaper engine: the per-user pinboard settings
-document (wallpaper choice, fit, backdrop colour, icon flow, sort order),
-the shipped default wallpaper catalog and its bounded fail-closed listing
-model, and the one pure wallpaper-placement geometry the desktop renderer
-and the chooser's preview both draw through. It defines the validated
-settings model (`PinboardSettings`) and the closed key registry over the
-store's document (`SettingsKey`) — plus the shipped wallpaper identity
-(`WALLPAPER_STORE`, `DEFAULT_WALLPAPER`) and the placement geometry
-(`place`, `decode_request`).
+The desktop's user-scope settings engine: the per-user **desktop settings
+document** (the backdrop keys — wallpaper choice, fit, backdrop colour, icon
+flow, sort order — and the appearance keys — light/dark, contrast, density,
+motion, interface scale), the shipped default wallpaper catalog and its
+bounded fail-closed listing model, the one pure wallpaper-placement geometry
+the desktop renderer and the chooser's preview both draw through, and the one
+client every surface asks the session to adopt a change with. It defines the
+validated settings model (`DesktopSettings`) and the closed key registry over
+the store's document (`SettingsKey`) — plus the shipped wallpaper identity
+(`WALLPAPER_STORE`, `DEFAULT_WALLPAPER`), the placement geometry (`place`,
+`decode_request`), and the apply client (`ApplyOutcome`, and `apply` behind
+the `rt` feature).
 
 ## Where the document lives, and who may touch it
 
@@ -47,6 +50,18 @@ key's own closed vocabulary:
 | `backdrop`  | `theme`, or six bare hex digits `rrggbb`           | `theme`                                       |
 | `icons`     | `leading` \| `trailing`                            | `leading`                                     |
 | `sort`      | `name` \| `kind` \| `size` \| `date`               | `name`                                        |
+| `appearance`| `dark` \| `light`                                  | `dark`                                        |
+| `contrast`  | `normal` \| `high` \| `monochrome`                 | `normal`                                      |
+| `density`   | `compact` \| `normal` \| `comfortable`             | `normal`                                      |
+| `motion`    | `full` \| `reduced`                                | `full`                                        |
+| `scale`     | a bare decimal percentage in `Scale`'s own range   | `100`                                         |
+
+`SettingsKey::PINBOARD` and `SettingsKey::APPEARANCE` are the two groups: the
+backdrop and the icons on it, and how every surface is drawn. They share one
+document because they share one owner and one published scope. The four
+appearance value sets are `tairix_abi::desktop`'s own, imported rather than
+restated, because the session publishes them to every application over the
+window channel.
 
 A colour is written **bare** — `112233`, never `#112233`. That is now a
 *registry* rule rather than a grammar one: the format engine quotes a value
@@ -58,23 +73,27 @@ bare digits and [`Rgb::to_hex`] writes them. A wallpaper *path* carrying a
 
 ## Two readings, deliberately different
 
-`PinboardSettings::load` is the **tolerant** one, for a document held in a
+`DesktopSettings::load` is the **tolerant** one, for a document held in a
 store: a value the registry refuses leaves that one field at its documented
 default and is *named* to the caller, so one stale setting costs only
 itself and never blanks a user's desktop. It reads through
 `tairix_appconf::Lookup`, so the same loader serves the session's own
 published-scope handle and the `Document` a foreign read answers with.
 
-`decode` is the **strict** one, for a document that arrived over the
+`merge` is the **strict** one, for a document that arrived over the
 pinboard channel: a line outside the grammar, a key outside the registry,
 or a value outside a key's closed set is a defect in the *sender* rather
 than something a person typed, and adopting a desktop the sender did not
-describe is worse than refusing it (`DocumentRefusal` names which).
+describe is worse than refusing it (`DocumentRefusal` names which). It
+merges over what the desktop already holds rather than replacing it, so a
+surface that renders only the keys it edits cannot reset a setting it never
+showed — and refuses whole, leaving the base untouched.
 
-`PinboardSettings::document` renders the canonical form both readings
+`DesktopSettings::document` renders the canonical form both readings
 accept: every registry key, in registry order, including one still at its
-default, so a render/read round trip is exact. Publishing to the store
-instead goes key by key, so only what actually changed is written.
+default, so a render/read round trip is exact. That is what the session
+persists; a surface *asking* for a change renders one group with
+`document_of`.
 
 A settings document is untrusted input either way: the format engine bounds
 the document, the line, the key and the value, and `MAX_WALLPAPER_PATH_LEN`
@@ -105,7 +124,9 @@ rectangle, and whether the source tiles — every dimension checked/widened
 through `u64` so it never panics and never divides by zero, however extreme
 the aspect ratio.
 
-The crate performs no I/O and holds no authority: reading and writing the
+The registry, the catalog and the fit geometry perform no I/O and hold no
+authority; the `rt`-gated apply client makes exactly one call, asking the
+session to adopt a document it cannot itself write. Reading and writing the
 document, and listing a wallpaper directory, go through the secured VFS
 under the caller's own kernel-attested identity — a per-user store is an
 ordinary write under that user's own identity. A wallpaper path surviving

@@ -48,14 +48,27 @@ tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # The desktop's icon vocabulary: each category's sidebar glyph, every one of
 # which carries a first-party built-in glyph so a row can never blank.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The desktop's user-scope settings document: the closed key registry this
+# surface reads its rows from and renders its applies into. The registry is
+# the session's, not this application's — Settings holds no authority to
+# write it and only asks.
+tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
+# The four closed value sets the appearance rows offer, read from the one
+# place the document and the window channel both take them from.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 
 # Everything only the freestanding `Run` binary links is pulled in for the
 # bare-metal targets it is actually built for; on the host the binary is an
 # inert stub with no extra dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
 # The frozen `Errno` and the window-channel wire vocabulary the `Run` binary
-# speaks.
-tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# speaks are already a plain dependency; these are the two transports only
+# the freestanding binary has: the app-data client, over which it reads the
+# desktop session's *published* settings by naming the publisher on a
+# request shape that carries no scope field, and the shared apply client's
+# one round trip.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0", features = ["rt"] }
 # The app half of the window channel: the shared app shell that owns the
 # transport, the parked event mailbox, the desktop query, and the retained
 # window surface.

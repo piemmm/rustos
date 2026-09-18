@@ -9,6 +9,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
 use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_abi::{Errno, Time64};
 use tairix_browse::{
@@ -20,12 +21,12 @@ use tairix_icon::NoArtwork;
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
-use tairix_wallpaper::{Backdrop, IconFlow, IconSort, PinboardSettings, Rgb, WallpaperChoice};
+use tairix_wallpaper::{Backdrop, DesktopSettings, IconFlow, IconSort, Rgb, WallpaperChoice};
 use tairix_wm::{Key, NamedKey};
 
 use crate::desktop::{
-    Desktop, DesktopAction, DesktopActivation, DesktopOutcome, PinboardChange, DESKTOP_MARGIN,
-    RELIST_MIN_INTERVAL_NS,
+    BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, PinboardChange,
+    DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
 };
 use crate::pinboard::{self, PinboardCommand};
 use tairix_controls::{ChainChild, ChainModel};
@@ -109,16 +110,16 @@ fn desktop_of(entries: Vec<Entry>) -> Desktop<FakeDir> {
 }
 
 /// The default settings with the icon arrangement and sort order replaced.
-fn arranged_by(icons: IconFlow, sort: IconSort) -> PinboardSettings {
-    PinboardSettings {
+fn arranged_by(icons: IconFlow, sort: IconSort) -> DesktopSettings {
+    DesktopSettings {
         icons,
         sort,
-        ..PinboardSettings::default()
+        ..DesktopSettings::default()
     }
 }
 
 /// A desktop over `entries` under `settings`, already listed once.
-fn desktop_with(entries: Vec<Entry>, settings: PinboardSettings) -> Desktop<FakeDir> {
+fn desktop_with(entries: Vec<Entry>, settings: DesktopSettings) -> Desktop<FakeDir> {
     let mut desktop = Desktop::new(FakeDir(holding(entries)), home());
     let _ = desktop.apply_settings(settings);
     desktop.relist(0);
@@ -991,8 +992,8 @@ fn changing_the_arrangement_relays_the_icons_out_without_relisting() {
     let change = desktop
         .apply_settings(arranged_by(IconFlow::Trailing, IconSort::default()))
         .expect("the arrangement changed");
-    assert!(change.relayout);
-    assert!(!change.relist && !change.wallpaper);
+    assert!(change.backdrop.relayout);
+    assert!(!change.backdrop.relist && !change.backdrop.wallpaper);
     assert_eq!(listings(&folder), 1, "an arrangement is not a listing");
 
     let after = cell(&layout_of(&desktop), 0);
@@ -1037,7 +1038,7 @@ fn the_kind_order_groups_folders_then_bundles_then_files() {
 fn adopting_settings_reports_only_the_work_the_edit_implies() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     assert_eq!(
-        desktop.apply_settings(PinboardSettings::default()),
+        desktop.apply_settings(DesktopSettings::default()),
         None,
         "the settings already in force cost nothing at all"
     );
@@ -1045,11 +1046,11 @@ fn adopting_settings_reports_only_the_work_the_edit_implies() {
     let sorted = desktop
         .apply_settings(arranged_by(IconFlow::default(), IconSort::Size))
         .expect("the order changed");
-    assert!(sorted.relist);
-    assert!(!sorted.relayout && !sorted.wallpaper);
+    assert!(sorted.backdrop.relist);
+    assert!(!sorted.backdrop.relayout && !sorted.backdrop.wallpaper);
 
     let base = desktop.settings().clone();
-    let recoloured = desktop.apply_settings(PinboardSettings {
+    let recoloured = desktop.apply_settings(DesktopSettings {
         backdrop: Backdrop::Colour(Rgb::new(1, 2, 3)),
         ..base
     });
@@ -1061,13 +1062,13 @@ fn adopting_settings_reports_only_the_work_the_edit_implies() {
 
     let base = desktop.settings().clone();
     let papered = desktop
-        .apply_settings(PinboardSettings {
+        .apply_settings(DesktopSettings {
             wallpaper: WallpaperChoice::None,
             ..base
         })
         .expect("the wallpaper changed");
-    assert!(papered.wallpaper);
-    assert!(!papered.relist && !papered.relayout);
+    assert!(papered.backdrop.wallpaper);
+    assert!(!papered.backdrop.relist && !papered.backdrop.relayout);
 }
 
 // --- The context-menu gesture and its commands ----------------------------
@@ -1291,7 +1292,7 @@ fn the_menu_offers_exactly_the_closed_row_set_with_the_settings_in_force_marked(
 
 #[test]
 fn every_row_names_the_command_at_its_own_index() {
-    let model = pinboard::model(true, &PinboardSettings::default());
+    let model = pinboard::model(true, &DesktopSettings::default());
     let commands: Vec<PinboardCommand> = (1..=u16::try_from(model.rows().len()).expect("small"))
         .map(|raw| {
             PinboardCommand::from_item(AppMenuItemId::new(raw).expect("a non-zero row id"))
@@ -1313,7 +1314,7 @@ fn every_row_names_the_command_at_its_own_index() {
 /// mean: an id is a command's own position, never a row's.
 #[test]
 fn a_menu_opened_on_the_backdrop_offers_no_open_row_and_shifts_no_id() {
-    let bare = pinboard::model(false, &PinboardSettings::default());
+    let bare = pinboard::model(false, &DesktopSettings::default());
     assert_eq!(
         bare.rows().first().map(|row| row.drawn().label()),
         Some("New Folder")
@@ -1328,7 +1329,7 @@ fn a_menu_opened_on_the_backdrop_offers_no_open_row_and_shifts_no_id() {
         "only `Open` is left out"
     );
 
-    let over_icon = pinboard::model(true, &PinboardSettings::default());
+    let over_icon = pinboard::model(true, &DesktopSettings::default());
     assert!(
         over_icon.rows()[1].drawn().is_group_break(),
         "with Open above it, New Folder starts its own group"
@@ -1347,7 +1348,7 @@ fn a_menu_opened_on_the_backdrop_offers_no_open_row_and_shifts_no_id() {
 /// that begins nothing.
 #[test]
 fn the_menu_groups_its_rows_by_what_they_are() {
-    let model = pinboard::model(true, &PinboardSettings::default());
+    let model = pinboard::model(true, &DesktopSettings::default());
     let grouped: Vec<&str> = model
         .rows()
         .iter()
@@ -1370,7 +1371,7 @@ fn the_menu_groups_its_rows_by_what_they_are() {
 #[test]
 fn the_model_declares_no_row_the_chain_cannot_answer_with() {
     for on_icon in [false, true] {
-        let model = pinboard::model(on_icon, &PinboardSettings::default());
+        let model = pinboard::model(on_icon, &DesktopSettings::default());
         assert!(!model.rows().is_empty(), "a plate with nothing to choose");
         for row in model.rows() {
             assert_eq!(
@@ -1379,5 +1380,65 @@ fn the_model_declares_no_row_the_chain_cannot_answer_with() {
                 "the backdrop menu declares no submenu and hangs no window"
             );
         }
+    }
+}
+
+#[test]
+fn an_appearance_edit_asks_for_a_re_theme_and_nothing_of_the_backdrop() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let base = desktop.settings().clone();
+    let themed = desktop
+        .apply_settings(DesktopSettings {
+            contrast: Contrast::High,
+            ..base
+        })
+        .expect("the contrast changed");
+    assert!(themed.appearance.theme);
+    assert!(!themed.appearance.scale);
+    assert!(themed.appearance.any());
+    // A contrast change must not re-list the folder or decode a wallpaper.
+    assert_eq!(themed.backdrop, BackdropWork::default());
+
+    let base = desktop.settings().clone();
+    let rescaled = desktop
+        .apply_settings(DesktopSettings {
+            scale: Scale::from_percent(150).expect("150% is a scale"),
+            ..base
+        })
+        .expect("the scale changed");
+    assert!(rescaled.appearance.scale);
+    assert!(!rescaled.appearance.theme);
+    assert_eq!(rescaled.backdrop, BackdropWork::default());
+}
+
+#[test]
+fn a_backdrop_edit_asks_for_no_appearance_work() {
+    let mut desktop = desktop_of(vec![file("a.txt")]);
+    let base = desktop.settings().clone();
+    let papered = desktop
+        .apply_settings(DesktopSettings {
+            wallpaper: WallpaperChoice::None,
+            ..base
+        })
+        .expect("the wallpaper changed");
+    assert!(!papered.appearance.any());
+}
+
+#[test]
+fn every_appearance_axis_asks_for_the_re_theme() {
+    // Each of the four is a way the desktop is drawn, so each owes the
+    // republish every open application converges on.
+    let axes: [fn(&mut DesktopSettings); 4] = [
+        |s| s.appearance = Appearance::Light,
+        |s| s.contrast = Contrast::Monochrome,
+        |s| s.density = Density::Compact,
+        |s| s.motion = Motion::Reduced,
+    ];
+    for axis in axes {
+        let mut desktop = desktop_of(vec![file("a.txt")]);
+        let mut wanted = desktop.settings().clone();
+        axis(&mut wanted);
+        let change = desktop.apply_settings(wanted).expect("an axis moved");
+        assert!(change.appearance.theme);
     }
 }

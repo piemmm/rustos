@@ -142,6 +142,20 @@ fn every_pane_states_how_the_machine_stands() {
                     pane.pane
                 );
             }
+            // A composed pane makes no statement: its rows are what it
+            // says, and it must actually have some.
+            PaneBacking::Composed => {
+                assert!(
+                    pane.composition().is_some(),
+                    "{:?} claims controls it composes nothing for",
+                    pane.pane
+                );
+                assert!(
+                    !pane.settings.is_empty(),
+                    "{:?} composes controls no search can reach",
+                    pane.pane
+                );
+            }
         }
     }
 }
@@ -152,7 +166,7 @@ fn a_pane_only_declares_settings_it_could_show() {
     // cannot exist without a row that shows it: a pane that composes no
     // controls declares none.
     for pane in CATEGORIES.iter().flat_map(|row| row.panes) {
-        if matches!(pane.backing, PaneBacking::None { .. }) {
+        if !matches!(pane.backing, PaneBacking::Composed) {
             assert!(
                 pane.settings.is_empty(),
                 "{:?} declares a setting it cannot show",
@@ -335,4 +349,33 @@ fn an_empty_query_is_not_a_search() {
     assert!(strip_rows(Category::General, "")
         .iter()
         .any(|row| matches!(row, StripRow::Pane(Category::General, _))));
+}
+
+#[test]
+fn the_bundle_presents_no_icon_bar_slot_and_runs_one_instance() {
+    // Two properties the *manifest* carries and no Rust constant can: this
+    // window is part of the desktop rather than an application the user
+    // manages, so closing it ends the program and there is no slot to keep
+    // a handle on it — and a second Settings would be a second view of one
+    // machine's configuration, each able to overwrite the other's applies.
+    //
+    // A singleton is the signed header's default, so what this pins is that
+    // no `multi-instance` key was ever added; the icon-bar exception has to
+    // be declared, so that one is read directly.
+    let manifest = include_str!("../AppInfo.toml");
+    let declares = |key: &str| {
+        manifest
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .any(|line| line.starts_with(key))
+    };
+    assert!(
+        declares("icon-bar = false"),
+        "the manifest must declare no icon-bar slot"
+    );
+    assert!(
+        !declares("multi-instance"),
+        "a second Settings could overwrite the first's applies"
+    );
 }

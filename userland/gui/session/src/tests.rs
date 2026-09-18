@@ -9242,7 +9242,7 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
 
 use crate::desktop::Desktop;
 use tairix_browse::GridView;
-use tairix_wallpaper::{Backdrop, PinboardSettings, Rgb};
+use tairix_wallpaper::{Backdrop, DesktopSettings, Rgb};
 use tairix_window::WindowHost;
 use tairix_wm::{Region, Window};
 
@@ -9279,7 +9279,7 @@ type Gesture<'a> = dyn Fn(&mut Desktop<TreeSource>, &mut Region) + 'a;
 /// `desktop` with its backdrop set to the flat colour `rgb`.
 fn with_backdrop(desktop: &mut Desktop<TreeSource>, rgb: Rgb) {
     let base = desktop.settings().clone();
-    let _ = desktop.apply_settings(PinboardSettings {
+    let _ = desktop.apply_settings(DesktopSettings {
         backdrop: Backdrop::Colour(rgb),
         ..base
     });
@@ -9746,7 +9746,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
     chain
         .open(
             ChainOwner::Backdrop,
-            crate::pinboard::model(true, &PinboardSettings::default()),
+            crate::pinboard::model(true, &DesktopSettings::default()),
             crate::windows::window_menu_placement(Rect::new(at.x, at.y, 0, 0)),
             &geom,
         )
@@ -9770,7 +9770,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
     chain
         .open(
             ChainOwner::Backdrop,
-            crate::pinboard::model(false, &PinboardSettings::default()),
+            crate::pinboard::model(false, &DesktopSettings::default()),
             crate::windows::window_menu_placement(Rect::new(
                 screen.right() - 1,
                 screen.bottom() - 1,
@@ -9824,7 +9824,7 @@ fn a_chain_under_a_new_owner_does_not_inherit_the_displaced_chains_windows() {
         chain
             .open(
                 ChainOwner::Backdrop,
-                crate::pinboard::model(true, &PinboardSettings::default()),
+                crate::pinboard::model(true, &DesktopSettings::default()),
                 crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
                 &geom,
             )
@@ -9882,7 +9882,7 @@ fn moving_a_menu_highlight_recomposites_two_rows_and_not_the_plate() {
     chain
         .open(
             ChainOwner::Backdrop,
-            crate::pinboard::model(true, &PinboardSettings::default()),
+            crate::pinboard::model(true, &DesktopSettings::default()),
             crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
             &geom,
         )
@@ -10504,7 +10504,7 @@ fn an_owned_menu_plate_frosts_what_is_behind_it() {
     chain
         .open(
             ChainOwner::Backdrop,
-            crate::pinboard::model(true, &PinboardSettings::default()),
+            crate::pinboard::model(true, &DesktopSettings::default()),
             crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
             &geom,
         )

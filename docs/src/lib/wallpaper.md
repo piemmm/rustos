@@ -1,10 +1,11 @@
-# `tairix-wallpaper` — the desktop pinboard wallpaper engine
+# `tairix-wallpaper` — the desktop settings document and wallpaper engine
 
-`lib/wallpaper` is the shared engine behind the desktop pinboard: the
-per-user pinboard settings document, the shipped wallpaper set and the
-listing model a chooser draws its thumbnail grid from, and the one wallpaper
-placement geometry the desktop renderer and the chooser's preview both draw
-through. The settings are **data on the volume**, never a compiled-in table:
+`lib/wallpaper` is the shared engine behind the desktop's own user-scope
+configuration: the per-user **desktop settings document**, the shipped
+wallpaper set and the listing model a chooser draws its thumbnail grid from,
+the one wallpaper placement geometry the desktop renderer and the chooser's
+preview both draw through, and the one client every surface asks the session
+to adopt a change with. The settings are **data on the volume**, never a compiled-in table:
 one document per user, in the desktop session's **published** app-data scope
 ([the app-data store](./appdata.md), `plans/APPDATA.md` §3.11).
 Because there is exactly one definition of the registry, of the catalog, and
@@ -30,7 +31,7 @@ the store rather than from convention:
   application of that user could also *rewrite*.
 
 An **absent** store is not an error: it means the documented defaults
-(`PinboardSettings::default`), and so does an account whose session has never
+(`DesktopSettings::default`), and so does an account whose session has never
 run. A document naming only some keys leaves the rest at their default.
 Pinboard settings are per-user state only; there is no machine-wide store,
 and the published scope has no layer beneath it, so nobody can make the
@@ -38,23 +39,32 @@ desktop appear to say something it never said.
 
 ## Two readings, deliberately different
 
-`PinboardSettings::load` is the **tolerant** one, for a document held in a
+`DesktopSettings::load` is the **tolerant** one, for a document held in a
 store: a value the registry refuses leaves that one field at its documented
 default and is *named* to the caller, so one stale setting costs only itself
 and never blanks a user's desktop. It reads through `tairix_appconf::Lookup`,
 so the same loader serves the session's own published-scope handle and the
 `Document` a foreign read answers with.
 
-`decode` is the **strict** one, for a document that arrived over the pinboard
+`merge` is the **strict** one, for a document that arrived over the pinboard
 channel: a line outside the grammar, a key outside the registry, or a value
 outside a key's closed set is a defect in the *sender* rather than something
 a person typed, and adopting a desktop the sender did not describe is worse
-than refusing it. `DocumentRefusal` names which.
+than refusing it. `DocumentRefusal` names which. It refuses whole — the merge
+runs on a copy, so a refusal partway through leaves the base untouched.
 
-`PinboardSettings::document` renders the canonical form both readings accept:
+It **merges** rather than replaces, because the desktop has more than one
+surface asking it to change and no surface shows every setting: the wallpaper
+chooser edits the backdrop keys, Settings edits the appearance keys. A key a
+sender did not name keeps the value the desktop already has, so one surface
+cannot undo the other's change by staying silent about it — which taking the
+absent keys as their *defaults* would do on every single apply.
+
+`DesktopSettings::document` renders the canonical form both readings accept:
 every registry key, in registry order, so a render/read round trip is exact.
-Publishing to the store instead goes key by key, so only what actually
-changed is written.
+That is what the session *persists*. A surface *asking* for a change renders
+only the keys it edits, with `document_of` over `SettingsKey::PINBOARD` or
+`SettingsKey::APPEARANCE`.
 
 ## The registry
 
@@ -68,8 +78,28 @@ that key's own closed vocabulary:
 | `backdrop`  | `theme`, or six bare hex digits `rrggbb`          | `theme`                                       |
 | `icons`     | `leading` \| `trailing`                           | `leading`                                     |
 | `sort`      | `name` \| `kind` \| `size` \| `date`              | `name`                                        |
+| `appearance`| `dark` \| `light`                                 | `dark`                                        |
+| `contrast`  | `normal` \| `high` \| `monochrome`                | `normal`                                      |
+| `density`   | `compact` \| `normal` \| `comfortable`            | `normal`                                      |
+| `motion`    | `full` \| `reduced`                               | `full`                                        |
+| `scale`     | a bare decimal percentage in `Scale`'s own range  | `100`                                         |
 
 Keys and values are case-sensitive: each has one canonical spelling.
+
+The keys fall into two groups, which is a reader's distinction rather than the
+document's: `SettingsKey::PINBOARD` describes the backdrop and the icons
+standing on it, and `SettingsKey::APPEARANCE` describes how every surface of
+the desktop is drawn. They share one document because they share one owner and
+one published scope — the session writes both, in one round trip, and a
+desktop half-adopted from two documents is a desktop nobody chose.
+
+The four appearance value sets are `tairix_abi::desktop`'s own
+(`Appearance`, `Contrast`, `Density`, `Motion`), imported rather than
+restated: the session publishes them to every application over the window
+channel, so the value this document stores and the byte on that wire are one
+definition. `scale` is validated by `tairix_geometry::Scale`, the one
+validator of a UI scale, so a percentage this registry accepts is always one
+the desktop can actually be drawn at.
 
 A colour is written as **bare** hex digits — `112233`, never `#112233`. The
 document's own comment grammar cuts a line at the first `#`, so a
@@ -81,17 +111,30 @@ consumer cannot pick a spelling the document cannot hold.
 `render` always emits **every** key in `SettingsKey::ALL` order, including a
 key still at its default, so the document a user opens always shows the whole
 registry and `parse(render(s)) == s` exactly. Adding a key means adding a
-`SettingsKey` variant, its `PinboardSettings` field, and its parse/render
+`SettingsKey` variant, its `DesktopSettings` field, and its parse/render
 arms in the same change; there is no free-form key namespace and no second
 store.
 
+## Asking the session to adopt a change
+
+`apply` (behind the crate's `rt` feature) is the one client of the pinboard
+rendezvous, shared by every surface that edits the desktop's settings — the
+wallpaper chooser's backdrop keys and the Settings application's appearance
+keys. A second copy of the round trip would be two places for "what did the
+session say" to drift apart. `ApplyOutcome` distinguishes an adopted change,
+a typed refusal with its reason, and a rendezvous nobody answered.
+
+The feature is off by default, so the registry, the catalog and the fit
+geometry stay linkable with no runtime behind them — which is what lets the
+session's own engine and every host test drive them directly.
+
 ## Security
 
-A pinboard settings document is **untrusted input** to every consumer, and the
+A desktop settings document is **untrusted input** to every consumer, and the
 two readings above bound it the same way: the format engine bounds the
 document, the line, the key and the value, and `MAX_WALLPAPER_PATH_LEN` bounds
 the one value that carries a path. Neither reading ever half-applies a
-document — `decode` refuses the whole thing, `load` leaves the refused field
+document — `merge` refuses the whole thing, `load` leaves the refused field
 at its documented default and names it — so a desktop is never left in a state
 no user asked for.
 
@@ -198,7 +241,7 @@ every source pixel at 1:1 and so needs the native size.
 
 - `settings::{parse, render}` — the bounded, fail-closed, line-numbered parse
   and the canonical render.
-- `PinboardSettings{wallpaper, fit, backdrop, icons, sort}` and its `Default`
+- `DesktopSettings{wallpaper, fit, backdrop, icons, sort}` and its `Default`
   — the document model.
 - `WallpaperChoice::{None, Image}`, `WallpaperPath::{new, as_str}`,
   `WallpaperPathError::{TooLong, Malformed}` — the validated wallpaper value.
@@ -206,9 +249,11 @@ every source pixel at 1:1 and so needs the native size.
   `Backdrop::{Theme, Colour}`, `Rgb::{new, from_hex, to_hex}`,
   `IconFlow::{Leading, Trailing}`, `IconSort::{Name, Kind, Size, Date}` — the
   closed value vocabularies.
-- `SettingsKey::{ALL, name, from_name, value_of}` — the closed key registry;
-  `PinboardSettings::{load, document}` and `decode` — the two readings and
-  the canonical render; `DocumentRefusal` — the strict reading's reasons.
+- `SettingsKey::{ALL, PINBOARD, APPEARANCE, name, from_name, value_of}` — the
+  closed key registry and its two groups;
+  `DesktopSettings::{load, document, document_of}` and `merge` — the two
+  readings, the canonical render, and the per-group one a surface posts;
+  `DocumentRefusal` — the strict reading's reasons.
 - `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER,
   category_path, wallpaper_path, default_wallpaper_path,
   is_wallpaper_category_name, is_wallpaper_file_name, catalog_categories,
@@ -217,6 +262,8 @@ every source pixel at 1:1 and so needs the native size.
   placement geometry.
 - `PINBOARD_PUBLISHER` — the desktop session's signed bundle identifier, the
   one spelling a reader hands to `tairix_appdata::read_published`.
+- `ApplyOutcome` and (behind `rt`) `apply` — the one client every surface
+  asks the session to adopt a document with.
 
 The crate is `no_std` + `alloc`, forbids `unsafe`, performs no I/O, holds no
 authority, is host-unit-tested beside the code, and is fuzzed by

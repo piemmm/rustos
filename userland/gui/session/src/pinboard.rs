@@ -21,7 +21,7 @@
 
 use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_controls::{ChainModel, ChainRow, ControlState, MenuItem, MenuMark};
-use tairix_wallpaper::{IconFlow, IconSort, PinboardSettings};
+use tairix_wallpaper::{DesktopSettings, IconFlow, IconSort};
 
 /// The root plate's title: the surface the menu acts on, named as the user
 /// knows it.
@@ -129,7 +129,7 @@ impl PinboardCommand {
     /// exactly one of which holds, so the one in force is the group's chosen
     /// member; every other command asks for an action rather than for a state,
     /// and none of them is ever already done.
-    fn in_force(self, settings: &PinboardSettings) -> bool {
+    fn in_force(self, settings: &DesktopSettings) -> bool {
         match self {
             Self::SortBy(sort) => sort == settings.sort,
             Self::ArrangeFrom(flow) => flow == settings.icons,
@@ -164,7 +164,7 @@ impl PinboardCommand {
 /// rather than a command — and the first row of the plate never opens a group,
 /// since there is nothing above it to divide it from.
 #[must_use]
-pub fn model(on_icon: bool, settings: &PinboardSettings) -> ChainModel {
+pub fn model(on_icon: bool, settings: &DesktopSettings) -> ChainModel {
     let mut model = ChainModel::new(PINBOARD_TITLE);
     for (index, command) in PinboardCommand::ALL.into_iter().enumerate() {
         if command.needs_icon() && !on_icon {

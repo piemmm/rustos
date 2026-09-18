@@ -36,6 +36,16 @@ to the process that already owns that domain, or a re-authenticated run of the
 tool that already writes that store. Nothing here can be tricked into an
 escalation, because there is no capability in it to escalate with.
 
+**One instance, and no icon-bar slot.** Settings is part of the desktop
+rather than an application the user manages. Its signed manifest declares
+`icon-bar = false`, so it has no slot of its own and **closing its window
+ends the program** — there is no slot left holding a handle on a windowless
+process. It is a singleton, which is the manifest's own default: relaunching
+it while it is open raises the window that is already there rather than
+starting a second view of one machine's configuration, each able to overwrite
+the other's applies. The desktop's one launch funnel resolves that, so every
+route in — the system menu, the Program Library, a shell — behaves the same.
+
 **Three write paths, and no fourth.** Every settable reaches one of exactly
 three owners: the desktop session, for the user's own desktop; the tool that
 already writes a machine-wide store, run as a re-authenticated account; or the
@@ -91,19 +101,53 @@ the keyboard cursor and the pane dispatch. A pane cannot exist without a row,
 or a row without a pane — the crate's own tests hold both directions — so
 adding a category is adding a row and a renderer, never editing the shell.
 
+## Appearance and Accessibility
+
+The two panes that compose real controls today. They are two views of one
+registry: light/dark is Appearance's alone, and contrast, density, motion and
+the interface scale appear in both — from one definition, because a reader
+looks for them in either place.
+
+| Setting | What it changes |
+|---|---|
+| Appearance | Light or dark. |
+| Contrast | Normal, high, or monochrome — monochrome tells every state apart by shape rather than by colour. |
+| Density | Compact, normal, or comfortable. It moves the three metrics that decide how much room a control is given and nothing else, so a compact desktop packs the same controls closer rather than drawing different ones. |
+| Motion | Full, or reduced — a reduced state change is still visible, it just happens at once. |
+| Interface scale | How large every desktop length is drawn. |
+
+Each row commits on the choice: the change is cheap, reversible, and its
+effect is the feedback, so there is no Apply button to go stale. The pane
+renders **only the keys it edits** and posts them to the desktop session,
+which merges them over what it already holds — a wallpaper change and an
+appearance change cannot undo each other.
+
+The round trip runs on a worker, never on the window's event loop: the
+session answers only once its own publisher has written the store, so waiting
+for it inline would freeze this window for a disk commit. The rows show the
+reader's choice at once and adopt the *durable* value when the answer lands,
+so a refusal states its reason and puts the row back rather than leaving a
+value on screen the next login would not restore.
+
+Accessibility additionally states, in a row of its own, that this desktop
+keeps **no pointer size**: the pointer is drawn at the interface scale, and a
+size of its own would need a factor in the session's cursor controller. It is
+stated rather than drawn as a control that would change nothing.
+
 ## Absence is stated, never mimed
 
 A control that would change nothing is never drawn. Each pane declares what
-backs it, and the two answers are different facts to a reader:
+backs it, and the three answers are different facts to a reader:
 
 | Backing | What the pane says |
 |---|---|
+| it composes real controls | nothing — the rows are what it says |
 | nothing in this system can serve it | what is missing, and what would have to exist |
 | the readings and writes exist, and this surface does not yet compose them | what the pane will show, and where the setting is read or set today |
 
-Both draw through one renderer, quiet and on the surface behind them with no
-plate — the same shape every other stated absence in the desktop takes,
-because a plate would read as something to interact with.
+The two stated absences draw through one renderer, quiet and on the surface
+behind them with no plate — the same shape every other stated absence in the
+desktop takes, because a plate would read as something to interact with.
 
 Seven of the categories a desktop should offer have no subsystem beneath them
 on this tree at all: there is no audio stack, no Bluetooth stack, no

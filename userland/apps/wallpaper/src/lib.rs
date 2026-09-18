@@ -90,6 +90,10 @@ mod paint;
 
 pub use chooser::{Chooser, PreviewRequest, ThumbnailRequest};
 pub use layout::Layout;
+/// The shared apply client's outcome, re-exported so this crate's own
+/// surfaces name it once. The round trip itself is `lib/wallpaper`'s, shared
+/// with every other surface that edits the desktop's settings.
+pub use tairix_wallpaper::ApplyOutcome;
 
 #[cfg(test)]
 mod tests;
@@ -525,26 +529,6 @@ impl Focus {
         let len = Self::ORDER.len();
         Self::ORDER[(self.index() + len - 1) % len]
     }
-}
-
-/// The outcome of asking the desktop session to adopt a rendered settings
-/// document (`plans/PINBOARD.md` §6).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ApplyOutcome {
-    /// The request is with the session and no answer has come back yet.
-    ///
-    /// The chooser shows this rather than the previous attempt's answer, so a
-    /// footer can never report a result the store has not given: the apply is
-    /// carried out on a worker and the window keeps drawing meanwhile.
-    Applying,
-    /// The session adopted and persisted the change.
-    Applied,
-    /// The session refused the request, with the reason it gave.
-    Refused(String),
-    /// No desktop session answered the pinboard rendezvous at all (the
-    /// [`PINBOARD_ENDPOINT`](tairix_abi::pinboard_ipc::PINBOARD_ENDPOINT)
-    /// call itself failed) — distinct from an authenticated refusal.
-    NoDesktop,
 }
 
 /// The result of feeding one pointer or key event to the chooser.

@@ -53,8 +53,7 @@ mod program {
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::KeyInput;
-    use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest, PINBOARD_ENDPOINT};
-    use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
+    use tairix_abi::pinboard_ipc::PinboardDocument;
     use tairix_abi::window_ipc::{WindowEvent, WindowSizing};
     use tairix_abi::{Duration64, Errno, WaitSetOp, WaitSourceKind};
     use tairix_appdata::RtHost;
@@ -69,7 +68,7 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_wallpaper::{
-        catalog_categories, catalog_entries, category_path, PinboardSettings, WallpaperFit,
+        catalog_categories, catalog_entries, category_path, DesktopSettings, WallpaperFit,
         WallpaperPath, MAX_WALLPAPER_BYTES, PINBOARD_PUBLISHER, WALLPAPER_STORE,
     };
     use tairix_wallpaper_chooser::{
@@ -241,17 +240,17 @@ mod program {
     /// build's registry does not accept) also yields the defaults for the
     /// affected setting, but says so on `stderr` rather than opening on
     /// settings the user cannot see the reason for.
-    fn settings_in_effect() -> PinboardSettings {
+    fn settings_in_effect() -> DesktopSettings {
         let document = match tairix_appdata::read_published(&mut RtHost, PINBOARD_PUBLISHER) {
             Ok(document) => document,
             Err(err) => {
                 report(&alloc::format!(
                     "the desktop's settings could not be read ({err:?}); showing the defaults"
                 ));
-                return PinboardSettings::default();
+                return DesktopSettings::default();
             }
         };
-        let (settings, refused) = PinboardSettings::load(&document);
+        let (settings, refused) = DesktopSettings::load(&document);
         for key in refused {
             report(&alloc::format!(
                 "the desktop publishes a `{key}` this build does not accept; showing its default"
@@ -438,25 +437,9 @@ mod program {
         );
     }
 
-    /// Ask the desktop session to adopt `document` and report what it
-    /// said.
-    ///
-    /// Nothing is reported as applied that the session did not accept: a
-    /// document this program cannot even encode, an unanswered rendezvous,
-    /// and a typed refusal are three distinct outcomes.
+    /// The worker's body: the shared apply client's one round trip.
     fn send_apply(_: &mut (), document: &mut PinboardDocument) -> ApplyOutcome {
-        let request = PinboardRequest::Apply {
-            document: *document,
-        }
-        .to_le_bytes();
-        let mut reply = [0u8; STATUS_REPLY_LEN];
-        let Ok(len) = tairix_rt::ipc_call(PINBOARD_ENDPOINT, &request, &mut reply) else {
-            return ApplyOutcome::NoDesktop;
-        };
-        match decode_status_reply(&reply[..len.min(reply.len())]) {
-            Ok(()) => ApplyOutcome::Applied,
-            Err(err) => ApplyOutcome::Refused(alloc::format!("{err:?}")),
-        }
+        tairix_wallpaper::apply(*document)
     }
 
     /// The chooser's applier: the session round trip an *Apply* costs, carried

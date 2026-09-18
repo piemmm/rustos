@@ -668,8 +668,9 @@ tairix/
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol.
 │   ├── virtio_input/    # Arch-neutral virtio-input device logic.
 │   ├── vt/              # Shared ANSI/VT/xterm vocabulary.
-│   ├── wallpaper/       # Desktop pinboard: settings registry, wallpaper catalog,
-│   │                    #   fit geometry, and the shipped masters in `assets/`.
+│   ├── wallpaper/       # Desktop user-scope settings document, wallpaper
+│   │                    #   catalog, fit geometry, the apply client, and the
+│   │                    #   shipped masters in `assets/`.
 │   └── window/          # Window-channel protocol engine.
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.

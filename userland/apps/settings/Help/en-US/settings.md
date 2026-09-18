@@ -18,10 +18,19 @@ desktop session, which owns the user's own settings, or a re-authenticated run
 of the command that already writes that store, so nothing here can raise a
 privilege.
 
+**Appearance** chooses whether the desktop is drawn light or dark, and
+**Accessibility** groups the same contrast, density, motion and interface-scale
+settings the way a reader looking for them would; both panes show them, because
+a reader looks in either place. A row takes effect as soon as it is chosen, so
+there is no button to press afterwards; if the desktop refuses a change, the
+reason is reported on the standard error stream and the row goes back to what
+the desktop actually holds.
+
 A category this system cannot serve says so plainly and names what would have
 to exist before it could. A category it can serve, whose controls this release
 does not yet draw, names where the setting is read or set instead. A control
-that would change nothing is never shown.
+that would change nothing is never shown — which is why Accessibility states
+that this desktop keeps no separate pointer size rather than offering one.
 
 Type in the search field above the sidebar to filter it to the categories and
 settings a word reaches. `Tab` and `Shift+Tab` move between the search field,

@@ -11,10 +11,11 @@ use alloc::string::String;
 
 use crate::cursor::CursorSet;
 use crate::metrics::Metrics;
-use crate::motion::{Contrast, Density, MotionTheme};
+use crate::motion::{Contrast, Density, Motion, MotionTheme};
 use crate::palette::Palette;
 use crate::typography::{FamilyKey, Fonts};
 use crate::Rgba;
+use tairix_abi::desktop::DesktopInfo;
 
 /// A stable identifier for a theme.
 ///
@@ -62,6 +63,35 @@ pub enum SurfaceGround {
     /// take the palette's chrome alphas, so the wallpaper and windows behind
     /// read through as a wash of their colours.
     Floating,
+}
+
+/// The desktop's accessibility axes: how a theme is drawn, as distinct from
+/// which theme it is.
+///
+/// One value because they are one decision a user makes and one repaint an
+/// application owes: the session publishes all three together over the
+/// window channel, and a surface that adopted them separately could draw a
+/// frame on half of what the user asked for.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub struct Accessibility {
+    /// How much separation is drawn around a control.
+    pub contrast: Contrast,
+    /// How much room a control is given.
+    pub density: Density,
+    /// Whether a state change is animated.
+    pub motion: Motion,
+}
+
+impl Accessibility {
+    /// The axes the desktop reports in `info`.
+    #[must_use]
+    pub const fn of(info: &DesktopInfo) -> Self {
+        Self {
+            contrast: info.contrast(),
+            density: info.density(),
+            motion: info.motion(),
+        }
+    }
 }
 
 /// A complete, named theme: colours, metrics, fonts, and cursors.
@@ -190,6 +220,26 @@ impl Theme {
     #[must_use]
     pub fn contrast(&self) -> Contrast {
         self.contrast
+    }
+
+    /// The same theme drawn on `axes`.
+    ///
+    /// The one place the desktop's accessibility axes are laid over a
+    /// theme: the contrast and the motion policy are carried as they are,
+    /// and the density is applied by deriving this theme's own metric table
+    /// at that density ([`Metrics::at_density`]) rather than swapping in a
+    /// second table. A custom theme therefore gets the same treatment as a
+    /// built-in with no work of its own, and nothing anywhere else has to
+    /// know how an axis reaches the pixels.
+    #[must_use]
+    pub fn with_axes(self, axes: Accessibility) -> Self {
+        Self {
+            metrics: self.metrics.at_density(axes.density),
+            motion: self.motion.with_reduced_motion(axes.motion.is_reduced()),
+            density: axes.density,
+            contrast: axes.contrast,
+            ..self
+        }
     }
 
     /// The built-in **dark** theme — TAIRiX's default.

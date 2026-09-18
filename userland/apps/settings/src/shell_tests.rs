@@ -6,16 +6,19 @@
 //! itself, the category list a shed strip becomes, and the scroll a pane too
 //! tall for its column gets.
 
+use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_font::install_test_transport;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
+use tairix_wallpaper::{DesktopSettings, SettingsKey};
 
+use crate::appearance::{Composition, Setting, POINTER_SIZE_LABEL};
 use crate::frame::{resolve_frame, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
 use crate::registry::{Category, Location, Pane, StripRow, CATEGORIES};
-use crate::shell::Shell;
+use crate::shell::{Shell, ShellOutcome};
 
 /// A window wide enough to seat the strip and a full content column.
 const WIDE: Rect = Rect::new(0, 0, 900, 640);
@@ -28,7 +31,7 @@ fn theme() -> Theme {
 }
 
 fn shell() -> Shell {
-    Shell::new().expect("the registry holds a category")
+    Shell::new(DesktopSettings::default()).expect("the registry holds a category")
 }
 
 fn damage() -> tairix_geometry::Region {
@@ -575,5 +578,338 @@ fn the_cursor_walks_past_the_fold() {
     assert!(
         row.top() >= sidebar.top() && row.bottom() <= sidebar.bottom(),
         "the cursor was left out of sight: {row:?} vs {sidebar:?}"
+    );
+}
+
+/// Feed one key press with no modifiers, answering what it concluded.
+fn press(
+    shell: &mut Shell,
+    key: Key,
+    theme: &Theme,
+    sink: &mut tairix_geometry::Region,
+) -> ShellOutcome {
+    shell.on_key(key, Modifiers::default(), WIDE, Scale::ONE, theme, sink)
+}
+
+/// Go to `location` and hand back the shell showing it.
+fn shell_at(location: Location) -> Shell {
+    let mut shell = shell();
+    let theme = theme();
+    let mut sink = damage();
+    shell.go_to_for_test(location, WIDE, Scale::ONE, &theme, &mut sink);
+    shell
+}
+
+#[test]
+fn the_two_composed_panes_draw_a_form_rather_than_a_statement() {
+    for (pane, groups) in [(Pane::Appearance, 2), (Pane::Accessibility, 3)] {
+        let category = pane.locate().expect("a located pane").0;
+        let shell = shell_at(Location { category, pane });
+        let form = shell
+            .form_for_test()
+            .unwrap_or_else(|| panic!("{pane:?} composes no form"));
+        assert_eq!(form.groups().len(), groups, "{pane:?}");
+        // Composing a form means the statement renderer draws nothing, so
+        // the column's height is the form's alone.
+        assert!(shell.pane_height(600, Scale::ONE, &theme()) > 0);
+    }
+}
+
+#[test]
+fn a_pane_that_states_an_absence_composes_no_form() {
+    let shell = shell_at(Location {
+        category: Category::Bluetooth,
+        pane: Pane::Bluetooth,
+    });
+    assert!(shell.form_for_test().is_none());
+}
+
+#[test]
+fn choosing_a_value_posts_only_the_appearance_keys() {
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    });
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+
+    // Open the first row's choice list and take the second choice, which is
+    // the appearance the desktop is not currently on.
+    let outcome = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    assert!(outcome.changed(), "the list did not open");
+    let down = press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
+    assert!(down.changed());
+    let chosen = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+
+    let document = chosen
+        .document()
+        .expect("choosing a value asks for a document");
+    assert!(document.contains("appearance = light"), "{document}");
+    // The pinboard keys are the chooser's: posting them here would reimpose
+    // whatever wallpaper this window happened to read at start-up.
+    for key in SettingsKey::PINBOARD {
+        assert!(
+            !document.contains(key.name()),
+            "{} posted: {document}",
+            key.name()
+        );
+    }
+}
+
+#[test]
+fn the_rows_show_what_the_desktop_holds_not_the_defaults() {
+    let settings = DesktopSettings {
+        appearance: Appearance::Light,
+        contrast: Contrast::Monochrome,
+        ..DesktopSettings::default()
+    };
+    let mut shell = Shell::new(settings.clone()).expect("a registry");
+    let theme = theme();
+    let mut sink = damage();
+    shell.go_to_for_test(
+        Location {
+            category: Category::Appearance,
+            pane: Pane::Appearance,
+        },
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    assert_eq!(
+        shell.form_for_test().map(|form| form.settings().clone()),
+        Some(settings)
+    );
+}
+
+#[test]
+fn adopting_the_desktops_answer_replaces_what_the_rows_show() {
+    let mut shell = shell_at(Location {
+        category: Category::Accessibility,
+        pane: Pane::Accessibility,
+    });
+    let answered = DesktopSettings {
+        density: Density::Compact,
+        ..DesktopSettings::default()
+    };
+    shell.adopt_settings(answered.clone());
+    assert_eq!(shell.settings_for_test(), &answered);
+    assert_eq!(
+        shell.form_for_test().map(|form| form.settings().clone()),
+        Some(answered)
+    );
+}
+
+#[test]
+fn a_refused_apply_reverts_the_row_to_what_the_store_holds() {
+    // The session answers with what it still holds, so re-adopting after a
+    // refusal must put the row back rather than leave the chosen value
+    // standing.
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    });
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+    press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
+    let chosen = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    assert!(chosen.document().is_some());
+    assert_eq!(
+        shell.form_for_test().map(|form| form.settings().appearance),
+        Some(Appearance::Light)
+    );
+
+    shell.adopt_settings(DesktopSettings::default());
+    assert_eq!(
+        shell.form_for_test().map(|form| form.settings().appearance),
+        Some(Appearance::Dark)
+    );
+}
+
+#[test]
+fn accessibility_states_the_pointer_size_it_does_not_keep() {
+    let shell = shell_at(Location {
+        category: Category::Accessibility,
+        pane: Pane::Accessibility,
+    });
+    let form = shell.form_for_test().expect("a form");
+    let stated = form
+        .groups()
+        .iter()
+        .flat_map(tairix_controls::FieldGroup::rows)
+        .find(|row| row.label() == POINTER_SIZE_LABEL)
+        .expect("the pointer-size row");
+    // Stated, never drawn as a control that would change nothing.
+    assert!(matches!(
+        stated.control(),
+        tairix_controls::FieldControl::Unmeasured(_)
+    ));
+}
+
+#[test]
+fn both_composed_panes_offer_the_shared_settings_from_one_definition() {
+    let appearance = Composition::Appearance.labels();
+    let accessibility = Composition::Accessibility.labels();
+    for shared in [
+        Setting::Contrast.label(),
+        Setting::Density.label(),
+        Setting::Motion.label(),
+        Setting::Scale.label(),
+    ] {
+        assert!(
+            appearance.contains(&shared),
+            "{shared} missing from Appearance"
+        );
+        assert!(
+            accessibility.contains(&shared),
+            "{shared} missing from Accessibility"
+        );
+    }
+    // Light/dark is Appearance's alone; the pointer statement is
+    // Accessibility's alone.
+    assert!(appearance.contains(&Setting::Appearance.label()));
+    assert!(!accessibility.contains(&Setting::Appearance.label()));
+    assert!(accessibility.contains(&POINTER_SIZE_LABEL));
+}
+
+#[test]
+fn a_composed_panes_settings_are_the_labels_its_rows_actually_draw() {
+    // The search index is derived from the registry, so it must name
+    // exactly what the composition draws — a term that reaches a row that
+    // is not there is a search that lands nowhere.
+    for (pane, composition) in [
+        (Pane::Appearance, Composition::Appearance),
+        (Pane::Accessibility, Composition::Accessibility),
+    ] {
+        let row = pane.locate().expect("a located pane").1;
+        assert_eq!(row.settings, composition.labels().as_slice(), "{pane:?}");
+    }
+}
+
+#[test]
+fn the_cursor_walks_from_one_group_into_the_next() {
+    // A group clamps at its own ends, so without the form carrying the
+    // cursor between groups every row below the first plate would be
+    // unreachable from the keyboard.
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    });
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+    assert_eq!(shell.form_group_cursor_for_test(), Some((0, 0)));
+
+    // The first group holds one row, so one Down must leave it.
+    press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
+    assert_eq!(shell.form_group_cursor_for_test(), Some((1, 0)));
+
+    // And Up comes back to the group above, landing on its last row.
+    press(&mut shell, Key::Named(NamedKey::Up), &theme, &mut sink);
+    assert_eq!(shell.form_group_cursor_for_test(), Some((0, 0)));
+}
+
+#[test]
+fn walking_to_a_row_below_the_fold_scrolls_it_into_view() {
+    // A short window cannot seat every group; a row the cursor reached but
+    // the column does not show is a control the reader cannot use.
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 200);
+    let mut shell = shell();
+    let mut sink = damage();
+    shell.go_to_for_test(
+        Location {
+            category: Category::Accessibility,
+            pane: Pane::Accessibility,
+        },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    shell.lay_out(short, Scale::ONE, &theme);
+    shell.focus_content_for_test(short, Scale::ONE, &theme);
+    assert_eq!(shell.scroll_offset(), 0);
+
+    // Walk to the very last row of the last group.
+    for _ in 0..12 {
+        shell.on_key(
+            Key::Named(NamedKey::Down),
+            Modifiers::default(),
+            short,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+    }
+    let (group, _) = shell
+        .form_group_cursor_for_test()
+        .expect("the cursor is on a row");
+    assert_eq!(group, 2, "the cursor did not reach the last group");
+    assert!(
+        shell.form_first_for_test() > Some(0),
+        "the column did not follow the cursor past the fold"
+    );
+    // And what it drew from is what the bar reports, so the two cannot
+    // disagree about where the pane is.
+    assert_eq!(
+        shell.form_first_for_test().map(|first| first as u64),
+        Some(shell.scroll_offset())
+    );
+}
+
+#[test]
+fn walking_back_up_scrolls_a_row_above_the_fold_into_view() {
+    // The mirror of the case above, and the one a narrowing cast hides: a
+    // row scrolled off the *top* is above the frame, not at it.
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 200);
+    let mut shell = shell();
+    let mut sink = damage();
+    shell.go_to_for_test(
+        Location {
+            category: Category::Accessibility,
+            pane: Pane::Accessibility,
+        },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    shell.lay_out(short, Scale::ONE, &theme);
+    shell.focus_content_for_test(short, Scale::ONE, &theme);
+    for _ in 0..12 {
+        shell.on_key(
+            Key::Named(NamedKey::Down),
+            Modifiers::default(),
+            short,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+    }
+    assert!(
+        shell.form_first_for_test() > Some(0),
+        "the walk down did not scroll"
+    );
+
+    for _ in 0..12 {
+        shell.on_key(
+            Key::Named(NamedKey::Up),
+            Modifiers::default(),
+            short,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+    }
+    assert_eq!(shell.form_group_cursor_for_test(), Some((0, 0)));
+    assert_eq!(
+        shell.form_first_for_test(),
+        Some(0),
+        "the column did not follow the cursor back to the top"
     );
 }

@@ -40,3 +40,8 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
 library = "SystemTools"
 # This bundle's own icon master in its Resources/, authored as SVG.
 library-icon = "settings.svg"
+# No icon-bar slot of its own: Settings is part of the desktop rather than an
+# application the user manages. It is opened from the system menu, the program
+# library, or by name, and closing its window ends it — so there is nothing
+# for a slot to keep a handle on.
+icon-bar = false

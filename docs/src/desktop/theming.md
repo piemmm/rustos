@@ -409,6 +409,37 @@ duplicate id each return a `ThemeError` and leave the registry unchanged.
 Because the built-ins are held in a fixed-size array, `active` always returns
 a theme without an `unwrap` or an out-of-bounds index.
 
+### The accessibility axes
+
+Contrast, density and motion belong to the *desktop*, not to a theme: a user
+who turns contrast up has not chosen a different palette, and their choice
+must survive switching between light and dark and must reach a custom theme
+too. `ThemeRegistry::set_accessibility(Accessibility)` lays them over
+whichever theme is active and `accessibility()` reads them back.
+
+`active()` therefore answers the theme **as it is drawn** — the selected one
+with the axes applied — because every consumer wants the theme that is on
+screen and none of them should have to remember to apply the axes itself.
+`selected()` answers the theme as it was *registered*, with no axes, which is
+what a surface editing them reads so it shows what the theme declares rather
+than what the current axes already did to it. The drawn theme is derived once
+whenever the selection or the axes move, never per call: `active` is read on
+every paint and every hit test, and re-deriving a metric table there would
+put the axis arithmetic on the hot path.
+
+`Theme::with_axes` is the one place an axis reaches the pixels. Contrast and
+the motion policy are carried as they are; **density** is applied by deriving
+the theme's own metric table at that density (`Metrics::at_density`) rather
+than swapping in a second table. Density moves exactly the three lengths that
+decide how much room a control is given — `control_height` (which is also the
+minimum interactive target), `control_inset` and `control_gap` — one step
+either side of normal. Nothing else moves, and that is the point: corner
+radii, border and instrument thicknesses, selector and bead extents, and the
+window furniture are what a control *is*, not how much room it is given.
+Scaling them would make a compact desktop draw different-looking controls
+rather than closer-packed ones, and would change the meaning of a state,
+which density must never do.
+
 ### The light/dark control
 
 A "switch to light/dark" desktop control toggles the `Appearance` axis, not a
@@ -435,12 +466,17 @@ menu can never ask for the appearance already in use. See
 An application's window is the application's own pixels: the session composes
 them but cannot re-colour them, so re-theming the desktop alone would leave
 every open window sitting in the appearance the user just left. The session
-therefore *publishes* the new state. `Appearance` is part of the seat's desktop
-record (`tairix_abi::desktop::DesktopInfo`), which an app reads before it
-paints its first frame and then converges on through the `Desktop` system
-notice, which the session publishes whenever the switch happens. Each app
-re-applies the appearance to its own `ThemeRegistry`, re-resolves whatever it
-derived from the theme, and presents — so the switch reaches the whole screen
+therefore *publishes* the new state. `Appearance`, `Contrast`, `Density` and
+`Motion` are all part of the seat's desktop record
+(`tairix_abi::desktop::DesktopInfo`), which an app reads before it paints its
+first frame and then converges on through the `Desktop` system notice, which
+the session publishes whenever any of them changes. They travel together
+because they are one decision to a reader and one repaint to an application:
+an application that learned only half of what changed would draw the other
+half the way the user just stopped asking for. `lib/window`'s
+`adopt_desktop` applies all of them in the one call an app already makes, so
+each app re-applies the appearance *and* the axes to its own `ThemeRegistry`,
+re-resolves whatever it derived from the theme, and presents — so the switch reaches the whole screen
 at once, including the apps that have no window open at the time. The enum crossing
 that wire *is* `tairix_theme::Appearance`: the theme crate re-exports the ABI's
 definition rather than restating it, so the byte on the wire and the value a

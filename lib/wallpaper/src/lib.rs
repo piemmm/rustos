@@ -32,11 +32,11 @@
 //!
 //! The settings document is **untrusted input** to every consumer, and this
 //! crate has two readings of it, deliberately different
-//! ([`PinboardSettings::load`] tolerant, [`decode`] strict — [`settings`]
+//! ([`DesktopSettings::load`] tolerant, [`merge`] strict — [`settings`]
 //! records why). Both are bounded: the format engine bounds the document,
 //! the line, the key and the value, and [`MAX_WALLPAPER_PATH_LEN`] bounds
 //! the one value that carries a path. Neither ever half-applies a document:
-//! a reader that cannot use a value runs on [`PinboardSettings::default`]
+//! a reader that cannot use a value runs on [`DesktopSettings::default`]
 //! for that field rather than guessing at a partial intent. A wallpaper path
 //! surviving validation still names untrusted image content; this crate
 //! performs no decode of its own.
@@ -55,10 +55,14 @@
 
 extern crate alloc;
 
+pub mod apply;
 pub mod catalog;
 pub mod fit;
 pub mod settings;
 
+#[cfg(feature = "rt")]
+pub use apply::apply;
+pub use apply::ApplyOutcome;
 pub use catalog::{
     catalog_categories, catalog_entries, category_path, default_wallpaper_path,
     is_wallpaper_category_name, is_wallpaper_file_name, wallpaper_path, CatalogEntry,
@@ -67,7 +71,7 @@ pub use catalog::{
 };
 pub use fit::{decode_request, nominal_source_size, place, Placement};
 pub use settings::{
-    decode, Backdrop, DocumentRefusal, IconFlow, IconSort, PinboardSettings, Rgb, SettingsKey,
+    merge, Backdrop, DesktopSettings, DocumentRefusal, IconFlow, IconSort, Rgb, SettingsKey,
     WallpaperChoice, WallpaperFit, WallpaperPath, WallpaperPathError, MAX_WALLPAPER_PATH_LEN,
 };
 

@@ -291,6 +291,15 @@ applies, and persists**.
   second encoding of the settings model: a struct of fit/flow/sort
   discriminants beside the document's own grammar would be two definitions of
   one thing.
+  - **The session merges it over what it holds.** More than one surface asks
+    the desktop to change and none shows every setting: the chooser and the
+    backdrop menu edit the backdrop keys, Settings edits the appearance keys
+    (`plans/NEW-DESKTOP-SETTINGS.md` DS3). Each renders only the keys it
+    edits (`DesktopSettings::document_of`) and a key the sender did not name
+    keeps the value the desktop has, so one surface cannot undo the other's
+    change by staying silent about it — which taking the absent keys as their
+    *defaults* would do on every apply. The merge runs on a copy, so a
+    document the registry refuses leaves the desktop exactly as it was.
 - **Authority** — the session serves a request only from a caller whose
   kernel-attested `Origin` carries the session's own uid; anything else is
   refused and logged. The document is display/config data, never a

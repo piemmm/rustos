@@ -43,7 +43,7 @@ blocking I/O an interactive surface may not perform.
 
 | Topic | Payload | Published by | Read by |
 |---|---|---|---|
-| `Desktop` | `DesktopInfo` (12 bytes) | the holder of a seat's live display lease | every windowed application |
+| `Desktop` | `DesktopInfo` (16 bytes) | the holder of a seat's live display lease | every windowed application |
 | `Mounts` | none — the generation *is* the news | the kernel, on every mount-table mutation | the file manager's places rail |
 | `MemoryPressure` | the band depth (1 byte) | the kernel, from the pressure gauge | any process holding a reclaimable cache |
 
@@ -116,7 +116,7 @@ length, the ceiling, and both prototypes:
 ```c
 #define TAIRIX_NOTICE_PAYLOAD_MAX 16u
 #define TAIRIX_NOTICE_TOPIC_DESKTOP 0u
-#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 12u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 16u
 /* ... */
 
 uint64_t tairix_sys_notice_read(uint32_t topic, void *buf, uintptr_t len);

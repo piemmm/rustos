@@ -41,7 +41,7 @@ use alloc::vec::Vec;
 use tairix_abi::pinboard_ipc::PinboardRequest;
 use tairix_abi::Errno;
 use tairix_appdata::{AppDataHost, Settings as SettingsStore};
-use tairix_wallpaper::{decode, DocumentRefusal, PinboardSettings};
+use tairix_wallpaper::{merge, DesktopSettings, DocumentRefusal};
 
 /// What loading the user's pinboard settings produced: the settings the
 /// desktop starts on, and the ready-to-print warning lines for anything that
@@ -49,7 +49,7 @@ use tairix_wallpaper::{decode, DocumentRefusal, PinboardSettings};
 #[derive(Clone, Debug, Default)]
 pub struct LoadedPinboard {
     /// The settings to apply before the desktop's first listing.
-    pub settings: PinboardSettings,
+    pub settings: DesktopSettings,
     /// One line per reason the stored settings were not fully used, ready for
     /// `stderr` (newline-terminated, in the session's `desktop:` diagnosis
     /// convention). Empty when the store answered and every value was one the
@@ -123,7 +123,7 @@ pub fn load_pinboard(host: &mut dyn AppDataHost) -> LoadedPinboard {
 /// Decode what `store` says, keeping the documented default for anything this
 /// build's registry does not accept and saying so.
 fn read_pinboard(store: &SettingsStore<'_>) -> LoadedPinboard {
-    let (settings, refused) = PinboardSettings::load(store);
+    let (settings, refused) = DesktopSettings::load(store);
     let warnings = refused
         .into_iter()
         .map(|key| {
@@ -152,15 +152,15 @@ fn read_pinboard(store: &SettingsStore<'_>) -> LoadedPinboard {
 /// published.
 pub fn publish_pinboard(
     host: &mut dyn AppDataHost,
-    settings: &PinboardSettings,
+    settings: &DesktopSettings,
 ) -> Result<LoadedPinboard, Errno> {
     let mut store = SettingsStore::open_published(host);
     store.replace(&settings.document())?;
     Ok(read_pinboard(&store))
 }
 
-/// Attest an *apply* request against the session's own identity and read the
-/// settings it carries.
+/// Attest an *apply* request against the session's own identity and lay the
+/// settings it carries over `in_effect`.
 ///
 /// `caller_uid` is the **kernel-attested** origin uid of the calling task,
 /// read off the endpoint by the embedder — never anything the caller said
@@ -170,6 +170,13 @@ pub fn publish_pinboard(
 /// will not decode, or a document the registry's strict reading refuses, is
 /// likewise a typed refusal.
 ///
+/// The request is **merged** over the settings currently in effect rather
+/// than replacing them, because the desktop has more than one surface
+/// asking it to change and no surface shows every setting: the chooser
+/// edits the backdrop, the Settings application edits how everything is
+/// drawn. A key the caller did not name keeps the value the desktop has, so
+/// one surface cannot undo the other's change by staying silent about it.
+///
 /// The returned settings are only *what was asked for*: the session still
 /// publishes and applies them through its own path, and still reads the
 /// wallpaper the document names under its own identity, so this channel
@@ -177,18 +184,20 @@ pub fn publish_pinboard(
 ///
 /// # Errors
 ///
-/// The [`PinboardApplyRefusal`] naming why the request was refused.
+/// The [`PinboardApplyRefusal`] naming why the request was refused. Nothing
+/// is half-applied: `in_effect` is what the desktop keeps on a refusal.
 pub fn serve_pinboard_apply(
     session_uid: u32,
     caller_uid: u32,
+    in_effect: &DesktopSettings,
     request: &[u8],
-) -> Result<PinboardSettings, PinboardApplyRefusal> {
+) -> Result<DesktopSettings, PinboardApplyRefusal> {
     if caller_uid != session_uid {
         return Err(PinboardApplyRefusal::Unattested);
     }
     let request = PinboardRequest::from_bytes(request).map_err(PinboardApplyRefusal::Malformed)?;
     let PinboardRequest::Apply { document } = request;
-    decode(document.as_str()).map_err(PinboardApplyRefusal::Undecodable)
+    merge(in_effect, document.as_str()).map_err(PinboardApplyRefusal::Undecodable)
 }
 
 /// One ready-to-print warning line for settings the desktop could not fully
@@ -205,7 +214,7 @@ mod tests {
     use tairix_abi::Errno;
     use tairix_appdata::fake::FakeService;
     use tairix_wallpaper::{
-        DocumentRefusal, IconFlow, IconSort, PinboardSettings, SettingsKey, WallpaperChoice,
+        DesktopSettings, DocumentRefusal, IconFlow, IconSort, SettingsKey, WallpaperChoice,
         WallpaperFit,
     };
 
@@ -228,18 +237,18 @@ mod tests {
 
     /// Settings distinguishable from the defaults in every field the
     /// document carries.
-    fn edited() -> PinboardSettings {
-        PinboardSettings {
+    fn edited() -> DesktopSettings {
+        DesktopSettings {
             wallpaper: WallpaperChoice::None,
             fit: WallpaperFit::Centre,
             icons: IconFlow::Trailing,
             sort: IconSort::Size,
-            ..PinboardSettings::default()
+            ..DesktopSettings::default()
         }
     }
 
     /// An `Apply` frame carrying `settings` as its canonical document.
-    fn apply_frame(settings: &PinboardSettings) -> Vec<u8> {
+    fn apply_frame(settings: &DesktopSettings) -> Vec<u8> {
         let document =
             PinboardDocument::new(&settings.document().render()).expect("renders a valid document");
         PinboardRequest::Apply { document }.to_le_bytes().to_vec()
@@ -266,7 +275,7 @@ mod tests {
     fn an_empty_store_is_the_silent_fresh_account_state() {
         let mut host = service();
         let loaded = load_pinboard(&mut host);
-        assert_eq!(loaded.settings, PinboardSettings::default());
+        assert_eq!(loaded.settings, DesktopSettings::default());
         assert!(loaded.warnings.is_empty());
     }
 
@@ -314,7 +323,7 @@ mod tests {
         let mut host = service();
         host.refusal().set(Some(Errno::DeviceOffline));
         let loaded = load_pinboard(&mut host);
-        assert_eq!(loaded.settings, PinboardSettings::default());
+        assert_eq!(loaded.settings, DesktopSettings::default());
         assert_eq!(loaded.warnings.len(), 1);
         assert!(loaded.warnings[0].starts_with("desktop: pinboard settings"));
         assert!(loaded.warnings[0].contains("DeviceOffline"));
@@ -344,7 +353,12 @@ mod tests {
     fn an_apply_from_the_session_user_reads_its_document() {
         let frame = apply_frame(&edited());
         assert_eq!(
-            serve_pinboard_apply(SESSION_UID, SESSION_UID, &frame),
+            serve_pinboard_apply(
+                SESSION_UID,
+                SESSION_UID,
+                &DesktopSettings::default(),
+                &frame
+            ),
             Ok(edited())
         );
     }
@@ -353,13 +367,18 @@ mod tests {
     fn an_apply_from_another_user_is_refused_without_reading_it() {
         let frame = apply_frame(&edited());
         assert_eq!(
-            serve_pinboard_apply(SESSION_UID, SESSION_UID + 1, &frame),
+            serve_pinboard_apply(
+                SESSION_UID,
+                SESSION_UID + 1,
+                &DesktopSettings::default(),
+                &frame
+            ),
             Err(PinboardApplyRefusal::Unattested)
         );
         // Even a frame that could never decode is refused on identity
         // first, so a foreign caller learns nothing about the grammar.
         assert_eq!(
-            serve_pinboard_apply(SESSION_UID, 0, &[]),
+            serve_pinboard_apply(SESSION_UID, 0, &DesktopSettings::default(), &[]),
             Err(PinboardApplyRefusal::Unattested)
         );
         assert_eq!(
@@ -370,8 +389,9 @@ mod tests {
 
     #[test]
     fn a_malformed_frame_from_the_session_user_is_refused() {
-        let refusal = serve_pinboard_apply(SESSION_UID, SESSION_UID, &[])
-            .expect_err("a truncated frame cannot decode");
+        let refusal =
+            serve_pinboard_apply(SESSION_UID, SESSION_UID, &DesktopSettings::default(), &[])
+                .expect_err("a truncated frame cannot decode");
         assert_eq!(
             refusal,
             PinboardApplyRefusal::Malformed(Errno::BufferTooSmall)
@@ -386,8 +406,13 @@ mod tests {
         // only cost that one field its default.
         let document = PinboardDocument::new("sort = sideways\n").expect("well-formed transport");
         let frame = PinboardRequest::Apply { document }.to_le_bytes();
-        let refusal = serve_pinboard_apply(SESSION_UID, SESSION_UID, &frame)
-            .expect_err("an unusable document is refused");
+        let refusal = serve_pinboard_apply(
+            SESSION_UID,
+            SESSION_UID,
+            &DesktopSettings::default(),
+            &frame,
+        )
+        .expect_err("an unusable document is refused");
         assert_eq!(
             refusal,
             PinboardApplyRefusal::Undecodable(DocumentRefusal::InvalidValue(SettingsKey::Sort))
@@ -405,5 +430,51 @@ mod tests {
         ] {
             assert!(!refusal.reason().is_empty());
         }
+    }
+
+    #[test]
+    fn an_apply_keeps_every_key_the_caller_did_not_name() {
+        // The defect this forecloses: the wallpaper chooser posts only the
+        // backdrop keys, so adopting its request must not reset the
+        // appearance the user set from Settings (and the reverse).
+        let in_effect = DesktopSettings {
+            appearance: tairix_abi::desktop::Appearance::Light,
+            density: tairix_abi::desktop::Density::Compact,
+            ..DesktopSettings::default()
+        };
+        let asked = DesktopSettings {
+            sort: IconSort::Size,
+            ..DesktopSettings::default()
+        };
+        let document = asked
+            .document_of(&tairix_wallpaper::SettingsKey::PINBOARD)
+            .render();
+        let frame = PinboardRequest::Apply {
+            document: PinboardDocument::new(&document).expect("a bounded document"),
+        }
+        .to_le_bytes()
+        .to_vec();
+
+        let merged = serve_pinboard_apply(SESSION_UID, SESSION_UID, &in_effect, &frame)
+            .expect("the backdrop keys are valid");
+        assert_eq!(merged.sort, IconSort::Size);
+        assert_eq!(merged.appearance, in_effect.appearance);
+        assert_eq!(merged.density, in_effect.density);
+    }
+
+    #[test]
+    fn an_unattested_apply_reads_nothing_and_changes_nothing() {
+        let in_effect = DesktopSettings {
+            appearance: tairix_abi::desktop::Appearance::Light,
+            ..DesktopSettings::default()
+        };
+        let frame = apply_frame(&edited());
+        assert_eq!(
+            serve_pinboard_apply(SESSION_UID, SESSION_UID + 1, &in_effect, &frame),
+            Err(PinboardApplyRefusal::Unattested)
+        );
+        // The identity check precedes the parse, so the settings in effect
+        // are untouched whatever the document said.
+        assert_eq!(in_effect.appearance, tairix_abi::desktop::Appearance::Light);
     }
 }

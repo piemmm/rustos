@@ -2670,6 +2670,7 @@ name = "tairix-settings"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appdata",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -2678,6 +2679,7 @@ dependencies = [
  "tairix-raster",
  "tairix-rt",
  "tairix-theme",
+ "tairix-wallpaper",
  "tairix-window",
 ]
 
@@ -5926,10 +5928,12 @@ dependencies = [
 name = "tairix-wallpaper"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-appconf",
  "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-path",
+ "tairix-rt",
 ]
 
 [[package]]

@@ -5,9 +5,9 @@ use alloc::string::String;
 use crate::motion::MotionInteraction;
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
-    Appearance, Contrast, CursorKind, CursorSet, Density, Fade, FamilyKey, FontWeight, Fonts,
-    Metrics, MotionTheme, Palette, Rgba, SignalRole, SurfaceGround, TextRole, Theme, ThemeError,
-    ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS,
+    Accessibility, Appearance, Contrast, CursorKind, CursorSet, Density, Fade, FamilyKey,
+    FontWeight, Fonts, Metrics, Motion, MotionTheme, Palette, Rgba, SignalRole, SurfaceGround,
+    TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS,
 };
 
 #[test]
@@ -1246,4 +1246,119 @@ fn easing_starts_and_ends_gently_but_still_spans_the_whole_range() {
     }
     // A settled timeline is complete on either curve.
     assert_eq!(Timeline::SETTLED.eased(0), u8::MAX);
+}
+
+#[test]
+fn density_moves_the_spacing_metrics_and_nothing_else() {
+    let normal = *Theme::dark().metrics();
+    let compact = normal.at_density(Density::Compact);
+    let comfortable = normal.at_density(Density::Comfortable);
+
+    assert!(compact.control_height < normal.control_height);
+    assert!(compact.control_inset < normal.control_inset);
+    assert!(compact.control_gap < normal.control_gap);
+    assert!(comfortable.control_height > normal.control_height);
+    assert!(comfortable.control_inset > normal.control_inset);
+    assert!(comfortable.control_gap > normal.control_gap);
+
+    // What a control *is* does not move with how much room it gets: a
+    // compact desktop packs the same controls closer, it does not draw
+    // different ones.
+    for derived in [compact, comfortable] {
+        assert_eq!(derived.control_corner_radius, normal.control_corner_radius);
+        assert_eq!(derived.border_thickness, normal.border_thickness);
+        assert_eq!(derived.selector_extent, normal.selector_extent);
+        assert_eq!(derived.toggle_track_length, normal.toggle_track_length);
+        assert_eq!(derived.bead_size, normal.bead_size);
+        assert_eq!(derived.title_bar_height, normal.title_bar_height);
+        assert_eq!(derived.scrollbar_breadth, normal.scrollbar_breadth);
+    }
+    assert_eq!(normal.at_density(Density::Normal), normal);
+}
+
+#[test]
+fn a_spacing_metric_never_rounds_away_to_nothing() {
+    let mut metrics = *Theme::dark().metrics();
+    metrics.control_gap = 1;
+    metrics.control_inset = 1;
+    metrics.control_height = 1;
+    let compact = metrics.at_density(Density::Compact);
+    assert_eq!(compact.control_gap, 1);
+    assert_eq!(compact.control_inset, 1);
+    assert_eq!(compact.control_height, 1);
+}
+
+#[test]
+fn the_axes_reach_the_theme_a_surface_actually_draws_with() {
+    let mut themes = ThemeRegistry::with_builtins();
+    let plain = themes.active().clone();
+    let axes = Accessibility {
+        contrast: Contrast::High,
+        density: Density::Comfortable,
+        motion: Motion::Reduced,
+    };
+    assert!(themes.set_accessibility(axes));
+    assert_eq!(themes.accessibility(), axes);
+
+    let drawn = themes.active();
+    assert_eq!(drawn.contrast(), Contrast::High);
+    assert_eq!(drawn.density(), Density::Comfortable);
+    assert!(drawn.motion().reduced_motion());
+    assert_eq!(
+        *drawn.metrics(),
+        plain.metrics().at_density(Density::Comfortable)
+    );
+    // The selection itself is untouched: the axes are the desktop's, not
+    // the theme's, so a surface editing them still reads what the theme
+    // declares.
+    assert_eq!(themes.selected().contrast(), Contrast::Normal);
+    assert_eq!(themes.selected().density(), Density::Normal);
+    assert!(!themes.selected().motion().reduced_motion());
+
+    // Setting the same axes again changes nothing, so a republished
+    // desktop does not cost a repaint.
+    assert!(!themes.set_accessibility(axes));
+}
+
+#[test]
+fn the_axes_survive_an_appearance_switch() {
+    let mut themes = ThemeRegistry::with_builtins();
+    themes.set_accessibility(Accessibility {
+        contrast: Contrast::Monochrome,
+        density: Density::Compact,
+        motion: Motion::Reduced,
+    });
+    themes.set_appearance(Appearance::Light);
+    assert_eq!(themes.active().appearance(), Appearance::Light);
+    assert_eq!(themes.active().contrast(), Contrast::Monochrome);
+    assert_eq!(themes.active().density(), Density::Compact);
+    assert!(themes.active().motion().reduced_motion());
+}
+
+#[test]
+fn a_custom_theme_is_drawn_on_the_desktops_axes_too() {
+    let mut themes = ThemeRegistry::with_builtins();
+    let id = ThemeId(77);
+    let custom = Theme::new(
+        id,
+        String::from("Custom"),
+        Appearance::Dark,
+        *Theme::dark().palette(),
+        *Theme::dark().metrics(),
+        *Theme::dark().fonts(),
+        Theme::dark().cursors().clone(),
+        Theme::dark().motion(),
+        Density::Normal,
+        Contrast::Normal,
+    );
+    assert!(themes.register(custom).is_ok());
+    themes.set_accessibility(Accessibility {
+        contrast: Contrast::High,
+        density: Density::Compact,
+        motion: Motion::Full,
+    });
+    assert!(themes.set_active(id).is_ok());
+    assert_eq!(themes.active().id(), id);
+    assert_eq!(themes.active().contrast(), Contrast::High);
+    assert_eq!(themes.active().density(), Density::Compact);
 }

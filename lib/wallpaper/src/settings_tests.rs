@@ -1,4 +1,4 @@
-//! Unit tests for the pinboard settings registry.
+//! Unit tests for the desktop settings registry.
 
 use tairix_appconf::Document;
 
@@ -6,13 +6,13 @@ use super::*;
 use crate::catalog;
 
 /// The settings a document naming exactly `text` yields under the strict
-/// reading, or the refusal it raised.
-fn read(text: &str) -> Result<PinboardSettings, DocumentRefusal> {
-    decode(text)
+/// reading over the defaults, or the refusal it raised.
+fn read(text: &str) -> Result<DesktopSettings, DocumentRefusal> {
+    merge(&DesktopSettings::default(), text)
 }
 
 /// The canonical rendered document of `settings`.
-fn rendered(settings: &PinboardSettings) -> String {
+fn rendered(settings: &DesktopSettings) -> String {
     settings.document().render()
 }
 
@@ -20,13 +20,13 @@ fn rendered(settings: &PinboardSettings) -> String {
 fn an_empty_document_is_the_default_settings() {
     assert_eq!(
         read("").expect("empty document"),
-        PinboardSettings::default()
+        DesktopSettings::default()
     );
 }
 
 #[test]
 fn defaults_match_the_documented_table() {
-    let settings = PinboardSettings::default();
+    let settings = DesktopSettings::default();
     assert_eq!(
         settings.wallpaper,
         WallpaperChoice::Image(WallpaperPath::new(&catalog::default_wallpaper_path()).unwrap())
@@ -44,7 +44,7 @@ fn the_default_wallpaper_path_is_itself_a_valid_wallpaper_path() {
     // validating constructor agree on the same value.
     let validated = WallpaperPath::new(&catalog::default_wallpaper_path()).expect("valid path");
     assert_eq!(
-        PinboardSettings::default().wallpaper,
+        DesktopSettings::default().wallpaper,
         WallpaperChoice::Image(validated)
     );
 }
@@ -90,12 +90,17 @@ fn wallpaper_none_is_accepted() {
 
 #[test]
 fn the_render_is_canonical_and_round_trips() {
-    let settings = PinboardSettings {
+    let settings = DesktopSettings {
         wallpaper: WallpaperChoice::None,
         fit: WallpaperFit::Stretch,
         backdrop: Backdrop::Colour(Rgb::new(0xaa, 0xbb, 0xcc)),
         icons: IconFlow::Trailing,
         sort: IconSort::Size,
+        appearance: Appearance::Light,
+        contrast: Contrast::High,
+        density: Density::Comfortable,
+        motion: Motion::Reduced,
+        scale: Scale::from_percent(150).expect("150% is a scale"),
     };
     let text = rendered(&settings);
     assert_eq!(
@@ -104,14 +109,19 @@ fn the_render_is_canonical_and_round_trips() {
          fit = stretch\n\
          backdrop = aabbcc\n\
          icons = trailing\n\
-         sort = size\n"
+         sort = size\n\
+         appearance = light\n\
+         contrast = high\n\
+         density = comfortable\n\
+         motion = reduced\n\
+         scale = 150\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);
 }
 
 #[test]
 fn default_settings_render_and_reread_exactly() {
-    let settings = PinboardSettings::default();
+    let settings = DesktopSettings::default();
     assert_eq!(
         read(&rendered(&settings)).expect("re-reads"),
         settings,
@@ -128,9 +138,9 @@ fn every_fit_value_round_trips() {
         WallpaperFit::Centre,
         WallpaperFit::Tile,
     ] {
-        let settings = PinboardSettings {
+        let settings = DesktopSettings {
             fit,
-            ..PinboardSettings::default()
+            ..DesktopSettings::default()
         };
         assert_eq!(read(&rendered(&settings)).unwrap().fit, fit);
     }
@@ -139,9 +149,9 @@ fn every_fit_value_round_trips() {
 #[test]
 fn every_icon_flow_and_sort_round_trips() {
     for icons in [IconFlow::Leading, IconFlow::Trailing] {
-        let settings = PinboardSettings {
+        let settings = DesktopSettings {
             icons,
-            ..PinboardSettings::default()
+            ..DesktopSettings::default()
         };
         assert_eq!(read(&rendered(&settings)).unwrap().icons, icons);
     }
@@ -151,9 +161,9 @@ fn every_icon_flow_and_sort_round_trips() {
         IconSort::Size,
         IconSort::Date,
     ] {
-        let settings = PinboardSettings {
+        let settings = DesktopSettings {
             sort,
-            ..PinboardSettings::default()
+            ..DesktopSettings::default()
         };
         assert_eq!(read(&rendered(&settings)).unwrap().sort, sort);
     }
@@ -238,15 +248,15 @@ fn an_oversized_document_is_refused() {
 
 #[test]
 fn the_canonical_document_holds_every_registry_key() {
-    // `PinboardSettings::document` drops a key the format engine refuses, so
+    // `DesktopSettings::document` drops a key the format engine refuses, so
     // this is what pins that it never has to: every registry key is inside
     // the key grammar and every rendered value inside the value grammar.
-    let document = PinboardSettings::default().document();
+    let document = DesktopSettings::default().document();
     for key in SettingsKey::ALL {
         assert_eq!(tairix_appconf::validate_key(key.name()), Ok(()));
         assert_eq!(
             document.get(key.name()),
-            Some(key.value_of(&PinboardSettings::default()).as_str()),
+            Some(key.value_of(&DesktopSettings::default()).as_str()),
             "{key}"
         );
     }
@@ -259,7 +269,7 @@ fn the_canonical_document_holds_every_registry_key() {
 fn a_stored_value_the_registry_refuses_costs_only_itself() {
     let document =
         Document::parse("fit = sideways\nicons = trailing\n").expect("a well-formed document");
-    let (settings, refused) = PinboardSettings::load(&document);
+    let (settings, refused) = DesktopSettings::load(&document);
     assert_eq!(refused, alloc::vec![SettingsKey::Fit]);
     assert_eq!(
         settings.fit,
@@ -275,8 +285,8 @@ fn a_stored_value_the_registry_refuses_costs_only_itself() {
 
 #[test]
 fn an_absent_stored_document_is_the_defaults_with_nothing_refused() {
-    let (settings, refused) = PinboardSettings::load(&Document::new());
-    assert_eq!(settings, PinboardSettings::default());
+    let (settings, refused) = DesktopSettings::load(&Document::new());
+    assert_eq!(settings, DesktopSettings::default());
     assert!(refused.is_empty());
 }
 
@@ -286,7 +296,7 @@ fn a_stored_line_the_grammar_refused_is_ignored_rather_than_fatal() {
     // may predate this build, and a desktop must never be blanked by one
     // line the registry cannot place.
     let document = Document::parse("nonsense\nsort = size\n").expect("tolerant parse");
-    let (settings, refused) = PinboardSettings::load(&document);
+    let (settings, refused) = DesktopSettings::load(&document);
     assert!(refused.is_empty());
     assert_eq!(settings.sort, IconSort::Size);
 }
@@ -394,11 +404,11 @@ fn a_wallpaper_path_carrying_a_hash_survives_the_round_trip() {
     // The hand-rolled grammar this replaced had to refuse such a path to
     // stay unambiguous; the format engine quotes it instead, so a file the
     // user really named this way is choosable.
-    let settings = PinboardSettings {
+    let settings = DesktopSettings {
         wallpaper: WallpaperChoice::Image(
             WallpaperPath::new("/Users/ada/Pictures/sunset#2.png").expect("a legal path"),
         ),
-        ..PinboardSettings::default()
+        ..DesktopSettings::default()
     };
     let text = rendered(&settings);
     assert!(
@@ -465,4 +475,155 @@ fn a_refusal_names_what_was_wrong() {
     assert!(
         alloc::format!("{}", read("fit = tile\nnonsense\n").unwrap_err()).starts_with("line 2:")
     );
+}
+
+#[test]
+fn every_appearance_key_reads_its_closed_set() {
+    let settings = read(
+        "appearance = light\n\
+         contrast = monochrome\n\
+         density = compact\n\
+         motion = reduced\n\
+         scale = 175\n",
+    )
+    .expect("every value is in its set");
+    assert_eq!(settings.appearance, Appearance::Light);
+    assert_eq!(settings.contrast, Contrast::Monochrome);
+    assert_eq!(settings.density, Density::Compact);
+    assert_eq!(settings.motion, Motion::Reduced);
+    assert_eq!(settings.scale.percent(), 175);
+}
+
+#[test]
+fn an_appearance_value_outside_its_set_is_refused_whole() {
+    for (key, bad) in [
+        ("appearance", "sepia"),
+        ("contrast", "Normal"),
+        ("density", "dense"),
+        ("motion", "none"),
+    ] {
+        let text = alloc::format!("{key} = {bad}\n");
+        let refusal = read(&text).expect_err("outside the closed set");
+        assert!(matches!(refusal, DocumentRefusal::InvalidValue(_)), "{key}");
+    }
+}
+
+#[test]
+fn a_scale_outside_what_the_desktop_can_draw_is_refused() {
+    // The bound is `Scale`'s own, so a percentage this registry accepts is
+    // always one the geometry can resolve.
+    let below = alloc::format!("scale = {}\n", Scale::MIN_PERCENT - 1);
+    let above = alloc::format!("scale = {}\n", Scale::MAX_PERCENT + 1);
+    for text in [below, above, String::from("scale = 0\n")] {
+        assert!(matches!(
+            read(&text),
+            Err(DocumentRefusal::InvalidValue(SettingsKey::Scale))
+        ));
+    }
+    // One spelling only: a sign, a space, or a radix prefix is a second way
+    // to write a value the document already has one way to write.
+    for text in ["scale = +150\n", "scale = 1 5 0\n", "scale = 0x96\n"] {
+        assert!(matches!(
+            read(text),
+            Err(DocumentRefusal::InvalidValue(SettingsKey::Scale))
+        ));
+    }
+}
+
+#[test]
+fn a_scale_that_would_overflow_the_accumulator_is_refused_not_wrapped() {
+    let text = alloc::format!("scale = {}\n", u64::from(u32::MAX) + 1);
+    assert!(matches!(
+        read(&text),
+        Err(DocumentRefusal::InvalidValue(SettingsKey::Scale))
+    ));
+}
+
+#[test]
+fn a_tolerant_read_leaves_exactly_the_refused_appearance_key_at_its_default() {
+    let mut document = Document::new();
+    let _ = document.set("appearance", "light");
+    let _ = document.set("contrast", "sepia");
+    let _ = document.set("density", "compact");
+    let (settings, refused) = DesktopSettings::load(&document);
+    assert_eq!(refused, alloc::vec![SettingsKey::Contrast]);
+    assert_eq!(settings.appearance, Appearance::Light);
+    assert_eq!(settings.contrast, Contrast::Normal);
+    assert_eq!(settings.density, Density::Compact);
+}
+
+#[test]
+fn a_merge_leaves_every_key_the_sender_did_not_name() {
+    // The defect this forecloses: choosing a wallpaper must not reimpose
+    // the appearance the chooser happened to open on.
+    let in_effect = DesktopSettings {
+        appearance: Appearance::Light,
+        contrast: Contrast::High,
+        density: Density::Comfortable,
+        motion: Motion::Reduced,
+        scale: Scale::from_percent(150).expect("150% is a scale"),
+        ..DesktopSettings::default()
+    };
+    let posted = DesktopSettings {
+        fit: WallpaperFit::Tile,
+        sort: IconSort::Date,
+        ..DesktopSettings::default()
+    }
+    .document_of(&SettingsKey::PINBOARD)
+    .render();
+
+    let merged = merge(&in_effect, &posted).expect("the pinboard keys are valid");
+    assert_eq!(merged.fit, WallpaperFit::Tile);
+    assert_eq!(merged.sort, IconSort::Date);
+    assert_eq!(merged.appearance, Appearance::Light);
+    assert_eq!(merged.contrast, Contrast::High);
+    assert_eq!(merged.density, Density::Comfortable);
+    assert_eq!(merged.motion, Motion::Reduced);
+    assert_eq!(merged.scale.percent(), 150);
+}
+
+#[test]
+fn a_refused_merge_changes_nothing_at_all() {
+    let in_effect = DesktopSettings {
+        appearance: Appearance::Light,
+        fit: WallpaperFit::Tile,
+        ..DesktopSettings::default()
+    };
+    // The valid key precedes the invalid one, so a half-applying merge
+    // would show `Centre` here.
+    let refusal = merge(&in_effect, "fit = centre\ncontrast = sepia\n")
+        .expect_err("the second value is outside its set");
+    assert_eq!(
+        refusal,
+        DocumentRefusal::InvalidValue(SettingsKey::Contrast)
+    );
+    assert_eq!(in_effect.fit, WallpaperFit::Tile);
+}
+
+#[test]
+fn the_two_key_groups_partition_the_registry() {
+    // Every key belongs to exactly one group, so a surface that renders
+    // its group can never leave a key with no owner or post one twice.
+    for key in SettingsKey::ALL {
+        let pinboard = SettingsKey::PINBOARD.contains(&key);
+        let appearance = SettingsKey::APPEARANCE.contains(&key);
+        assert!(pinboard ^ appearance, "{key} is in neither group or both");
+    }
+    assert_eq!(
+        SettingsKey::PINBOARD.len() + SettingsKey::APPEARANCE.len(),
+        SettingsKey::ALL.len()
+    );
+}
+
+#[test]
+fn a_group_document_names_only_its_own_keys() {
+    let rendered = DesktopSettings::default()
+        .document_of(&SettingsKey::APPEARANCE)
+        .render();
+    for key in SettingsKey::APPEARANCE {
+        assert!(rendered.contains(key.name()), "{key} missing");
+    }
+    for key in SettingsKey::PINBOARD {
+        assert!(!rendered.contains(key.name()), "{key} should not be here");
+    }
 }

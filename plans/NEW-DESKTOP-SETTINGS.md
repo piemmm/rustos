@@ -33,8 +33,9 @@ dropped is a category the surface then has to lie about.
 |---|---|---|---|---|
 | **DS1** | `lib/controls::form` — `FieldRow`/`FieldGroup`/`FieldControl`/`FieldLayout` over the row chrome hoisted into the shared `paint` core, the measured-width accessors the slot model needs, and a `widgets.app` gallery tab | — | DS1, §4 | done |
 | **DS2** | The `userland/apps/settings` crate and its shell: the closed `Category`/`Pane` registry, the vertical `Tabs` sidebar, the search index, the breadcrumb band, frame shedding, the absence-pane renderer, and the taskbar's *Settings…* row | DS1 | DS2 | done |
-| **DS3** | Appearance and Accessibility over the session's user-scope appearance registry, and the apply rendezvous every other user-scope write reuses | DS2 | DS3 | planned |
-| **DS4** | Wallpaper — the pinboard keys as rows, the resolved current picture, and the route to the chooser's gallery; the chooser's own drop-downs rebuilt on the family | DS3 | DS4 | blocked — nothing in the tree lets Settings reach `wallpaper.app` under its manifest; the three candidate routes are in DS4 and the choice is the User's |
+| **DS3** | Appearance and Accessibility over the session's user-scope appearance registry, and the apply rendezvous every other user-scope write reuses | DS2 | DS3 | done |
+| **DS3b** | The cursor pair: a cursor-set store under `/System/Graphics/Cursors/<set>/` so `cursor.set` has a choice space at all, and a `cursor.size` factor in the session's cursor controller | DS3 | DS3b | planned |
+| **DS4** | Wallpaper — the gallery absorbed into the pane over two served requests, `wallpaper.app` deleted, and *Change Background…* opening Settings at that pane | DS3 | DS4 | planned |
 | **DS5** | Storage — one group per mount with its capacity track and health pill, over the mount→capacity derivation moved into `lib/procinfo` and shared with the Switchboard | DS2 | DS5 | planned |
 | **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | planned |
 | **DS7** | Networking read — per-interface facts, link state, addresses and rates through the Switchboard's own client, plus the stack-wide `net.*` options | DS2, DS6 | DS7 | planned |
@@ -94,6 +95,13 @@ write path on landing.
   password record**. A settings browser that wanted to print a user's full
   name would be holding every hash on the machine. So the account roster comes
   from the ungated, credential-free `USER_DIRECTORY` query instead (DS9).
+  This survives absorbing the wallpaper gallery (DS4), which is the one place
+  it came under real pressure: browsing pictures needs the store listed and
+  each one decoded, and the chooser held `CAP_FS_ACCESS`, `CAP_PROC_SPAWN` and
+  `CAP_LOG_EMIT` to do it. Settings does not inherit them. The session already
+  owns a sandboxed image renderer, so it serves the catalog and the previews
+  and Settings asks — which keeps the manifest at two capabilities *and*
+  leaves one sandboxed decode path on the desktop instead of two.
   An application that could change everything is precisely the ambient-
   authority god-app `AGENTS.md` §4 and §5.2 forbid, and a settings *browser*
   does not need to be one: every change is either a request to the process that
@@ -139,8 +147,9 @@ write path on landing.
   That shape is not this app's to invent privately: the file manager
   hand-rolled a permissions grid, the wallpaper chooser a column of four
   drop-downs, and `datetime.app` a row of six fields. `lib/controls::form` is
-  the one family (DS1), and DS4/DS14 rebuild those three surfaces on it,
-  because two form idioms in one desktop is the duplication `AGENTS.md` §2.2
+  the one family (DS1). `datetime.app` is converted (DS14), the chooser's copy
+  goes with the chooser itself (DS4), and `PermGrid` is what remains — because
+  two form idioms in one desktop is the duplication `AGENTS.md` §2.2
   forbids. The family composes the existing row chrome and control families; it
   re-implements no plate, press, focus, disabled or Authority-Mark rendering.
 
@@ -166,6 +175,15 @@ write path on landing.
   reading it could not take renders unmeasured, never a fabricated zero or a
   default presented as the truth. It re-reads on window focus and after every
   applied change, so what it shows is what is.
+
+- **One window, one instance, and no icon-bar slot.** Settings is part of the
+  desktop rather than an application the user manages: its signed manifest
+  presents no icon-bar slot, so closing the window ends the program — there is
+  no slot left holding a handle on a windowless process. It is a singleton,
+  which is the manifest's own default and is what makes *Change Background…*
+  able to reach the Settings a user already has open (DS4) rather than
+  starting a second view of one machine's configuration, each able to
+  overwrite the other's applies.
 
 - **One window, resizable, server-decorated.** The compositor draws the title
   bar, frame, and window commands; Settings' content is the whole client
@@ -278,8 +296,8 @@ owner the change goes to; the last column is what a refusal looks like.
 | General → Login & startup | `lib/sysconfig` `os.loginType` | elevated `configure` | Authority Mark, value unchanged |
 | General → Caching | `lib/sysconfig` `cache.*` | elevated `configure` | Authority Mark, value unchanged |
 | General → Date & Time | `WallClockReading` | elevated `datetime.app` (launched) | prompt not shown, clock untouched |
-| Appearance | active `Theme` | session apply | apply refused, stated in footer |
-| Wallpaper | session's published pinboard document | session apply; gallery → `wallpaper.app` | apply refused, stated |
+| Appearance | the session's published settings document | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
+| Wallpaper | session's published settings document; the store catalog and each preview served by the session | session apply (merged) | apply refused, stated; a preview that did not arrive draws its placeholder |
 | Displays | `SEAT_LIST`, `DesktopInfo`, `Compositor::window_scale` | session apply (scale only) | mode change: no interface (§3) |
 | Lock Screen | session's lock policy document | session apply | apply refused, stated |
 | Screensaver | session's idle policy document | session apply | apply refused, stated |
@@ -296,7 +314,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | Trackpad | — | — | pane states absence (§3) |
 | Touchscreen | — | — | pane states absence (§3) |
 | Printers & Scanners | — | — | pane states absence (§3) |
-| Accessibility | active `Theme` (contrast, density, motion), scale, cursor size | session apply | apply refused, stated |
+| Accessibility | the session's published settings document (contrast, density, motion, scale) | session apply (merged) | apply refused, stated on `stderr`, row reverts; cursor size: no interface (§3) |
 | Language & Region | the bundle `Help/` locale set, `lib/sysconfig` | elevated `configure`; zones → `plans/TIMEZONES.md` | Authority Mark |
 | Sharing | — | — | pane states absence (§3) |
 | Users & Groups | ungated `USER_DIRECTORY` / `GROUP_DIRECTORY` roster + own record; other accounts' fields, lock state and grants only after admin authentication (DS9) | elevated user-admin tool (DS9) | Authority Mark, account unchanged |
@@ -331,6 +349,8 @@ would change nothing.
 | Keyboard → shortcuts | no shortcut registry anywhere; each surface owns its own keys | a desktop-wide binding registry |
 | Language & Region → time zone | no zone data, no local rendering | `plans/TIMEZONES.md` |
 | General → Software Update | no updater, no package store | out of scope for this plan |
+| Accessibility → pointer size | the pointer is rasterised at the output's density and the session keeps no size of its own | a size factor in the session's `CursorController` (DS3b) |
+| Accessibility → cursor set | `/System/Graphics/Cursors/` holds one set, named by the active theme; there is nothing to choose between | a cursor-set store scanned like the wallpaper catalog (DS3b) |
 | Accessibility → screen reader, zoom, sticky keys | no assistive-technology surface | out of scope for this plan |
 
 Two of these are cheap enough to build *here* rather than defer, and this plan
@@ -496,49 +516,136 @@ What the shell guarantees, which no later stage re-derives:
 ### DS3 — Appearance and Accessibility: the session's user-scope document
 
 The first *writing* panes, and the template for every other user-scope write.
-The desktop settings document (today `lib/wallpaper`'s five pinboard keys)
-grows the desktop's own appearance registry — `appearance`, `contrast`,
-`density`, `motion`, `scale`, `cursor.set`, `cursor.size` — with the same
-closed-key, tolerant-read, canonical-render discipline and the same one engine.
-The session applies each through the paths it already owns
-(`DesktopShell::set_scale`, the theme registry's `set_appearance`, the cursor
-registry's `set_active`) and persists the whole document to its published
-scope; Settings posts and re-reads. Appearance and Accessibility are two views
-of one registry — contrast, density, motion, scale, and cursor size appear in
-both, from one definition, because a reader looks for them in either place.
+What it guarantees, which no later stage re-derives:
 
-Host tests: the registry round trip; a refused value leaving exactly its own
-key at the default and naming it; the session's apply policy refusing an
-unattested caller and a malformed document; every immediate row's commit
-reaching the document it claims to.
+- **One document, two groups.** `lib/wallpaper`'s settings registry — now the
+  desktop's, not the pinboard's, and its type renamed `DesktopSettings` to say
+  so — grew `appearance`, `contrast`, `density`, `motion` and `scale` beside
+  the five backdrop keys, on the same closed-key, tolerant-read,
+  canonical-render discipline and the same one format engine.
+  `SettingsKey::PINBOARD` and `SettingsKey::APPEARANCE` partition it, and a
+  test holds the partition. One document because one owner and one published
+  scope: the session writes both in one round trip.
+- **An apply merges; it does not replace.** Two surfaces edit the desktop and
+  neither shows every setting, so a surface renders only the keys it edits
+  (`document_of`) and the session lays them over what it holds (`merge`). The
+  old whole-document post would have made every wallpaper change reimpose the
+  appearance the chooser happened to open on. A refused document is refused
+  whole, on a copy, so nothing half-applies.
+- **The axes reach the pixels, and every application.** `Contrast`, `Density`
+  and `Motion` moved into `lib/abi::desktop` beside `Appearance` (the ABI owns
+  a vocabulary that crosses the window channel; `lib/theme` re-exports rather
+  than restating), `DesktopInfo` grew all three, and `adopt_desktop` applies
+  them in the one call every app already makes. `ThemeRegistry` gained the
+  `Accessibility` overlay — `active()` is the theme *as drawn*, `selected()`
+  the theme as registered — and `Theme::with_axes` is the single place an axis
+  reaches a pixel. **Density was doing nothing at all** before this stage:
+  `Metrics::at_density` now derives the three spacing metrics that decide how
+  much room a control is given, so the row is a real setting rather than a
+  control that would change nothing.
+- **One adopt path, bring-up included.** `PinboardChange` split into
+  `BackdropWork` and `AppearanceWork`, and `adopt_appearance` is the one place
+  the appearance half is put into effect — re-theme, rescale, republish. The
+  session's boot-time settings load drives the very same function, so a stored
+  `appearance = light` is in force before the first frame rather than ignored
+  until the user changed something.
+- **The panes are one row definition seen twice.** `appearance::Setting` holds
+  each settable's label, sentence, choices, read and write; Appearance adds
+  light/dark, Accessibility groups the rest the way a reader looking for them
+  would, and the registry's `settings` labels are asserted equal to what the
+  composition actually draws. `PaneBacking::Composed` is the third answer a
+  pane can give, and the statement renderer draws nothing for it.
+- **Asked for, never written, and never on the loop.** The apply client
+  (`ApplyOutcome`, and `apply` behind `lib/wallpaper`'s `rt` feature) is one
+  definition shared with the chooser, and Settings drives it from a worker:
+  the session answers only once its store has been written, so an inline call
+  would freeze the window for a disk commit. The rows show the choice at once
+  and adopt the durable value when the answer lands, so a refusal reverts.
 
-### DS4 — Wallpaper
+**The cursor pair is not here, and DS3b says why.** `cursor.size` has no
+mechanism anywhere — the pointer is rasterised at the output's density and the
+session keeps no size of its own — and `cursor.set` has no *choice space*:
+`/System/Graphics/Cursors/` holds one set, named by the active theme, so the
+key would be a closed set of one and the row a control that would change
+nothing. Accessibility therefore states the absence in a row of its own rather
+than offering it.
 
-The pinboard keys as `FieldRow`s (fit, backdrop, icon flow, sort) applied
-immediately through DS3's channel, the current wallpaper named with its
-resolved path, and a **Choose Picture…** button that launches
-`wallpaper.app` for the gallery. The gallery stays in the chooser deliberately:
-decoding an untrusted image needs the sandbox worker the chooser spawns, and
-Settings must not acquire `CAP_PROC_SPAWN` to grow a second gallery. In the
-same stage the chooser's own four drop-downs are rebuilt on `FieldGroup`/
-`FieldRow` so the two surfaces share one form idiom.
+### DS3b — the cursor pair
 
-**Open decision, and DS4 does not start until it is settled.** Nothing in the
-tree lets Settings launch that chooser under the manifest §0 fixes. There is no
-launch request on the window channel (`WindowRequest` opens windows and popups,
-it starts no program), `ElevateRequest::Launch` re-authenticates with a
-password — absurd for an unprivileged gallery — and every app that launches
-another today (`files`, `wallpaper`, `man`, `terminal`) holds `CAP_PROC_SPAWN`
-itself. So exactly one of three has to be chosen, and the choice is not this
-plan's to guess: (a) Settings holds `CAP_PROC_SPAWN`, which costs it the clean
-sizing §0 rests on; (b) the session gains a user-gesture-mediated launch
-request on the window channel, which is a real new interface and belongs in
-`plans/APPWIN.md` with its own authority argument — the session spawns on a
-gesture *it* witnessed, never on an app's word; or (c) the button goes, and the
-gallery is reached only from the backdrop menu and the program library, with
-the Wallpaper pane naming where it is. The same question governs Date & Time,
-which reaches `datetime.app` through the broker's `Launch` and so pays a
-password prompt for a clock the account may already set.
+`cursor.size` as a factor the session's `CursorController` rasterises at
+(a third component of its cache epoch, so a size change re-rasterises exactly
+as a scale change does), and `cursor.set` over a real cursor-set store:
+`/System/Graphics/Cursors/<set>/` scanned like the wallpaper catalog, each set
+registered with the window manager's existing `CursorRegistry`, so the key has
+more than one legal value. Both then join the `SettingsKey::APPEARANCE` group
+and the Accessibility pane's rows, replacing the stated absence DS3 left.
+
+### DS4 — Wallpaper: the chooser absorbed, and `wallpaper.app` deleted
+
+Wallpaper is a *section of Settings*, not an application beside it. The
+picture gallery moves into the Wallpaper pane, `userland/apps/wallpaper` is
+deleted, and the backdrop menu's *Change Background…* row opens Settings at
+that pane.
+
+**Settings still holds no domain authority, and the gallery does not change
+that.** Listing the shipped store needs `CAP_FS_ACCESS` and decoding an
+untrusted picture needs the sandbox worker a `CAP_PROC_SPAWN` holder hosts —
+which is exactly why the chooser held them. Granting all three to the
+application that will later carry Networking, Users and Storage is the
+ambient-authority god-app §0 exists to prevent, so the gallery is served
+rather than hosted: the desktop session already owns a sandboxed image
+renderer (it fits the wallpaper and rasterises every icon through it), and
+Settings asks it.
+
+- **Two descriptive window-channel requests**, of the same posture as
+  `QueryDesktop`: seat-scoped, capability-free, describing the caller's own
+  desktop and granting nothing. One answers the shipped store's categories
+  and entries, bounded by the catalog model `lib/wallpaper` already owns; the
+  other renders one candidate at a named destination size into a
+  shared-memory region **Settings** created and granted, which is the one
+  thing its existing `CAP_SHM` already lets it do. There is then exactly one
+  sandboxed decode path on the desktop instead of two, and no picture is ever
+  decoded in the address space of the application that browses them.
+- **The pane.** The four pinboard settings (fit, backdrop, icon flow, sort)
+  are `FieldRow`s committing immediately and posting `SettingsKey::PINBOARD`
+  through DS3's merge, so they cannot disturb the appearance keys. The
+  gallery is an `IconTile` collection over the answered catalog, with each
+  preview filled in as it arrives — requested, never awaited, and a paint
+  draws what has come back and a placeholder for what has not.
+- **`userland/apps/wallpaper` is deleted**, not left beside its replacement:
+  the crate, its bundle, `AppInfo.toml`, `Resources/`, its `Help/` tree in
+  every required locale, and its README. Its host-tested engine is salvaged
+  where something genuinely shares it — the candidate model and the gallery's
+  wrapping/hit-test geometry — and the rest goes with it. Every reference
+  goes in the same change: the harness's discovered-bundle list, the kernel's
+  capability-request registry, `tools/syshelp`, the QEMU fixtures,
+  `WALLPAPER_RUN_PATH` / `WALLPAPER_LABEL` and the `ChangeBackground` arm in
+  the session, `PLAN.md`, `plans/PINBOARD.md`, `docs/src/desktop/pinboard.md`,
+  and the §15.18 jump-sheet.
+- **A launch may name a place inside an application.** *Change Background…*
+  goes through the desktop's one launch funnel with a target naming the
+  Wallpaper pane. Singleton is already the signed manifest's default, so a
+  Settings that is already running is *reused*: the hand-over delivers the
+  pane to it and it navigates, while a fresh spawn is given the same pane and
+  opens on it. Both routes end on the same pane, and a hand-over the instance
+  does not take falls back to spawning, which is the existing all-or-nothing
+  rule for a launch that names something.
+  - It is a **third** target form rather than a `LaunchTarget::Path`, because
+    the two existing forms are both authority over a *file*: a path is
+    resolved against the filesystem under the application's own authority,
+    which Settings has none of, and a document is a one-shot delegation.
+    A pane is neither — it is a name resolved against the closed pane
+    registry, it grants nothing, and an unknown one leaves the window on the
+    pane it was already showing rather than failing to open.
+- **The chooser's own four drop-downs are not "rebuilt"; they are replaced.**
+  The second form idiom DS14 tracks loses one of its three instances here by
+  the surface carrying it ceasing to exist.
+
+Host tests: the catalog and preview requests refusing a malformed or
+out-of-bound ask and answering nothing; the pane composing the four settings
+rows from the one `Setting` definition; a preview that never arrived drawing
+its placeholder rather than a blank tile; the pane target naming an unknown
+pane leaving the location alone.
 
 ### DS5 — Storage
 

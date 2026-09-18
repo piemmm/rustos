@@ -16,7 +16,7 @@
 //!
 //! # The pinboard settings live here
 //!
-//! The desktop owns the user's [`PinboardSettings`] — the wallpaper and its
+//! The desktop owns the user's [`DesktopSettings`] — the wallpaper and its
 //! fit, the backdrop colour, the icon arrangement, and the sort order — as the
 //! single copy inside the session: the shell reads them from the desktop
 //! rather than holding a second set that could drift from the one the icons
@@ -76,7 +76,7 @@ use tairix_icon::IconArtwork;
 use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
-use tairix_wallpaper::{IconFlow, IconSort, PinboardSettings};
+use tairix_wallpaper::{DesktopSettings, IconFlow, IconSort};
 use tairix_wm::{ClickKind, DoubleClickTracker, Key, NamedKey, PointerButton};
 
 use crate::library::catalogued;
@@ -156,7 +156,7 @@ pub enum DesktopAction {
     /// The model names the new settings; it does not apply them itself, so
     /// there is exactly one place settings are adopted and the persisted
     /// document and the live desktop can never drift apart.
-    AdoptSettings(PinboardSettings),
+    AdoptSettings(DesktopSettings),
     /// Open the wallpaper chooser, which is an installed application the
     /// embedder resolves and launches (the model knows no bundle paths).
     ChangeBackground,
@@ -166,15 +166,15 @@ pub enum DesktopAction {
     Refuse(String),
 }
 
-/// The work a settings edit implies, beyond the repaint that having changed
-/// anything at all already implies.
+/// The work a change to the *backdrop* implies: the wallpaper, and the icons
+/// standing on it.
 ///
-/// Each field names one piece of work the *edit* asks for, so a change of sort
+/// Each field names one piece of work the edit asks for, so a change of sort
 /// order does not cost a wallpaper decode and a change of wallpaper does not
 /// cost a directory read. An edit that only changes the backdrop colour asks
 /// for none of them — the repaint alone shows it.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct PinboardChange {
+pub struct BackdropWork {
     /// The icon arrangement moved: the grid must be laid out again before the
     /// next paint or hit-test.
     pub relayout: bool,
@@ -184,6 +184,43 @@ pub struct PinboardChange {
     /// The wallpaper image or its fit changed: the embedder must prepare the
     /// screen-sized wallpaper surface again and hand it to the shell.
     pub wallpaper: bool,
+}
+
+/// The work a change to how the desktop is *drawn* implies.
+///
+/// Separate from [`BackdropWork`] because it is a different embedder's job:
+/// the backdrop work is the desktop layer's alone, while these reach the
+/// theme registry, the output's density, and every application on the
+/// screen.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct AppearanceWork {
+    /// The appearance, contrast, density or motion changed: the embedder
+    /// must re-theme the desktop and republish it, because every open
+    /// application draws its own pixels and would otherwise be left in the
+    /// appearance the user has just stopped asking for.
+    pub theme: bool,
+    /// The UI scale changed: the embedder must rescale the output and
+    /// republish, so every logical length on the desktop and in every
+    /// application resolves at the new density.
+    pub scale: bool,
+}
+
+impl AppearanceWork {
+    /// Whether anything the desktop is drawn with moved.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.theme || self.scale
+    }
+}
+
+/// The work a settings edit implies, beyond the repaint that having changed
+/// anything at all already implies.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct PinboardChange {
+    /// What the backdrop and its icons owe.
+    pub backdrop: BackdropWork,
+    /// What the desktop's appearance owes.
+    pub appearance: AppearanceWork,
 }
 
 /// The outcome of one desktop gesture: whether the gesture re-listed the
@@ -243,7 +280,7 @@ pub struct Desktop<S: DirectorySource> {
     /// The user's pinboard settings. The desktop is their single owner inside
     /// the session: the shell reads them from here rather than keeping a
     /// second copy that could drift.
-    settings: PinboardSettings,
+    settings: DesktopSettings,
     entries: Vec<Entry>,
     selected: Option<usize>,
     hovered: Option<usize>,
@@ -270,7 +307,7 @@ impl<S: DirectorySource> Desktop<S> {
         Self {
             source,
             folder,
-            settings: PinboardSettings::default(),
+            settings: DesktopSettings::default(),
             entries: Vec::new(),
             selected: None,
             hovered: None,
@@ -289,7 +326,7 @@ impl<S: DirectorySource> Desktop<S> {
 
     /// The pinboard settings in force.
     #[must_use]
-    pub const fn settings(&self) -> &PinboardSettings {
+    pub const fn settings(&self) -> &DesktopSettings {
         &self.settings
     }
 
@@ -354,15 +391,24 @@ impl<S: DirectorySource> Desktop<S> {
     /// [`PinboardChange`] names the further work on top of it, so the caller
     /// re-lays out, re-lists, or re-prepares the wallpaper only when the edit
     /// actually asks for it. The desktop applies nothing beyond its own state.
-    pub fn apply_settings(&mut self, settings: PinboardSettings) -> Option<PinboardChange> {
+    pub fn apply_settings(&mut self, settings: DesktopSettings) -> Option<PinboardChange> {
         if settings == self.settings {
             return None;
         }
         let change = PinboardChange {
-            relayout: settings.icons != self.settings.icons,
-            relist: settings.sort != self.settings.sort,
-            wallpaper: settings.wallpaper != self.settings.wallpaper
-                || settings.fit != self.settings.fit,
+            backdrop: BackdropWork {
+                relayout: settings.icons != self.settings.icons,
+                relist: settings.sort != self.settings.sort,
+                wallpaper: settings.wallpaper != self.settings.wallpaper
+                    || settings.fit != self.settings.fit,
+            },
+            appearance: AppearanceWork {
+                theme: settings.appearance != self.settings.appearance
+                    || settings.contrast != self.settings.contrast
+                    || settings.density != self.settings.density
+                    || settings.motion != self.settings.motion,
+                scale: settings.scale != self.settings.scale,
+            },
         };
         self.settings = settings;
         Some(change)
@@ -678,11 +724,11 @@ impl<S: DirectorySource> Desktop<S> {
             PinboardCommand::NewFolder => DesktopOutcome::acting(DesktopAction::CreateFolder {
                 path: self.path_of(&suggest_new_dir_name(&self.entries)),
             }),
-            PinboardCommand::SortBy(sort) => self.adopt(PinboardSettings {
+            PinboardCommand::SortBy(sort) => self.adopt(DesktopSettings {
                 sort,
                 ..self.settings.clone()
             }),
-            PinboardCommand::ArrangeFrom(icons) => self.adopt(PinboardSettings {
+            PinboardCommand::ArrangeFrom(icons) => self.adopt(DesktopSettings {
                 icons,
                 ..self.settings.clone()
             }),
@@ -703,7 +749,7 @@ impl<S: DirectorySource> Desktop<S> {
 
     /// Name the settings edit `next` for the embedder to adopt, or change
     /// nothing when it asks for the settings already in force.
-    fn adopt(&self, next: PinboardSettings) -> DesktopOutcome {
+    fn adopt(&self, next: DesktopSettings) -> DesktopOutcome {
         if next == self.settings {
             return DesktopOutcome::ignored();
         }

@@ -1,13 +1,19 @@
-//! The pinboard settings document: its validated model, closed key
-//! registry, and the two readings the registry has.
+//! The desktop settings document: its validated model, closed key registry,
+//! and the two readings the registry has.
 //!
-//! One document is one [`PinboardSettings`]: the user's chosen wallpaper
-//! (or none), how it is fitted to the screen, the backdrop colour shown
-//! where the wallpaper does not reach, the desktop icon flow, and the sort
-//! order the `Desktop` folder is listed in. Every field is a closed value
-//! set, and the document itself is a plain `lib/appconf` `key = value`
-//! document — the one format engine the app-data store speaks, so this
-//! crate defines the *registry* over it and no grammar of its own.
+//! One document is one [`DesktopSettings`], in two groups. The *backdrop*
+//! keys are the user's chosen wallpaper (or none), how it is fitted to the
+//! screen, the colour shown where it does not reach, the desktop icon flow,
+//! and the sort order the `Desktop` folder is listed in. The *appearance*
+//! keys are how every surface of the desktop is drawn: light or dark,
+//! contrast, density, motion, and the interface scale. Every field is a
+//! closed value set, and the document itself is a plain `lib/appconf`
+//! `key = value` document — the one format engine the app-data store speaks,
+//! so this crate defines the *registry* over it and no grammar of its own.
+//!
+//! The two groups share one document because they share one owner and one
+//! published scope: the session writes both, in one round trip, and a
+//! desktop half-adopted from two documents is a desktop nobody chose.
 //!
 //! # Where the document lives
 //!
@@ -22,27 +28,32 @@
 //!
 //! # Two readings, deliberately different
 //!
-//! [`PinboardSettings::load`] is the **tolerant** one, for a document held
+//! [`DesktopSettings::load`] is the **tolerant** one, for a document held
 //! in a store: a value the registry refuses leaves that one field at its
 //! documented default and is *named* to the caller, so one stale setting
 //! costs only itself and never blanks a user's desktop.
 //!
-//! [`decode`] is the **strict** one, for a document that arrived over a
+//! [`merge`] is the **strict** one, for a document that arrived over a
 //! channel: a line outside the grammar, a key outside the registry, or a
 //! value outside a key's closed set is a defect in the *sender* rather than
 //! something a person typed, and adopting a desktop the sender did not
-//! describe is worse than refusing it.
+//! describe is worse than refusing it. It lays the document over what the
+//! desktop already holds rather than replacing it, because more than one
+//! surface edits the desktop and none of them shows every setting.
 //!
-//! [`PinboardSettings::document`] renders the canonical form both readings
+//! [`DesktopSettings::document`] renders the canonical form both readings
 //! accept: every registry key, in registry order, so a render/read round
-//! trip is exact.
+//! trip is exact. [`DesktopSettings::document_of`] renders one group, which
+//! is what a surface asking for a change posts.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
 use tairix_appconf::{ConfError, Document, Lookup};
+use tairix_geometry::Scale;
 
 use crate::catalog;
 
@@ -377,13 +388,21 @@ impl IconSort {
     }
 }
 
-/// One key of the closed pinboard settings registry.
+/// One key of the closed desktop settings registry.
 ///
 /// Adding a key means adding a variant here, its row in [`SettingsKey::ALL`],
-/// its field on [`PinboardSettings`], and its arms in this module's private
+/// its field on [`DesktopSettings`], and its arms in this module's private
 /// `set_field` and `field_value` bridges — the compiler then forces every
 /// consumer to state what the new key means. There is no free-form key
 /// namespace: an unknown key fails closed at parse.
+///
+/// The keys fall into two groups, which is a reader's distinction rather
+/// than the document's: the *pinboard* keys describe the backdrop and the
+/// icons standing on it, and the *appearance* keys describe how every
+/// surface of the desktop is drawn. They share one document because they
+/// share one owner and one published scope — the session writes both, in one
+/// round trip, and a desktop half-adopted from two documents is a desktop
+/// nobody chose.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SettingsKey {
     /// `wallpaper` — the wallpaper image, or `none`.
@@ -396,16 +415,51 @@ pub enum SettingsKey {
     Icons,
     /// `sort` — how the `Desktop` folder's icons are ordered.
     Sort,
+    /// `appearance` — whether the desktop is drawn light or dark.
+    Appearance,
+    /// `contrast` — how much separation is drawn around a control.
+    Contrast,
+    /// `density` — how much room a control is given.
+    Density,
+    /// `motion` — whether a state change is animated.
+    Motion,
+    /// `scale` — the UI scale, as a percentage of the reference density.
+    Scale,
 }
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 10] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
         Self::Icons,
         Self::Sort,
+        Self::Appearance,
+        Self::Contrast,
+        Self::Density,
+        Self::Motion,
+        Self::Scale,
+    ];
+
+    /// The keys describing the backdrop and the icons standing on it: what
+    /// the wallpaper chooser and the backdrop menu edit.
+    pub const PINBOARD: [Self; 5] = [
+        Self::Wallpaper,
+        Self::Fit,
+        Self::Backdrop,
+        Self::Icons,
+        Self::Sort,
+    ];
+
+    /// The keys describing how every surface of the desktop is drawn: what
+    /// the Settings application's Appearance and Accessibility panes edit.
+    pub const APPEARANCE: [Self; 5] = [
+        Self::Appearance,
+        Self::Contrast,
+        Self::Density,
+        Self::Motion,
+        Self::Scale,
     ];
 
     /// The canonical key spelling.
@@ -417,6 +471,11 @@ impl SettingsKey {
             Self::Backdrop => "backdrop",
             Self::Icons => "icons",
             Self::Sort => "sort",
+            Self::Appearance => "appearance",
+            Self::Contrast => "contrast",
+            Self::Density => "density",
+            Self::Motion => "motion",
+            Self::Scale => "scale",
         }
     }
 
@@ -432,7 +491,7 @@ impl SettingsKey {
     /// The one place a setting becomes text, so a writer publishing to the
     /// store and a sender rendering a document cannot spell one differently.
     #[must_use]
-    pub fn value_of(self, settings: &PinboardSettings) -> String {
+    pub fn value_of(self, settings: &DesktopSettings) -> String {
         field_value(settings, self)
     }
 }
@@ -445,8 +504,8 @@ impl fmt::Display for SettingsKey {
 
 /// Why a pinboard settings document that arrived over a channel was refused.
 ///
-/// Only [`decode`] raises these: a document held in the store is read
-/// tolerantly, key by key, by [`PinboardSettings::load`].
+/// Only [`merge`] raises these: a document held in the store is read
+/// tolerantly, key by key, by [`DesktopSettings::load`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DocumentRefusal {
     /// The document is outside the format engine's own bounds or grammar.
@@ -474,13 +533,13 @@ impl fmt::Display for DocumentRefusal {
 /// The per-user pinboard settings: the desktop backdrop's wallpaper, fit,
 /// colour, and the `Desktop` folder's icon flow and sort order.
 ///
-/// [`PinboardSettings::default`] is the settings an **absent** document
+/// [`DesktopSettings::default`] is the settings an **absent** document
 /// implies, exactly the table `plans/PINBOARD.md` §2 specifies: the shipped
 /// default wallpaper, `Fill`, the theme's own backdrop colour, a leading
 /// icon flow, and a name sort — so a fresh account or an unusable document
 /// runs on a calm, fully-specified desktop rather than a guessed one.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PinboardSettings {
+pub struct DesktopSettings {
     /// The wallpaper image, or [`WallpaperChoice::None`].
     pub wallpaper: WallpaperChoice,
     /// How the wallpaper is mapped onto the screen.
@@ -491,9 +550,19 @@ pub struct PinboardSettings {
     pub icons: IconFlow,
     /// How the `Desktop` folder's icons are ordered.
     pub sort: IconSort,
+    /// Whether the desktop is drawn light or dark.
+    pub appearance: Appearance,
+    /// How much separation is drawn around a control.
+    pub contrast: Contrast,
+    /// How much room a control is given.
+    pub density: Density,
+    /// Whether a state change is animated.
+    pub motion: Motion,
+    /// The UI scale every logical length is resolved through.
+    pub scale: Scale,
 }
 
-impl Default for PinboardSettings {
+impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
             wallpaper: WallpaperChoice::Image(WallpaperPath::shipped_default()),
@@ -501,11 +570,16 @@ impl Default for PinboardSettings {
             backdrop: Backdrop::Theme,
             icons: IconFlow::default(),
             sort: IconSort::default(),
+            appearance: Appearance::default(),
+            contrast: Contrast::Normal,
+            density: Density::Normal,
+            motion: Motion::Full,
+            scale: Scale::ONE,
         }
     }
 }
 
-impl PinboardSettings {
+impl DesktopSettings {
     /// The settings `source` holds, and every key whose stored value the
     /// registry refused.
     ///
@@ -540,14 +614,27 @@ impl PinboardSettings {
     /// registry order.
     ///
     /// Every key is written, including one still at its default, so the
-    /// document is self-describing and a render/[`decode`] round trip is
-    /// exact. It is what a program that must hand a whole desktop to another
-    /// sends; publishing to the store instead goes key by key, so that only
-    /// what actually changed is written.
+    /// document is self-describing and a render/[`merge`] round trip is
+    /// exact. It is what the session persists, because the store holds the
+    /// whole desktop; a surface *asking* for a change renders only the keys
+    /// it edits ([`document_of`](Self::document_of)).
     #[must_use]
     pub fn document(&self) -> Document {
+        self.document_of(&SettingsKey::ALL)
+    }
+
+    /// Just `keys` of these settings, as a document.
+    ///
+    /// What a surface posts to the session: an apply is *merged* over what
+    /// the desktop currently holds ([`merge`]), so a surface that renders
+    /// only the keys it edits cannot reset a setting it never showed. The
+    /// wallpaper chooser rendering the whole document is exactly how a
+    /// wallpaper change would otherwise undo an appearance change made
+    /// while the chooser was open.
+    #[must_use]
+    pub fn document_of(&self, keys: &[SettingsKey]) -> Document {
         let mut document = Document::new();
-        for key in SettingsKey::ALL {
+        for key in keys.iter().copied() {
             // Every registry key is inside the format's key grammar and every
             // rendered value inside its value grammar, which
             // `the_canonical_document_holds_every_registry_key` pins; a
@@ -564,7 +651,7 @@ impl PinboardSettings {
 /// Returns `false` when `value` is outside `key`'s closed set; `settings`
 /// is left unchanged on refusal.
 #[must_use]
-fn set_field(settings: &mut PinboardSettings, key: SettingsKey, value: &str) -> bool {
+fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> bool {
     match key {
         SettingsKey::Wallpaper => {
             let Some(wallpaper) = WallpaperChoice::from_value(value) else {
@@ -596,43 +683,106 @@ fn set_field(settings: &mut PinboardSettings, key: SettingsKey, value: &str) -> 
             };
             settings.sort = sort;
         }
+        SettingsKey::Appearance => {
+            let Some(appearance) = Appearance::from_value(value) else {
+                return false;
+            };
+            settings.appearance = appearance;
+        }
+        SettingsKey::Contrast => {
+            let Some(contrast) = Contrast::from_value(value) else {
+                return false;
+            };
+            settings.contrast = contrast;
+        }
+        SettingsKey::Density => {
+            let Some(density) = Density::from_value(value) else {
+                return false;
+            };
+            settings.density = density;
+        }
+        SettingsKey::Motion => {
+            let Some(motion) = Motion::from_value(value) else {
+                return false;
+            };
+            settings.motion = motion;
+        }
+        SettingsKey::Scale => {
+            let Some(scale) = parse_scale(value) else {
+                return false;
+            };
+            settings.scale = scale;
+        }
     }
     true
 }
 
+/// Decode the canonical bare decimal percentage the `scale` key carries.
+///
+/// The range is [`Scale`]'s own, because a scale this crate accepted and the
+/// geometry could not resolve would be a desktop nothing can draw. Only
+/// ASCII digits are read: a signed, spaced, or radix-prefixed number is a
+/// different spelling of the same value, and two spellings of one setting
+/// are two ways for consumers to disagree.
+fn parse_scale(value: &str) -> Option<Scale> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut percent: u32 = 0;
+    for byte in value.bytes() {
+        percent = percent
+            .checked_mul(10)?
+            .checked_add(u32::from(byte - b'0'))?;
+    }
+    Scale::from_percent(percent)
+}
+
 /// The current value of `key` on `settings`, in its canonical spelling.
-fn field_value(settings: &PinboardSettings, key: SettingsKey) -> String {
+fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
     match key {
         SettingsKey::Wallpaper => settings.wallpaper.render_value(),
         SettingsKey::Fit => settings.fit.as_str().to_string(),
         SettingsKey::Backdrop => settings.backdrop.render_value(),
         SettingsKey::Icons => settings.icons.as_str().to_string(),
         SettingsKey::Sort => settings.sort.as_str().to_string(),
+        SettingsKey::Appearance => settings.appearance.as_str().to_string(),
+        SettingsKey::Contrast => settings.contrast.as_str().to_string(),
+        SettingsKey::Density => settings.density.as_str().to_string(),
+        SettingsKey::Motion => settings.motion.as_str().to_string(),
+        SettingsKey::Scale => format!("{}", settings.scale.percent()),
     }
 }
 
-/// Read a pinboard settings document that arrived over a channel, refusing
-/// anything the registry does not fully understand.
+/// Read a desktop settings document that arrived over a channel and lay it
+/// over `base`, refusing anything the registry does not fully understand.
 ///
 /// This is the **strict** reading. A document on the wire was rendered by a
 /// program from this same registry, so a line outside the grammar, a key
 /// outside the registry, or a value outside a key's closed set means the
 /// sender is not describing a desktop this build can show — and adopting
-/// half of what it asked for would put the user in front of a backdrop
-/// nobody chose. A document that names only some keys is *not* a refusal:
-/// the rest keep their documented defaults, exactly as an absent document
-/// does.
+/// half of what it asked for would put the user in front of a desktop
+/// nobody chose.
+///
+/// It **merges** rather than replaces, because the desktop has more than one
+/// surface asking it to change: the wallpaper chooser edits the backdrop, the
+/// Settings application edits how everything is drawn, and neither shows the
+/// other's settings. A sender renders only the keys it edits
+/// ([`DesktopSettings::document_of`]) and a key it did not name keeps the
+/// value the desktop already has, so one surface can never silently undo the
+/// other's change — which taking the absent keys as their *defaults* would
+/// do on every single apply.
 ///
 /// # Errors
 ///
-/// The [`DocumentRefusal`] naming what was wrong; the document is refused
-/// whole, never half-applied.
-pub fn decode(text: &str) -> Result<PinboardSettings, DocumentRefusal> {
+/// The [`DocumentRefusal`] naming what was wrong. The document is refused
+/// whole, never half-applied: the merge runs on a copy, so a refusal partway
+/// through leaves `base` exactly as it was.
+pub fn merge(base: &DesktopSettings, text: &str) -> Result<DesktopSettings, DocumentRefusal> {
     let document = Document::parse(text).map_err(DocumentRefusal::Malformed)?;
     if let Some(line) = document.unparsed().next() {
         return Err(DocumentRefusal::Unparsed(line.line));
     }
-    let mut settings = PinboardSettings::default();
+    let mut settings = base.clone();
     for setting in document.settings() {
         let key = SettingsKey::from_name(setting.key)
             .ok_or_else(|| DocumentRefusal::UnknownKey(setting.key.to_string()))?;

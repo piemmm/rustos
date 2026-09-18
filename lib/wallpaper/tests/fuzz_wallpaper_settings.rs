@@ -4,14 +4,14 @@
 //! this harness holds is the **registry** over it, for any bytes the desktop
 //! session's published document or a pinboard-channel payload may carry:
 //!
-//! 1. [`decode`] — the strict reading — never panics on any input, and
+//! 1. [`merge`] — the strict reading — never panics on any input, and
 //!    every document it accepts yields a total, well-formed settings value.
-//! 2. [`PinboardSettings::document`] and [`decode`] are inverses: the
+//! 2. [`DesktopSettings::document`] and [`merge`] are inverses: the
 //!    canonical document of accepted settings re-reads equal, and its
 //!    rendered text is itself within [`tairix_appconf::MAX_DOCUMENT_LEN`],
 //!    so a writer can never emit a document the reader would refuse as too
 //!    long.
-//! 3. [`PinboardSettings::load`] — the tolerant reading — never panics and
+//! 3. [`DesktopSettings::load`] — the tolerant reading — never panics and
 //!    is *total*: whatever a stored document says, every field it does not
 //!    accept is left at its documented default and named in the refusal
 //!    list, so the two readings agree on every document the strict one
@@ -25,7 +25,7 @@
 //! the same seeded stream keeps being drawn until the budget elapses.
 
 use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
-use tairix_wallpaper::{decode, PinboardSettings};
+use tairix_wallpaper::{merge, DesktopSettings};
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 5_000;
@@ -117,13 +117,13 @@ fn check_round_trip(doc: &str) -> bool {
     // The tolerant reading is total for *every* document the engine can
     // parse, accepted or not, so it is exercised on both branches.
     if let Ok(parsed) = Document::parse(doc) {
-        let (lenient, refused) = PinboardSettings::load(&parsed);
+        let (lenient, refused) = DesktopSettings::load(&parsed);
         assert!(
             refused.len() <= KEYS.len(),
             "a refusal list longer than the registry"
         );
         // A refused key left its field at the documented default.
-        let defaults = PinboardSettings::default();
+        let defaults = DesktopSettings::default();
         for key in refused {
             assert_eq!(
                 key.value_of(&lenient),
@@ -133,7 +133,7 @@ fn check_round_trip(doc: &str) -> bool {
         }
     }
 
-    let Ok(settings) = decode(doc) else {
+    let Ok(settings) = merge(&DesktopSettings::default(), doc) else {
         return false;
     };
 
@@ -142,10 +142,11 @@ fn check_round_trip(doc: &str) -> bool {
         rendered.len() <= MAX_DOCUMENT_LEN,
         "a rendered document exceeded the document bound"
     );
-    let reread = decode(&rendered).expect("a rendered document re-reads");
-    assert_eq!(settings, reread, "render/decode is not a round trip");
+    let reread =
+        merge(&DesktopSettings::default(), &rendered).expect("a rendered document re-reads");
+    assert_eq!(settings, reread, "render/merge is not a round trip");
     // The two readings agree on every document the strict one accepts.
-    let (lenient, refused) = PinboardSettings::load(&settings.document());
+    let (lenient, refused) = DesktopSettings::load(&settings.document());
     assert!(refused.is_empty(), "a canonical document refused a key");
     assert_eq!(settings, lenient, "the two readings disagree");
     true
@@ -183,9 +184,9 @@ fn arbitrary_ascii_never_panics() {
             for _ in 0..len {
                 buf.push(char::from(u8::try_from(rng.below(128)).expect("byte fits")));
             }
-            let _ = decode(&buf);
+            let _ = merge(&DesktopSettings::default(), &buf);
             if let Ok(parsed) = Document::parse(&buf) {
-                let _ = PinboardSettings::load(&parsed);
+                let _ = DesktopSettings::load(&parsed);
             }
         }
         if !tairix_fuzzseed::within_budget(deadline) {

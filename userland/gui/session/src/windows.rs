@@ -20,7 +20,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::desktop::DesktopInfo;
+use tairix_abi::desktop::{DesktopInfo, Motion};
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::window_ipc::{
     AppBar, AppMenu, HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, TerrainPlate,
@@ -1267,10 +1267,11 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 ///
 /// One definition for both directions: the answer an application's query
 /// receives, and the announcement the session pushes when any of it
-/// changes. All three facts come from the compositor — it owns the output
-/// it scans out to, that output's density, and the active theme — so an
-/// application reads the very values the desktop draws itself with rather
-/// than a copy that could drift.
+/// changes. Every fact comes from the compositor — it owns the output it
+/// scans out to, that output's density, and the theme the desktop is
+/// actually drawn with, accessibility axes and all — so an application
+/// reads the very values the desktop draws itself with rather than a copy
+/// that could drift.
 ///
 /// # Errors
 ///
@@ -1282,11 +1283,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
     let screen = compositor.screen_rect();
     let scale = u16::try_from(compositor.scale().percent()).map_err(|_| Errno::OutOfRange)?;
-    DesktopInfo::new(
-        screen.width,
-        screen.height,
-        scale,
-        compositor.theme().appearance(),
+    let theme = compositor.theme();
+    Ok(
+        DesktopInfo::new(screen.width, screen.height, scale, theme.appearance())?.with_axes(
+            theme.contrast(),
+            theme.density(),
+            Motion::from_reduced(theme.motion().reduced_motion()),
+        ),
     )
 }
 

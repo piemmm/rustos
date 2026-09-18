@@ -3,7 +3,7 @@
 use tairix_cursor::CursorTheme;
 use tairix_icon::IconSet;
 use tairix_taskbar::{Taskbar, TaskbarConfig};
-use tairix_theme::{Appearance, Theme, ThemeError, ThemeId, ThemeRegistry};
+use tairix_theme::{Accessibility, Appearance, Theme, ThemeError, ThemeId, ThemeRegistry};
 
 use crate::assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 
@@ -105,6 +105,22 @@ impl DesktopSession {
         let id = self.themes.set_appearance(appearance);
         self.reground();
         id
+    }
+
+    /// Lay the desktop's accessibility axes over whichever theme is active
+    /// and re-theme the taskbar, reporting whether anything moved.
+    ///
+    /// The counterpart of [`set_appearance`](Self::set_appearance) for
+    /// contrast, density and motion. The axes belong to the desktop rather
+    /// than to a theme, so they survive a theme switch and a custom theme
+    /// gets them too; a `false` return means the axes were already in force
+    /// and nothing needs repainting.
+    pub fn set_accessibility(&mut self, axes: Accessibility) -> bool {
+        if !self.themes.set_accessibility(axes) {
+            return false;
+        }
+        self.reground();
+        true
     }
 
     /// Load the active theme's cursor set from the on-disk SVG assets under

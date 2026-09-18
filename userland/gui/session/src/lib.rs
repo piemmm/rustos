@@ -237,8 +237,8 @@ pub use config::{
 };
 pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
 pub use desktop::{
-    Desktop, DesktopAction, DesktopActivation, DesktopOutcome, PinboardChange, DESKTOP_MARGIN,
-    RELIST_MIN_INTERVAL_NS,
+    AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
+    PinboardChange, DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use elevate::{

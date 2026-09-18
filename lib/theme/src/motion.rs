@@ -376,19 +376,16 @@ impl Fade {
 
 /// The information density of a theme (spec §14).
 ///
-/// Density changes metrics, never state semantics. It is data on the theme,
-/// so a denser layout is a different [`Metrics`](crate::Metrics) table, not a
-/// sibling control implementation.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
-pub enum Density {
-    /// Tables, task lists, sidebars, dense system panels.
-    Compact,
-    /// Default desktop applications.
-    #[default]
-    Normal,
-    /// Touch-adjacent or distance-viewed surfaces.
-    Comfortable,
-}
+/// Density changes metrics, never state semantics: a denser layout is a
+/// different [`Metrics`](crate::Metrics) table
+/// ([`Metrics::at_density`](crate::Metrics::at_density)), not a sibling
+/// control implementation.
+///
+/// The enum itself is `tairix_abi::desktop::Density`, imported rather than
+/// restated for the same reason [`Appearance`](crate::Appearance) is: the
+/// session reports the density it composites at to every application over
+/// the window channel.
+pub use tairix_abi::desktop::Density;
 
 /// The contrast policy of a theme (spec §15).
 ///
@@ -396,13 +393,16 @@ pub enum Density {
 /// a monochrome-safe policy additionally requires every semantic role to be
 /// distinguished by shape, not colour. Contrast never changes the meaning of
 /// a state.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
-pub enum Contrast {
-    /// Normal contrast.
-    #[default]
-    Normal,
-    /// Increased rim/rail/text contrast.
-    High,
-    /// Monochrome-safe: semantic roles must be distinguished by shape.
-    Monochrome,
-}
+///
+/// Imported from `tairix_abi::desktop` rather than restated, like
+/// [`Density`] and [`Appearance`](crate::Appearance).
+pub use tairix_abi::desktop::Contrast;
+
+/// Whether the desktop animates a state change or steps straight to it, as
+/// the window channel spells it.
+///
+/// [`MotionTheme`] is where a theme *holds* the policy, as the
+/// [`reduced_motion`](MotionTheme::reduced_motion) flag its duration table
+/// reads; this is the same decision as one value, which is what a settings
+/// document stores and the session publishes.
+pub use tairix_abi::desktop::Motion;

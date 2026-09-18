@@ -9,14 +9,17 @@
 //!
 //! Each pane also declares what backs it, because a settings surface that
 //! cannot say why a category is empty is a surface that lies about the
-//! machine. [`PaneBacking`] is that statement, and the two variants are two
-//! different facts to a reader: nothing in this system can serve the pane at
-//! all, or the readings and writes exist and this surface does not yet
-//! compose them, in which case the row says where the setting is reached.
+//! machine. [`PaneBacking`] is that declaration, and its three answers are
+//! three different facts to a reader: the pane composes real controls,
+//! nothing in this system can serve it at all, or the readings and writes
+//! exist and this surface does not yet compose them — in which case the row
+//! says where the setting is reached.
 
 use alloc::vec::Vec;
 
 use tairix_icon::IconKind;
+
+use crate::appearance::{Composition, Setting, POINTER_SIZE_LABEL};
 
 /// One top-level entry of the sidebar: a group of related settings.
 ///
@@ -132,7 +135,7 @@ pub enum Pane {
 
 /// What backs a pane, and therefore what it draws.
 ///
-/// Neither variant is a control that would change nothing: a pane states the
+/// No variant is a control that would change nothing: a pane states the
 /// truth about the machine and offers what it actually has.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PaneBacking {
@@ -144,6 +147,9 @@ pub enum PaneBacking {
         /// What would have to exist before the pane can show anything.
         needs: &'static str,
     },
+    /// The pane composes real controls over a live reading and a real write
+    /// path, so there is no absence to state: the form is what it draws.
+    Composed,
     /// The readings and writes exist, and this surface does not yet compose
     /// them into controls.
     Elsewhere {
@@ -170,6 +176,19 @@ pub struct PaneRow {
     /// under it. A pane that composes no controls declares none, so a
     /// searchable setting cannot exist without a row that shows it.
     pub settings: &'static [&'static str],
+}
+
+impl PaneRow {
+    /// The form this pane composes, or `None` for one that states an
+    /// absence instead.
+    #[must_use]
+    pub const fn composition(&self) -> Option<Composition> {
+        match self.pane {
+            Pane::Appearance => Some(Composition::Appearance),
+            Pane::Accessibility => Some(Composition::Accessibility),
+            _ => None,
+        }
+    }
 }
 
 /// One category's registry row.
@@ -366,6 +385,25 @@ fn contains_fold(haystack: &str, needle: &str) -> bool {
         })
 }
 
+/// The Appearance pane's setting labels.
+const APPEARANCE_SETTINGS: &[&str] = &[
+    Setting::Appearance.label(),
+    Setting::Contrast.label(),
+    Setting::Density.label(),
+    Setting::Motion.label(),
+    Setting::Scale.label(),
+];
+
+/// The Accessibility pane's setting labels: the shared rows plus the
+/// pointer size it states it does not keep.
+const ACCESSIBILITY_SETTINGS: &[&str] = &[
+    Setting::Contrast.label(),
+    Setting::Density.label(),
+    Setting::Scale.label(),
+    Setting::Motion.label(),
+    POINTER_SIZE_LABEL,
+];
+
 /// Every category, in sidebar order, with its panes.
 ///
 /// The single definition of the whole surface. The order is the reading order
@@ -429,13 +467,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
         panes: &[PaneRow {
             pane: Pane::Appearance,
             title: "Appearance",
-            backing: PaneBacking::Elsewhere {
-                shows: "The light and dark appearance, and the desktop's contrast, density and \
-                        motion.",
-                elsewhere: "The light and dark appearance is chosen from the icon bar's system \
-                            menu. This desktop keeps no contrast, density or motion setting yet.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed,
+            settings: APPEARANCE_SETTINGS,
         }],
     },
     CategoryRow {
@@ -700,12 +733,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
         panes: &[PaneRow {
             pane: Pane::Accessibility,
             title: "Accessibility",
-            backing: PaneBacking::None {
-                missing: "The desktop keeps no accessibility settings, so its contrast, density, \
-                          motion, interface scale and cursor size are all fixed as shipped.",
-                needs: "An appearance registry in the desktop session.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed,
+            settings: ACCESSIBILITY_SETTINGS,
         }],
     },
     CategoryRow {

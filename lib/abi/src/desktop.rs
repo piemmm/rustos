@@ -1,16 +1,22 @@
 //! The desktop a window is displayed on, as its session reports it: the
-//! screen extent, the UI scale, and which way round the theme's colours
-//! run.
+//! screen extent, the UI scale, and the four axes of how its theme is
+//! drawn — light or dark, contrast, density, and motion.
 //!
 //! These are the facts an application needs before it can lay itself out
 //! honestly — how large the screen it will be shown on is, how many
-//! physical pixels a logical one is worth, and whether to paint light-on-
-//! dark or dark-on-light. All three belong to the seat's desktop, all
-//! three are known to the session that composites it, and none of them
-//! describes another principal's data or authorises an action: they are
-//! descriptive, seat-scoped, and delivered over the window channel the
-//! application already holds ([`crate::window_ipc`]), so learning them
-//! needs no capability and opens no new endpoint.
+//! physical pixels a logical one is worth, and how the user has asked the
+//! desktop to be drawn. All of them belong to the seat's desktop, all are
+//! known to the session that composites it, and none describes another
+//! principal's data or authorises an action: they are descriptive,
+//! seat-scoped, and delivered over the window channel the application
+//! already holds ([`crate::window_ipc`]), so learning them needs no
+//! capability and opens no new endpoint.
+//!
+//! The accessibility axes travel with the appearance rather than beside
+//! it because they are one decision to a reader and one repaint to an
+//! application: a user who turns contrast up has not changed the screen,
+//! and an application that learned only half of what changed would draw
+//! the other half the way the user just stopped asking for.
 //!
 //! The record travels in two places, from one definition: an application
 //! *asks* for it with `QueryDesktop` — before it opens a window, so its
@@ -33,9 +39,10 @@ use crate::Errno;
 /// channel: `lib/theme` re-exports this very type rather than restating
 /// it, so the byte on the wire and the value a theme carries can never
 /// drift apart.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub enum Appearance {
-    /// Light foreground on dark surfaces.
+    /// Light foreground on dark surfaces. TAIRiX's default.
+    #[default]
     Dark,
     /// Dark foreground on light surfaces.
     Light,
@@ -70,6 +77,255 @@ impl Appearance {
             _ => Err(Errno::OutOfRange),
         }
     }
+
+    /// Every appearance, in the canonical listing order a chooser offers
+    /// them in.
+    pub const ALL: [Self; 2] = [Self::Dark, Self::Light];
+
+    /// The canonical settings-document spelling.
+    ///
+    /// The desktop's settings document carries this same closed set as
+    /// text, so the spelling lives with the value rather than beside each
+    /// reader of it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    /// Decode a settings-document spelling; `None` for anything outside
+    /// the closed set (case-sensitive — one canonical spelling).
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
+/// How much separation a theme draws between what a control *is* and what
+/// is behind it.
+///
+/// Like [`Appearance`] this vocabulary lives in the ABI because it crosses
+/// the window channel: `lib/theme` re-exports it rather than restating it,
+/// so the byte on the wire and the value a theme carries cannot drift
+/// apart.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum Contrast {
+    /// The theme's own contrast.
+    #[default]
+    Normal,
+    /// Increased rim, rail and text contrast.
+    High,
+    /// Monochrome-safe: a semantic role must be told apart by shape, never
+    /// by hue alone.
+    Monochrome,
+}
+
+/// Wire code of [`Contrast::Normal`]. Zero is deliberately no contrast, so
+/// an all-zero frame can never decode as a desktop.
+const CONTRAST_NORMAL: u8 = 1;
+/// Wire code of [`Contrast::High`].
+const CONTRAST_HIGH: u8 = 2;
+/// Wire code of [`Contrast::Monochrome`].
+const CONTRAST_MONOCHROME: u8 = 3;
+
+impl Contrast {
+    /// This contrast's wire code.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Normal => CONTRAST_NORMAL,
+            Self::High => CONTRAST_HIGH,
+            Self::Monochrome => CONTRAST_MONOCHROME,
+        }
+    }
+
+    /// The contrast `code` names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any other byte, including the zero a blank
+    /// frame carries.
+    pub const fn from_code(code: u8) -> Result<Self, Errno> {
+        match code {
+            CONTRAST_NORMAL => Ok(Self::Normal),
+            CONTRAST_HIGH => Ok(Self::High),
+            CONTRAST_MONOCHROME => Ok(Self::Monochrome),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Every contrast, in the canonical listing order a chooser offers
+    /// them in.
+    pub const ALL: [Self; 3] = [Self::Normal, Self::High, Self::Monochrome];
+
+    /// The canonical settings-document spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::High => "high",
+            Self::Monochrome => "monochrome",
+        }
+    }
+
+    /// Decode a settings-document spelling; `None` for anything outside
+    /// the closed set.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
+/// How much room a theme gives a control: the spacing axis, never the
+/// meaning of a state.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum Density {
+    /// Tables, task lists, sidebars and dense system panels.
+    Compact,
+    /// Ordinary desktop applications.
+    #[default]
+    Normal,
+    /// Touch-adjacent or distance-viewed surfaces.
+    Comfortable,
+}
+
+/// Wire code of [`Density::Compact`]. Zero is deliberately no density.
+const DENSITY_COMPACT: u8 = 1;
+/// Wire code of [`Density::Normal`].
+const DENSITY_NORMAL: u8 = 2;
+/// Wire code of [`Density::Comfortable`].
+const DENSITY_COMFORTABLE: u8 = 3;
+
+impl Density {
+    /// This density's wire code.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Compact => DENSITY_COMPACT,
+            Self::Normal => DENSITY_NORMAL,
+            Self::Comfortable => DENSITY_COMFORTABLE,
+        }
+    }
+
+    /// The density `code` names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any other byte, including the zero a blank
+    /// frame carries.
+    pub const fn from_code(code: u8) -> Result<Self, Errno> {
+        match code {
+            DENSITY_COMPACT => Ok(Self::Compact),
+            DENSITY_NORMAL => Ok(Self::Normal),
+            DENSITY_COMFORTABLE => Ok(Self::Comfortable),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Every density, in the canonical listing order a chooser offers them
+    /// in.
+    pub const ALL: [Self; 3] = [Self::Compact, Self::Normal, Self::Comfortable];
+
+    /// The canonical settings-document spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Normal => "normal",
+            Self::Comfortable => "comfortable",
+        }
+    }
+
+    /// Decode a settings-document spelling; `None` for anything outside
+    /// the closed set.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
+/// Whether the desktop animates a state change or steps straight to it.
+///
+/// [`Motion::Reduced`] is not "no feedback": the state still changes
+/// visibly, through contrast, rail thickness, shape marks and labels. It is
+/// the animation between the two states that goes.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum Motion {
+    /// Animated transitions run at the theme's tuned durations.
+    #[default]
+    Full,
+    /// Every animated transition collapses to an immediate state change.
+    Reduced,
+}
+
+/// Wire code of [`Motion::Full`]. Zero is deliberately no motion policy.
+const MOTION_FULL: u8 = 1;
+/// Wire code of [`Motion::Reduced`].
+const MOTION_REDUCED: u8 = 2;
+
+impl Motion {
+    /// This motion policy's wire code.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Full => MOTION_FULL,
+            Self::Reduced => MOTION_REDUCED,
+        }
+    }
+
+    /// The motion policy `code` names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any other byte, including the zero a blank
+    /// frame carries.
+    pub const fn from_code(code: u8) -> Result<Self, Errno> {
+        match code {
+            MOTION_FULL => Ok(Self::Full),
+            MOTION_REDUCED => Ok(Self::Reduced),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Whether this policy suppresses animated transitions, which is the
+    /// form a theme's motion table asks the question in.
+    #[must_use]
+    pub const fn is_reduced(self) -> bool {
+        matches!(self, Self::Reduced)
+    }
+
+    /// The policy a reduced-motion flag names, so a theme and the wire have
+    /// one conversion rather than each carrying its own.
+    #[must_use]
+    pub const fn from_reduced(reduced: bool) -> Self {
+        if reduced {
+            Self::Reduced
+        } else {
+            Self::Full
+        }
+    }
+
+    /// Every motion policy, in the canonical listing order a chooser
+    /// offers them in.
+    pub const ALL: [Self; 2] = [Self::Full, Self::Reduced];
+
+    /// The canonical settings-document spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Reduced => "reduced",
+        }
+    }
+
+    /// Decode a settings-document spelling; `None` for anything outside
+    /// the closed set.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
 }
 
 /// The desktop a window is displayed on.
@@ -87,16 +343,25 @@ pub struct DesktopInfo {
     screen_height_px: u32,
     scale_percent: u16,
     appearance: Appearance,
+    contrast: Contrast,
+    density: Density,
+    motion: Motion,
 }
 
 impl DesktopInfo {
     /// Encoded size on the wire: screen width (4), screen height (4),
-    /// scale percentage (2), appearance (1), and one reserved byte that
-    /// must be zero.
-    pub const WIRE_LEN: usize = 12;
+    /// scale percentage (2), appearance (1), one reserved byte that must be
+    /// zero, contrast (1), density (1), motion (1), and a second reserved
+    /// byte that must be zero.
+    pub const WIRE_LEN: usize = 16;
 
     /// The desktop with a `screen_width_px` × `screen_height_px` screen,
-    /// drawn at `scale_percent` of the reference density in `appearance`.
+    /// drawn at `scale_percent` of the reference density in `appearance`,
+    /// on the theme's own contrast, density and motion.
+    ///
+    /// [`with_axes`](Self::with_axes) derives the same desktop on other
+    /// axes, so a caller that only knows the extent and the appearance —
+    /// the great majority — says so rather than restating three defaults.
     ///
     /// # Errors
     ///
@@ -117,7 +382,21 @@ impl DesktopInfo {
             screen_height_px,
             scale_percent,
             appearance,
+            contrast: Contrast::Normal,
+            density: Density::Normal,
+            motion: Motion::Full,
         })
+    }
+
+    /// The same desktop drawn on `contrast`, `density` and `motion`.
+    #[must_use]
+    pub const fn with_axes(self, contrast: Contrast, density: Density, motion: Motion) -> Self {
+        Self {
+            contrast,
+            density,
+            motion,
+            ..self
+        }
     }
 
     /// The screen's width in physical pixels; never zero.
@@ -143,6 +422,24 @@ impl DesktopInfo {
     #[must_use]
     pub const fn appearance(&self) -> Appearance {
         self.appearance
+    }
+
+    /// How much separation the desktop draws around a control.
+    #[must_use]
+    pub const fn contrast(&self) -> Contrast {
+        self.contrast
+    }
+
+    /// How much room the desktop gives a control.
+    #[must_use]
+    pub const fn density(&self) -> Density {
+        self.density
+    }
+
+    /// Whether the desktop animates a state change.
+    #[must_use]
+    pub const fn motion(&self) -> Motion {
+        self.motion
     }
 
     /// Encode `self` little-endian.
@@ -174,6 +471,9 @@ impl DesktopInfo {
         put_u32(out, 4, self.screen_height_px);
         put_u16(out, 8, self.scale_percent);
         out[10] = self.appearance.code();
+        out[12] = self.contrast.code();
+        out[13] = self.density.code();
+        out[14] = self.motion.code();
     }
 
     /// Decode the record occupying the `WIRE_LEN` bytes of `bytes` from
@@ -185,21 +485,26 @@ impl DesktopInfo {
     ///   at `at`.
     /// * [`Errno::OutOfRange`] — a zero extent, a zero scale, or an
     ///   appearance code this version does not define.
-    /// * [`Errno::BadMagic`] — the reserved byte is not zero (wire
+    /// * [`Errno::BadMagic`] — either reserved byte is not zero (wire
     ///   corruption or a smuggled field, never silently ignored).
     pub fn from_bytes_at(bytes: &[u8], at: usize) -> Result<Self, Errno> {
         let Some(record) = bytes.get(at..at + Self::WIRE_LEN) else {
             return Err(Errno::BufferTooSmall);
         };
-        if record[11] != 0 {
+        if record[11] != 0 || record[15] != 0 {
             return Err(Errno::BadMagic);
         }
-        Self::new(
+        Ok(Self::new(
             read_u32(record, 0),
             read_u32(record, 4),
             read_u16(record, 8),
             Appearance::from_code(record[10])?,
-        )
+        )?
+        .with_axes(
+            Contrast::from_code(record[12])?,
+            Density::from_code(record[13])?,
+            Motion::from_code(record[14])?,
+        ))
     }
 
     /// Decode a record that occupies the whole of `bytes`.
@@ -214,7 +519,7 @@ impl DesktopInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{Appearance, DesktopInfo};
+    use super::{Appearance, Contrast, Density, DesktopInfo, Motion};
     use crate::Errno;
 
     /// A desktop for the tests to round-trip.
@@ -233,6 +538,23 @@ mod tests {
         assert_eq!(info.screen_height_px(), 1080);
         assert_eq!(info.scale_percent(), 150);
         assert_eq!(info.appearance(), Appearance::Light);
+        assert_eq!(info.contrast(), Contrast::Normal);
+        assert_eq!(info.density(), Density::Normal);
+        assert_eq!(info.motion(), Motion::Full);
+    }
+
+    #[test]
+    fn the_accessibility_axes_round_trip_through_the_wire() {
+        let info = desktop().with_axes(Contrast::Monochrome, Density::Compact, Motion::Reduced);
+        let back = DesktopInfo::from_bytes(&info.to_le_bytes());
+        assert_eq!(back, Ok(info));
+        assert_eq!(info.contrast(), Contrast::Monochrome);
+        assert_eq!(info.density(), Density::Compact);
+        assert_eq!(info.motion(), Motion::Reduced);
+        // The axes are the only thing that moved: a desktop that differs
+        // only in how it is drawn still describes the same screen.
+        assert_eq!(info.screen_width_px(), desktop().screen_width_px());
+        assert_eq!(info.appearance(), desktop().appearance());
     }
 
     #[test]
@@ -288,9 +610,24 @@ mod tests {
         reserved[11] = 1;
         assert_eq!(DesktopInfo::from_bytes(&reserved), Err(Errno::BadMagic));
 
+        let mut reserved_tail = good;
+        reserved_tail[15] = 1;
+        assert_eq!(
+            DesktopInfo::from_bytes(&reserved_tail),
+            Err(Errno::BadMagic)
+        );
+
         let mut appearance = good;
         appearance[10] = 3;
         assert_eq!(DesktopInfo::from_bytes(&appearance), Err(Errno::OutOfRange));
+
+        // Each axis is decoded, so an unknown one is refused rather than
+        // drawn as the default the user did not ask for.
+        for slot in [12usize, 13, 14] {
+            let mut axis = good;
+            axis[slot] = 9;
+            assert_eq!(DesktopInfo::from_bytes(&axis), Err(Errno::OutOfRange));
+        }
 
         let mut width = good;
         width[..4].copy_from_slice(&0u32.to_le_bytes());
@@ -308,5 +645,52 @@ mod tests {
         }
         assert_eq!(Appearance::from_code(0), Err(Errno::OutOfRange));
         assert_ne!(Appearance::Dark.code(), Appearance::Light.code());
+    }
+
+    #[test]
+    fn every_axis_code_round_trips_and_zero_is_none() {
+        for contrast in [Contrast::Normal, Contrast::High, Contrast::Monochrome] {
+            assert_eq!(Contrast::from_code(contrast.code()), Ok(contrast));
+        }
+        for density in [Density::Compact, Density::Normal, Density::Comfortable] {
+            assert_eq!(Density::from_code(density.code()), Ok(density));
+        }
+        for motion in [Motion::Full, Motion::Reduced] {
+            assert_eq!(Motion::from_code(motion.code()), Ok(motion));
+            assert_eq!(Motion::from_reduced(motion.is_reduced()), motion);
+        }
+        assert_eq!(Contrast::from_code(0), Err(Errno::OutOfRange));
+        assert_eq!(Density::from_code(0), Err(Errno::OutOfRange));
+        assert_eq!(Motion::from_code(0), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn every_axis_spelling_round_trips_and_is_distinct() {
+        // One spelling per value, and no two values sharing one, or a
+        // settings document could name a desktop that is two things at
+        // once.
+        for appearance in Appearance::ALL {
+            assert_eq!(
+                Appearance::from_value(appearance.as_str()),
+                Some(appearance)
+            );
+        }
+        for contrast in Contrast::ALL {
+            assert_eq!(Contrast::from_value(contrast.as_str()), Some(contrast));
+        }
+        for density in Density::ALL {
+            assert_eq!(Density::from_value(density.as_str()), Some(density));
+        }
+        for motion in Motion::ALL {
+            assert_eq!(Motion::from_value(motion.as_str()), Some(motion));
+        }
+        assert_eq!(Appearance::from_value("Dark"), None);
+        assert_eq!(Contrast::from_value(""), None);
+        assert_eq!(Density::from_value("dense"), None);
+        assert_eq!(Motion::from_value("none"), None);
+        // `normal` is a value of two different axes and must stay each
+        // axis's own: a document key decides which set is read.
+        assert_eq!(Contrast::from_value("normal"), Some(Contrast::Normal));
+        assert_eq!(Density::from_value("normal"), Some(Density::Normal));
     }
 }

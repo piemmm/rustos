@@ -11,6 +11,7 @@
 //! state afterwards, so a burst of pointer motion costs one frame rather than
 //! one per sample.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_controls::{
@@ -23,7 +24,9 @@ use tairix_icon::{IconArtwork, IconKind};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
+use tairix_wallpaper::DesktopSettings;
 
+use crate::appearance::{Form, FormOutcome, FormPlace};
 use crate::frame::{resolve_frame, Overflow, ShellFrame};
 use crate::registry::{strip_rows, CategoryRow, Location, StripRow, CATEGORIES};
 use crate::statement;
@@ -61,12 +64,18 @@ enum Focus {
 
 /// What one routed event concluded, for a caller that must act outside the
 /// window.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ShellOutcome {
     /// Nothing on screen changed.
     Idle,
     /// The shell changed and must be re-presented.
     Changed,
+    /// The reader chose a setting: the rendered document the caller posts to
+    /// the desktop session, which decides whether to adopt it.
+    ///
+    /// The shell holds no capability and performs no I/O: it never writes
+    /// the desktop's settings, it says what was asked for.
+    Apply(String),
 }
 
 impl ShellOutcome {
@@ -81,8 +90,17 @@ impl ShellOutcome {
 
     /// Whether the shell must be re-presented.
     #[must_use]
-    pub const fn changed(self) -> bool {
-        matches!(self, Self::Changed)
+    pub const fn changed(&self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+
+    /// The document this outcome asks the session to adopt, if any.
+    #[must_use]
+    pub fn document(&self) -> Option<&str> {
+        match self {
+            Self::Apply(document) => Some(document),
+            Self::Idle | Self::Changed => None,
+        }
     }
 }
 
@@ -107,16 +125,23 @@ pub struct Shell {
     focus: Focus,
     /// The last pointer position, for routing a press to the region under it.
     pointer: Point,
+    /// The desktop settings every composed pane's rows are built from.
+    settings: DesktopSettings,
+    /// The form the pane on show composes, or `None` for one that states an
+    /// absence instead.
+    form: Option<Form>,
 }
 
 impl Shell {
-    /// The shell as the window opens: the first category, its first pane, and
-    /// the cursor on the strip.
+    /// The shell as the window opens on `settings`: the first category, its
+    /// first pane, and the cursor on the strip.
     ///
-    /// An empty registry would leave nothing to show, so it answers `None`
-    /// rather than inventing a location; the registry's own test rules it out.
+    /// `settings` is the desktop's own published document, read by the
+    /// caller — the shell performs no I/O. An empty registry would leave
+    /// nothing to show, so it answers `None` rather than inventing a
+    /// location; the registry's own test rules it out.
     #[must_use]
-    pub fn new() -> Option<Self> {
+    pub fn new(settings: DesktopSettings) -> Option<Self> {
         let location = Location::opening()?;
         let rows = strip_rows(location.category, "");
         let mut shell = Self {
@@ -130,9 +155,46 @@ impl Shell {
             categories: None,
             focus: Focus::Strip,
             pointer: Point::ORIGIN,
+            settings,
+            form: None,
         };
         shell.restate_trail();
+        shell.restate_form();
         Some(shell)
+    }
+
+    /// Adopt the desktop settings the session now holds.
+    ///
+    /// What the window does when an apply is answered, and on regaining
+    /// focus: every composed row shows what the store actually holds, so a
+    /// refused apply reverts rather than leaving a value on screen the next
+    /// login would not restore.
+    pub fn adopt_settings(&mut self, settings: DesktopSettings) {
+        // Against what the *form* shows, not against the last answer: a
+        // choice the reader made moved the rows on screen without moving
+        // this, so an answer equal to the last one is exactly the refusal
+        // that has to put them back.
+        let shown = match &self.form {
+            Some(form) => form.settings() == &settings,
+            None => self.settings == settings,
+        };
+        self.settings = settings;
+        if shown {
+            return;
+        }
+        match &mut self.form {
+            Some(form) => form.adopt(&self.settings),
+            None => self.restate_form(),
+        }
+    }
+
+    /// Build the form the pane on show composes, if it composes one.
+    fn restate_form(&mut self) {
+        self.form = self
+            .location
+            .rows()
+            .and_then(|(_, pane)| pane.composition())
+            .map(|composition| Form::new(composition, &self.settings));
     }
 
     /// Where the surface is.
@@ -195,12 +257,20 @@ impl Shell {
         // the ranges are set from are the ones a bar has already been taken
         // out of.
         let frame = resolve_frame(viewport, scale, theme, overflow);
-        let pane = self.content_height(frame.content.width, scale, theme);
-        self.scroll.set_model(
-            self.scroll
-                .model()
-                .resize(u64::from(pane), u64::from(frame.content.height)),
-        );
+        // Groups for a form, because that is the unit a placed plate moves
+        // in; pixels for a statement, which is drawn at any offset.
+        let (extent, seen) = match &self.form {
+            Some(form) => (
+                groups_as_extent(form.groups_len()),
+                groups_as_extent(form.seated(place(frame.content, viewport, scale, theme))),
+            ),
+            None => (
+                u64::from(self.content_height(frame.content.width, scale, theme)),
+                u64::from(frame.content.height),
+            ),
+        };
+        self.scroll
+            .set_model(self.scroll.model().resize(extent, seen));
         // The strip's scroll is counted in *rows*, because that is the unit a
         // strip drawing from an entry of its own moves in.
         let seats = frame
@@ -271,8 +341,10 @@ impl Shell {
     }
 
     /// The pane's own height in a column `width` pixels wide.
-    /// The pane's own height in a column `width` pixels wide.
     fn content_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        if let Some(form) = &self.form {
+            return form.measured_height(scale, theme);
+        }
         self.location.rows().map_or(0, |(_, pane)| {
             statement::measured_height(pane, width, scale, theme)
         })
@@ -306,19 +378,16 @@ impl Shell {
             self.strip_scroll.render(surface, rect, scale, theme);
         }
         if let Some((_, pane)) = self.location.rows() {
-            let offset = u32::try_from(self.scroll.model().offset()).unwrap_or(u32::MAX);
-            let column = Rect::new(
-                frame.content.left(),
-                frame.content.top().saturating_sub(to_i32(offset)),
-                frame.content.width,
-                frame.content.height.saturating_add(offset),
-            );
+            let column = self.pane_column(&frame);
             surface.with_clip(
                 u32::try_from(frame.content.left()).unwrap_or(0),
                 u32::try_from(frame.content.top()).unwrap_or(0),
                 frame.content.width,
                 frame.content.height,
-                |clipped| statement::render(clipped, pane, column, scale, theme),
+                |clipped| match &self.form {
+                    Some(form) => form.render(clipped, place(column, viewport, scale, theme)),
+                    None => statement::render(clipped, pane, column, scale, theme),
+                },
             );
         }
         if let Some(rect) = frame.scrollbar {
@@ -333,6 +402,58 @@ impl Shell {
                 theme,
             );
         }
+    }
+
+    /// Scroll the form's focused row into view.
+    ///
+    /// A row the cursor reached but the column does not show is a control
+    /// the reader cannot use, which is the same correctness property the
+    /// strip's own gutter exists for.
+    fn reveal_focused_group(
+        &mut self,
+        frame: &ShellFrame,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let column = self.pane_column(frame);
+        let spot = place(column, viewport, scale, theme);
+        let Some(form) = &self.form else {
+            return;
+        };
+        let want = form.reveal_from(form.focused_group(), spot);
+        if want == form.first() {
+            return;
+        }
+        if let Some(form) = &mut self.form {
+            form.set_first(want);
+        }
+        self.scroll
+            .set_model(self.scroll.model().scroll_to(groups_as_extent(want)));
+        damage.add(frame.content);
+    }
+
+    /// The pane's own rectangle, scrolled: the column the form or the
+    /// statement is drawn in and hit-tested against.
+    ///
+    /// The top rides above the frame while the column is scrolled, so a
+    /// press lands on the row the reader can actually see. One definition,
+    /// read by the paint and the hit test alike.
+    fn pane_column(&self, frame: &ShellFrame) -> Rect {
+        if self.form.is_some() {
+            // A form is *placed* on the surface rather than clipped to it,
+            // so it never rides above the column's own top; it scrolls by
+            // whole groups instead, exactly as the strip scrolls by rows.
+            return frame.content;
+        }
+        let offset = u32::try_from(self.scroll.model().offset()).unwrap_or(u32::MAX);
+        Rect::new(
+            frame.content.left(),
+            frame.content.top().saturating_sub(to_i32(offset)),
+            frame.content.width,
+            frame.content.height.saturating_add(offset),
+        )
     }
 
     /// Route one pointer event.
@@ -361,10 +482,18 @@ impl Shell {
                 return ShellOutcome::of(self.scrolled(frame.content, acted, damage));
             }
         }
-        if frame.content.contains(self.pointer) {
+        if frame.content.contains(self.pointer) || self.form_is_listing() {
             if let InputEvent::PointerScrolled { dx, dy } = event {
                 let acted = self.scroll.wheel(*dx, *dy, frame.content, damage);
                 return ShellOutcome::of(self.scrolled(frame.content, acted, damage));
+            }
+            let column = self.pane_column(&frame);
+            if let Some(form) = &mut self.form {
+                let acted = form.on_pointer(event, place(column, viewport, scale, theme), damage);
+                if !matches!(acted, FormOutcome::Idle) {
+                    self.focus_on(Focus::Content, viewport, scale, theme, damage);
+                    return outcome_of(acted);
+                }
             }
         }
         if let Some(rect) = frame.search {
@@ -458,6 +587,19 @@ impl Shell {
                 }
             }
             Focus::Content => {
+                let column = self.pane_column(&frame);
+                if let Some(form) = &mut self.form {
+                    let acted = form.on_key(
+                        key,
+                        modifiers,
+                        place(column, viewport, scale, theme),
+                        damage,
+                    );
+                    if !matches!(acted, FormOutcome::Idle) {
+                        self.reveal_focused_group(&frame, viewport, scale, theme, damage);
+                        return outcome_of(acted);
+                    }
+                }
                 let Some(rect) = frame.scrollbar else {
                     return ShellOutcome::Idle;
                 };
@@ -472,6 +614,11 @@ impl Shell {
         match acted {
             Some(ScrollAction::ScrollTo { offset }) => {
                 self.scroll.set_model(self.scroll.model().scroll_to(offset));
+                // A form's scroll is counted in groups, because that is the
+                // unit a placed plate can move in.
+                if let Some(form) = &mut self.form {
+                    form.set_first(usize::try_from(offset).unwrap_or(usize::MAX));
+                }
                 damage.add(column);
                 true
             }
@@ -605,6 +752,7 @@ impl Shell {
         let frame = self.frame(viewport, scale, theme);
         self.location = location;
         self.scroll.set_model(self.scroll.model().scroll_to(0));
+        self.restate_form();
         self.restate_trail();
         self.restate_strip(viewport, scale, theme, damage);
         self.lay_out(viewport, scale, theme);
@@ -742,7 +890,7 @@ impl Shell {
 
     /// The focus ring for `frame`: every region the frame actually seated, in
     /// Tab order.
-    fn ring(frame: &ShellFrame) -> Vec<Focus> {
+    fn ring(&self, frame: &ShellFrame) -> Vec<Focus> {
         let mut ring = Vec::with_capacity(4);
         if frame.search.is_some() {
             ring.push(Focus::Search);
@@ -751,10 +899,19 @@ impl Shell {
         if frame.sidebar.is_some() {
             ring.push(Focus::Strip);
         }
-        if frame.scrollbar.is_some() {
+        // A pane composing controls is reachable whether or not it is long
+        // enough to scroll; one that only scrolls is reachable only when
+        // there is something to scroll.
+        if self.form.is_some() || frame.scrollbar.is_some() {
             ring.push(Focus::Content);
         }
         ring
+    }
+
+    /// Whether the form has a choice list open, which is modal: the list
+    /// keeps the pointer even when it hangs outside the pane's own column.
+    fn form_is_listing(&self) -> bool {
+        self.form.as_ref().is_some_and(Form::is_listing)
     }
 
     /// Move the cursor one step round the ring.
@@ -766,7 +923,7 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) {
-        let ring = Self::ring(&self.frame(viewport, scale, theme));
+        let ring = self.ring(&self.frame(viewport, scale, theme));
         if ring.is_empty() {
             return;
         }
@@ -792,13 +949,18 @@ impl Shell {
         damage: &mut Region,
     ) {
         let frame = self.frame(viewport, scale, theme);
-        if !Self::ring(&frame).contains(&focus) || self.focus == focus {
+        if !self.ring(&frame).contains(&focus) || self.focus == focus {
             return;
         }
         self.focus = focus;
         self.search.set_focused(focus == Focus::Search);
         self.trail.adopt_focus((focus == Focus::Trail).then_some(0));
-        self.scroll.set_focused(focus == Focus::Content);
+        self.scroll
+            .set_focused(focus == Focus::Content && self.form.is_none());
+        if let Some(form) = &mut self.form {
+            form.set_focused(focus == Focus::Content);
+            damage.add(frame.content);
+        }
         if let Some(rect) = frame.sidebar {
             let cursor = (focus == Focus::Strip)
                 .then(|| self.selected_row())
@@ -882,6 +1044,83 @@ impl Shell {
     pub(crate) fn strip_for_test(&self) -> &Tabs {
         &self.strip
     }
+
+    /// Show `location`, as choosing its strip row would.
+    #[cfg(test)]
+    pub(crate) fn go_to_for_test(
+        &mut self,
+        location: Location,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        self.go_to(location, viewport, scale, theme, damage);
+    }
+
+    /// The form the pane on show composes, for a test that asks what it
+    /// composed.
+    #[cfg(test)]
+    pub(crate) fn form_for_test(&self) -> Option<&Form> {
+        self.form.as_ref()
+    }
+
+    /// Which group the form is drawing from.
+    #[cfg(test)]
+    pub(crate) fn form_first_for_test(&self) -> Option<usize> {
+        self.form.as_ref().map(Form::first)
+    }
+
+    /// Which group and row the form's keyboard cursor is on.
+    #[cfg(test)]
+    pub(crate) fn form_group_cursor_for_test(&self) -> Option<(usize, usize)> {
+        self.form.as_ref().and_then(Form::cursor)
+    }
+
+    /// The settings the shell is showing.
+    #[cfg(test)]
+    pub(crate) fn settings_for_test(&self) -> &DesktopSettings {
+        &self.settings
+    }
+
+    /// Put the keyboard cursor on the pane column.
+    #[cfg(test)]
+    pub(crate) fn focus_content_for_test(&mut self, viewport: Rect, scale: Scale, theme: &Theme) {
+        self.focus_on(
+            Focus::Content,
+            viewport,
+            scale,
+            theme,
+            &mut tairix_controls::damage::sink(),
+        );
+    }
+}
+
+/// Where a composed pane's form is drawn, gathered once for the call that
+/// needs it.
+fn place(bounds: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> FormPlace<'_> {
+    FormPlace {
+        bounds,
+        viewport,
+        scale,
+        theme,
+    }
+}
+
+/// The shell outcome a form's answer implies.
+fn outcome_of(acted: FormOutcome) -> ShellOutcome {
+    match acted {
+        FormOutcome::Idle => ShellOutcome::Idle,
+        FormOutcome::Changed => ShellOutcome::Changed,
+        FormOutcome::Apply(document) => ShellOutcome::Apply(document),
+    }
+}
+
+/// A group count as a form scroll's extent, for the same reason a row count
+/// is the strip's: a list of more entries than a `u64` can count is not one
+/// this surface could draw.
+fn groups_as_extent(groups: usize) -> u64 {
+    u64::try_from(groups).unwrap_or(u64::MAX)
 }
 
 /// A row count as the strip scroll's extent.

@@ -171,7 +171,7 @@ fn stopping_hands_out_no_more_work() {
 
 #[test]
 fn the_wanted_source_is_derived_from_the_settings_and_the_screen() {
-    let settings = PinboardSettings::default();
+    let settings = DesktopSettings::default();
     let wanted = WallpaperSource::wanted(&settings, Rect::new(0, 0, 1280, 720));
     assert_eq!(wanted.width, 1280);
     assert_eq!(wanted.height, 720);

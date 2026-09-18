@@ -16,16 +16,16 @@ use tairix_controls::tabs::Tab;
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::{TextRole, ThemeRegistry};
-use tairix_wallpaper::{CatalogEntry, PinboardSettings, WallpaperPath};
+use tairix_wallpaper::{CatalogEntry, DesktopSettings, WallpaperPath};
 
 use super::*;
 
 /// Settings with no wallpaper at all, everything else at the shared
 /// default.
-fn settings_without_a_wallpaper() -> PinboardSettings {
-    PinboardSettings {
+fn settings_without_a_wallpaper() -> DesktopSettings {
+    DesktopSettings {
         wallpaper: WallpaperChoice::None,
-        ..PinboardSettings::default()
+        ..DesktopSettings::default()
     }
 }
 
@@ -56,10 +56,10 @@ fn style_with_screen(theme: &Theme, screen: (u32, u32)) -> Style<'_> {
 
 /// A settings document naming a wallpaper, otherwise at the shared crate
 /// default.
-fn settings_selecting(path: &str) -> PinboardSettings {
-    PinboardSettings {
+fn settings_selecting(path: &str) -> DesktopSettings {
+    DesktopSettings {
         wallpaper: WallpaperChoice::Image(WallpaperPath::new(path).expect("a valid test path")),
-        ..PinboardSettings::default()
+        ..DesktopSettings::default()
     }
 }
 
@@ -1166,9 +1166,9 @@ fn backdrop_options_always_offer_the_current_backdrop() {
 #[test]
 fn a_current_colour_outside_the_palette_is_offered_and_carried_through() {
     let unlisted = Backdrop::Colour(Rgb::new(0x12, 0x34, 0x56));
-    let settings = PinboardSettings {
+    let settings = DesktopSettings {
         backdrop: unlisted,
-        ..PinboardSettings::default()
+        ..DesktopSettings::default()
     };
     let chooser = Chooser::new(catalog(1), &settings);
     assert_eq!(chooser.backdrop(), unlisted);
@@ -1186,7 +1186,8 @@ fn the_rendered_document_matches_the_state_the_controls_are_in() {
     let document = chooser.settings_document();
     // The document goes on the wire to the session, which reads it with the
     // registry's *strict* reading — so that is what this asserts against.
-    let parsed = tairix_wallpaper::decode(&document).expect("a valid document");
+    let parsed =
+        tairix_wallpaper::merge(&DesktopSettings::default(), &document).expect("a valid document");
     assert_eq!(parsed, chooser.to_settings());
     assert_eq!(
         parsed.wallpaper,

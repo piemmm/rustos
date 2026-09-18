@@ -1,13 +1,15 @@
 //! The one renderer for a pane that has no controls to draw, and the height
 //! it needs.
 //!
-//! Both [`PaneBacking`] variants draw through here, because both are the same
-//! shape to a reader: a heading saying what the pane is about, a sentence
-//! saying how this system actually stands, and a second sentence saying what
-//! would change that or where the setting is reached instead. Two renderers
-//! would let the two absences drift into reading like the same thing, and
-//! they are not: one is a category this system cannot serve at all, the other
-//! a category it can, whose controls this surface does not yet compose.
+//! Both stated [`PaneBacking`] variants draw through here, because both are
+//! the same shape to a reader: a heading saying what the pane is about, a
+//! sentence saying how this system actually stands, and a second sentence
+//! saying what would change that or where the setting is reached instead.
+//! Two renderers would let the two absences drift into reading like the same
+//! thing, and they are not: one is a category this system cannot serve at
+//! all, the other a category it can, whose controls this surface does not yet
+//! compose. A pane that *does* compose controls has no statement to make and
+//! draws its form instead.
 
 use alloc::vec::Vec;
 
@@ -38,21 +40,23 @@ const NEEDS_LABEL: &str = "WHAT WOULD BE NEEDED";
 const ELSEWHERE_LABEL: &str = "WHERE IT IS SET";
 
 impl<'a> Statement<'a> {
-    /// The statement `pane` makes.
-    fn of(pane: &'a PaneRow) -> Self {
+    /// The statement `pane` makes, or `None` for a pane that composes
+    /// controls and so has no absence to state.
+    fn of(pane: &'a PaneRow) -> Option<Self> {
         match pane.backing {
-            PaneBacking::None { missing, needs } => Self {
+            PaneBacking::None { missing, needs } => Some(Self {
                 heading: pane.title,
                 body: missing,
                 tail: needs,
                 needs: true,
-            },
-            PaneBacking::Elsewhere { shows, elsewhere } => Self {
+            }),
+            PaneBacking::Elsewhere { shows, elsewhere } => Some(Self {
                 heading: pane.title,
                 body: shows,
                 tail: elsewhere,
                 needs: false,
-            },
+            }),
+            PaneBacking::Composed => None,
         }
     }
 
@@ -68,11 +72,15 @@ impl<'a> Statement<'a> {
 
 /// The physical height `pane`'s statement needs in a column `width` pixels
 /// wide, so the shell's scroll model measures exactly what the paint draws.
+///
+/// Zero for a pane that composes controls: the form is what it draws, and
+/// the form measures itself.
 #[must_use]
 pub fn measured_height(pane: &PaneRow, width: u32, scale: Scale, theme: &Theme) -> u32 {
-    let metrics = Metrics::resolve(width, scale, theme);
-    let statement = Statement::of(pane);
-    metrics.height(&statement)
+    let Some(statement) = Statement::of(pane) else {
+        return 0;
+    };
+    Metrics::resolve(width, scale, theme).height(&statement)
 }
 
 /// Draw `pane`'s statement into `surface` at `bounds`.
@@ -86,8 +94,10 @@ pub fn measured_height(pane: &PaneRow, width: u32, scale: Scale, theme: &Theme) 
 /// surface while the column is scrolled; the caller clips to what is on
 /// screen.
 pub fn render(surface: &mut Surface, pane: &PaneRow, bounds: Rect, scale: Scale, theme: &Theme) {
+    let Some(statement) = Statement::of(pane) else {
+        return;
+    };
     let metrics = Metrics::resolve(bounds.width, scale, theme);
-    let statement = Statement::of(pane);
     if metrics.text_w == 0 {
         return;
     }

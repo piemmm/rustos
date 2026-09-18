@@ -9350,7 +9350,7 @@ fn default_wallpaper_master() -> Result<
     ),
     String,
 > {
-    let settings = tairix_wallpaper::PinboardSettings::default();
+    let settings = tairix_wallpaper::DesktopSettings::default();
     if !matches!(
         settings.wallpaper,
         tairix_wallpaper::WallpaperChoice::Image(_)
@@ -11032,7 +11032,7 @@ fn fsmutate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     // The plate the session opens for a press on bare backdrop, and its New
     // Folder row. The model is the production one: no icon under the pointer,
     // and the settings a session with nothing stored runs with.
-    let model = pinboard::model(false, &tairix_wallpaper::PinboardSettings::default());
+    let model = pinboard::model(false, &tairix_wallpaper::DesktopSettings::default());
     let (_, row) = chain_plate_and_row(
         model,
         window_menu_placement(Rect::new(backdrop.x, backdrop.y, 0, 0)),

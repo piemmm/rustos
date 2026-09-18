@@ -12,8 +12,16 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The four closed value sets the desktop's appearance keys carry
+# (`Appearance`, `Contrast`, `Density`, `Motion`). They live in the ABI
+# because the session publishes them to every application over the window
+# channel, so the value this document stores and the byte on that wire are
+# one definition.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 # Integer screen geometry (`Rect`), so the wallpaper placement geometry and
-# the compositor agree on one rectangle type rather than a second one.
+# the compositor agree on one rectangle type rather than a second one, and
+# `Scale` — the one validator of a UI scale, so a percentage this document
+# accepts is always one the desktop can actually be drawn at.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
 # The shared path-spelling parser: the settings document's wallpaper path is
 # validated as an absolute path through the one first-party parser, and the
@@ -25,6 +33,17 @@ tairix-path = { path = "../path", version = "=0.0.0" }
 # so this crate defines the closed *registry* over that format and no
 # grammar of its own (plans/APPDATA.md §1.3, §3.11).
 tairix-appconf = { path = "../appconf", version = "=0.0.0" }
+
+# Only the apply client's own round trip: a surface asking the session to
+# adopt a document makes one `ipc_call`, and the rest of the crate stays the
+# pure, I/O-free registry a host test drives directly.
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+
+[features]
+# The apply client's transport. Off by default, so the registry, the catalog
+# and the fit geometry stay linkable by a host test and by the session's own
+# engine with no runtime behind them.
+rt = ["dep:tairix-rt"]
 
 [dev-dependencies]
 # The store's own key grammar and document bound, so the registry's tests

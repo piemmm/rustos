@@ -255,8 +255,12 @@ mod tests {
             Notice::decode(NoticeTopic::Desktop, &buf[..len - 1]),
             Err(Errno::LengthOutOfRange)
         );
+        // A payload longer than the topic's is refused, not read as a
+        // prefix. The desktop record now fills the bound exactly, so the
+        // over-long case needs a byte more than the bound itself.
+        let over = [0u8; NOTICE_PAYLOAD_MAX + 1];
         assert_eq!(
-            Notice::decode(NoticeTopic::Desktop, &buf),
+            Notice::decode(NoticeTopic::Desktop, &over),
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(

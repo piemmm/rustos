@@ -67,16 +67,26 @@ Three properties matter more than the format:
 
 ## Changing the settings
 
-The chooser app and the backdrop menu both **ask**; the session decides,
-applies, and persists. The rendezvous is `PINBOARD_ENDPOINT`, a reserved,
-seat-scoped call endpoint in `lib/abi`, bound like the notification and
-window rendezvous: the session that owns the seat serves the pinboard shown
-on it, and nothing else may.
+The chooser app, the backdrop menu and the Settings application all **ask**;
+the session decides, applies, and persists. The rendezvous is
+`PINBOARD_ENDPOINT`, a reserved, seat-scoped call endpoint in `lib/abi`,
+bound like the notification and window rendezvous: the session that owns the
+seat serves the pinboard shown on it, and nothing else may.
 
 The request carries the **rendered settings document** rather than a struct
 of discriminants. That is deliberate: a second encoding of the same model
 beside the document's own grammar would be two definitions of one thing,
 and the two would eventually disagree.
+
+The session **merges** the request over what it currently holds rather than
+replacing it. More than one surface asks the desktop to change and none of
+them shows every setting: the chooser edits the backdrop keys, Settings edits
+the appearance keys. Each renders only the keys it edits, and a key a sender
+did not name keeps the value the desktop has — so choosing a wallpaper cannot
+reimpose whatever appearance the chooser happened to open on, and vice versa.
+Taking the absent keys as their *defaults* would do exactly that, on every
+single apply. A document the registry refuses is refused whole: the merge
+runs on a copy, so a refusal partway through leaves the desktop untouched.
 
 The security posture is worth stating plainly, because it is easy to get
 wrong:

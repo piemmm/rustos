@@ -12,8 +12,9 @@ map are documented at `docs/src/desktop/settings.md`.
 Two targets in one crate, the shape every windowed first-party app here takes:
 
 - the `[lib]` (`tairix_settings`) is the host-tested shell — the closed pane
-  registry, the frame resolver, the sidebar/search/trail navigation, and the
-  one renderer for a pane that states how the machine actually stands;
+  registry, the frame resolver, the sidebar/search/trail navigation, the
+  composed Appearance and Accessibility forms, and the one renderer for a
+  pane that states how the machine actually stands;
 - the `[[bin]]` (`src/run.rs`) is the on-disk bundle's `Run` entry point,
   which composes that shell over the window channel. It is a freestanding
   pure-Rust program on the Tier-1 bare-metal targets and an inert stub on the
@@ -34,6 +35,17 @@ there.
   can serve but whose controls this stage does not compose says where the
   setting is reached instead. No control that would change nothing is ever
   drawn.
+- **Appearance and Accessibility are two views of one registry.** Light/dark
+  is Appearance's alone; contrast, density, motion and the interface scale
+  appear in both, from one row definition, because a reader looks for them in
+  either place. Each row commits on the choice and posts **only the keys it
+  edits**, which the session merges over what it already holds — so a
+  wallpaper change and an appearance change cannot undo each other.
+- **A change is asked for, never written, and never on the loop.** The apply
+  goes to a worker; the rows show the reader's choice at once and adopt the
+  durable value when the session answers, so a refusal states its reason and
+  puts the row back rather than leaving a value the next login would not
+  restore.
 - **One registry table is the whole surface.** `registry::CATEGORIES` is the
   single definition of the sidebar strip, the search index, the location
   trail, the keyboard cursor and the pane dispatch, so a category cannot exist

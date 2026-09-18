@@ -37,8 +37,8 @@ use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_wallpaper::{
-    catalog_categories, Backdrop, IconFlow, IconSort, PinboardSettings, WallpaperChoice,
-    WallpaperFit, WallpaperPath,
+    catalog_categories, Backdrop, DesktopSettings, IconFlow, IconSort, SettingsKey,
+    WallpaperChoice, WallpaperFit, WallpaperPath,
 };
 
 use crate::{
@@ -128,6 +128,12 @@ pub struct Chooser {
     width: u32,
     height: u32,
     preview: PreviewSlot,
+    /// The whole desktop document this chooser was opened on.
+    ///
+    /// Held so [`Chooser::to_settings`] can answer with the real desktop
+    /// rather than fabricating a default for the settings this surface
+    /// neither shows nor edits.
+    opened_on: DesktopSettings,
 }
 
 impl Chooser {
@@ -147,7 +153,7 @@ impl Chooser {
     /// no list of its own. It opens on the category holding the selection, so
     /// the wallpaper in effect is shown in the company it was chosen from.
     #[must_use]
-    pub fn new(images: Vec<Candidate>, settings: &PinboardSettings) -> Self {
+    pub fn new(images: Vec<Candidate>, settings: &DesktopSettings) -> Self {
         let mut candidates = Vec::with_capacity(images.len().saturating_add(1));
         candidates.push(Candidate::none_entry());
         candidates.extend(images);
@@ -193,6 +199,7 @@ impl Chooser {
             .unwrap_or(0);
 
         Self {
+            opened_on: settings.clone(),
             candidates,
             selected,
             categories,
@@ -347,9 +354,14 @@ impl Chooser {
     }
 
     /// The settings document the current state means.
+    ///
+    /// The pinboard fields are the chooser's own; everything else the
+    /// desktop holds is carried through from what it was opened on, because
+    /// this surface neither shows nor edits it. What is actually *posted*
+    /// is narrower still ([`Self::settings_document`]).
     #[must_use]
-    pub fn to_settings(&self) -> PinboardSettings {
-        PinboardSettings {
+    pub fn to_settings(&self) -> DesktopSettings {
+        DesktopSettings {
             wallpaper: self
                 .candidates
                 .get(self.selected)
@@ -358,19 +370,27 @@ impl Chooser {
             backdrop: self.backdrop(),
             icons: self.icons(),
             sort: self.sort(),
+            ..self.opened_on.clone()
         }
     }
 
-    /// Render [`Self::to_settings`] as the canonical document text, ready to
-    /// post to the desktop session (`plans/PINBOARD.md` §6).
+    /// Render the pinboard keys of [`Self::to_settings`] as document text,
+    /// ready to post to the desktop session (`plans/PINBOARD.md` §6).
     ///
     /// The chooser posts a document rather than writing one: an application
     /// publishes only its *own* app-data scope, so this program cannot write
     /// the desktop's settings at all — it asks, and the session decides
     /// (`plans/APPDATA.md` §3.11).
+    ///
+    /// Only the keys this surface edits are rendered, because the session
+    /// merges an apply over what the desktop already holds: posting the
+    /// whole document would make choosing a wallpaper reimpose whatever
+    /// appearance the chooser happened to open on.
     #[must_use]
     pub fn settings_document(&self) -> String {
-        self.to_settings().document().render()
+        self.to_settings()
+            .document_of(&SettingsKey::PINBOARD)
+            .render()
     }
 
     /// The wallpaper the preview panel is showing, whether or not its pixels

@@ -125,20 +125,21 @@ mod program {
         load_programs, maybe_send_seat_report, open_tray, parse, publish_pinboard, reap_launched,
         relay_power, resolve_launch, resolve_window_identities, serve_pinboard_apply,
         serve_switchboard_request, window_control_alternate_event, window_control_event, Answer,
-        AppBarBridge, AppBarService, ArtworkFileReader, ArtworkSandbox, BundleIndex, CliError,
-        Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
-        DesktopOutcome, DesktopShell, DeviceInputSource, DocumentRelay, ElevatePrompt, Elevator,
-        FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
-        HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource, Launch,
-        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard,
-        LoadedPrograms, LockedDrain, OwnerBundleGate, OwnerWindow, PickConclusion, Prepared,
-        PresentedOwners, PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
-        SessionClock, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
-        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource,
-        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
-        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
+        BundleIndex, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
+        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
+        DocumentRelay, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
+        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource,
+        KeyboardInputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LayerDecision,
+        LayerFeed, LoadedPinboard, LoadedPrograms, LockedDrain, OwnerBundleGate, OwnerWindow,
+        PickConclusion, Prepared, PresentedOwners, PromptOutcome, ScreenFade, ScreenLock,
+        SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader, SessionPicker,
+        SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
+        WallpaperDesk, WallpaperSource, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
+        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
         PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
         SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN,
@@ -159,7 +160,8 @@ mod program {
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
-    use tairix_wallpaper::{PinboardSettings, MAX_WALLPAPER_BYTES};
+    use tairix_theme::Accessibility;
+    use tairix_wallpaper::{DesktopSettings, MAX_WALLPAPER_BYTES};
     use tairix_window::{
         event_endpoint_for, CallerIdentity, EventSink, OpenEntry, WindowServer, WINDOW_REPLY_MAX,
     };
@@ -1834,7 +1836,7 @@ mod program {
         // *before* the first listing, so the very first frame already has
         // the user's own sort order and icon arrangement rather than
         // re-sorting a frame later.
-        let mut pinboard = load_pinboard(&mut desktop, sandbox);
+        let mut pinboard = load_pinboard(&mut desktop, &mut shell, &mut compositor, sandbox);
         desktop.relist(tairix_rt::clock_get());
         // The wallpaper the desktop layer is painted over: read under the
         // session's own identity and fitted to this screen in the sandbox
@@ -3769,7 +3771,7 @@ mod program {
     /// gesture displaces before it is taken is answered right there, so no
     /// caller is ever left parked on an answer nobody will produce.
     struct PublishJob {
-        settings: PinboardSettings,
+        settings: DesktopSettings,
         /// The `PINBOARD_ENDPOINT` call to answer, for a publish a foreign
         /// application asked for. `None` for one the desktop asked itself.
         ticket: Option<u64>,
@@ -3835,7 +3837,7 @@ mod program {
         /// thread, exactly as the session did before it had one: a submitted
         /// change nobody will serve would leave the desktop showing settings it
         /// never adopted.
-        fn submit(&self, settings: PinboardSettings, ticket: Option<u64>) -> Option<PublishAnswer> {
+        fn submit(&self, settings: DesktopSettings, ticket: Option<u64>) -> Option<PublishAnswer> {
             let submitted = {
                 let mut desk = self.desk.lock();
                 if desk.stopping() {
@@ -4096,16 +4098,27 @@ mod program {
     /// over the production file seams and `sandbox`.
     ///
     /// The settings are applied to the model here rather than returned, so
-    /// only the desktop ever holds what is in force.
+    /// only the desktop ever holds what is in force, and the appearance the
+    /// stored document asks for is put into effect before the first frame —
+    /// a desktop that came up dark because nothing read its own `appearance`
+    /// key would be showing a setting the user did not choose.
     fn load_pinboard<S: DirectorySource>(
         desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
         sandbox: SharedSandbox,
     ) -> PinboardPanel {
         let loaded = read_pinboard_store(&mut RtHost);
         for warning in &loaded.warnings {
             let _ = write!(Stderr, "{warning}");
         }
-        desktop.apply_settings(loaded.settings);
+        let wanted = loaded.settings.clone();
+        if let Some(change) = desktop.apply_settings(loaded.settings) {
+            // Through the same adopt path a later change takes, so the
+            // desktop a user logs in to and the desktop they get from
+            // changing a setting are drawn by one piece of code.
+            adopt_appearance(change.appearance, &wanted, shell, compositor);
+        }
         PinboardPanel {
             sandbox,
             prepared: None,
@@ -4498,9 +4511,10 @@ mod program {
         shell.present_tooltip(compositor);
     }
 
-    /// Attest the caller of a pending pinboard call from the kernel, decode
-    /// the settings it carries through the shared, host-tested policy, and
-    /// adopt them through the session's one persist-then-adopt path.
+    /// Attest the caller of a pending pinboard call from the kernel, lay the
+    /// settings it carries over the ones in effect through the shared,
+    /// host-tested policy, and adopt the result through the session's one
+    /// persist-then-adopt path.
     ///
     /// Only a caller running as this session's own user may rewrite this
     /// session's desktop: the uid compared is the kernel-attested
@@ -4522,7 +4536,7 @@ mod program {
         ticket: u64,
         request: &[u8],
     ) {
-        let attested = attest_pinboard(session_uid, ticket, request);
+        let attested = attest_pinboard(session_uid, desktop.settings(), ticket, request);
         let settings = match attested {
             Ok(settings) => settings,
             Err(err) => {
@@ -4549,7 +4563,7 @@ mod program {
     }
 
     /// Attest a pending pinboard call against the session's own identity and
-    /// decode the settings it carries.
+    /// merge the settings it carries over the ones in effect.
     ///
     /// # Errors
     ///
@@ -4558,14 +4572,15 @@ mod program {
     /// — each stated on `stderr` in the session's own wording.
     fn attest_pinboard(
         session_uid: u32,
+        in_effect: &DesktopSettings,
         ticket: u64,
         request: &[u8],
-    ) -> Result<PinboardSettings, Errno> {
+    ) -> Result<DesktopSettings, Errno> {
         let mut buf = [0u8; ORIGIN_WIRE_LEN];
         let len = tairix_rt::call_peer_origin(PINBOARD_ENDPOINT, ticket, &mut buf)
             .map_err(Errno::from_syscall)?;
         let origin = Origin::from_bytes(&buf[..len])?;
-        serve_pinboard_apply(session_uid, origin.uid(), request).map_err(|refusal| {
+        serve_pinboard_apply(session_uid, origin.uid(), in_effect, request).map_err(|refusal| {
             let msg = refusal.reason();
             let _ = writeln!(Stderr, "desktop: {msg}");
             refusal.errno()
@@ -5998,7 +6013,7 @@ mod program {
     /// Answers whether the desktop layer needs a whole repaint.
     #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
     fn request_pinboard_settings<S: DirectorySource>(
-        settings: PinboardSettings,
+        settings: DesktopSettings,
         publisher: &Publisher,
         ticket: Option<u64>,
         pinboard: &mut PinboardPanel,
@@ -6072,19 +6087,59 @@ mod program {
         for warning in &published.warnings {
             let _ = write!(Stderr, "{warning}");
         }
+        let wanted = published.settings.clone();
         let Some(change) = desktop.apply_settings(published.settings) else {
             return false;
         };
-        if change.relist {
+        if change.backdrop.relist {
             desktop.relist(now_ns);
         }
-        if change.wallpaper {
+        if change.backdrop.wallpaper {
             prepare_wallpaper(pinboard, wallpapers, shell, desktop, compositor, now_ns);
         }
+        adopt_appearance(change.appearance, &wanted, shell, compositor);
         // A re-layout, a re-list, and a new wallpaper all show as the same
         // repaint of the desktop layer, so one present covers whichever of
         // them the change asked for.
         true
+    }
+
+    /// Put the *appearance* half of a settings change into effect: the theme
+    /// axes and the UI scale.
+    ///
+    /// The one place they are adopted, so the desktop a user sees after a
+    /// login and the desktop they see after a change made while logged in
+    /// cannot differ. The backdrop half of the same change — the wallpaper,
+    /// the icon flow, the sort order — is the desktop model's and is applied
+    /// by its own caller; this touches only what every surface on the screen
+    /// is drawn with.
+    fn adopt_appearance(
+        change: AppearanceWork,
+        settings: &DesktopSettings,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        if change.theme {
+            shell.session_mut().set_appearance(settings.appearance);
+            shell.session_mut().set_accessibility(Accessibility {
+                contrast: settings.contrast,
+                density: settings.density,
+                motion: settings.motion,
+            });
+            shell.sync_theme(compositor);
+            shell.present(compositor);
+        }
+        if change.scale {
+            shell.set_scale(settings.scale, compositor);
+        }
+        if change.any() {
+            // Every served window holds its application's own pixels, which
+            // the session cannot redraw: it says how the desktop now looks
+            // and each application repaints itself. Without this the desktop
+            // would change and every open window would sit there in the
+            // appearance and density the user just left.
+            publish_desktop(compositor);
+        }
     }
 
     /// Answer a `PINBOARD_ENDPOINT` call with the shared status frame.

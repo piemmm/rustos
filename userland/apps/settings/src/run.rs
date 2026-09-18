@@ -26,24 +26,36 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    extern crate alloc;
+
+    use alloc::string::String;
     use core::cell::Cell;
 
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
-    use tairix_abi::window_ipc::{AppBarClick, PointerAction, WindowEvent, WindowSizing};
-    use tairix_abi::{Errno, ProcId};
+    use tairix_abi::pinboard_ipc::PinboardDocument;
+    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowSizing};
+    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
+    use tairix_appdata::RtHost;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::NoArtwork;
     use tairix_input::InputEvent;
     use tairix_rt::io::{Stderr, Write};
-    use tairix_settings::Shell;
+    use tairix_settings::{Shell, ShellOutcome};
     use tairix_theme::{Theme, ThemeRegistry};
+    use tairix_wallpaper::{ApplyOutcome, DesktopSettings, PINBOARD_PUBLISHER};
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
-        EventError, EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents,
+        EventError, EventMailbox, EventSource, Parked, Repaint, WindowEvents,
     };
+
+    /// The wait-set token of the applier's wake pipe: readable exactly when
+    /// the desktop session has answered an apply, so the rows are brought up
+    /// to date through the park the loop is already in rather than by
+    /// waiting for it.
+    const APPLY_TOKEN: u64 = app::FIRST_APP_TOKEN;
 
     /// The window's logical width at the reference density: the strip plus a
     /// content column wide enough for a pane's widest row.
@@ -55,6 +67,98 @@ mod program {
     const MIN_WIDTH: u32 = 320;
     /// The shortest logical client the window may be resized to.
     const MIN_HEIGHT: u32 = 240;
+
+    /// The desktop settings in effect for the launching user, so every
+    /// composed row opens on what the desktop is actually drawn with.
+    ///
+    /// Read from the desktop session's **published** app-data scope, which
+    /// is the sanctioned channel one application reaches another's values
+    /// through: this program names the publisher and nothing else, so the
+    /// request shape it sends cannot ask for the session's private
+    /// settings. It never writes them — an application publishes only its
+    /// own scope — so a change is a request the session decides on.
+    ///
+    /// A desktop that has published **nothing** means the documented
+    /// defaults and is not an error: a fresh account has never applied a
+    /// setting. Anything else that stops the document being used says so on
+    /// `stderr` rather than showing values the user cannot account for.
+    fn settings_in_effect() -> DesktopSettings {
+        let document = match tairix_appdata::read_published(&mut RtHost, PINBOARD_PUBLISHER) {
+            Ok(document) => document,
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: the desktop's settings could not be read ({err:?}); showing the \
+                     defaults"
+                );
+                return DesktopSettings::default();
+            }
+        };
+        let (settings, refused) = DesktopSettings::load(&document);
+        for key in refused {
+            let _ = writeln!(
+                Stderr,
+                "settings: the desktop publishes a `{key}` this build does not accept; showing \
+                 its default"
+            );
+        }
+        settings
+    }
+
+    /// The applier: the session round trip an apply costs, carried out on a
+    /// worker thread.
+    ///
+    /// The session answers only once its own publisher has written the
+    /// store, so making the choice wait for it would freeze this window for
+    /// a disk commit — and freeze it again on every further choice. The loop
+    /// encodes the document (in memory, and refusable on the spot), submits,
+    /// and adopts the answer on the wake it nudges.
+    type Applier = tairix_rt::work::Worker<(), PinboardDocument, ApplyOutcome>;
+
+    /// The worker's body: the shared apply client's one round trip.
+    fn send_apply(_: &mut (), document: &mut PinboardDocument) -> ApplyOutcome {
+        tairix_wallpaper::apply(*document)
+    }
+
+    /// Ask the desktop session to adopt `document`, off the event loop.
+    ///
+    /// A document this program cannot even encode is refused here, where it
+    /// costs nothing; everything else goes to the worker and is answered on
+    /// a later wake.
+    fn submit_apply(applier: &Applier, document: &str) -> Option<ApplyOutcome> {
+        match PinboardDocument::new(document) {
+            // With no worker the call was made on this thread and its answer
+            // is already on the desk.
+            Ok(document) if applier.submit(document) => applier.collect(),
+            Ok(_) => None,
+            Err(_) => Some(ApplyOutcome::Refused(String::from(
+                "settings document out of range",
+            ))),
+        }
+    }
+
+    /// Adopt what the desktop answered: state a refusal, then re-read what
+    /// the desktop actually holds into `shell`.
+    ///
+    /// Persist-then-adopt. The rows showed the reader's choice at once; the
+    /// durable value is whatever the session answers with, so a refusal puts
+    /// the row back rather than leaving a value on screen the next login
+    /// would not restore.
+    fn adopt_apply(shell: &mut Shell, outcome: ApplyOutcome) {
+        match outcome {
+            ApplyOutcome::Applied | ApplyOutcome::Applying => {}
+            ApplyOutcome::Refused(reason) => {
+                let _ = writeln!(Stderr, "settings: the desktop refused the change: {reason}");
+            }
+            ApplyOutcome::NoDesktop => {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: no desktop session answered; nothing was changed"
+                );
+            }
+        }
+        shell.adopt_settings(settings_in_effect());
+    }
 
     /// State the abnormal-exit reason on `stderr` (fail loud) and hand back
     /// `code` for `main`.
@@ -69,37 +173,15 @@ mod program {
         err.code()
     }
 
-    /// Declare this application's icon-bar presence: the shared convention's
-    /// information row and *Quit*.
-    ///
-    /// A refused declaration is an answer, not a death: the application says
-    /// so and carries on with no slot of its own.
-    fn declare_app_bar(client: &mut WindowClient<app::RtWindowTransport>, endpoint: u64) {
-        match tairix_window::info_and_quit(endpoint, AppBarClick::RaiseOrOpen) {
-            Ok(bar) => {
-                if let Err(err) = client.set_app_bar(&bar) {
-                    let _ = writeln!(
-                        Stderr,
-                        "settings: the desktop refused this application's icon-bar presence \
-                         ({err}); carrying on without one"
-                    );
-                }
-            }
-            Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: this application's icon-bar menu is invalid ({err:?}); carrying \
-                     on without one"
-                );
-            }
-        }
-    }
-
     /// The production [`EventSource`]: drain the app's own event mailbox,
     /// parking on the wait-set whenever it is empty.
     struct RtEventSource<'a> {
         mailbox: EventMailbox,
         set: u64,
+        /// The applier's wake, drained on an [`APPLY_TOKEN`] wake. Its
+        /// readiness is a level peek, so leaving it undrained would report
+        /// ready for ever and turn the park into a spin.
+        applier: &'a Applier,
         /// Set when the park woke for a desktop change, cleared when the loop
         /// adopts it.
         desktop_moved: &'a Cell<bool>,
@@ -114,6 +196,13 @@ mod program {
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
             match app::park(self.set)? {
+                // The session answered an apply. Draining is the whole of
+                // noticing it, and the answer is the loop's to adopt, so the
+                // wait ends here rather than parking again on a ready source.
+                Wake::App(APPLY_TOKEN) => {
+                    self.applier.wake().drain();
+                    Ok(Parked::Interrupted)
+                }
                 Wake::PressureChanged => {
                     tairix_font::trim_glyph_cache();
                     Ok(Parked::Served)
@@ -193,7 +282,7 @@ mod program {
     }
 
     /// What one delivered event concluded.
-    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     enum Acted {
         /// Nothing on screen changed.
         Idle,
@@ -201,10 +290,9 @@ mod program {
         Changed,
         /// The whole client changed and no report could describe it.
         Whole,
-        /// Close the window, leaving the app on the icon bar.
-        Close,
-        /// Open a window, the app having none.
-        Open,
+        /// The reader chose a setting: ask the desktop to adopt it, then
+        /// re-read what it holds.
+        Apply(String),
         /// End the program.
         Quit,
     }
@@ -219,17 +307,13 @@ mod program {
         damage: &mut Region,
     ) -> Acted {
         let viewport = surface.viewport();
-        let changed = |acted: bool| {
-            if acted {
-                Acted::Changed
-            } else {
-                Acted::Idle
-            }
+        let concluded = |outcome: ShellOutcome| match outcome {
+            ShellOutcome::Idle => Acted::Idle,
+            ShellOutcome::Changed => Acted::Changed,
+            ShellOutcome::Apply(document) => Acted::Apply(document),
         };
         match event {
-            WindowEvent::CloseRequested { .. } => Acted::Close,
-            WindowEvent::AppBarMenu { item } if tairix_window::is_quit(*item) => Acted::Quit,
-            WindowEvent::AppBarDefault => Acted::Open,
+            WindowEvent::CloseRequested { .. } => Acted::Quit,
             // The desktop resized the client: re-map the frame region to the
             // new extent, then lay the shell out to it.
             WindowEvent::Resized {
@@ -257,14 +341,12 @@ mod program {
                 key: pressed @ KeyInput::Pressed { .. },
                 ..
             } => match key_input_event(*pressed) {
-                InputEvent::KeyPressed { key, modifiers } => changed(
-                    shell
-                        .on_key(key, modifiers, viewport, scale, theme, damage)
-                        .changed(),
-                ),
+                InputEvent::KeyPressed { key, modifiers } => {
+                    concluded(shell.on_key(key, modifiers, viewport, scale, theme, damage))
+                }
                 _ => Acted::Idle,
             },
-            WindowEvent::Pointer { x, y, action, .. } => changed(apply_pointer(
+            WindowEvent::Pointer { x, y, action, .. } => concluded(apply_pointer(
                 shell,
                 pointer_point(*x, *y),
                 *action,
@@ -275,11 +357,7 @@ mod program {
             )),
             WindowEvent::Scrolled { dx, dy, .. } => {
                 let scroll = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
-                changed(
-                    shell
-                        .on_pointer(&scroll, viewport, scale, theme, damage)
-                        .changed(),
-                )
+                concluded(shell.on_pointer(&scroll, viewport, scale, theme, damage))
             }
             // A redraw needs nothing here: the client library re-presents the
             // last frame and the shell it drew has not changed. The rest are
@@ -287,7 +365,13 @@ mod program {
             // desktop's, declares no file association, and owns no desktop
             // layer — and `ContentReleased` is the caller's, which owns the
             // region it lets go of.
+            // Settings is part of the desktop rather than an application
+            // the user manages: its signed manifest presents no icon-bar
+            // slot and it declares none, so neither icon-bar event can
+            // reach it. A secondary press on Close asks to leave what the
+            // window shows, and this window shows only itself.
             WindowEvent::AlternateCloseRequested { .. }
+            | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::MenuClosed { .. }
             | WindowEvent::TerrainChanged { .. }
@@ -305,6 +389,10 @@ mod program {
 
     /// Route one wire pointer event: a move to `at` to sync the pointer, then
     /// the press or release the action names.
+    ///
+    /// A press and its release are two inputs of one gesture, so the
+    /// stronger of what they concluded is the gesture's: an apply the
+    /// release asked for is not lost behind the press's bare repaint.
     fn apply_pointer(
         shell: &mut Shell,
         at: Point,
@@ -313,14 +401,17 @@ mod program {
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
-    ) -> bool {
-        let mut acted = false;
+    ) -> ShellOutcome {
+        let mut concluded = ShellOutcome::Idle;
         for input in pointer_input_events(action, at) {
-            acted |= shell
-                .on_pointer(&input, viewport, scale, theme, damage)
-                .changed();
+            let acted = shell.on_pointer(&input, viewport, scale, theme, damage);
+            if matches!(acted, ShellOutcome::Apply(_))
+                || (acted.changed() && !matches!(concluded, ShellOutcome::Apply(_)))
+            {
+                concluded = acted;
+            }
         }
-        acted
+        concluded
     }
 
     /// Adopt the desktop the session published, if the park said it moved.
@@ -342,16 +433,43 @@ mod program {
     }
 
     /// The event loop: park, apply, repaint.
-    fn run_event_loop(
-        surface: &mut SettingsWindow,
-        desktop: &mut Desktop,
-        themes: &mut ThemeRegistry,
-        shell: &mut Shell,
-        event_endpoint: u64,
-        desktop_moved: &Cell<bool>,
-        mut events: WindowEvents<RtEventSource<'_>>,
-    ) -> i32 {
+    /// The long-lived state one turn of the event loop reads and writes.
+    ///
+    /// Grouped because every path through the loop needs all of it: the
+    /// window it presents to, the desktop and theme it draws with, the
+    /// shell it routes into, and the channels it answers on.
+    struct Session<'a> {
+        surface: &'a mut SettingsWindow,
+        desktop: &'a mut Desktop,
+        themes: &'a mut ThemeRegistry,
+        shell: &'a mut Shell,
+        desktop_moved: &'a Cell<bool>,
+        applier: &'a Applier,
+    }
+
+    fn run_event_loop(session: Session<'_>, mut events: WindowEvents<RtEventSource<'_>>) -> i32 {
+        let Session {
+            surface,
+            desktop,
+            themes,
+            shell,
+            desktop_moved,
+            applier,
+        } = session;
         loop {
+            // An answer the park drained is the loop's to adopt, whether or
+            // not an event came with it.
+            if let Some(outcome) = applier.collect() {
+                adopt_apply(shell, outcome);
+                shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+                let whole = DamageRect::full(&surface.mode);
+                if surface
+                    .present(shell, themes.active(), desktop.scale(), whole)
+                    .is_err()
+                {
+                    return fail(EXIT_CHANNEL_LOST, "present refused");
+                }
+            }
             let event = match events.wait(surface.window.client()) {
                 Ok(Some(event)) => event,
                 // A wait that ended without an event is the desktop notice; a
@@ -396,15 +514,14 @@ mod program {
                     surface.close();
                     return 0;
                 }
-                Acted::Close => {
-                    surface.close();
-                    continue;
-                }
-                Acted::Open => {
-                    // A refusal is already stated; the slot is still there to
-                    // try again from.
-                    let _ = surface.open(event_endpoint, shell, themes.active(), desktop.scale());
-                    continue;
+                Acted::Apply(ref document) => {
+                    // Submitted, not awaited: the answer arrives on the wake
+                    // the worker nudges. With no worker to serve it the call
+                    // was made here and its answer is already in hand.
+                    if let Some(outcome) = submit_apply(applier, document) {
+                        adopt_apply(shell, outcome);
+                        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+                    }
                 }
                 Acted::Idle | Acted::Changed | Acted::Whole => {}
             }
@@ -412,7 +529,11 @@ mod program {
                 surface.window.release_frames();
                 continue;
             }
-            let repaint = match (redraw || acted == Acted::Whole, acted == Acted::Changed) {
+            // An apply re-read the desktop, so every row may have moved:
+            // the whole client is redrawn rather than the one row the
+            // choice reported.
+            let whole = redraw || matches!(acted, Acted::Whole | Acted::Apply(_));
+            let repaint = match (whole, matches!(acted, Acted::Changed)) {
                 (true, _) => Repaint::Whole,
                 (false, true) => Repaint::Reported,
                 (false, false) => Repaint::Nothing,
@@ -449,16 +570,46 @@ mod program {
             Err(err) => return fail_shell(err),
         };
         let event_endpoint = binding.endpoint();
-        declare_app_bar(surface.window.client(), event_endpoint);
 
         // An empty registry would leave the window nothing to show at all, so
         // it ends fail-loud rather than opening a blank frame.
-        let Some(mut shell) = Shell::new() else {
+        let Some(mut shell) = Shell::new(settings_in_effect()) else {
             return fail(
                 EXIT_CHANNEL_LOST,
                 "the settings registry holds no categories",
             );
         };
+        // The apply worker. A machine that grants none leaves the round
+        // trip on this task — where it would otherwise stall the window —
+        // and says so once rather than silently.
+        let applier = alloc::sync::Arc::new(Applier::new(
+            send_apply,
+            (),
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        if let Err(reason) = Applier::start(&applier) {
+            let _ = writeln!(
+                Stderr,
+                "settings: no apply worker ({reason:?}); the desktop is asked on the event loop"
+            );
+        }
+        let _applier_guard = tairix_rt::work::WorkerGuard::new(&applier);
+        // A refused add is fatal rather than tolerated: an answer nobody
+        // collects would leave every row showing a value the desktop may
+        // never have adopted.
+        if let Some(read) = applier.wake().read_end() {
+            if tairix_rt::waitset_ctl(
+                binding.set(),
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                APPLY_TOKEN,
+            ) != 0
+            {
+                return fail(app::EXIT_NO_EVENTS, "apply wake refused");
+            }
+        }
+
         let server = match surface.open(event_endpoint, &shell, themes.active(), desktop.scale()) {
             Ok(server) => server,
             Err(code) => return code,
@@ -468,15 +619,18 @@ mod program {
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
+            applier: &applier,
             desktop_moved: &desktop_moved,
         });
         run_event_loop(
-            &mut surface,
-            &mut desktop,
-            &mut themes,
-            &mut shell,
-            event_endpoint,
-            &desktop_moved,
+            Session {
+                surface: &mut surface,
+                desktop: &mut desktop,
+                themes: &mut themes,
+                shell: &mut shell,
+                desktop_moved: &desktop_moved,
+                applier: &applier,
+            },
             events,
         )
     }

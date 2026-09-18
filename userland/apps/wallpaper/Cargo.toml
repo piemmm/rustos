@@ -69,6 +69,10 @@ path = "src/run.rs"
 # `Run`-only dependency because the chooser model itself holds settings it was
 # handed, and its host tests inject those directly.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+# The shared apply client's own round trip: the one `ipc_call` that asks the
+# desktop session to adopt a document, written once rather than in every
+# surface that edits the desktop's settings.
+tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0", features = ["rt"] }
 # The browser engine's production symbolic-link reader (`RtLinkReader`): the
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.

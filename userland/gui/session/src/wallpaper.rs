@@ -37,7 +37,7 @@ use alloc::string::String;
 
 use tairix_geometry::Rect;
 use tairix_raster::Surface;
-use tairix_wallpaper::{PinboardSettings, WallpaperChoice, WallpaperFit};
+use tairix_wallpaper::{DesktopSettings, WallpaperChoice, WallpaperFit};
 
 /// Everything a prepared wallpaper depends on: the chosen file, how it is
 /// placed, and the screen it was placed on.
@@ -65,7 +65,7 @@ impl WallpaperSource {
     /// request, so the comparison that decides whether to prepare and the
     /// request that is prepared cannot disagree.
     #[must_use]
-    pub fn wanted(settings: &PinboardSettings, screen: Rect) -> Self {
+    pub fn wanted(settings: &DesktopSettings, screen: Rect) -> Self {
         Self {
             choice: settings.wallpaper.clone(),
             fit: settings.fit,
