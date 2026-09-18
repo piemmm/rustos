@@ -1,0 +1,38 @@
+[package]
+name = "tairix-wintersun-net"
+description = "WinterSun realm wire protocol (plans/WINTERSUN.md §7): the fixed-width little-endian message vocabulary, the total bounded decode every frame is admitted through, the sealed record transport, and the authenticated session handshake (X25519 agreement, Ed25519 realm identity with first-use pinning, HKDF schedule, ChaCha20-Poly1305 records). no_std, allocation-free, forbids unsafe, fail-closed: every refusal names the reason the connection ends with. A game's own protocol, held to the ABI discipline but deliberately outside lib/abi, which is the user/kernel contract."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `Time64`: absolute time on this wire is the one 64-bit-native definition,
+# never a second epoch type.
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+# The audited primitives the session is composed from — X25519 agreement,
+# Ed25519 realm identity, HMAC-SHA256 as the key-schedule PRF, SHA-256 for the
+# transcript, ChaCha20-Poly1305 for the records. Composed here, never
+# re-implemented.
+tairix-crypto = { path = "../../../../lib/crypto", version = "=0.0.0" }
+# The audited optimisation-resistant wipe. Session keys and every opened
+# record's plaintext (which may hold an account password) are wiped on drop; a
+# hand-rolled loop would be elided.
+zeroize = { version = "1.8.1", default-features = false }
+
+[dev-dependencies]
+# The in-tree fuzz harnesses draw their inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it at the start of the test, and
+# bounds the smoke/soak loop. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../../../tests/fuzzseed", version = "=0.0.0" }
+# Realm-identity *signing*. `lib/crypto` deliberately exposes verification
+# only, so the responder takes a signer callback and the realm's secret never
+# enters this crate; the tests stand in for that holder with the same audited
+# crate `lib/crypto` verifies against. Already in the tree and source-pinned,
+# so this adds nothing to the audit surface.
+ed25519-dalek = { version = "=2.1.1", default-features = false }
