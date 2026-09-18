@@ -213,9 +213,13 @@ exercise.
   with ordered failover (a declared `primary` reclaims the path); `balance`
   spreads flows across the eligible members by a `flow_hash` over the
   4-tuple, so a flow never reorders across links. Every mutation returns
-  the `BondEvent`s the composing interface acts on (`PathChanged` ⇒
-  gratuitous ARP / unsolicited NA + audit; `WentDown` ⇒ transmit fails
-  closed); the member set is bounded and `transmit_member` fails closed to
+  the one `BondEvent` it produced, if any: `CameUp` (the bond acquired its
+  first eligible member) and `PathChanged` (the path moved while the bond
+  was already transmitting — a failover or a deliberate failback) both
+  announce presence with a gratuitous ARP / unsolicited NA, and `WentDown`
+  fails transmit closed. The bring-up is deliberately *not* a path change,
+  so an auditor can tell a bond coming up from a live member dying under
+  it. The member set is bounded and `transmit_member` fails closed to
   `None` when no member is eligible. The monitor is tickless
   (`next_deadline` arms only while a member awaits admission).
 - `tcp` — the TCP segment codec (RFC 9293): the fixed header, the eight

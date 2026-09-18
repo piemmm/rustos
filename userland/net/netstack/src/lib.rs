@@ -38,8 +38,8 @@ mod socket;
 pub use channel::{FrameService, LocalFrameService, NetChannelClient, NetChannelTransport};
 pub use cookie::CryptoCookieSecret;
 pub use iface::{
-    queue_tx, BondMemberHealth, DhcpRngFactory, FrameBatch, Interface, Netstack, ServiceHint,
-    ServiceOutcome, TempAddrFactory,
+    queue_tx, BondChange, BondMemberHealth, DhcpRngFactory, FrameBatch, Interface, Netstack,
+    ServiceHint, ServiceOutcome, TempAddrFactory,
 };
 pub use service::{serve, Caller};
 pub use socket::{

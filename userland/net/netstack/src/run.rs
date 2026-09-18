@@ -70,7 +70,7 @@ mod program {
     use tairix_net::iface::{eui64_interface_id, TempAddrSource};
     use tairix_net::stack::StackEvent;
     use tairix_netstack::{
-        events, queue_tx, serve, Caller, CryptoCookieSecret, Delivery, FrameBatch,
+        events, queue_tx, serve, BondChange, Caller, CryptoCookieSecret, Delivery, FrameBatch,
         NetChannelClient, NetChannelTransport, Netstack, ServiceHint, SocketService, StreamIo,
     };
     use tairix_rt::LogSink;
@@ -376,12 +376,12 @@ mod program {
         }
     }
 
-    /// Apply a member NIC's live link change to the bond and transmit any
-    /// resulting presence re-announcement (a failover), auditing it. A
-    /// change that produces no announcement (a plain interface, or a bond
-    /// with no path change) is silent. Callable only where the whole
-    /// `channels` table is in hand, because the announcement egresses the
-    /// newly-selected member — a *different* channel from the one that
+    /// Apply a member NIC's live link change to the bond, audit whatever
+    /// transition it produced, and transmit any resulting presence
+    /// re-announcement. A change that moves no bond (a plain interface, or
+    /// a bond whose path stayed put) is silent. Callable only where the
+    /// whole `channels` table is in hand, because the announcement egresses
+    /// the newly-selected member — a *different* channel from the one that
     /// reported the change.
     fn handle_link_change(
         stack: &mut Netstack,
@@ -392,15 +392,44 @@ mod program {
         link: LinkState,
         now: Duration64,
     ) {
-        let announcements = stack.on_member_link_change(iface, link, now);
-        if !announcements.is_empty() {
+        let change = stack.on_member_link_change(iface, link, now);
+        audit_bond_change(&change, PATH_CHANGED_ON_LINK_REPORT);
+        transmit_batch(stack, sockets, channels, secret, &change.announcements);
+    }
+
+    /// The path-change audit message for a transition a member's own link
+    /// report drove: a member died under the bond and it failed over.
+    const PATH_CHANGED_ON_LINK_REPORT: &str =
+        "netstack: bond transmit path changed on a member link report (presence re-announced)";
+
+    /// The path-change audit message for a transition the failover
+    /// monitor's sweep drove: a recovered member was readmitted past its
+    /// up-delay and reclaimed the path (a deliberate failback).
+    const PATH_CHANGED_ON_MONITOR_SWEEP: &str =
+        "netstack: bond transmit path changed on a monitor readmission (presence re-announced)";
+
+    /// Audit a bond mutation's transitions, each a distinct security-relevant
+    /// fact and each recorded whether or not it produced a presence
+    /// announcement — a path change on a bond holding no announceable
+    /// address is still a path change, and a bond losing its last member
+    /// never announces at all.
+    fn audit_bond_change(change: &BondChange, path_changed: &'static str) {
+        if change.came_up {
             audit(
-                events::BOND_FAILOVER,
+                events::BOND_UP,
                 Level::Info,
-                "netstack: bond transmit path changed on a member link report (presence \
-                 re-announced)",
+                "netstack: bond came up on its first eligible member (presence announced)",
             );
-            transmit_batch(stack, sockets, channels, secret, &announcements);
+        }
+        if change.path_changed {
+            audit(events::BOND_FAILOVER, Level::Info, path_changed);
+        }
+        if change.went_down {
+            audit(
+                events::BOND_DOWN,
+                Level::Warn,
+                "netstack: bond lost its last eligible member (transmit fails closed)",
+            );
         }
     }
 
@@ -1141,17 +1170,11 @@ mod program {
         let io = sockets.advance_streams(stack, now);
         distribute(stack, sockets, channels, secret, &io);
         // Advance every bond's failover health monitor (admitting recovered
-        // members past their up-delay) and transmit any gratuitous
-        // announcements a resulting path change produced, then audit it.
-        let announcements = stack.advance_bonds(now);
-        if !announcements.is_empty() {
-            audit(
-                events::BOND_FAILOVER,
-                Level::Info,
-                "netstack: bond transmit path changed (presence re-announced)",
-            );
-            transmit_batch(stack, sockets, channels, secret, &announcements);
-        }
+        // members past their up-delay), audit whatever transition that
+        // produced, and transmit the gratuitous announcements.
+        let change = stack.advance_bonds(now);
+        audit_bond_change(&change, PATH_CHANGED_ON_MONITOR_SWEEP);
+        transmit_batch(stack, sockets, channels, secret, &change.announcements);
         // Pump each channel; collect any live link change a driver report
         // surfaced so it can be applied after this borrow of `channels`
         // ends (a failover announcement egresses a *different* member's

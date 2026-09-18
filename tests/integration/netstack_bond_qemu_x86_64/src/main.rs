@@ -39,7 +39,11 @@
 //!    static address assigned.
 //! 2. `netstack`'s `BOND_FAILOVER` — the bond's transmit path changed after a
 //!    member link report (the harness dropped the primary member's carrier
-//!    and the driver's config-change interrupt reported it down).
+//!    and the driver's config-change interrupt reported it down). The bond's
+//!    own bring-up is `BOND_UP`, a distinct event, so it cannot satisfy this
+//!    witness however the admission sweep and the address's DAD happen to
+//!    interleave — otherwise the guest could exit before the harness had
+//!    dropped anything.
 //! 3. `netstack`'s `INBOUND_ECHO_SERVED` **observed after witness 2** — an
 //!    echo request addressed to the bond's static address was answered *after*
 //!    the failover, so a frame crossed the two-process boundary over the

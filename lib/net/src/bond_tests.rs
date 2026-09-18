@@ -25,11 +25,11 @@ fn bond(mode: BondMode, primary: Option<&str>) -> Bond {
 }
 
 /// Bring a member up and admit it: report link-up at `t0`, then advance
-/// past the up-delay. Returns the admission events.
-fn bring_up(b: &mut Bond, name: &str, t0: u64) -> Vec<BondEvent> {
+/// past the up-delay. Returns the admission's transition.
+fn bring_up(b: &mut Bond, name: &str, t0: u64) -> Option<BondEvent> {
     let m = member(name);
     let down = b.set_member_link(m, LinkState::Up, ms(t0));
-    assert!(down.is_empty(), "link-up alone must not admit (up-delay)");
+    assert_eq!(down, None, "link-up alone must not admit (up-delay)");
     b.advance(ms(t0 + 100))
 }
 
@@ -65,9 +65,10 @@ fn a_link_up_member_is_admitted_only_after_the_up_delay() {
     b.add_member(member("eth0")).unwrap();
 
     // Link-up alone does not admit and does not change the path.
-    assert!(b
-        .set_member_link(member("eth0"), LinkState::Up, ms(0))
-        .is_empty());
+    assert_eq!(
+        b.set_member_link(member("eth0"), LinkState::Up, ms(0)),
+        None
+    );
     assert!(!b.is_up());
     assert_eq!(
         b.transmit_member(0),
@@ -79,11 +80,12 @@ fn a_link_up_member_is_admitted_only_after_the_up_delay() {
     assert_eq!(b.next_deadline(), Some(ms(100)));
 
     // Advancing before the interval does not admit.
-    assert!(b.advance(ms(99)).is_empty());
+    assert_eq!(b.advance(ms(99)), None);
     assert!(!b.is_up());
 
-    // Advancing at the interval admits and brings the path up.
-    assert_eq!(b.advance(ms(100)), alloc::vec![BondEvent::PathChanged]);
+    // Advancing at the interval admits and brings the bond *up* — a
+    // bring-up, never a failover: there was no previous path.
+    assert_eq!(b.advance(ms(100)), Some(BondEvent::CameUp));
     assert!(b.is_up());
     assert_eq!(b.active_member(), Some(member("eth0")));
     assert_eq!(b.transmit_member(0), Some(member("eth0")));
@@ -105,10 +107,48 @@ fn active_backup_fails_over_immediately_on_link_down() {
     assert_eq!(b.eligible_count(), 2);
 
     // The active member drops: failover is immediate (no advance needed).
-    let events = b.set_member_link(member("eth0"), LinkState::Down, ms(500));
-    assert_eq!(events, alloc::vec![BondEvent::PathChanged]);
+    let event = b.set_member_link(member("eth0"), LinkState::Down, ms(500));
+    assert_eq!(event, Some(BondEvent::PathChanged));
     assert_eq!(b.active_member(), Some(member("eth1")));
     assert_eq!(b.transmit_member(0), Some(member("eth1")));
+}
+
+/// Regression: a bond's bring-up was reported as `PathChanged`, so an
+/// auditor (and the bond QEMU vertical's failover witness) could not tell a
+/// bond acquiring its first member from a live member dying under it. The
+/// two transitions must be distinguishable in both modes.
+#[test]
+fn a_bring_up_is_never_reported_as_a_path_change() {
+    for mode in [BondMode::ActiveBackup, BondMode::Balance] {
+        let mut b = bond(mode, None);
+        b.add_member(member("eth0")).unwrap();
+        b.add_member(member("eth1")).unwrap();
+
+        // Both members come up together, so one admission sweep takes the
+        // bond from "cannot transmit" to "can": a bring-up.
+        b.set_member_link(member("eth0"), LinkState::Up, ms(0));
+        b.set_member_link(member("eth1"), LinkState::Up, ms(0));
+        assert_eq!(b.advance(ms(100)), Some(BondEvent::CameUp), "{mode:?}");
+
+        // Only now can the path *change*: a member dies under a bond that
+        // was already carrying traffic.
+        assert_eq!(
+            b.set_member_link(member("eth0"), LinkState::Down, ms(200)),
+            Some(BondEvent::PathChanged),
+            "{mode:?}"
+        );
+
+        // And losing the last one is its own transition, not a path change.
+        assert_eq!(
+            b.set_member_link(member("eth1"), LinkState::Down, ms(300)),
+            Some(BondEvent::WentDown),
+            "{mode:?}"
+        );
+
+        // A recovered member brings it back up, not "over".
+        b.set_member_link(member("eth1"), LinkState::Up, ms(400));
+        assert_eq!(b.advance(ms(500)), Some(BondEvent::CameUp), "{mode:?}");
+    }
 }
 
 #[test]
@@ -118,8 +158,8 @@ fn active_backup_goes_down_when_the_last_member_dies() {
     bring_up(&mut b, "eth0", 0);
     assert!(b.is_up());
 
-    let events = b.set_member_link(member("eth0"), LinkState::Down, ms(500));
-    assert_eq!(events, alloc::vec![BondEvent::WentDown]);
+    let event = b.set_member_link(member("eth0"), LinkState::Down, ms(500));
+    assert_eq!(event, Some(BondEvent::WentDown));
     assert!(!b.is_up());
     assert_eq!(b.active_member(), None);
     assert_eq!(
@@ -141,14 +181,15 @@ fn a_recovered_primary_reclaims_the_path_only_after_the_up_delay() {
     // Primary dies ⇒ immediate failover to the backup.
     assert_eq!(
         b.set_member_link(member("eth0"), LinkState::Down, ms(500)),
-        alloc::vec![BondEvent::PathChanged]
+        Some(BondEvent::PathChanged)
     );
     assert_eq!(b.active_member(), Some(member("eth1")));
 
     // Primary recovers: it does NOT reclaim the path instantly (no flap).
-    assert!(b
-        .set_member_link(member("eth0"), LinkState::Up, ms(600))
-        .is_empty());
+    assert_eq!(
+        b.set_member_link(member("eth0"), LinkState::Up, ms(600)),
+        None
+    );
     assert_eq!(
         b.active_member(),
         Some(member("eth1")),
@@ -157,7 +198,7 @@ fn a_recovered_primary_reclaims_the_path_only_after_the_up_delay() {
     assert_eq!(b.next_deadline(), Some(ms(700)));
 
     // After the up-delay, the primary deliberately reclaims the path.
-    assert_eq!(b.advance(ms(700)), alloc::vec![BondEvent::PathChanged]);
+    assert_eq!(b.advance(ms(700)), Some(BondEvent::PathChanged));
     assert_eq!(b.active_member(), Some(member("eth0")));
 }
 
@@ -177,10 +218,7 @@ fn without_a_primary_a_recovered_member_does_not_preempt_the_active() {
     // eth0 recovers and is admitted, but must not preempt eth1 (no needless
     // path change without a declared primary).
     b.set_member_link(member("eth0"), LinkState::Up, ms(600));
-    assert!(
-        b.advance(ms(700)).is_empty(),
-        "no preemption ⇒ no path change"
-    );
+    assert_eq!(b.advance(ms(700)), None, "no preemption ⇒ no path change");
     assert_eq!(b.active_member(), Some(member("eth1")));
     assert_eq!(b.eligible_count(), 2);
 }
@@ -196,15 +234,10 @@ fn balance_keeps_a_flow_on_one_member_and_spreads_across_the_set() {
         "balance has no single active member"
     );
 
-    assert_eq!(
-        bring_up(&mut b, "eth0", 0),
-        alloc::vec![BondEvent::PathChanged]
-    );
-    // Second member joining changes the eligible set ⇒ path change.
-    assert_eq!(
-        bring_up(&mut b, "eth1", 0),
-        alloc::vec![BondEvent::PathChanged]
-    );
+    // The first admitted member brings the ring up from empty.
+    assert_eq!(bring_up(&mut b, "eth0", 0), Some(BondEvent::CameUp));
+    // Second member joining changes an already-transmitting eligible set.
+    assert_eq!(bring_up(&mut b, "eth1", 0), Some(BondEvent::PathChanged));
     assert_eq!(b.eligible_count(), 2);
 
     // The same flow hash always maps to the same member.
@@ -227,14 +260,14 @@ fn balance_member_loss_moves_its_flows_and_going_empty_fails_closed() {
     bring_up(&mut b, "eth1", 0);
 
     // Losing a member is a path change; every flow now maps to the survivor.
-    let events = b.set_member_link(member("eth1"), LinkState::Down, ms(500));
-    assert_eq!(events, alloc::vec![BondEvent::PathChanged]);
+    let event = b.set_member_link(member("eth1"), LinkState::Down, ms(500));
+    assert_eq!(event, Some(BondEvent::PathChanged));
     assert_eq!(b.transmit_member(0), Some(member("eth0")));
     assert_eq!(b.transmit_member(1), Some(member("eth0")));
 
     // Losing the last member fails closed.
-    let events = b.set_member_link(member("eth0"), LinkState::Down, ms(600));
-    assert_eq!(events, alloc::vec![BondEvent::WentDown]);
+    let event = b.set_member_link(member("eth0"), LinkState::Down, ms(600));
+    assert_eq!(event, Some(BondEvent::WentDown));
     assert_eq!(b.transmit_member(0), None);
 }
 
@@ -247,8 +280,8 @@ fn removing_the_active_member_fails_over() {
     bring_up(&mut b, "eth1", 0);
     assert_eq!(b.active_member(), Some(member("eth0")));
 
-    let events = b.remove_member(member("eth0")).unwrap();
-    assert_eq!(events, alloc::vec![BondEvent::PathChanged]);
+    let event = b.remove_member(member("eth0")).unwrap();
+    assert_eq!(event, Some(BondEvent::PathChanged));
     assert_eq!(b.active_member(), Some(member("eth1")));
     assert_eq!(b.member_ids(), alloc::vec![member("eth1")]);
 }
@@ -263,16 +296,21 @@ fn switching_mode_at_runtime_recomputes_the_path() {
     assert_eq!(b.active_member(), Some(member("eth0")));
 
     // Active-backup ⇒ balance: the whole eligible set becomes the ring.
-    assert_eq!(
-        b.set_mode(BondMode::Balance),
-        alloc::vec![BondEvent::PathChanged]
-    );
+    assert_eq!(b.set_mode(BondMode::Balance), Some(BondEvent::PathChanged));
     assert_eq!(b.mode(), BondMode::Balance);
     assert_eq!(b.active_member(), None);
     assert_eq!(b.transmit_member(1), Some(member("eth1")));
 
     // Idempotent: setting the same mode is a no-op.
-    assert!(b.set_mode(BondMode::Balance).is_empty());
+    assert_eq!(b.set_mode(BondMode::Balance), None);
+
+    // A switch on a *down* bond has no path to change, so it reports
+    // nothing — and in particular not a bring-up, even though the switch
+    // clears the selection state.
+    let mut down = bond(BondMode::ActiveBackup, None);
+    down.add_member(member("eth0")).unwrap();
+    assert_eq!(down.set_mode(BondMode::Balance), None);
+    assert!(!down.is_up());
 }
 
 #[test]
@@ -295,7 +333,7 @@ fn setting_a_primary_at_runtime_reclaims_the_path() {
     // Declaring eth0 the primary makes it reclaim the path (it is eligible).
     assert_eq!(
         b.set_primary(Some(member("eth0"))),
-        alloc::vec![BondEvent::PathChanged]
+        Some(BondEvent::PathChanged)
     );
     assert_eq!(b.active_member(), Some(member("eth0")));
     assert_eq!(b.primary(), Some(member("eth0")));
@@ -328,9 +366,10 @@ fn a_stale_report_from_a_removed_member_is_harmless() {
     bring_up(&mut b, "eth0", 0);
     b.remove_member(member("eth0")).unwrap();
     // A late report for the now-removed member changes nothing.
-    assert!(b
-        .set_member_link(member("eth0"), LinkState::Down, ms(900))
-        .is_empty());
+    assert_eq!(
+        b.set_member_link(member("eth0"), LinkState::Down, ms(900)),
+        None
+    );
     assert!(!b.is_up());
 }
 

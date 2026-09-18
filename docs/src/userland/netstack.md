@@ -240,9 +240,15 @@ is readmitted only after one `monitor-interval` up-delay (deliberate
 failback, never flapping), driven by the tickless failover monitor folded
 into the service's wait-set deadline. On a transmit-path change the bond
 re-announces its presence with a gratuitous ARP / unsolicited Neighbour
-Advertisement out the newly-selected member so peers relearn the path, and
-the change is audited (`BOND_FAILOVER`). When no member is eligible the
-bond's aggregate link is down and transmit fails closed. Two transmit
+Advertisement out the newly-selected member so peers relearn the path.
+Each transition is audited under its own event and *independently of
+whether an announcement came of it* — a bond holding no announceable
+address (none yet, or an IPv6 address still in DAD) still moved its path,
+and a bond losing its last member announces nothing at all: acquiring the
+first eligible member is `BOND_UP`, a move between members while already
+transmitting is `BOND_FAILOVER` (a failover, or a deliberate failback),
+and losing the last one is `BOND_DOWN` at `Warn`. When no member is
+eligible the bond's aggregate link is down and transmit fails closed. Two transmit
 policies form a closed set: `active-backup` (one transmitting member,
 ordered failover, an optional reclaiming `primary`) and `balance`
 (flow-hashed spread — one flow stays on one member so a TCP stream never
@@ -367,7 +373,10 @@ mid-flow over the QEMU monitor (`set_link net0 off`): the driver's
 bond fails over to the surviving member, witnessed by `BOND_CONFIG_APPLIED`,
 `BOND_FAILOVER`, and a post-failover `INBOUND_ECHO_SERVED` (the ordering makes
 a pre-failover echo insufficient) — the end-to-end proof of the live
-link-status → failover path.
+link-status → failover path. The bond's own bring-up is `BOND_UP`, so it
+cannot satisfy the failover witness; while the two shared one event the
+vertical could exit on a bring-up, before the harness had dropped
+anything.
 
 The `netstack_dhcp_qemu_{aarch64,riscv64,x86_64}` verticals prove the RFC 2131
 dynamic-addressing path live on all three Tier-1 targets (`plans/DHCP.md` D3).

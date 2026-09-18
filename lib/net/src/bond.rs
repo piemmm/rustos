@@ -91,15 +91,26 @@ pub enum BondError {
 
 /// An observable transition the composing interface must act on.
 ///
-/// The two path-affecting variants prompt the interface to emit a gratuitous
-/// ARP / unsolicited Neighbour Advertisement so peers relearn which member now
-/// carries the bond's MAC, and to audit the change. [`BondEvent::WentDown`]
-/// carries no gratuitous traffic — there is no member to send it on.
+/// A mutation recomputes the selection once, so it produces **at most one**
+/// of these. The two announcing variants prompt the interface to emit a
+/// gratuitous ARP / unsolicited Neighbour Advertisement so peers learn which
+/// member carries the bond's MAC; [`BondEvent::WentDown`] carries no
+/// gratuitous traffic — there is no member to send it on.
+///
+/// [`BondEvent::CameUp`] is distinct from [`BondEvent::PathChanged`]: a bond
+/// acquiring its first eligible member has no previous path to fail over
+/// from, so conflating the two makes a healthy bond indistinguishable from a
+/// degraded one to anything keying on a failover.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BondEvent {
-    /// The transmit path changed while the bond can still transmit: the
-    /// active member changed (active-backup) or the eligible set changed
-    /// (balance). Peers must relearn the path to the bond's MAC.
+    /// The bond acquired its first eligible member: it can transmit where
+    /// before it could not. Peers must learn the path to the bond's MAC.
+    CameUp,
+    /// The transmit path changed while the bond could **already** transmit:
+    /// the active member changed (active-backup) or the eligible set changed
+    /// (balance). A member dying is a failover; a recovered `primary`
+    /// reclaiming the path is a deliberate failback. Peers must relearn the
+    /// path to the bond's MAC.
     PathChanged,
     /// The bond lost its last eligible member; transmit now fails closed
     /// until a member recovers.
@@ -143,8 +154,8 @@ pub struct BondConfig {
 /// Construct with [`Bond::new`], enrol members with [`Bond::add_member`],
 /// feed link reports through [`Bond::set_member_link`], advance the
 /// monitor with [`Bond::advance`], and query the transmit member with
-/// [`Bond::transmit_member`]. Every mutation returns the [`BondEvent`]s
-/// the composing interface must act on; the engine performs no I/O.
+/// [`Bond::transmit_member`]. Every mutation returns the one
+/// [`BondEvent`] it produced, if any; the engine performs no I/O.
 #[derive(Clone, Debug)]
 pub struct Bond {
     mode: BondMode,
@@ -199,12 +210,12 @@ impl Bond {
         Ok(())
     }
 
-    /// Remove a member, returning any resulting transmit-path events.
+    /// Remove a member, returning the transmit-path transition it caused.
     ///
     /// # Errors
     ///
     /// [`BondError::UnknownMember`] if `id` is not enrolled.
-    pub fn remove_member(&mut self, id: MemberId) -> Result<Vec<BondEvent>, BondError> {
+    pub fn remove_member(&mut self, id: MemberId) -> Result<Option<BondEvent>, BondError> {
         let index = self
             .members
             .iter()
@@ -226,11 +237,9 @@ impl Bond {
         id: MemberId,
         link: LinkState,
         now: Duration64,
-    ) -> Vec<BondEvent> {
+    ) -> Option<BondEvent> {
         let now_nanos = nanos(now);
-        let Some(member) = self.members.iter_mut().find(|m| m.id == id) else {
-            return Vec::new();
-        };
+        let member = self.members.iter_mut().find(|m| m.id == id)?;
         match link {
             LinkState::Up => {
                 if !member.link_up {
@@ -250,10 +259,12 @@ impl Bond {
     }
 
     /// Advance the health monitor: admit members whose up-delay has
-    /// elapsed and recompute the transmit path. Returns the resulting
-    /// events. Re-arm the one-shot monitor timer from
+    /// elapsed and recompute the transmit path. Returns the transition it
+    /// caused — a [`BondEvent::CameUp`] on the first admission, a
+    /// [`BondEvent::PathChanged`] when a readmitted member reclaims the
+    /// path. Re-arm the one-shot monitor timer from
     /// [`Bond::next_deadline`] after calling this.
-    pub fn advance(&mut self, now: Duration64) -> Vec<BondEvent> {
+    pub fn advance(&mut self, now: Duration64) -> Option<BondEvent> {
         let now_nanos = nanos(now);
         for member in &mut self.members {
             if member.link_up
@@ -357,23 +368,27 @@ impl Bond {
         self.members.iter().find(|m| m.id == id).map(|m| m.link_up)
     }
 
-    /// Change the transmit policy at runtime (config reload). Returns any
-    /// resulting transmit-path events.
-    pub fn set_mode(&mut self, mode: BondMode) -> Vec<BondEvent> {
+    /// Change the transmit policy at runtime (config reload). Returns the
+    /// transmit-path transition it caused.
+    pub fn set_mode(&mut self, mode: BondMode) -> Option<BondEvent> {
         if self.mode == mode {
-            return Vec::new();
+            return None;
         }
+        // Captured before the reset below: clearing the selection state
+        // would otherwise make a switch on a transmitting bond read as a
+        // bring-up rather than the path change it is.
+        let could_transmit = self.can_transmit();
         self.mode = mode;
         // Reset the per-mode selection state so the diff in `recompute`
         // reflects the new policy from a clean slate.
         self.active = None;
         self.ring.clear();
-        self.recompute()
+        self.recompute_from(could_transmit)
     }
 
     /// Change the configured `primary` at runtime (config reload). Returns
-    /// any resulting transmit-path events.
-    pub fn set_primary(&mut self, primary: Option<MemberId>) -> Vec<BondEvent> {
+    /// the transmit-path transition it caused.
+    pub fn set_primary(&mut self, primary: Option<MemberId>) -> Option<BondEvent> {
         self.primary = primary;
         self.recompute()
     }
@@ -388,42 +403,62 @@ impl Bond {
     }
 
     /// Recompute the transmit selection from the committed member health
-    /// and emit the events describing how the path changed. The single
-    /// point where selection policy lives, so both modes and every mutator
-    /// share one definition.
-    fn recompute(&mut self) -> Vec<BondEvent> {
+    /// and name the transition it produced. The single point where
+    /// selection policy lives, so both modes and every mutator share one
+    /// definition.
+    fn recompute(&mut self) -> Option<BondEvent> {
+        let could_transmit = self.can_transmit();
+        self.recompute_from(could_transmit)
+    }
+
+    /// [`Self::recompute`] against an explicit "could transmit before"
+    /// basis, for [`Self::set_mode`], which must clear the per-mode
+    /// selection state before the new policy is applied to it.
+    fn recompute_from(&mut self, could_transmit: bool) -> Option<BondEvent> {
         let new_ring: Vec<MemberId> = self
             .members
             .iter()
             .filter(|m| m.admitted)
             .map(|m| m.id)
             .collect();
-        match self.mode {
+        let selection_moved = match self.mode {
             BondMode::ActiveBackup => {
                 let new_active = self.select_active(&new_ring);
+                let moved = new_active != self.active;
+                self.active = new_active;
                 self.ring = new_ring;
-                let mut events = Vec::new();
-                if new_active != self.active {
-                    match (self.active, new_active) {
-                        (Some(_), None) => events.push(BondEvent::WentDown),
-                        _ => events.push(BondEvent::PathChanged),
-                    }
-                    self.active = new_active;
-                }
-                events
+                moved
             }
             BondMode::Balance => {
-                let mut events = Vec::new();
-                if new_ring != self.ring {
-                    if new_ring.is_empty() {
-                        events.push(BondEvent::WentDown);
-                    } else {
-                        events.push(BondEvent::PathChanged);
-                    }
-                }
+                let moved = new_ring != self.ring;
                 self.ring = new_ring;
-                events
+                moved
             }
+        };
+        if !selection_moved {
+            return None;
+        }
+        Self::transition(could_transmit, self.can_transmit())
+    }
+
+    /// Whether the current selection can carry a transmit, under the
+    /// current mode — the state each [`BondEvent`] is a transition of.
+    fn can_transmit(&self) -> bool {
+        match self.mode {
+            BondMode::ActiveBackup => self.active.is_some(),
+            BondMode::Balance => !self.ring.is_empty(),
+        }
+    }
+
+    /// Name the transition between two transmit-capability states. Total in
+    /// both arguments, so a selection that moved while the bond could not
+    /// transmit either side of it reports nothing rather than faulting.
+    fn transition(could_transmit: bool, can_transmit: bool) -> Option<BondEvent> {
+        match (could_transmit, can_transmit) {
+            (false, true) => Some(BondEvent::CameUp),
+            (true, false) => Some(BondEvent::WentDown),
+            (true, true) => Some(BondEvent::PathChanged),
+            (false, false) => None,
         }
     }
 

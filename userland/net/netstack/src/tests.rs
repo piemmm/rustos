@@ -376,10 +376,12 @@ fn service_interface_surfaces_a_device_link_change() {
         .expect("pump");
     assert_eq!(outcome.link_change, Some(LinkState::Down));
 
-    // Applying it (a plain interface: no bond, so no announcement) records
-    // the state, so a subsequent unchanged pump reports no further change.
-    let batch = stack.on_member_link_change(name("eth0"), LinkState::Down, t(2));
-    assert!(batch.is_empty());
+    // Applying it (a plain interface: no bond, so no transition and no
+    // announcement) records the state, so a subsequent unchanged pump
+    // reports no further change.
+    let change = stack.on_member_link_change(name("eth0"), LinkState::Down, t(2));
+    assert!(change.announcements.is_empty());
+    assert!(!change.came_up && !change.path_changed && !change.went_down);
     assert_eq!(
         stack
             .service_interface(name("eth0"), &mut fs, t(3), ServiceHint::default())
@@ -3864,9 +3866,9 @@ fn bond_cfg(
 }
 
 /// A `Netstack` with `eth0`/`eth1` composed into an active-backup `bond0`
-/// (primary `eth0`, 1 s monitor), a static IPv4 address on the bond, and
-/// both members admitted past the up-delay.
-fn two_member_bond() -> Netstack {
+/// (primary `eth0`, 1 s monitor) and **no** address on the bond, with
+/// neither member yet admitted.
+fn two_member_bond_unaddressed() -> Netstack {
     let mut stack = Netstack::new(
         test_temp_factory(),
         test_dhcp_rng_factory(),
@@ -3905,6 +3907,13 @@ fn two_member_bond() -> Netstack {
             t(0),
         )
         .expect("compose bond");
+    stack
+}
+
+/// [`two_member_bond_unaddressed`] plus a static IPv4 address on the bond,
+/// with both members admitted past the up-delay.
+fn two_member_bond() -> Netstack {
+    let mut stack = two_member_bond_unaddressed();
     stack
         .apply_interface_config(
             &NetInterfaceConfigMsg {
@@ -4244,13 +4253,17 @@ fn a_bond_member_refuses_direct_addressing() {
 fn a_bond_fails_over_immediately_and_announces_the_new_path() {
     let mut stack = two_member_bond();
     // Kill the active member: the transmit path fails over at once.
-    let batch = stack.set_member_link(name("eth0"), LinkState::Down, t(3));
+    let change = stack.set_member_link(name("eth0"), LinkState::Down, t(3));
     assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth1")));
     assert_eq!(stack.egress_member(name("bond0"), 0), Some(name("eth1")));
+    // The transition is a path change, never a bring-up: the bond was
+    // already carrying traffic when the member died.
+    assert!(change.path_changed && !change.came_up && !change.went_down);
     // A gratuitous announcement (the bond's own address) goes out the new
     // member so peers relearn the path.
     assert!(
-        batch
+        change
+            .announcements
             .iter()
             .any(|(member, frames)| *member == name("eth1") && !frames.is_empty()),
         "gratuitous announcement emitted on the new member"
@@ -4341,13 +4354,90 @@ fn bond_members_are_listed_with_health_and_are_broker_gated() {
 fn a_bond_loses_its_link_when_the_last_member_dies() {
     let mut stack = two_member_bond();
     stack.set_member_link(name("eth0"), LinkState::Down, t(3));
-    stack.set_member_link(name("eth1"), LinkState::Down, t(3));
+    let change = stack.set_member_link(name("eth1"), LinkState::Down, t(3));
     // No eligible member: the bond is down and transmit fails closed.
     assert_eq!(stack.bond_active_member(name("bond0")), None);
     assert_eq!(stack.egress_member(name("bond0"), 0), None);
     let state = stack.state_records(0, 8);
     let bond = state.iter().find(|s| s.name == name("bond0")).unwrap();
     assert!(!bond.link_up);
+    // Losing the last member is its own reportable transition. It can
+    // announce nothing (no member to announce on), so the report is the
+    // only way the service can audit it.
+    assert!(change.went_down && !change.path_changed && !change.came_up);
+    assert!(change.announcements.is_empty());
+}
+
+/// Regression: the service audited a bond transition only when it produced
+/// gratuitous announcement frames, so a path change on a bond with nothing
+/// announceable — no address yet, or an IPv6 address still in DAD — went
+/// unrecorded. The transition is the fact; the frames are a consequence.
+#[test]
+fn a_bond_transition_is_reported_even_when_it_announces_nothing() {
+    let mut stack = two_member_bond_unaddressed();
+
+    // Bring-up: the bond acquires its first eligible member. It holds no
+    // address, so there is nothing to announce — but the transition stands.
+    let change = stack.advance_bonds(t(2));
+    assert!(
+        change.came_up && !change.path_changed && !change.went_down,
+        "the first admission is a bring-up"
+    );
+    assert!(
+        change.announcements.is_empty(),
+        "an address-less bond announces nothing"
+    );
+    assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth0")));
+
+    // Failover: the active member dies. Still nothing to announce, still a
+    // reportable path change.
+    let change = stack.set_member_link(name("eth0"), LinkState::Down, t(3));
+    assert!(change.path_changed && !change.came_up && !change.went_down);
+    assert!(change.announcements.is_empty());
+    assert_eq!(stack.bond_active_member(name("bond0")), Some(name("eth1")));
+}
+
+/// Regression: a bond's ordinary bring-up was reported as a path change, so
+/// the audit trail — and the bond QEMU vertical's failover witness — could
+/// not tell a bond acquiring its first member from a live member dying.
+#[test]
+fn composing_a_bond_reports_a_bring_up_not_a_failover() {
+    let mut stack = two_member_bond_unaddressed();
+    stack
+        .apply_interface_config(
+            &NetInterfaceConfigMsg {
+                alias: name("bond0"),
+                match_mac: None,
+                match_node: None,
+                ipv4: NetIpv4Config::Static {
+                    addr: [10, 0, 2, 15],
+                    prefix: 24,
+                    gateway: None,
+                },
+                ipv6: NetIpv6Config::Disabled,
+                mtu: 0,
+                dns: NetDnsServers::EMPTY,
+            },
+            t(0),
+        )
+        .expect("bond address");
+
+    // The monitor sweep that admits the members brings the bond up. It does
+    // announce (the bond holds an address), which is exactly the case that
+    // used to masquerade as a failover.
+    let change = stack.advance_bonds(t(2));
+    assert!(
+        change.came_up && !change.path_changed,
+        "bring-up is not a failover"
+    );
+    assert!(
+        !change.announcements.is_empty(),
+        "an addressed bond announces its presence on coming up"
+    );
+
+    // A second sweep with nothing to admit reports nothing at all.
+    let change = stack.advance_bonds(t(3));
+    assert!(!change.came_up && !change.path_changed && !change.went_down);
 }
 
 #[test]

@@ -658,13 +658,21 @@ member at a time with ordered failover to the next eligible member; a
 declared `primary` makes it a deliberate failover interface. `balance`
 spreads transmits across the eligible members by a family-agnostic
 `flow_hash` over the 4-tuple, so one flow stays on one member (a TCP stream
-never reorders across links) while that member stays eligible. Every
-mutation returns the `BondEvent`s the composing interface acts on:
-`PathChanged` (emit a gratuitous ARP / unsolicited NA so peers relearn the
-path, and audit the change) and `WentDown` (the bond lost its last eligible
-member; transmit now fails closed). The member set is bounded by
-`MAX_BOND_MEMBERS`, and `transmit_member` returns `None` — fail closed —
-whenever no member is eligible.
+never reorders across links) while that member stays eligible.
+
+Every mutation recomputes the selection once, so it returns the one
+`BondEvent` it produced, if any. `CameUp` — the bond acquired its first
+eligible member and can transmit where before it could not — and
+`PathChanged` — the path moved between members while the bond was
+*already* transmitting, a failover or a deliberate failback — both have
+the composing interface emit a gratuitous ARP / unsolicited NA so peers
+learn the path, and both are audited. `WentDown` means the last eligible
+member is gone and transmit now fails closed; it announces nothing,
+because there is no member to announce on. The bring-up is a distinct
+transition on purpose: folding it into `PathChanged` made a bond coming up
+indistinguishable in the audit trail from a live member dying under it.
+The member set is bounded by `MAX_BOND_MEMBERS`, and `transmit_member`
+returns `None` — fail closed — whenever no member is eligible.
 
 ### `tcp` — the TCP segment codec and sequence arithmetic
 

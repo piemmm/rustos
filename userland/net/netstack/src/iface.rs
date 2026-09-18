@@ -71,6 +71,40 @@ enum BondRole {
 /// ([`Netstack::originate`], the multicast join/leave paths) returns.
 pub type FrameBatch = Vec<([u8; IF_NAME_LEN], Vec<TxFrame>)>;
 
+/// What a bond mutation did: the presence announcements to transmit and the
+/// transitions to audit.
+///
+/// The transitions are separate from the frames because they are not the
+/// same fact: a bond holding no announceable address (none yet, or an IPv6
+/// address still in DAD) announces nothing, and one losing its last member
+/// cannot announce at all, yet both moved and both must be auditable.
+///
+/// The flags are a folded set rather than one event because
+/// [`Netstack::advance_bonds`] sweeps every bond in one call.
+#[derive(Debug, Default)]
+pub struct BondChange {
+    /// Frames to transmit, each tagged by the member it egresses on.
+    pub announcements: FrameBatch,
+    /// A bond acquired its first eligible member: a bring-up, not a
+    /// failover.
+    pub came_up: bool,
+    /// A bond's transmit path moved between members while it was already
+    /// transmitting: a failover, or a deliberate failback.
+    pub path_changed: bool,
+    /// A bond lost its last eligible member; its transmit fails closed.
+    pub went_down: bool,
+}
+
+impl BondChange {
+    /// Fold another bond's change in, for the whole-table sweep.
+    fn merge(&mut self, mut other: Self) {
+        self.announcements.append(&mut other.announcements);
+        self.came_up |= other.came_up;
+        self.path_changed |= other.path_changed;
+        self.went_down |= other.went_down;
+    }
+}
+
 /// The rename [`Netstack::apply_interface_config`] performed:
 /// `Some((old_name, new_name))` when the matched interface was renamed to
 /// its admin alias, else `None`. The service layer uses it to retarget the
@@ -141,7 +175,7 @@ fn push_multicast<F: FrameService>(
 /// interrupt woke the stack for exactly this), and a change is the sole
 /// live source of a bond failover: the service layer feeds it to
 /// [`Netstack::on_member_link_change`], which drives the bond and returns
-/// the presence re-announcement to transmit.
+/// the transition to audit plus the presence re-announcement to transmit.
 pub struct ServiceOutcome {
     /// The typed engine events the pump reported.
     pub events: Vec<StackEvent>,
@@ -1679,39 +1713,39 @@ impl Netstack {
     }
 
     /// Report a member NIC's link-state change to its bond and act on the
-    /// resulting transmit-path events, returning any gratuitous
-    /// ARP/unsolicited-NA frames tagged by the newly-selected member (for
-    /// the caller to transmit). A link report for a NIC that is not an
+    /// resulting transmit-path transition, returning it for the caller to
+    /// audit along with any gratuitous ARP/unsolicited-NA frames tagged by
+    /// the newly-selected member. A link report for a NIC that is not an
     /// enrolled member is ignored (no change).
     pub fn set_member_link(
         &mut self,
         member: [u8; IF_NAME_LEN],
         link: LinkState,
         now: Duration64,
-    ) -> FrameBatch {
+    ) -> BondChange {
         let Some(member_index) = self.find(member) else {
-            return FrameBatch::new();
+            return BondChange::default();
         };
         let BondRole::Member { bond } = self.interfaces[member_index].role else {
-            return FrameBatch::new();
+            return BondChange::default();
         };
         // Track the member's own link for observability.
         self.interfaces[member_index].facts.link = link;
         let Some(bond_index) = self.find(bond) else {
-            return FrameBatch::new();
+            return BondChange::default();
         };
-        let events = match &mut self.interfaces[bond_index].role {
+        let event = match &mut self.interfaces[bond_index].role {
             BondRole::Bond { engine, .. } => engine.set_member_link(member_id(member), link, now),
-            _ => Vec::new(),
+            _ => None,
         };
-        self.apply_bond_events(bond_index, &events, now)
+        self.apply_bond_event(bond_index, event, now)
     }
 
     /// Apply a live link-state change the service pump observed on a NIC's
     /// driver report (a virtio config-change interrupt: a member unplugged,
-    /// a carrier lost or regained), returning any gratuitous presence
-    /// announcement the resulting bond path change requires (tagged by the
-    /// newly-selected member) for the caller to transmit.
+    /// a carrier lost or regained), returning the bond transition it caused
+    /// and any gratuitous presence announcement that transition requires
+    /// (tagged by the newly-selected member) for the caller to transmit.
     ///
     /// For a bond **member** this is the sole live source of a failover: it
     /// reports the member's new link to the bond engine (via
@@ -1726,9 +1760,9 @@ impl Netstack {
         name: [u8; IF_NAME_LEN],
         link: LinkState,
         now: Duration64,
-    ) -> FrameBatch {
+    ) -> BondChange {
         let Some(index) = self.find(name) else {
-            return FrameBatch::new();
+            return BondChange::default();
         };
         if matches!(self.interfaces[index].role, BondRole::Member { .. }) {
             // `set_member_link` records the member's link and drives the
@@ -1739,26 +1773,27 @@ impl Netstack {
         // so a down link is no longer chosen for egress.
         self.interfaces[index].facts.link = link;
         self.interfaces[index].stack.set_link(link);
-        FrameBatch::new()
+        BondChange::default()
     }
 
     /// Advance every bond's failover health monitor (admitting members
-    /// past their anti-flap up-delay), returning any gratuitous
-    /// announcements the resulting path changes require, tagged by the
-    /// member each must go out. Folded into the service's timer sweep.
-    pub fn advance_bonds(&mut self, now: Duration64) -> FrameBatch {
-        let mut batch = FrameBatch::new();
+    /// past their anti-flap up-delay), returning the transitions the sweep
+    /// produced and any gratuitous announcements they require, each tagged
+    /// by the member it must go out. Folded into the service's timer
+    /// sweep.
+    pub fn advance_bonds(&mut self, now: Duration64) -> BondChange {
+        let mut change = BondChange::default();
         let bonds: Vec<usize> = (0..self.interfaces.len())
             .filter(|&i| matches!(self.interfaces[i].role, BondRole::Bond { .. }))
             .collect();
         for bond_index in bonds {
-            let events = match &mut self.interfaces[bond_index].role {
+            let event = match &mut self.interfaces[bond_index].role {
                 BondRole::Bond { engine, .. } => engine.advance(now),
-                _ => Vec::new(),
+                _ => None,
             };
-            batch.append(&mut self.apply_bond_events(bond_index, &events, now));
+            change.merge(self.apply_bond_event(bond_index, event, now));
         }
-        batch
+        change
     }
 
     /// Sync a bond's own stack link to the engine's aggregate up-state.
@@ -1774,21 +1809,34 @@ impl Netstack {
         });
     }
 
-    /// Act on a bond's transmit-path events: keep the bond stack's link in
-    /// sync, and on a [`BondEvent::PathChanged`] re-announce the bond's
-    /// presence (gratuitous ARP / unsolicited NA) so peers relearn the
-    /// path, returning those frames tagged by the newly-selected member.
-    fn apply_bond_events(
+    /// Act on a bond's transmit-path transition: keep the bond stack's link
+    /// in sync, report the transition for the caller to audit, and — where
+    /// the bond can transmit — re-announce its presence (gratuitous ARP /
+    /// unsolicited NA) out the newly-selected member so peers learn the
+    /// path.
+    ///
+    /// The transition is reported whether or not an announcement came of
+    /// it: a bond with no announceable address (IPv6 still in DAD, or no
+    /// address at all) still moved its path.
+    fn apply_bond_event(
         &mut self,
         bond_index: usize,
-        events: &[BondEvent],
+        event: Option<BondEvent>,
         now: Duration64,
-    ) -> FrameBatch {
-        let mut batch = FrameBatch::new();
+    ) -> BondChange {
+        let mut change = BondChange::default();
         self.sync_bond_link(bond_index);
-        let path_changed = events.iter().any(|e| matches!(e, BondEvent::PathChanged));
-        if !path_changed {
-            return batch;
+        let Some(event) = event else {
+            return change;
+        };
+        match event {
+            BondEvent::CameUp => change.came_up = true,
+            BondEvent::PathChanged => change.path_changed = true,
+            // Nothing is eligible, so there is no member to announce on.
+            BondEvent::WentDown => {
+                change.went_down = true;
+                return change;
+            }
         }
         // Emit the presence announcement on the member the flow-agnostic
         // selection now points at (the active member in active-backup).
@@ -1797,7 +1845,7 @@ impl Netstack {
             _ => None,
         };
         let Some(member) = member else {
-            return batch;
+            return change;
         };
         let Self {
             interfaces, out, ..
@@ -1805,9 +1853,9 @@ impl Netstack {
         interfaces[bond_index].stack.announce_presence(out, now);
         let frames = core::mem::take(&mut out.frames);
         if !frames.is_empty() {
-            batch.push((member, frames));
+            change.announcements.push((member, frames));
         }
-        batch
+        change
     }
 
     /// Resolve the physical channel alias a logical interface transmits on

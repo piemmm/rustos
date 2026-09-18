@@ -98,9 +98,13 @@ pub const BOND_CONFIG_APPLIED: EventId = EventId(16_017);
 /// failure): recorded at `Warn` so a bad configuration surfaces and the
 /// bond is left untouched (fail closed).
 pub const BOND_CONFIG_REFUSED: EventId = EventId(16_018);
-/// A bond's transmit path changed member (failover or deliberate
-/// failback): the bond re-announced its presence so peers relearn the
-/// path. Recorded at `Info` — a dead member is a visible, audited fact.
+/// A bond's transmit path changed member **while it was already
+/// transmitting** (a failover, or a deliberate failback): the bond
+/// re-announced its presence so peers relearn the path. Recorded at `Info`
+/// — a dead member is a visible, audited fact.
+///
+/// A bond acquiring its *first* member is [`BOND_UP`], not this: a bring-up
+/// has no previous path to fail over from.
 pub const BOND_FAILOVER: EventId = EventId(16_019);
 
 /// An interface's DHCPv4 client committed a lease (RFC 2131): the engine
@@ -139,6 +143,17 @@ pub const SYN_COOKIES_ENGAGED: EventId = EventId(16_024);
 /// force, and the filter is never widened to make an over-large set fit.
 pub const MULTICAST_FILTER_REFUSED: EventId = EventId(16_025);
 
+/// A bond acquired its first eligible member and can now transmit: it
+/// announced its presence so peers learn which member carries its MAC.
+/// Recorded at `Info` — the counterpart to [`BOND_DOWN`], and deliberately
+/// **not** [`BOND_FAILOVER`].
+pub const BOND_UP: EventId = EventId(16_026);
+/// A bond lost its last eligible member: its transmit fails closed until a
+/// member recovers. Recorded at `Warn` — an aggregate with no surviving
+/// link is a fault, and it announces nothing (there is no member to
+/// announce on), so the log is the only place it surfaces.
+pub const BOND_DOWN: EventId = EventId(16_027);
+
 /// The message [`SYN_COOKIES_ENGAGED`] carries. Named here because the
 /// connection-exhaustion QEMU vertical (`plans/NETWORK.md` N16b) gates its
 /// run on this text appearing in the serial transcript, so the wording is
@@ -154,7 +169,7 @@ mod tests {
         NETWORK_SETTINGS_APPLIED, REQUEST_DENIED, REQUEST_MALFORMED, SOCKET_ACCEPTED,
         SOCKET_DENIED, SOCKET_LISTENING, SOCKET_MALFORMED, SOCKET_OPENED, SOCKET_REFUSED,
     };
-    use super::{BOND_CONFIG_APPLIED, BOND_CONFIG_REFUSED, BOND_FAILOVER};
+    use super::{BOND_CONFIG_APPLIED, BOND_CONFIG_REFUSED, BOND_DOWN, BOND_FAILOVER, BOND_UP};
     use super::{DHCP6_LEASE_ACQUIRED, DHCP6_LEASE_LOST, DHCP_LEASE_ACQUIRED, DHCP_LEASE_LOST};
     use super::{MULTICAST_FILTER_REFUSED, SYN_COOKIES_ENGAGED};
 
@@ -180,6 +195,8 @@ mod tests {
             BOND_CONFIG_APPLIED,
             BOND_CONFIG_REFUSED,
             BOND_FAILOVER,
+            BOND_UP,
+            BOND_DOWN,
             DHCP_LEASE_ACQUIRED,
             DHCP_LEASE_LOST,
             DHCP6_LEASE_ACQUIRED,
@@ -213,6 +230,8 @@ mod tests {
             BOND_CONFIG_APPLIED.0,
             BOND_CONFIG_REFUSED.0,
             BOND_FAILOVER.0,
+            BOND_UP.0,
+            BOND_DOWN.0,
             DHCP_LEASE_ACQUIRED.0,
             DHCP_LEASE_LOST.0,
             DHCP6_LEASE_ACQUIRED.0,

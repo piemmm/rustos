@@ -1606,12 +1606,20 @@ routes, or I/O.
   only after one `monitor_interval` up-delay (deliberate failback, never
   flapping). The monitor is tickless (`next_deadline` arms a one-shot only
   while a member awaits admission).
-- **Events**: each mutation returns `BondEvent`s the composing interface
-  acts on — `PathChanged` (emit gratuitous ARP / unsolicited NA + audit)
-  and `WentDown` (transmit fails closed). `transmit_member` returns `None`
-  when no member is eligible; the member set is bounded by
-  `MAX_BOND_MEMBERS`. Runtime `set_mode`/`set_primary`/`add_member`/
-  `remove_member` recompute through the one selection point.
+- **Events**: each mutation recomputes the selection once and so returns
+  the one `BondEvent` it produced, if any — `CameUp` (the bond acquired its
+  first eligible member), `PathChanged` (the path moved while the bond was
+  *already* transmitting: a failover, or a deliberate failback), or
+  `WentDown` (transmit fails closed). The first two announce presence
+  (gratuitous ARP / unsolicited NA); all three are audited. `CameUp` is
+  distinct from `PathChanged` on purpose: a bring-up has no previous path,
+  so folding them made a healthy bond indistinguishable from a degraded
+  one. `transmit_member` returns `None` when no member is eligible; the
+  member set is bounded by `MAX_BOND_MEMBERS`. Runtime
+  `set_mode`/`set_primary`/`add_member`/`remove_member` recompute through
+  the one selection point (`set_mode` clears the per-mode selection state,
+  so it passes the pre-switch transmit capability in rather than reading it
+  back off the state it just cleared).
 - Covered by 15 `bond` host tests (admission/up-delay, immediate failover,
   deliberate + no-op failback, balance stickiness + spread, fail-closed
   transmit, runtime reconfig, flow-hash determinism). Not a byte decoder,
@@ -1637,8 +1645,15 @@ but its QEMU verticals are β-2.
   sync the bond's aggregate link, and emit a gratuitous announcement on
   `PathChanged` tagged by the newly-selected member; egress is routed to
   the flow-selected member (`egress_member`), fail-closed when no member is
-  eligible. Failover is audited (`BOND_CONFIG_APPLIED`/`BOND_CONFIG_REFUSED`
-  16_017/16_018, `BOND_FAILOVER` 16_019). Bond `active-member`/per-member
+  eligible. Every transition is audited, on the transition itself rather
+  than on whether an announcement came of it (`BOND_CONFIG_APPLIED`/
+  `BOND_CONFIG_REFUSED` 16_017/16_018, `BOND_FAILOVER` 16_019, `BOND_UP`
+  16_026, `BOND_DOWN` 16_027 at `Warn`): a bond holding no announceable
+  address still moved its path, and a bond losing its last member announces
+  nothing at all. `Netstack::set_member_link`/`on_member_link_change`/
+  `advance_bonds` therefore return a `BondChange` (the announcements plus
+  the folded transitions) rather than a bare frame batch. Bond
+  `active-member`/per-member
   health are exposed (`bond_active_member`/`bond_member_health`). 9 host
   tests (compose/up-delay/defer-until-present/facts+member-address-refusal/
   immediate-failover+announce/last-member-down/deliberate-failback/reload-
@@ -1773,6 +1788,11 @@ answering over the second wire. PASS keys on `BOND_CONFIG_APPLIED`,
 `BOND_FAILOVER`, **and** an `INBOUND_ECHO_SERVED` observed *after* the failover
 (the ordering makes a pre-failover echo insufficient), plus the peer's own
 reply verdict — so neither side passes without the flow surviving the drop.
+The bond's own bring-up is `BOND_UP`, so it cannot satisfy the failover
+witness however the admission sweep and the static address's DAD interleave;
+sharing one event id made the vertical load-sensitive, because a bring-up
+that announced (DAD already done) read as a failover and the guest exited
+before `set_link net0 off` was ever sent.
 
 Bringing it up required two supporting pieces, both first-class:
 - **A live link-status path (the sole live source of a bond failover).** The
