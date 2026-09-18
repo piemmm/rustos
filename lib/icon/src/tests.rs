@@ -159,6 +159,76 @@ fn each_task_command_glyph_is_its_own_mark() {
 }
 
 #[test]
+fn each_settings_category_glyph_is_its_own_mark() {
+    // A sidebar row's glyph is how a reader finds a category without
+    // reading, so none of these may fall back to the placeholder diamond or
+    // draw the same artwork as a sibling row.
+    let categories = [
+        IconKind::Settings,
+        IconKind::Appearance,
+        IconKind::Wallpaper,
+        IconKind::Display,
+        IconKind::LockScreen,
+        IconKind::Screensaver,
+        IconKind::Power,
+        IconKind::Network,
+        IconKind::Bluetooth,
+        IconKind::Sound,
+        IconKind::Notifications,
+        IconKind::Keyboard,
+        IconKind::Mouse,
+        IconKind::Trackpad,
+        IconKind::Touchscreen,
+        IconKind::Printer,
+        IconKind::Accessibility,
+        IconKind::Language,
+        IconKind::Sharing,
+        IconKind::Users,
+        IconKind::Storage,
+    ];
+    for (position, kind) in categories.iter().enumerate() {
+        assert_ne!(
+            builtin_icon(*kind, FG),
+            builtin_icon(IconKind::Generic, FG),
+            "{kind:?} fell back to the placeholder"
+        );
+        for other in &categories[position + 1..] {
+            assert_ne!(
+                builtin_icon(*kind, FG),
+                builtin_icon(*other, FG),
+                "{kind:?} and {other:?} draw the same mark"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_settings_category_shares_the_reading_it_stands_beside() {
+    // The audio category and the tray's volume reading are one speaker, and
+    // the notification-policy category and a pending notification one bell:
+    // each category carries its own asset slot a theme may override, never a
+    // second copy of the artwork.
+    assert_eq!(
+        builtin_icon(IconKind::Sound, FG),
+        builtin_icon(IconKind::Volume, FG)
+    );
+    assert_eq!(
+        builtin_icon(IconKind::Notifications, FG),
+        builtin_icon(IconKind::Bell, FG)
+    );
+    // The plural accounts and the whole machine's storage are *not* the
+    // single account and the single drive, so each draws its own mark.
+    assert_ne!(
+        builtin_icon(IconKind::Users, FG),
+        builtin_icon(IconKind::User, FG)
+    );
+    assert_ne!(
+        builtin_icon(IconKind::Storage, FG),
+        builtin_icon(IconKind::Disk, FG)
+    );
+}
+
+#[test]
 fn disk_icon_maps_every_medium() {
     assert_eq!(
         disk_icon(Some(BlkDeviceClass::Rotational)),

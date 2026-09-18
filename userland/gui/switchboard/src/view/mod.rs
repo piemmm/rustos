@@ -85,7 +85,7 @@ use tairix_controls::{
     ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, Tab, TabGroupAbsence, Tabs, TabsAction,
     TabsOrientation,
 };
-use tairix_icon::{IconArtwork, IconKind, IconRequest};
+use tairix_icon::{IconArtwork, IconKind, IconRequest, NoArtwork};
 
 mod block;
 pub mod frame;
@@ -1622,7 +1622,8 @@ impl Switchboard {
         // pixel no control covers keeps whatever the shared frame region held
         // before, which reads as a transparent window.
         Self::fill_client(surface, bounds, theme);
-        self.rail.render(surface, layout.rail, scale, theme);
+        self.rail
+            .render(surface, layout.rail, scale, theme, &mut NoArtwork);
         self.render_section(surface, ctx, artwork);
 
         // The scrollbar, drawn after the content so its thumb sits above it.

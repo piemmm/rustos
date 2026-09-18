@@ -173,6 +173,7 @@
 - [SVG asset decoding](./desktop/svg-assets.md)
 - [Variable DPI and UI scale](./desktop/dpi.md)
 - [Default desktop apps](./desktop/apps.md)
+- [Settings](./desktop/settings.md)
 - [Widget gallery](./desktop/widgets.md)
 - [Sapper](./desktop/sapper.md)
 - [Cinder](./desktop/cinder.md)

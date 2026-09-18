@@ -1,0 +1,42 @@
+# Signed-AppInfo manifest source for the `settings` desktop Settings
+# application (plans/NEW-DESKTOP-SETTINGS.md). Discovered by the build's
+# app-bundle composer, which cross-compiles Run, signs the manifest, and
+# plants the bundle on the read-only /System/Applications store; the
+# Switchboard capsule's system quick-actions menu has the "Settings..." row
+# that launches it (and the shell resolves it by name, like any program in
+# either system store).
+#
+# The capability list is the bundle's request, and it is deliberately the
+# smallest set a window can be drawn with: CAP_CONSOLE_WRITE for its fail-loud
+# stderr diagnostics, and CAP_SHM to create and grant the zero-copy window
+# frame region the desktop session maps. That is the whole request.
+#
+# Settings holds no domain authority and never will. It does not request
+# CAP_TIME_SET, CAP_NET_ADMIN, CAP_USER_ADMIN, CAP_SYSTEM_POWER,
+# CAP_STORAGE_ADMIN, CAP_DISPLAY, CAP_FS_MOUNT, CAP_USERS_READ or
+# CAP_FS_ACCESS: an application holding the union of every domain's authority
+# would be exactly the ambient-authority god-app the charter forbids, and a
+# settings *browser* needs to be no such thing. Every change it makes is
+# either a request to the process that already owns that domain — the desktop
+# session for the user's own desktop — or a re-authenticated run of the tool
+# that already writes that store. Nothing in this application can be tricked
+# into an escalation, because there is no capability in it to escalate with.
+#
+# The launched process receives this set intersected with the launching user's
+# grants, never more.
+id = "os.tairix.settings"
+name = "settings"
+title = "Settings"
+version = "0.1.0"
+kind = "application"
+# The identity the desktop's icon-bar information panel states, drawn from
+# this *signed* manifest rather than from anything the running process says
+# about itself (plans/NEW-TASKBAR.md).
+purpose = "Configure the desktop and this machine"
+author = "The TAIRiX Project"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
+# A windowed, user-facing application: list it in the desktop's program
+# library beside the other system tools.
+library = "SystemTools"
+# This bundle's own icon master in its Resources/, authored as SVG.
+library-icon = "settings.svg"

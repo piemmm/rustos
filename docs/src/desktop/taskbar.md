@@ -965,17 +965,24 @@ two can never disagree (`AGENTS.md` §2.2):
 | About This System | opens the Switchboard's overview |
 | System Monitor | opens the Switchboard's task list |
 | Task Shell | launches the terminal bundle |
+| Settings… | opens the settings bundle |
 | Light / Dark Appearance | switches the desktop's theme |
 | Lock Screen | secures the screen behind this user's password |
 | Log Out | ends the session; the login supervisor re-prompts |
 | Restart / Shut Down | confirmed, then relayed to the one holder of the power capability |
 
+*Settings…* heads the appearance group because it is the general form of the
+two rows beneath it: everything either of them does, and the rest of the
+machine's configuration besides ([Settings](settings.md)). Like *Task Shell*
+it maps onto the bar's one launch response, so the session gains no second
+path to a program on the user's account.
+
 The bar holds none of this authority. Each row reports a typed response and
 the session resolves it, and every row whose backing is missing renders
 **non-actionable with its reason stated** rather than being hidden or
-silently offered: an uninstalled terminal bundle, a Switchboard that has not
-attested it can power the machine, or a session that has attested it cannot
-prompt for a password. Every such attestation defaults to refusing, so a bar
+silently offered: an uninstalled terminal or settings bundle, a Switchboard
+that has not attested it can power the machine, or a session that has
+attested it cannot prompt for a password. Every such attestation defaults to refusing, so a bar
 that was never told offers nothing it cannot deliver (`AGENTS.md` §5.4).
 
 Locking heads the last group because it is the one way out of the session

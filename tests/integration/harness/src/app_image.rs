@@ -1117,6 +1117,7 @@ mod tests {
                 "seatmgr",
                 "seq",
                 "servicectl",
+                "settings",
                 "sleep",
                 "ss",
                 "stat",

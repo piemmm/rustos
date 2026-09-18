@@ -19,7 +19,7 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
 use crate::damage;
-use crate::menu::{Menu, MenuAction, MenuItem};
+use crate::menu::{plate_rect, Menu, MenuAction, MenuItem, PlatePlacement, PlateSide};
 use crate::paint::{
     paint_bead, paint_chevron, paint_plate, plate_border, resolve_bead, resolve_frame, role_font,
     surface_rect, text_plate_height, to_i32, withheld, ChevronDir, PlateStyle,
@@ -241,6 +241,35 @@ impl ComboBox {
         let w = self.menu.preferred_width(scale, theme).max(field_width);
         let h = self.menu.preferred_height(scale, theme);
         (w, h)
+    }
+
+    /// Where this control's expanded choice list is drawn for a collapsed
+    /// field at `field`, inside `viewport`.
+    ///
+    /// The one placement rule every drop-down goes through, so a list opens
+    /// the same way wherever a combo box sits: below the field where there is
+    /// room, flipped above it where there is not, and never past an edge of
+    /// the surface it has to fit in. It is the shared plate rule
+    /// [`plate_rect`] — the same arithmetic a menu plate
+    /// and a submenu are placed by — over [`popup_size`](Self::popup_size),
+    /// rather than a second copy per owner.
+    ///
+    /// A collapsed control has no list to place, and measuring one costs a
+    /// pass over every choice's text, so a caller resolves this only for the
+    /// field that is actually showing one.
+    #[must_use]
+    pub fn popup_rect(&self, field: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
+        let (w, h) = self.popup_size(field.width, scale, theme);
+        plate_rect(
+            w,
+            h,
+            PlatePlacement {
+                anchor: field,
+                side: PlateSide::Below,
+                gap: 0,
+            },
+            viewport,
+        )
     }
 
     /// The chevron square width for a field of the given inner height.

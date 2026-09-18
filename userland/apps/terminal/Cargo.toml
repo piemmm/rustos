@@ -39,6 +39,10 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # control or of the frame arithmetic. The window menu is the desktop's, so
 # this app draws no menu row itself.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The desktop icon vocabulary, for the refusing artwork lookup the settings
+# sheet's glyph-free page strip is drawn through: it holds no icon cache and
+# its strip names no glyph, so nothing is ever resolved.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # The shared pointer and keyboard vocabulary the control family is driven with,
 # so the app routes input through one definition rather than its own.
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }

@@ -1,0 +1,77 @@
+[package]
+name = "tairix-settings"
+description = "TAIRiX Settings (settings.app): the windowed application that configures the desktop and the machine. The host-tested shell — the closed pane registry, the frame resolver, the sidebar/search/trail navigation, and the one honest-absence pane renderer — is the crate's [lib]; the freestanding `Run` binary is the on-disk bundle's entry point composing it over lib/window (plans/NEW-DESKTOP-SETTINGS.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The host-testable shell. Everything with behaviour worth testing lives here
+# — which pane is on show, what the strip holds, how the frame sheds a region
+# a narrow window cannot seat, and what a routed event changes — exactly as
+# the widget gallery and the wallpaper chooser keep their logic in a
+# host-tested engine and only *compose* it in the `Run` binary. It is
+# `no_std` + `alloc`, so it links unchanged into the freestanding binary and
+# runs under the host test harness.
+[lib]
+name = "tairix_settings"
+path = "src/lib.rs"
+
+# The `Run` entry-point binary of the on-disk `settings.app` bundle: a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert
+# host stub elsewhere (see `src/run.rs` / `build.rs`).
+[[bin]]
+name = "tairix-settings-run"
+path = "src/run.rs"
+
+[dependencies]
+# The shared Reactive Alloy control family the whole surface is built from:
+# the vertical `Tabs` strip, the `SearchField`, the `Breadcrumb`, the
+# `ScrollBar`, and the `Menu` the shed strip becomes. No control is defined
+# here.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# Integer screen geometry (`Rect`, `Scale`, `Region`): the one coordinate and
+# density vocabulary every layout, hit test and damage report agrees on.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The single shared theme definition, so this window's colours, metrics and
+# type ladder are the desktop's.
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# Shared text rasterisation: the face each statement and label is drawn with.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# Shared software rasterisation (`Surface`): the same premultiplied-alpha
+# primitives the window manager paints with.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# The shared pointer and keyboard vocabulary every control is driven with.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# The desktop's icon vocabulary: each category's sidebar glyph, every one of
+# which carries a first-party built-in glyph so a row can never blank.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+
+# Everything only the freestanding `Run` binary links is pulled in for the
+# bare-metal targets it is actually built for; on the host the binary is an
+# inert stub with no extra dependencies.
+[target.'cfg(target_os = "none")'.dependencies]
+# The frozen `Errno` and the window-channel wire vocabulary the `Run` binary
+# speaks.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The app half of the window channel: the shared app shell that owns the
+# transport, the parked event mailbox, the desktop query, and the retained
+# window surface.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the stack canary, the panic
+# handler, the allocator, and the syscall wrappers.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# On the real target the `Run` binary composites glyphs through the sandboxed
+# font service over the runtime `ipc_call` transport; the base dependency
+# stays host-neutral so host tests inject the mock transport instead.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+
+# The shell's host tests draw text, so they inject the shared solid test
+# transport via the `test-util` feature (never a running `fontd`).
+[dev-dependencies]
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true

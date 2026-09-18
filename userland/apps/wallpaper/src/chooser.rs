@@ -42,10 +42,10 @@ use tairix_wallpaper::{
 };
 
 use crate::{
-    backdrop_options, leaf_name, to_i32, to_u32, ApplyOutcome, BackdropOption, Candidate,
-    ChooserAction, Focus, Layout, OptionGroup, Style, Thumbnail, ALL_CATEGORIES_LABEL, APPLY_LABEL,
-    CLOSE_LABEL, FIT_ALL, FIT_LABELS, ICON_FLOW_ALL, ICON_FLOW_LABELS, OPTION_GROUP_COUNT,
-    SORT_ALL, SORT_LABELS, WIN_HEIGHT, WIN_WIDTH,
+    backdrop_options, leaf_name, to_u32, ApplyOutcome, BackdropOption, Candidate, ChooserAction,
+    Focus, Layout, OptionGroup, Style, Thumbnail, ALL_CATEGORIES_LABEL, APPLY_LABEL, CLOSE_LABEL,
+    FIT_ALL, FIT_LABELS, ICON_FLOW_ALL, ICON_FLOW_LABELS, OPTION_GROUP_COUNT, SORT_ALL,
+    SORT_LABELS, WIN_HEIGHT, WIN_WIDTH,
 };
 
 /// A wallpaper the caller must render for the preview panel.
@@ -764,22 +764,17 @@ impl Chooser {
         }
     }
 
-    /// Where the expanded drop-down of `group` is drawn: directly below its
-    /// field where the window has room, flipped above it where it does not,
-    /// and never past either side of the window.
+    /// Where the expanded drop-down of `group` is drawn, through the one
+    /// shared drop-down placement rule: below its field where the window has
+    /// room, flipped above it where it does not, and never past an edge.
     #[must_use]
     pub(crate) fn popup_rect(&self, group: OptionGroup, layout: &Layout, style: Style<'_>) -> Rect {
-        let field = layout.option_field(group);
-        let (width, height) =
-            self.fields[group.index()].popup_size(field.width, style.scale(), style.theme());
-        let below = field.bottom();
-        let y = if to_u32(below).saturating_add(height) <= self.height {
-            below
-        } else {
-            field.top().saturating_sub(to_i32(height))
-        };
-        let right_limit = to_i32(self.width.saturating_sub(width.min(self.width)));
-        Rect::new(field.left().min(right_limit).max(0), y, width, height)
+        self.fields[group.index()].popup_rect(
+            layout.option_field(group),
+            Rect::new(0, 0, self.width, self.height),
+            style.scale(),
+            style.theme(),
+        )
     }
 
     /// The window geometry for the current size, with no side effect.

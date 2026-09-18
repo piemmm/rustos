@@ -8,15 +8,18 @@
 //! height, carrying a strong leading seam and a quiet selected plate.
 //!
 //! A vertical item is a list entry rather than a tab shape, so it takes the
-//! anatomy a sidebar needs: its label leads, an optional live
-//! [`reading`](Tab::with_reading) trails on that same line, and an optional
-//! bounded [`trend`](Tab::with_trend) draws beneath — which makes the strip a
-//! live summary of everything it selects between. Items may be grouped:
-//! [`with_group`](Tab::with_group) puts a quiet heading above the item that
-//! starts a group. A vertical strip stacks rather than splits, so a list
-//! longer than its box shows the entries it can seat whole and the owner
-//! scrolls it — a squeezed entry that cannot draw its own label would be a
-//! list that truncates instead of one that scrolls.
+//! anatomy a sidebar needs: an optional leading [`icon`](Tab::with_icon), its
+//! label, an optional live [`reading`](Tab::with_reading) trailing on that
+//! same line, an optional [`disclosure`](Tab::with_disclosure) chevron
+//! trailing it, and an optional bounded [`trend`](Tab::with_trend) beneath —
+//! which makes the strip a live summary of everything it selects between.
+//! Items may be grouped: [`with_group`](Tab::with_group) puts a quiet heading
+//! above the item that starts a group, and [`nested`](Tab::nested) indents an
+//! entry that is a page of the disclosing entry above it, so one cursor walks
+//! a two-level list as a single column. A vertical strip stacks rather than
+//! splits, so a list longer than its box shows the entries it can seat whole
+//! and the owner scrolls it — a squeezed entry that cannot draw its own label
+//! would be a list that truncates instead of one that scrolls.
 //!
 //! A horizontal strip has one row and no room for either, so it draws neither;
 //! a reading belongs in its label there (see [`Tab::set_label`]).
@@ -36,6 +39,7 @@ use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Rgba, TextRole, Theme};
@@ -43,8 +47,9 @@ use tairix_theme::{Rgba, TextRole, Theme};
 use crate::chart::Chart;
 use crate::damage;
 use crate::paint::{
-    draw_outline, heavy_contrast, paint_bead, plate_border, rail_thickness, role_font,
-    seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape,
+    draw_outline, heavy_contrast, icon_slot_side, paint_bead, paint_chevron, paint_icon_slot,
+    plate_border, rail_thickness, role_font, seam_thickness, seam_width, surface_rect,
+    text_plate_height, to_i32, withheld, BeadShape, ChevronDir, FULL_COLOUR,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlState, RenderInvariant, SelectionState,
@@ -138,9 +143,15 @@ impl TabGroupAbsence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Tab {
     label: String,
+    icon: Option<IconKind>,
     reading: Option<String>,
     trend: Option<Chart>,
     group: Option<String>,
+    /// Set when this entry discloses pages of its own, and whether they are
+    /// currently shown.
+    disclosure: Option<bool>,
+    /// Set when this entry is a page of the disclosing entry above it.
+    nested: bool,
     modified: bool,
     state: ControlState,
 }
@@ -151,9 +162,12 @@ impl Tab {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            icon: None,
             reading: None,
             trend: None,
             group: None,
+            disclosure: None,
+            nested: false,
             modified: false,
             state: ControlState::idle(),
         }
@@ -170,6 +184,39 @@ impl Tab {
     #[must_use]
     pub fn with_state(mut self, state: ControlState) -> Self {
         self.state = state;
+        self
+    }
+
+    /// This entry with a leading glyph, drawn before its label — sidebar
+    /// anatomy, so a horizontal strip draws it nowhere.
+    ///
+    /// The picture comes from the owner's artwork lookup at
+    /// [`Tabs::render`]'s own slot side, so a strip of glyphs costs a cache
+    /// lookup per entry rather than re-resolving vector coverage each frame.
+    #[must_use]
+    pub fn with_icon(mut self, icon: IconKind) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// This entry as one that discloses pages of its own, `expanded` saying
+    /// whether they are shown — sidebar anatomy, so a horizontal strip draws
+    /// it nowhere.
+    ///
+    /// The chevron states the entry's own posture and nothing more: what
+    /// choosing it does is the owner's, which is what lets the same strip
+    /// hold a list whose sections both select a view and open their pages.
+    #[must_use]
+    pub fn with_disclosure(mut self, expanded: bool) -> Self {
+        self.disclosure = Some(expanded);
+        self
+    }
+
+    /// This entry as a page of the disclosing entry above it, drawn indented —
+    /// sidebar anatomy, so a horizontal strip draws it nowhere.
+    #[must_use]
+    pub fn nested(mut self) -> Self {
+        self.nested = true;
         self
     }
 
@@ -205,6 +252,25 @@ impl Tab {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// The entry's leading glyph, if it has one.
+    #[must_use]
+    pub fn icon(&self) -> Option<IconKind> {
+        self.icon
+    }
+
+    /// Whether this entry's own pages are shown, or `None` when it discloses
+    /// none.
+    #[must_use]
+    pub fn disclosure(&self) -> Option<bool> {
+        self.disclosure
+    }
+
+    /// Whether this entry is a page of the disclosing entry above it.
+    #[must_use]
+    pub fn is_nested(&self) -> bool {
+        self.nested
     }
 
     /// Replace the tab's label, leaving the rest of the tab alone.
@@ -345,6 +411,28 @@ struct Band {
     rect: Rect,
 }
 
+/// The running edges of an entry's label line as its anatomy claims room:
+/// where the label may start, where the trailing marks end, and how much text
+/// budget is left.
+struct LabelLine {
+    lead: u32,
+    trail: u32,
+    avail: u32,
+}
+
+/// What painting one entry needs beyond the entry itself: where it goes, at
+/// what density, in which theme and face, and the owner's icon lookup.
+///
+/// One value rather than five loose parameters threaded through every helper
+/// the entry's anatomy is drawn by.
+struct EntryPaint<'a> {
+    rect: (u32, u32, u32, u32),
+    scale: Scale,
+    theme: &'a Theme,
+    font: BitmapFont,
+    artwork: &'a mut dyn IconArtwork,
+}
+
 /// Item `index`'s rectangle within `bands`, or `None` when it was not seated —
 /// the one rule every damage report and hit test applies.
 fn item_area(bands: &[Band], index: usize) -> Option<Rect> {
@@ -360,10 +448,11 @@ fn item_area(bands: &[Band], index: usize) -> Option<Rect> {
 /// part of it.
 fn same_entries(live: &[Tab], fresh: &[Tab]) -> bool {
     live.len() == fresh.len()
-        && live
-            .iter()
-            .zip(fresh)
-            .all(|(live, fresh)| live.label() == fresh.label() && live.group() == fresh.group())
+        && live.iter().zip(fresh).all(|(live, fresh)| {
+            live.label() == fresh.label()
+                && live.group() == fresh.group()
+                && live.is_nested() == fresh.is_nested()
+        })
 }
 
 /// A row of equal-width tabs, or — laid out [`TabsOrientation::Vertical`] — a
@@ -388,6 +477,9 @@ fn same_entries(live: &[Tab], fresh: &[Tab]) -> bool {
 pub struct Tabs {
     items: Vec<Tab>,
     orientation: TabsOrientation,
+    /// The first entry a vertical strip draws: the owner's scroll position
+    /// through a list longer than its column.
+    first: usize,
     /// The tab the pointer rests on, or the one holding a press while the
     /// pointer slides off it.
     hovered: Option<usize>,
@@ -413,6 +505,7 @@ impl Tabs {
         Self {
             items: tabs,
             orientation: TabsOrientation::Horizontal,
+            first: 0,
             hovered: None,
             current: None,
             pointer: RenderInvariant::new(Point::ORIGIN),
@@ -473,9 +566,14 @@ impl Tabs {
             fresh.hovered = self.hovered;
             fresh.armed = self.armed;
             fresh.current = self.current;
+            fresh.first = self.first;
         } else {
             fresh.hovered = None;
             fresh.armed = RenderInvariant::new(None);
+            // A different run of entries is a different list to be scrolled
+            // through, so the owner's position through the old one means
+            // nothing; it re-derives one from what the fresh list holds.
+            fresh.first = self.first.min(fresh.items.len().saturating_sub(1));
         }
         let moved = *self != fresh;
         *self = fresh;
@@ -696,8 +794,13 @@ impl Tabs {
                     heading_h.saturating_add(text_plate_height(theme, scale, TextRole::Body));
                 let mut bands = Vec::with_capacity(self.items.len());
                 let mut top = 0u32;
-                let mut absences = self.absences.iter().enumerate().peekable();
-                for (index, tab) in self.items.iter().enumerate() {
+                let mut absences = self
+                    .absences
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, absence)| absence.before >= self.first)
+                    .peekable();
+                for (index, tab) in self.items.iter().enumerate().skip(self.first) {
                     // The empty groups that belong above this item, in their
                     // own rail position.
                     while let Some((slot, _)) =
@@ -775,6 +878,39 @@ impl Tabs {
         }
     }
 
+    /// The first entry a vertical strip draws.
+    #[must_use]
+    pub fn first(&self) -> usize {
+        self.first
+    }
+
+    /// Draw from entry `index` onward, which is how an owner scrolls a list
+    /// longer than the column it has (`measured_height` states the height a
+    /// whole list wants).
+    ///
+    /// An index past the last entry keeps the last one in view rather than
+    /// scrolling the list off its own column; a horizontal strip has one row
+    /// and nothing to scroll, so it ignores this.
+    pub fn set_first(&mut self, index: usize) {
+        self.first = match self.orientation {
+            TabsOrientation::Horizontal => 0,
+            TabsOrientation::Vertical => index.min(self.items.len().saturating_sub(1)),
+        };
+    }
+
+    /// How many entries `bounds` seats whole from [`first`](Self::first).
+    ///
+    /// The window an owner's scroll model is sized against: entries stack at
+    /// their own content height, so how many fit is the layout's answer and
+    /// not arithmetic an owner can do.
+    #[must_use]
+    pub fn seated(&self, bounds: Rect, scale: Scale, theme: &Theme) -> usize {
+        self.layout(bounds, scale, theme)
+            .iter()
+            .filter(|band| matches!(band.kind, BandKind::Item(_)))
+            .count()
+    }
+
     /// Tab `index`'s area within `bounds`, or `None` if it was not seated.
     #[must_use]
     pub fn tab_area(
@@ -803,7 +939,21 @@ impl Tabs {
     }
 
     /// Paint the strip into `surface` at `bounds` for the active theme.
-    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+    ///
+    /// A sidebar entry's leading glyph is resolved through `artwork` at
+    /// [`Self::icon_side`], so a strip of glyphs costs a cache lookup per
+    /// entry rather than re-resolving vector coverage every frame; a caller
+    /// holding no cache passes [`NoArtwork`](tairix_icon::NoArtwork) and each
+    /// glyph is rasterised in place. A horizontal strip draws no glyph and
+    /// never consults it.
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: &mut dyn IconArtwork,
+    ) {
         if withheld(surface, bounds) {
             return;
         }
@@ -817,12 +967,39 @@ impl Tabs {
                     self.paint_heading(surface, index, rect, scale, theme);
                 }
                 BandKind::Item(index) => {
-                    self.paint_tab(surface, index, rect, scale, theme, font);
+                    self.paint_tab(
+                        surface,
+                        index,
+                        &mut EntryPaint {
+                            rect,
+                            scale,
+                            theme,
+                            font,
+                            artwork,
+                        },
+                    );
                 }
                 BandKind::Absence(slot) => {
                     self.paint_absence(surface, slot, rect, scale, theme, font);
                 }
             }
+        }
+    }
+
+    /// The side of the square glyph slot a sidebar entry reserves, which is
+    /// also the pixel side an owner's cache should rasterise its glyphs at.
+    ///
+    /// One definition, so what the strip paints at and what its owner
+    /// resolves at cannot drift apart. Zero for a horizontal strip, which
+    /// draws no glyph.
+    #[must_use]
+    pub fn icon_side(&self, scale: Scale, theme: &Theme) -> u32 {
+        match self.orientation {
+            TabsOrientation::Horizontal => 0,
+            TabsOrientation::Vertical => icon_slot_side(
+                role_font(theme, scale, TextRole::Body),
+                text_plate_height(theme, scale, TextRole::Body),
+            ),
         }
     }
 
@@ -889,18 +1066,17 @@ impl Tabs {
     /// Paint the tab at `index` into the `rect` [`Self::layout`] gave it:
     /// its plate, the seam its orientation carries, the keyboard focus ring,
     /// then its own content.
-    fn paint_tab(
-        &self,
-        surface: &mut Surface,
-        index: usize,
-        rect: (u32, u32, u32, u32),
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
+    fn paint_tab(&self, surface: &mut Surface, index: usize, paint: &mut EntryPaint<'_>) {
         let Some(tab) = self.items.get(index) else {
             return;
         };
+        let EntryPaint {
+            rect,
+            scale,
+            theme,
+            font,
+            ..
+        } = *paint;
         let (x, y, w, h) = rect;
         if w == 0 || h == 0 {
             return;
@@ -925,7 +1101,7 @@ impl Tabs {
                 };
                 surface.fill_rect(x, y, w, h, Color::from(plate));
                 Self::paint_seam(surface, self.orientation, rect, scale, theme, tab);
-                Self::paint_entry(surface, rect, scale, theme, font, tab);
+                Self::paint_entry(surface, tab, paint);
             }
             // A horizontal tab is a page shape, not a row: the selected tab
             // reads as the content surface it opens onto, an unselected one is
@@ -1060,59 +1236,75 @@ impl Tabs {
         Self::paint_tab_bead(surface, rect, scale, theme, tab);
     }
 
-    /// Paint `tab` as a sidebar list entry: its label leading, its reading
-    /// trailing on that same line, and its trend beneath.
+    /// Paint `tab` as a sidebar list entry: its glyph and label leading, its
+    /// reading and disclosure chevron trailing on that same line, and its
+    /// trend beneath.
     ///
     /// Room is claimed in the order a reader needs it: the Signal Bead first
-    /// (it is a state, not a reading), then the reading, then the label, which
-    /// is what truncates — the reading is what the reader came for. The trend
-    /// draws only where a whole one still fits beneath the label line.
-    fn paint_entry(
-        surface: &mut Surface,
-        rect: (u32, u32, u32, u32),
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-        tab: &Tab,
-    ) {
+    /// (it is a state, not a reading), then the disclosure chevron and the
+    /// reading, then the leading glyph, then the label, which is what
+    /// truncates — the reading is what the reader came for, and a row whose
+    /// glyph gave way would leave a nameless indent. The trend draws only
+    /// where a whole one still fits beneath the label line.
+    fn paint_entry(surface: &mut Surface, tab: &Tab, paint: &mut EntryPaint<'_>) {
+        let EntryPaint {
+            rect,
+            scale,
+            theme,
+            font,
+            ..
+        } = *paint;
         let (x, y, w, h) = rect;
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-        let seam = seam_thickness(theme, scale);
-        let lead = seam.saturating_add(pad);
+        let indent = if tab.nested {
+            Self::nest_indent(scale, theme)
+        } else {
+            0
+        };
+        let lead = seam_thickness(theme, scale)
+            .saturating_add(pad)
+            .saturating_add(indent);
         let Some(inner_w) = w.checked_sub(lead.saturating_add(pad)) else {
             Self::paint_tab_bead(surface, rect, scale, theme, tab);
             return;
         };
-        let inner_x = x.saturating_add(lead);
-        let glyph_h = font.glyph_height();
         let label_row = text_plate_height(theme, scale, TextRole::Body);
-        let text_y = y.saturating_add(label_row.saturating_sub(glyph_h) / 2);
+        let text_y = y.saturating_add(label_row.saturating_sub(font.glyph_height()) / 2);
 
         let bead_w = Self::bead_gutter(scale, theme, rect, tab);
-        let mut avail = inner_w.saturating_sub(bead_w);
+        // The label line's running edges: what the glyph has claimed from the
+        // leading side, and what the bead, chevron and reading have claimed
+        // from the trailing one.
+        let mut line = LabelLine {
+            lead: x.saturating_add(lead),
+            trail: x
+                .saturating_add(lead)
+                .saturating_add(inner_w)
+                .saturating_sub(bead_w),
+            avail: inner_w.saturating_sub(bead_w),
+        };
+
+        Self::paint_disclosure(surface, tab, paint, &mut line, label_row);
+        Self::paint_entry_icon(surface, tab, paint, &mut line, label_row);
 
         if let Some(reading) = tab.reading() {
-            let fitted = font.truncate_to_width(reading, avail);
-            let reading_w = font.text_width(fitted).min(avail);
-            let reading_x = inner_x
-                .saturating_add(inner_w)
-                .saturating_sub(bead_w)
-                .saturating_sub(reading_w);
+            let fitted = font.truncate_to_width(reading, line.avail);
+            let reading_w = font.text_width(fitted).min(line.avail);
             font.draw_text(
                 surface,
-                to_i32(reading_x),
+                to_i32(line.trail.saturating_sub(reading_w)),
                 to_i32(text_y),
                 fitted,
                 Color::from(theme.palette().on_surface_muted),
             );
-            avail = avail.saturating_sub(reading_w.saturating_add(gap));
+            line.avail = line.avail.saturating_sub(reading_w.saturating_add(gap));
         }
-        if avail > 0 {
-            let fitted = font.truncate_to_width(tab.label(), avail);
+        if line.avail > 0 {
+            let fitted = font.truncate_to_width(tab.label(), line.avail);
             font.draw_text(
                 surface,
-                to_i32(inner_x),
+                to_i32(line.lead),
                 to_i32(text_y),
                 fitted,
                 Self::label_color(theme, tab, theme.palette().on_surface),
@@ -1122,10 +1314,11 @@ impl Tabs {
         if let Some(trend) = tab.trend() {
             let trend_h = chart_height(scale, theme);
             let trend_y = y.saturating_add(label_row);
-            if trend_y.saturating_add(trend_h) <= y.saturating_add(h) && inner_w > 0 {
+            let trend_w = line.trail.saturating_sub(line.lead.min(line.trail));
+            if trend_y.saturating_add(trend_h) <= y.saturating_add(h) && trend_w > 0 {
                 trend.render(
                     surface,
-                    Rect::new(to_i32(inner_x), to_i32(trend_y), inner_w, trend_h),
+                    Rect::new(to_i32(line.lead), to_i32(trend_y), trend_w, trend_h),
                     scale,
                     theme,
                 );
@@ -1133,6 +1326,96 @@ impl Tabs {
         }
 
         Self::paint_tab_bead(surface, rect, scale, theme, tab);
+    }
+
+    /// Draw `tab`'s disclosure chevron in the trailing gutter, claiming its
+    /// room from `line` — or nothing, when the entry discloses nothing or the
+    /// row cannot afford the mark.
+    fn paint_disclosure(
+        surface: &mut Surface,
+        tab: &Tab,
+        paint: &EntryPaint<'_>,
+        line: &mut LabelLine,
+        label_row: u32,
+    ) {
+        let Some(expanded) = tab.disclosure else {
+            return;
+        };
+        let (_, y, _, h) = paint.rect;
+        let gap = paint
+            .scale
+            .scale_length(paint.theme.metrics().control_gap)
+            .max(1);
+        let side = icon_slot_side(paint.font, label_row);
+        let Some(remaining) = line.avail.checked_sub(side.saturating_add(gap)) else {
+            return;
+        };
+        paint_chevron(
+            surface,
+            Rect::new(
+                to_i32(line.trail.saturating_sub(side)),
+                to_i32(y),
+                side,
+                label_row.min(h),
+            ),
+            if expanded {
+                ChevronDir::Down
+            } else {
+                ChevronDir::Right
+            },
+            Self::label_color(paint.theme, tab, paint.theme.palette().on_surface),
+        );
+        line.trail = line.trail.saturating_sub(side.saturating_add(gap));
+        line.avail = remaining;
+    }
+
+    /// Draw `tab`'s leading glyph, claiming its room from `line` — or
+    /// nothing, when the entry names none or the row cannot afford the slot.
+    fn paint_entry_icon(
+        surface: &mut Surface,
+        tab: &Tab,
+        paint: &mut EntryPaint<'_>,
+        line: &mut LabelLine,
+        label_row: u32,
+    ) {
+        let Some(kind) = tab.icon else {
+            return;
+        };
+        let (_, y, _, _) = paint.rect;
+        let gap = paint
+            .scale
+            .scale_length(paint.theme.metrics().control_gap)
+            .max(1);
+        let side = icon_slot_side(paint.font, label_row);
+        let Some(remaining) = line.avail.checked_sub(side.saturating_add(gap)) else {
+            return;
+        };
+        let tint = Self::label_color(paint.theme, tab, paint.theme.palette().on_surface);
+        let picture = paint.artwork.artwork(IconRequest::kind(kind), side);
+        paint_icon_slot(
+            surface,
+            (
+                line.lead,
+                y.saturating_add(label_row.saturating_sub(side) / 2),
+                side,
+            ),
+            kind,
+            tint,
+            picture,
+            FULL_COLOUR,
+        );
+        line.lead = line.lead.saturating_add(side.saturating_add(gap));
+        line.avail = remaining;
+    }
+
+    /// The leading offset a nested entry is drawn at: one glyph slot plus the
+    /// gap after it, so a page lines up with the label of the entry that
+    /// disclosed it rather than at an indent of its own.
+    fn nest_indent(scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let label_row = text_plate_height(theme, scale, TextRole::Body);
+        icon_slot_side(font, label_row)
+            .saturating_add(scale.scale_length(theme.metrics().control_gap).max(1))
     }
 
     /// The width `tab`'s Signal Bead claims at the trailing end of its label

@@ -2666,6 +2666,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-settings"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-controls",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-icon",
+ "tairix-input",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-theme",
+ "tairix-window",
+]
+
+[[package]]
 name = "tairix-sleep"
 version = "0.0.0"
 dependencies = [
@@ -2875,6 +2891,7 @@ dependencies = [
  "tairix-display",
  "tairix-font",
  "tairix-geometry",
+ "tairix-icon",
  "tairix-input",
  "tairix-keymap",
  "tairix-procinfo",

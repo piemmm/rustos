@@ -41,6 +41,9 @@ pub enum SystemAction {
     SystemMonitor,
     /// Launch the terminal.
     TaskShell,
+    /// Open the settings application, where the desktop and the machine are
+    /// configured.
+    Settings,
     /// Switch the desktop to this appearance.
     Appearance(Appearance),
     /// Secure the screen behind this user's password, leaving the session
@@ -94,16 +97,23 @@ impl SystemRow {
 /// installed.
 pub const TASK_SHELL_BUNDLE: &str = "os.tairix.terminal";
 
+/// The catalog identifier of the settings bundle the *Settings…* row opens,
+/// on the same terms as [`TASK_SHELL_BUNDLE`].
+pub const SETTINGS_BUNDLE: &str = "os.tairix.settings";
+
 /// The system menu, in order. This is the single definition of the menu's
 /// shape; the rendered rows and the row → command mapping are both derived
 /// from it, never written out a second time.
 ///
 /// The grouping separates what the rows *do*: inspecting the machine, then
-/// changing how it looks, then securing, leaving, or stopping it. The two
-/// power rows are destructive and confirmed; nothing above them is. Locking
-/// heads the last group because it is the one way out of the session that
-/// keeps the session, and switching away follows it as the other —
-/// everything below them ends work in progress.
+/// changing how it is configured and how it looks, then securing, leaving, or
+/// stopping it. *Settings* heads the middle group because it is the general
+/// form of the two appearance rows beneath it — everything either of them
+/// does, and the rest of the machine's configuration besides. The two power
+/// rows are destructive and confirmed; nothing above them is. Locking heads
+/// the last group because it is the one way out of the session that keeps the
+/// session, and switching away follows it as the other — everything below
+/// them ends work in progress.
 pub const ROWS: &[SystemRow] = &[
     SystemRow {
         action: SystemAction::About,
@@ -124,9 +134,15 @@ pub const ROWS: &[SystemRow] = &[
         role: ControlRole::Neutral,
     },
     SystemRow {
+        action: SystemAction::Settings,
+        label: "Settings…",
+        group_break: true,
+        role: ControlRole::Neutral,
+    },
+    SystemRow {
         action: SystemAction::Appearance(Appearance::Light),
         label: "Light Appearance",
-        group_break: true,
+        group_break: false,
         role: ControlRole::Neutral,
     },
     SystemRow {
@@ -205,6 +221,9 @@ pub struct SystemPermits {
     /// Whether the terminal bundle the Task Shell row launches is present
     /// in the desktop's catalog.
     pub task_shell_installed: bool,
+    /// Whether the settings bundle the Settings row opens is present in the
+    /// desktop's catalog.
+    pub settings_installed: bool,
     /// Whether this session can put a password prompt in front of the
     /// screen — that is, whether it runs on a console whose login
     /// supervisor can be asked to re-verify the signed-in user.
@@ -258,6 +277,10 @@ pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<BarMenuRow> {
                     item.with_state(ControlState::disabled()),
                     Some(REASON_NOT_INSTALLED),
                 ),
+                SystemAction::Settings if !permits.settings_installed => (
+                    item.with_state(ControlState::disabled()),
+                    Some(REASON_NOT_INSTALLED),
+                ),
                 SystemAction::Lock if !permits.lock_available => (
                     item.with_state(
                         ControlState::default().with_authority(AuthorityState::NeedsCapability),
@@ -303,6 +326,11 @@ pub(crate) fn response_at(index: usize) -> Option<TaskbarResponse> {
         // honest answer if it ever did.
         SystemAction::TaskShell => TaskbarResponse::LibraryLaunch {
             entry: EntryId::new(TASK_SHELL_BUNDLE).ok()?,
+        },
+        // The bar's one launch response, so the session gains no second path
+        // to a program on its account.
+        SystemAction::Settings => TaskbarResponse::LibraryLaunch {
+            entry: EntryId::new(SETTINGS_BUNDLE).ok()?,
         },
         SystemAction::Appearance(appearance) => TaskbarResponse::SetAppearance { appearance },
         SystemAction::Lock => TaskbarResponse::LockSession,

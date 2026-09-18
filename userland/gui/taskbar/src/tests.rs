@@ -181,6 +181,7 @@ use crate::picker::{
 };
 use crate::render::{icon_cache, IconEpoch, TaskbarRenderer};
 use crate::repaint::TaskbarRepaint;
+use crate::system::SystemAction;
 use crate::taskbar::{Taskbar, TaskbarConfig};
 use crate::tasks::{TaskId, TaskList};
 use crate::tray::derive_signal;
@@ -7365,6 +7366,9 @@ fn bar_with_task_shell() -> Taskbar {
     catalog
         .insert(entry("terminal", "Terminal", LibraryCategory::Utilities))
         .expect("fits");
+    catalog
+        .insert(entry("settings", "Settings", LibraryCategory::SystemTools))
+        .expect("fits");
     bar.library_mut().set_catalog(catalog);
     let _ = bar.take_repaint();
     bar
@@ -7375,6 +7379,17 @@ fn power_capable_summary() -> TraySummary {
     let mut summary = tray_summary(0, 0, 100);
     summary.power_capable = true;
     summary
+}
+
+/// The position of the row carrying `action` in the one system-menu table.
+///
+/// Tests name the command rather than a literal index, so inserting a row
+/// cannot silently retarget an assertion at its neighbour.
+fn system_row(action: SystemAction) -> usize {
+    crate::system::ROWS
+        .iter()
+        .position(|row| row.action == action)
+        .expect("the table carries the command")
 }
 
 /// Ask for the system menu with a secondary press on the Switchboard capsule.
@@ -7464,8 +7479,13 @@ fn the_row_table_states_its_labels_groups_and_roles() {
             ),
             ("Task Shell", false, tairix_controls::ControlRole::Neutral),
             (
-                "Light Appearance",
+                "Settings\u{2026}",
                 true,
+                tairix_controls::ControlRole::Neutral
+            ),
+            (
+                "Light Appearance",
+                false,
                 tairix_controls::ControlRole::Neutral
             ),
             (
@@ -7490,9 +7510,12 @@ fn the_active_appearance_row_is_the_groups_chosen_member_and_is_not_actionable()
     // The two appearances are a group of alternatives exactly one of which
     // holds, so the one in force is marked as its group's chosen member —
     // a bullet, disabled, with its reason — never as work that finished.
-    for (appearance, active_row, inactive_row) in
-        [(Appearance::Dark, 4, 3), (Appearance::Light, 3, 4)]
-    {
+    let light = system_row(SystemAction::Appearance(Appearance::Light));
+    let dark = system_row(SystemAction::Appearance(Appearance::Dark));
+    for (appearance, active_row, inactive_row) in [
+        (Appearance::Dark, dark, light),
+        (Appearance::Light, light, dark),
+    ] {
         let mut bar = Taskbar::new(
             TaskbarConfig::bottom_bar(1000, 800),
             &if appearance == Appearance::Dark {
@@ -7553,6 +7576,9 @@ fn every_row_maps_to_exactly_its_expected_response() {
         Some(TaskbarResponse::LibraryLaunch {
             entry: EntryId::new("os.tairix.terminal").expect("id"),
         }),
+        Some(TaskbarResponse::LibraryLaunch {
+            entry: EntryId::new("os.tairix.settings").expect("id"),
+        }),
         Some(TaskbarResponse::SetAppearance {
             appearance: Appearance::Light,
         }),
@@ -7604,7 +7630,10 @@ fn an_unpermitted_power_row_is_denied_with_the_authority_mark_and_a_reason() {
     let mut input = TaskbarInput::new();
     let request = ask_system_menu(&mut input, &mut bar);
 
-    for row in [8, 9] {
+    for row in [
+        system_row(SystemAction::Restart),
+        system_row(SystemAction::ShutDown),
+    ] {
         let item = offered_row(&request, row);
         assert_eq!(
             item.state().authority,
@@ -7628,7 +7657,10 @@ fn the_power_rows_are_denied_when_no_authority_has_been_published() {
     let mut input = TaskbarInput::new();
     let request = ask_system_menu(&mut input, &mut bar);
 
-    for row in [8, 9] {
+    for row in [
+        system_row(SystemAction::Restart),
+        system_row(SystemAction::ShutDown),
+    ] {
         let item = offered_row(&request, row);
         assert_eq!(
             item.state().authority,
@@ -7643,11 +7675,12 @@ fn the_power_rows_are_denied_when_no_authority_has_been_published() {
     // service that then dies withdraws them again.
     bar.set_tray_summary(Some(power_capable_summary()));
     let request = ask_system_menu(&mut input, &mut bar);
-    assert!(offered_row(&request, 8).state().is_actionable());
+    let restart = system_row(SystemAction::Restart);
+    assert!(offered_row(&request, restart).state().is_actionable());
 
     bar.set_tray_summary(None);
     let request = ask_system_menu(&mut input, &mut bar);
-    assert!(!offered_row(&request, 8).state().is_actionable());
+    assert!(!offered_row(&request, restart).state().is_actionable());
 }
 
 #[test]
@@ -7658,7 +7691,7 @@ fn the_lock_row_is_denied_until_the_session_attests_it_can_prompt() {
     let mut input = TaskbarInput::new();
     let request = ask_system_menu(&mut input, &mut bar);
 
-    let item = offered_row(&request, 5);
+    let item = offered_row(&request, system_row(SystemAction::Lock));
     assert_eq!(item.label(), "Lock Screen");
     assert_eq!(
         item.state().authority,
@@ -7667,18 +7700,18 @@ fn the_lock_row_is_denied_until_the_session_attests_it_can_prompt() {
     );
     assert!(!item.state().is_actionable());
     assert_eq!(
-        offered_tip(&request, 5),
+        offered_tip(&request, system_row(SystemAction::Lock)),
         Some("This session has no password prompt to unlock with")
     );
 
     // The session attests, and the row becomes the real command.
     bar.set_elevation_available(true);
     let request = ask_system_menu(&mut input, &mut bar);
-    let item = offered_row(&request, 5);
+    let item = offered_row(&request, system_row(SystemAction::Lock));
     assert!(item.state().is_actionable());
-    assert_eq!(offered_tip(&request, 5), None);
+    assert_eq!(offered_tip(&request, system_row(SystemAction::Lock)), None);
     assert_eq!(
-        chosen_at(&mut bar, &request, 5),
+        chosen_at(&mut bar, &request, system_row(SystemAction::Lock)),
         Some(TaskbarResponse::LockSession)
     );
 }
@@ -7698,27 +7731,36 @@ fn the_switch_user_row_is_absent_until_the_session_can_be_resumed() {
         .iter()
         .all(|row| row.drawn().label() != "Switch User…"));
     assert!(
-        table_row(&request, 6).is_none(),
+        table_row(&request, system_row(SystemAction::SwitchUser)).is_none(),
         "the absent row's own position states nothing"
     );
     // A row's id is its command's own position, so the rows below it keep
     // their meaning rather than closing up onto a stale index.
-    assert_eq!(offered_row(&request, 5).label(), "Lock Screen");
-    assert_eq!(offered_row(&request, 7).label(), "Log Out");
     assert_eq!(
-        chosen_at(&mut bar, &request, 7),
+        offered_row(&request, system_row(SystemAction::Lock)).label(),
+        "Lock Screen"
+    );
+    assert_eq!(
+        offered_row(&request, system_row(SystemAction::LogOut)).label(),
+        "Log Out"
+    );
+    assert_eq!(
+        chosen_at(&mut bar, &request, system_row(SystemAction::LogOut)),
         Some(TaskbarResponse::LogOut)
     );
 
     // The session attests it bound the mailbox, and the row appears.
     bar.set_switch_user_available(true);
     let request = ask_system_menu(&mut input, &mut bar);
-    let item = offered_row(&request, 6);
+    let item = offered_row(&request, system_row(SystemAction::SwitchUser));
     assert_eq!(item.label(), "Switch User…");
     assert!(item.state().is_actionable());
-    assert_eq!(offered_tip(&request, 6), None);
     assert_eq!(
-        chosen_at(&mut bar, &request, 6),
+        offered_tip(&request, system_row(SystemAction::SwitchUser)),
+        None
+    );
+    assert_eq!(
+        chosen_at(&mut bar, &request, system_row(SystemAction::SwitchUser)),
         Some(TaskbarResponse::SwitchUser)
     );
 }
@@ -7814,10 +7856,55 @@ fn a_launch_row_whose_bundle_is_absent_is_disabled_and_asks_for_nothing() {
     let mut input = TaskbarInput::new();
     let request = ask_system_menu(&mut input, &mut bar);
 
-    let item = offered_row(&request, 2);
+    let shell_row = system_row(SystemAction::TaskShell);
+    let item = offered_row(&request, shell_row);
     assert_eq!(item.label(), "Task Shell");
     assert!(!item.state().is_actionable());
-    assert_eq!(offered_tip(&request, 2), Some("Not installed"));
+    assert_eq!(offered_tip(&request, shell_row), Some("Not installed"));
+}
+
+#[test]
+fn the_settings_row_heads_the_appearance_group_and_opens_the_settings_bundle() {
+    // Settings is the general form of the two appearance rows beneath it, so
+    // it opens their group rather than sitting among the inspection rows.
+    let settings = system_row(SystemAction::Settings);
+    assert_eq!(
+        settings + 1,
+        system_row(SystemAction::Appearance(Appearance::Light)),
+        "Settings sits immediately above Light Appearance"
+    );
+    assert!(crate::system::ROWS[settings].group_break);
+    assert!(!crate::system::ROWS[settings + 1].group_break);
+
+    let mut bar = bar_with_task_shell();
+    let mut input = TaskbarInput::new();
+    let request = ask_system_menu(&mut input, &mut bar);
+    let item = offered_row(&request, settings);
+    assert_eq!(item.label(), "Settings\u{2026}");
+    assert!(item.state().is_actionable());
+    assert_eq!(offered_tip(&request, settings), None);
+    assert_eq!(
+        chosen_at(&mut bar, &request, settings),
+        Some(TaskbarResponse::LibraryLaunch {
+            entry: EntryId::new("os.tairix.settings").expect("id"),
+        }),
+        "it reuses the bar's one launch response"
+    );
+}
+
+#[test]
+fn the_settings_row_is_disabled_when_its_bundle_is_not_installed() {
+    // The standard fixture holds no settings bundle, so the row is offered
+    // with its reason stated rather than emitting a launch that must fail.
+    let settings = system_row(SystemAction::Settings);
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let request = ask_system_menu(&mut input, &mut bar);
+
+    let item = offered_row(&request, settings);
+    assert_eq!(item.label(), "Settings\u{2026}");
+    assert!(!item.state().is_actionable());
+    assert_eq!(offered_tip(&request, settings), Some("Not installed"));
 }
 
 #[test]

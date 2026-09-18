@@ -15,7 +15,7 @@ use tairix_controls::collection::IconTile;
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_font::BitmapFont;
 use tairix_geometry::Rect;
-use tairix_icon::{IconKind, IconPicture};
+use tairix_icon::{IconKind, IconPicture, NoArtwork};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 use tairix_wallpaper::{Backdrop, WallpaperChoice};
@@ -158,7 +158,7 @@ fn paint_gallery(surface: &mut Surface, chooser: &Chooser, layout: &Layout, styl
     if !rail.is_empty() {
         chooser
             .rail()
-            .render(surface, rail, style.scale(), style.theme());
+            .render(surface, rail, style.scale(), style.theme(), &mut NoArtwork);
     }
 
     let tiles = layout.tiles();

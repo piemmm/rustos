@@ -18,6 +18,7 @@ use alloc::vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::{IconKind, NoArtwork};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, SignalRole, TextRole, Theme};
@@ -48,7 +49,13 @@ fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) ->
 
 fn render(tabs: &Tabs, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
-    tabs.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
+    tabs.render(
+        &mut surface,
+        Rect::new(0, 0, W, H),
+        Scale::ONE,
+        theme,
+        &mut NoArtwork,
+    );
     surface
 }
 
@@ -140,7 +147,13 @@ fn loading_tab_shows_a_lower_heat_seam() {
         Tab::new("Busy").with_state(ControlState::idle().with_activity(ActivityState::Working)),
     ]);
     let mut surface = Surface::new(W, H).expect("surface");
-    tabs.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, &theme);
+    tabs.render(
+        &mut surface,
+        Rect::new(0, 0, W, H),
+        Scale::ONE,
+        &theme,
+        &mut NoArtwork,
+    );
     let each = W / 2;
     assert!(region_has(
         &surface,
@@ -155,7 +168,13 @@ fn modified_tab_shows_a_bead() {
     let theme = Theme::dark();
     let tabs = Tabs::new(vec![Tab::new("Doc").with_modified(true), Tab::new("Other")]);
     let mut surface = Surface::new(W, H).expect("surface");
-    tabs.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, &theme);
+    tabs.render(
+        &mut surface,
+        Rect::new(0, 0, W, H),
+        Scale::ONE,
+        &theme,
+        &mut NoArtwork,
+    );
     let each = W / 2;
     // The modified bead sits at the top-trailing corner of tab 0.
     assert!(region_has(
@@ -518,7 +537,13 @@ fn renders_at_a_larger_scale_without_panicking() {
     let mut tabs = three_tabs();
     tabs.adopt_selected(0);
     let mut surface = Surface::new(W, H * 2).expect("surface");
-    tabs.render(&mut surface, Rect::new(0, 0, W, H * 2), scale, &theme);
+    tabs.render(
+        &mut surface,
+        Rect::new(0, 0, W, H * 2),
+        scale,
+        &theme,
+        &mut NoArtwork,
+    );
     assert!(has_pixel(&surface, premul(theme.palette().accent)));
 }
 
@@ -613,7 +638,13 @@ fn vertical_three() -> Tabs {
 /// Render `tabs` into its own `w`×`h` surface at `scale`.
 fn render_in(tabs: &Tabs, theme: &Theme, scale: Scale, w: u32, h: u32) -> Surface {
     let mut surface = Surface::new(w, h).expect("surface");
-    tabs.render(&mut surface, Rect::new(0, 0, w, h), scale, theme);
+    tabs.render(
+        &mut surface,
+        Rect::new(0, 0, w, h),
+        scale,
+        theme,
+        &mut NoArtwork,
+    );
     surface
 }
 
@@ -1080,7 +1111,7 @@ fn degenerate_bounds_paint_nothing_in_either_orientation() {
         for (w, h) in [(0, VH), (VW, 0), (0, 0)] {
             let bounds = Rect::new(0, 0, w, h);
             let mut surface = Surface::new(VW, VH).expect("surface");
-            tabs.render(&mut surface, bounds, Scale::ONE, &theme);
+            tabs.render(&mut surface, bounds, Scale::ONE, &theme, &mut NoArtwork);
             assert!(is_blank(&surface));
             assert_eq!(
                 tabs.tab_at(bounds, Scale::ONE, &Theme::dark(), Point::new(0, 0)),
@@ -1090,7 +1121,7 @@ fn degenerate_bounds_paint_nothing_in_either_orientation() {
         // An off-surface origin is refused rather than wrapped into the surface.
         let off = Rect::new(-4, -4, VW, VH);
         let mut surface = Surface::new(VW, VH).expect("surface");
-        tabs.render(&mut surface, off, Scale::ONE, &theme);
+        tabs.render(&mut surface, off, Scale::ONE, &theme, &mut NoArtwork);
         assert!(is_blank(&surface));
         assert_eq!(
             tabs.tab_at(off, Scale::ONE, &Theme::dark(), Point::new(0, 0)),
@@ -1103,6 +1134,7 @@ fn degenerate_bounds_paint_nothing_in_either_orientation() {
             Rect::new(0, 0, VW / 2, VH / 2),
             Scale::ONE,
             &theme,
+            &mut NoArtwork,
         );
         assert!(untouched_outside(&surface, VW / 2, VH / 2));
     }
@@ -2078,4 +2110,275 @@ fn a_vertical_cursor_draws_no_ring() {
 /// rather than restated as a literal.
 fn tabs_rail_thickness(theme: &Theme) -> u32 {
     crate::paint::rail_thickness(theme, Scale::ONE)
+}
+
+// --- Sidebar anatomy: the leading glyph, disclosure, and nesting --------
+
+/// The vertical strip bounds a sidebar test renders into, and its surface.
+fn sidebar_surface(tabs: &Tabs, theme: &Theme, w: u32, h: u32) -> Surface {
+    let mut surface = Surface::new(w, h).expect("surface");
+    tabs.render(
+        &mut surface,
+        Rect::new(0, 0, w, h),
+        Scale::ONE,
+        theme,
+        &mut NoArtwork,
+    );
+    surface
+}
+
+/// An entry's leading glyph draws inside its own row, and the row's label
+/// still draws beside it.
+#[test]
+fn a_sidebar_entry_draws_its_leading_glyph() {
+    let theme = Theme::dark();
+    let plain = Tabs::new(vec![Tab::new("General")]).with_orientation(TabsOrientation::Vertical);
+    let with_icon = Tabs::new(vec![Tab::new("General").with_icon(IconKind::Settings)])
+        .with_orientation(TabsOrientation::Vertical);
+
+    let row = plain
+        .tab_area(0, Rect::new(0, 0, W, H * 4), Scale::ONE, &theme)
+        .expect("a seated entry");
+    // A glyph costs the row no height: the two strips seat the same row.
+    assert_eq!(
+        with_icon.tab_area(0, Rect::new(0, 0, W, H * 4), Scale::ONE, &theme),
+        Some(row)
+    );
+
+    let bare = sidebar_surface(&plain, &theme, W, H * 4);
+    let glyphed = sidebar_surface(&with_icon, &theme, W, H * 4);
+    assert_ne!(
+        bare.pixels(),
+        glyphed.pixels(),
+        "the glyph drew nothing at all"
+    );
+    // The glyph is inside the entry it belongs to, never over the row below.
+    let below = u32::try_from(row.bottom()).expect("a positive row bottom");
+    for y in below..H * 4 {
+        for x in 0..W {
+            assert_eq!(
+                bare.get(x, y),
+                glyphed.get(x, y),
+                "glyph spilled at {x},{y}"
+            );
+        }
+    }
+}
+
+/// A horizontal strip is a page shape with no room for sidebar anatomy, so it
+/// draws neither a glyph nor a disclosure chevron and reserves no slot.
+#[test]
+fn a_horizontal_strip_draws_no_sidebar_anatomy() {
+    let theme = Theme::dark();
+    let plain = Tabs::new(vec![Tab::new("One"), Tab::new("Two")]);
+    let dressed = Tabs::new(vec![
+        Tab::new("One")
+            .with_icon(IconKind::Settings)
+            .with_disclosure(true),
+        Tab::new("Two").nested(),
+    ]);
+    assert_eq!(plain.icon_side(Scale::ONE, &theme), 0);
+    assert_eq!(
+        render(&plain, &theme).pixels(),
+        render(&dressed, &theme).pixels()
+    );
+}
+
+/// The chevron states the entry's own posture: collapsed and expanded draw
+/// differently, and neither draws as no disclosure at all.
+#[test]
+fn a_disclosure_chevron_states_which_way_it_points() {
+    let theme = Theme::dark();
+    let vertical = |tab: Tab| Tabs::new(vec![tab]).with_orientation(TabsOrientation::Vertical);
+    let none = sidebar_surface(&vertical(Tab::new("General")), &theme, W, H * 4);
+    let shut = sidebar_surface(
+        &vertical(Tab::new("General").with_disclosure(false)),
+        &theme,
+        W,
+        H * 4,
+    );
+    let open = sidebar_surface(
+        &vertical(Tab::new("General").with_disclosure(true)),
+        &theme,
+        W,
+        H * 4,
+    );
+    assert_ne!(
+        none.pixels(),
+        shut.pixels(),
+        "a collapsed entry drew no mark"
+    );
+    assert_ne!(shut.pixels(), open.pixels(), "both postures drew alike");
+}
+
+/// A nested entry's label is indented, and the entry is still the strip's own
+/// row: one cursor walks a two-level list as a single column.
+#[test]
+fn a_nested_entry_indents_and_still_takes_the_cursor() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H * 6);
+    let mut tabs = Tabs::new(vec![
+        Tab::new("General")
+            .with_icon(IconKind::Settings)
+            .with_disclosure(true),
+        Tab::new("About").nested(),
+        Tab::new("Caching").nested(),
+    ])
+    .with_orientation(TabsOrientation::Vertical);
+
+    let flat = Tabs::new(vec![
+        Tab::new("General")
+            .with_icon(IconKind::Settings)
+            .with_disclosure(true),
+        Tab::new("About"),
+        Tab::new("Caching"),
+    ])
+    .with_orientation(TabsOrientation::Vertical);
+    assert_ne!(
+        sidebar_surface(&tabs, &theme, W, H * 6).pixels(),
+        sidebar_surface(&flat, &theme, W, H * 6).pixels(),
+        "the indent moved nothing"
+    );
+
+    // Every row, nested or not, is hit-testable and on the keyboard ring.
+    for index in 0..3 {
+        let row = tabs
+            .tab_area(index, bounds, Scale::ONE, &theme)
+            .expect("a seated entry");
+        assert_eq!(
+            tabs.tab_at(
+                bounds,
+                Scale::ONE,
+                &theme,
+                Point::new(row.left() + xi(W / 2), row.top() + xi(row.height / 2))
+            ),
+            Some(index)
+        );
+    }
+    let mut damage = sink();
+    tabs.set_current(Some(0), bounds, Scale::ONE, &theme, &mut damage);
+    for expected in 1..3 {
+        assert_eq!(
+            tabs.on_key(
+                Key::Named(NamedKey::Down),
+                bounds,
+                Scale::ONE,
+                &theme,
+                &mut damage
+            ),
+            None,
+            "moving the cursor selects nothing by itself"
+        );
+        assert_eq!(tabs.current(), Some(expected));
+    }
+}
+
+/// A row too narrow to seat its glyph keeps its label: room is given out in
+/// the order a reader needs it, and a nameless indent is no use.
+#[test]
+fn a_cramped_entry_gives_up_its_glyph_before_its_label() {
+    let theme = Theme::dark();
+    let tabs = Tabs::new(vec![Tab::new("General").with_icon(IconKind::Settings)])
+        .with_orientation(TabsOrientation::Vertical);
+    let side = tabs.icon_side(Scale::ONE, &theme);
+    assert!(side > 0, "a sidebar entry reserves a glyph slot");
+
+    // Narrow enough that the glyph slot cannot be afforded at all.
+    let narrow = side.saturating_add(4);
+    let surface = sidebar_surface(&tabs, &theme, narrow, H * 2);
+    let bare = Tabs::new(vec![Tab::new("General")]).with_orientation(TabsOrientation::Vertical);
+    assert_eq!(
+        surface.pixels(),
+        sidebar_surface(&bare, &theme, narrow, H * 2).pixels(),
+        "a slot that does not fit is not drawn"
+    );
+}
+
+/// The strip's hover and press latch are about which entries it holds, so a
+/// restatement that re-shapes the list as a nested one is a different list.
+#[test]
+fn restating_a_flat_list_as_a_nested_one_resets_the_latch() {
+    let mut live = Tabs::new(vec![Tab::new("General"), Tab::new("About")])
+        .with_orientation(TabsOrientation::Vertical);
+    let nested = Tabs::new(vec![Tab::new("General"), Tab::new("About").nested()])
+        .with_orientation(TabsOrientation::Vertical);
+    assert!(live.restate(nested), "the strip's shape changed");
+}
+
+/// A vertical strip longer than its column draws from the entry its owner
+/// scrolled to, and states how many the column seats — so an owner can reach
+/// every entry rather than losing the ones past the fold.
+#[test]
+fn a_vertical_strip_draws_from_the_entry_its_owner_scrolled_to() {
+    let theme = Theme::dark();
+    let labels = ["One", "Two", "Tri", "Four", "Five", "Six", "Seven", "Eight"];
+    let mut tabs = Tabs::new(labels.iter().map(|l| Tab::new(*l)).collect())
+        .with_orientation(TabsOrientation::Vertical);
+    // A column with room for only a few of them.
+    let bounds = Rect::new(0, 0, W, H * 3);
+    let seats = tabs.seated(bounds, Scale::ONE, &theme);
+    assert!(
+        seats > 0 && seats < labels.len(),
+        "this column is supposed to seat some but not all: {seats}"
+    );
+    assert_eq!(tabs.first(), 0);
+    assert!(tabs
+        .tab_area(labels.len() - 1, bounds, Scale::ONE, &theme)
+        .is_none());
+
+    // Scrolled to the last entry, the column draws it and not the first.
+    tabs.set_first(labels.len() - 1);
+    assert_eq!(tabs.first(), labels.len() - 1);
+    assert!(tabs
+        .tab_area(labels.len() - 1, bounds, Scale::ONE, &theme)
+        .is_some());
+    assert!(tabs.tab_area(0, bounds, Scale::ONE, &theme).is_none());
+    // The hit test follows the same layout, so a press lands on the entry the
+    // reader is looking at.
+    let row = tabs
+        .tab_area(labels.len() - 1, bounds, Scale::ONE, &theme)
+        .expect("a seated entry");
+    assert_eq!(
+        tabs.tab_at(
+            bounds,
+            Scale::ONE,
+            &theme,
+            Point::new(row.left() + 4, row.top() + xi(row.height / 2))
+        ),
+        Some(labels.len() - 1)
+    );
+
+    // An index past the end keeps the last entry in view rather than
+    // scrolling the list off its own column.
+    tabs.set_first(labels.len() + 10);
+    assert_eq!(tabs.first(), labels.len() - 1);
+
+    // A horizontal strip has one row and nothing to scroll.
+    let mut flat = Tabs::new(labels.iter().map(|l| Tab::new(*l)).collect());
+    flat.set_first(3);
+    assert_eq!(flat.first(), 0);
+}
+
+/// The owner's scroll position survives a restatement that keeps the same
+/// entries, and is clamped into a list that no longer holds it.
+#[test]
+fn restating_carries_the_scroll_position_and_clamps_it() {
+    let five = || {
+        Tabs::new(
+            ["A", "B", "C", "D", "E"]
+                .iter()
+                .map(|l| Tab::new(*l))
+                .collect(),
+        )
+        .with_orientation(TabsOrientation::Vertical)
+    };
+    let mut live = five();
+    live.set_first(3);
+    live.restate(five());
+    assert_eq!(live.first(), 3, "the same list is the same list");
+
+    let shorter =
+        Tabs::new(vec![Tab::new("A"), Tab::new("B")]).with_orientation(TabsOrientation::Vertical);
+    live.restate(shorter);
+    assert_eq!(live.first(), 1, "clamped into what the fresh list holds");
 }

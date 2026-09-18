@@ -468,3 +468,74 @@ fn choosing_reports_the_popup_and_the_field() {
         damage.bounds()
     );
 }
+
+// --- The one drop-down placement rule -----------------------------------
+
+/// The list opens below its field when the surface has room beneath it.
+#[test]
+fn the_list_opens_below_its_field() {
+    let theme = Theme::dark();
+    let combo = combo();
+    let field = Rect::new(20, 40, W, H);
+    let viewport = Rect::new(0, 0, 400, 400);
+    let (pw, ph) = combo.popup_size(W, Scale::ONE, &theme);
+
+    assert_eq!(
+        combo.popup_rect(field, viewport, Scale::ONE, &theme),
+        Rect::new(20, field.bottom(), pw, ph)
+    );
+}
+
+/// A field with no room beneath it opens the list upward rather than off the
+/// surface — the footer case every drop-down in a footer relies on.
+#[test]
+fn a_field_at_the_bottom_opens_the_list_upward() {
+    let theme = Theme::dark();
+    let combo = combo();
+    let (pw, ph) = combo.popup_size(W, Scale::ONE, &theme);
+    // A surface that ends exactly at the field's own bottom edge.
+    let viewport = Rect::new(0, 0, 400, ph.saturating_add(H));
+    let field = Rect::new(0, xi(ph), W, H);
+
+    let popup = combo.popup_rect(field, viewport, Scale::ONE, &theme);
+    assert_eq!(popup, Rect::new(0, 0, pw, ph));
+    assert_eq!(popup.bottom(), field.top(), "it hangs off the field's top");
+}
+
+/// The list never draws past an edge of the surface it has to fit in.
+#[test]
+fn the_list_stays_inside_the_surface() {
+    let theme = Theme::dark();
+    let combo = combo();
+    let (pw, ph) = combo.popup_size(W, Scale::ONE, &theme);
+    let viewport = Rect::new(0, 0, pw.saturating_add(8), ph.saturating_mul(4));
+    // A field hard against the surface's trailing edge.
+    let field = Rect::new(xi(pw), 0, W, H);
+
+    let popup = combo.popup_rect(field, viewport, Scale::ONE, &theme);
+    assert!(
+        popup.left() >= viewport.left() && popup.right() <= viewport.right(),
+        "{popup:?} left {viewport:?}"
+    );
+    assert!(popup.top() >= viewport.top() && popup.bottom() <= viewport.bottom());
+}
+
+/// The placed rectangle is the one the control's own hit test is fed, so a
+/// press on a row of the list as drawn selects that row.
+#[test]
+fn a_press_on_the_placed_list_selects_its_row() {
+    let theme = Theme::dark();
+    let mut combo = combo();
+    let field = Rect::new(0, 0, W, H);
+    let viewport = Rect::new(0, 0, 400, 400);
+    open_and_popup(&mut combo, &theme);
+    let popup = combo.popup_rect(field, viewport, Scale::ONE, &theme);
+
+    let y = popup.top() + xi(ROW_H) + xi(ROW_H / 2);
+    combo.on_pointer(&moved(40, y), field, popup, Scale::ONE, &theme, &mut sink());
+    combo.on_pointer(&PRESS, field, popup, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        combo.on_pointer(&RELEASE, field, popup, Scale::ONE, &theme, &mut sink()),
+        Some(ComboAction::Selected { index: 1 })
+    );
+}

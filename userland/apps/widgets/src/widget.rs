@@ -17,13 +17,32 @@ use tairix_controls::{
     BandCorner, Button, Card, Checkbox, ComboBox, Dialog, FieldAction, FieldControl, FieldGroup,
     FieldGroupAction, FieldLayout, HelpTip, IconButton, ListRow, Menu, Panel, Progress, Radio,
     ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider, SliderAction,
-    SplitButton, TableRow, TextField, Toggle, Toolbar, ToolbarOutcome, Tooltip, WindowControl,
+    SplitButton, TableRow, Tabs, TabsAction, TextField, Toggle, Toolbar, ToolbarOutcome, Tooltip,
+    WindowControl,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
+
+/// Where a demo widget is drawn and how.
+///
+/// One value rather than four loose parameters through every entry point: the
+/// widget's own rectangle, the whole client a popped-up choice list has to fit
+/// inside (which is the gallery's to know, not the widget's), the density, and
+/// the theme.
+#[derive(Copy, Clone, Debug)]
+pub struct DemoContext<'a> {
+    /// The widget's own rectangle.
+    pub rect: Rect,
+    /// The client a popped-up list must stay inside.
+    pub viewport: Rect,
+    /// The active UI density.
+    pub scale: Scale,
+    /// The active theme.
+    pub theme: &'a Theme,
+}
 
 /// One shared control shown in a gallery panel.
 ///
@@ -52,40 +71,13 @@ pub enum DemoWidget {
     Card(Card),
     Panel(Panel),
     FieldGroup(FieldGroup),
+    Sidebar(Tabs),
     Dialog(Dialog),
     Tooltip(Tooltip),
     HelpTip(HelpTip),
     Toolbar(Toolbar),
     ScrollBar(ScrollBar),
     WindowControl(WindowControl),
-}
-
-/// The popup rectangle a [`ComboBox`] expands into: directly below its field,
-/// sized by the control's own preferred popup size, so the field draw and the
-/// popup hit-test agree.
-fn combo_popup_rect(combo: &ComboBox, field: Rect, scale: Scale, theme: &Theme) -> Rect {
-    let (w, h) = combo.popup_size(field.width, scale, theme);
-    Rect::new(field.left(), field.bottom(), w, h)
-}
-
-/// The layout a [`FieldGroup`] is drawn with in `rect`: the slot column the
-/// group resolves for its own rows, and any expanded slot's choice list placed
-/// below the slot it belongs to.
-///
-/// The group names the row and slot to anchor the list to; placing it is the
-/// owner's, because only the owner knows the surface it has to fit in. Here
-/// that is the same rule a standalone drop-down is placed by.
-fn field_layout(group: &FieldGroup, rect: Rect, scale: Scale, theme: &Theme) -> FieldLayout {
-    let layout = FieldLayout::new(rect, group.slot_column(rect, scale, theme));
-    match group
-        .popup_anchor(layout, scale, theme)
-        .and_then(|(row, slot)| Some((group.rows().get(row)?.control(), slot)))
-    {
-        Some((FieldControl::Combo(combo), slot)) => {
-            layout.with_popup(combo_popup_rect(combo, slot, scale, theme))
-        }
-        _ => layout,
-    }
 }
 
 /// Commit a row's request into the control that made it, so the demo reacts
@@ -162,14 +154,8 @@ impl DemoWidget {
 
     /// Set (or clear) this widget's keyboard focus where it has one, at the
     /// `rect` the widget is rendered at.
-    pub fn set_focused(
-        &mut self,
-        focused: bool,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
+    pub fn set_focused(&mut self, focused: bool, ctx: DemoContext<'_>, damage: &mut Region) {
+        let (rect, scale, theme) = (ctx.rect, ctx.scale, ctx.theme);
         match self {
             DemoWidget::Button(w) => w.set_focused(focused),
             DemoWidget::IconButton(w) => w.set_focused(focused),
@@ -187,6 +173,7 @@ impl DemoWidget {
             // The gallery reports this item's whole rectangle when the ring
             // moves, and the highlighted row is drawn inside it.
             DemoWidget::Menu(w) => w.adopt_current(focused.then_some(0)),
+            DemoWidget::Sidebar(w) => w.adopt_current(focused.then_some(0)),
             DemoWidget::FieldGroup(w) => w.adopt_focus(focused.then_some(0)),
             DemoWidget::Toolbar(w) => {
                 w.set_focus(focused.then_some(0), rect, scale, theme, damage);
@@ -204,7 +191,11 @@ impl DemoWidget {
     }
 
     /// Draw the widget into `surface` at `rect` for the active theme.
-    pub fn render(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
+    ///
+    /// `viewport` is the whole client a popped-up choice list has to fit
+    /// inside, which is the gallery's to know rather than the widget's.
+    pub fn render(&self, surface: &mut Surface, ctx: DemoContext<'_>) {
+        let (rect, viewport, scale, theme) = (ctx.rect, ctx.viewport, ctx.scale, ctx.theme);
         match self {
             DemoWidget::Button(w) => w.render(surface, rect, scale, theme),
             // The gallery shows the built-in glyph: it is a control catalogue,
@@ -221,11 +212,12 @@ impl DemoWidget {
             DemoWidget::ComboBox(w) => {
                 w.render(surface, rect, scale, theme);
                 if w.is_expanded() {
-                    let popup = combo_popup_rect(w, rect, scale, theme);
+                    let popup = w.popup_rect(rect, viewport, scale, theme);
                     w.render_popup(surface, popup, scale, theme);
                 }
             }
             DemoWidget::Menu(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::Sidebar(w) => w.render(surface, rect, scale, theme, &mut NoArtwork),
             DemoWidget::ListRow(w) => w.render(surface, rect, scale, theme, None),
             DemoWidget::TableRow(w) => {
                 let columns = equal_columns(w.cells().len(), rect.width);
@@ -234,7 +226,7 @@ impl DemoWidget {
             DemoWidget::Card(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Panel(w) => w.render(surface, rect, scale, theme),
             DemoWidget::FieldGroup(w) => {
-                let layout = field_layout(w, rect, scale, theme);
+                let layout = w.layout(rect, viewport, scale, theme);
                 w.render(surface, layout, scale, theme);
                 w.render_popup(surface, layout.popup, scale, theme);
             }
@@ -257,36 +249,26 @@ impl DemoWidget {
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
+        ctx: DemoContext<'_>,
         damage: &mut Region,
     ) -> bool {
+        let (rect, viewport, scale, theme) = (ctx.rect, ctx.viewport, ctx.scale, ctx.theme);
         match self {
             DemoWidget::Button(w) => w.on_pointer(event, rect, damage).is_some(),
             DemoWidget::IconButton(w) => w.on_pointer(event, rect, damage).is_some(),
             DemoWidget::SplitButton(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
-            DemoWidget::Toggle(w) => match w.on_pointer(event, rect, damage) {
-                Some(SelectorAction::Set { on }) => {
-                    w.set_on(on);
-                    committed(rect, damage)
-                }
-                None => false,
-            },
-            DemoWidget::Checkbox(w) => match w.on_pointer(event, rect, damage) {
-                Some(SelectorAction::Set { on }) => {
-                    w.set_selection(selection_for(on));
-                    committed(rect, damage)
-                }
-                None => false,
-            },
-            DemoWidget::Radio(w) => match w.on_pointer(event, rect, damage) {
-                Some(SelectorAction::Set { on }) => {
-                    w.set_selected(on);
-                    committed(rect, damage)
-                }
-                None => false,
-            },
+            DemoWidget::Toggle(w) => {
+                let acted = w.on_pointer(event, rect, damage);
+                set_on(acted, rect, damage, |on| w.set_on(on))
+            }
+            DemoWidget::Checkbox(w) => {
+                let acted = w.on_pointer(event, rect, damage);
+                set_on(acted, rect, damage, |on| w.set_selection(selection_for(on)))
+            }
+            DemoWidget::Radio(w) => {
+                let acted = w.on_pointer(event, rect, damage);
+                set_on(acted, rect, damage, |on| w.set_selected(on))
+            }
             DemoWidget::Slider(w) => match w.on_pointer(event, rect, damage) {
                 // The gallery holds the value in memory and nothing else, so
                 // the live sample and the settle are the same acknowledgement.
@@ -300,11 +282,18 @@ impl DemoWidget {
             DemoWidget::TextField(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::SearchField(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::ComboBox(w) => {
-                let popup = combo_popup_rect(w, rect, scale, theme);
+                let popup = w.popup_rect(rect, viewport, scale, theme);
                 w.on_pointer(event, rect, popup, scale, theme, damage)
                     .is_some()
             }
             DemoWidget::Menu(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
+            DemoWidget::Sidebar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
+                Some(TabsAction::Selected { index }) => {
+                    w.set_selected(index, rect, scale, theme, damage);
+                    true
+                }
+                None => false,
+            },
             DemoWidget::ListRow(w) => match w.on_pointer(event, rect, damage) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
@@ -322,9 +311,18 @@ impl DemoWidget {
             DemoWidget::Card(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::Panel(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::FieldGroup(w) => {
-                let before = field_layout(w, rect, scale, theme);
+                let before = w.layout(rect, viewport, scale, theme);
                 let acted = w.on_pointer(event, before, scale, theme, damage);
-                field_popup_moved(w, before, rect, scale, theme, damage, acted.is_some());
+                field_popup_moved(
+                    w,
+                    before,
+                    rect,
+                    viewport,
+                    scale,
+                    theme,
+                    damage,
+                    acted.is_some(),
+                );
                 if let Some(action) = acted {
                     commit_field(w, action, rect, damage);
                     return true;
@@ -361,36 +359,26 @@ impl DemoWidget {
         &mut self,
         key: Key,
         modifiers: Modifiers,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
+        ctx: DemoContext<'_>,
         damage: &mut Region,
     ) -> bool {
+        let (rect, viewport, scale, theme) = (ctx.rect, ctx.viewport, ctx.scale, ctx.theme);
         match self {
             DemoWidget::Button(w) => w.on_key(key).is_some(),
             DemoWidget::IconButton(w) => w.on_key(key).is_some(),
             DemoWidget::SplitButton(w) => w.on_key(key).is_some(),
-            DemoWidget::Toggle(w) => match w.on_key(key) {
-                Some(SelectorAction::Set { on }) => {
-                    w.set_on(on);
-                    committed(rect, damage)
-                }
-                None => false,
-            },
-            DemoWidget::Checkbox(w) => match w.on_key(key) {
-                Some(SelectorAction::Set { on }) => {
-                    w.set_selection(selection_for(on));
-                    committed(rect, damage)
-                }
-                None => false,
-            },
-            DemoWidget::Radio(w) => match w.on_key(key) {
-                Some(SelectorAction::Set { on }) => {
-                    w.set_selected(on);
-                    committed(rect, damage)
-                }
-                None => false,
-            },
+            DemoWidget::Toggle(w) => {
+                let acted = w.on_key(key);
+                set_on(acted, rect, damage, |on| w.set_on(on))
+            }
+            DemoWidget::Checkbox(w) => {
+                let acted = w.on_key(key);
+                set_on(acted, rect, damage, |on| w.set_selection(selection_for(on)))
+            }
+            DemoWidget::Radio(w) => {
+                let acted = w.on_key(key);
+                set_on(acted, rect, damage, |on| w.set_selected(on))
+            }
             DemoWidget::Slider(w) => match w.on_key(key, rect, damage) {
                 Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
                     w.set_value(permille);
@@ -402,10 +390,17 @@ impl DemoWidget {
             DemoWidget::TextField(w) => w.on_key(key, modifiers, rect, damage).is_some(),
             DemoWidget::SearchField(w) => w.on_key(key, modifiers, rect, damage).is_some(),
             DemoWidget::ComboBox(w) => {
-                let popup = combo_popup_rect(w, rect, scale, theme);
+                let popup = w.popup_rect(rect, viewport, scale, theme);
                 w.on_key(key, rect, popup, scale, theme, damage).is_some()
             }
             DemoWidget::Menu(w) => w.on_key(key, rect, scale, theme, damage).is_some(),
+            DemoWidget::Sidebar(w) => match w.on_key(key, rect, scale, theme, damage) {
+                Some(TabsAction::Selected { index }) => {
+                    w.set_selected(index, rect, scale, theme, damage);
+                    true
+                }
+                None => false,
+            },
             DemoWidget::ListRow(w) => match w.on_key(key) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
@@ -423,9 +418,18 @@ impl DemoWidget {
             DemoWidget::Card(w) => w.on_key(key).is_some(),
             DemoWidget::Panel(w) => w.on_key(key).is_some(),
             DemoWidget::FieldGroup(w) => {
-                let before = field_layout(w, rect, scale, theme);
+                let before = w.layout(rect, viewport, scale, theme);
                 let acted = w.on_key(key, modifiers, before, scale, theme, damage);
-                field_popup_moved(w, before, rect, scale, theme, damage, acted.is_some());
+                field_popup_moved(
+                    w,
+                    before,
+                    rect,
+                    viewport,
+                    scale,
+                    theme,
+                    damage,
+                    acted.is_some(),
+                );
                 if let Some(action) = acted {
                     commit_field(w, action, rect, damage);
                     return true;
@@ -461,10 +465,12 @@ impl DemoWidget {
 /// a layout that had no list in it yet, the *close* from one that no longer
 /// does. Reporting both the list that was there and the one that is now covers
 /// either transition; an absent list is an empty rectangle and covers nothing.
+#[allow(clippy::too_many_arguments)] // The two layouts' inputs, threaded explicitly.
 fn field_popup_moved(
     group: &FieldGroup,
     before: FieldLayout,
     rect: Rect,
+    viewport: Rect,
     scale: Scale,
     theme: &Theme,
     damage: &mut Region,
@@ -473,10 +479,27 @@ fn field_popup_moved(
     if !acted {
         return;
     }
-    let after = field_layout(group, rect, scale, theme);
+    let after = group.layout(rect, viewport, scale, theme);
     if before.popup != after.popup {
         damage.add(before.popup);
         damage.add(after.popup);
+    }
+}
+
+/// Commit the boolean a selector asked for through `apply`, and report the
+/// control's own pixels — the shape all three boolean selectors share.
+fn set_on(
+    acted: Option<SelectorAction>,
+    rect: Rect,
+    damage: &mut Region,
+    mut apply: impl FnMut(bool),
+) -> bool {
+    match acted {
+        Some(SelectorAction::Set { on }) => {
+            apply(on);
+            committed(rect, damage)
+        }
+        None => false,
     }
 }
 

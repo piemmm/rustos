@@ -1021,7 +1021,13 @@ const EVERY_FAMILY: &[Family] = &[
         TraySignal::new(IconKind::Network, "net0").render_readout(sf, b, s, th);
     }),
     ("Tabs", SEAT, |sf, b, s, th| {
-        Tabs::new(alloc::vec![Tab::new("Tasks"), Tab::new("Resources")]).render(sf, b, s, th);
+        Tabs::new(alloc::vec![Tab::new("Tasks"), Tab::new("Resources")]).render(
+            sf,
+            b,
+            s,
+            th,
+            &mut tairix_icon::NoArtwork,
+        );
     }),
     ("TextField", SEAT, |sf, b, s, th| {
         TextField::new().render(sf, b, s, th);

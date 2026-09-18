@@ -12,7 +12,7 @@ use core::mem;
 use tairix_abi::ProcId;
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Region, Scale};
-use tairix_icon::IconArtwork;
+use tairix_icon::{IconArtwork, NoArtwork};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, Theme};
@@ -558,7 +558,7 @@ impl RecoverySection {
             detail_facts(item).render(surface, inner, ctx.scale, ctx.theme);
         }
         self.pages
-            .render(surface, layout.pages, ctx.scale, ctx.theme);
+            .render(surface, layout.pages, ctx.scale, ctx.theme, &mut NoArtwork);
         self.render_page(surface, item, layout.body, ctx);
     }
 

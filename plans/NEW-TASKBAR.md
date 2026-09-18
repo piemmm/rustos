@@ -1388,6 +1388,7 @@ no authority: each row reports a typed outcome and the session resolves it.
 | System Monitor | session → Switchboard `Tasks` | the T11 open panel |
 | Task Shell | session → launch `os.tairix.terminal` | the graphical terminal bundle |
 | — | | |
+| Settings… | session → launch `os.tairix.settings` | the settings bundle (`plans/NEW-DESKTOP-SETTINGS.md`) |
 | Light / Dark Appearance | session `ThemeRegistry::set_theme` | §10; the active one is the group's chosen member — a bullet, disabled, with its reason |
 | — | | |
 | Lock Screen | session `ScreenLock` → `ElevateRequest::Verify` | the per-console elevation broker |
@@ -1413,6 +1414,10 @@ no authority: each row reports a typed outcome and the session resolves it.
   stated reason rather than emitting a launch that would fail.
 - **Lock heads the last group.** It is the one way out of the session that
   *keeps* the session; everything below it ends work in progress.
+- **Settings heads the appearance group.** It is the general form of the two
+  rows beneath it — everything either of them does, and the rest of the
+  machine's configuration besides — and it maps onto the bar's *existing*
+  launch response, so the session gains no second path to a program.
 - **A lock that could not be undone is never offered.** `SystemPermits`
   carries `lock_available`, which the bar fills from the one console
   attestation `set_elevation_available` — the session's single
@@ -1439,10 +1444,6 @@ act must not exist, so these are absent rather than present-but-dead:
 - **Permissions** — there is no graphical capability-inspection surface, and
   `cap_query` answers only about the caller itself. It needs a real
   permissions view before it can have a menu row.
-- **Configure** — `configure` is a console command app; with no argv-passing
-  launch path the desktop cannot run it in a window, and a settings *surface*
-  is separate work. System Settings therefore remains reached from the shell
-  until that surface exists; it is still **not** a program-library folder.
 
 **The lock surface** (`userland/gui/session/src/lock.rs`, `ScreenLock`).
 Locking is the one way out of a session that keeps the session: everything

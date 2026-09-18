@@ -58,7 +58,20 @@ screen's own section list beside a location breadcrumb,
 Tasks section names its commands with — `Job` (an hourglass, for queued or
 background work), `TaskSwitch` (an arrow entering a window body),
 `Reveal` (the window frame itself), `Pause`, `Resume`, `Priority` (a
-downward arrow) and `Quit` (a cross) — and a `Generic` fallback diamond.
+downward arrow) and `Quit` (a cross), the settings categories each sidebar
+row of [Settings](settings.md) is found by without reading — `Settings` (a
+cog), `Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`,
+`Power`, `Bluetooth`, `Sound`, `Notifications`, `Keyboard`, `Mouse`,
+`Trackpad`, `Touchscreen`, `Printer`, `Accessibility`, `Language`, `Sharing`,
+`Users` (two busts, beside the single `User` bust that stands for one
+account) and `Storage` (stacked media, beside the `Disk` family that stands
+for one drive) — and a `Generic` fallback diamond.
+
+Two of those categories share the artwork of the reading they stand beside,
+because they *are* the same mark: `Sound` draws `Volume`'s speaker and
+`Notifications` draws `Bell`'s bell. Each still has its own asset slot, so a
+theme may give the settings category different artwork from the tray's
+reading without either inheriting the other's.
 `IconKind::for_asset` resolves a theme asset identifier to a kind and
 falls back to `Generic` for an unrecognised id, so an unexpected notification
 still draws a placeholder instead of nothing (`AGENTS.md` §2.9).

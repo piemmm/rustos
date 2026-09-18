@@ -1,0 +1,772 @@
+//! The pane registry: the closed [`Category`] and [`Pane`] sets, and the one
+//! ordered [`CATEGORIES`] table that defines the whole surface.
+//!
+//! The table is the single definition of the sidebar strip, the search index,
+//! the location trail, the keyboard cursor, and which renderer a pane gets. A
+//! pane cannot exist without a row, or a row without a pane — the registry's
+//! own tests hold both directions — so adding a category is adding a row and
+//! a renderer, never editing the shell.
+//!
+//! Each pane also declares what backs it, because a settings surface that
+//! cannot say why a category is empty is a surface that lies about the
+//! machine. [`PaneBacking`] is that statement, and the two variants are two
+//! different facts to a reader: nothing in this system can serve the pane at
+//! all, or the readings and writes exist and this surface does not yet
+//! compose them, in which case the row says where the setting is reached.
+
+use alloc::vec::Vec;
+
+use tairix_icon::IconKind;
+
+/// One top-level entry of the sidebar: a group of related settings.
+///
+/// Closed: every variant has exactly one [`CATEGORIES`] row, and the strip,
+/// the trail and the search index are all derived from that row.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Category {
+    /// What this system is, and how it starts.
+    General,
+    /// The desktop's light and dark appearance.
+    Appearance,
+    /// The desktop backdrop and its icon arrangement.
+    Wallpaper,
+    /// The attached screens.
+    Displays,
+    /// When the screen locks.
+    LockScreen,
+    /// What the screen shows once it is idle.
+    Screensaver,
+    /// The machine's power behaviour.
+    Power,
+    /// Interfaces, addressing and name resolution.
+    Networking,
+    /// Short-range radio devices.
+    Bluetooth,
+    /// Audio output and input.
+    Sound,
+    /// Which notifications reach the desktop.
+    Notifications,
+    /// Key layout and repeat.
+    Keyboard,
+    /// Pointer behaviour.
+    Mouse,
+    /// Touchpad behaviour.
+    Trackpad,
+    /// Touch input.
+    Touchscreen,
+    /// Printing and scanning.
+    Printers,
+    /// Contrast, density, motion, scale and cursor size.
+    Accessibility,
+    /// Language, region and civil time.
+    Language,
+    /// What this machine offers to others.
+    Sharing,
+    /// Accounts and groups.
+    Users,
+    /// The mounted volumes and how full they are.
+    Storage,
+}
+
+/// One pane: the settings a single column of groups shows.
+///
+/// A category with one pane shares its name; a category with several names
+/// each of them, and the sidebar discloses them beneath their category.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Pane {
+    /// What this system is: identity, version, uptime, processors, memory.
+    About,
+    /// Whether this system starts at a text login or a graphical one.
+    LoginStartup,
+    /// How much memory this system may keep as caches.
+    Caching,
+    /// The wall clock and where it is set from.
+    DateTime,
+    /// The light and dark appearance and the desktop's visual density.
+    Appearance,
+    /// The desktop picture and the pinboard's arrangement.
+    Wallpaper,
+    /// The attached screens' modes, arrangement and scale.
+    Displays,
+    /// When the screen locks, and locking it now.
+    LockScreen,
+    /// What the screen shows once it is idle.
+    Screensaver,
+    /// Battery, sleep and thermal behaviour.
+    Power,
+    /// Each wired interface's state and addressing.
+    Ethernet,
+    /// Wireless networks.
+    WiFi,
+    /// The name servers this system resolves through.
+    Dns,
+    /// The stack-wide protocol options.
+    TcpIp,
+    /// Paired short-range radio devices.
+    Bluetooth,
+    /// Output and input levels and devices.
+    Sound,
+    /// Which sources may notify, and how loudly.
+    Notifications,
+    /// Key layout, repeat and shortcuts.
+    Keyboard,
+    /// Button order, speed and the double-click interval.
+    Mouse,
+    /// Touchpad gestures and sensitivity.
+    Trackpad,
+    /// Touch calibration and gestures.
+    Touchscreen,
+    /// Printers, print queues and scanners.
+    Printers,
+    /// Contrast, density, motion, scale and cursor size.
+    Accessibility,
+    /// Language, region and time zone.
+    Language,
+    /// File, screen and remote-access sharing.
+    Sharing,
+    /// Accounts, groups and their grants.
+    Users,
+    /// Each mounted volume and how full it is.
+    Storage,
+}
+
+/// What backs a pane, and therefore what it draws.
+///
+/// Neither variant is a control that would change nothing: a pane states the
+/// truth about the machine and offers what it actually has.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PaneBacking {
+    /// Nothing in this system can serve the pane at all: what is missing, and
+    /// what would have to exist for the pane to have anything to show.
+    None {
+        /// What this system does not have, stated plainly.
+        missing: &'static str,
+        /// What would have to exist before the pane can show anything.
+        needs: &'static str,
+    },
+    /// The readings and writes exist, and this surface does not yet compose
+    /// them into controls.
+    Elsewhere {
+        /// What the pane will show once it composes them.
+        shows: &'static str,
+        /// Where the setting is read or set today, so the reader is not left
+        /// looking for a surface that does not exist.
+        elsewhere: &'static str,
+    },
+}
+
+/// One pane's registry row.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PaneRow {
+    /// Which pane this row is.
+    pub pane: Pane,
+    /// The pane's own title: the trailing crumb of the location trail, and the
+    /// sidebar label of a disclosed pane. Equal to its category's label for a
+    /// category that holds one pane.
+    pub title: &'static str,
+    /// What backs the pane.
+    pub backing: PaneBacking,
+    /// The setting labels this pane shows, which is the whole search index
+    /// under it. A pane that composes no controls declares none, so a
+    /// searchable setting cannot exist without a row that shows it.
+    pub settings: &'static [&'static str],
+}
+
+/// One category's registry row.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CategoryRow {
+    /// Which category this row is.
+    pub category: Category,
+    /// The sidebar label and the middle crumb of the location trail.
+    pub label: &'static str,
+    /// The glyph the sidebar row draws. Every kind carries a first-party
+    /// built-in glyph, so a sidebar row can never blank.
+    pub icon: IconKind,
+    /// The category's panes, in sidebar order. Never empty.
+    pub panes: &'static [PaneRow],
+}
+
+impl CategoryRow {
+    /// Whether the sidebar discloses this category's panes as rows of their
+    /// own, which it does exactly when there is more than one to tell apart.
+    #[must_use]
+    pub const fn discloses(&self) -> bool {
+        self.panes.len() > 1
+    }
+
+    /// The pane the category opens on: its first.
+    #[must_use]
+    pub fn first_pane(&self) -> Option<&'static PaneRow> {
+        self.panes.first()
+    }
+}
+
+impl Category {
+    /// This category's registry row, or `None` for a category the table does
+    /// not list — which the registry's totality test rules out.
+    #[must_use]
+    pub fn row(self) -> Option<&'static CategoryRow> {
+        CATEGORIES.iter().find(|row| row.category == self)
+    }
+}
+
+impl Pane {
+    /// The category that holds this pane, and its row.
+    #[must_use]
+    pub fn locate(self) -> Option<(Category, &'static PaneRow)> {
+        CATEGORIES.iter().find_map(|row| {
+            row.panes
+                .iter()
+                .find(|pane| pane.pane == self)
+                .map(|pane| (row.category, pane))
+        })
+    }
+}
+
+/// Where the surface is: a category and one of its panes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Location {
+    /// The open category.
+    pub category: Category,
+    /// The pane on show, which is one of that category's.
+    pub pane: Pane,
+}
+
+impl Location {
+    /// The location the surface opens on: the first pane of the first
+    /// category, or `None` for an empty table — which the registry's own test
+    /// rules out.
+    #[must_use]
+    pub fn opening() -> Option<Self> {
+        let row = CATEGORIES.first()?;
+        Some(Self {
+            category: row.category,
+            pane: row.first_pane()?.pane,
+        })
+    }
+
+    /// The category and pane rows this location names, or `None` when the
+    /// pane does not belong to the category (fail closed — the caller draws
+    /// nothing rather than guessing at a pane).
+    #[must_use]
+    pub fn rows(self) -> Option<(&'static CategoryRow, &'static PaneRow)> {
+        let category = self.category.row()?;
+        let pane = category.panes.iter().find(|row| row.pane == self.pane)?;
+        Some((category, pane))
+    }
+}
+
+/// One row of the sidebar strip: a category, or one of its disclosed panes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum StripRow {
+    /// A category's own row. Choosing it opens the category on its first pane.
+    Category(Category),
+    /// A disclosed pane of the category above it. Choosing it shows the pane.
+    Pane(Category, Pane),
+}
+
+impl StripRow {
+    /// The location choosing this row goes to, or `None` for a row the table
+    /// no longer holds.
+    #[must_use]
+    pub fn location(self) -> Option<Location> {
+        match self {
+            Self::Category(category) => Some(Location {
+                category,
+                pane: category.row()?.first_pane()?.pane,
+            }),
+            Self::Pane(category, pane) => Some(Location { category, pane }),
+        }
+    }
+}
+
+/// The strip's rows for an `open` category and a search `query`.
+///
+/// With no query the strip is every category, and the open category's panes
+/// disclosed beneath it. With a query it is every category the query reaches —
+/// by its own label, by a pane's title, or by a setting label a pane declares
+/// — with the panes that matched disclosed beneath their category, so a
+/// matched setting is always reachable in one press. A query that reaches
+/// nothing yields no rows, which is the honest answer.
+#[must_use]
+pub fn strip_rows(open: Category, query: &str) -> Vec<StripRow> {
+    let mut rows = Vec::with_capacity(CATEGORIES.len());
+    for row in CATEGORIES {
+        if query.is_empty() {
+            rows.push(StripRow::Category(row.category));
+            if row.discloses() && row.category == open {
+                rows.extend(
+                    row.panes
+                        .iter()
+                        .map(|pane| StripRow::Pane(row.category, pane.pane)),
+                );
+            }
+            continue;
+        }
+        let label_hit = contains_fold(row.label, query);
+        let matched: Vec<&PaneRow> = row
+            .panes
+            .iter()
+            .filter(|pane| pane_matches(pane, query))
+            .collect();
+        if !label_hit && matched.is_empty() {
+            continue;
+        }
+        rows.push(StripRow::Category(row.category));
+        if !row.discloses() {
+            continue;
+        }
+        // A category reached only by its own label offers every pane, because
+        // the reader has not said which; one reached through its panes offers
+        // exactly those.
+        if matched.is_empty() {
+            rows.extend(
+                row.panes
+                    .iter()
+                    .map(|pane| StripRow::Pane(row.category, pane.pane)),
+            );
+        } else {
+            rows.extend(
+                matched
+                    .iter()
+                    .map(|pane| StripRow::Pane(row.category, pane.pane)),
+            );
+        }
+    }
+    rows
+}
+
+/// Whether `query` reaches `pane`: its title, or any setting label it shows.
+fn pane_matches(pane: &PaneRow, query: &str) -> bool {
+    contains_fold(pane.title, query)
+        || pane
+            .settings
+            .iter()
+            .any(|setting| contains_fold(setting, query))
+}
+
+/// Whether `haystack` contains `needle`, comparing ASCII letters without
+/// regard to case.
+///
+/// Case folding beyond ASCII would need a table this surface has no business
+/// carrying, so the comparison is byte-wise over ASCII and exact elsewhere;
+/// every label in the table is ASCII.
+fn contains_fold(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    let hay = haystack.as_bytes();
+    hay.len() >= needle.len()
+        && (0..=hay.len() - needle.len()).any(|start| {
+            hay[start..start + needle.len()]
+                .iter()
+                .zip(needle)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
+}
+
+/// Every category, in sidebar order, with its panes.
+///
+/// The single definition of the whole surface. The order is the reading order
+/// the desktop presents: what the system is, then how it looks, then the
+/// screen, then the machine's own behaviour, then its connections, then how it
+/// is driven, then who uses it and what it holds.
+pub const CATEGORIES: &[CategoryRow] = &[
+    CategoryRow {
+        category: Category::General,
+        label: "General",
+        icon: IconKind::Settings,
+        panes: &[
+            PaneRow {
+                pane: Pane::About,
+                title: "About",
+                backing: PaneBacking::Elsewhere {
+                    shows: "What this system is: its name, its version, how long it has been \
+                            running, and its processors and memory.",
+                    elsewhere: "Reported by the `sysinfo` command, and by the Switchboard's \
+                                Resources section.",
+                },
+                settings: &[],
+            },
+            PaneRow {
+                pane: Pane::LoginStartup,
+                title: "Login & startup",
+                backing: PaneBacking::Elsewhere {
+                    shows: "Whether this system starts at a text login or a graphical one.",
+                    elsewhere: "Set with the `configure` command, by an account that may write \
+                                the system configuration.",
+                },
+                settings: &[],
+            },
+            PaneRow {
+                pane: Pane::Caching,
+                title: "Caching",
+                backing: PaneBacking::Elsewhere {
+                    shows: "How much memory this system may keep as caches, and which caches it \
+                            keeps.",
+                    elsewhere: "Set with the `configure` command, by an account that may write \
+                                the system configuration.",
+                },
+                settings: &[],
+            },
+            PaneRow {
+                pane: Pane::DateTime,
+                title: "Date & Time",
+                backing: PaneBacking::Elsewhere {
+                    shows: "The wall clock, and whether it is set from the network.",
+                    elsewhere: "Set from the desktop clock's Set Date & Time row, which asks for \
+                                the password of an account that may set the clock.",
+                },
+                settings: &[],
+            },
+        ],
+    },
+    CategoryRow {
+        category: Category::Appearance,
+        label: "Appearance",
+        icon: IconKind::Appearance,
+        panes: &[PaneRow {
+            pane: Pane::Appearance,
+            title: "Appearance",
+            backing: PaneBacking::Elsewhere {
+                shows: "The light and dark appearance, and the desktop's contrast, density and \
+                        motion.",
+                elsewhere: "The light and dark appearance is chosen from the icon bar's system \
+                            menu. This desktop keeps no contrast, density or motion setting yet.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Wallpaper,
+        label: "Wallpaper",
+        icon: IconKind::Wallpaper,
+        panes: &[PaneRow {
+            pane: Pane::Wallpaper,
+            title: "Wallpaper",
+            backing: PaneBacking::Elsewhere {
+                shows: "The desktop picture, how it is placed on the screen, and how the \
+                        desktop's own icons are arranged.",
+                elsewhere: "Chosen from the desktop backdrop's Change Background row.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Displays,
+        label: "Displays",
+        icon: IconKind::Display,
+        panes: &[PaneRow {
+            pane: Pane::Displays,
+            title: "Displays",
+            backing: PaneBacking::None {
+                missing: "This system cannot change how a screen is driven: the display \
+                          interface can be asked what a screen is doing and told to present to \
+                          it, but it lists no modes and sets none. Nothing sets the interface \
+                          scale either.",
+                needs: "Mode enumeration and mode setting in the display interface, with driver \
+                        support behind them.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::LockScreen,
+        label: "Lock Screen",
+        icon: IconKind::LockScreen,
+        panes: &[PaneRow {
+            pane: Pane::LockScreen,
+            title: "Lock Screen",
+            backing: PaneBacking::None {
+                missing: "This desktop keeps no idle time, so there is no moment for it to lock \
+                          the screen after. Locking it now is on the icon bar's system menu, and \
+                          unlocking always asks for this account's password.",
+                needs: "An idle deadline in the desktop session.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Screensaver,
+        label: "Screensaver",
+        icon: IconKind::Screensaver,
+        panes: &[PaneRow {
+            pane: Pane::Screensaver,
+            title: "Screensaver",
+            backing: PaneBacking::None {
+                missing: "This desktop keeps no idle time, so there is no moment for it to blank \
+                          or cover the screen after.",
+                needs: "An idle deadline in the desktop session.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Power,
+        label: "Power",
+        icon: IconKind::Power,
+        panes: &[PaneRow {
+            pane: Pane::Power,
+            title: "Power",
+            backing: PaneBacking::None {
+                missing: "This system reads no power supply, battery or temperature, and has no \
+                          driver that could report one. Restarting and shutting down are on the \
+                          icon bar's system menu.",
+                needs: "A sensor interface, a driver to serve it, and a firmware sleep path.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Networking,
+        label: "Networking",
+        icon: IconKind::Network,
+        panes: &[
+            PaneRow {
+                pane: Pane::Ethernet,
+                title: "Ethernet",
+                backing: PaneBacking::Elsewhere {
+                    shows: "Each wired interface's link state, addresses and throughput, and how \
+                            it is addressed.",
+                    elsewhere: "Interface state is reported by the Switchboard's Network \
+                                section. Addressing is written when this system is installed.",
+                },
+                settings: &[],
+            },
+            PaneRow {
+                pane: Pane::WiFi,
+                title: "Wi-Fi",
+                backing: PaneBacking::None {
+                    missing: "This system has no wireless driver, nothing that could join a \
+                              network, and no way to describe one.",
+                    needs: "An 802.11 driver and a supplicant service.",
+                },
+                settings: &[],
+            },
+            PaneRow {
+                pane: Pane::Dns,
+                title: "DNS",
+                backing: PaneBacking::Elsewhere {
+                    shows: "The name servers this system resolves through.",
+                    elsewhere: "Reported by the Switchboard's Network section. Written when this \
+                                system is installed.",
+                },
+                settings: &[],
+            },
+            PaneRow {
+                pane: Pane::TcpIp,
+                title: "TCP/IP",
+                backing: PaneBacking::Elsewhere {
+                    shows: "Whether IPv4 and IPv6 are enabled, and the options the whole stack \
+                            shares.",
+                    elsewhere: "Set with the `configure` command, by an account that may write \
+                                the system configuration.",
+                },
+                settings: &[],
+            },
+        ],
+    },
+    CategoryRow {
+        category: Category::Bluetooth,
+        label: "Bluetooth",
+        icon: IconKind::Bluetooth,
+        panes: &[PaneRow {
+            pane: Pane::Bluetooth,
+            title: "Bluetooth",
+            backing: PaneBacking::None {
+                missing: "This system has no Bluetooth support at all: nothing to reach a radio \
+                          through, nothing to speak the protocol, and nowhere to remember a \
+                          paired device.",
+                needs: "A host-controller transport, a host stack, and a pairing store.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Sound,
+        label: "Sound",
+        icon: IconKind::Sound,
+        panes: &[PaneRow {
+            pane: Pane::Sound,
+            title: "Sound",
+            backing: PaneBacking::None {
+                missing: "This system has no audio support at all: no sound-device driver, \
+                          nothing to mix what programs play, and no way for a program to ask to \
+                          play anything.",
+                needs: "An audio driver class, a mixer service, and an audio interface for \
+                        programs to reach it through.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Notifications,
+        label: "Notifications",
+        icon: IconKind::Notifications,
+        panes: &[PaneRow {
+            pane: Pane::Notifications,
+            title: "Notifications",
+            backing: PaneBacking::None {
+                missing: "The desktop shows notifications but keeps no policy for them, so there \
+                          is nothing here to allow or refuse.",
+                needs: "A per-source notification policy in the desktop session.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Keyboard,
+        label: "Keyboard",
+        icon: IconKind::Keyboard,
+        panes: &[PaneRow {
+            pane: Pane::Keyboard,
+            title: "Keyboard",
+            backing: PaneBacking::None {
+                missing: "This system has one built-in key layout, keeps no key-repeat setting, \
+                          and holds no list of the desktop's shortcuts.",
+                needs: "A key-layout registry, a key-repeat policy in the desktop session, and a \
+                        desktop-wide shortcut registry.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Mouse,
+        label: "Mouse",
+        icon: IconKind::Mouse,
+        panes: &[PaneRow {
+            pane: Pane::Mouse,
+            title: "Mouse",
+            backing: PaneBacking::None {
+                missing: "The desktop keeps no pointer policy, so there is no button order, no \
+                          speed and no double-click interval to set.",
+                needs: "A pointer policy in the desktop session.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Trackpad,
+        label: "Trackpad",
+        icon: IconKind::Trackpad,
+        panes: &[PaneRow {
+            pane: Pane::Trackpad,
+            title: "Trackpad",
+            backing: PaneBacking::None {
+                missing: "This system has no touchpad driver: the shared input decode \
+                          understands a plain mouse and nothing else.",
+                needs: "A multi-touch input driver.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Touchscreen,
+        label: "Touchscreen",
+        icon: IconKind::Touchscreen,
+        panes: &[PaneRow {
+            pane: Pane::Touchscreen,
+            title: "Touchscreen",
+            backing: PaneBacking::None {
+                missing: "No touch reaches the desktop: there is no touch driver, and the shared \
+                          input vocabulary has no touch event to carry one.",
+                needs: "A multi-touch input driver, and a touch event in the shared input \
+                        vocabulary.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Printers,
+        label: "Printers & Scanners",
+        icon: IconKind::Printer,
+        panes: &[PaneRow {
+            pane: Pane::Printers,
+            title: "Printers & Scanners",
+            backing: PaneBacking::None {
+                missing: "This system cannot print or scan: there is nothing to hold a print \
+                          queue, no way for a program to ask to scan, and no driver class for \
+                          either.",
+                needs: "A print spooler, a scanning interface, and a driver class for both.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Accessibility,
+        label: "Accessibility",
+        icon: IconKind::Accessibility,
+        panes: &[PaneRow {
+            pane: Pane::Accessibility,
+            title: "Accessibility",
+            backing: PaneBacking::None {
+                missing: "The desktop keeps no accessibility settings, so its contrast, density, \
+                          motion, interface scale and cursor size are all fixed as shipped.",
+                needs: "An appearance registry in the desktop session.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Language,
+        label: "Language & Region",
+        icon: IconKind::Language,
+        panes: &[PaneRow {
+            pane: Pane::Language,
+            title: "Language & Region",
+            backing: PaneBacking::None {
+                missing: "This system ships its help in several languages but keeps no language, \
+                          region or time-zone setting, and holds no civil time-zone data.",
+                needs: "A language and region setting, and a compiled time-zone store.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Sharing,
+        label: "Sharing",
+        icon: IconKind::Sharing,
+        panes: &[PaneRow {
+            pane: Pane::Sharing,
+            title: "Sharing",
+            backing: PaneBacking::None {
+                missing: "This system offers nothing to other machines: it runs no file server, \
+                          no remote-screen server, and no web server.",
+                needs: "A sharing service for each thing a machine may offer.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Users,
+        label: "Users & Groups",
+        icon: IconKind::Users,
+        panes: &[PaneRow {
+            pane: Pane::Users,
+            title: "Users & Groups",
+            backing: PaneBacking::Elsewhere {
+                shows: "Every account on this system, its groups, and what it is allowed to do.",
+                elsewhere: "Listed by the `users` command; an account is created with `useradd` \
+                            by an account that may administer users.",
+            },
+            settings: &[],
+        }],
+    },
+    CategoryRow {
+        category: Category::Storage,
+        label: "Storage",
+        icon: IconKind::Storage,
+        panes: &[PaneRow {
+            pane: Pane::Storage,
+            title: "Storage",
+            backing: PaneBacking::Elsewhere {
+                shows: "Each mounted volume: its label, its filesystem, how full it is, and \
+                        whether it is healthy.",
+                elsewhere: "Reported by the `df` command, and by the Switchboard's System \
+                            section.",
+            },
+            settings: &[],
+        }],
+    },
+];

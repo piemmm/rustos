@@ -1002,6 +1002,38 @@ impl FieldGroup {
         Some((index, slot))
     }
 
+    /// The layout this group is drawn with in `bounds`, inside `viewport`:
+    /// the slot column its rows line up in, and an expanded slot's choice
+    /// list placed where it fits.
+    ///
+    /// The ready-made application of [`slot_column`](Self::slot_column),
+    /// [`popup_anchor`](Self::popup_anchor) and
+    /// [`FieldLayout::with_popup`]: an owner that lays its groups out
+    /// independently hands in the surface the list has to fit in and gets the
+    /// whole layout back, rather than each owner carrying the same three
+    /// calls. An owner that shares one column across several groups resolves
+    /// the widest itself and places the list through those pieces instead.
+    #[must_use]
+    pub fn layout(&self, bounds: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> FieldLayout {
+        let layout = FieldLayout::new(bounds, self.slot_column(bounds, scale, theme));
+        let placed = self
+            .popup_anchor(layout, scale, theme)
+            .and_then(|(row, slot)| match self.rows.get(row)?.control() {
+                FieldControl::Combo(combo) => Some(combo.popup_rect(slot, viewport, scale, theme)),
+                // Every other slot control draws wholly inside its own row.
+                FieldControl::Toggle(_)
+                | FieldControl::Slider(_)
+                | FieldControl::Text(_)
+                | FieldControl::Button(_)
+                | FieldControl::Reading(_)
+                | FieldControl::Unmeasured(_) => None,
+            });
+        match placed {
+            Some(popup) => layout.with_popup(popup),
+            None => layout,
+        }
+    }
+
     /// Paint the group into `surface` for `layout`: its plate, its caption,
     /// every whole row that fits, and its footnote.
     ///

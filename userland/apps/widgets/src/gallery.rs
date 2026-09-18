@@ -16,12 +16,13 @@ use alloc::vec::Vec;
 use tairix_controls::{damage, Tab, Tabs, TabsAction};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::panels;
-use crate::widget::DemoWidget;
+use crate::widget::{DemoContext, DemoWidget};
 
 /// One control family, shown on its own tab.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -132,6 +133,20 @@ impl DemoItem {
 
 /// The logical width of a panel's left caption column, in reference pixels.
 const CAPTION_WIDTH: u32 = 168;
+
+/// Where and how one demo widget is drawn, assembled from what the gallery
+/// already holds.
+///
+/// A focus mark draws wholly inside its widget's own rectangle, so the
+/// focus path passes an empty viewport: it opens no list that would need one.
+fn ctx(rect: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> DemoContext<'_> {
+    DemoContext {
+        rect,
+        viewport,
+        scale,
+        theme,
+    }
+}
 
 /// Which region of the gallery currently holds keyboard focus.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -275,7 +290,10 @@ impl Gallery {
             Color::from(palette.surface),
         );
         let (tabs_rect, content) = Self::layout(viewport, scale, theme);
-        self.tabs.render(surface, tabs_rect, scale, theme);
+        // The gallery shows the built-in glyph: it is a control catalogue, not
+        // an application with icon artwork of its own to supply.
+        self.tabs
+            .render(surface, tabs_rect, scale, theme, &mut NoArtwork);
 
         let rects = self.item_rects(content, scale, theme);
         let glyph_h = font.glyph_height();
@@ -294,7 +312,8 @@ impl Gallery {
                 text,
                 Color::from(palette.on_surface),
             );
-            item.widget.render(surface, *rect, scale, theme);
+            item.widget
+                .render(surface, ctx(*rect, viewport, scale, theme));
         }
     }
 
@@ -344,7 +363,9 @@ impl Gallery {
                 self.panels[self.current.index()].get_mut(idx),
                 rects.get(idx),
             ) {
-                let changed = item.widget.on_pointer(event, *rect, scale, theme, damage);
+                let changed =
+                    item.widget
+                        .on_pointer(event, ctx(*rect, viewport, scale, theme), damage);
                 if changed {
                     self.enforce_radio_group(idx, &rects, damage);
                 }
@@ -386,9 +407,12 @@ impl Gallery {
             Focus::Item(idx) => {
                 let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
                 if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
-                    let changed = item
-                        .widget
-                        .on_key(key, modifiers, rect, scale, theme, damage);
+                    let changed = item.widget.on_key(
+                        key,
+                        modifiers,
+                        ctx(rect, viewport, scale, theme),
+                        damage,
+                    );
                     if changed {
                         self.enforce_radio_group(idx, &rects, damage);
                     }
@@ -452,7 +476,8 @@ impl Gallery {
         );
         for (idx, item) in self.panels[self.current.index()].iter_mut().enumerate() {
             let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
-            item.widget.set_focused(false, rect, scale, theme, damage);
+            item.widget
+                .set_focused(false, ctx(rect, Rect::EMPTY, scale, theme), damage);
         }
         self.tabs.set_current(None, tabs, scale, theme, damage);
         self.focus = focus;
@@ -464,7 +489,8 @@ impl Gallery {
             Focus::Item(idx) => {
                 let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
                 if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
-                    item.widget.set_focused(true, rect, scale, theme, damage);
+                    item.widget
+                        .set_focused(true, ctx(rect, Rect::EMPTY, scale, theme), damage);
                 }
             }
         }

@@ -2378,7 +2378,7 @@ pub fn draw_properties_window(
         }
         PropertiesFrame::Ready(props) => props,
     };
-    properties_tabs(view.tab).render(surface, layout.tabs, scale, theme);
+    properties_tabs(view.tab).render(surface, layout.tabs, scale, theme, artwork);
     let Some(body) = layout.body else {
         return;
     };

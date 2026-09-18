@@ -240,6 +240,7 @@ members = [
     "userland/apps/sapper",
     "userland/apps/seq",
     "userland/apps/setcap",
+    "userland/apps/settings",
     "userland/apps/sleep",
     "userland/apps/ss",
     "userland/apps/stat",

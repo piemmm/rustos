@@ -178,6 +178,48 @@ pub enum IconKind {
     /// An `i` in a ring, for showing what is known about the thing on
     /// display.
     Info,
+    /// A cog, for the desktop's settings surface and its General category.
+    Settings,
+    /// A half-filled ring, for the appearance (light/dark, contrast) category.
+    Appearance,
+    /// A framed landscape, for the desktop-backdrop category.
+    Wallpaper,
+    /// A monitor on a stand, for the attached-displays category.
+    Display,
+    /// A padlock, for the screen-lock category.
+    LockScreen,
+    /// A crescent moon, for the screensaver category.
+    Screensaver,
+    /// The power symbol, for the machine's power category.
+    Power,
+    /// The Bluetooth rune, for the short-range-radio category.
+    Bluetooth,
+    /// A speaker, for the audio category; shares the volume glyph.
+    Sound,
+    /// A bell, for the notification-policy category; shares the bell glyph.
+    Notifications,
+    /// A key bank, for the keyboard category.
+    Keyboard,
+    /// A mouse body and wheel, for the pointing-device category.
+    Mouse,
+    /// A pad under a fingertip, for the trackpad category.
+    Trackpad,
+    /// A finger on an upright screen, for the touch-input category.
+    Touchscreen,
+    /// A printer with a sheet through it, for the print and scan category.
+    Printer,
+    /// A figure with arms out in a ring, for the accessibility category.
+    Accessibility,
+    /// A globe, for the language and region category.
+    Language,
+    /// Joined nodes, for the file- and screen-sharing category.
+    Sharing,
+    /// Two busts, for the accounts and groups category, beside the single
+    /// [`User`](Self::User) bust that stands for one account.
+    Users,
+    /// Stacked media, for the storage category, beside the
+    /// [`Disk`](Self::Disk) family that stands for one drive.
+    Storage,
 }
 
 impl IconKind {
@@ -242,6 +284,26 @@ impl IconKind {
             "rotate-left" => Self::RotateLeft,
             "mirror" => Self::Mirror,
             "info" => Self::Info,
+            "settings" => Self::Settings,
+            "appearance" => Self::Appearance,
+            "wallpaper" => Self::Wallpaper,
+            "display" => Self::Display,
+            "lock-screen" => Self::LockScreen,
+            "screensaver" => Self::Screensaver,
+            "power" => Self::Power,
+            "bluetooth" => Self::Bluetooth,
+            "sound" => Self::Sound,
+            "notifications" => Self::Notifications,
+            "keyboard" => Self::Keyboard,
+            "mouse" => Self::Mouse,
+            "trackpad" => Self::Trackpad,
+            "touchscreen" => Self::Touchscreen,
+            "printer" => Self::Printer,
+            "accessibility" => Self::Accessibility,
+            "language" => Self::Language,
+            "sharing" => Self::Sharing,
+            "users" => Self::Users,
+            "storage" => Self::Storage,
             _ => Self::Generic,
         }
     }
@@ -312,6 +374,26 @@ impl IconKind {
             Self::RotateLeft => 53,
             Self::Mirror => 54,
             Self::Info => 55,
+            Self::Settings => 56,
+            Self::Appearance => 57,
+            Self::Wallpaper => 58,
+            Self::Display => 59,
+            Self::LockScreen => 60,
+            Self::Screensaver => 61,
+            Self::Power => 62,
+            Self::Bluetooth => 63,
+            Self::Sound => 64,
+            Self::Notifications => 65,
+            Self::Keyboard => 66,
+            Self::Mouse => 67,
+            Self::Trackpad => 68,
+            Self::Touchscreen => 69,
+            Self::Printer => 70,
+            Self::Accessibility => 71,
+            Self::Language => 72,
+            Self::Sharing => 73,
+            Self::Users => 74,
+            Self::Storage => 75,
         }
     }
 
@@ -381,6 +463,26 @@ impl IconKind {
             Self::RotateLeft => "rotate-left",
             Self::Mirror => "mirror",
             Self::Info => "info",
+            Self::Settings => "settings",
+            Self::Appearance => "appearance",
+            Self::Wallpaper => "wallpaper",
+            Self::Display => "display",
+            Self::LockScreen => "lock-screen",
+            Self::Screensaver => "screensaver",
+            Self::Power => "power",
+            Self::Bluetooth => "bluetooth",
+            Self::Sound => "sound",
+            Self::Notifications => "notifications",
+            Self::Keyboard => "keyboard",
+            Self::Mouse => "mouse",
+            Self::Trackpad => "trackpad",
+            Self::Touchscreen => "touchscreen",
+            Self::Printer => "printer",
+            Self::Accessibility => "accessibility",
+            Self::Language => "language",
+            Self::Sharing => "sharing",
+            Self::Users => "users",
+            Self::Storage => "storage",
         }
     }
 }
@@ -407,9 +509,12 @@ pub const fn disk_icon(medium: Option<BlkDeviceClass>) -> IconKind {
 pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
     let layers = match kind {
         IconKind::Network => network(color),
-        IconKind::Volume => volume(color),
+        // The audio category and the tray's volume reading are the same
+        // speaker; only the asset slot a theme may override differs.
+        IconKind::Volume | IconKind::Sound => volume(color),
         IconKind::Battery => battery(color),
-        IconKind::Bell => bell(color),
+        // As for the notification-policy category and a pending notification.
+        IconKind::Bell | IconKind::Notifications => bell(color),
         IconKind::Folder => folder(color),
         IconKind::FolderOpen => folder_open(color),
         IconKind::FolderFilled => folder_filled(color),
@@ -463,6 +568,24 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::RotateLeft => rotate(color, false),
         IconKind::Mirror => mirror(color),
         IconKind::Info => info(color),
+        IconKind::Settings => settings(color),
+        IconKind::Appearance => appearance(color),
+        IconKind::Wallpaper => wallpaper(color),
+        IconKind::Display => display(color),
+        IconKind::LockScreen => lock_screen(color),
+        IconKind::Screensaver => screensaver(color),
+        IconKind::Power => power(color),
+        IconKind::Bluetooth => bluetooth(color),
+        IconKind::Keyboard => keyboard(color),
+        IconKind::Mouse => mouse(color),
+        IconKind::Trackpad => trackpad(color),
+        IconKind::Touchscreen => touchscreen(color),
+        IconKind::Printer => printer(color),
+        IconKind::Accessibility => accessibility(color),
+        IconKind::Language => language(color),
+        IconKind::Sharing => sharing(color),
+        IconKind::Users => users(color),
+        IconKind::Storage => storage(color),
     };
     VectorIcon::new(DESIGN, layers)
 }
@@ -1092,4 +1215,512 @@ fn info(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, DOT),
         IconLayer::from_points(color, STEM),
     ]
+}
+
+/// A cog: an eight-toothed rim around a hub bore.
+///
+/// The rim and the bore are one even-odd ring, which is what carves the bore
+/// out rather than a second layer in the background colour a theme may not
+/// have.
+fn settings(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const COG: &[(i32, i32)] = &[
+        (23, 12),
+        (19, 15),
+        (20, 20),
+        (15, 19),
+        (12, 23),
+        (9, 19),
+        (4, 20),
+        (5, 15),
+        (1, 12),
+        (5, 9),
+        (4, 4),
+        (9, 5),
+        (12, 1),
+        (15, 5),
+        (20, 4),
+        (19, 9),
+        (16, 12),
+        (15, 15),
+        (12, 16),
+        (9, 15),
+        (8, 12),
+        (9, 9),
+        (12, 8),
+        (15, 9),
+    ];
+    vec![IconLayer::from_points(color, COG)]
+}
+
+/// A ring with its trailing half filled: the light/dark contrast mark.
+fn appearance(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const RIM: &[(i32, i32)] = &[
+        (22, 12),
+        (19, 19),
+        (12, 22),
+        (5, 19),
+        (2, 12),
+        (5, 5),
+        (12, 2),
+        (19, 5),
+        (20, 12),
+        (18, 18),
+        (12, 20),
+        (6, 18),
+        (4, 12),
+        (6, 6),
+        (12, 4),
+        (18, 6),
+    ];
+    const FILLED_HALF: &[(i32, i32)] = &[(12, 4), (18, 6), (20, 12), (18, 18), (12, 20)];
+    vec![
+        IconLayer::from_points(color, RIM),
+        IconLayer::from_points(color, FILLED_HALF),
+    ]
+}
+
+/// A framed landscape with a sun: the desktop backdrop.
+fn wallpaper(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const FRAME: &[(i32, i32)] = &[
+        (2, 4),
+        (22, 4),
+        (22, 20),
+        (2, 20),
+        (4, 6),
+        (20, 6),
+        (20, 18),
+        (4, 18),
+    ];
+    const HILLS: &[(i32, i32)] = &[(4, 18), (10, 11), (14, 15), (20, 9), (20, 18)];
+    const SUN: &[(i32, i32)] = &[(10, 9), (8, 11), (6, 9), (8, 7)];
+    vec![
+        IconLayer::from_points(color, FRAME),
+        IconLayer::from_points(color, HILLS),
+        IconLayer::from_points(color, SUN),
+    ]
+}
+
+/// A landscape screen on a pedestal stand.
+fn display(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BEZEL: &[(i32, i32)] = &[
+        (2, 3),
+        (22, 3),
+        (22, 17),
+        (2, 17),
+        (4, 5),
+        (20, 5),
+        (20, 15),
+        (4, 15),
+    ];
+    const NECK: &[(i32, i32)] = &[(11, 17), (13, 17), (13, 20), (11, 20)];
+    const BASE: &[(i32, i32)] = &[(7, 20), (17, 20), (17, 22), (7, 22)];
+    vec![
+        IconLayer::from_points(color, BEZEL),
+        IconLayer::from_points(color, NECK),
+        IconLayer::from_points(color, BASE),
+    ]
+}
+
+/// A padlock: a shackle over a closed body.
+fn lock_screen(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const SHACKLE: &[(i32, i32)] = &[
+        (7, 11),
+        (7, 7),
+        (9, 4),
+        (12, 3),
+        (15, 4),
+        (17, 7),
+        (17, 11),
+        (15, 11),
+        (15, 8),
+        (14, 6),
+        (12, 5),
+        (10, 6),
+        (9, 8),
+        (9, 11),
+    ];
+    const BODY: &[(i32, i32)] = &[(4, 11), (20, 11), (20, 22), (4, 22)];
+    vec![
+        IconLayer::from_points(color, SHACKLE),
+        IconLayer::from_points(color, BODY),
+    ]
+}
+
+/// A crescent moon: the screen has gone to sleep.
+fn screensaver(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const CRESCENT: &[(i32, i32)] = &[
+        (12, 1),
+        (18, 4),
+        (21, 10),
+        (20, 17),
+        (15, 22),
+        (8, 23),
+        (3, 20),
+        (7, 19),
+        (13, 18),
+        (16, 13),
+        (15, 8),
+        (11, 4),
+    ];
+    vec![IconLayer::from_points(color, CRESCENT)]
+}
+
+/// The power symbol: a broken ring with a stem through its gap.
+fn power(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const RING: &[(i32, i32)] = &[
+        (17, 5),
+        (21, 11),
+        (20, 18),
+        (14, 22),
+        (10, 22),
+        (4, 18),
+        (3, 11),
+        (7, 5),
+        (9, 7),
+        (6, 11),
+        (6, 16),
+        (10, 19),
+        (14, 19),
+        (18, 16),
+        (18, 11),
+        (15, 7),
+    ];
+    const STEM: &[(i32, i32)] = &[(11, 2), (13, 2), (13, 10), (11, 10)];
+    vec![
+        IconLayer::from_points(color, RING),
+        IconLayer::from_points(color, STEM),
+    ]
+}
+
+/// The Bluetooth rune: a stem crossed by two chevrons.
+fn bluetooth(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const STEM: &[(i32, i32)] = &[(11, 3), (13, 3), (13, 21), (11, 21)];
+    const UPPER: &[(i32, i32)] = &[(12, 3), (19, 8), (12, 13), (12, 11), (16, 8), (12, 5)];
+    const LOWER: &[(i32, i32)] = &[(12, 21), (19, 16), (12, 11), (12, 13), (16, 16), (12, 19)];
+    vec![
+        IconLayer::from_points(color, STEM),
+        IconLayer::from_points(color, UPPER),
+        IconLayer::from_points(color, LOWER),
+    ]
+}
+
+/// A key bank: a case holding a row of keys and a space bar.
+fn keyboard(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const CASE: &[(i32, i32)] = &[
+        (1, 6),
+        (23, 6),
+        (23, 19),
+        (1, 19),
+        (3, 8),
+        (21, 8),
+        (21, 17),
+        (3, 17),
+    ];
+    const KEYS: &[(i32, i32)] = &[(5, 10), (19, 10), (19, 12), (5, 12)];
+    const SPACE: &[(i32, i32)] = &[(8, 14), (16, 14), (16, 16), (8, 16)];
+    vec![
+        IconLayer::from_points(color, CASE),
+        IconLayer::from_points(color, KEYS),
+        IconLayer::from_points(color, SPACE),
+    ]
+}
+
+/// A mouse: an outlined body with its scroll wheel.
+fn mouse(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BODY: &[(i32, i32)] = &[
+        (12, 2),
+        (17, 5),
+        (18, 12),
+        (17, 19),
+        (12, 22),
+        (7, 19),
+        (6, 12),
+        (7, 5),
+        (12, 5),
+        (15, 7),
+        (16, 12),
+        (15, 17),
+        (12, 19),
+        (9, 17),
+        (8, 12),
+        (9, 7),
+    ];
+    const WHEEL: &[(i32, i32)] = &[(11, 7), (13, 7), (13, 12), (11, 12)];
+    vec![
+        IconLayer::from_points(color, BODY),
+        IconLayer::from_points(color, WHEEL),
+    ]
+}
+
+/// A trackpad: a pad under a fingertip.
+fn trackpad(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const PAD: &[(i32, i32)] = &[
+        (3, 4),
+        (21, 4),
+        (21, 20),
+        (3, 20),
+        (5, 6),
+        (19, 6),
+        (19, 18),
+        (5, 18),
+    ];
+    const TIP: &[(i32, i32)] = &[
+        (15, 12),
+        (14, 14),
+        (12, 15),
+        (10, 14),
+        (9, 12),
+        (10, 10),
+        (12, 9),
+        (14, 10),
+    ];
+    vec![
+        IconLayer::from_points(color, PAD),
+        IconLayer::from_points(color, TIP),
+    ]
+}
+
+/// A finger touching an upright screen.
+fn touchscreen(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const SCREEN: &[(i32, i32)] = &[
+        (3, 2),
+        (21, 2),
+        (21, 22),
+        (3, 22),
+        (5, 4),
+        (19, 4),
+        (19, 20),
+        (5, 20),
+    ];
+    const FINGER: &[(i32, i32)] = &[(10, 12), (14, 8), (21, 14), (17, 18)];
+    const CONTACT: &[(i32, i32)] = &[(11, 10), (13, 12), (11, 14), (9, 12)];
+    vec![
+        IconLayer::from_points(color, SCREEN),
+        IconLayer::from_points(color, FINGER),
+        IconLayer::from_points(color, CONTACT),
+    ]
+}
+
+/// A printer: a sheet fed in above the case and a printed sheet below it.
+fn printer(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const FEED: &[(i32, i32)] = &[(7, 2), (17, 2), (17, 9), (7, 9)];
+    const CASE: &[(i32, i32)] = &[
+        (2, 9),
+        (22, 9),
+        (22, 19),
+        (2, 19),
+        (4, 11),
+        (20, 11),
+        (20, 17),
+        (4, 17),
+    ];
+    const SHEET: &[(i32, i32)] = &[(7, 17), (17, 17), (17, 22), (7, 22)];
+    vec![
+        IconLayer::from_points(color, FEED),
+        IconLayer::from_points(color, CASE),
+        IconLayer::from_points(color, SHEET),
+    ]
+}
+
+/// A figure with its arms out inside a ring: the universal access mark.
+fn accessibility(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const RING: &[(i32, i32)] = &[
+        (23, 12),
+        (20, 20),
+        (12, 23),
+        (4, 20),
+        (1, 12),
+        (4, 4),
+        (12, 1),
+        (20, 4),
+        (21, 12),
+        (18, 18),
+        (12, 21),
+        (6, 18),
+        (3, 12),
+        (6, 6),
+        (12, 3),
+        (18, 6),
+    ];
+    const HEAD: &[(i32, i32)] = &[(12, 5), (14, 7), (12, 9), (10, 7)];
+    const ARMS: &[(i32, i32)] = &[(5, 10), (19, 10), (19, 12), (5, 12)];
+    const TORSO: &[(i32, i32)] = &[
+        (11, 12),
+        (13, 12),
+        (13, 16),
+        (15, 19),
+        (13, 20),
+        (12, 17),
+        (11, 20),
+        (9, 19),
+        (11, 16),
+    ];
+    vec![
+        IconLayer::from_points(color, RING),
+        IconLayer::from_points(color, HEAD),
+        IconLayer::from_points(color, ARMS),
+        IconLayer::from_points(color, TORSO),
+    ]
+}
+
+/// A globe: a rim crossed by an equator and a meridian.
+fn language(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const RIM: &[(i32, i32)] = &[
+        (22, 12),
+        (19, 19),
+        (12, 22),
+        (5, 19),
+        (2, 12),
+        (5, 5),
+        (12, 2),
+        (19, 5),
+        (20, 12),
+        (18, 18),
+        (12, 20),
+        (6, 18),
+        (4, 12),
+        (6, 6),
+        (12, 4),
+        (18, 6),
+    ];
+    const EQUATOR: &[(i32, i32)] = &[(3, 11), (21, 11), (21, 13), (3, 13)];
+    const MERIDIAN: &[(i32, i32)] = &[
+        (12, 2),
+        (16, 7),
+        (16, 17),
+        (12, 22),
+        (8, 17),
+        (8, 7),
+        (12, 4),
+        (14, 7),
+        (14, 17),
+        (12, 20),
+        (10, 17),
+        (10, 7),
+    ];
+    vec![
+        IconLayer::from_points(color, RIM),
+        IconLayer::from_points(color, EQUATOR),
+        IconLayer::from_points(color, MERIDIAN),
+    ]
+}
+
+/// Three joined nodes: what this machine offers to others.
+fn sharing(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const HUB: &[(i32, i32)] = &[
+        (8, 12),
+        (7, 15),
+        (5, 16),
+        (3, 15),
+        (2, 12),
+        (3, 9),
+        (5, 8),
+        (7, 9),
+    ];
+    const UPPER: &[(i32, i32)] = &[
+        (21, 6),
+        (20, 9),
+        (18, 10),
+        (16, 9),
+        (15, 6),
+        (16, 3),
+        (18, 2),
+        (20, 3),
+    ];
+    const LOWER: &[(i32, i32)] = &[
+        (21, 18),
+        (20, 21),
+        (18, 22),
+        (16, 21),
+        (15, 18),
+        (16, 15),
+        (18, 14),
+        (20, 15),
+    ];
+    const UPPER_LINK: &[(i32, i32)] = &[(6, 11), (17, 6), (18, 8), (7, 13)];
+    const LOWER_LINK: &[(i32, i32)] = &[(6, 13), (17, 18), (16, 20), (5, 15)];
+    vec![
+        IconLayer::from_points(color, UPPER_LINK),
+        IconLayer::from_points(color, LOWER_LINK),
+        IconLayer::from_points(color, HUB),
+        IconLayer::from_points(color, UPPER),
+        IconLayer::from_points(color, LOWER),
+    ]
+}
+
+/// Two busts: the accounts on this machine, beside the one-bust
+/// [`user`] glyph that stands for a single account.
+fn users(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BEHIND_HEAD: &[(i32, i32)] = &[
+        (19, 7),
+        (18, 9),
+        (16, 10),
+        (14, 9),
+        (13, 7),
+        (14, 5),
+        (16, 4),
+        (18, 5),
+    ];
+    const BEHIND_SHOULDERS: &[(i32, i32)] =
+        &[(16, 10), (19, 11), (21, 14), (22, 18), (13, 18), (14, 14)];
+    const FRONT_HEAD: &[(i32, i32)] = &[
+        (13, 8),
+        (12, 11),
+        (9, 12),
+        (6, 11),
+        (5, 8),
+        (6, 5),
+        (9, 4),
+        (12, 5),
+    ];
+    const FRONT_SHOULDERS: &[(i32, i32)] = &[
+        (9, 12),
+        (13, 13),
+        (16, 16),
+        (17, 21),
+        (1, 21),
+        (2, 16),
+        (5, 13),
+    ];
+    vec![
+        IconLayer::from_points(color, BEHIND_HEAD),
+        IconLayer::from_points(color, BEHIND_SHOULDERS),
+        IconLayer::from_points(color, FRONT_HEAD),
+        IconLayer::from_points(color, FRONT_SHOULDERS),
+    ]
+}
+
+/// Stacked media: the machine's storage as a whole, beside the
+/// [`disk`] glyph that stands for one drive.
+fn storage(color: Color) -> alloc::vec::Vec<IconLayer> {
+    vec![platter(color, 5), platter(color, 12), platter(color, 19)]
+}
+
+/// One platter of the [`storage`] stack, centred on `cy`: an ellipse rim,
+/// outer then inner in one even-odd ring.
+///
+/// Written once because three identical rims at different heights is what
+/// makes the stack read as a stack.
+fn platter(color: Color, cy: i32) -> IconLayer {
+    IconLayer::from_points(
+        color,
+        &[
+            (12, cy - 4),
+            (18, cy - 2),
+            (20, cy),
+            (18, cy + 2),
+            (12, cy + 4),
+            (6, cy + 2),
+            (4, cy),
+            (6, cy - 2),
+            (12, cy - 2),
+            (16, cy - 1),
+            (17, cy),
+            (16, cy + 1),
+            (12, cy + 2),
+            (8, cy + 1),
+            (7, cy),
+            (8, cy - 1),
+        ],
+    )
 }

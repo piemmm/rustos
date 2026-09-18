@@ -147,7 +147,11 @@ about the machine:
   cover it. `FieldGroup::popup_anchor` names the row and the slot to anchor the
   list to; the owner places it, hands it back through `FieldLayout::with_popup`,
   and paints it with `render_popup` once every group is drawn. Only the owner
-  knows the viewport the list has to fit in.
+  knows the viewport the list has to fit in, which is why it is the one thing
+  the owner supplies: `FieldGroup::layout` takes that viewport and answers the
+  whole layout — the group's slot column and an expanded slot's list, placed —
+  so an owner laying its groups out independently carries none of that
+  arithmetic itself.
 
 A group resolves the one slot column its controls line up in
 (`FieldGroup::slot_column`): the widest width any of its rows wants, or the
@@ -163,6 +167,17 @@ A row reports what the control in its slot asked for and commits nothing
 itself. `FieldAction::SetValue` is a slider's live value and
 `FieldAction::Settled` its settle point; a durable change — a document posted,
 a store written — is made on the settle alone.
+
+### Where a drop-down's list goes
+
+`ComboBox::popup_rect` is the one placement rule every expanded choice list
+goes through, so a list opens the same way wherever a combo box sits: below
+its field where the surface has room, flipped above it where it does not, and
+never past an edge of the surface it has to fit in. It is the shared plate
+rule `plate_rect` — the same arithmetic a menu plate and a submenu are placed
+by — over the control's own `popup_size`, rather than a copy per owner. A
+field in a footer therefore opens upward without its owner knowing it is
+special: there is simply no room beneath it.
 
 Present-day consumers: the widget gallery's Forms tab and the Date & Time
 window, whose two groups of three civil fields replaced a hand-rolled
@@ -299,6 +314,36 @@ it, or frame the content that does:
   Because a vertical entry's rectangle depends on the theme's own metrics, the
   hit test and every damage-reporting entry point take the scale and theme the
   strip was laid out with, exactly as `ActionRail` does.
+- **A list longer than its column is scrolled by its owner, in entries.**
+  `Tabs::measured_height` states the height a whole list wants and
+  `Tabs::seated` how many entries a given column actually seats;
+  `Tabs::set_first` draws from an entry of the owner's choosing. The unit is
+  an *entry* rather than a pixel because entries stack at their own content
+  height, so how far a pixel offset moves the list is not a number an owner
+  can compute — and because a strip laid out at a negative origin would draw
+  nothing at all. The scroll position survives a restatement that keeps the
+  same entries and is clamped into a list that no longer holds it, exactly as
+  the hover and the cursor are.
+- **A sidebar list may be two levels deep, and it is still one column.** An
+  entry that holds pages of its own is declared with `Tab::with_disclosure`,
+  which draws a trailing chevron stating that entry's own posture — down when
+  its pages are shown, right when they are not — and each of those pages is an
+  entry declared `Tab::nested`, drawn indented by exactly one glyph slot so it
+  lines up with the label of the entry that disclosed it. They are ordinary
+  entries in every other respect: one cursor walks the whole column, each is
+  hit-tested and selectable, and no index means anything special. What
+  *choosing* a disclosing entry does is the owner's — the strip states the
+  posture and nothing more — which is what lets one strip hold a list whose
+  sections both select a view and open their pages.
+- **A sidebar entry may lead with a glyph.** `Tab::with_icon` names the kind;
+  `Tabs::render` resolves the picture through the owner's `IconArtwork` lookup
+  at `Tabs::icon_side`, so a strip of glyphs costs a cache lookup per entry
+  rather than re-resolving vector coverage every frame, and an owner holding
+  no cache passes `NoArtwork` and each glyph is rasterised in place. Room is
+  claimed in the order a reader needs it: the Signal Bead, then the chevron
+  and the reading, then the glyph, then the label, which is what truncates —
+  so a row too narrow for its glyph keeps its name rather than becoming a
+  nameless indent.
 - **The two orientations carry selection differently, because one is a row and
   the other is a page shape.** A sidebar entry is a row: selection lifts it to
   the raised fill and marks its *leading* edge at the shared rail breadth,

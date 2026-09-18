@@ -32,7 +32,7 @@ dropped is a category the surface then has to lie about.
 | # | Stage | Depends on | Spec | Status |
 |---|---|---|---|---|
 | **DS1** | `lib/controls::form` — `FieldRow`/`FieldGroup`/`FieldControl`/`FieldLayout` over the row chrome hoisted into the shared `paint` core, the measured-width accessors the slot model needs, and a `widgets.app` gallery tab | — | DS1, §4 | done |
-| **DS2** | The `userland/apps/settings` crate and its shell: the closed `Category`/`Pane` registry, the vertical `Tabs` sidebar, the search index, the breadcrumb band, frame shedding, the absence-pane renderer, and the taskbar's *Settings…* row | DS1 | DS2 | planned |
+| **DS2** | The `userland/apps/settings` crate and its shell: the closed `Category`/`Pane` registry, the vertical `Tabs` sidebar, the search index, the breadcrumb band, frame shedding, the absence-pane renderer, and the taskbar's *Settings…* row | DS1 | DS2 | done |
 | **DS3** | Appearance and Accessibility over the session's user-scope appearance registry, and the apply rendezvous every other user-scope write reuses | DS2 | DS3 | planned |
 | **DS4** | Wallpaper — the pinboard keys as rows, the resolved current picture, and the route to the chooser's gallery; the chooser's own drop-downs rebuilt on the family | DS3 | DS4 | blocked — nothing in the tree lets Settings reach `wallpaper.app` under its manifest; the three candidate routes are in DS4 and the choice is the User's |
 | **DS5** | Storage — one group per mount with its capacity track and health pill, over the mount→capacity derivation moved into `lib/procinfo` and shared with the Switchboard | DS2 | DS5 | planned |
@@ -363,7 +363,15 @@ reporting, and a `widgets.app` gallery tab, exactly as every other family.
   tooltip). Rows share one column model so every control in a group lines up,
   and a group draws one plate rather than nesting a plate per row.
 
-That is the whole addition. Everything else a pane needs already exists:
+DS2 added to that: the one `ComboBox::popup_rect` drop-down placement rule
+over the shared `plate_rect` (retiring the three private copies in the widget
+gallery, the wallpaper chooser and the Switchboard), `FieldGroup::layout` as
+its ready-made application for a form owner, and the vertical `Tabs`
+sidebar-list anatomy above — a leading glyph, a disclosure chevron, one level
+of nesting, and the entry-wise scroll (`set_first`, `seated`) a long list
+needs.
+
+Everything else a pane needs already exists:
 `Toggle`, `Checkbox`, `Radio`, `ComboBox`, `Slider`, `TextField`, `Button`,
 `Tabs` (the sidebar), `SearchField`, `Breadcrumb`, `ScrollBar`, `Menu`,
 `Dialog`, `FactList` (read-only panes), `MetricTile` (Storage' capacity
@@ -375,7 +383,13 @@ built-in vector glyph so the sidebar can never blank: `Settings`, `Appearance`,
 `Wallpaper`, `Display`, `LockScreen`, `Screensaver`, `Power`, `Bluetooth`,
 `Sound`, `Notifications`, `Keyboard`, `Mouse`, `Trackpad`, `Touchscreen`,
 `Printer`, `Accessibility`, `Language`, `Sharing`, `Users`, `Storage`.
-(`Network` and `Volume` already exist and are reused, not duplicated.)
+`Network` is reused as-is for Networking. Two of the new kinds share the
+artwork of the reading they stand beside rather than drawing a second copy of
+it — `Sound` draws `Volume`'s speaker and `Notifications` draws `Bell`'s
+bell — keeping an asset slot of their own so a theme may distinguish the
+settings category from the tray reading. `Users` and `Storage` draw marks of
+their own, because a group of accounts is not one account and a machine's
+storage is not one drive.
 
 ---
 
@@ -424,40 +438,60 @@ The contract it delivers, which no later stage re-derives:
 
 ### DS2 — the Settings shell, every category reachable, nothing faked
 
-The crate: `userland/apps/settings` (`tairix-settings`), with `AppInfo.toml`
-carrying `id = "os.tairix.settings"`, `name`, `version`,
-`kind = "application"`, `library = "SystemTools"`, `purpose`, `author`,
-`capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]`, and `library-icon` naming
-its own SVG master in `Resources/` — a declared icon the build cannot draw is
-a build failure, never a silent fallback glyph. Plus a `Help/en-US/` tree and
-the crate's `README.md`, which is a source file: the installed bundle carries
-only the top-level names `AGENTS.md` §16.5 permits.
-`build.rs` mirrors the sibling apps' `freestanding` cfg so the library target
-is host-testable and `Run` is a freestanding program.
+`userland/apps/settings` (`tairix-settings`) is the bundle: a signed
+`AppInfo.toml` declaring `os.tairix.settings`, `kind = "application"`,
+`library = "SystemTools"` and `capabilities = ["CAP_CONSOLE_WRITE",
+"CAP_SHM"]` with its own SVG master in `Resources/`, a `Help/` tree in every
+required locale, a `README.md`, and a `build.rs` mirroring the sibling apps'
+`freestanding` cfg so the shell is host-testable and `Run` is a freestanding
+program. Its two hand-maintained pins — the harness's discovered-bundle list
+and the kernel's capability-request registry — carry it as a
+`WINDOWED_APP_REQUEST` application.
 
-The shell: the closed `Category`/`Pane` enums and the one ordered `CATEGORIES`
-table; `resolve_frame`; the vertical `Tabs` sidebar with category glyphs and
-in-place pane expansion; the `SearchField` and the index derived from the
-table; the `Breadcrumb` band; the scroll model; the focus-region policy and
-cursor; resizable window with frame re-map on `Resized`; and the one
-absence-pane renderer that draws a §3 row's statement. Every category in §2 is
-listed and selectable from this stage on — the ones with no backing state their
-absence, the ones with backing land their content in DS3–DS12.
+What the shell guarantees, which no later stage re-derives:
 
-The **launch row**: `userland/gui/taskbar/src/system.rs` grows
-`SystemAction::Settings` with label `Settings…`, a `SETTINGS_BUNDLE`
-identifier, and a `settings_installed` permit resolved against the catalog the
-session handed the bar — exactly as `TaskShell` already is. It maps to the
-bar's existing `TaskbarResponse::LibraryLaunch`, so the session gains **no new
-launch path** for it (`AGENTS.md` §2.2), and the row renders non-actionable with
-`REASON_NOT_INSTALLED` when the bundle is absent. It sits at the head of the
-appearance group, above *Light Appearance*, because it is the general form of
-the two rows beneath it.
-
-Host tests: the registry's totality (every `Pane` has a row and every row a
-renderer); the search index covering every declared label; frame shedding at
-the narrow width with the content column surviving; the cursor reaching every
-row; the taskbar row's presence, order, permit, and command mapping.
+- **The registry is the surface.** `Category` (21) and `Pane` (27) are closed
+  sets and `registry::CATEGORIES` is the single definition of the sidebar
+  strip, the search index, the location trail, the keyboard cursor and the
+  pane dispatch. Its tests hold totality in both directions, so a category
+  cannot exist without a row or a row without a pane, and adding a category is
+  adding a row and a renderer.
+- **Every pane declares what backs it**, and the two answers are the two
+  different facts a reader needs: `PaneBacking::None` names what this system
+  does not have and what would have to exist, `PaneBacking::Elsewhere` names
+  what the pane will show and where the setting is read or set today. Both
+  draw through the one `statement` renderer, quiet and with no plate — the
+  shape every other stated absence in the desktop takes. A pane that composes
+  no controls declares no setting labels, so a searchable setting cannot exist
+  without a row that shows it.
+- **`frame::resolve_frame` is the one division of the client.** The paint and
+  the hit test both read it. A client narrower than the sidebar plus
+  `CONTENT_FLOOR` sheds the sidebar *and* the search field — there being no
+  strip left to filter — and the leading crumb then lists the categories as a
+  shared `Menu`, placed by the one plate rule. The content column always
+  survives.
+- **The strip is the vertical `Tabs` sidebar list**, which gained the anatomy
+  this needs and `lib/controls` lacked: a leading `IconKind` glyph resolved
+  through the owner's artwork lookup, a disclosure chevron stating a
+  category's own posture, one level of nesting for a disclosed pane, and the
+  entry-wise scroll the strip's docs already promised an owner but gave it no
+  way to perform. Twenty-one categories want some 700 physical pixels at the
+  reference density, so a short window cannot seat them all: the strip gets a
+  gutter of its own — carved out of the strip's column, never the pane's — and
+  the cursor, a selection and a search result each scroll themselves into
+  view. A category the reader cannot reach is a category they cannot open, so
+  this is a correctness property rather than a convenience.
+- **The search index is derived, not held.** `strip_rows(open, query)` filters
+  the table by a category's label, a pane's title, or a setting label a pane
+  declares, folding ASCII case; a category reached by its own label offers
+  every pane, one reached through its panes offers exactly those, and a query
+  that reaches nothing lists nothing.
+- **The launch row** is `SystemAction::Settings` in the taskbar's one
+  `system::ROWS` table, at the head of the appearance group, mapped onto the
+  bar's existing `TaskbarResponse::LibraryLaunch` and resolved against the
+  catalog through the same `installed` predicate *Task Shell* uses — so the
+  session gained no new launch path, and an absent bundle renders
+  non-actionable with `REASON_NOT_INSTALLED`.
 
 ### DS3 — Appearance and Accessibility: the session's user-scope document
 
@@ -684,12 +718,12 @@ guest's own witnesses — an `APP_LOADED` naming the settings bundle, the window
 creates served on the reserved endpoint, and the session's witness that each
 frame is on screen before the runner reads it back.
 
-Docs in the same stage: `docs/src/desktop/settings.md` (the surface, the
-authority map, the absence table, and the three write paths), its `SUMMARY.md`
-entry, the `Help/en-US/settings.md` topic, and updates to
-`docs/src/desktop/apps.md`, `docs/src/desktop/taskbar.md` (the new row),
-`docs/src/desktop/widgets.md` (the form family's gallery tab), and
-`docs/src/userland/confd.md` if DS3's document lands new scope keys there.
+Docs in the same stage: `docs/src/desktop/settings.md` grows each pane's own
+content as DS3–DS12 land it, and `docs/src/userland/confd.md` gains whatever
+scope keys DS3's document adds. The page itself, its `SUMMARY.md` entry, the
+`Help/` topic, and the `docs/src/desktop/taskbar.md`,
+`docs/src/desktop/widgets.md`, `docs/src/desktop/icons.md` and
+`docs/src/lib/controls.md` updates landed with DS2.
 
 ### DS14 — retire the second form idiom
 

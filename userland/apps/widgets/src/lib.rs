@@ -28,7 +28,7 @@ mod panels;
 mod widget;
 
 pub use gallery::{DemoItem, Gallery, GalleryTab};
-pub use widget::DemoWidget;
+pub use widget::{DemoContext, DemoWidget};
 
 #[cfg(test)]
 mod gallery_tests;

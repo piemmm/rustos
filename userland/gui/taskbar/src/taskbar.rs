@@ -877,8 +877,8 @@ impl Taskbar {
         let permits = SystemPermits {
             appearance: self.theme.appearance(),
             power: self.tray.power_capable(),
-            task_shell_installed: EntryId::new(system::TASK_SHELL_BUNDLE)
-                .is_ok_and(|id| self.library.catalog().entry(&id).is_some()),
+            task_shell_installed: self.installed(system::TASK_SHELL_BUNDLE),
+            settings_installed: self.installed(system::SETTINGS_BUNDLE),
             lock_available: self.elevation_available,
             switch_user_available: self.switch_user_available,
         };
@@ -887,6 +887,15 @@ impl Taskbar {
             model: menu::system_menu(permits),
             placement: self.menu_placement(anchor, scale),
         }
+    }
+
+    /// Whether the bundle `id` names is in the catalog the session handed the
+    /// bar, which is what makes a launch row actionable.
+    ///
+    /// One definition, so two rows cannot come to disagree about what
+    /// "installed" means.
+    fn installed(&self, id: &str) -> bool {
+        EntryId::new(id).is_ok_and(|id| self.library.catalog().entry(&id).is_some())
     }
 
     /// The chain the desktop should open for the clock, anchored at it.

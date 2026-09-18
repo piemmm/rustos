@@ -1072,18 +1072,18 @@ impl TasksSection {
         Self::footer_split(frame).grouping.unwrap_or(frame.footer)
     }
 
-    /// The expanded grouping popup's rectangle, clamped inside the window.
+    /// The expanded grouping popup's rectangle, through the one shared
+    /// drop-down placement rule.
+    ///
+    /// The field sits in a footer at the bottom of the content, so there is
+    /// no room beneath it and the rule opens the list upward.
     fn grouping_popup_rect(&self, ctx: SectionCtx<'_>) -> Rect {
-        let field = Self::grouping_field(&ctx.frame);
-        let (w, h) = self.grouping.popup_size(field.width, ctx.scale, ctx.theme);
-        // A footer sits at the bottom of the content, so the list opens
-        // upward from the field rather than off the bottom of the window.
-        let top = field.top().saturating_sub(to_i32(h)).max(ctx.bounds.top());
-        let left = field
-            .left()
-            .min(ctx.bounds.right().saturating_sub(to_i32(w)))
-            .max(ctx.bounds.left());
-        Rect::new(left, top, w, h)
+        self.grouping.popup_rect(
+            Self::grouping_field(&ctx.frame),
+            ctx.bounds,
+            ctx.scale,
+            ctx.theme,
+        )
     }
 
     /// Which shown row the content cursor is on, or `None` when it is on

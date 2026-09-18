@@ -1508,6 +1508,7 @@ mod tests {
             ("seatmgr", ProgramKind::Service, SEATMGR_MANIFEST),
             ("seq", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("servicectl", ProgramKind::Command, SERVICECTL_TOOL_REQUEST),
+            ("settings", ProgramKind::Application, WINDOWED_APP_REQUEST),
             ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("ss", ProgramKind::Command, SS_TOOL_REQUEST),
             ("stat", ProgramKind::Command, PURE_TOOL_REQUEST),

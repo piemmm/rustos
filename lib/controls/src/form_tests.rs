@@ -514,6 +514,118 @@ fn an_expanded_slot_reports_its_row_and_anchor() {
     );
 }
 
+/// [`FieldGroup::layout`] resolves what an owner would otherwise assemble by
+/// hand: the group's own slot column, and an expanded slot's list placed by
+/// the one shared drop-down rule.
+#[test]
+fn a_resolved_layout_carries_the_column_and_the_placed_list() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let bounds = Rect::new(0, 0, W, 200);
+    let viewport = Rect::new(0, 0, W, 400);
+    let mut group = FieldGroup::new(
+        "GENERAL",
+        vec![
+            toggle_row("Reduce motion", false),
+            FieldRow::new(
+                "Login",
+                FieldControl::Combo(ComboBox::new(choices(&["Text", "Graphical"]))),
+            ),
+        ],
+    );
+
+    let closed = group.layout(bounds, viewport, scale, &theme);
+    assert_eq!(closed.bounds, bounds);
+    assert_eq!(closed.column, group.slot_column(bounds, scale, &theme));
+    assert_eq!(closed.popup, Rect::EMPTY, "no list is open");
+
+    let slot = {
+        let rect = group
+            .row_rect(1, bounds, scale, &theme)
+            .expect("a row rect");
+        group.rows()[1]
+            .slot_rect(FieldLayout::new(rect, closed.column), scale, &theme)
+            .expect("a slot")
+    };
+    let centre = Point::new(
+        slot.left() + to_i32(slot.width) / 2,
+        slot.top() + to_i32(slot.height) / 2,
+    );
+    let mut damage = sink();
+    for event in [
+        InputEvent::PointerMoved { to: centre },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        group.on_pointer(&event, closed, scale, &theme, &mut damage);
+    }
+
+    let open = group.layout(bounds, viewport, scale, &theme);
+    let FieldControl::Combo(combo) = group.rows()[1].control() else {
+        panic!("the row holds a combo");
+    };
+    assert_eq!(
+        open.popup,
+        combo.popup_rect(slot, viewport, scale, &theme),
+        "the list is placed by the control's own rule, not a second copy"
+    );
+    assert!(!open.popup.is_empty());
+}
+
+/// A row omitted for lack of room has no anchor, so a layout resolved for a
+/// plate too short to draw it places no list (fail closed) rather than
+/// guessing at a rectangle.
+#[test]
+fn a_layout_places_no_list_for_a_row_it_cannot_draw() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let viewport = Rect::new(0, 0, W, 400);
+    let tall = Rect::new(0, 0, W, 200);
+    let mut group = FieldGroup::new(
+        "GENERAL",
+        vec![FieldRow::new(
+            "Login",
+            FieldControl::Combo(ComboBox::new(choices(&["Text", "Graphical"]))),
+        )],
+    );
+    let layout = group.layout(tall, viewport, scale, &theme);
+    let slot = {
+        let rect = group.row_rect(0, tall, scale, &theme).expect("a row rect");
+        group.rows()[0]
+            .slot_rect(FieldLayout::new(rect, layout.column), scale, &theme)
+            .expect("a slot")
+    };
+    let centre = Point::new(
+        slot.left() + to_i32(slot.width) / 2,
+        slot.top() + to_i32(slot.height) / 2,
+    );
+    let mut damage = sink();
+    for event in [
+        InputEvent::PointerMoved { to: centre },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        group.on_pointer(&event, layout, scale, &theme, &mut damage);
+    }
+    assert!(group.rows()[0].popup_open(), "the list is open");
+
+    // The same group in a plate with no room for its one row.
+    let squashed = Rect::new(0, 0, W, 1);
+    assert_eq!(group.row_rect(0, squashed, scale, &theme), None);
+    assert_eq!(
+        group.layout(squashed, viewport, scale, &theme).popup,
+        Rect::EMPTY
+    );
+}
+
 #[test]
 fn a_group_paints_no_list_until_one_is_open() {
     let theme = Theme::dark();

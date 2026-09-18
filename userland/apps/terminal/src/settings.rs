@@ -38,6 +38,7 @@ use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
+use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -314,7 +315,9 @@ impl Settings {
         let model = self.scrolled_model(body_rect, scale, theme, font);
 
         if let Some(rect) = tabs_rect {
-            self.tabs.render(surface, rect, scale, theme);
+            // The sheet's page strip carries no glyphs, so no lookup is consulted.
+            self.tabs
+                .render(surface, rect, scale, theme, &mut NoArtwork);
         }
         if let Some(rect) = body_rect {
             if let Some((bx, by, bw, bh)) = surface_rect(rect) {

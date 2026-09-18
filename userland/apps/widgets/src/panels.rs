@@ -14,8 +14,9 @@ use tairix_controls::{
     ActivityState, AuthorityState, Button, ButtonContent, Card, Checkbox, ComboBox, ControlRole,
     ControlState, Dialog, FieldControl, FieldGroup, FieldRow, HelpTip, IconButton, ListRow, Menu,
     MenuItem, Panel, Progress, ProgressValue, Radio, ScrollBar, ScrollModel, ScrollOrientation,
-    ScrollRange, SearchField, SelectionState, Slider, SplitButton, TableCell, TableRow, TextField,
-    Toggle, Toolbar, Tooltip, ValidationState, WindowControl, WindowControlKind,
+    ScrollRange, SearchField, SelectionState, Slider, SplitButton, Tab, TableCell, TableRow, Tabs,
+    TabsOrientation, TextField, Toggle, Toolbar, Tooltip, ValidationState, WindowControl,
+    WindowControlKind,
 };
 use tairix_icon::IconKind;
 
@@ -257,9 +258,32 @@ fn collections() -> Vec<DemoItem> {
         DemoItem::new("List row (selected)", DemoWidget::ListRow(selected), 34),
         DemoItem::new("List row", DemoWidget::ListRow(row), 34),
         DemoItem::new("Table row", DemoWidget::TableRow(table), 34),
+        DemoItem::new("Sidebar list", DemoWidget::Sidebar(sidebar()), 130),
         DemoItem::new("Card", DemoWidget::Card(card), 110),
         DemoItem::new("Panel", DemoWidget::Panel(panel), 140),
     ]
+}
+
+/// A vertical [`Tabs`] strip in its sidebar-list form: a glyphed section that
+/// discloses pages of its own, those pages nested beneath it, and a plain
+/// section beside them.
+fn sidebar() -> Tabs {
+    let mut strip = Tabs::new(vec![
+        Tab::new("General")
+            .with_icon(IconKind::Settings)
+            .with_disclosure(true),
+        Tab::new("About").nested(),
+        Tab::new("Caching").nested(),
+        Tab::new("Storage")
+            .with_icon(IconKind::Storage)
+            .with_reading("2 volumes"),
+        Tab::new("Sound")
+            .with_icon(IconKind::Sound)
+            .with_disclosure(false),
+    ])
+    .with_orientation(TabsOrientation::Vertical);
+    strip.adopt_selected(1);
+    strip
 }
 
 /// One captioned group of settings rows, and the two rows that state a

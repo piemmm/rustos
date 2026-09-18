@@ -834,6 +834,14 @@ field does not, because a query is not a credential.
 
 A combo box is a field plus disclosure action. It uses the text field focus model and the menu model for expanded choices. Selection state belongs to the choice list, not to string parsing inside the control.
 
+- **The list's placement is the control's, not each owner's.**
+  `ComboBox::popup_rect` answers where an expanded list goes for a field and
+  the surface it must fit in: below the field where there is room, flipped
+  above where there is not, and never past an edge. It is the shared plate
+  rule (§11.10's `plate_rect`) over the control's own popup size, so a
+  drop-down in a footer opens upward without its owner knowing it is special,
+  and no surface carries a placement copy of its own.
+
 ### 11.10 Menu and MenuItem
 
 Menus are pinned command plates. They are not floating ornament.
@@ -965,6 +973,34 @@ a page:
   it from its own selection each sample would light a ring on the selected
   entry permanently and snap a reader's cursor back the moment a live reading
   moved.
+- **A list longer than its column is the owner's to scroll, in entries.** The
+  strip states the height a whole list wants and how many entries a given
+  column seats, and draws from whichever entry the owner scrolled to. The unit
+  is an *entry*, not a pixel: entries stack at their own content height, so no
+  pixel offset is a number an owner could compute, and a strip laid out at a
+  negative origin draws nothing. The position is part of the reader's view of
+  the list, so it survives a restatement that keeps the same entries and is
+  clamped into one that no longer holds it, like the hover and the cursor.
+- **An entry may lead with a glyph, and the owner resolves the picture.**
+  `Tab::with_icon` names the kind; the strip resolves it through the owner's
+  icon lookup at the one slot side it paints at (`Tabs::icon_side`), so a
+  strip of glyphs costs a cache lookup per entry rather than re-resolving
+  vector coverage every frame. Room is claimed in the order a reader needs
+  it — the Signal Bead, then the disclosure chevron and the reading, then the
+  glyph, then the label, which is what truncates — so an entry too narrow for
+  its glyph keeps its name rather than becoming a nameless indent.
+- **A sidebar list may be two levels deep, and it is still one column.** An
+  entry that holds pages of its own carries a trailing disclosure chevron
+  stating *its own* posture (`Tab::with_disclosure`): down while its pages are
+  shown, right while they are not. Each page is an ordinary entry declared
+  nested (`Tab::nested`), indented by exactly one glyph slot so it lines up
+  with the label of the entry that disclosed it. One cursor therefore walks
+  the whole column, every row is hit-tested and selectable, and no index means
+  anything special. What *choosing* a disclosing entry does is the owner's —
+  the strip states the posture and nothing more — which is what lets one strip
+  hold a list whose sections both select a view and open their pages. The
+  indent is part of a strip's entry identity, so restating a flat list as a
+  nested one drops the hover and press latch like any other re-shaping.
 - **Settle point.** A strip has none of its own: selection is a discrete
   commit (`TabsAction::Selected`) the owner applies, and re-stating a reading
   or a trend is a repaint, never a durable action.
@@ -1886,7 +1922,13 @@ rows sit on.
 - **The owner places the choice popup.** An expanded list is drawn above every
   group, so a row cannot paint it — the group's later rows would cover it. The
   group names the row and slot to anchor it to; the owner places it within the
-  viewport it alone knows and paints it after every group is drawn.
+  viewport it alone knows and paints it after every group is drawn. That
+  viewport is the *only* thing the owner has to supply: `FieldGroup::layout`
+  takes it and answers the whole layout — the group's slot column, and the
+  list placed by the one drop-down placement rule (§11.9) — so an owner laying
+  its groups out independently carries none of that arithmetic. An owner
+  sharing one column across several groups resolves the widest itself and
+  places the list through the anchor instead.
 - **The cursor clamps within a group and never traps itself.** Up and Down walk
   rows and stop at the ends, because a group is a fixed set of settings rather
   than a cycling ring and the surface above it carries the cursor *between*
