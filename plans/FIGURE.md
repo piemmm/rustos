@@ -1,0 +1,353 @@
+# FIGURE.md — parametric figures: shared primitives, the game rig, and provable art quality
+
+Binding under `AGENTS.md`. This plan owns **how a character exists**: the
+parametric shapes a figure is drawn from, the skeleton that places them, the
+pose parameters and clips that move them, and — the part that matters most —
+the harness that makes "the art is good" a **measured, gated property** instead
+of an opinion.
+
+It is deliberately split across two homes, because exactly one part of it is
+general and the rest is a game's:
+
+| Half | Home | Why there |
+|---|---|---|
+| The parametric **outline primitives** — a superellipse, a taper, a wedge, a scalloped panel, a bevelled panel, a splat — and their tracer | `lib/raster::shape` | Two independent consumers (`cinder` and the game) and no game semantics: they are 2D vector primitives feeding the scan converter `lib/raster` already owns, sitting beside `fill_round_rect`. |
+| **Everything with character semantics** — rigs, joint limits, equipment sockets, draw order, the body frame, pose parameters, clips, blending, the transition machine, motion layers, character parameter spaces, presets, the art harness | `userland/games/wintersun/figure` | A rig is game content, not OS infrastructure. `lib/*` is the OS's shared-library namespace and a figure engine has no business in it. |
+
+That line is the whole organisational decision, and it is drawn at "does this
+carry meaning about a *creature*?". A taper is geometry; a *limb* is anatomy.
+The primitive is shared under its geometric name and the anatomy stays with the
+consumer that means it — which is also why the shared names are `Taper` and
+`Splat` rather than `Limb` and `Fur`.
+
+`cinder` therefore migrates only its **shape** code (FG1) and keeps its own
+skeleton, gait, pose model and mind exactly where they are. It never depends on
+the game: `userland/games/*` is a leaf subtree nothing outside may depend on
+(§17.4), so that dependency could not exist even if someone tried.
+
+Read first (§15.18): `plans/CINDER.md` §B2 (the proven shape vocabulary and
+skeleton this generalises), `AGENTS.md` §10 (asset tiers and DPI), §27
+(foundational primitives are complete, not minimal), `plans/WINTERSUN.md` §1
+(the games subtree) and §4, `plans/GUI-CONTROLS-DESIGN.md` (the designer's
+controls), `lib/raster` and `lib/util::mathf` rustdoc.
+
+## Ledger
+
+| # | Item | Status |
+|---|---|---|
+| FG0 | This plan, the jump-sheet row, the §3 map entry, the `PLAN.md` section | done |
+| FG1 | `lib/raster::shape`: the six outline primitives, the tracer, the build-time vertex bounds, and `cinder` migrated onto them with its existing tests as the acceptance gate | planned |
+| FG2 | `wintersun/figure`: the rig — skeleton, joint hierarchy with limits, named equipment sockets, draw order, and the one body frame that serves every heading | planned |
+| FG3 | Pose parameters, clips (keyframed parameter curves with easing), clip blending, and the transition state machine | planned |
+| FG4 | Procedural layers over a clip: gait phase from velocity, look-at, recoil, cloth and hair sway, breathing, contact shadow | planned |
+| FG5 | `cargo xtask artsheet`: the contact-sheet renderer, the committed goldens, and the automated quality checks | planned |
+| FG6 | The parameter space: species and build parameters, the palette model, validated bounds, and the compact serialised form a character record stores | planned |
+| FG7 | The designer engine: the parameter model, live preview, presets, and randomised-but-plausible generation | planned |
+
+Items are built in ledger order; each is complete — tests, docs, green gate —
+before the next begins.
+
+## 0. The problem this plan actually solves
+
+Hand-drawn sprite sheets are how this kind of game is normally made, and they
+are the wrong answer here for reasons that are structural rather than a matter
+of taste:
+
+- **Eight headings × N clips × M frames × every equipment combination** is a
+  combinatorial explosion of artwork that no one can author or keep consistent,
+  and equipment then cannot be mixed at all without redrawing it.
+- **A sprite sheet is unreviewable by a test.** A regression in it is invisible
+  until a human looks, so it rots silently.
+- **It does not scale with DPI.** §10 requires every desktop length to resolve
+  through one scale factor; a fixed-resolution sprite either blurs or aliases.
+- **It cannot be generated honestly by an AI contributor**, which is the
+  practical point. Asked for a 16-frame run cycle as pixels, a language model
+  produces something that looks approximately right and is wrong in exactly the
+  ways that matter — sliding feet, popping joints, inconsistent silhouettes,
+  drifting palettes. Committing that and calling it art is the failure mode
+  this plan is written to make impossible.
+
+The alternative already works in this tree. `cinder.app` draws a cat from
+**sixty-four parametric parts on a skeleton**, with pose parameters as data, one
+body frame so a single rig serves every heading, worst-case vertex counts
+asserted at build time, and host tests over the shapes, the gait, and the
+painter. It is legible, it is scalable, it is reviewable, and every property
+that can be stated as a number is stated as one.
+
+So: generalise it, and then make quality measurable.
+
+## 1. FG1 — the shared primitives, and `cinder`'s migration
+
+`lib/raster::shape` owns the primitives. The set generalises
+`cinder/src/shape.rs` without acquiring any game meaning:
+
+| Primitive | The geometry | What a consumer uses it for |
+|---|---|---|
+| `Superellipse { rx, ry, square }` | an ellipse pulled `square` of the way to its bounding box — corners round while flats stay flat | trunks, skulls, haunches, eyes |
+| `Taper { length, top, foot }` | a taper from an origin to a rounded end, rotated about that origin | arms, legs, tails, weapon shafts |
+| `Wedge { half_width, height, lean }` | a leaning wedge with a tucked base | ears, horns, blade tips, spurs |
+| `ScallopedPanel { rx, ry, folds }` | a panel with a scalloped hem | cloaks, skirts, banners, tabards |
+| `BevelledPanel { rx, ry, bevel }` | a hard-edged panel with a bevelled rim | armour, shields, buckles, metal |
+| `Splat { radius }` | a radial blob with a deterministic angular ripple | fur, hair, foliage, smoke |
+
+Every name states the *geometry*; the third column is the consumer's business
+and is documentation, not API. That is the rule that keeps this from being
+disguised game content in `lib/*`: `cinder`'s cat calls a `Taper` a leg in its
+own rig table, and `lib/raster` never learns that legs exist.
+
+`Wedge` is `cinder`'s `Ear` renamed to state what it is rather than where it
+was first used. `BevelledPanel` is the one genuinely new primitive, because
+armour drawn as a superellipse reads as flesh. Anything a primitive cannot
+state is a *composition* of primitives, never a seventh variant added for one
+asset (§2.3).
+
+`Splat` is the judgement call in the set, and worth naming as one: it was
+written for cat fur. It is kept because a radial blob with deterministic edge
+irregularity is equally foliage, smoke, a blot or a starburst — general
+geometry that happens to have had a creature as its first caller. If a reviewer
+disagrees, the alternative is for both consumers to carry it privately, which
+is the duplication §2.2 forbids; it is not to keep it in `lib/*` under a
+creature's name.
+
+Every outline is filled through `lib/raster`'s single anti-aliased scan
+converter — no second rasteriser (§2.2) — into `lib/inline` fixed arrays, so
+the outline path touches no allocator. Each shape's worst-case vertex count is
+asserted against the buffer at **build** time, so a generator given more detail
+fails the build rather than silently truncating a ring into a shape nobody
+authored. That rule is `cinder`'s and it is kept.
+
+**`cinder` migrates in the same change.** It is the existing consumer; leaving
+its private copy in place beside a second one would be the duplication this
+module exists to remove (§2.2, §2.14). Only its `shape.rs` moves — its
+skeleton, gait, roam and mind stay exactly where they are, because those are
+one creature's content, not a shared primitive. Its current `shape_tests.rs`, `paint_tests.rs`, `gait_tests.rs`
+and the desktop-companion QEMU vertical are the acceptance gate: the migration
+is correct when they pass unchanged in meaning, and its own pixels are
+unchanged where the shape is unchanged. The one deliberate difference is
+the renames to geometric terms and the arrival of `BevelledPanel`, which `cinder` does not use. **This is
+a real risk to a finished feature**, and it is taken deliberately rather than
+avoided by duplication; if the migration cannot preserve `cinder`'s pixels, that
+is a finding to surface (§15.7), not to paper over.
+
+## 2. FG2 — the rig (game-side)
+
+A `Rig` in `wintersun/figure` is a skeleton: joints in a parent-relative hierarchy, each with a rest
+transform and **documented rotation limits**; parts bound to joints with a
+body-local offset; a draw order that is the skeleton's own, so a piece of
+piping stays behind the flap it edges; and named **sockets** where equipment
+attaches (hand, off-hand, head, back, shoulder, hip, foot).
+
+Two rules carry most of the visual quality:
+
+- **A joint that bears a limb also carries its mass.** Each limb's joint is
+  also where the trunk carries a shoulder or haunch, from one table, so a
+  swinging shank can never open a gap at the shoulder. Legs that floated below
+  the body were the defect this closes in `cinder`, and it generalises exactly.
+- **One body frame serves every heading.** A figure is not drawn from
+  per-direction sprite sets. Its parts are placed in a body frame that is
+  rotated and foreshortened by the heading, with the depth component of
+  velocity scaling the frame — so walking away shrinks and walking toward the
+  camera enlarges, and eight or sixteen headings need no new artwork and no
+  `cfg`. This is `cinder`'s insight and it is the single largest saving in the
+  whole design.
+
+Equipment is parts on sockets with their own palette, so gear is visible,
+mixable, and costs no new art path. A helm is a `Plate` and a `Wedge`, not a
+redrawn head.
+
+## 3. FG3/FG4 — animation
+
+**Pose parameters are data, not code paths.** A pose is a named set of scalars
+— gait phase, crouch, lift, lean, head yaw and pitch, limb swing, tail sway,
+cloth sway, expression, eye state — and a figure is drawn from one pose. A
+`Clip` is a keyframed curve per parameter with an easing per segment, a
+duration, and a loop mode. Blending is a weighted sum of poses with per-clip
+masks, so a cast animation can play on the upper body while the legs keep
+walking.
+
+A `Transitions` state machine selects clips from the simulation's state
+(grounded, speed, action, stagger) with per-edge blend durations. The machine
+is data and is validated at load: every state reachable, every clip referenced
+present, every blend duration positive.
+
+**A clip also carries named events at phases** — `footstep`, `hit_frame`,
+`loose`, `cast_release` — which is the seam the game's combat timing is built
+on (`plans/WINTERSUN.md` §5, "Game feel"): a hitbox opens and a sound plays on
+the frame the art shows it, rather than on a timer that drifts from the
+animation. The events are part of the clip because that is the only place the
+phase is known; what a consumer *does* with `hit_frame` is the consumer's
+business, and the engine never learns what a hitbox is. An event at a phase
+outside `0..=1`, or a clip declaring an event name twice, is refused at load.
+
+Over the clip sit **procedural layers**, which is where animation stops looking
+keyframed:
+
+- **Gait phase is driven by distance travelled, not by a timer.** Feet are
+  planted as a function of position, so a walk cannot slide, cannot skate when
+  the speed changes, and cannot walk on the spot. `cinder`'s `roam` already
+  proves this is the difference between motion and the appearance of it.
+- **Look-at** rotates head and eyes toward a target within the joint limits.
+- **Recoil and follow-through** displace the rig briefly on an impact or a
+  loose, and settle on a damped curve — the thing whose absence makes an
+  attack feel weightless.
+- **Cloth, hair, and tail** are damped springs driven by acceleration and the
+  wind vector, so a cloak trails the turn instead of rotating with it.
+- **Breathing** is a small always-on cycle, which is what stops an idle figure
+  reading as a paused one.
+- **Feet are planted on the ground, not on the ground's average.** The world
+  generator produces real slopes, so a figure standing across a gradient has
+  one foot higher than the other; without correction both feet sit at the
+  root's height and visibly float on the uphill side and sink on the
+  downhill. Each foot is therefore solved to its own terrain height within a
+  stated reach, and the excess is absorbed up the chain — the pelvis drops
+  toward the lower foot and the supporting knee takes the bend, within the
+  joint limits FG2 declares. A slope steeper than the reach allows tilts the
+  whole figure rather than tearing the rig. **This is a correctness
+  requirement, not polish**: a top-down camera looks straight at the
+  ground-contact line, which is exactly where the error is most visible.
+- **Root motion where a clip needs it.** A dodge, a lunge and a stagger
+  displace the figure by an amount the *clip* owns, so the animation and the
+  movement cannot disagree. The authoritative displacement stays the
+  simulation's (a client cannot move itself by playing an animation); the clip
+  supplies the curve the simulation's own move follows.
+- **A contact shadow** at the ground point, squashed by the light direction and
+  fading with height — the trick that makes a jump readable.
+
+Every layer is a pure function of (pose, state, time) and is host-tested
+against its stated property, not against a screenshot.
+
+## 4. FG5 — making quality provable
+
+This is the heart of the plan. Three mechanisms, and none of them is optional.
+
+### Contact sheets as committed goldens
+
+`cargo xtask artsheet` renders every figure preset × every clip × a fixed set of
+phases, at the fixed set of pixel sides the game draws, into PNG contact sheets
+committed to the tree. It runs in two modes, exactly as the existing
+`cargo xtask font-atlas` does for the glyph atlas: `--write` regenerates, and
+the bare form **verifies and fails closed on drift**, so it belongs in `ci`.
+
+A change to the rig, a clip, a shape, or a palette therefore either produces
+identical sheets or fails the gate with the sheet that changed. A human reviews
+a picture; the machine notices the change. That is the only arrangement in
+which art does not rot.
+
+### Automated quality checks, per sheet
+
+Each rendered frame is measured, and a failing measurement is a failing test:
+
+- **Silhouette readability**, defined concretely enough to be a gate. At the
+  smallest drawn size the figure's coverage mask must satisfy three measured
+  bounds: the alpha-weighted **coverage ratio** falls inside a band (a figure
+  that fills its box reads as a blob; one that barely marks it reads as
+  nothing); the count of **connected components** in the thresholded mask is at
+  least the rig's declared silhouette landmarks, so the head and limbs remain
+  separable rather than merging into the trunk; and the **contrast ratio**
+  between the figure's mean luminance and each of the dark and light theme
+  backgrounds clears a stated minimum. "It becomes a blob at icon size" is the
+  symptom; these three numbers are what actually fails the build, because a
+  metric a reviewer has to eyeball is not a gate.
+- **Palette conformance.** Every colour resolves from the figure's declared
+  palette and the active `lib/theme` tokens. An off-palette pixel is a defect,
+  which is what stops incremental colour drift.
+- **Joint limits.** No frame of any clip drives a joint outside its documented
+  limit. This is the check that catches the elbow bending backwards.
+- **Foot slide.** During locomotion, a planted foot's world position moves less
+  than a stated bound per frame. This is the check that catches skating, and it
+  is the single most common animation defect.
+- **Motion continuity.** No parameter's second difference exceeds a bound
+  across a clip or across a blended transition, so nothing pops.
+- **Loop closure.** A looping clip's first and last pose match within a bound,
+  so a cycle does not hitch.
+- **Budget.** Vertex counts per figure and fill cost per frame stay within the
+  stated budget at the largest drawn size, so a figure cannot quietly become
+  the frame's cost centre (§2.16).
+
+### The honest limit
+
+These checks prove a figure is **consistent, readable, correctly animated, and
+on-palette**. They cannot prove it is beautiful. What they do is make every
+failure mode that can be stated as a number fail loudly, and leave a reviewable
+picture for the judgement that cannot — which is the most that can be claimed
+truthfully, and considerably more than a sprite sheet offers.
+
+## 5. FG6/FG7 — the parameter space and the designer
+
+A figure's identity is a validated parameter record: species, build (height,
+mass distribution, limb proportion, head proportion), features (face shape, eye
+shape and colour, ear form, horn or tail presence and form, hair style and
+volume), and a palette (skin/fur, hair, eyes, markings, cloth accent). Every
+parameter has documented bounds, and the record's decoder is total and fails
+closed — because in `plans/WINTERSUN.md` it arrives **off the wire from a
+client**, which is assumed hostile: the server re-validates every parameter
+against its bounds and refuses an impossible figure rather than drawing one.
+The serialised form is compact and versioned, since a character record stores
+one per character.
+
+The designer engine is the parameter model plus the preview; the surfaces are
+the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
+
+- **§28, which a designer is the surface most likely to violate.** A slider
+  changes the parameter in memory and repaints — it does not write a store, and
+  it does not re-derive anything the parameter does not feed. The durable write
+  happens once, when the drag settles. The known real-world defect this cites
+  is the settings slider that wrote to the configuration service on every
+  pointer-motion sample and froze its window for the whole drag, and then, with
+  the write removed, still re-derived the entire surface per sample.
+- **Randomised means plausible, not uniform.** "Surprise me" draws from
+  per-parameter distributions with correlations (a heavy build gets broader
+  shoulders; a pale palette gets pale markings), from an injected
+  `lib/rng` generator so it is deterministic and host-testable. Uniform
+  sampling over a parameter box produces monsters, which is how a designer
+  earns a reputation for ugly output.
+
+## 6. Refused by name
+
+- **A figure engine in `lib/*`.** Rigs, clips and character parameters are game
+  content; `lib/*` is the OS's shared-library namespace. Only the geometric
+  primitives are shared, and only under geometric names (§1).
+- **Hand-drawn per-direction sprite sheets**, for the reasons in §0.
+- **A seventh shape variant added for one asset.** Compose from the six.
+- **A second rasteriser, blend, or outline path.** `lib/raster` owns them.
+- **Runtime-loaded figure geometry from an untrusted source.** Parameters are
+  validated data; geometry is first-party code.
+- **Screenshot-diff tests as the only animation check.** They catch that
+  something changed, never that it is wrong. The measurements in §4 are what
+  state correctness; the sheets are for the human judgement that remains.
+- **An `#[allow]` or a widened bound to make a quality check pass.** A failing
+  readability, slide, or limit check is a real finding (§15.3, §2.18).
+
+## 7. Verification
+
+- The six shapes' outlines are traced within their asserted vertex bounds, and
+  a generator exceeding one fails the build.
+- `cinder`'s existing shape, paint, gait, roam, and vertical tests pass after
+  the FG1 migration, with unchanged pixels where the shape is unchanged.
+- Rig: joint limits enforced; a limb's joint always carries its mass; draw
+  order is the skeleton's; every socket resolves.
+- Clips: curve evaluation at known t; loop closure; blend weights sum to one;
+  a malformed clip or transition document is refused. Events fire once per
+  playback at their authored phase, survive a blended transition without
+  duplicating or being dropped, and a clip with an out-of-range or duplicated
+  event is refused at load.
+- Layers: a walk of known distance plants a known number of steps with foot
+  slide inside its bound; a figure standing and walking across a known slope
+  has each foot at its own terrain height with the pelvis and knee absorbing
+  the difference inside the joint limits, and a slope beyond the reach tilts
+  the figure rather than tearing the rig; root motion displaces by the clip's
+  own curve and never by more than the simulation authorised; look-at respects limits; springs are stable (no
+  divergence) for a bounded input; breathing is non-zero at idle.
+- `artsheet` verify mode fails on any drift and is part of `ci`; every §4 check
+  runs over every sheet.
+- Parameter records: bounds enforced, malformed refused, round-trip exact,
+  versioned decode total. Fuzz harness over the decoder, since it is
+  attacker-reachable in the game (§19.6).
+- Designer: a simulated drag produces exactly one durable write and one repaint
+  per drained input burst, and touches no state the changed parameter does not
+  feed (§28.10, §28.11).
+- `miri`: `lib/raster` is enrolled if the `shape` module ever carries `unsafe`;
+  on the present design it carries none, since the tracer writes into
+  `lib/inline` fixed arrays through bounds-checked indices. `loom` is not
+  applicable to either half — neither holds shared mutable state — stated so
+  the absence is an answer rather than silence (§19.11).

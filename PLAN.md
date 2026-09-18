@@ -8986,3 +8986,142 @@ margin reaches the window beneath, and both feeds stopping when the lock screen
 comes up. `plans/CINDER.md` CD12 states the five steps. CD13 is a second holder
 of the authority, which is what will prove the seam is a seam rather than one
 app's private path.
+
+---
+
+## WINTERSUN — the desktop RPG and its three enabling libraries  **[PLANNED, NOT STARTED]**
+
+Plans: `plans/WINTERSUN.md` (the game), `plans/FIGURE.md` (characters and
+animation), `plans/RECDB.md` (durable storage), `plans/GPU.md` (the render
+seam). Each carries its own ledger; this section states only what the body of
+work is, what it depends on, and what it changes outside itself.
+
+**What it is.** WinterSun is a 2D top-down isekai action-RPG: a procedurally
+generated world with real hydrology, climate-derived biomes, weather and a
+day/night cycle; parametric characters with a designer; magic, ranged combat and
+traps; skills, levelling and a self-balancing economy; and a
+server-authoritative realm serving up to a thousand players. It ships as
+`/Apps/WinterSun.app` with its client `Run` binary and three server binaries
+inside the bundle, plus a `wintersunctl` command app.
+
+**Why it is four plans and not one.** Three pieces have consumers beyond the
+game, so a single definition is the charter's rule (§2.2, §6):
+
+- The **figure work is split by whether it carries creature meaning**
+  (`plans/FIGURE.md`). The parametric *outline primitives* `cinder` and the game
+  genuinely share go into `lib/raster::shape` under geometric names
+  (`Superellipse`, `Taper`, `Splat` — never `Limb` or `Fur`), beside the scan
+  converter that fills them; `cinder` migrates its `shape.rs` onto them in the
+  same change, with its existing shape, paint, gait and roam tests as the
+  acceptance gate, and keeps its own skeleton, gait and mind where they are.
+  Everything with character semantics — rigs, sockets, clips, blending, motion
+  layers, character parameters, the art harness — is **game code** and lives in
+  the games subtree. `lib/*` gets the geometry and nothing else. The `cinder`
+  migration is a deliberate, stated risk to a finished feature.
+- `lib/recdb` is the record store TAIRiX does not have. Structured state is
+  persisted today either as a whole-file text rewrite (`lib/users`) or as an
+  opaque blob (`lib/appdata`), neither of which survives many records, partial
+  updates, or a power cut. The account database, the journal index and the
+  app-data blob index are named as follow-on consumers with their own staging —
+  named so they are not assumed, staged separately because each is new work
+  with its own risk.
+- `lib/gpu` is the answer to the OpenGL question, which is **no**: GL is a
+  hand-authored C API surface (§1, §15.11, and §9 permits a C surface only as
+  generated output of `lib/abi`), its shader compiler is a large
+  untrusted-code surface needing `CAP_JIT_MAP_EXEC` (§19.2), there is no
+  first-party driver to run it on, and a partial implementation would be a
+  misleading compatibility claim (§2.19). Instead: an explicit device-neutral
+  render seam whose kernels are a **closed registry of first-party Rust
+  operations** rather than a shading language, landing *with* its first backend
+  and never before it (§2.4).
+
+**Dependencies outside these four plans.** Each is named in
+`plans/WINTERSUN.md` §"Prerequisites owned by other plans" so none is
+discovered late:
+
+- `plans/SOUND.md` SND2–SND4 and SND9. **There is no audio stack at all
+  today** — no driver class, no mixer, no stream ABI, no capability — so the
+  game is silent until that plan's working base lands. This is the single
+  largest external dependency.
+- `plans/COMPOSITOR-WORK.md`: window **size states** (`Normal` / `Maximised` /
+  `Fullscreen`) on the window channel, and the compositor promoting a
+  scanout-sized fullscreen surface to one unblended layer. Exclusive fullscreen
+  is *not* a second display path and *not* a framebuffer seizure: taking it any
+  other way would be the private back-channel §17.3 forbids.
+- `lib/crypto` gains X25519 key agreement (the audited `x25519-dalek`, the same
+  family as the present `ed25519-dalek`), so the realm session handshake
+  composes audited primitives rather than hand-rolling agreement (§2.12).
+- `plans/FIX-DISPLAY-ACCELERATION.md` is where `drivers/display/gpu_virtio`
+  stops being an empty placeholder. `plans/GPU.md` GP1 is that driver, and it
+  has independent value: without it the desktop's own accelerated path is
+  unreachable on every QEMU target.
+
+**What it adds to the tree, and where the line is drawn.** A game is not an OS
+library, so **none of it goes in `lib/*`**. It lands in a new
+`userland/games/` leaf subtree — `userland/games/wintersun/{app,art,ctl,figure,
+net,rules,world}` — modelled exactly on `userland/gui/`: its crates compose
+each other and `lib/*`, and nothing outside the subtree may depend on them, so
+game code cannot reach the OS libraries even by accident. WS1 adds
+`Layer::UserGame` to `deps_check.rs` (the `userland/games/` arm must precede
+the generic `userland/` arm, or every game crate classifies as plain `Userland`
+and its internal edges are refused). The subtree is nested under `userland/`
+rather than made top-level because `classify`'s fallthrough is `Layer::Tooling`,
+which is layering-*exempt* — a forgotten arm on a top-level tree would silently
+let game code name kernel internals, where a forgotten arm under `userland/`
+merely over-restricts and fails loudly.
+
+What reaches `lib/*` is only what the OS itself wants: `lib/recdb`, `lib/gpu`,
+and a `shape` module in `lib/raster`. All recorded in §3, with §17.4 gaining the
+`userland/games/*` edge. No new capability: a realm's
+roles are the realm's records enforced by its server, not kernel authority,
+because they govern a game's objects and not the machine's (§5.2). No new
+syscall. No `lib/abi` change except the window size states, which are genuinely
+desktop ABI and belong to the desktop's plan.
+
+**The claims this work is judged on**, all of them tests rather than assertions:
+
+- The authoritative simulation is **bit-deterministic across all four Tier-1
+  targets** — a fixed seed and intent log yield one state hash on `x86_64`,
+  `aarch64`, `riscv64` and `wasm32`. This is affordable only because
+  `lib/util::mathf` is TAIRiX's own libm rather than a per-platform one, so the
+  transcendentals are the same source everywhere and Rust contracts no FMA.
+- The world is a **pure function of its seed**, so terrain is never
+  transmitted and never stored: a realm's disk cost is O(player changes) and
+  its RAM cost is O(working set), whatever its extent. What the seed may not
+  decide — a dungeon interior, a container's contents, an undetected trap,
+  another player outside your awareness — is server-only, which makes a radar
+  cheat structurally impossible rather than detected.
+- The economy's price controller is **stable over a measured envelope** — and
+  says so rather than claiming a proof it cannot offer: the median-price input
+  makes the loop non-linear, so what is delivered is a derivation of the
+  default gains plus long-horizon simulations under injected shocks asserting
+  bounded drift, convergence, no oscillation, and closed arbitrage.
+- The client and the realm hold a playable feel **at a simulated 100 ms round
+  trip**, not on loopback: authored windup/active/recovery frames that the
+  animation timing derives from, animation-event-driven hitboxes, bounded
+  input buffering and grace windows, and bounded "favour the shooter" lag
+  compensation whose clamp is validated against the shooter's own measured
+  round trip.
+- The software renderer holds a **stated per-pass frame budget** at 1280×720/60
+  on a four-core reference machine, with a fixed degradation order in which
+  frame rate is the last thing to give way. This is the plan's most likely
+  wrong number, which is why milestone M1 exists to measure it early.
+- Art quality is **measured**: contact sheets committed as goldens and verified
+  in `ci` (the `cargo xtask font-atlas` pattern), plus automated silhouette
+  readability, palette conformance, joint-limit, foot-slide, motion-continuity
+  and loop-closure checks. This is the deliberate answer to hand-drawn sprite
+  sheets, which no test can review and which rot silently.
+- `lib/recdb` survives **crash injection at any byte boundary**: every
+  committed transaction present, no uncommitted transaction visible, every
+  index agreeing with its table, for every injection point.
+- The §26.7 floor holds as a **conjunction**, not one condition at a time: a
+  realm at its stated population with multiple zones, and a client rendering at
+  a playable rate, both on a modest discovered-RAM configuration — bounded
+  resident set, growth then fail-closed on exhaustion, no panic, no busy-spin.
+
+**Refused by name**, so none is re-proposed: a scripting VM for game content
+(content is data over a closed effect vocabulary, not an untrusted-code
+surface); OpenGL; client authority of any kind; a second renderer, rasteriser,
+blend or present path; a second system audio mixer (the game composes one
+stream); anti-cheat by inspecting a player's processes or memory; tile-grid
+terrain; a `/proc`-style telemetry file; and real-money or wagering mechanics.
