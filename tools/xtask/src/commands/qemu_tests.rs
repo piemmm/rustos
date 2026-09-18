@@ -3817,7 +3817,7 @@ static TESTS: &[QemuTest] = &[
     // end to end over the production `KernelDispatchHook` chassis, which here
     // also carries a real `KernelProcessSignal` — a group `exit` has to drive
     // every sibling to its stopping point, and `thread_create` refuses a group
-    // that cannot be stopped. The six-role fixture program's parent is spawned
+    // that cannot be stopped. The fixture program's parent is spawned
     // through the production `InitSpawnCtx::spawn_driver_process` seam and
     // drives each child through production `spawn` + `wait`: `counter`
     // (contended futex `Mutex` over one address space), `rendezvous` (a
@@ -3825,7 +3825,10 @@ static TESTS: &[QemuTest] = &[
     // would starve the notifier on this single-CPU cooperative drive), `tls`
     // (each thread reads its own magic through its psABI thread pointer, before
     // and after a trap), `exitearly` (the kernel's clear-on-exit word releases
-    // a joiner), and `groupexit` (a sibling parked in the kernel, reapable only
+    // a joiner), `reapchild` (a child spawned and reaped from a thread that is
+    // not the group's leader, so the blocking `wait` has to park the calling
+    // thread rather than the leader), and `groupexit` (a sibling parked in the
+    // kernel, reapable only
     // because the group exit reached it). PASS once the chassis reaps a parent
     // exit of 0. Single CPU and a 60-second budget match the sibling
     // boot-then-do-fixed-work tests.
@@ -3849,7 +3852,7 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
-    // The riscv64 twin of the threads vertical above: the same six-role fixture
+    // The riscv64 twin of the threads vertical above: the same fixture
     // program and production chassis, driven on the riscv64 `virt` board through
     // the S-mode trap path, so each thread's `tp` is the port's own per-task
     // thread pointer.
@@ -3873,7 +3876,7 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
-    // The x86_64 twin of the threads verticals above: the same six-role fixture
+    // The x86_64 twin of the threads verticals above: the same fixture
     // program, driven through the shared production board bring-up
     // (`bring_up_bsp`) with the hook installed into the production
     // `DISPATCH_SLOT`, so each thread's `FS` base is reloaded by the kernel at
@@ -9546,7 +9549,7 @@ fn assert_files_window_screendump(
         0,
         tairix_browse::WIN_WIDTH,
         tairix_browse::WIN_HEIGHT,
-        tairix_browse::WIN_SIZING.resizable(),
+        tairix_browse::WIN_RESIZABLE,
         theme,
     )
     .outer;
@@ -10909,7 +10912,7 @@ fn reconstruct_manager_item_click(
         slot,
         tairix_browse::WIN_WIDTH,
         tairix_browse::WIN_HEIGHT,
-        tairix_browse::WIN_SIZING.resizable(),
+        tairix_browse::WIN_RESIZABLE,
         theme,
     )
     .client;
@@ -11830,7 +11833,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         0,
         tairix_browse::WIN_WIDTH,
         tairix_browse::WIN_HEIGHT,
-        tairix_browse::WIN_SIZING.resizable(),
+        tairix_browse::WIN_RESIZABLE,
         shell.session().active_theme(),
     )
     .client;
@@ -12817,7 +12820,7 @@ mod tests {
                 slot,
                 tairix_browse::WIN_WIDTH,
                 tairix_browse::WIN_HEIGHT,
-                tairix_browse::WIN_SIZING.resizable(),
+                tairix_browse::WIN_RESIZABLE,
                 &theme,
             )
             .client;
@@ -13150,7 +13153,7 @@ mod tests {
             0,
             tairix_browse::WIN_WIDTH,
             tairix_browse::WIN_HEIGHT,
-            tairix_browse::WIN_SIZING.resizable(),
+            tairix_browse::WIN_RESIZABLE,
             &theme,
         );
         assert_eq!(
@@ -13162,7 +13165,7 @@ mod tests {
             (tairix_browse::WIN_WIDTH, tairix_browse::WIN_HEIGHT),
         );
         let frame = tairix_controls::WindowFrame::new(tairix_controls::WindowFurnitureState {
-            resizable: tairix_browse::WIN_SIZING.resizable(),
+            resizable: tairix_browse::WIN_RESIZABLE,
             ..tairix_controls::WindowFurnitureState::default()
         });
         assert_eq!(
@@ -13191,7 +13194,7 @@ mod tests {
         // The frame's own hit map is the oracle here: deepening the theme's hit
         // slop past the aim inset fails this test rather than silently
         // resizing a window in a QEMU vertical.
-        let aim = served_client_aim(0, tairix_browse::WIN_SIZING.resizable(), &theme);
+        let aim = served_client_aim(0, tairix_browse::WIN_RESIZABLE, &theme);
         assert_eq!(
             frame.hit(layout.outer, Scale::ONE, &theme, aim),
             tairix_controls::FurniturePart::Client,

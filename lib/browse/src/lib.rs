@@ -184,6 +184,7 @@ pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::{DirectorySource, Listing, Probe};
 pub use tairix_abi::window_ipc::WindowSizing;
+use tairix_geometry::Scale;
 /// The pointer button a consumer names when it reports a press. Re-exported
 /// because it is part of this engine's own surface and should not need a
 /// dependency of its own. The double-click rule those presses pair under is
@@ -194,6 +195,7 @@ pub use tairix_input::PointerButton;
 /// rather than re-implemented so a surface that spells a resolved link target
 /// uses the same rule the engine does.
 pub use tairix_path::{join as join_child, leaf_name};
+use tairix_theme::Theme;
 pub use trash::{
     empty_trash_plan, trash_dest_path, trash_dir, trash_strategy, DeleteDisposition, TrashError,
     TrashStrategy, MAX_TRASH_NAME_ATTEMPTS,
@@ -202,7 +204,9 @@ pub use trash::{
 pub use vfs::RtLinkReader;
 pub use vfs::{LinkInfo, LinkReader, NoLinks, NoProbe, VfsDirectorySource};
 
-/// Window content width of a browser view, in pixels — the one definition
+/// Window content width of a browser view, in logical pixels at the
+/// reference density, resolved through the desktop's own scale — the one
+/// definition
 /// the files app's `Run` binary and the session's trusted picker size
 /// their windows with, and the QEMU vertical's host-side scan-out
 /// assertion measures against (`plans/APPWIN.md` AW3/AW5).
@@ -217,29 +221,55 @@ pub const WIN_WIDTH: u32 = 480;
 /// further.
 pub const WIN_HEIGHT: u32 = 480;
 
-/// The smallest client width, in pixels, a browser window declares at
-/// create: the floor the window manager holds an interactive resize to, so a
-/// drag toward nothing stops at a window that still shows its chrome. The
-/// app never re-imposes it — it lays out at whatever size it is given, and
-/// the content clips gracefully below its natural size.
-const MIN_WIN_WIDTH: u32 = 240;
+/// The smallest client width, in logical pixels, a *listing* still reads at.
+///
+/// The floor a window declares is the larger of this and what its own
+/// command toolbar needs ([`win_sizing`]); below that the shared toolbar
+/// would have to scroll, and a browser view rebuilds its strip per frame so
+/// it holds no offset to scroll with.
+const MIN_LISTING_WIDTH: u32 = 240;
 
-/// The smallest client height a browser window declares (see
-/// [`MIN_WIN_WIDTH`]).
+/// The smallest client height a browser window declares, in logical pixels
+/// (see [`MIN_LISTING_WIDTH`]).
 const MIN_WIN_HEIGHT: u32 = 160;
 
-/// The sizing a browser window asks the window manager for: resizable, down
-/// to the smallest client a listing still reads at (see [`WIN_WIDTH`]).
+/// The sizing a browser window asks the window manager for at `scale`:
+/// resizable, down to the smallest client both a listing and the command
+/// toolbar still fit in.
 ///
-/// The app's `Create` request and the QEMU vertical's host-side
-/// reconstruction of the window's on-screen footprint read this one value,
-/// so the drawn window and the pixels a test looks at cannot disagree —
-/// resizable decoration widens the furniture band reserved around the
-/// client.
-pub const WIN_SIZING: WindowSizing = WindowSizing::Resizable {
-    min_width_px: MIN_WIN_WIDTH,
-    min_height_px: MIN_WIN_HEIGHT,
-};
+/// The floor the window manager holds an interactive resize to. The app never
+/// re-imposes it — it lays out at whatever size it is given, and the content
+/// clips gracefully below its natural size. It is derived rather than
+/// hand-picked, because the toolbar's own tools are what set it and a denser
+/// theme or a larger scale changes what they need. The ABI field is
+/// *physical*, so the logical floors above are resolved here.
+#[must_use]
+pub fn win_sizing(scale: Scale, theme: &Theme) -> WindowSizing {
+    sizing_of(
+        scale
+            .scale_length(MIN_LISTING_WIDTH)
+            .max(render::toolbar_natural_width(scale, theme)),
+        scale.scale_length(MIN_WIN_HEIGHT),
+    )
+}
+
+/// One spelling of the sizing variant, so [`win_sizing`] and
+/// [`WIN_RESIZABLE`] cannot state different things about the decoration.
+const fn sizing_of(min_width_px: u32, min_height_px: u32) -> WindowSizing {
+    WindowSizing::Resizable {
+        min_width_px,
+        min_height_px,
+    }
+}
+
+/// Whether a browser window is decorated resizable, which widens the
+/// furniture band reserved around the client.
+///
+/// Derived from the one sizing constructor rather than stated a second time,
+/// so the drawn window and the on-screen footprint a QEMU vertical
+/// reconstructs cannot disagree; the floor does not affect the decoration, so
+/// any value answers it.
+pub const WIN_RESIZABLE: bool = sizing_of(0, 0).resizable();
 
 /// The item view a **file-manager** window opens showing: icons, not rows.
 ///

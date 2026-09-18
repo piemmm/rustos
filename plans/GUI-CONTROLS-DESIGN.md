@@ -851,6 +851,39 @@ Toolbars are containers for IconButtons, SplitButtons, fields, and grouped actio
 - Group boundaries use quiet vertical gutters.
 - The active tool has a persistent accent rim or lower seam.
 - Background work belonging to a tool appears as a Heat Seam on that tool, not across the full toolbar.
+- **A strip never draws or hit-tests outside its own bounds.** A strip with
+  room for every tool seats them from its leading edge. One without seats
+  **whole tools only** and scrolls; a tool with no room has no rectangle at
+  all, so paint and hit-test agree by construction and a press can never land
+  on a tool nothing drew.
+- **The offset is in whole tools**, held as a `ScrollModel` over a
+  `ScrollRange { content: tools, viewport: seats, offset: first shown }` with
+  `line_step = 1` — the crate's own "application records" unit. One scroll
+  engine, so the clamp is the scrollbar's own.
+- **The overflow affordances are reserved when the strip scrolls at all**, one
+  tool slot at each end, whether or not either is currently drawn — so
+  scrolling moves the tools and not the band they sit in, and one step moves
+  exactly one tool. A strip wide enough for every tool reserves nothing. Each
+  is **drawn and pressable only where there is something that way**, through
+  the shared `paint_chevron` the scrollbar's end buttons use rather than a
+  second glyph; a strip whose band seats no tool at all offers neither,
+  because stepping it could not help (fail closed).
+- **A press steps one tool; a held press auto-repeats** through
+  `Toolbar::repeat`, driven by the owner's one-shot timer and event-driven
+  wakeups, never a polling loop (§11.28's rule for the scrollbar, applied
+  here). The cadence — `REPEAT_DELAY_NS` before the first repeat, then
+  `REPEAT_INTERVAL_NS` — is defined **once** in `lib/controls`'s scroll module
+  and shared by every press-and-hold stepping control, so two held controls in
+  one window cannot step at different rates. The wheel over the strip scrolls
+  it, and a keyboard focus move scrolls the tool it lands on into view, so the
+  keyboard reaches every tool however narrow the strip is.
+- **An owner sizes its window from the strip, not from a guess.**
+  `Toolbar::natural_width` is what seating every tool costs — the floor for an
+  owner whose strip must never scroll — and `Toolbar::min_width` is the two
+  reserved slots plus the widest single tool, the floor for one whose strip
+  may. Neither is a hand-picked constant (§24.1).
+- A held affordance draws the same as an idle one, so the press latch is
+  **not** part of the render-equivalence comparison; the offset is.
 
 ### 11.12 Tabs
 
@@ -2210,6 +2243,7 @@ A control or control family is ready when the following are true:
 - Hit-map tests prove that client content cannot receive outer-furniture input and that the resize corner does not overlap either scrollbar.
 - Breadcrumb tests cover the trailing crumb refusing activation from every route and refusing focus, elision from the front with the ellipsis activating the newest hidden ancestor, the ellipsis being dropped last so the current crumb survives alone, a focused elided crumb keeping its ring on the ellipsis, a press that slides onto another crumb activating nothing, and `crumb_at`/`crumb_rect` agreeing with the painted layout.
 - ActionRail tests cover the shared button height and control gap, full-width items, a rail too short drawing only whole items with hit-testing agreeing, keyboard focus movement reporting the two item rectangles, a denied item keeping its Authority Mark, and the Edge Wake lighting only when asked.
+- Toolbar tests cover a wide strip seating every tool and reserving nothing, a narrow strip seating whole tools only inside its bounds, nothing outside the strip or on an affordance slot hit-testing to a tool, a chevron drawn only where there is something that way, a press stepping exactly one tool and a held press repeating until the offset reaches a bound, the wheel scrolling and a full strip ignoring it, keyboard focus scrolling a tool into view, a band too narrow for one tool showing and offering nothing, and the render-equivalence gate comparing the offset but not the press latch.
 - TableHeader tests cover a header and its rows resolving identical column spans across a row-state change, a reported sort never reordering or redrawing until `set_sort` commits one, a committed sort that differs from the request being what is drawn, an already-sorted column flipping order, a fixed column emitting nothing, and a denied column keeping its title and its layout.
 
 ---

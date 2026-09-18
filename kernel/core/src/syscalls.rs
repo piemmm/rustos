@@ -7243,7 +7243,8 @@ where
         let reported = if flags.is_nonblock() {
             self.process_wait.poll(caller.process(), pid, flags)?
         } else {
-            self.process_wait.wait(caller.process(), pid, flags)?
+            self.process_wait
+                .wait(caller.process(), caller.task_id, pid, flags)?
         };
 
         // Copy the typed status record out to the caller's `status` pointer
@@ -27826,6 +27827,9 @@ mod tests {
     /// real scheduler-side wait path.
     struct RecordingProcessWait {
         last: tairix_sync::SpinLock<Option<(u64, i64)>>,
+        /// The thread the blocking `wait` was told to park, so a test can
+        /// prove the handler named the *caller* and not its group leader.
+        last_waiter: tairix_sync::SpinLock<Option<u64>>,
         last_poll: tairix_sync::SpinLock<Option<(u64, i64)>>,
         last_flags: tairix_sync::SpinLock<Option<WaitFlags>>,
         last_exit: tairix_sync::SpinLock<Option<(u64, i32)>>,
@@ -27836,6 +27840,7 @@ mod tests {
         fn new(result: Result<crate::procwait::WaitedChild, Errno>) -> Self {
             Self {
                 last: tairix_sync::SpinLock::new(None),
+                last_waiter: tairix_sync::SpinLock::new(None),
                 last_poll: tairix_sync::SpinLock::new(None),
                 last_flags: tairix_sync::SpinLock::new(None),
                 last_exit: tairix_sync::SpinLock::new(None),
@@ -27848,10 +27853,12 @@ mod tests {
         fn wait(
             &self,
             parent: ProcessId,
+            waiter: SecTaskId,
             pid: i64,
             flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             *self.last.lock() = Some((parent.0, pid));
+            *self.last_waiter.lock() = Some(waiter.0);
             *self.last_flags.lock() = Some(flags);
             self.result
         }
@@ -27917,11 +27924,64 @@ mod tests {
         .with_process_wait(producer);
 
         // Returns the reaped child's PID; the producer saw the caller's
-        // task id as `parent` and the requested `pid` verbatim.
+        // process as `parent` and the requested `pid` verbatim.
         assert_eq!(h.wait(&ctx, 9, 0x1000, WaitFlags::empty()), Ok(42));
         assert_eq!(*producer.last.lock(), Some((2, 9)));
         // The blocking branch went to `wait`, never the poll path.
         assert_eq!(*producer.last_poll.lock(), None);
+    }
+
+    /// A blocking `wait` names the **calling thread** as the one to park, not
+    /// its process's leader.
+    ///
+    /// The process-wait *table* is process-keyed — a child belongs to the
+    /// thread group and any of its threads may reap it — but the park has to
+    /// name the schedulable entity. A multi-threaded process that reaps from a
+    /// non-leader thread used to register the leader on the wait queue and
+    /// park itself, so the exit woke the wrong task and the real waiter slept
+    /// for the rest of the boot (`view.app`'s decode worker disposing of a
+    /// closed window's sandbox was the reported symptom).
+    #[test]
+    fn wait_parks_the_calling_thread_not_the_group_leader() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // A second thread of process 2: its task id is its own, so the two
+        // ids the producer is handed cannot be confused for one another.
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(77),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+            RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
+                pid: 42,
+                status: tairix_abi::WaitStatus::Exited(0),
+            })),
+        ));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(producer);
+
+        assert_eq!(h.wait(&ctx, 9, 0x1000, WaitFlags::empty()), Ok(42));
+        // The table is keyed by the process the child belongs to ...
+        assert_eq!(*producer.last.lock(), Some((2, 9)));
+        // ... and the park by the thread that actually called.
+        assert_eq!(*producer.last_waiter.lock(), Some(77));
     }
 
     /// `WaitFlags::NONBLOCK` routes the handler through the producer's
@@ -34884,6 +34944,7 @@ mod tests {
         fn wait(
             &self,
             _parent: ProcessId,
+            _waiter: SecTaskId,
             _pid: i64,
             _flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {

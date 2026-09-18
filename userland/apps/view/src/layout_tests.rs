@@ -4,8 +4,10 @@
 //! checks a property of it, so a change to the geometry moves the tests with
 //! it rather than quietly making them assert about empty space.
 
+use tairix_controls::{ControlRole, IconButton, Toolbar};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
+use tairix_icon::IconKind;
 use tairix_theme::{TextRole, Theme, ThemeRegistry};
 
 use super::Layout;
@@ -15,12 +17,30 @@ fn font(theme: &Theme, scale: Scale) -> BitmapFont {
     BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
 }
 
+/// A strip of the viewer's own tool count, so the room the layout reserves
+/// for the tools is the room the real toolbar asks for.
+fn tools() -> Toolbar {
+    let mut toolbar = Toolbar::new();
+    for _ in 0..super::TOOL_COUNT {
+        toolbar = toolbar.with_icon(IconButton::new(IconKind::Bell, ControlRole::Neutral), 0);
+    }
+    toolbar
+}
+
 /// The layout of a `width`x`height` window at `scale`, with the information
 /// panel in the state named.
 fn layout(width: u32, height: u32, scale: Scale, info: bool) -> Layout {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
-    Layout::for_window(width, height, theme, scale, font(theme, scale), info)
+    Layout::for_window(
+        width,
+        height,
+        theme,
+        scale,
+        font(theme, scale),
+        tools().natural_width(scale, theme),
+        info,
+    )
 }
 
 /// An ordinary window with the panel closed.
@@ -182,4 +202,108 @@ fn a_zero_sized_window_yields_empty_bands_rather_than_an_error() {
         );
     }
     assert!(layout.window().is_empty());
+}
+
+// ---- sizing the window to a picture -----------------------------------
+
+#[test]
+fn client_for_canvas_round_trips_the_canvas_band() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    for scale in [Scale::ONE, Scale::from_percent(200).expect("a legal scale")] {
+        for info in [false, true] {
+            // Swept rather than sampled: the panel's share is an integer
+            // division, so its inverse is only exact if it is exact at every
+            // width — one rounding step out and a picture shown at 100% would
+            // carry a scrollbar. A degenerate axis is excluded because a band
+            // with no pixels has no rectangle at all.
+            let widths = (1u32..600).chain([800, 1_600, 4_000]).map(|w| (w, 240));
+            let heights = (1u32..600).chain([800, 1_600, 3_000]).map(|h| (320, h));
+            for canvas in widths.chain(heights) {
+                let (w, h) =
+                    Layout::client_for_canvas(canvas, theme, scale, font(theme, scale), info);
+                let back = layout(w, h, scale, info);
+                assert_eq!(
+                    (back.canvas().width, back.canvas().height),
+                    canvas,
+                    "the client for a {canvas:?} canvas at {}% (info {info}) laid out {:?}",
+                    scale.percent(),
+                    (back.canvas().width, back.canvas().height),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_minimum_client_is_derived_and_still_lays_out() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    for scale in [Scale::ONE, Scale::from_percent(200).expect("a legal scale")] {
+        let strip = tools();
+        let (w, h) = Layout::min_client(
+            theme,
+            scale,
+            font(theme, scale),
+            strip.min_width(scale, theme),
+        );
+        let least = layout(w, h, scale, false);
+        assert!(
+            !least.toolbar().is_empty() && !least.status().is_empty(),
+            "the chrome the minimum exists to keep must be there"
+        );
+        assert!(
+            !least.canvas().is_empty(),
+            "and a canvas to draw the picture in"
+        );
+        // The toolbar can still show a tool and both its affordances, which is
+        // what makes every tool reachable at the floor.
+        assert!(
+            strip
+                .tool_rect(0, least.tools(), scale, theme)
+                .is_some_and(|rect| rect.right() <= least.tools().right()),
+            "the floor must seat a tool inside the strip"
+        );
+        // A denser desktop needs more physical pixels for the same chrome.
+        if scale.percent() > 100 {
+            let (one_w, one_h) = Layout::min_client(
+                theme,
+                Scale::ONE,
+                font(theme, Scale::ONE),
+                strip.min_width(Scale::ONE, theme),
+            );
+            assert!(w > one_w && h > one_h, "the floor is not a pixel constant");
+        }
+    }
+}
+
+#[test]
+fn the_tools_keep_their_strip_and_the_slider_gives_way() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let strip = tools();
+    let needed = strip.natural_width(Scale::ONE, theme);
+
+    // Wide: both the tools and the slider have room, and they do not overlap.
+    let wide = layout(900, 640, Scale::ONE, false);
+    assert!(!wide.zoom_slider().is_empty());
+    assert!(
+        wide.tools().width >= needed,
+        "the tools' strip is reserved before the slider"
+    );
+    assert!(!overlaps(wide.tools(), wide.zoom_slider()));
+
+    // Exactly the tools' own width: the slider has nothing left and goes.
+    let tight = layout(needed, 640, Scale::ONE, false);
+    assert!(
+        tight.zoom_slider().is_empty(),
+        "the slider gives way rather than squeezing the tools"
+    );
+    assert_eq!(tight.tools(), tight.toolbar());
+    assert!(
+        strip
+            .tool_rect(super::TOOL_COUNT - 1, tight.tools(), Scale::ONE, theme)
+            .is_some(),
+        "every tool is still seated at the width they need"
+    );
 }

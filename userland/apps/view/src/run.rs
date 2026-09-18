@@ -80,8 +80,7 @@ mod program {
     use tairix_theme::{TextRole, Theme};
     use tairix_view::view::{Command, Outcome, View};
     use tairix_view::{
-        Answer, Layout, Refusal, Request, MAX_DOCUMENT_BYTES, MIN_WIN_HEIGHT, MIN_WIN_WIDTH,
-        WIN_HEIGHT, WIN_WIDTH,
+        Answer, Layout, Refusal, Request, MAX_DOCUMENT_BYTES, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
@@ -645,6 +644,8 @@ mod program {
         event_endpoint: u64,
         server: ProcId,
         desktop: &Desktop,
+        theme: &Theme,
+        scale: Scale,
         source: Option<Source>,
     ) -> Option<Window> {
         let (width, height) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
@@ -653,9 +654,14 @@ mod program {
             report("no drawing surface; no window opened");
             return None;
         };
+        // Declared in *physical* pixels, derived from the theme's metrics at
+        // the desktop's own density: what the toolbar needs to keep a tool and
+        // both its overflow affordances reachable, and the chrome plus a
+        // strip of canvas down.
+        let least = tairix_view::min_client_size(theme, scale, face(theme, scale));
         let sizing = WindowSizing::Resizable {
-            min_width_px: MIN_WIN_WIDTH,
-            min_height_px: MIN_WIN_HEIGHT,
+            min_width_px: least.0,
+            min_height_px: least.1,
         };
         let (pane, replied) =
             match WindowPane::open(client, event_endpoint, &mode, APP_TITLE, sizing) {
@@ -952,6 +958,8 @@ mod program {
                 event_endpoint,
                 server,
                 &desktop,
+                theme,
+                scale,
                 inherited_source,
             ) {
                 windows.push(opened);
@@ -989,15 +997,33 @@ mod program {
                 desk.outstanding = false;
                 if let Reply::Window { window, answer } = reply {
                     if let Some(index) = index_of(&windows, window) {
+                        // A document that has just opened is the one moment
+                        // the window sizes itself to the picture; a render, a
+                        // zoom, or a resize never does, so it cannot fight
+                        // the user's own drag.
+                        let just_opened = matches!(&answer, Answer::Opened { opened: Ok(_), .. });
                         let layout = windows[index].layout(theme, scale);
                         let changed = windows[index]
                             .view
                             .deliver(answer, &layout, &mut reported)
                             .changed;
                         retitle(&mut windows[index], &mut client);
-                        if changed
+                        let resized = just_opened
+                            && hug_picture(
+                                &mut windows[index],
+                                &mut client,
+                                &desktop,
+                                theme,
+                                scale,
+                            );
+                        let repaint = if resized {
+                            Repaint::Whole
+                        } else {
+                            Repaint::Reported
+                        };
+                        if (changed || resized)
                             && windows[index]
-                                .present(&mut client, Repaint::Reported, &reported, theme, scale)
+                                .present(&mut client, repaint, &reported, theme, scale)
                                 .is_err()
                         {
                             return fail(app::EXIT_CHANNEL_LOST, "present refused");
@@ -1035,7 +1061,16 @@ mod program {
                     // asked for on the next turn.
                     let now = tairix_rt::clock_get();
                     for window in &mut windows {
-                        let _ = window.view.tick(now);
+                        // Each window's own sink: one window's rectangles are
+                        // no description of another's surface.
+                        let mut owed = damage::sink();
+                        let layout = window.layout(theme, scale);
+                        if window.view.tick(now, &layout, scale, theme, &mut owed) {
+                            // A held control's step, or an animation frame,
+                            // moved pixels the park was woken for.
+                            let _ =
+                                window.present(&mut client, Repaint::Reported, &owed, theme, scale);
+                        }
                     }
                     woken
                 }
@@ -1386,6 +1421,39 @@ mod program {
         }
     }
 
+    /// Shrink `window` to hug the picture it has just opened, answering
+    /// whether its geometry moved.
+    ///
+    /// Shrink-only and once per document: the viewer asks for the client
+    /// whose canvas is exactly the picture's own pixels, capped at the window
+    /// it opens at and floored at the smallest client it lays out for, so a
+    /// small picture is shown at 100% without a frame of empty canvas round
+    /// it and a photograph keeps the default window. A refused re-map leaves
+    /// the window at the size it had.
+    fn hug_picture(
+        window: &mut Window,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        desktop: &Desktop,
+        theme: &Theme,
+        scale: Scale,
+    ) -> bool {
+        let Some((want_w, want_h)) =
+            window
+                .view
+                .preferred_client_size(theme, scale, face(theme, scale))
+        else {
+            return false;
+        };
+        // Never larger than the display the window has to appear on.
+        let screen = desktop.screen();
+        let mode = app::mode_for(want_w.min(screen.width), want_h.min(screen.height));
+        let held = window.pane.mode();
+        if held.width_px == mode.width_px && held.height_px == mode.height_px {
+            return false;
+        }
+        resize(window, client, &mode)
+    }
+
     /// Re-map the window's frame region and its retained surface onto `mode`,
     /// answering whether the new geometry was adopted.
     ///
@@ -1436,6 +1504,8 @@ mod program {
             app.event_endpoint,
             app.server,
             app.desktop,
+            theme,
+            scale,
             None,
         ) else {
             return;
@@ -1486,6 +1556,8 @@ mod program {
                 app.event_endpoint,
                 app.server,
                 app.desktop,
+                theme,
+                scale,
                 Some(source),
             ) else {
                 continue;

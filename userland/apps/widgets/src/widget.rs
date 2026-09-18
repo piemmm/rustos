@@ -17,7 +17,7 @@ use tairix_controls::{
     BandCorner, Button, Card, Checkbox, ComboBox, Dialog, FieldAction, FieldControl, FieldGroup,
     FieldGroupAction, FieldLayout, HelpTip, IconButton, ListRow, Menu, Panel, Progress, Radio,
     ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider, SliderAction,
-    SplitButton, TableRow, TextField, Toggle, Toolbar, Tooltip, WindowControl,
+    SplitButton, TableRow, TextField, Toggle, Toolbar, ToolbarOutcome, Tooltip, WindowControl,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::NoArtwork;
@@ -162,7 +162,14 @@ impl DemoWidget {
 
     /// Set (or clear) this widget's keyboard focus where it has one, at the
     /// `rect` the widget is rendered at.
-    pub fn set_focused(&mut self, focused: bool, rect: Rect, damage: &mut Region) {
+    pub fn set_focused(
+        &mut self,
+        focused: bool,
+        rect: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
         match self {
             DemoWidget::Button(w) => w.set_focused(focused),
             DemoWidget::IconButton(w) => w.set_focused(focused),
@@ -181,7 +188,9 @@ impl DemoWidget {
             // moves, and the highlighted row is drawn inside it.
             DemoWidget::Menu(w) => w.adopt_current(focused.then_some(0)),
             DemoWidget::FieldGroup(w) => w.adopt_focus(focused.then_some(0)),
-            DemoWidget::Toolbar(w) => w.set_focus(focused.then_some(0), rect, damage),
+            DemoWidget::Toolbar(w) => {
+                w.set_focus(focused.then_some(0), rect, scale, theme, damage);
+            }
             // No focus ring: split button, progress, card, panel, dialog,
             // tooltip, help tip. Focus is a no-op rather than an error.
             DemoWidget::SplitButton(_)
@@ -325,11 +334,14 @@ impl DemoWidget {
             DemoWidget::Dialog(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::HelpTip(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::Toolbar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
-                Some(action) => {
+                ToolbarOutcome::Activated(action) => {
                     w.set_active(action.index);
                     committed(rect, damage)
                 }
-                None => false,
+                // A hover, a press, or a scrolled strip: the damage the
+                // control reported is what the gallery repaints.
+                ToolbarOutcome::Redraw => true,
+                ToolbarOutcome::Idle => false,
             },
             DemoWidget::ScrollBar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {
@@ -422,12 +434,13 @@ impl DemoWidget {
             }
             DemoWidget::Dialog(w) => w.on_key(key).is_some(),
             DemoWidget::HelpTip(w) => w.on_key(key).is_some(),
-            DemoWidget::Toolbar(w) => match w.on_key(key, rect, damage) {
-                Some(action) => {
+            DemoWidget::Toolbar(w) => match w.on_key(key, rect, scale, theme, damage) {
+                ToolbarOutcome::Activated(action) => {
                     w.set_active(action.index);
                     committed(rect, damage)
                 }
-                None => false,
+                ToolbarOutcome::Redraw => true,
+                ToolbarOutcome::Idle => false,
             },
             DemoWidget::ScrollBar(w) => match w.on_key(key, rect, damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {

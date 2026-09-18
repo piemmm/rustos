@@ -12,12 +12,13 @@
 //!   its parent (called from the `spawn` admit path).
 //! * [`ProcessWait::record_exit`] — capture a child's exit code when it exits
 //!   (called from the `exit` handler).
-//! * [`ProcessWait::wait`] — block the parent until a matching child is
-//!   reapable, reap it, and report it (called from the `wait` handler).
+//! * [`ProcessWait::wait`] — block the calling thread until a matching child
+//!   of its process is reapable, reap it, and report it (called from the
+//!   `wait` handler).
 //!
-//! Blocking the caller means cooperatively parking it back on the scheduler
-//! until a child becomes reapable — work that belongs with the live scheduler
-//! integration, not the decoupled handler — so, like the
+//! Blocking the caller means cooperatively parking the *calling thread* back
+//! on the scheduler until a child becomes reapable — work that belongs with
+//! the live scheduler integration, not the decoupled handler — so, like the
 //! [`ArchImageBuilder`](crate::spawn::ArchImageBuilder) and
 //! [`MemMap`](crate::memmap::MemMap) producers, the concrete producer
 //! ([`KernelProcessWait`]) is installed at boot through the
@@ -33,7 +34,7 @@ use alloc::collections::BTreeMap;
 
 use tairix_abi::{Errno, Signal, WaitFlags, WaitStatus, WAIT_PID_ANY};
 use tairix_kernel_sched_api::SchedulerArch;
-use tairix_kernel_sec::ProcessId;
+use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_sync::SpinLock;
 
 use crate::dispatch_slot::RescheduleAction;
@@ -58,8 +59,8 @@ pub struct WaitedChild {
 ///
 /// Implemented by the scheduler-side producer that tracks each spawned
 /// child against its parent, captures a child's exit code on exit, and
-/// blocks `parent` until one of its children is reapable. The bookkeeping
-/// methods carry default no-op bodies so the fail-closed default
+/// blocks one thread of `parent` until one of its children is reapable. The
+/// bookkeeping methods carry default no-op bodies so the fail-closed default
 /// ([`NullProcessWait`]) and the host-test doubles announce an inert
 /// interface without restating them; the concrete [`KernelProcessWait`]
 /// overrides all three.
@@ -68,8 +69,14 @@ pub struct WaitedChild {
 /// shared by the per-CPU syscall handlers, exactly like the console device,
 /// the spawn producer, and the anonymous-memory producer.
 pub trait ProcessWait: Sync {
-    /// Block `parent` until the child selected by `pid` exits, reap it, and
-    /// return the reaped child's PID and exit code.
+    /// Block `waiter` — one thread of `parent` — until the child selected by
+    /// `pid` exits, reap it, and return the reaped child's PID and exit code.
+    ///
+    /// The table is keyed by the *process*, because a child belongs to the
+    /// thread group and any of its threads may reap it; the park names the
+    /// **thread**, because that is the schedulable entity a wake has to
+    /// reach. Registering the group's leader instead would strand a
+    /// non-leader reaper asleep for the rest of the boot.
     ///
     /// `pid` is either a specific child's PID or [`tairix_abi::WAIT_PID_ANY`]
     /// to wait for whichever of `parent`'s children exits next. With
@@ -87,7 +94,13 @@ pub trait ProcessWait: Sync {
     /// `parent` (and `parent` has no children, for [`tairix_abi::WAIT_PID_ANY`]).
     /// The default producer ([`NullProcessWait`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
-    fn wait(&self, parent: ProcessId, pid: i64, flags: WaitFlags) -> Result<WaitedChild, Errno>;
+    fn wait(
+        &self,
+        parent: ProcessId,
+        waiter: TaskId,
+        pid: i64,
+        flags: WaitFlags,
+    ) -> Result<WaitedChild, Errno>;
 
     /// Non-blocking counterpart to [`Self::wait`]: try to report a child of
     /// `parent` selected by `pid` **without ever parking the caller**.
@@ -213,7 +226,13 @@ pub trait ProcessWait: Sync {
 pub struct NullProcessWait;
 
 impl ProcessWait for NullProcessWait {
-    fn wait(&self, _parent: ProcessId, _pid: i64, _flags: WaitFlags) -> Result<WaitedChild, Errno> {
+    fn wait(
+        &self,
+        _parent: ProcessId,
+        _waiter: TaskId,
+        _pid: i64,
+        _flags: WaitFlags,
+    ) -> Result<WaitedChild, Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -640,7 +659,13 @@ where
         self.table.lock().is_live(process)
     }
 
-    fn wait(&self, parent: ProcessId, pid: i64, flags: WaitFlags) -> Result<WaitedChild, Errno> {
+    fn wait(
+        &self,
+        parent: ProcessId,
+        waiter: TaskId,
+        pid: i64,
+        flags: WaitFlags,
+    ) -> Result<WaitedChild, Errno> {
         loop {
             // Re-poll under the lock, then release it *before* parking so the
             // child whose exit we are waiting for can take the same lock from
@@ -664,18 +689,23 @@ where
                     // carries `NO_DEADLINE` (no timed wake). A `false`
                     // reschedule means no resumable user kthread is published
                     // on this CPU — fail closed rather than busy-spin.
+                    //
+                    // The wait queue is keyed by the *thread* that parks, not
+                    // by its process: a wake has to reach the task the
+                    // scheduler suspended, and a group's leader is not the
+                    // thread that called `wait`.
                     let cpu = self.arch.current_cpu();
-                    crate::waitq::PROCWAIT_WAITQ.register(parent.0, crate::waitq::NO_DEADLINE);
+                    crate::waitq::PROCWAIT_WAITQ.register(waiter.0, crate::waitq::NO_DEADLINE);
                     let parked = reschedule_current(cpu, RescheduleAction::Park);
-                    crate::waitq::PROCWAIT_WAITQ.deregister(parent.0);
+                    crate::waitq::PROCWAIT_WAITQ.deregister(waiter.0);
                     if !parked {
                         return Err(Errno::NotImplemented);
                     }
                     // A doomed waiter never re-parks: a termination deferred
-                    // against this process unwinds the wait so the kill lands at
+                    // against this thread unwinds the wait so the kill lands at
                     // the syscall boundary (the errno never reaches user
                     // space).
-                    if crate::procsignal::kill_pending(parent.0) {
+                    if crate::procsignal::kill_pending(waiter.0) {
                         return Err(Errno::Interrupted);
                     }
                 }
@@ -691,16 +721,26 @@ where
 mod tests {
     use super::*;
 
+    /// A thread of the waiting process that is deliberately **not** its
+    /// leader, so a park keyed by the process rather than by the caller
+    /// shows up here rather than as a hang on a running machine.
+    const REAPER: TaskId = TaskId(41);
+
     #[test]
     fn null_process_wait_fails_closed() {
         assert_eq!(
-            NULL_PROCESS_WAIT.wait(ProcessId(7), 9, WaitFlags::empty()),
+            NULL_PROCESS_WAIT.wait(ProcessId(7), REAPER, 9, WaitFlags::empty()),
             Err(Errno::NotImplemented)
         );
         // A WAIT_PID_ANY request announces the inert interface too, rather than
         // pretending a child was reaped.
         assert_eq!(
-            NullProcessWait.wait(ProcessId(1), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            NullProcessWait.wait(
+                ProcessId(1),
+                REAPER,
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
             Err(Errno::NotImplemented)
         );
         // The bookkeeping hooks are inert no-ops on the null producer.
@@ -1018,7 +1058,7 @@ mod tests {
         // termination status, indistinguishable from a self-exit to `reap`.
         p.record_exit(ProcessId(2), 130);
         assert_eq!(
-            p.wait(ProcessId(1), WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid: 2,
                 status: WaitStatus::Exited(130)
@@ -1045,7 +1085,7 @@ mod tests {
         // vertical).
         p.record_exit(ProcessId(2), 9);
         assert_eq!(
-            p.wait(ProcessId(1), WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid: 2,
                 status: WaitStatus::Exited(9)
@@ -1053,7 +1093,7 @@ mod tests {
         );
         // The zombie was consumed; a second wait finds no child.
         assert_eq!(
-            p.wait(ProcessId(1), WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
             Err(Errno::NotFound)
         );
     }
@@ -1065,11 +1105,11 @@ mod tests {
         p.record_exit(ProcessId(2), 0);
         // Task 9 never spawned child 2: it may not reap it.
         assert_eq!(
-            p.wait(ProcessId(9), WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(ProcessId(9), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
             Err(Errno::NotFound)
         );
         assert_eq!(
-            p.wait(ProcessId(9), 2, WaitFlags::empty()),
+            p.wait(ProcessId(9), REAPER, 2, WaitFlags::empty()),
             Err(Errno::NotFound)
         );
     }
@@ -1083,7 +1123,7 @@ mod tests {
         // busy-spinning forever.
         p.register_child(ProcessId(1), ProcessId(2));
         assert_eq!(
-            p.wait(ProcessId(1), WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
             Err(Errno::NotImplemented)
         );
     }
@@ -1299,7 +1339,7 @@ mod tests {
         // The stop is already pending when the parent waits, so the report
         // is immediate — the blocking park path is never reached.
         assert_eq!(
-            p.wait(ProcessId(1), WAIT_PID_ANY, WaitFlags::STOPPED),
+            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::STOPPED),
             Ok(WaitedChild {
                 pid: 2,
                 status: WaitStatus::Stopped(Signal::Stop)

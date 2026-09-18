@@ -242,6 +242,21 @@ it, or frame the content that does:
   is and is deliberately not activatable, and a trail too long for its bounds
   elides oldest-first through one activatable ellipsis, so the current
   location is never the crumb that gets dropped.
+- `Toolbar` is a horizontal strip of tool controls in groups. A strip with no
+  room for every tool **scrolls in whole tools** rather than running off its
+  own edge: it seats only tools that fit inside the bounds it was given,
+  reserves one tool slot at each end for the overflow affordances (reserved
+  whether or not one is currently drawn, so scrolling moves the tools and not
+  the band they sit in), and holds the offset as a `ScrollModel` over the
+  shared scroll engine, so the clamp is the same one every scrollbar uses. A
+  chevron is drawn — and pressable — only where there is something that way,
+  and a strip wide enough for every tool reserves nothing. A press steps one
+  tool, a held press auto-repeats on the owner's one-shot timer through
+  `Toolbar::repeat` at the cadence `REPEAT_DELAY_NS`/`REPEAT_INTERVAL_NS`
+  every press-and-hold stepping control shares, the wheel over the strip
+  scrolls it, and a keyboard focus move scrolls the tool it lands on into
+  view. An owner that must never scroll its strip floors its window on
+  `Toolbar::natural_width`; one that may, on `Toolbar::min_width`.
 - `ActionRail` is the vertical counterpart of `Toolbar`: a column of `Button`
   commands anchored beside content, so plate, role, disabled, and denied
   rendering are not restated per surface. It lights the Edge Wake described

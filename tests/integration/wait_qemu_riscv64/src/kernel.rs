@@ -36,7 +36,7 @@ use tairix_kernel_mem::{
     VirtAddr,
 };
 use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
-use tairix_kernel_sec::ProcessId;
+use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::SpinLock;
@@ -249,7 +249,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Ok(flags) => flags,
             Err(err) => return encode(Err(err)),
         };
-        match producer.wait(ProcessId(cur), pid, flags) {
+        match producer.wait(ProcessId(cur), TaskId(cur), pid, flags) {
             Ok(reaped) => {
                 // Copy the typed status record out to the parent's `status`
                 // pointer through the validated boundary, exactly as the

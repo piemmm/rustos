@@ -1,5 +1,5 @@
 //! THREADS stage `T3b-u` fixture: a separately-linked pure-Rust user-mode
-//! program built once and driven in six argv-selected roles.
+//! program built once and driven in eight argv-selected roles.
 //!
 //! The consuming verticals (`tests/integration/threads_qemu_{aarch64,riscv64,
 //! x86_64}`) register this one `rxe` under role-selecting argument vectors
@@ -30,6 +30,11 @@
 //!   round against the same pass run on one thread. Proves the fork-join
 //!   protocol itself: the epoch wake, the claim, the barrier over workers, the
 //!   erased dispatch pointer's lifetime, nested dispatch, and the join at drop.
+//! * **`reapchild`** — spawns a child and reaps it from a thread that is
+//!   **not** the process's leader. A process id is its leader's task id, so a
+//!   single-threaded reaper cannot tell a park keyed by the process from one
+//!   keyed by the calling thread; a sibling can, and used to be left asleep
+//!   for the rest of the boot.
 //! * **`groupexit <code>`** — parks a sibling thread on a condition variable
 //!   nobody will ever notify, then `exit(code)`. The process can only be reaped
 //!   if the group exit drove that parked sibling to its stopping point; a fan-out
@@ -338,6 +343,12 @@ mod program {
         tairix_rt::exit(code as i32)
     }
 
+    /// The registry path of the role a *thread* spawns and reaps
+    /// ([`reap_child`]), named once here because the parent drives the same
+    /// role directly too: it ends promptly with status zero, so what the
+    /// reaping role proves is the reap and not the child.
+    const PATH_EXITEARLY: &[u8] = b"/bin/th-exitearly";
+
     /// The child roles the parent drives, in order. Each exits `0`; the last
     /// exits with the status the vertical pinned in `arg(2)`, which the parent
     /// reads rather than duplicating — one number, named once by the vertical.
@@ -345,10 +356,43 @@ mod program {
         b"/bin/th-counter",
         b"/bin/th-rendezvous",
         b"/bin/th-tls",
-        b"/bin/th-exitearly",
+        PATH_EXITEARLY,
         b"/bin/th-parallel",
+        b"/bin/th-reapchild",
         b"/bin/th-groupexit",
     ];
+
+    /// The `reapchild` role: spawn a child from a thread that is **not** this
+    /// process's leader, and reap it there through the production blocking
+    /// `wait`.
+    ///
+    /// The reap registers the *calling thread* on the process-wait queue and
+    /// parks it; registering the group's leader instead parks this thread
+    /// against a row nothing ever wakes, so the role never returns and the
+    /// vertical reports its step budget.
+    fn reap_child() -> i32 {
+        let Ok(reaper) = Builder::new().stack_bytes(THREAD_STACK).spawn(|| -> i32 {
+            let pid = tairix_rt::spawn(PATH_EXITEARLY);
+            if pid <= 0 {
+                return FAIL_PARENT;
+            }
+            let mut code = 0i32;
+            if tairix_rt::wait_exit(pid, &mut code) < 0 {
+                return FAIL_PARENT;
+            }
+            if code == 0 {
+                0
+            } else {
+                FAIL_CHILD
+            }
+        }) else {
+            return FAIL_SPAWN;
+        };
+        match reaper.join() {
+            Ok(code) => code,
+            Err(_) => FAIL_JOIN,
+        }
+    }
 
     /// The `parent` role: spawn each child in turn, reap it through the
     /// production blocking `wait`, and require the status its role must carry.
@@ -514,6 +558,7 @@ mod program {
             Some(b"tls") => tls(),
             Some(b"exitearly") => exit_early(),
             Some(b"parallel") => parallel(),
+            Some(b"reapchild") => reap_child(),
             Some(b"groupexit") => group_exit(),
             _ => FAIL_ROLE,
         }

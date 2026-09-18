@@ -36,6 +36,16 @@ revocation incomplete.
 capability snapshot the syscall dispatcher already takes yields the caller's
 process id with no extra lookup and no extra lock.
 
+**A park, an unpark, a wake, or a kill check names the thread; only
+per-process state is keyed by the group.** The two are different types
+precisely so the compiler rejects a site that confuses them — but a value
+handed to an interface typed in the scheduler's `TaskId = u64` alias loses
+that protection at `.0`, which is how the blocking `wait` came to register a
+reaping thread's *process* on the wait queue and park the thread. A
+kernel-side producer that blocks therefore takes the waiting `TaskId`
+**beside** the `ProcessId` its own table is keyed by, so the call site has to
+name both.
+
 ## Creating a thread
 
 `thread_create(entry, arg, stack_len, tls_base, clear_on_exit)` (`abi-v1`
@@ -209,7 +219,11 @@ the first dying thread declared, and whichever thread lands last performs the
 teardown. Carrying the status through the deferral is what stops a sibling's
 synthesised `128 + n` from overwriting a real `exit` code.
 
-`wait` therefore reports a child only when its whole thread group is gone.
+`wait` therefore reports a child only when its whole thread group is gone —
+and **any** thread of the parent may be the one that reaps it. The child rows
+are the parent process's, so a worker thread reaping on its own behalf is an
+ordinary use of the syscall and blocks only that thread; its siblings keep
+running.
 
 A thread that is *not* the group's last also returns its own stack reservation,
 which its surviving siblings' syscalls must stop being able to reach: the release
@@ -285,7 +299,9 @@ unlimited, so the real bound is the growable kernel-stack arena failing closed.
 * Handler level, host-tested: every `thread_create` address and bound refusal,
   the `futex_wait` compare-and-block, the `futex_wake` alignment gate, the
   group-teardown landing rule (a process torn down only once its last thread is
-  down, and a landing that owes no `wait` reap), a dying thread's stack leaving
+  down, and a landing that owes no `wait` reap), a blocking `wait` handing its
+  producer the calling thread rather than the group's leader, a dying thread's
+  stack leaving
   nothing translating in its surviving process's snapshot, growth charging
   headroom only for the pages it backs, and a driver unload stopping every thread
   of its group.
@@ -295,5 +311,7 @@ unlimited, so the real bound is the growable kernel-stack arena failing closed.
   for its own tally; a `Condvar` rendezvous that completes only because the wait
   genuinely parked; each thread reading its own magic through its psABI thread
   pointer before and after a trap; a thread that ends itself releasing its joiner
-  through the kernel's word; and a group `exit` reaching a sibling parked in the
-  kernel.
+  through the kernel's word; a child spawned and reaped from a **non-leader**
+  thread, which is the only arrangement that can tell a park keyed by the
+  process from one keyed by the caller; and a group `exit` reaching a sibling
+  parked in the kernel.

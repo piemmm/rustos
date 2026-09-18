@@ -7,7 +7,7 @@
 //!    (the test runs the shared production board bring-up, so it links
 //!    exactly like the other freestanding x86_64 integration binaries).
 //! 2. Compile the pure-Rust EL0 fixture program
-//!    (`tests/integration/threads_program`) **once** — the four roles
+//!    (`tests/integration/threads_program`) **once** — the roles
 //!    are selected at runtime from the registry argument vector —
 //!    position-independent for the freestanding x86_64 target, then convert
 //!    the linked PIE ELF to an `rxe` blob with

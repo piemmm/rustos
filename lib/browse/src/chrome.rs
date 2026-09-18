@@ -159,6 +159,24 @@ pub struct ToolbarModel {
 }
 
 impl ToolbarModel {
+    /// Every command actionable — the state a *measurement* of the strip is
+    /// taken against.
+    ///
+    /// A disabled tool renders in place (muted, never hidden), so a tool's
+    /// width is independent of its enable state and the widest strip is the
+    /// one with every tool in it. The same reasoning
+    /// [`ManagerToolModel::new(true)`](ManagerToolModel::new) is used under.
+    #[must_use]
+    pub fn all_enabled() -> Self {
+        Self {
+            back: true,
+            forward: true,
+            up: true,
+            view_mode: ViewMode::default(),
+            sort_mode: SortMode::default(),
+        }
+    }
+
     /// Build the toolbar state from `browser`.
     ///
     /// Back/Forward reflect the navigation history

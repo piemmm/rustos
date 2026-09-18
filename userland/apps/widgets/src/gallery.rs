@@ -452,7 +452,7 @@ impl Gallery {
         );
         for (idx, item) in self.panels[self.current.index()].iter_mut().enumerate() {
             let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
-            item.widget.set_focused(false, rect, damage);
+            item.widget.set_focused(false, rect, scale, theme, damage);
         }
         self.tabs.set_current(None, tabs, scale, theme, damage);
         self.focus = focus;
@@ -464,7 +464,7 @@ impl Gallery {
             Focus::Item(idx) => {
                 let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
                 if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
-                    item.widget.set_focused(true, rect, damage);
+                    item.widget.set_focused(true, rect, scale, theme, damage);
                 }
             }
         }

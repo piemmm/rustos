@@ -11,7 +11,7 @@
 //!    so the board tree is embedded at build time; the dump helper lives in
 //!    the shared harness so no aarch64 build script re-rolls it.
 //! 2. Compile the pure-Rust EL0 fixture program
-//!    (`tests/integration/threads_program`) **once** — the four roles
+//!    (`tests/integration/threads_program`) **once** — the roles
 //!    are selected at runtime from the registry argument vector —
 //!    position-independent for the freestanding aarch64 target.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with

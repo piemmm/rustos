@@ -701,9 +701,12 @@ mod program {
         // --- Open the window (resizable: the grid re-lays out to each new
         // client size, down to the floor the window manager is told to hold)
         // and paint the first frame.
+        // Declared in *physical* pixels: the floor is authored in logical
+        // ones like every other desktop length, so it is resolved at the
+        // desktop's density before the manager is told.
         let sizing = WindowSizing::Resizable {
-            min_width_px: MIN_WIN_WIDTH,
-            min_height_px: MIN_WIN_HEIGHT,
+            min_width_px: desktop.scale().scale_length(MIN_WIN_WIDTH),
+            min_height_px: desktop.scale().scale_length(MIN_WIN_HEIGHT),
         };
         let server = match surface.window.open(event_endpoint, &mode, TITLE, sizing) {
             Ok(server) => server,

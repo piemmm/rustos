@@ -24,6 +24,21 @@
 //! zero-offset scrollbar rather than producing out-of-bounds geometry. Every
 //! division is guarded by a non-zero denominator, so no path panics.
 
+/// How long a press is held before it starts repeating, in nanoseconds.
+///
+/// The one cadence every press-and-hold stepping control is paced by
+/// ([`crate::scrollbar::ScrollBar::repeat`],
+/// [`crate::toolbar::Toolbar::repeat`]), so two controls in one window cannot
+/// step at different rates. The owner arms its one-shot timer on this and on
+/// [`REPEAT_INTERVAL_NS`] thereafter; nothing here polls.
+///
+/// Long enough that a deliberate single step is never mistaken for a hold.
+pub const REPEAT_DELAY_NS: u64 = 400_000_000;
+
+/// How long between repeats once a held press has started stepping, in
+/// nanoseconds (see [`REPEAT_DELAY_NS`]).
+pub const REPEAT_INTERVAL_NS: u64 = 60_000_000;
+
 /// Which axis a scrollbar lays out along.
 ///
 /// The behaviour is identical on both axes; orientation only decides how the

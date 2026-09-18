@@ -329,6 +329,7 @@ pub use rail::{ActionRail, RailAction};
 pub use record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
 pub use scroll::{
     ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
+    REPEAT_DELAY_NS, REPEAT_INTERVAL_NS,
 };
 pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
@@ -344,7 +345,7 @@ pub use state::{
 };
 pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
 pub use text::{SearchField, TextAction, TextField};
-pub use toolbar::{ToolActivation, Toolbar, ToolbarAction};
+pub use toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
 pub use value::{Progress, Slider, SliderAction};
 pub use window::{
     BandCorner, FrameInsets, FrameLayout, FrameRim, FurniturePart, GrabReach, ResizeEdge,

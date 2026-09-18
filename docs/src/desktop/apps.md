@@ -2005,9 +2005,16 @@ per-size layout code. The re-map is fail-closed (`AGENTS.md` §5.4): a fresh
 region is allocated and granted and adopted only once the session accepts
 `WindowClient::resize`; the old region is released only after adoption, and a
 refused or unallocatable resize leaves the current window intact rather than
-blanking or crashing. `MIN_WIN_WIDTH` × `MIN_WIN_HEIGHT` is *declared* on the
-window create (`WindowSizing`) and enforced by the window manager, so a drag
-simply stops there. The app must not clamp a granted size itself: resizing its
+blanking or crashing. The floor is *declared* on the window create
+(`WindowSizing`) and enforced by the window manager, so a drag simply stops
+there. It is **derived**, not hand-picked: `tairix_browse::win_sizing(scale,
+theme)` takes the larger of what a listing still reads at and what the command
+toolbar's own tools need across (`Toolbar::natural_width`), resolved at the
+desktop's density — the ABI field is *physical* pixels while every desktop
+length is authored in logical ones. That is what keeps the strip from ever
+being handed a band too narrow for its tools: the shared `Toolbar` would then
+scroll, and a browser view rebuilds its strip per frame so it holds no offset
+to scroll with. The app must not clamp a granted size itself: resizing its
 own window back up while a drag keeps shrinking makes the two fight once per
 pointer sample, which is what made the listing visibly bounce as the window
 approached its minimum. An app never answers a resize with a larger size of

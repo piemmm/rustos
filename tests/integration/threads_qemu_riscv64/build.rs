@@ -9,7 +9,7 @@
 //! 1. Hand the riscv64 `virt` linker script to the test kernel (the single
 //!    per-board script the architecture port owns).
 //! 2. Compile the pure-Rust U-mode fixture program
-//!    (`tests/integration/threads_program`) **once** — the four roles
+//!    (`tests/integration/threads_program`) **once** — the roles
 //!    are selected at runtime from the registry argument vector —
 //!    position-independent for the freestanding riscv64 target, and
 //!    convert the linked PIE ELF to an `rxe` blob with

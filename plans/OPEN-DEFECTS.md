@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 28 open, 105 closed, 133 total.
+table normalises all three to **closed**. 28 open, 106 closed, 134 total.
 
 ### Open (28)
 
@@ -57,7 +57,7 @@ table normalises all three to **closed**. 28 open, 105 closed, 133 total.
 
 | D133 | a task can grow another task's kernel-side pending-`fd_grant` table without bound | noticed while re-pointing the hand-over vertical; not absorbed. Fail-closed refusal, not a capacity |
 
-### Closed (105)
+### Closed (106)
 
 | ID | Subject |
 |---|---|
@@ -166,6 +166,7 @@ table normalises all three to **closed**. 28 open, 105 closed, 133 total.
 | D128 | the panic backtrace's stack reader rebuilt a pointer from an integer address, so the unwinder could not be interpreted — and only ever vouched for the boot stack, so a kthread panic carried no frame chain |
 | D129 | the `SleepLock` releaser deleted a live waiter's re-registered row, stranding it on a free lock |
 | D130 | a thread killed while parked left its row in every wait queue, where a counted wake spent itself on it |
+| D137 | the blocking `wait` registered the calling thread's *process* on the wait queue and parked the *thread*, so a non-leader reaper slept for the rest of the boot |
 
 ## Scope
 
@@ -183,6 +184,13 @@ The open items, in priority order:
   `kernel/sched/api::park` with an honest error contract, and the enrolment
   gained a four-CPU row for the unlock -> store-scan -> autoload chain. The
   authoritative record is `plans/FIX-SLEEPLOCK.md` (S1, S3, S4, S6).
+- **D137 — the blocking `wait` parked the calling thread but registered its
+  process — FIXED.** A non-leader thread reaping a child registered the
+  group's *leader* on `PROCWAIT_WAITQ` and parked *itself*, so the exit woke
+  the wrong task and the real waiter slept for the rest of the boot —
+  `view.app`'s third document never appeared because its decode worker was
+  that thread. `ProcessWait::wait` now takes the waiting `TaskId` beside the
+  `ProcessId` its table is keyed by; see the section.
 - **D130 — a retired thread's rows outlived it and ate counted wakes —
   FIXED.** Nothing deregistered a task on its behalf, and the batched wakes
   counted the unparks they *issued*, so `wake_n(_, 1)` over a retired head
@@ -7892,3 +7900,62 @@ consume what it cannot hand on, so an honest refusal leaves nothing pending.
 Its regression test is part of the fix: mint past the ceiling and assert the
 typed refusal with the earlier delegations still redeemable, plus the session
 answering `NotRunning` leaving no pending entry.
+
+## D137 — the blocking `wait` parked the calling thread but registered its process (FIXED)
+
+**Mechanism.** `KernelProcessWait::wait` parked the **calling thread** and
+registered the **process** on the wait queue:
+
+```rust
+crate::waitq::PROCWAIT_WAITQ.register(parent.0, crate::waitq::NO_DEADLINE);
+let parked = reschedule_current(cpu, RescheduleAction::Park);
+```
+
+`WaitQueue::register` takes a `TaskId` — the schedulable entity, so what a
+park, an unpark, or a wake must name — and `kernel/sched/api`'s `TaskId` is
+`pub type TaskId = u64`, so `ProcessId(pub u64)`'s `.0` compiled silently.
+`kill_pending(parent.0)` was the same slip a second time, and a
+security-relevant one in its own right: the kill gate's `pending` map is keyed
+by **thread** (`defer_kill_in_kernel(thread, …)`), so a non-leader thread
+parked in `wait` consulted the leader's row and could never observe a
+termination deferred against itself — an unkillable waiter surviving its own
+group's teardown. This is exactly the
+misuse class the `ProcessId` newtype exists to catch (`plans/THREADS.md`
+decision 3); the retype caught the process-wait *table*, which is correctly
+process-scoped, but could not catch the *park*, because the alias erases the
+distinction at `.0`. Every other park site in the kernel passes a thread
+(`caller.task_id.0`, `task`, `sched_task`) — this was the only one that did
+not.
+
+A process id **is** its leader thread's task id, so a single-threaded caller
+had always worked. A **multi-threaded** caller reaping from a non-leader
+thread registered the *leader*, parked *itself*, and was never unparked:
+`record_exit` → `procwait_wake` → `wake_all` unparked the leader spuriously
+and left the real waiter asleep for the rest of the boot.
+
+**What it looked like from outside.** `view.app` failed to display its *third*
+document — open two, close the second, open a third and the window stays
+blank. Its decode worker thread owns one `ParserSandbox` per window; closing a
+window submits `Work::Forget`, which drops that sandbox →
+`RtLauncher::dispose` → `wait_exit(pid)` → the worker thread parks for ever.
+The worker desk is one slot behind a `Desk::outstanding` latch, so no later
+open or render was ever submitted: the third window opened, its `Request::Open`
+was never carried out, and every remaining window silently stopped
+re-rendering. Three documents opened *without* a close worked, which is why
+the `handover_qemu_aarch64` vertical never saw it.
+
+**The fix.** `ProcessWait::wait` takes the waiting `TaskId` beside the
+`ProcessId` its table is keyed by. The table stays process-keyed — a child
+belongs to the thread group and any of its threads may reap it — and only the
+park, the deregister, and the `kill_pending` check name the thread. Passing a
+`ProcessId` there no longer compiles. `ProcessWait::poll` is unchanged: it
+never parks.
+
+**Its regression tests.** A host test in `kernel/core`: with a caller whose
+`TaskId` and `ProcessId` differ — a non-leader thread — the `wait` handler
+hands the producer the *calling thread*. It cannot pass before the fix,
+because the producer was never told which thread to park. End to end, an
+eighth argv-selected role in `tests/integration/threads_program`
+(`reapchild`) spawns a child from a non-leader thread and reaps it there;
+before the fix the role never returns and the three `threads_qemu_*` verticals
+fail on their step budget, after it they exit `0`.

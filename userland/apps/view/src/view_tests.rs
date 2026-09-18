@@ -143,6 +143,15 @@ fn drawn(document: ViewDocument) -> (View, Layout, ThemeRegistry) {
     (view, layout, registry)
 }
 
+/// Advance `view` to `now_ns` with the dressing a held control needs, and
+/// report whether anything drawn changed.
+fn tick(view: &mut View, layout: &Layout, now_ns: u64) -> bool {
+    let (registry, scale) = dressing();
+    let theme = registry.active();
+    let mut region = damage::sink();
+    view.tick(now_ns, layout, scale, theme, &mut region)
+}
+
 /// Run `command` and report the outcome plus the damage it owed.
 fn run(view: &mut View, layout: &Layout, command: Command) -> (Outcome, Region) {
     let mut region = damage::sink();
@@ -283,7 +292,9 @@ fn the_pixel_buffer_comes_back_and_is_lent_out_again() {
     // drew into is handed back on the next request rather than a fresh one
     // being made.
     let (mut view, layout, _registry) = drawn(still(4_000, 3_000));
-    let (outcome, _) = run(&mut view, &layout, Command::ActualSize);
+    // A document opens at actual size, so fitting it to the window is what
+    // moves the state here.
+    let (outcome, _) = run(&mut view, &layout, Command::FitWindow);
     assert!(outcome.changed);
     let Some(Request::Show { pixels, .. }) = view.next_request() else {
         panic!("a render was asked for");
@@ -299,7 +310,7 @@ fn a_superseded_answer_is_dropped_rather_than_drawn() {
     let (mut view, layout, _registry) = drawn(still(4_000, 3_000));
     // Ask for one render, then change the state again so the answer describes
     // a rectangle the user has already moved away from.
-    let (outcome, _) = run(&mut view, &layout, Command::ActualSize);
+    let (outcome, _) = run(&mut view, &layout, Command::FitWindow);
     assert!(outcome.changed, "a render is now called for");
     let Some(Request::Show {
         page,
@@ -310,7 +321,7 @@ fn a_superseded_answer_is_dropped_rather_than_drawn() {
     else {
         panic!("a render was asked for");
     };
-    let (outcome, _) = run(&mut view, &layout, Command::FitWindow);
+    let (outcome, _) = run(&mut view, &layout, Command::ActualSize);
     assert!(outcome.changed, "the state moved on");
     pixels.resize((window.width * window.height * 4) as usize, 0xFF);
     let mut region = damage::sink();
@@ -358,7 +369,7 @@ fn a_refused_open_states_the_reason_and_holds_no_document() {
 #[test]
 fn a_refused_render_states_the_reason_and_keeps_showing_what_it_had() {
     let (mut view, layout, _registry) = drawn(still(4_000, 3_000));
-    let (outcome, _) = run(&mut view, &layout, Command::ActualSize);
+    let (outcome, _) = run(&mut view, &layout, Command::FitWindow);
     assert!(outcome.changed);
     let Some(Request::Show {
         page,
@@ -560,7 +571,6 @@ fn a_page_change_keeps_the_turn_and_the_fit_but_not_the_pan() {
     const PAGE: (u32, u32) = (4_000, 3_000);
     let (mut view, layout, _registry) = drawn(pages(3, 4_000, 3_000));
     let (_, _) = run(&mut view, &layout, Command::RotateRight);
-    let (_, _) = run(&mut view, &layout, Command::ActualSize);
     assert!(serve(&mut view, &layout, PAGE));
     let (_, _) = run(&mut view, &layout, Command::Pan { dx: 3, dy: 3 });
     assert_ne!(view.viewport().pan(), (0, 0));
@@ -619,8 +629,8 @@ fn a_tick_before_the_deadline_does_nothing_and_one_after_it_steps_the_frame() {
     let (_, _) = run(&mut view, &layout, Command::TogglePlayback);
     view.arm_deadline(0);
     let deadline = view.deadline_ns().expect("armed");
-    assert!(!view.tick(deadline - 1), "not due yet");
-    assert!(view.tick(deadline), "due");
+    assert!(!tick(&mut view, &layout, deadline - 1), "not due yet");
+    assert!(tick(&mut view, &layout, deadline), "due");
     assert_eq!(view.deadline_ns(), None, "the deadline is spent");
     assert!(serve(&mut view, &layout, PAGE));
     assert_eq!(view.document().expect("open").index(), 1);
@@ -634,7 +644,7 @@ fn playback_wraps_at_the_last_frame() {
     for expected in [1, 0, 1] {
         view.arm_deadline(0);
         let deadline = view.deadline_ns().expect("armed");
-        assert!(view.tick(deadline));
+        assert!(tick(&mut view, &layout, deadline));
         assert!(serve(&mut view, &layout, PAGE));
         assert_eq!(view.document().expect("open").index(), expected);
     }
@@ -642,8 +652,8 @@ fn playback_wraps_at_the_last_frame() {
 
 #[test]
 fn a_paused_viewer_never_steps_however_late_the_clock_is() {
-    let (mut view, _layout, _registry) = drawn(animation(4, 400, 300));
-    assert!(!view.tick(u64::MAX));
+    let (mut view, layout, _registry) = drawn(animation(4, 400, 300));
+    assert!(!tick(&mut view, &layout, u64::MAX));
     assert_eq!(view.document().expect("open").index(), 0);
 }
 
@@ -651,10 +661,7 @@ fn a_paused_viewer_never_steps_however_late_the_clock_is() {
 
 #[test]
 fn a_pan_repaints_the_canvas_and_its_chrome_and_nothing_more() {
-    const PAGE: (u32, u32) = (4_000, 3_000);
     let (mut view, layout, _registry) = drawn(still(4_000, 3_000));
-    let (_, _) = run(&mut view, &layout, Command::ActualSize);
-    assert!(serve(&mut view, &layout, PAGE));
     let (outcome, region) = run(&mut view, &layout, Command::Pan { dx: 1, dy: 1 });
     assert!(outcome.changed);
     assert!(
@@ -763,11 +770,8 @@ fn clicking_a_tool_runs_its_command() {
 
 #[test]
 fn dragging_the_canvas_pans_the_picture_the_other_way() {
-    const PAGE: (u32, u32) = (4_000, 3_000);
     let (mut view, layout, registry) = drawn(still(4_000, 3_000));
     let theme = registry.active();
-    let (_, _) = run(&mut view, &layout, Command::ActualSize);
-    assert!(serve(&mut view, &layout, PAGE));
     let centre = layout.canvas().center();
     let mut region = damage::sink();
     let mut feed = |view: &mut View, event: InputEvent| {
@@ -836,11 +840,8 @@ fn a_secondary_press_on_the_canvas_asks_for_the_context_menu() {
 
 #[test]
 fn the_wheel_over_the_canvas_pans_and_elsewhere_does_not() {
-    const PAGE: (u32, u32) = (4_000, 3_000);
     let (mut view, layout, registry) = drawn(still(4_000, 3_000));
     let theme = registry.active();
-    let (_, _) = run(&mut view, &layout, Command::ActualSize);
-    assert!(serve(&mut view, &layout, PAGE));
     let mut region = damage::sink();
     view.on_pointer(
         &InputEvent::PointerMoved {
@@ -913,8 +914,6 @@ fn the_keyboard_reaches_the_commands_the_tools_do() {
 fn the_arrow_keys_pan_and_shifted_they_change_page() {
     const PAGE: (u32, u32) = (4_000, 3_000);
     let (mut view, layout, _registry) = drawn(pages(3, 4_000, 3_000));
-    let (_, _) = run(&mut view, &layout, Command::ActualSize);
-    assert!(serve(&mut view, &layout, PAGE));
     let mut region = damage::sink();
     let outcome = view.on_key(
         Key::Named(NamedKey::Right),
@@ -960,8 +959,11 @@ fn an_unbound_key_changes_nothing() {
 #[test]
 fn a_resize_refits_a_fitted_zoom_and_reclamps_the_pan() {
     const PAGE: (u32, u32) = (4_000, 3_000);
-    let (mut view, _layout, registry) = drawn(still(4_000, 3_000));
+    let (mut view, layout, registry) = drawn(still(4_000, 3_000));
     let theme = registry.active();
+    // A document opens at actual size, so the fit whose refitting is the
+    // subject here has to be asked for.
+    let (_, _) = run(&mut view, &layout, Command::FitWindow);
     let fitted = view.viewport().zoom();
     let bigger = view.layout(1_920, 1_200, theme, Scale::ONE, font(theme, Scale::ONE));
     assert!(
@@ -996,10 +998,7 @@ fn a_window_with_no_canvas_asks_for_no_render() {
 
 #[test]
 fn the_scrollbars_report_the_pan_they_are_a_view_of() {
-    const PAGE: (u32, u32) = (4_000, 3_000);
     let (mut view, layout, _registry) = drawn(still(4_000, 3_000));
-    let (_, _) = run(&mut view, &layout, Command::ActualSize);
-    assert!(serve(&mut view, &layout, PAGE));
     let (_, _) = run(&mut view, &layout, Command::Pan { dx: 2, dy: 2 });
     let (vertical, horizontal) = view.bars();
     let pan = view.viewport().pan();
@@ -1099,5 +1098,90 @@ fn an_answer_about_an_entry_the_user_has_left_is_recorded_but_not_drawn() {
     assert!(
         !view.document().expect("open").decoded(),
         "the worker holds a different entry from the one on screen"
+    );
+}
+
+// ---- the window sizes itself to the picture ---------------------------
+
+#[test]
+fn an_opened_document_is_at_a_hundred_percent() {
+    let (view, _layout, _registry) = opened(still(4_000, 3_000));
+    assert_eq!(
+        view.viewport().zoom(),
+        ZOOM_ACTUAL_PER_MILLE,
+        "a document opens at the size it was authored at"
+    );
+    assert_eq!(view.viewport().fit, Fit::Actual);
+
+    // A small picture too: 100% is the answer whichever way the window would
+    // have fitted it.
+    let (small, _layout, _registry) = opened(still(120, 90));
+    assert_eq!(small.viewport().zoom(), ZOOM_ACTUAL_PER_MILLE);
+    assert_eq!(small.viewport().fit, Fit::Actual);
+}
+
+#[test]
+fn the_preferred_client_shrinks_to_a_small_picture_and_caps_at_the_default() {
+    let (registry, scale) = dressing();
+    let theme = registry.active();
+    let face = font(theme, scale);
+    let default = (
+        scale.scale_length(crate::WIN_WIDTH),
+        scale.scale_length(crate::WIN_HEIGHT),
+    );
+
+    // A small picture: the window hugs it, so its canvas is exactly the
+    // picture's own pixels and the window is smaller than the default.
+    let (small, ..) = opened(still(320, 240));
+    let want = small
+        .preferred_client_size(theme, scale, face)
+        .expect("a document is open");
+    assert!(
+        want.0 < default.0 && want.1 < default.1,
+        "a small picture shrinks the window ({want:?} against {default:?})"
+    );
+    let laid = Layout::for_window(
+        want.0,
+        want.1,
+        theme,
+        scale,
+        face,
+        small.toolbar_control().natural_width(scale, theme),
+        small.info_open(),
+    );
+    assert_eq!((laid.canvas().width, laid.canvas().height), (320, 240));
+
+    // A photograph: shrink-only, so the window stays at the default and the
+    // picture pans inside it.
+    let (big, ..) = opened(still(4_000, 3_000));
+    assert_eq!(
+        big.preferred_client_size(theme, scale, face),
+        Some(default),
+        "the window never grows past the size the viewer opens at"
+    );
+
+    // Nothing open: no size to prefer.
+    let empty = View::new(false);
+    assert_eq!(empty.preferred_client_size(theme, scale, face), None);
+}
+
+#[test]
+fn the_preferred_client_never_falls_below_the_derived_minimum() {
+    let (registry, scale) = dressing();
+    let theme = registry.active();
+    let face = font(theme, scale);
+    let (tiny, ..) = opened(still(1, 1));
+    let want = tiny
+        .preferred_client_size(theme, scale, face)
+        .expect("a document is open");
+    let floor = Layout::min_client(
+        theme,
+        scale,
+        face,
+        tiny.toolbar_control().min_width(scale, theme),
+    );
+    assert!(
+        want.0 >= floor.0 && want.1 >= floor.1,
+        "a one-pixel picture would otherwise leave no room for the chrome ({want:?} against {floor:?})"
     );
 }

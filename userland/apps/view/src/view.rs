@@ -13,7 +13,8 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_controls::{
     ControlRole, IconButton, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange,
-    Slider, SliderAction, Toolbar, ToolbarAction,
+    Slider, SliderAction, Toolbar, ToolbarAction, ToolbarOutcome, REPEAT_DELAY_NS,
+    REPEAT_INTERVAL_NS,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -244,8 +245,13 @@ pub struct View {
     info: bool,
     /// Whether an animation is playing.
     playing: bool,
-    /// When the next frame is due, in monotonic nanoseconds.
-    deadline_ns: Option<u64>,
+    /// When the next animation frame is due, in monotonic nanoseconds.
+    frame_ns: Option<u64>,
+    /// When a held control's next auto-repeat step is due, in monotonic
+    /// nanoseconds. The toolbar's overflow affordances and both scrollbars
+    /// are driven by this one deadline, so two held controls in one window
+    /// cannot step at different rates.
+    repeat_ns: Option<u64>,
     /// The canvas the last layout resolved, so a command that refits has the
     /// geometry to refit against without being handed one.
     canvas: (u32, u32),
@@ -267,10 +273,7 @@ impl View {
     /// with neither a document nor a refusal to state.
     #[must_use]
     pub fn new(opening: bool) -> Self {
-        let mut toolbar = Toolbar::new();
-        for (icon, _, _) in TOOLS {
-            toolbar = toolbar.with_icon(IconButton::new(icon, ControlRole::Neutral), 0);
-        }
+        let toolbar = tools();
         Self {
             document: None,
             viewport: Viewport::new(),
@@ -292,7 +295,8 @@ impl View {
             horizontal: ScrollBar::new(ScrollOrientation::Horizontal, empty_scroll()),
             info: false,
             playing: false,
-            deadline_ns: None,
+            frame_ns: None,
+            repeat_ns: None,
             canvas: (0, 0),
             drag: None,
             pointer: Point::ORIGIN,
@@ -362,14 +366,19 @@ impl View {
         self.playing
     }
 
-    /// When the next animation frame is due, in monotonic nanoseconds, or
-    /// `None` when nothing is timed.
+    /// When this viewer next needs waking, in monotonic nanoseconds, or
+    /// `None` when nothing is timed: the nearer of the next animation frame
+    /// and the next auto-repeat step of a held control.
     ///
-    /// What the embedder's park deadline is set from, so a paused viewer arms
-    /// no timer at all and a playing one arms exactly one.
+    /// What the embedder's park deadline is set from, so a paused viewer with
+    /// nothing held arms no timer at all and one with either arms exactly
+    /// one.
     #[must_use]
-    pub const fn deadline_ns(&self) -> Option<u64> {
-        self.deadline_ns
+    pub fn deadline_ns(&self) -> Option<u64> {
+        match (self.frame_ns, self.repeat_ns) {
+            (Some(frame), Some(repeat)) => Some(frame.min(repeat)),
+            (due, None) | (None, due) => due,
+        }
     }
 
     /// The zoom slider, for the painter.
@@ -409,7 +418,15 @@ impl View {
         scale: Scale,
         font: BitmapFont,
     ) -> Layout {
-        let layout = Layout::for_window(width, height, theme, scale, font, self.info);
+        let layout = Layout::for_window(
+            width,
+            height,
+            theme,
+            scale,
+            font,
+            self.toolbar.natural_width(scale, theme),
+            self.info,
+        );
         let canvas = (layout.canvas().width, layout.canvas().height);
         if canvas != self.canvas {
             self.canvas = canvas;
@@ -421,6 +438,35 @@ impl View {
             self.sync_controls();
         }
         layout
+    }
+
+    /// The client size whose canvas is exactly the selected page's own pixels,
+    /// or `None` with nothing open.
+    ///
+    /// **Shrink-only**: capped per axis at the window the viewer opens at, so
+    /// a small picture hugs its own size while a photograph keeps the default
+    /// window and pans inside it; floored at the smallest client the viewer is
+    /// laid out for, so hugging a tiny picture can never leave the tools or
+    /// the status line without room.
+    #[must_use]
+    pub fn preferred_client_size(
+        &self,
+        theme: &Theme,
+        scale: Scale,
+        font: BitmapFont,
+    ) -> Option<(u32, u32)> {
+        let natural = self.natural()?;
+        let (want_w, want_h) = Layout::client_for_canvas(natural, theme, scale, font, self.info);
+        let (floor_w, floor_h) =
+            Layout::min_client(theme, scale, font, self.toolbar.min_width(scale, theme));
+        let (cap_w, cap_h) = (
+            scale.scale_length(crate::WIN_WIDTH),
+            scale.scale_length(crate::WIN_HEIGHT),
+        );
+        Some((
+            want_w.clamp(floor_w.min(cap_w), cap_w),
+            want_h.clamp(floor_h.min(cap_h), cap_h),
+        ))
     }
 
     /// The selected page's natural pixel size, or `None` with nothing open.
@@ -594,7 +640,7 @@ impl View {
         }
         self.playing = !self.playing;
         if !self.playing {
-            self.deadline_ns = None;
+            self.frame_ns = None;
         }
         if let Some(button) = self.toolbar.icon_mut(PLAYBACK_TOOL) {
             *button = IconButton::new(
@@ -630,22 +676,36 @@ impl View {
             .set_model(scroll_for(scaled.0, self.canvas.0, pan.0));
     }
 
-    /// Advance an animation whose frame is due at `now_ns`, reporting whether
-    /// the entry on screen should change.
+    /// Advance whatever is due at `now_ns` — an animation frame, and one
+    /// auto-repeat step of any held control — reporting whether anything
+    /// drawn changed.
     ///
     /// Tickless by construction: the deadline is a single instant the
-    /// embedder parks until, and a paused viewer has none at all.
-    pub fn tick(&mut self, now_ns: u64) -> bool {
+    /// embedder parks until, and a paused viewer with nothing held has none
+    /// at all.
+    pub fn tick(
+        &mut self,
+        now_ns: u64,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        self.repeat(now_ns, layout, scale, theme, damage) | self.next_frame(now_ns)
+    }
+
+    /// Step the animation if its frame is due.
+    fn next_frame(&mut self, now_ns: u64) -> bool {
         if !self.playing {
             return false;
         }
-        let Some(deadline) = self.deadline_ns else {
+        let Some(deadline) = self.frame_ns else {
             return false;
         };
         if now_ns < deadline {
             return false;
         }
-        self.deadline_ns = None;
+        self.frame_ns = None;
         let Some(document) = self.document.as_ref() else {
             return false;
         };
@@ -653,6 +713,51 @@ impl View {
         // A one-frame animation stays where it is rather than re-selecting
         // itself, so a container declaring one frame arms no further work.
         self.go_to_page(next)
+    }
+
+    /// Step every held control once if their shared repeat is due, and re-arm
+    /// it at the interval while anything is still held.
+    fn repeat(
+        &mut self,
+        now_ns: u64,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        let Some(due) = self.repeat_ns else {
+            return false;
+        };
+        if now_ns < due {
+            return false;
+        }
+        self.repeat_ns = None;
+        let mut changed = self.toolbar.repeat(layout.tools(), scale, theme, damage);
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.vertical.repeat(layout.vertical_bar(), damage)
+        {
+            changed |= self.pan_to(None, Some(offset));
+        }
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.horizontal.repeat(layout.horizontal_bar(), damage)
+        {
+            changed |= self.pan_to(Some(offset), None);
+        }
+        if changed {
+            damage.add(layout.canvas());
+            damage.add(layout.status());
+        }
+        self.repeat_ns = self
+            .holding()
+            .then(|| now_ns.saturating_add(REPEAT_INTERVAL_NS));
+        changed
+    }
+
+    /// Whether any control is holding a press that wants repeat wake-ups.
+    fn holding(&self) -> bool {
+        self.toolbar.is_repeating()
+            || self.vertical.is_repeating()
+            || self.horizontal.is_repeating()
     }
 
     /// The render the current state calls for, or `None` when what is held is
@@ -775,7 +880,7 @@ impl View {
                 self.refusal = None;
                 self.viewport = Viewport::new();
                 if let Some(natural) = self.natural() {
-                    self.viewport.set_fit(Fit::Window, natural, self.canvas);
+                    self.viewport.set_fit(Fit::Actual, natural, self.canvas);
                     self.viewport.cap_zoom(natural);
                 }
                 self.sync_controls();
@@ -894,11 +999,26 @@ impl View {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
         }
-        if let Some(action) = self
+        // The wheel over the tools scrolls the strip rather than reaching the
+        // canvas beneath it, so a strip too narrow for its tools is reachable
+        // with the same gesture the rest of the window uses.
+        if let InputEvent::PointerScrolled { dx, dy } = event {
+            if layout.tools().contains(self.pointer) {
+                let moved = self
+                    .toolbar
+                    .wheel(*dx, *dy, layout.tools(), scale, theme, damage);
+                return Outcome::changed(moved);
+            }
+        }
+        match self
             .toolbar
             .on_pointer(event, layout.tools(), scale, theme, damage)
         {
-            return self.tool(action, layout, damage);
+            ToolbarOutcome::Activated(action) => return self.tool(action, layout, damage),
+            // A hover arriving or leaving, a press latching, or a scrolled
+            // strip: the toolbar reported its own pixels and owes a present.
+            ToolbarOutcome::Redraw => return Outcome::changed(true),
+            ToolbarOutcome::Idle => {}
         }
         if let Some(action) = self.zoom.on_pointer(event, layout.zoom_slider(), damage) {
             return Outcome::changed(self.slid(action));
@@ -1104,13 +1224,20 @@ impl View {
         self.run(command, layout, damage)
     }
 
-    /// Arm the next animation frame's deadline from the entry now on screen.
+    /// Arm the deadlines the current state calls for: the next animation
+    /// frame, and the first auto-repeat step of a freshly held control.
     ///
     /// Called by the embedder once it knows the clock, because the engine
     /// holds no clock of its own: a frame's delay is the container's and the
-    /// instant it lands on is the machine's.
+    /// instant it lands on is the machine's. A press released before its
+    /// first step disarms rather than firing once more.
     pub fn arm_deadline(&mut self, now_ns: u64) {
-        if !self.playing || self.deadline_ns.is_some() {
+        self.repeat_ns = match (self.holding(), self.repeat_ns) {
+            (true, None) => Some(now_ns.saturating_add(REPEAT_DELAY_NS)),
+            (true, armed) => armed,
+            (false, _) => None,
+        };
+        if !self.playing || self.frame_ns.is_some() {
             return;
         }
         let Some(delay) = self
@@ -1121,8 +1248,31 @@ impl View {
         else {
             return;
         };
-        self.deadline_ns = Some(now_ns.saturating_add(delay.max(MIN_FRAME_DELAY_NS)));
+        self.frame_ns = Some(now_ns.saturating_add(delay.max(MIN_FRAME_DELAY_NS)));
     }
+}
+
+/// The viewer's toolbar: one icon tool per command in [`TOOLS`], in order.
+///
+/// One definition, so the strip a window draws and the strip the declared
+/// window floor is measured from are the same strip.
+fn tools() -> Toolbar {
+    let mut toolbar = Toolbar::new();
+    for (icon, _, _) in TOOLS {
+        toolbar = toolbar.with_icon(IconButton::new(icon, ControlRole::Neutral), 0);
+    }
+    toolbar
+}
+
+/// The smallest client the viewer is laid out for, in **physical** pixels at
+/// `scale` — what a window declares to the window manager when it opens.
+///
+/// Derived from the theme's metrics and from the toolbar's own tools, so a
+/// denser theme or a larger scale cannot leave the tools unreachable or the
+/// canvas without a strip to draw in.
+#[must_use]
+pub fn min_client_size(theme: &Theme, scale: Scale, font: BitmapFont) -> (u32, u32) {
+    Layout::min_client(theme, scale, font, tools().min_width(scale, theme))
 }
 
 /// The least a frame is shown for, in nanoseconds.

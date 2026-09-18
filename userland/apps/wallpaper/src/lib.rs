@@ -94,7 +94,8 @@ pub use layout::Layout;
 #[cfg(test)]
 mod tests;
 
-/// Initial window content width of the chooser window, in pixels. The
+/// Initial window content width of the chooser window, in logical pixels at
+/// the reference density, resolved through the desktop's own scale. The
 /// chooser re-lays everything out to whatever client size the window
 /// manager reports ([`Layout::compute`]), so this is a starting size, not a
 /// fixed one.
@@ -104,10 +105,11 @@ pub const WIN_WIDTH: u32 = 880;
 /// [`WIN_WIDTH`]).
 pub const WIN_HEIGHT: u32 = 640;
 
-/// The smallest client width the chooser lays out into, in pixels — below
-/// this the gallery and its options stop being usable. It is declared to
-/// the window manager when the window opens, which is what holds a resize
-/// to it; the app itself adopts whatever size it is given.
+/// The smallest client width the chooser lays out into, in **logical**
+/// pixels — below this the gallery and its options stop being usable. Like
+/// [`WIN_WIDTH`] it is resolved at the desktop's density before it is
+/// declared to the window manager, which is what holds a resize to it; the
+/// app itself adopts whatever size it is given.
 pub const MIN_WIN_WIDTH: u32 = 420;
 
 /// The smallest client height the chooser declares (see

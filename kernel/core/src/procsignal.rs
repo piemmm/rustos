@@ -1497,7 +1497,12 @@ mod tests {
         // as if it had exited with that code itself.
         let pid = child;
         assert_eq!(
-            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(
+                ProcessId(7),
+                TaskId(7),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(143)
@@ -1939,7 +1944,12 @@ mod tests {
         let pid = child;
         // Kill surfaces as SIGKILL's familiar 137, distinct from Terminate.
         assert_eq!(
-            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(
+                ProcessId(7),
+                TaskId(7),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(137)
@@ -1963,7 +1973,12 @@ mod tests {
         let pid = child;
         // Interrupt surfaces as the `^C` 130 every POSIX shell reports.
         assert_eq!(
-            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(
+                ProcessId(7),
+                TaskId(7),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(130)
@@ -2058,7 +2073,12 @@ mod tests {
         assert!(!task_is_stopped(child));
         // The terminal exit superseded the unobserved stop.
         assert_eq!(
-            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::STOPPED),
+            wait.wait(
+                ProcessId(7),
+                TaskId(7),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::STOPPED
+            ),
             Ok(WaitedChild {
                 pid: child,
                 status: WaitStatus::Exited(137)
@@ -2086,7 +2106,12 @@ mod tests {
         assert_eq!(signaller.deliver(fg(child), Signal::Interrupt), Ok(()));
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
-            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(
+                ProcessId(7),
+                TaskId(7),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
             Ok(WaitedChild {
                 pid: child,
                 status: WaitStatus::Exited(130)
@@ -2326,7 +2351,12 @@ mod tests {
         );
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
-            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(
+                ProcessId(7),
+                TaskId(7),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
             Ok(WaitedChild {
                 pid: child,
                 status: WaitStatus::Exited(137)
@@ -2360,7 +2390,12 @@ mod tests {
         );
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
-            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(
+                ProcessId(7),
+                TaskId(7),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
             Ok(WaitedChild {
                 pid: child,
                 status: WaitStatus::Exited(130)

@@ -79,7 +79,9 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 const BOOT_CPU: u32 = 0;
 
 /// Physical frames the production spawn producer and the demand-fault path
-/// draw from: six spawned processes (image, eagerly committed stack top, page
+/// draw from: eight spawned processes — the parent's seven child roles plus
+/// the child one of those roles spawns from a thread of its own — (image,
+/// eagerly committed stack top, page
 /// tables) plus each role's threads — every thread costs one eagerly backed
 /// stack page, a kernel stack, and whatever its body faults in. Sized from
 /// that appetite with generous headroom (16 MiB).
@@ -235,8 +237,9 @@ fn threads_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
 /// parent's `spawn` only. The parent's set doubles as the inherited
 /// ceiling the production spawn intersects each child's manifest request
 /// with, so a child's effective set is exactly its registry row's request
-/// — and the children request nothing (stack growth, `rlimit_set`
-/// lowering, and faulting need no capability).
+/// — and only the `reapchild` role requests anything (it spawns a child of
+/// its own; stack growth, `rlimit_set` lowering, and faulting need no
+/// capability).
 fn parent_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
     caps.insert(CapabilityId::PROC_SPAWN);
@@ -247,7 +250,7 @@ fn parent_caps() -> CapabilitySet {
 /// parent's child paths against: one `rxe` image, one row per role, each
 /// pinning its role word and its numeric parameters through the registered
 /// default argument vector.
-static CHILD_PROGRAMS: [EmbeddedProgram; 6] = [
+static CHILD_PROGRAMS: [EmbeddedProgram; 7] = [
     EmbeddedProgram {
         path: b"/bin/th-counter",
         rxe: PROGRAM_RXE,
@@ -287,6 +290,15 @@ static CHILD_PROGRAMS: [EmbeddedProgram; 6] = [
             &PARALLEL_WORKERS_ARG,
             &PARALLEL_ROUNDS_ARG,
         ],
+    },
+    EmbeddedProgram {
+        path: b"/bin/th-reapchild",
+        rxe: PROGRAM_RXE,
+        // The only child role that spawns: its reaping thread launches one of
+        // its siblings, so its manifest asks for the spawn authority the
+        // parent's ceiling already carries.
+        caps: &[CapabilityId::PROC_SPAWN],
+        args: &[b"th", b"reapchild"],
     },
     EmbeddedProgram {
         path: b"/bin/th-groupexit",

@@ -48,6 +48,16 @@ modules; the reference documentation is `docs/src/architecture/threads.md`.
    wait, which the retype forced a decision on (it is the owning *process*,
    since an interrupt binding is a process resource any of its threads may wait
    on).
+   **A park, an unpark, a wake, or a kill check names the *thread*; only
+   per-process state is keyed by the group.** The newtype cannot catch the slip
+   on its own wherever the value reaches an interface typed in the scheduler's
+   `TaskId = u64` alias, because `ProcessId(pub u64).0` compiles there: the
+   process-wait producer registered the group *leader* on `PROCWAIT_WAITQ` and
+   then parked the calling thread, so a multi-threaded caller reaping from a
+   non-leader thread woke the wrong task and slept for the rest of the boot.
+   A producer that blocks therefore takes the waiting `TaskId` **beside** the
+   `ProcessId` its table is keyed by, so the two cannot be confused at the
+   call site (`plans/OPEN-DEFECTS.md` D137).
 4. **The live address space becomes a shared, locked process object.**
    `ProcessSpace { space: SpinLock<Box<dyn LiveUserSpace + Send>> }` behind an
    `Arc`, cloned into each thread's `ThreadControl`; the per-CPU slot publishes a
@@ -286,14 +296,20 @@ address and bound refusal, the `futex_wait` compare-and-block, the `futex_wake`
 alignment gate), for the landing rule, for the released stack leaving nothing
 translating in the surviving process's snapshot, for growth charging headroom only
 for the pages it backs, and for the driver unload stopping every thread of its
-group; the pure policy is host-tested beside its code. End to end:
-`tests/integration/threads_program` in six argv-selected
-roles, driven by `threads_qemu_{aarch64,riscv64,x86_64}` over the production
-dispatch hook — N threads incrementing a shared counter under a futex mutex and
-each joined for its tally, a `Condvar` rendezvous that completes only because the
-wait genuinely parked, each thread reading its own magic through its psABI thread
-pointer before and after a trap, a thread that ends itself releasing its joiner,
-and a group `exit` reaching a sibling parked in the kernel.
+group; and a handler test that a blocking `wait` hands its producer the
+*calling* thread rather than the group's leader. The pure policy is host-tested
+beside its code. End to end: `tests/integration/threads_program` in eight
+argv-selected roles, driven by `threads_qemu_{aarch64,riscv64,x86_64}` over the
+production dispatch hook — N threads incrementing a shared counter under a futex
+mutex and each joined for its tally, a `Condvar` rendezvous that completes only
+because the wait genuinely parked, each thread reading its own magic through its
+psABI thread pointer before and after a trap, a thread that ends itself
+releasing its joiner, the fork-join pool over real threads, a child spawned and
+reaped from a **non-leader** thread (the decision-3 park rule: a process id is
+its leader's task id, so only a sibling can tell a park keyed by the process
+from one keyed by the caller — before the fix this role never returned and the
+vertical reported its step budget), and a group `exit` reaching a sibling parked
+in the kernel.
 
 **wasm32** is an honest declared n/a: it has no user mode at all (no
 `userentry.rs`, no `context_hal.rs`), so `thread_create` fails closed with

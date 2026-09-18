@@ -248,6 +248,17 @@ impl ScrollBar {
         self.held
     }
 
+    /// Whether an end-button or track press is held down, so the owner owes
+    /// this bar a repeat wake-up ([`repeat`](Self::repeat)).
+    ///
+    /// The same question [`crate::toolbar::Toolbar::is_repeating`] answers,
+    /// spelled the same way, so an owner driving both from one timer asks
+    /// them the same thing.
+    #[must_use]
+    pub fn is_repeating(&self) -> bool {
+        self.held.is_some()
+    }
+
     /// Whether a primary press is currently captured on the bar — a thumb
     /// drag in progress or an end/track button held down. An owner uses this
     /// to decide that a subsequent move or release belongs to the bar (the

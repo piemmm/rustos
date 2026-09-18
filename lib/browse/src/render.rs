@@ -937,6 +937,23 @@ fn build_toolbar(
     toolbar
 }
 
+/// The width the widest command toolbar — every read-only command plus every
+/// manager write tool — needs to seat every tool at `scale`.
+///
+/// A browser window's declared floor is derived from this rather than
+/// hand-picked, so the strip can never be handed a band too narrow for its
+/// own tools: the shared [`Toolbar`] would then scroll, and a window whose
+/// toolbar is rebuilt per frame holds no offset to scroll with.
+#[must_use]
+pub fn toolbar_natural_width(scale: Scale, theme: &Theme) -> u32 {
+    build_toolbar(
+        ToolbarModel::all_enabled(),
+        chrome::MANAGER_TOOLS,
+        ManagerToolModel::new(true),
+    )
+    .natural_width(scale, theme)
+}
+
 /// Draw the command toolbar in the top strip: [`chrome::TOOLBAR_COMMANDS`] then
 /// the manager-only write `tools`, as themed [`IconButton`]s over the
 /// [`ToolbarModel`], spanning the full window width above the item view. A

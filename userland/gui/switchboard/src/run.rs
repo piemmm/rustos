@@ -100,9 +100,9 @@ mod program {
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_switchboard::{
-        authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
-        PanelLayout, Service, ServiceHost, Switchboard, SwitchboardAction, WaitToken, PANEL_TITLE,
-        SESSION_REFUSED, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
+        authenticate_command, probe_scopes, refusal_notice, win_sizing, CycleOutcome,
+        DegradedField, PanelLayout, Service, ServiceHost, Switchboard, SwitchboardAction,
+        WaitToken, PANEL_TITLE, SESSION_REFUSED, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::app::{self, AppWindow};
@@ -393,7 +393,12 @@ mod program {
             // `WindowEvent::Resized` arrives.
             let server = self
                 .window
-                .open(self.event_endpoint, &mode, PANEL_TITLE, WIN_SIZING)
+                .open(
+                    self.event_endpoint,
+                    &mode,
+                    PANEL_TITLE,
+                    win_sizing(self.desktop.scale()),
+                )
                 .map_err(|err| err.errno())?;
             // The window's own event member is armed only while a window is
             // open, so a closed window's channel is never left idly armed.

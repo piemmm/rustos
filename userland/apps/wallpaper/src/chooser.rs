@@ -44,8 +44,8 @@ use tairix_wallpaper::{
 use crate::{
     backdrop_options, leaf_name, to_i32, to_u32, ApplyOutcome, BackdropOption, Candidate,
     ChooserAction, Focus, Layout, OptionGroup, Style, Thumbnail, ALL_CATEGORIES_LABEL, APPLY_LABEL,
-    CLOSE_LABEL, FIT_ALL, FIT_LABELS, ICON_FLOW_ALL, ICON_FLOW_LABELS, MIN_WIN_HEIGHT,
-    MIN_WIN_WIDTH, OPTION_GROUP_COUNT, SORT_ALL, SORT_LABELS, WIN_HEIGHT, WIN_WIDTH,
+    CLOSE_LABEL, FIT_ALL, FIT_LABELS, ICON_FLOW_ALL, ICON_FLOW_LABELS, OPTION_GROUP_COUNT,
+    SORT_ALL, SORT_LABELS, WIN_HEIGHT, WIN_WIDTH,
 };
 
 /// A wallpaper the caller must render for the preview panel.
@@ -229,14 +229,19 @@ impl Chooser {
         }
     }
 
-    /// Adopt a new client size, never below the window's own floor.
+    /// Adopt the client size the window manager reported, exactly.
+    ///
+    /// The floor is the manager's to hold — it is declared at create and a
+    /// drag stops there — so the app lays out at the size it is told rather
+    /// than second-guessing it against a logical constant it would have to
+    /// re-resolve at the desktop's density.
     ///
     /// Only the size is stored: every derived extent — the layout, the
     /// gallery's grid, the scroll range — is resolved afresh from it on the
     /// next paint or event, so a resize can leave nothing stale behind.
     pub fn relayout(&mut self, width: u32, height: u32) {
-        self.width = width.max(MIN_WIN_WIDTH);
-        self.height = height.max(MIN_WIN_HEIGHT);
+        self.width = width;
+        self.height = height;
     }
 
     /// Every candidate the chooser holds, whichever category is being

@@ -349,8 +349,13 @@ addressable.
 - the document model over the page source;
 - a viewport carrying continuous zoom, fit modes (fit, fit-width, actual size),
   clamped pan, and rotation/flip;
-- one `Layout::for_window(w, h, theme, scale)` producing every `Rect` that
-  render, hit-test, and the tests read, so the three cannot disagree;
+- one `Layout::for_window(w, h, theme, scale, font, tools_width, info)`
+  producing every `Rect` that render, hit-test, and the tests read, so the
+  three cannot disagree, plus its exact inverse for the canvas band
+  (`Layout::client_for_canvas`) and the derived smallest client
+  (`Layout::min_client`) — both over the one private metrics resolution
+  `for_window` divides the window up with, so the forward and the reverse
+  cannot disagree about what a band costs;
 - renderers that **paint only from state**;
 - a decoded-surface cache under `lib/reclaim`'s budget and pressure bands;
 - one pure `InputEvent` entry point returning state change plus damage;
@@ -392,6 +397,36 @@ already showing for another application, a refused listing). That last one is
 why `View::cancelled` became `View::no_document(why)`: a refused *ask* is the
 one outcome with nothing coming after it, so a window withheld on it would
 never appear.
+
+**A document opens at 100%, and the window shrinks to hug it.** The viewport's
+default fit is `Fit::Actual`, so a picture is first shown at the size it was
+authored at rather than fitted to whatever window happened to open — the fit
+and fit-width *commands* are untouched and still available. The window then
+gives way to the picture rather than the other way round:
+`View::preferred_client_size` answers the client whose canvas is exactly the
+selected page's own pixels, **capped per axis at the size the viewer opens at**
+(shrink-only, so a photograph keeps the default window and pans inside it) and
+floored at `Layout::min_client`. `Run` applies it **once per document open** —
+in the `Answer::Opened { Ok }` arm alone, never on a render, a zoom, or a
+resize — so it can never fight the user's own resize drag; a refused re-map
+leaves the window at the size it had.
+
+**The declared window floor is derived, not hand-picked.** What the viewer
+tells the window manager at create is `min_client_size(theme, scale, font)`:
+the toolbar's own `Toolbar::min_width` across (a tool plus both overflow
+affordances) and the toolbar, status line, scrollbar and one control-height of
+canvas down, resolved at the desktop's density and declared in **physical**
+pixels, which is what the `WindowSizing::Resizable` field is in.
+
+**The toolbar reserves its tools' strip before the zoom slider.** The tools are
+the strip's primary surface and the slider the incidental one, so
+`Layout::for_window` claims what the tools need first and gives the slider what
+is left, dropping it entirely below the width a rung could be aimed at. A
+window narrower still is handled by the shared control: the strip scrolls in
+whole tools (`plans/GUI-CONTROLS-DESIGN.md` §11.11), and `view` holds no
+private copy of that behaviour. The toolbar's and both scrollbars'
+press-and-hold repeat is folded into the one-shot deadline the animation
+already uses, so a held affordance steps on a timer rather than a poll.
 
 **Closing a window keeps the viewer; only *Quit* ends it.** The slot's Quit row
 closes every window and exits; `CloseRequested` closes one and leaves the
@@ -492,6 +527,13 @@ clients, and their exit-code sets are their own.
 ## Status
 
 - `plans/VIEW.md` and the jump-sheet row — **done**.
+- **A document opens at 100% and the window hugs it; the toolbar fits at every
+  size** — **done**, as specified above. The third document failing to appear
+  after a window was closed was not the app: the kernel's blocking `wait`
+  registered the *process* on the wait queue and parked the *calling thread*,
+  so the decode worker's `RtLauncher::dispose` reap never woke and the one-slot
+  desk stayed latched for the rest of the boot
+  (`plans/OPEN-DEFECTS.md` D137).
 - **One viewer for every document, whoever launched it** — **done**. The
   single-instance funnel found a running viewer only when the *desktop* had
   spawned it, so a viewer the file manager started was invisible to it and

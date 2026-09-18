@@ -45,7 +45,7 @@ pub mod paint;
 pub mod view;
 
 pub use layout::Layout;
-pub use view::{Command, Outcome, Refusal, View};
+pub use view::{min_client_size, Command, Outcome, Refusal, View};
 
 /// The window extent the viewer asks the desktop for, in logical pixels.
 ///
@@ -55,13 +55,6 @@ pub use view::{Command, Outcome, Refusal, View};
 pub const WIN_WIDTH: u32 = 900;
 /// The window height the viewer asks for, in logical pixels.
 pub const WIN_HEIGHT: u32 = 640;
-
-/// The smallest window the viewer asks the window manager to hold, in
-/// logical pixels: below this the toolbar's tools would not fit and the
-/// canvas would be too small to read a picture in.
-pub const MIN_WIN_WIDTH: u32 = 420;
-/// The smallest window height the viewer asks for, in logical pixels.
-pub const MIN_WIN_HEIGHT: u32 = 320;
 
 /// Largest document, in bytes, the viewer will hold resident to hand to its
 /// worker.
@@ -136,16 +129,21 @@ const PAN_STEP_PERCENT: u32 = 12;
 /// changes, because the whole point of a fit is that it holds; [`Free`] is
 /// the user's own factor and survives a resize.
 ///
+/// The default is [`Actual`]: a document opens at 100%, the size it was
+/// authored at, and the *window* gives way to the picture rather than the
+/// picture to the window.
+///
 /// [`Free`]: Fit::Free
+/// [`Actual`]: Fit::Actual
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum Fit {
     /// The whole picture inside the canvas.
-    #[default]
     Window,
     /// The picture's full width across the canvas, however tall that leaves
     /// it.
     Width,
     /// One picture pixel per screen pixel.
+    #[default]
     Actual,
     /// Whatever the user set, by slider, wheel, or the zoom tools.
     Free,
@@ -273,11 +271,11 @@ impl Default for Viewport {
 }
 
 impl Viewport {
-    /// A viewport fitting the whole picture, unturned.
+    /// A viewport at actual size, unturned.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            fit: Fit::Window,
+            fit: Fit::Actual,
             zoom: ZOOM_ACTUAL_PER_MILLE,
             pan: (0, 0),
             reorient: Reorient::None,

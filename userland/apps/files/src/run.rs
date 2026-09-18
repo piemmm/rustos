@@ -148,8 +148,7 @@ mod program {
         ManagerToolModel, OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem,
         PasteStrategy, Places, Probe, ProgressModel, ProgressOp, Properties, RenameError, RowList,
         RtLinkReader, ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume,
-        VolumeId, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_SIZING,
-        WIN_WIDTH,
+        VolumeId, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -707,11 +706,13 @@ mod program {
     /// # Errors
     ///
     /// The exit code naming what refused.
+    #[allow(clippy::too_many_arguments)] // The window's whole opening state, threaded explicitly.
     fn open_window(
         client: &mut WindowClient<app::RtWindowTransport>,
         event_endpoint: u64,
         desktop: &Desktop,
         places: &Places,
+        theme: &Theme,
         reads: &alloc::sync::Arc<Reads>,
         location: Option<alloc::vec::Vec<String>>,
     ) -> Result<OpenWindow, i32> {
@@ -730,7 +731,8 @@ mod program {
         // The window opens carrying the location it shows, rather than a name
         // the first frame would have to replace.
         let title = location_title(&browser);
-        let pane = match WindowPane::open(client, event_endpoint, &mode, &title, WIN_SIZING) {
+        let sizing = tairix_browse::win_sizing(desktop.scale(), theme);
+        let pane = match WindowPane::open(client, event_endpoint, &mode, &title, sizing) {
             Ok((pane, _)) => pane,
             Err(err) => {
                 report_error(&alloc::format!("{err}; no window opened"));
@@ -1299,8 +1301,15 @@ mod program {
         // address-space limit, both derived from the machine and both refusing
         // with a stated reason. A hand-picked ceiling in front of them would
         // only refuse windows the machine could have given.
-        let Ok(mut win) = open_window(client, event_endpoint, desktop, places, reads, location)
-        else {
+        let Ok(mut win) = open_window(
+            client,
+            event_endpoint,
+            desktop,
+            places,
+            theme,
+            reads,
+            location,
+        ) else {
             // Already stated by `open_window`; a component simply has one
             // fewer window and the desktop carries on.
             return;
@@ -5719,7 +5728,8 @@ mod program {
             report_error("window surface refused; no Properties window opened");
             return;
         };
-        let pane = match WindowPane::open(client, event_endpoint, &mode, &title, WIN_SIZING) {
+        let sizing = tairix_browse::win_sizing(desktop.scale(), theme);
+        let pane = match WindowPane::open(client, event_endpoint, &mode, &title, sizing) {
             Ok((pane, _)) => pane,
             Err(err) => {
                 report_error(&alloc::format!("{err}; no Properties window opened"));
@@ -6684,6 +6694,7 @@ mod program {
                 event_endpoint,
                 &desktop,
                 &places,
+                themes.active(),
                 &reads,
                 start.location,
             ) {

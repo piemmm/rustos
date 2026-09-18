@@ -135,8 +135,8 @@ pub use model::{
     PanelModel, SessionReport,
 };
 pub use panel::{
-    refusal_notice, Panel, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT, WIN_SIZING,
-    WIN_WIDTH,
+    refusal_notice, win_resizable, win_sizing, Panel, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE,
+    WIN_HEIGHT, WIN_WIDTH,
 };
 pub use publish::Publisher;
 pub use resource_report::build_resource_report;

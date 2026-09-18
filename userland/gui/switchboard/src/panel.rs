@@ -355,7 +355,8 @@ impl Panel {
 /// registers and decorates for it.
 pub const PANEL_TITLE: &str = "Switchboard";
 
-/// The overview window's initial client width in physical pixels.
+/// The overview window's initial client width in logical pixels at the
+/// reference density, resolved through the desktop's own scale.
 ///
 /// The panel's size envelope lives beside the panel itself — the service
 /// binary opens and resizes the window with it, and the QEMU vertical's
@@ -366,23 +367,40 @@ pub const PANEL_TITLE: &str = "Switchboard";
 /// the room a section's own anatomy had beside it.
 pub const WIN_WIDTH: u32 = 760 + crate::view::RAIL_WIDTH;
 
-/// The overview window's initial client height in physical pixels (see
+/// The overview window's initial client height in logical pixels (see
 /// [`WIN_WIDTH`]).
 pub const WIN_HEIGHT: u32 = 560;
 
 /// The sizing the overview window asks the window manager for: resizable,
 /// down to the narrowest client its sections still seat (see [`WIN_WIDTH`]).
 ///
-/// Resizable decoration widens the furniture band reserved around the
-/// client.
-pub const WIN_SIZING: WindowSizing = WindowSizing::Resizable {
-    min_width_px: MIN_WIN_WIDTH,
-    min_height_px: MIN_WIN_HEIGHT,
-};
+/// The floor is authored in logical pixels like every other desktop length,
+/// so it is resolved at the desktop's density here — the ABI field is
+/// physical. Resizable decoration widens the furniture band reserved around
+/// the client.
+#[must_use]
+pub fn win_sizing(scale: Scale) -> WindowSizing {
+    WindowSizing::Resizable {
+        min_width_px: scale.scale_length(MIN_WIN_WIDTH),
+        min_height_px: scale.scale_length(MIN_WIN_HEIGHT),
+    }
+}
 
-/// The narrowest client width the panel is laid out for, declared to the
-/// window manager when the window opens so a drag simply stops here rather
-/// than squeezing the sections into a box they cannot fit.
+/// Whether the overview window is decorated resizable, which widens the
+/// furniture band reserved around the client.
+///
+/// Derived from [`win_sizing`] rather than stated a second time; the floor
+/// does not affect the decoration, so the unscaled desktop answers for every
+/// scale.
+#[must_use]
+pub fn win_resizable() -> bool {
+    win_sizing(Scale::ONE).resizable()
+}
+
+/// The narrowest client width the panel is laid out for, in logical pixels,
+/// declared to the window manager when the window opens so a drag simply
+/// stops here rather than squeezing the sections into a box they cannot
+/// fit.
 ///
 /// Declared, never self-imposed: an app that answered a resize by resizing
 /// its own window back up would fight the drag once per pointer sample.
@@ -397,8 +415,8 @@ pub const WIN_SIZING: WindowSizing = WindowSizing::Resizable {
 /// does.
 pub const MIN_WIN_WIDTH: u32 = 640 + crate::view::RAIL_WIDTH;
 
-/// The shortest client height the panel is laid out for (see
-/// [`MIN_WIN_WIDTH`]).
+/// The shortest client height the panel is laid out for, in logical pixels
+/// (see [`MIN_WIN_WIDTH`]).
 pub const MIN_WIN_HEIGHT: u32 = 240;
 
 /// The refusal notice for `action` refused with `refusal`, as one line
