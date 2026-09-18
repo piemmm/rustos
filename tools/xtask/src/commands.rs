@@ -1241,11 +1241,10 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
         // The undefined-behaviour oracle over the crates with a hand-written
         // `unsafe` core. A green test suite says what the code computes; only an
         // interpreter says whether a raw pointer stayed in bounds. It finds the
-        // class of defect the matrix structurally cannot. Last because enrolling
-        // `kernel/mem` made it the most expensive stage: every page those
-        // subsystems zero is paid for a byte at a time, so a cheaper stage placed
-        // behind it would make each of its own failures wait out the interpreter
-        // for nothing.
+        // class of defect the matrix structurally cannot. It closes the
+        // compile-heavy tail alongside the test matrix: both are dearer than
+        // every stage above them, so neither can be placed higher without
+        // making cheaper failures wait out an interpreter or a QEMU guest.
         ("miri", &|| miri::run(ctx, &[])),
     ];
     let labels: Vec<&str> = pipeline.iter().map(|(label, _)| *label).collect();

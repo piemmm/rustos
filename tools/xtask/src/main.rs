@@ -287,14 +287,7 @@ impl Context {
         let pid = child.id();
         let started = Instant::now();
         let status = await_within(label, pid, budget, move || child.wait())?;
-        // Every stage reports its wall clock in the same shape the concurrent
-        // job runner uses, so one grep over a pipeline log profiles the whole
-        // run. Without it there is no evidence for which phase to make faster.
-        eprintln!(
-            "xtask: [{label}] {} in {:?}",
-            if status.success() { "done" } else { "FAILED" },
-            started.elapsed()
-        );
+        report_elapsed(label, status.success(), started.elapsed());
         if status.success() {
             Ok(())
         } else {
@@ -443,6 +436,20 @@ const SIGTERM_GRACE: Duration = Duration::from_secs(2);
 /// uninterruptible kernel sleep would block the underlying `wait()` for as
 /// long as we let it, so this cannot be an unconditional join either.
 const KILL_REAP_GRACE: Duration = Duration::from_secs(5);
+
+/// Print one step's closing wall-clock line.
+///
+/// Every step reports its cost in this one shape, sequential and concurrent
+/// alike, so a single grep over a pipeline log profiles the whole run — and so
+/// a job quietly running at most of its budget is visible before the next
+/// slower host turns it into a kill. `docs/src/contributing.md` documents the
+/// grep, which is why the wording lives here rather than at each caller.
+pub(crate) fn report_elapsed(label: &str, ok: bool, elapsed: Duration) {
+    eprintln!(
+        "xtask: [{label}] {} in {elapsed:?}",
+        if ok { "done" } else { "FAILED" }
+    );
+}
 
 /// Widens `requested` upward to `$TAIRIX_XTASK_TIMEOUT_SECS` when that
 /// variable is set, and leaves it untouched otherwise.

@@ -19,13 +19,16 @@ rules, it points to them.
 
 ## How long `cargo xtask ci` takes, and how to run it under a tool cap
 
-Budget **about 15 minutes** on a warm `target/` and a 24-core host, and
-substantially longer on a cold one, where `-Z build-std` recompiles
-`core`/`alloc` per target and every image profile links from scratch.
+Budget **about 25 minutes** on a warm `target/` and a two-dozen-core host —
+the sum of the stage costs below — and substantially longer on a cold one,
+where `-Z build-std` recompiles `core`/`alloc` per target and every image
+profile links from scratch.
 
 Every stage reports its own wall clock. `grep 'stage:' ci.log` gives the
 per-stage totals the pipeline is ordered by; `grep 'done in' ci.log` gives the
-finer per-command lines inside them. A measured warm run:
+finer per-command lines inside them — sequential steps and concurrent jobs
+alike, so a job running at most of its budget is visible before a slower host
+turns it into a kill. A measured warm run:
 
 | Stage | Cost | Shape |
 | --- | --- | --- |
@@ -40,22 +43,33 @@ finer per-command lines inside them. A measured warm run:
 | `image` gate | 193 s over 319 spawns | sequential |
 | `clippy` host + 11 target passes | 330 s | sequential |
 | `test --qemu` (host matrix + 168 guests + 3 fixture cross-compiles) | 417 s | guests concurrent, `nproc/3` weighted budget |
-| `miri` (the UB oracle over the hand-written `unsafe` cores, the three paging ports, and `kernel/mem`) | 1360 s | one process per crate, concurrent; `kernel/mem` sets the makespan |
+| `miri` (the UB oracle over the hand-written `unsafe` cores, the three paging ports, and `kernel/mem`) | 383 s | one process per crate, concurrent; `kernel/mem` dealt across the host's cores |
 
-`miri` is now the pipeline's most expensive stage, and runs last for that
-reason. `kernel/mem` alone accounts for its whole makespan: interpreting the slab
-tier, the remap window's slot arithmetic and the DMA pool's direct-map slices
-means paying per-byte aliasing bookkeeping over every page those subsystems
-zero, which is most of what they do. The alternative was leaving that
-`unsafe` covered only by whoever remembered to run the oracle by hand. One
-`dma` test is excluded by name — a full-gigabyte window streaming thirteen
-32-page device regions costs four hours interpreted, and the `unsafe` it
-reaches is reached by the rest of its module; the registry carries that
-reason.
+Miri runs one interpreted thread at a time and reports a single CPU to the
+program, so libtest takes a crate's tests one after another whatever the host
+has. `kernel/mem`'s 465 of them therefore came to twenty minutes in a single
+single-core process — most of the stage, against a forty-five-minute per-job
+budget it eventually overran on a slower runner, while the rest of the machine
+idled. That target is now `Spread::PerCore`: the stage enumerates it through
+the test binary's own `--list` and deals the names round-robin across one
+process per core, so the makespan is the longest single test rather than the
+sum. The partition comes from the binary rather than a hand-kept list, so a
+test added later cannot fall outside every shard and go uninterpreted.
 
-Two figures in this table are Miri's, and Miri's clock is virtual: the
-`finished in …` line a test binary prints under the interpreter is **not**
-wall time and can exceed it severalfold. Measure the stage from outside.
+The cost that remains is the aliasing model, not the code: a zero-on-free clear
+is a volatile write per byte, and the same `dma` test costs 716 s under Stacked
+Borrows, 208 s under Tree Borrows and 44 s with the model off. Stacked Borrows
+stands — it is the stricter of the two, and the one intrusive pointer code is
+likeliest to violate — so where the interpreted extent is a sample rather than
+the assertion it is scaled under `cfg(miri)`. One `dma` test is excluded by
+name instead: a full-gigabyte window streaming thirteen 32-page device regions
+costs four hours interpreted, and the `unsafe` it reaches is reached by the
+rest of its module. The registry carries both reasons.
+
+Figures in this table are wall clock, taken from outside. Miri's own clock is
+virtual: the `finished in …` line a test binary prints under the interpreter is
+**not** wall time and can exceed it severalfold, so the runner's own per-job
+line is the figure to read, never libtest's.
 
 The order is that table, cheapest first, and it is maintained against
 *measured* cost rather than a guess about which gate usually trips. A cheap

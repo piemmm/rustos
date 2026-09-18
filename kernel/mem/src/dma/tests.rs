@@ -485,6 +485,13 @@ fn allocate_all_dma_then_free_it_all_reclaims_fully_every_round() {
     // empty and the frame allocator exactly as full as before — round after
     // round, with no leak or drift. A driver that runs for years issuing many
     // transfers depends on exactly this.
+    //
+    // Rounds are a sample of "round after round", not the assertion: drift
+    // shows up comparing any round against the first. Interpreted a round
+    // costs ~100 s, almost all of it the aliasing model's bookkeeping over
+    // the zero-on-free clear's per-byte volatile writes, so six cost 716 s.
+    const ROUNDS: u32 = if cfg!(miri) { 3 } else { 6 };
+
     let frames = fresh_frames(64);
     let sim = fresh_sim(64);
     let initial_free = frames.free_frames();
@@ -493,7 +500,7 @@ fn allocate_all_dma_then_free_it_all_reclaims_fully_every_round() {
     let mut pool = pool_with_capacity(&frames, &sim, 64);
 
     let mut first_round: Option<usize> = None;
-    for round in 0..6 {
+    for round in 0..ROUNDS {
         assert_eq!(pool.live(), 0, "round {round} starts empty");
         assert_eq!(
             frames.free_frames(),

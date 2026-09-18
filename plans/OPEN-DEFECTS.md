@@ -49,7 +49,7 @@ table normalises all three to **closed**. 28 open, 105 closed, 133 total.
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
-| D123 | `kernel/core` is not under the UB oracle | `kernel/mem` is **closed** — enrolled and green (1207 s, 0 leaks) once `DirectPhysMap` gained a provenance root, every leaked fixture became a `Once` cell, `slab`'s proptest stopped wanting a cwd, and the sample-sized sweeps were scaled; one 4-hour `dma` test is skipped by name, which made `miri` the pipeline's most expensive stage. `kernel/core` is **not** budget-bound as previously recorded: 577 test-side `Box::leak` sites across ~40 fixture types had never been seen, because every whole-crate run aborted on provenance before the leak check ran — see the section |
+| D123 | `kernel/core` is not under the UB oracle | `kernel/mem` is **closed** — enrolled and green (0 leaks) once `DirectPhysMap` gained a provenance root, every leaked fixture became a `Once` cell, `slab`'s proptest stopped wanting a cwd, the sample-sized sweeps were scaled, and the crate was dealt across the host's cores (`Spread::PerCore`) instead of taken serially in one process, which is what overran the runner's per-job budget; one 4-hour `dma` test is skipped by name. Stage 383 s. `kernel/core` is **not** budget-bound as previously recorded: 577 test-side `Box::leak` sites across ~40 fixture types had never been seen, because every whole-crate run aborted on provenance before the leak check ran — see the section |
 | D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
 | D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
 | D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static; `kernel/sched/api::park` would need one too. Distinct from D123, which is the UB oracle |
@@ -7615,16 +7615,16 @@ an unenrolled crate, so every fix to its `unsafe` rests on a developer
 remembering to run the oracle by hand. `lib/kalloc` closed as D126; the window
 address and the stack reader closed as the `kheap`/`kstack` and D128 work.
 
-**`kernel/mem` is enrolled and green.** `Scope::LibExcept`, with one skip.
+**`kernel/mem` is enrolled and green.** `Scope::LibExcept`, with one skip, and
+`Spread::PerCore` so the crate's tests are dealt across the host's cores.
 
 ```
-cargo miri test -p tairix-kernel-mem --lib --features host-tests \
-  -- --skip dma::tests::a_full_span_window_serves_a_multi_device_enclosure_lazily
-test result: ok. 463 passed; 0 failed; 1 filtered out
-1207 s wall, 0 leaks
+cargo xtask miri --package tairix-kernel-mem
+xtask: [miri tairix-kernel-mem --lib (part)] 464 tests dealt across 16 processes
+every shard ok, 0 leaks; longest shard 374 s against the 2700 s per-job budget
 ```
 
-Four things had to change before it could be:
+Five things had to change before it could be:
 
 * **`DirectPhysMap::translate` minted a pointer per call.** The map now holds
   the root for the region the MMU established (`NonNull<u8>`), derives every
@@ -7649,9 +7649,19 @@ Four things had to change before it could be:
   rule moved into `tairix_fuzzseed::prop::config(native, interpreted)` and both
   call sites read it.
 * **Sweeps were scaled where the extent is a sample, not an assertion.**
-  `seal`'s nonce uniqueness (89 s → 3 s) and `ramzip::tier`'s three
+  `seal`'s nonce uniqueness (89 s → 3 s); `ramzip::tier`'s three
   `bench_evidence_*` round trips, whose printed latency is explicitly "not a
-  guarantee".
+  guarantee"; and `dma`'s reclamation rounds (716 s → 288 s at three of six),
+  where drift shows up comparing any round against the first.
+* **The crate is dealt across the host's cores.** Miri runs one interpreted
+  thread at a time and reports a single CPU, so libtest took all 465 tests
+  back to back in one single-core process — twenty minutes against a
+  forty-five-minute budget, which the CI runner overran while the stage's
+  other ten jobs sat finished and the rest of the machine idled.
+  `Spread::PerCore` enumerates the crate through the test binary's own
+  `--list` and deals the names round-robin across one process per core, so the
+  partition cannot omit a test added later and the makespan falls to the
+  longest single test rather than their sum.
 
 **What must not be scaled, learned the hard way.**
 `ramzip::tier::band_cap_is_enforced_and_escalation_is_deterministic` looked like
@@ -7677,16 +7687,24 @@ scenario rather than the property under test. It passes when run, and all four
 `unsafe` sites in `dma.rs` are on the alloc/free/bytes paths the other 25 tests
 in the module reach.
 
+**What that volume actually costs, measured.** The zero-on-free clear is
+`zeroize`'s volatile byte loop, so a page is 4096 individually interpreted
+writes, and the aliasing model — not the writes — is nearly all of the bill:
+the sibling reclamation test ran 716 s under Stacked Borrows, 208 s under Tree
+Borrows and 44 s with the model off. Stacked Borrows stands regardless (it is
+the stricter of the two and the one intrusive pointer code is likeliest to
+violate); the lever is the number of interpreted bytes, which is why the round
+count scaled and the enclosure test stays skipped.
+
 **Miri's clock is virtual — measure the stage from outside.** The
 `finished in …` line a test binary prints under the interpreter is not wall
 time and can exceed it severalfold (`live` reported 267 s against 79 s real;
 `dma` reported 702 s against 14 584 s). Every per-module figure taken from that
 line is fiction.
 
-**The stage cost is now `kernel/mem`.** 1360 s against the former 287 s
-makespan, which makes `miri` the pipeline's most expensive stage; it moved to
-last so a cheaper stage's failure does not wait out the interpreter.
-`docs/src/contributing.md` carries the measured figure and the reason.
+**The stage cost is 383 s**, set by the longest `kernel/mem` shard (374 s) and
+`lib/collections`' whole run (341 s) — two comparable jobs rather than one
+dominant one. `docs/src/contributing.md` carries the measured figure.
 
 **Still open: `kernel/core`, and the blocker is not the budget.** The previous
 record said "what is left is the 1097 s-vs-287 s budget alone". That is wrong.

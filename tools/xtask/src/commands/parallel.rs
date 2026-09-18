@@ -60,7 +60,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::{
-    await_within, effective_timeout, soak_deadline, spawn_in_own_group, DEFAULT_COMMAND_TIMEOUT,
+    await_within, effective_timeout, report_elapsed, soak_deadline, spawn_in_own_group,
+    DEFAULT_COMMAND_TIMEOUT,
 };
 
 /// What a [`Job`] actually does when run.
@@ -289,7 +290,14 @@ fn run_streaming(job: Job) -> Option<String> {
                 Err(err) => return Some(format!("{label} could not be spawned: {err}")),
             };
             let pid = child.id();
-            match await_within(&label, pid, budget, move || child.wait()) {
+            let started = Instant::now();
+            let outcome = await_within(&label, pid, budget, move || child.wait());
+            report_elapsed(
+                &label,
+                matches!(&outcome, Ok(status) if status.success()),
+                started.elapsed(),
+            );
+            match outcome {
                 Ok(status) if status.success() => None,
                 Ok(status) => Some(format!("{label} failed with {status}")),
                 Err(err) => Some(err),
@@ -331,7 +339,9 @@ fn run_captured(job: Job, stdio_lock: &Mutex<()>) -> Result<(), String> {
                 Err(err) => return Err(format!("{label} could not be spawned: {err}")),
             };
             let pid = child.id();
+            let started = Instant::now();
             let output = await_within(&label, pid, budget, move || child.wait_with_output())?;
+            let elapsed = started.elapsed();
 
             {
                 let _guard = stdio_lock.lock().expect("stdio lock");
@@ -344,7 +354,9 @@ fn run_captured(job: Job, stdio_lock: &Mutex<()>) -> Result<(), String> {
                 if !stderr.trim().is_empty() {
                     eprint!("{stderr}");
                 }
-                eprintln!("xtask: [{label}] ----- end ({}) -----", output.status);
+                // Closes the captured block as well as reporting the cost, so
+                // the output above it has an unambiguous end.
+                report_elapsed(&label, output.status.success(), elapsed);
             }
 
             if output.status.success() {
@@ -365,11 +377,7 @@ fn run_captured(job: Job, stdio_lock: &Mutex<()>) -> Result<(), String> {
             let outcome = work();
             {
                 let _guard = stdio_lock.lock().expect("stdio lock");
-                eprintln!(
-                    "xtask: [{label}] {} in {:?}",
-                    if outcome.is_ok() { "done" } else { "FAILED" },
-                    started.elapsed()
-                );
+                report_elapsed(&label, outcome.is_ok(), started.elapsed());
             }
             outcome
         }
