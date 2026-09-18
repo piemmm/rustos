@@ -569,11 +569,13 @@ mod program {
         /// Whether presenting now would put an empty window on screen.
         ///
         /// The session shows a served window on its first present, so
-        /// withholding that present is withholding the window — which is what
-        /// a window waiting on a pick must do, or it sits blank behind the
-        /// chooser for as long as the choice takes. Once anything of the
-        /// window has been on screen it is never withheld again, whatever the
-        /// viewer goes on to show.
+        /// withholding that present is withholding the window. Every window
+        /// waiting for its document must do it: one waiting on a pick would
+        /// otherwise sit blank behind the chooser for as long as the choice
+        /// takes, and one handed a document would appear at the default
+        /// extent and then be resized to the picture, which reads as a
+        /// flash. Once anything of the window has been on screen it is never
+        /// withheld again, whatever the viewer goes on to show.
         fn withholding(&self) -> bool {
             !self.presented && self.view.nothing_to_show()
         }

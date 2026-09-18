@@ -208,16 +208,24 @@ fn a_viewer_launched_with_no_document_asks_for_nothing_at_all() {
 /// The window is shown by its first present, so a viewer with nothing to draw
 /// says so and its embedder withholds that present.
 ///
-/// The reported defect: launched on its own, the viewer opened a window and
-/// *then* asked the session's picker for a document, so an empty window sat
-/// behind the chooser for as long as the user took to choose. What ends the
-/// wait is either conclusion — the document, or the reason there is none.
+/// Two reported defects, one rule. Launched on its own, the viewer opened a
+/// window and *then* asked the session's picker for a document, so an empty
+/// window sat behind the chooser for as long as the user took to choose.
+/// Handed a document, it showed the window at the default extent and then
+/// shrank it to the picture, which reads as a flash. Both are the same
+/// mistake — presenting a window whose document is not in yet — so neither
+/// turns on *how* the document was asked for. What ends the wait is either
+/// conclusion: the document, or the reason there is none.
 #[test]
-fn a_viewer_waiting_on_a_pick_has_nothing_to_show() {
+fn a_viewer_waiting_for_its_document_has_nothing_to_show() {
+    // A viewer *handed* a document is waiting too, until it has been read.
+    // Presenting here would put the window on screen at a size the picture
+    // has not been measured against, and sizing it to the picture a moment
+    // later reads as a flash.
     let handed = View::new(true);
     assert!(
-        !handed.nothing_to_show(),
-        "a viewer handed a document at spawn shows it, or why it could not"
+        handed.nothing_to_show(),
+        "a handed document has still to be read, so there is nothing to draw"
     );
 
     let mut waiting = View::new(false);

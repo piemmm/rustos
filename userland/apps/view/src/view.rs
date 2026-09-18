@@ -259,9 +259,6 @@ pub struct View {
     drag: Option<Point>,
     /// The latest pointer position, for the context menu and hit-testing.
     pointer: Point,
-    /// Whether the document is the *user's* to choose: the viewer was
-    /// launched with none, so it asks the session's picker.
-    picks_its_own_document: bool,
 }
 
 impl View {
@@ -300,23 +297,23 @@ impl View {
             canvas: (0, 0),
             drag: None,
             pointer: Point::ORIGIN,
-            picks_its_own_document: !opening,
         }
     }
 
     /// Whether the viewer has nothing of its own to show yet.
     ///
-    /// True only while a viewer launched with *no* document is waiting on the
-    /// user: it asks the session's picker, and until the choice concludes —
-    /// and then until the document decodes or is refused — the canvas is
+    /// True while a window is still waiting for its document, however it was
+    /// launched: until the document decodes or is refused the canvas is
     /// empty. A served window is shown by its first present, so an embedder
     /// asks this before presenting rather than putting an empty window on
-    /// screen and leaving it behind the chooser for as long as the choice
-    /// takes. Either conclusion ends it: the document, or the reason there is
-    /// none.
+    /// screen — which for a viewer waiting on the picker leaves it blank
+    /// behind the chooser, and for one handed a document puts it on screen at
+    /// a size the picture has not been measured against yet, so sizing the
+    /// window to the picture reads as a flash. Either conclusion ends it: the
+    /// document, or the reason there is none.
     #[must_use]
     pub const fn nothing_to_show(&self) -> bool {
-        self.picks_its_own_document && self.document.is_none() && self.refusal.is_none()
+        self.document.is_none() && self.refusal.is_none()
     }
 
     /// The document open, if one is.

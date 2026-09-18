@@ -387,6 +387,15 @@ is none (`View::nothing_to_show`, which the embedder pairs with "has anything
 of this window been on screen yet"). The first present that is not withheld is
 forced whole, because nothing of the window is on screen.
 
+**The withholding turns on the document, never on how it was asked for.** A
+window handed a document — at spawn, or relayed to the running instance — is
+waiting just as much as one waiting on the picker, because until the document
+is read there is no picture *and* no reason there is none. Presenting there put
+the window on screen at the default extent and the window-to-picture sizing
+below then shrank it, which reads as a **flash** as a picture loads. Both are
+the same mistake — presenting a window whose document is not in yet — so
+`nothing_to_show` asks only whether the document has landed.
+
 A pick the user **cancels** closes that window rather than leaving it stating a
 refusal they already know about — they chose nothing, so there is nothing to
 display, and `Refusal::Cancelled` is therefore deleted rather than shown. A
@@ -409,7 +418,11 @@ selected page's own pixels, **capped per axis at the size the viewer opens at**
 floored at `Layout::min_client`. `Run` applies it **once per document open** —
 in the `Answer::Opened { Ok }` arm alone, never on a render, a zoom, or a
 resize — so it can never fight the user's own resize drag; a refused re-map
-leaves the window at the size it had.
+leaves the window at the size it had. It runs *before* that window's first
+present and the present before it was withheld, so the window is never on
+screen at the extent it was created at: it appears once, already the right
+size. A picture larger than the default window re-maps nothing at all
+(shrink-only), so that case is one present and no resize either.
 
 **The declared window floor is derived, not hand-picked.** What the viewer
 tells the window manager at create is `min_client_size(theme, scale, font)`:
@@ -528,7 +541,9 @@ clients, and their exit-code sets are their own.
 
 - `plans/VIEW.md` and the jump-sheet row — **done**.
 - **A document opens at 100% and the window hugs it; the toolbar fits at every
-  size** — **done**, as specified above. The third document failing to appear
+  size** — **done**, as specified above. The window is sized before its first
+  present rather than after, so loading a picture shows one window at one size
+  and never the default extent flashing to the picture's. The third document failing to appear
   after a window was closed was not the app: the kernel's blocking `wait`
   registered the *process* on the wait queue and parked the *calling thread*,
   so the decode worker's `RtLauncher::dispose` reap never woke and the one-slot
