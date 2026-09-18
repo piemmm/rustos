@@ -18,7 +18,7 @@ use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
 use crate::decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 use crate::state::{AuthorityState, ControlRole, ControlState};
-use crate::testkit::high_contrast;
+use crate::testkit::{high_contrast, text_ladder};
 
 fn scale2() -> Scale {
     Scale::from_percent(200).expect("valid scale")
@@ -218,6 +218,116 @@ fn dialog_action_rects_are_empty_when_the_plate_has_no_interior() {
     // (fail closed) rather than a phantom placement.
     let rects = dialog.action_rects(Rect::new(0, 0, 0, 0), Scale::ONE, &theme);
     assert!(rects.is_empty());
+}
+
+#[test]
+fn dialog_content_rect_clears_every_band_the_dialog_draws() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, DW, DH);
+    let dialog = Dialog::new("Date & Time")
+        .with_message("The machine's clock, in UTC.")
+        .with_reason("refused: no capability")
+        .with_actions(vec![Button::labelled("Close"), Button::labelled("Set")]);
+    let content = dialog
+        .content_rect(bounds, Scale::ONE, &theme)
+        .expect("a dialog this size has a content band");
+    let actions = dialog.action_rects(bounds, Scale::ONE, &theme);
+    let action_top = actions
+        .iter()
+        .filter(|r| r.height > 0)
+        .map(Rect::top)
+        .min()
+        .expect("both actions fit");
+
+    assert!(content.top() > 0, "the band clears the title");
+    assert!(
+        content.bottom() <= action_top,
+        "the band ends above the action row"
+    );
+    assert!(content.left() > 0 && content.width > 0);
+    assert!(content.right() <= iv(DW), "the band stays inside the plate");
+}
+
+#[test]
+fn dialog_content_rect_is_absent_when_there_is_no_room_for_one() {
+    let theme = Theme::dark();
+    let dialog = Dialog::new("Confirm")
+        .with_message("Are you sure?")
+        .with_actions(vec![Button::labelled("OK")]);
+    // A plate with no drawable interior, and one whose bands fill it, both
+    // answer nothing rather than a phantom band an owner would draw into.
+    assert_eq!(
+        dialog.content_rect(Rect::new(0, 0, 0, 0), Scale::ONE, &theme),
+        None
+    );
+    assert_eq!(
+        dialog.content_rect(Rect::new(0, 0, DW, 8), Scale::ONE, &theme),
+        None
+    );
+}
+
+#[test]
+fn dialog_height_for_content_round_trips_through_the_band_it_sizes() {
+    // Every combination of the optional bands, because each one moves the
+    // band's top or bottom and a caller sizing a window must get back exactly
+    // the room it asked for.
+    for message in [None, Some("The machine's clock, in UTC.")] {
+        for reason in [None, Some("refused: no capability")] {
+            for actions in 0..=2usize {
+                let mut dialog = Dialog::new("Date & Time");
+                if let Some(message) = message {
+                    dialog = dialog.with_message(message);
+                }
+                if let Some(reason) = reason {
+                    dialog = dialog.with_reason(reason);
+                }
+                dialog = dialog.with_actions(
+                    (0..actions)
+                        .map(|i| Button::labelled(alloc::format!("A{i}")))
+                        .collect(),
+                );
+                for theme in [Theme::dark(), high_contrast(), text_ladder(22)] {
+                    for scale in [Scale::ONE, scale2()] {
+                        let want = 137;
+                        let height = dialog.height_for_content(want, scale, &theme);
+                        let bounds = Rect::new(0, 0, DW, height);
+                        assert_eq!(
+                            dialog
+                                .content_rect(bounds, scale, &theme)
+                                .map(|band| band.height),
+                            Some(want),
+                            "message {message:?} reason {reason:?} actions {actions} \
+                             under {} at {}%",
+                            theme.name(),
+                            scale.percent()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dialog_content_rect_makes_room_for_a_message_only_when_there_is_one() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, DW, DH);
+    let bare = Dialog::new("Date & Time").with_actions(vec![Button::labelled("Close")]);
+    let messaged = Dialog::new("Date & Time")
+        .with_message("The machine's clock, in UTC.")
+        .with_actions(vec![Button::labelled("Close")]);
+    let bare_top = bare
+        .content_rect(bounds, Scale::ONE, &theme)
+        .expect("a band")
+        .top();
+    let messaged_top = messaged
+        .content_rect(bounds, Scale::ONE, &theme)
+        .expect("a band")
+        .top();
+    assert!(
+        messaged_top > bare_top,
+        "a message pushes the content band down"
+    );
 }
 
 #[test]

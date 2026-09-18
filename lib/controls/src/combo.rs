@@ -22,7 +22,7 @@ use crate::damage;
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::paint::{
     paint_bead, paint_chevron, paint_plate, plate_border, resolve_bead, resolve_frame, role_font,
-    surface_rect, to_i32, withheld, ChevronDir, PlateStyle,
+    surface_rect, text_plate_height, to_i32, withheld, ChevronDir, PlateStyle,
 };
 use crate::state::{ControlRole, ControlState, RenderInvariant, SelectionState};
 
@@ -248,6 +248,43 @@ impl ComboBox {
         inner_h
     }
 
+    /// The width a collapsed field spends on chrome rather than on the choice
+    /// it shows: its rim on both edges, the leading text inset, and the
+    /// trailing disclosure chevron.
+    ///
+    /// [`render`](Self::render) subtracts it to get the label's budget and
+    /// [`measured_width`](Self::measured_width) adds it back, so what the
+    /// field draws and how wide it asks to be cannot disagree.
+    fn chrome_width(scale: Scale, theme: &Theme, inner_h: u32) -> u32 {
+        plate_border(theme, scale)
+            .saturating_mul(2)
+            .saturating_add(scale.scale_length(theme.metrics().control_inset).max(1))
+            .saturating_add(Self::chevron_side(inner_h))
+    }
+
+    /// The width this field needs to show any of its choices whole at `scale`.
+    ///
+    /// Sized from the *widest* choice (and the placeholder) rather than the
+    /// selected one, so choosing a different value never resizes the field or
+    /// moves the column it sits in. Exposed for a container that lays a combo
+    /// box out beside other controls rather than stretching it — a settings
+    /// row's trailing slot — which has nothing else to size the slot from.
+    #[must_use]
+    pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let widest = self
+            .choices
+            .iter()
+            .map(String::as_str)
+            .chain(core::iter::once(self.placeholder.as_str()))
+            .map(|text| font.text_width(text))
+            .max()
+            .unwrap_or(0);
+        let height = text_plate_height(theme, scale, TextRole::Body);
+        let inner_h = height.saturating_sub(plate_border(theme, scale).saturating_mul(2));
+        Self::chrome_width(scale, theme, inner_h).saturating_add(widest)
+    }
+
     /// Paint the collapsed field into `surface` at `bounds` for the theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         if withheld(surface, bounds) {
@@ -283,13 +320,10 @@ impl ComboBox {
         let inner_h = h.saturating_sub(border.saturating_mul(2));
         let chevron_w = Self::chevron_side(inner_h);
         let left = x.saturating_add(border).saturating_add(pad);
-        let right = x
-            .saturating_add(w)
-            .saturating_sub(border)
-            .saturating_sub(chevron_w);
+        let budget = w.saturating_sub(Self::chrome_width(scale, theme, inner_h));
 
         // The selected choice, or the placeholder when nothing is selected.
-        if right > left {
+        if budget > 0 {
             let (text, color) = match self.selected_text() {
                 Some(sel) => (sel, frame.label),
                 None => (
@@ -297,7 +331,6 @@ impl ComboBox {
                     Color::from(palette.on_surface_muted),
                 ),
             };
-            let budget = right - left;
             let fitted = font.truncate_to_width(text, budget);
             let glyph_h = font.glyph_height();
             let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;

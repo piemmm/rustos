@@ -485,8 +485,10 @@ The remaining drawn families are also complete: the value controls
 (`scrollbar` — the one orientation-parameterized `ScrollBar` over the `scroll`
 engine), the window-manager furniture (`window` — `WindowFrame`/`TitleBar`/
 `WindowControl`/`ResizeGrabber`/`ScrollCorner`), the shell surfaces (`shell` —
-`Notification`/`TaskbarItem`/`TraySignal`), and the decision surfaces
-(`decision` — `Dialog`/`Tooltip`/`HelpTip`).
+`Notification`/`TaskbarItem`/`TraySignal`), the decision surfaces
+(`decision` — `Dialog`/`Tooltip`/`HelpTip`), and the form fields
+(`form` — `FieldRow`/`FieldGroup`, the one settings-form shape, composing
+the `collection` row chrome and a real control in each row's slot).
 
 An application's *screen* is not here. This crate holds only behaviour any
 surface may reuse, so a composition that arranges these controls into one

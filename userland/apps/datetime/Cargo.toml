@@ -31,8 +31,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # fields and `days_from_civil` composes the instant back, so the app can never
 # disagree with the desktop clock's own decomposition.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
-# The Reactive Alloy control family the window is built from: `TextField` for
-# the six civil fields and `Button` for Set/Close — no new control here.
+# The Reactive Alloy control families the window is built from: the form-field
+# family (`FieldGroup`/`FieldRow`) holding a `TextField` per civil field, the
+# `Dialog` chrome around them, and `Button` for Set/Close — no new control and
+# no second form layout here.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # Integer screen geometry (`Rect`, `Region`, `Scale`): every length is authored
 # logical and converted through the one shared scale.
@@ -69,6 +71,12 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"
 # transport via the `test-util` feature (never a running `fontd`).
 [dev-dependencies]
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The control families' shared test fixtures: the view's layout is held to the
+# same two axes every control is (the built-in themes and a varied type
+# ladder), over the one fixture rather than a copy of it here.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = [
+    "test-support",
+] }
 
 [lints]
 workspace = true

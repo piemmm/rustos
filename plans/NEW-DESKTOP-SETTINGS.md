@@ -22,18 +22,29 @@ all of them applies here without exception.
 regenerating the C header (`cargo xtask c-header --write`), which the drift
 guard enforces.
 
-## Status
+## Ledger
 
-`planned` — no stage has landed. DS1 is the prerequisite for every stage after
-it and does not exist in the tree: `lib/controls` has no `form` module, and the
-only form arithmetic anywhere is the file manager's private `FieldLayout`
-(`lib/browse/src/render.rs`), which DS14 retires. DS1 lands the family
-(`FieldRow`, `FieldGroup`, `FieldControl`, `FieldLayout`) with its
-specification in `plans/GUI-CONTROLS-DESIGN.md` beside the other control
-families, reuses the row chrome `ListRow`/`TableRow` already share in
-`lib/controls`' `paint` core, and adds the measured-width accessors its slot
-model needs to `Button` and `ComboBox` — neither carries one today. DS2 is the
-first stage that puts a window on screen.
+Every stage this plan calls for, what it waits on, and where it is specified.
+A stage is `done` only when its host tests, its rustdoc and `docs/` page, and a
+green whole-workspace gate landed with it. Nothing here is optional: a stage
+dropped is a category the surface then has to lie about.
+
+| # | Stage | Depends on | Spec | Status |
+|---|---|---|---|---|
+| **DS1** | `lib/controls::form` — `FieldRow`/`FieldGroup`/`FieldControl`/`FieldLayout` over the row chrome hoisted into the shared `paint` core, the measured-width accessors the slot model needs, and a `widgets.app` gallery tab | — | DS1, §4 | done |
+| **DS2** | The `userland/apps/settings` crate and its shell: the closed `Category`/`Pane` registry, the vertical `Tabs` sidebar, the search index, the breadcrumb band, frame shedding, the absence-pane renderer, and the taskbar's *Settings…* row | DS1 | DS2 | planned |
+| **DS3** | Appearance and Accessibility over the session's user-scope appearance registry, and the apply rendezvous every other user-scope write reuses | DS2 | DS3 | planned |
+| **DS4** | Wallpaper — the pinboard keys as rows, the resolved current picture, and the route to the chooser's gallery; the chooser's own drop-downs rebuilt on the family | DS3 | DS4 | blocked — nothing in the tree lets Settings reach `wallpaper.app` under its manifest; the three candidate routes are in DS4 and the choice is the User's |
+| **DS5** | Storage — one group per mount with its capacity track and health pill, over the mount→capacity derivation moved into `lib/procinfo` and shared with the Switchboard | DS2 | DS5 | planned |
+| **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | planned |
+| **DS7** | Networking read — per-interface facts, link state, addresses and rates through the Switchboard's own client, plus the stack-wide `net.*` options | DS2, DS6 | DS7 | planned |
+| **DS8** | Networking write — `configure` grows the `lib/netconfig` registry, Ethernet and DNS stage and apply through it, and the stack adopts the change without a reboot | DS6, DS7 | DS8 | planned |
+| **DS9** | Users & Groups — the ungated `GROUP_DIRECTORY` sibling, the caller's own record, the admin-authenticated read of every other account, and the user-admin operations the syscall carries but no tool spells | DS6 | DS9 | planned |
+| **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | planned |
+| **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | planned |
+| **DS12** | Lock Screen and Screensaver — the session's single idle deadline and the one timer armed only while a policy has one pending | DS3 | DS12 | planned |
+| **DS13** | The `settings_qemu_aarch64` vertical and the docs pages the surface owes | DS2–DS12 | DS13 | planned |
+| **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | in progress — `datetime.app` landed with DS1 (its grid deleted, its extent now measured through `Dialog::height_for_content`); `PermGrid` remains |
 
 **The honest shape of the deliverable.** Seven of the categories the desktop
 should offer have no subsystem beneath them today: there is no audio stack, no
@@ -380,16 +391,27 @@ split and staged here, never shipped half-done.
 ### DS1 — `lib/controls::form`: the form-field family
 
 `FieldRow` and `FieldGroup` per §4, over the existing row chrome, plate,
-metrics, and state vocabulary, with a `widgets.app` gallery tab. The contract
-it delivers, which no later stage re-derives:
+metrics, and state vocabulary, with a `widgets.app` gallery tab and the
+family's specification in `plans/GUI-CONTROLS-DESIGN.md` beside the other
+control families. Two pieces of shared machinery land with it, because the
+family composes rather than restates: the row chrome `ListRow` and `TableRow`
+already share moves out of `lib/controls`' `collection` module into its
+`paint` core so all three rows draw one recipe, and `Button`, `ComboBox` and
+`Toggle` each gain the measured-width accessor the slot model asks them for —
+none carried one, so the slot column had nowhere to come from but a second
+copy of each control's own layout arithmetic. A combo's figure is the width of
+its *widest* choice, so choosing a different value never moves the column.
+
+The contract it delivers, which no later stage re-derives:
 
 - **Room is given out control, label, description.** The slot is reserved
   first, the label elides into what remains, and the description draws only
   while the label fits whole. A slot never exceeds half the row's content
   (`form::slot_ceiling`), so a label always has room to be read.
-- **A row's authority is the setting's.** `FieldRow::set_state` shares
-  enablement and authority with the control in the slot, so a denied row cannot
-  hold an actionable control. A pane therefore states a refusal by setting the
+- **A row's disposition is the setting's.** `FieldRow::set_state` shares
+  enablement, authority and validation — exactly what decides actionability —
+  with the control in the slot, so a denied or pending row cannot hold an
+  actionable control. A pane therefore states a refusal by setting the
   *row*, never by remembering to set two states in step.
 - **The owner places the choice popup.** `FieldGroup::popup_anchor` names the
   row and slot to anchor an expanded `ComboBox` list to; the owner places it,
@@ -683,30 +705,28 @@ weakened, and the QEMU verticals that dump those surfaces re-baselined.
 
 ## 6. Sequencing and dependencies
 
-DS1 is the only true prerequisite for everything after it, and it is
-host-provable on its own — but it does not land alone. A shared family whose
-only caller is its own gallery tab is one caller, not the two independent ones
-`AGENTS.md` §23.3 requires of a shared helper, so DS1 lands with the first of
-DS14's two conversions in the same increment (`datetime.app`'s six-field row is
-the smaller, and its private arithmetic dies with it). The family is then proven
-by a surface that already had a form to draw, rather than by a gallery shaped
-around it. DS2 lands the shell and the launch row over DS1 and is
-independently useful the day it lands: every category is reachable and every
-absence is honest. DS3 establishes the user-scope document and the session's
-apply policy, and DS4, DS10, DS11 and DS12 are all further keys in that document
-— they can land in any order once DS3 has. DS5 depends only on DS2 (it is
-read-only) and can land beside DS3. DS6 gates every machine-scope write, so
-DS7's options, DS8, and DS9 all follow it; DS7's *readings* need only DS2 and
-may land earlier. DS8 depends on DS7 (the panes it writes to) and on the
-`configure` extension it brings. DS12 depends on DS3 and on the session's
-existing lock. DS13 closes the core; DS14 pays off DS1's debt and may land any
-time after DS4.
+The graph is the ledger's `Depends on` column; this is the reasoning behind the
+four edges that are not obvious from it.
 
-The two stages that touch shared machinery — DS6's argv extension and DS8's
-`configure` extension — each land with their consumer in the same increment, so
-nothing speculative is added ahead of a caller (`AGENTS.md` §2.4).
+**DS1 does not land alone.** It is host-provable by itself, but a shared family
+whose only caller is its own gallery tab is one caller, not the two independent
+ones `AGENTS.md` §23.3 requires of a shared helper. So it lands with the first
+of DS14's two conversions in the same increment — `datetime.app`'s six-field
+row is the smaller, and its private arithmetic dies with it — and the family is
+proven by a surface that already had a form to draw rather than by a gallery
+shaped around it.
 
----
+**DS2 is independently useful the day it lands**, which is why it comes before
+any writing pane: every category is reachable and every absence is honest.
+
+**DS3 is the template, not merely the first pane.** It establishes the
+user-scope document and the session's apply policy, so DS4, DS10, DS11 and
+DS12 are all further keys in that one document and may land in any order once
+it has.
+
+**Shared machinery lands with its consumer.** DS6's argv extension and DS8's
+`configure` extension are each in the same increment as the pane that uses
+them, so nothing speculative is added ahead of a caller (`AGENTS.md` §2.4).
 
 ## 7. What this explicitly refuses to become
 

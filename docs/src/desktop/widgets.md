@@ -22,6 +22,7 @@ the selected family. The families are:
 | Text | `TextField` (editable / placeholder / read-only / invalid), `SearchField` |
 | Choice | `ComboBox`, `Menu` |
 | Collections | `ListRow`, `TableRow`, `Card`, `Panel` |
+| Forms | `FieldGroup` — a captioned plate of `FieldRow`s holding a toggle, a combo box, a slider, a text field, a refused setting, a reading, a stated absence, and a command |
 | Bars | `Toolbar`, `ScrollBar` (vertical and horizontal) |
 | Feedback | `Dialog`, `Tooltip`, `HelpTip` |
 | Window | the `WindowControl` command buttons (close, minimize, put-to-back, size toggle) |

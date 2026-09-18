@@ -28,7 +28,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
+use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -38,11 +38,12 @@ use tairix_theme::{Rgba, SurfaceGround, TextRole, Theme};
 use crate::button::{Button, ButtonAction};
 use crate::damage;
 use crate::paint::{
-    dominant_color, draw_outline, foreground, grab_after, ground_fill, heavy_contrast,
-    icon_slot_side, inset, key_activation, paint_bead, paint_chevron, paint_count_badge,
-    paint_icon_slot, paint_surface_plate, plate_border, pointer_activation, press_latch,
-    rail_thickness, resolve_bead, resolve_rail, role_font, route_pointer, seam_thickness,
-    seam_width, surface_rect, to_i32, withheld, ChevronDir, ChromeLayer, FULL_COLOUR,
+    bead_band, centred_text_y, dominant_color, draw_outline, foreground, grab_after,
+    heavy_contrast, icon_slot_side, inset, key_activation, paint_bead, paint_chevron,
+    paint_count_badge, paint_icon_slot, paint_row, paint_run, paint_surface_plate, plate_border,
+    pointer_activation, press_latch, rail_thickness, resolve_bead, role_font, route_pointer,
+    row_content_span, run_width, seam_thickness, seam_width, surface_rect, to_i32, withheld,
+    ChevronDir, ChromeLayer, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -57,88 +58,6 @@ pub enum RowAction {
     Activated,
 }
 
-// --- Shared row visuals ------------------------------------------------
-//
-// [`ListRow`] and [`TableRow`] paint the same background, rails, activity
-// seam, Signal Bead, and focus ring; only their *content* (a label vs a set
-// of aligned cells) differs. That shared recipe lives here once so a change
-// to how a selected or pressured row reads cannot diverge between the two.
-
-/// The fixed two-rail gutter width reserved on a row's leading edge, always
-/// present regardless of the row's own state (spec §11.13). [`TableHeader`]
-/// reserves this identical gutter before laying its columns out, so its
-/// column titles begin exactly where an ordinary row's cells do — never a
-/// second, independently-derived gutter width that could drift out of step.
-#[must_use]
-fn row_gutter(theme: &Theme, scale: Scale, w: u32) -> u32 {
-    rail_thickness(theme, scale).saturating_mul(2).min(w)
-}
-
-/// The fixed trailing Signal Bead band width reserved on a row's trailing
-/// edge, sized from `h`/`theme`/`scale` alone — never from whether *this*
-/// row's particular state actually has a bead to draw right now.
-///
-/// [`paint_row`] reserves this band unconditionally, exactly as it reserves
-/// [`row_gutter`] unconditionally on the leading edge: a bead only ever
-/// paints inside the band, it never changes the band's width. That is what
-/// lets a row's disposition, recovery, or activity change without shifting
-/// its own columns (spec §11.13) — a row that merely becomes denied, or
-/// gains a recovery mark, keeps every cell exactly where it was.
-#[must_use]
-fn bead_band(theme: &Theme, scale: Scale, h: u32) -> u32 {
-    let border = plate_border(theme, scale);
-    scale
-        .scale_length(theme.metrics().bead_size)
-        .max(3)
-        .min(h.saturating_sub(border.saturating_mul(2)))
-}
-
-/// The `(x, width)` content span a row's (or [`TableHeader`]'s) cells are laid
-/// out across, given its `(x, w, h)` surface-pixel bounds.
-///
-/// The reservation is state-independent on both edges: the fixed leading
-/// [`row_gutter`] plus the theme's control padding, and that same padding
-/// plus the fixed trailing [`bead_band`] plus a second padding gap before the
-/// content — every one of those sized from `w`/`h`/`theme`/`scale` alone,
-/// never from a row's actual disposition, recovery, or activity. [`paint_row`],
-/// [`TableHeader::column_at`]/[`TableHeader::render`] (which draw no leading
-/// rails or trailing bead of their own but must reserve the identical space
-/// to stay lined up with the rows they name), and [`TableRow::cell_rects`]
-/// all derive their column rectangles from this one span, so a header, a
-/// plain row, and a bead-bearing row can never drift out of alignment (spec
-/// §11.13/§11.14). `None` when `w`/`h` are too small to hold any content past
-/// the reserved edges.
-#[must_use]
-fn row_content_span(scale: Scale, theme: &Theme, x: u32, w: u32, h: u32) -> Option<(u32, u32)> {
-    let gutter = row_gutter(theme, scale, w);
-    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-    let band = bead_band(theme, scale, h);
-    let content_x = x.saturating_add(gutter).saturating_add(pad);
-    let content_right = x
-        .saturating_add(w)
-        .saturating_sub(pad)
-        .saturating_sub(band)
-        .saturating_sub(pad);
-    if content_right <= content_x {
-        return None;
-    }
-    Some((content_x, content_right - content_x))
-}
-
-/// Paint the shared row chrome — background tint, leading pressure and
-/// selection rails, the bottom activity Heat Seam, the trailing Signal Bead,
-/// and the keyboard focus ring — into `rect`, returning the inner content
-/// rectangle `(x, y, w, h)` the caller draws its label or cells within.
-///
-/// Returning the content rect (already inset past the leading rails and the
-/// trailing bead band) keeps the column-alignment contract in one place: the
-/// caller lays content out relative to this rect, so a row's state changing
-/// never shifts where its content begins or ends (spec §11.13 "keep columns
-/// aligned"). The rect itself comes from `row_content_span`, whose
-/// reservation on both edges is fixed by the row's own size — a bead only
-/// ever paints *inside* the already-reserved trailing band, it never resizes
-/// it, so a row that merely becomes denied or gains a recovery mark never
-/// shifts its own cells, let alone its neighbours'.
 /// What every cell of one row paints against: the row's resolved text face and
 /// disposition, and the desktop's scale and theme.
 ///
@@ -150,116 +69,6 @@ struct CellContext<'a> {
     theme: &'a Theme,
     font: BitmapFont,
     row_disposition: ControlDisposition,
-}
-
-fn paint_row(
-    surface: &mut Surface,
-    rect: (u32, u32, u32, u32),
-    scale: Scale,
-    theme: &Theme,
-    state: ControlState,
-) -> Option<(u32, u32, u32, u32)> {
-    let (x, y, w, h) = rect;
-    if w == 0 || h == 0 {
-        return None;
-    }
-    let palette = theme.palette();
-    let selected = matches!(
-        state.selection,
-        SelectionState::Selected | SelectionState::Mixed
-    );
-
-    // Background tint: a pressed row recesses; a selected row lifts to the
-    // raised surface (and is further distinguished by its accent rail below); a
-    // hovered row takes the shared pointer wash, so the pointer never imitates
-    // selection; a resting row is the base surface.
-    //
-    // A row is part of the surface it sits in rather than a plate on it, so on
-    // floating chrome all four take the ground's own alpha: a resting row is
-    // then exactly its ground, and the pointer wash reads as the glass
-    // lightening (or, on a light theme, deepening) rather than as a solid bar
-    // laid across it.
-    let fill = ground_fill(
-        theme,
-        match state.pointer {
-            crate::state::PointerState::Pressed => palette.surface_pressed,
-            _ if selected => palette.surface_raised,
-            crate::state::PointerState::Hover => palette.surface_hover,
-            _ => palette.surface,
-        },
-        ChromeLayer::Ground,
-    );
-    surface.fill_rect(x, y, w, h, Color::from(fill));
-
-    // Leading rails: a *fixed* two-rail gutter is always reserved on the
-    // leading edge so a row's content never shifts when its selection or
-    // pressure changes — the table stays aligned (spec §11.13). Within that
-    // reserved gutter the resource-pressure semantic rail draws in the outer
-    // half and the selection accent rail in the inner half, so both read at
-    // once without overlap and without moving the content.
-    let rail_w = rail_thickness(theme, scale);
-    let gutter = row_gutter(theme, scale, w);
-    let lead = x.saturating_add(gutter);
-    let outer_w = rail_w.min(gutter);
-    if let Some(color) = resolve_rail(theme, state) {
-        surface.fill_rect(x, y, outer_w, h, color);
-    }
-    if selected {
-        let inner_w = rail_w.min(gutter.saturating_sub(outer_w));
-        if inner_w > 0 {
-            surface.fill_rect(x + outer_w, y, inner_w, h, Color::from(palette.accent));
-        }
-    }
-
-    // The bottom Heat Seam for live activity (proportional for known work).
-    let seam_h = seam_thickness(theme, scale).min(h);
-    let seam_w = seam_width(state.activity, w);
-    if seam_w > 0 {
-        surface.fill_rect(
-            x,
-            y + h - seam_h,
-            seam_w,
-            seam_h,
-            Color::from(palette.accent),
-        );
-    }
-
-    // The trailing Signal Bead band (denied lock / recovery diamond / complete
-    // check) is reserved unconditionally, exactly like the leading gutter
-    // above: only whether a bead actually paints inside it depends on the row's
-    // state, never the band's own width (spec §13, §15).
-    let border = plate_border(theme, scale);
-    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-    let band = bead_band(theme, scale, h);
-    if let Some((color, shape)) = resolve_bead(theme, state) {
-        let bead_right = x.saturating_add(w).saturating_sub(pad);
-        if band > 0 && bead_right > lead.saturating_add(band) {
-            let bx = bead_right.saturating_sub(band);
-            let by = y + (h.saturating_sub(band)) / 2;
-            paint_bead(surface, bx, by, band, color, shape);
-        }
-    }
-
-    // The keyboard focus ring, distinct from a pointer hover tint (spec §15).
-    if state.focus.focused {
-        draw_outline(
-            surface,
-            x,
-            y,
-            w,
-            h,
-            border.max(1),
-            Color::from(palette.rim_active),
-        );
-    }
-
-    row_content_span(scale, theme, x, w, h).map(|(cx, cw)| (cx, y, cw, h))
-}
-
-/// The baseline `y` that vertically centres one line of `font` in a
-/// `(y, h)` band.
-fn centred_text_y(font: BitmapFont, y: u32, h: u32) -> i32 {
-    to_i32(y) + (to_i32(h) - to_i32(font.glyph_height())).max(0) / 2
 }
 
 // --- ListRow -----------------------------------------------------------
@@ -449,8 +258,8 @@ impl ListRow {
     /// image bytes.
     ///
     /// The trailing caption takes what it needs of the content and the label
-    /// takes the rest; either one too long for its share ends with
-    /// [`ELLIPSIS`], so a reader can tell a hidden tail from a name that
+    /// takes the rest; either one too long for its share ends with the shared
+    /// elision mark, so a reader can tell a hidden tail from a name that
     /// simply ends there.
     pub fn render(
         &self,
@@ -2625,46 +2434,6 @@ struct LabelBand {
     top: u32,
     /// How many whole lines the band holds.
     lines: usize,
-}
-
-/// The drawn width of a fitted run — the pair a fitter hands back, text and
-/// whether [`ELLIPSIS`] follows it — mark included.
-fn run_width(font: BitmapFont, run: (&str, bool)) -> u32 {
-    let (text, elided) = run;
-    let width = font.text_width(text);
-    if elided {
-        return width.saturating_add(font.text_width(ELLIPSIS));
-    }
-    width
-}
-
-/// Draw a fitted run at `at`, its mark included, over `shadow` when the
-/// caller draws on ground it does not control.
-///
-/// The one "text, then the mark" recipe every collection control paints cut
-/// text through, so a hidden tail always says so rather than stopping
-/// mid-word as if the text ended there. A run the fitter marked unelided —
-/// including a box too narrow for the mark itself — draws its text alone.
-/// The mark takes the shadow with the text, so a shadowed label reads as one
-/// run rather than a shadowed name and a bare ellipsis.
-fn paint_run(
-    surface: &mut Surface,
-    font: BitmapFont,
-    run: (&str, bool),
-    at: (i32, i32),
-    color: Color,
-    shadow: Option<TextShadow>,
-) {
-    let (text, elided) = run;
-    let (x, y) = at;
-    let draw = |surface: &mut Surface, x: i32, text: &str| match shadow {
-        Some(shadow) => font.draw_text_shadowed(surface, x, y, text, color, shadow),
-        None => font.draw_text(surface, x, y, text, color),
-    };
-    let pen = draw(surface, x, text);
-    if elided {
-        draw(surface, pen, ELLIPSIS);
-    }
 }
 
 /// Fill an [`IconTile`]'s whole `rect` with one plate colour, rounded by the

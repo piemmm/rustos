@@ -341,3 +341,141 @@ fn the_leap_rule_holds_for_centuries_and_before_the_epoch() {
     assert!(is_leap_year(-4));
     assert!(!is_leap_year(-1));
 }
+
+// --- The window's layout ------------------------------------------------
+//
+// The six fields are two groups of the shared form-field family, so what is
+// tested here is what is genuinely this window's: that the extent it asks for
+// seats every field, that a press down the form finds them in the order a date
+// is written, and that exactly one field wears the caret.
+
+use tairix_controls::testkit::text_ladder;
+use tairix_geometry::{Point, Scale};
+use tairix_raster::{Pixel, Surface};
+use tairix_theme::Theme;
+
+use super::view;
+
+/// The appearances and type ladders the window must seat every field under.
+///
+/// The two ladders are the lever that proves the extent is *measured*: a
+/// window sized by a fixed figure loses fields under the wider one.
+fn appearances() -> [Theme; 4] {
+    [
+        Theme::dark(),
+        Theme::light(),
+        text_ladder(11),
+        text_ladder(22),
+    ]
+}
+
+/// The scales the window must seat every field under.
+fn scales() -> [Scale; 2] {
+    [
+        Scale::ONE,
+        Scale::from_percent(200).expect("200% is a valid scale"),
+    ]
+}
+
+/// The fields a press finds going down the form's label column, in the order
+/// they are met and with each named once.
+///
+/// Read through the window's own hit test, so this is what a user pressing
+/// down the window would actually reach — not a second derivation of the
+/// layout that could agree with nothing.
+fn fields_down_the_form(editor: &Editor, scale: Scale, theme: &Theme) -> alloc::vec::Vec<Field> {
+    let bounds = view::window_bounds(editor, scale, theme);
+    let x = bounds.left() + i32::try_from(bounds.width / 4).unwrap_or(0);
+    let mut met = alloc::vec::Vec::new();
+    for y in bounds.top()..bounds.bottom() {
+        if let Some(field) = view::field_at(editor, scale, theme, Point::new(x, y)) {
+            if met.last() != Some(&field) {
+                met.push(field);
+            }
+        }
+    }
+    met
+}
+
+#[test]
+fn every_field_is_drawn_in_the_order_a_date_is_written() {
+    let edit = editor("2024", "2", "29", "12", "34", "56");
+    for theme in appearances() {
+        for scale in scales() {
+            assert_eq!(
+                fields_down_the_form(&edit, scale, &theme),
+                Field::ALL.to_vec(),
+                "under {} at {}%",
+                theme.name(),
+                scale.percent()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_press_outside_every_row_names_no_field() {
+    let edit = editor("2024", "2", "29", "12", "34", "56");
+    let theme = Theme::dark();
+    let bounds = view::window_bounds(&edit, Scale::ONE, &theme);
+    // The title band at the very top and the action band at the very bottom
+    // hold no field, and neither does a point outside the window.
+    for point in [
+        Point::new(bounds.left() + 2, bounds.top() + 1),
+        Point::new(bounds.left() + 2, bounds.bottom() - 2),
+        Point::new(bounds.right() + 40, bounds.top() + 40),
+    ] {
+        assert_eq!(view::field_at(&edit, Scale::ONE, &theme, point), None);
+    }
+}
+
+#[test]
+fn exactly_one_field_wears_the_caret() {
+    let mut edit = editor("2024", "2", "29", "12", "34", "56");
+    for field in Field::ALL {
+        edit.set_focus(field);
+        let groups = view::groups(&edit);
+        let focused: alloc::vec::Vec<Option<usize>> = groups
+            .iter()
+            .map(tairix_controls::FieldGroup::focus)
+            .collect();
+        assert_eq!(
+            focused.iter().filter(|f| f.is_some()).count(),
+            1,
+            "{field:?}"
+        );
+        // And it is the group that actually holds the field, at its own row.
+        assert_eq!(
+            focused[field.index() / 3],
+            Some(field.index() % 3),
+            "{field:?}"
+        );
+    }
+}
+
+#[test]
+fn the_window_draws_under_every_appearance() {
+    let edit = editor("2024", "2", "29", "12", "34", "56");
+    for theme in appearances() {
+        let bounds = view::window_bounds(&edit, Scale::ONE, &theme);
+        let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+        view::render_into(&mut surface, &edit, Scale::ONE, &theme);
+        assert!(
+            surface.pixels().iter().any(|p| *p != Pixel::TRANSPARENT),
+            "{} drew nothing",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn an_unset_clock_still_lays_out_every_field() {
+    let mut edit = Editor::new();
+    edit.seed(WallClockReading::new(instant(0), WallTimeState::Unset));
+    // Empty fields and a stated status change the dialog's bands, so the
+    // extent is measured from the model it is actually drawing.
+    assert_eq!(
+        fields_down_the_form(&edit, Scale::ONE, &Theme::dark()),
+        Field::ALL.to_vec()
+    );
+}

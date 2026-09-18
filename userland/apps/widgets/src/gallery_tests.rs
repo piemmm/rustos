@@ -74,13 +74,15 @@ fn press(gallery: &mut Gallery, key: Key, themes: &ThemeRegistry) -> bool {
 
 #[test]
 fn tab_identity_round_trips() {
-    assert_eq!(GalleryTab::ALL.len(), 9);
+    // The count is stated, because `index` answers by position in `ALL` and a
+    // variant left out of the strip would silently take the first tab's index.
+    assert_eq!(GalleryTab::ALL.len(), 10);
     for (i, tab) in GalleryTab::ALL.iter().enumerate() {
         assert_eq!(tab.index(), i);
         assert_eq!(GalleryTab::from_index(i), Some(*tab));
         assert!(!tab.title().is_empty());
     }
-    assert_eq!(GalleryTab::from_index(9), None);
+    assert_eq!(GalleryTab::from_index(GalleryTab::ALL.len()), None);
 }
 
 #[test]
@@ -327,6 +329,39 @@ fn tab_centre(index: usize) -> Point {
     let x = i32::try_from(span).unwrap_or(0) * i32::try_from(index).unwrap_or(0)
         + i32::try_from(span / 2).unwrap_or(0);
     Point::new(x, viewport.top() + 8)
+}
+
+#[test]
+fn a_field_rows_choice_list_reports_the_pixels_it_covers() {
+    let mut prover = Prover::new();
+    prover.gallery = select_tab(prover.gallery, GalleryTab::Forms);
+    prover.shown = painted(&prover.gallery, &prover.theme);
+
+    // Tab puts the ring on the only item — the field group — whose own cursor
+    // then walks down to the choice row and opens its list.
+    prover.prove_key("focus the group", Key::Named(NamedKey::Tab));
+    prover.prove_key("cursor to the choice row", Key::Named(NamedKey::Down));
+    prover.prove_key("open the list", Key::Char(' '));
+    assert!(
+        field_group_popup_open(&prover.gallery),
+        "the choice row's list should be showing"
+    );
+    prover.prove_key("close the list", Key::Named(NamedKey::Escape));
+    assert!(!field_group_popup_open(&prover.gallery));
+}
+
+/// Whether the Forms panel's field group is showing a choice list.
+fn field_group_popup_open(gallery: &Gallery) -> bool {
+    gallery
+        .current_panel()
+        .iter()
+        .any(|item| match &item.widget {
+            DemoWidget::FieldGroup(group) => group
+                .rows()
+                .iter()
+                .any(tairix_controls::FieldRow::popup_open),
+            _ => false,
+        })
 }
 
 #[test]

@@ -90,6 +90,25 @@ fn action_row_rects(
     rects
 }
 
+/// Where a [`Dialog`]'s bands sit within its plate, resolved once per entry
+/// point rather than re-derived by each.
+struct Bands {
+    /// The title line's baseline `y`.
+    title_y: i32,
+    /// The message line's baseline `y`, where it has one.
+    message_y: Option<i32>,
+    /// The band the owner draws its own content in.
+    content: Rect,
+    /// The inline reason's baseline `y`, where it has one and it fits.
+    reason_y: Option<i32>,
+    /// The `x` every band's text begins at.
+    content_left: u32,
+    /// The width every band's text is fitted to.
+    content_w: u32,
+    /// The action buttons' rectangles, in action order.
+    actions: Vec<Rect>,
+}
+
 // --- Dialog ------------------------------------------------------------
 
 /// The outcome of feeding input to a [`Dialog`].
@@ -204,7 +223,133 @@ impl Dialog {
         inset(x, y, w, h, plate_border(theme, scale))
     }
 
+    /// How far below the plate's interior top the content band begins: the
+    /// title, the message where there is one, and the pads around them.
+    fn head_height(&self, pad: u32, line: u32) -> u32 {
+        let head = if self.message.is_some() {
+            line.saturating_mul(2).saturating_add(pad / 2)
+        } else {
+            line
+        };
+        pad.saturating_add(head).saturating_add(pad)
+    }
+
+    /// How far above the plate's interior bottom the content band ends: the
+    /// action row, the inline reason where there is one, and the gap above.
+    fn tail_height(&self, pad: u32, line: u32, action_h: u32) -> u32 {
+        let reason = if self.reason.is_some() {
+            line.saturating_add(pad / 2)
+        } else {
+            0
+        };
+        action_h.saturating_add(reason).saturating_add(pad / 2)
+    }
+
+    /// The plate height that leaves a content band exactly `content` pixels
+    /// tall, for a dialog carrying this title, message, reason and actions.
+    ///
+    /// A dialog that carries a *form* rather than a sentence is sized by what
+    /// the form measures, and this is what turns that figure into a window
+    /// extent. It reads the same two spans the band is placed between, so a
+    /// window sized by it seats its content exactly.
+    #[must_use]
+    pub fn height_for_content(&self, content: u32, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let line = font.line_height();
+        let action_h = if self.actions.is_empty() {
+            0
+        } else {
+            text_plate_height(theme, scale, TextRole::Body)
+        };
+        plate_border(theme, scale)
+            .saturating_mul(2)
+            .saturating_add(self.head_height(pad, line))
+            .saturating_add(content)
+            .saturating_add(self.tail_height(pad, line, action_h))
+    }
+
+    /// Where every band of the dialog sits for `bounds`: the title, the
+    /// optional message, the content band an owner draws its own form in, the
+    /// optional inline reason, and the action row.
+    ///
+    /// One definition read by [`render`](Self::render),
+    /// [`action_rects`](Self::action_rects) and
+    /// [`content_rect`](Self::content_rect), so an owner that draws inside the
+    /// dialog cannot place its content over the title or under the actions
+    /// when the theme's type ladder or insets change.
+    fn bands(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Option<Bands> {
+        let (ix, iy, iw, ih) = Self::inner(bounds, scale, theme)?;
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let content_left = ix.saturating_add(pad);
+        let content_w = iw.saturating_sub(pad.saturating_mul(2));
+        if content_w == 0 {
+            return None;
+        }
+        let line = font.line_height();
+        let title_y = to_i32(iy) + to_i32(pad);
+        let message_y = self
+            .message
+            .as_ref()
+            .map(|_| title_y + to_i32(line) + to_i32(pad) / 2);
+        let actions = action_row_rects(&self.actions, (ix, iy, iw, ih), scale, theme, font);
+        let action_h = actions
+            .iter()
+            .filter(|r| r.height > 0)
+            .map(|r| r.height)
+            .max()
+            .unwrap_or(0);
+        let action_top = actions.iter().filter(|r| r.height > 0).map(Rect::top).min();
+        let reason_y = self.reason.as_ref().and_then(|_| {
+            let bottom = action_top.unwrap_or(to_i32(iy + ih));
+            let y = bottom - to_i32(line) - to_i32(pad) / 2;
+            (y > title_y).then_some(y)
+        });
+
+        // The content band runs from below the head the dialog draws to above
+        // its tail, both measured by the same spans `height_for_content`
+        // inverts — so a window sized to a form seats that form exactly.
+        let top = to_i32(iy) + to_i32(self.head_height(pad, line));
+        let bottom = to_i32(iy)
+            .saturating_add(to_i32(ih))
+            .saturating_sub(to_i32(self.tail_height(pad, line, action_h)));
+        let content = Rect::new(
+            to_i32(content_left),
+            top,
+            content_w,
+            u32::try_from(bottom - top).unwrap_or(0),
+        );
+        Some(Bands {
+            title_y,
+            message_y,
+            content,
+            reason_y,
+            content_left,
+            content_w,
+            actions,
+        })
+    }
+
+    /// The band an owner draws its own content in — beneath the message,
+    /// above the inline reason and the action row — or [`None`] when the
+    /// plate has no room for one.
+    ///
+    /// A dialog that carries a form rather than a sentence (the Date & Time
+    /// window's field groups) lays that form out here, so it cannot drift out
+    /// of the dialog's own bands.
+    #[must_use]
+    pub fn content_rect(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let font = role_font(theme, scale, TextRole::Body);
+        self.bands(bounds, scale, theme, font)
+            .map(|bands| bands.content)
+            .filter(|rect| !rect.is_empty())
+    }
+
     /// Paint the dialog into `surface` at `bounds` for the active theme.
+    ///
+    /// The content band is *not* painted: it belongs to the owner, which
+    /// resolves it with [`content_rect`](Self::content_rect) and draws its own
+    /// content there after this.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         if withheld(surface, bounds) {
             return;
@@ -234,56 +379,39 @@ impl Dialog {
                 ring: Color::from(palette.rim_active),
             },
         );
-        let Some((ix, iy, iw, ih)) = Self::inner(bounds, scale, theme) else {
+        let Some(bands) = self.bands(bounds, scale, theme, font) else {
             return;
         };
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let content_left = ix.saturating_add(pad);
-        let content_w = iw.saturating_sub(pad.saturating_mul(2));
-        if content_w == 0 {
-            return;
-        }
 
-        // Title, then message.
-        let title_y = to_i32(iy) + to_i32(pad);
-        let fitted = font.truncate_to_width(&self.title, content_w);
+        let fitted = font.truncate_to_width(&self.title, bands.content_w);
         font.draw_text(
             surface,
-            to_i32(content_left),
-            title_y,
+            to_i32(bands.content_left),
+            bands.title_y,
             fitted,
             foreground(theme, crate::state::ControlDisposition::Interactive),
         );
-        if let Some(message) = &self.message {
-            let message_y = title_y + to_i32(font.line_height()) + to_i32(pad) / 2;
-            let fitted = font.truncate_to_width(message, content_w);
+        if let (Some(message), Some(message_y)) = (&self.message, bands.message_y) {
+            let fitted = font.truncate_to_width(message, bands.content_w);
             font.draw_text(
                 surface,
-                to_i32(content_left),
+                to_i32(bands.content_left),
                 message_y,
                 fitted,
                 Color::from(palette.on_surface_muted),
             );
         }
-
-        // The action row, and the inline reason just above it.
-        let rects = action_row_rects(&self.actions, (ix, iy, iw, ih), scale, theme, font);
-        let action_top = rects.iter().filter(|r| r.height > 0).map(Rect::top).min();
-        if let Some(reason) = &self.reason {
-            let reason_bottom = action_top.unwrap_or(to_i32(iy + ih));
-            let reason_y = reason_bottom - to_i32(font.line_height()) - to_i32(pad) / 2;
-            if reason_y > title_y {
-                let fitted = font.truncate_to_width(reason, content_w);
-                font.draw_text(
-                    surface,
-                    to_i32(content_left),
-                    reason_y,
-                    fitted,
-                    Color::from(palette.warning),
-                );
-            }
+        if let (Some(reason), Some(reason_y)) = (&self.reason, bands.reason_y) {
+            let fitted = font.truncate_to_width(reason, bands.content_w);
+            font.draw_text(
+                surface,
+                to_i32(bands.content_left),
+                reason_y,
+                fitted,
+                Color::from(palette.warning),
+            );
         }
-        for (button, rect) in self.actions.iter().zip(rects) {
+        for (button, rect) in self.actions.iter().zip(bands.actions) {
             if rect.width > 0 {
                 button.render(surface, rect, scale, theme);
             }
@@ -301,10 +429,9 @@ impl Dialog {
     #[must_use]
     pub fn action_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
         let font = role_font(theme, scale, TextRole::Body);
-        match Self::inner(bounds, scale, theme) {
-            Some(inner) => action_row_rects(&self.actions, inner, scale, theme, font),
-            None => Vec::new(),
-        }
+        self.bands(bounds, scale, theme, font)
+            .map(|bands| bands.actions)
+            .unwrap_or_default()
     }
 
     /// Route a pointer event to the actions it concerns; one that completes a

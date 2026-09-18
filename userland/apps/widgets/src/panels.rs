@@ -12,10 +12,10 @@ use alloc::vec::Vec;
 
 use tairix_controls::{
     ActivityState, AuthorityState, Button, ButtonContent, Card, Checkbox, ComboBox, ControlRole,
-    ControlState, Dialog, HelpTip, IconButton, ListRow, Menu, MenuItem, Panel, Progress,
-    ProgressValue, Radio, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, SearchField,
-    SelectionState, Slider, SplitButton, TableCell, TableRow, TextField, Toggle, Toolbar, Tooltip,
-    ValidationState, WindowControl, WindowControlKind,
+    ControlState, Dialog, FieldControl, FieldGroup, FieldRow, HelpTip, IconButton, ListRow, Menu,
+    MenuItem, Panel, Progress, ProgressValue, Radio, ScrollBar, ScrollModel, ScrollOrientation,
+    ScrollRange, SearchField, SelectionState, Slider, SplitButton, TableCell, TableRow, TextField,
+    Toggle, Toolbar, Tooltip, ValidationState, WindowControl, WindowControlKind,
 };
 use tairix_icon::IconKind;
 
@@ -32,6 +32,7 @@ pub fn build(tab: GalleryTab) -> Vec<DemoItem> {
         GalleryTab::Text => text(),
         GalleryTab::Choice => choice(),
         GalleryTab::Collections => collections(),
+        GalleryTab::Forms => forms(),
         GalleryTab::Bars => bars(),
         GalleryTab::Feedback => feedback(),
         GalleryTab::Window => window(),
@@ -259,6 +260,61 @@ fn collections() -> Vec<DemoItem> {
         DemoItem::new("Card", DemoWidget::Card(card), 110),
         DemoItem::new("Panel", DemoWidget::Panel(panel), 140),
     ]
+}
+
+/// One captioned group of settings rows, and the two rows that state a
+/// refusal and an absent reading.
+///
+/// The group is shown whole rather than as loose rows: the slot column every
+/// control lines up in is the group's to resolve, so a single row could not
+/// demonstrate it.
+fn forms() -> Vec<DemoItem> {
+    let mut refused = FieldRow::new(
+        "Set automatically",
+        FieldControl::Toggle(Toggle::new("", true)),
+    )
+    .with_description("Requires the time-setting capability");
+    refused.set_state(denied());
+    let group = FieldGroup::new(
+        "APPEARANCE",
+        vec![
+            FieldRow::new(
+                "Reduce motion",
+                FieldControl::Toggle(Toggle::new("", false)),
+            )
+            .with_description("Animations become instant"),
+            FieldRow::new(
+                "Cursor set",
+                FieldControl::Combo(
+                    ComboBox::new(vec!["Alloy".into(), "Contrast".into()]).with_selected(0),
+                ),
+            ),
+            FieldRow::new("Interface scale", FieldControl::Slider(Slider::new(500))),
+            FieldRow::new(
+                "Host name",
+                FieldControl::Text(TextField::new().with_text("tairix")),
+            ),
+            refused,
+            FieldRow::new("Uptime", FieldControl::Reading("4 days, 02:11".into())),
+            FieldRow::new(
+                "Battery",
+                FieldControl::Unmeasured("no power interface".into()),
+            ),
+            FieldRow::new(
+                "Wallpaper",
+                FieldControl::Button(Button::new(
+                    ButtonContent::Label("Choose Picture…".into()),
+                    ControlRole::Neutral,
+                )),
+            ),
+        ],
+    )
+    .with_footnote("Applies to this account only.");
+    vec![DemoItem::new(
+        "Field group",
+        DemoWidget::FieldGroup(group),
+        300,
+    )]
 }
 
 fn bars() -> Vec<DemoItem> {

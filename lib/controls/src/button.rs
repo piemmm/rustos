@@ -255,6 +255,17 @@ pub(crate) fn icon_content_side(w: u32, h: u32, border: u32) -> u32 {
     plate.saturating_sub(margin.saturating_mul(2))
 }
 
+/// The horizontal clearance a plate keeps between its rim and a line of type:
+/// the frame plus the theme's control inset.
+///
+/// [`paint_content`] charges it on both edges when fitting a label, and
+/// [`Button::measured_width`] adds it back when answering how wide the plate
+/// must be to hold one whole, so the two cannot disagree about what the label
+/// has room for.
+pub(crate) fn plate_text_edge(theme: &Theme, scale: Scale) -> u32 {
+    plate_border(theme, scale).saturating_add(scale.scale_length(theme.metrics().control_inset))
+}
+
 /// What a plate draws inside itself: the content group and where it sits.
 struct ContentGroup<'a> {
     content: &'a ButtonContent,
@@ -286,8 +297,7 @@ fn paint_content(
     let (x, y, w, h) = rect;
     let (content, align) = (group.content, group.align);
     let border = plate_border(theme, scale);
-    let pad = scale.scale_length(theme.metrics().control_inset);
-    let edge = border.saturating_add(pad);
+    let edge = plate_text_edge(theme, scale);
     let avail_w = w.saturating_sub(edge.saturating_mul(2));
     // `control_inset` is a *horizontal* text inset — room for a line of type
     // clear of the rounded corners. Vertically the content is centred and the
@@ -409,6 +419,33 @@ impl Button {
     #[must_use]
     pub fn height(scale: Scale, theme: &Theme) -> u32 {
         text_plate_height(theme, scale, TextRole::Body)
+    }
+
+    /// The width this button needs to draw its content whole at `scale`.
+    ///
+    /// Exposed for a container that lays a button out *beside* other controls
+    /// rather than stretching it across a column — a settings row's trailing
+    /// slot, a strip of commands — which cannot size the plate without the
+    /// figure the button's own content layout uses.
+    ///
+    /// An icon-only button answers its own height: it gives its whole face to
+    /// the glyph, so its natural plate is square.
+    #[must_use]
+    pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let content = match &self.content {
+            ButtonContent::Label(text) => font.text_width(text),
+            ButtonContent::Icon(_) => {
+                return Self::height(scale, theme);
+            }
+            ButtonContent::IconLabel { label, .. } => font
+                .glyph_height()
+                .saturating_add(scale.scale_length(theme.metrics().control_gap))
+                .saturating_add(font.text_width(label)),
+        };
+        plate_text_edge(theme, scale)
+            .saturating_mul(2)
+            .saturating_add(content)
     }
 
     /// A button with the given content and role, in the resting state.

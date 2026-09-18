@@ -40,6 +40,8 @@ pub enum GalleryTab {
     Choice,
     /// Collection surfaces: list row, table row, card, panel.
     Collections,
+    /// Form fields: the settings row and the captioned group it sits in.
+    Forms,
     /// Bars: toolbar and scroll bars.
     Bars,
     /// Feedback surfaces: dialog, tooltip, help tip.
@@ -50,13 +52,14 @@ pub enum GalleryTab {
 
 impl GalleryTab {
     /// Every tab, in strip order.
-    pub const ALL: [GalleryTab; 9] = [
+    pub const ALL: [GalleryTab; 10] = [
         GalleryTab::Buttons,
         GalleryTab::Selectors,
         GalleryTab::Values,
         GalleryTab::Text,
         GalleryTab::Choice,
         GalleryTab::Collections,
+        GalleryTab::Forms,
         GalleryTab::Bars,
         GalleryTab::Feedback,
         GalleryTab::Window,
@@ -84,6 +87,7 @@ impl GalleryTab {
             GalleryTab::Text => "Text",
             GalleryTab::Choice => "Choice",
             GalleryTab::Collections => "Collections",
+            GalleryTab::Forms => "Forms",
             GalleryTab::Bars => "Bars",
             GalleryTab::Feedback => "Feedback",
             GalleryTab::Window => "Window",

@@ -254,6 +254,18 @@
 //! rendering, and owns only the stacking geometry, the hover and focus
 //! bookkeeping, and the typed [`RailAction`] it reports.
 //!
+//! The [`form`] module is the form-field family — [`FieldRow`] and
+//! [`FieldGroup`]. A row is one setting: a label, an optional description
+//! line, and a trailing slot holding one real [`Toggle`], [`ComboBox`],
+//! [`Slider`], [`TextField`], [`Button`], read-only reading, or stated
+//! absence of one; a group is the captioned plate those rows sit on,
+//! resolving the one slot column their controls line up in. The row shares
+//! its authority with the control in its slot, so a denied setting cannot
+//! hold an actionable control, and room is given out control, label,
+//! description — a narrowing row loses its words, never the control the
+//! reader came for. It composes the row chrome [`ListRow`] and [`TableRow`]
+//! already draw and restates neither that nor any control.
+//!
 //! The [`damage`] module is the repaint seam every family reports through. An
 //! input or update call takes a sink, a control pushes its own bounds when a
 //! drawn state field changes, and the host renders and presents only what came
@@ -271,6 +283,7 @@ pub mod collection;
 pub mod combo;
 pub mod damage;
 pub mod decision;
+pub mod form;
 pub mod menu;
 pub mod metric;
 pub mod nav;
@@ -298,6 +311,7 @@ pub use collection::{
 };
 pub use combo::{ComboAction, ComboBox};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
+pub use form::{FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow};
 pub use menu::{
     plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, MenuMark,
     PlatePlacement, PlateSide, INFO_ROW_LABEL,
@@ -350,6 +364,8 @@ mod combo_tests;
 mod damage_tests;
 #[cfg(test)]
 mod decision_tests;
+#[cfg(test)]
+mod form_tests;
 #[cfg(test)]
 mod menu_tests;
 #[cfg(test)]

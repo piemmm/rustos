@@ -1803,6 +1803,72 @@ the parts it is made of. The bar is a read-only instrument, like both of them.
   Panel share that container's surface (§10's plate seating).
 - **Damage and settle point.** Read-only: it has no settle point, and its
   pixels are its owner's to report when the composition it was handed changes.
+### 11.41 FieldRow and FieldGroup
+
+A settings surface is a column of captioned groups of label/description/control
+rows. That shape is the language's, not each application's: before this family
+the file manager hand-rolled a permissions grid, the wallpaper chooser a column
+of four drop-downs, and the Date & Time window a three-column grid of six
+fields. A `FieldRow` is one setting; a `FieldGroup` is the captioned plate its
+rows sit on.
+
+- **A row composes the row chrome, it does not restate it.** The hover wash,
+  the leading pressure and selection rails, the activity Heat Seam, the
+  trailing Signal Bead band and the focus ring are the ones `ListRow` and
+  `TableRow` draw (§11.13), from one shared recipe — so a change to how a
+  selected or refused row reads cannot diverge between a list and a form. The
+  slot likewise holds a *real* control (§11.4–§11.9), never a second drawing
+  of one.
+- **A row's disposition is the setting's.** The row shares its enablement,
+  authority and validation — exactly what decides actionability — with the
+  control in its slot, so a denied or pending setting cannot hold an actionable
+  control. A pane therefore states a refusal by setting the *row*,
+  never by remembering to set two states in step. A disabled row mutes; a
+  denied one wears the Authority Mark (§13) in a band reserved either way, so
+  becoming denied never moves the row's own control.
+- **Three absences read differently, because they are different facts.**
+  Plainly disabled (the setting does not apply), the Authority Mark (this
+  caller may not change it), and a *stated* unmeasured value (there is no
+  reading, and why) are distinct. An unmeasured slot draws its statement in the
+  quiet muted tone whatever the row's disposition, so it can never be mistaken
+  for a measurement — never a blank, a dash, or a fabricated zero.
+- **Room is given out control, label, description.** The slot is served first
+  and never past **half** the row's content span, so a label always has room
+  to be read. The label elides into what remains, and the description draws
+  only while the label fits *whole*: once the setting's own name has had to be
+  cut, a second cut line beneath it is noise. Words are what a narrowing row
+  loses, because the control is what the reader came for.
+- **One slot column per group.** The group resolves the widest width its rows
+  want, or the half-span ceiling when a row's control takes whatever column it
+  is given — a cramped slider cannot be aimed and a cramped entry cannot be
+  read. Each control answers its own width (`measured_width`), so the column
+  comes from the controls' own layout rather than a second copy of it. A choice
+  control measures its **widest** choice, not the selected one, so choosing a
+  different value never resizes the field or moves the column.
+- **A group draws one plate, not a plate per row** (§10's plate seating), and
+  its caption and footnote begin exactly where a row's label does, so the three
+  read as one column rather than three indents. The footnote is where a setting
+  needs a sentence of consequence — on the surface, not behind a tooltip a
+  pointer has to find.
+- **The owner places the choice popup.** An expanded list is drawn above every
+  group, so a row cannot paint it — the group's later rows would cover it. The
+  group names the row and slot to anchor it to; the owner places it within the
+  viewport it alone knows and paints it after every group is drawn.
+- **The cursor clamps within a group and never traps itself.** Up and Down walk
+  rows and stop at the ends, because a group is a fixed set of settings rather
+  than a cycling ring and the surface above it carries the cursor *between*
+  groups. Home and End jump to the ends unless the focused row is editing text,
+  where they move a caret; an open choice list is modal and every key is the
+  list's until it resolves.
+- **A height too short for every row omits the ones it cannot draw whole**, and
+  a row that was not drawn cannot be pressed — one layout serves the paint, the
+  hit test and the focus reporting.
+- **Damage and settle point.** A row reports what the control in its slot asked
+  for and commits nothing itself; the slider slot's live value and its settle
+  point stay distinct (§11.6), and a durable change is made on the settle
+  alone. A pointer crossing one row reports that row; motion within it is
+  hit-testing input and reports nothing.
+
 ---
 
 ## 12. Reactive State Patterns

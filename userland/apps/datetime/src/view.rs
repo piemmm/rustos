@@ -1,31 +1,38 @@
 //! The Date & Time window's geometry and paint.
 //!
-//! Every length is authored in *logical* pixels at the reference density and
-//! converted through the one shared [`Scale`], so the window is the same
-//! shape at any desktop UI scale and no arithmetic is repeated here.
+//! The six civil fields are two captioned groups of the shared form-field
+//! family — the date above, the time below — laid out in the band the
+//! [`Dialog`] reserves for its owner's content. The family owns the row
+//! chrome, the slot column every field lines up in, and the label/field
+//! arithmetic, so this module holds only what is genuinely this window's: how
+//! many groups there are, which fields each carries, and the order they are
+//! read in.
 //!
-//! The rectangles are computed in exactly one place ([`field_rect`],
-//! [`window_bounds`]), which the paint, the hit test, and the host tests all
-//! read — a second copy could drift and put the caret somewhere the field is
-//! not drawn.
+//! The window's own extent is derived from what those groups measure at the
+//! active density and type ladder, so a wider ladder is seated rather than
+//! pushed under the action band. A fixed-size window cannot re-grant its frame
+//! region, so the extent is the one in force when it opened; a desktop that
+//! re-themes afterwards keeps the window it was given.
+//!
+//! The rows are drawn from the [`Editor`] every frame and route no input of
+//! their own: typing is validated per civil field by the editor, which is the
+//! only thing that may change a value. The hit test reads the same group
+//! layout the paint does, so a press cannot land on a field drawn elsewhere.
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_controls::{Button, Dialog, TextField};
-use tairix_geometry::{Rect, Scale};
+use tairix_controls::{Button, Dialog, FieldControl, FieldGroup, FieldLayout, FieldRow, TextField};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::{Editor, Field};
 
-/// The window's width in logical pixels: three field columns and their
-/// insets, and no wider.
+/// The window's width in logical pixels: a label column and a field column,
+/// and no wider.
 pub const WIN_WIDTH: u32 = 460;
-
-/// The window's height in logical pixels: the title, the format line, two
-/// rows of fields, the status line, and the action band.
-pub const WIN_HEIGHT: u32 = 268;
 
 /// The window title, which is also what the desktop lists the app under.
 pub const TITLE: &str = "Date & Time";
@@ -36,75 +43,19 @@ pub const TITLE: &str = "Date & Time";
 /// that looked local would be a claim the machine cannot make.
 pub const FORMAT_LINE: &str = "The machine's clock, in UTC.";
 
-/// Left and right inset of the field grid, in logical pixels.
-const INSET: u32 = 18;
-
-/// Gap between field columns, in logical pixels.
-const COL_GAP: u32 = 10;
-
-/// One field's height in logical pixels.
-const FIELD_HEIGHT: u32 = 32;
-
-/// Top of the first field row within the window, in logical pixels.
-const FIELD_TOP: u32 = 88;
-
-/// Vertical distance between the two field rows, in logical pixels.
-const ROW_PITCH: u32 = 46;
-
-/// Field columns per row: the date on the first row, the time on the second.
-const COLUMNS: u32 = 3;
-
 /// Index of the closing action in the dialog's band.
 pub const CLOSE_ACTION: usize = 0;
 
 /// Index of the setting action.
 pub const SET_ACTION: usize = 1;
 
-/// The window's own rectangle at `scale`, which is where its pixels start.
-#[must_use]
-pub fn window_bounds(scale: Scale) -> Rect {
-    Rect::new(
-        0,
-        0,
-        scale.scale_length(WIN_WIDTH),
-        scale.scale_length(WIN_HEIGHT),
-    )
-}
+/// Fields per group: the date in the first, the time in the second.
+const PER_GROUP: usize = 3;
 
-/// The physical rectangle of `field` in the window's own space.
-///
-/// The fields sit in a three-column grid: year, month, day on the first row
-/// and hour, minute, second on the second, which is the order a date is
-/// written and so the order a user expects to tab through.
-#[must_use]
-pub fn field_rect(scale: Scale, field: Field) -> Rect {
-    let index = u32::try_from(field.index()).unwrap_or(0);
-    let column = index % COLUMNS;
-    let row = index / COLUMNS;
-    let inset = scale.scale_length(INSET);
-    let gap = scale.scale_length(COL_GAP);
-    let usable = scale
-        .scale_length(WIN_WIDTH)
-        .saturating_sub(inset.saturating_mul(2))
-        .saturating_sub(gap.saturating_mul(COLUMNS - 1));
-    let width = usable / COLUMNS;
-    let left = inset + column * (width + gap);
-    let top = scale.scale_length(FIELD_TOP + row * ROW_PITCH);
-    Rect::new(
-        i32::try_from(left).unwrap_or(i32::MAX),
-        i32::try_from(top).unwrap_or(i32::MAX),
-        width,
-        scale.scale_length(FIELD_HEIGHT),
-    )
-}
-
-/// The field the window-local point `(x, y)` is over, if any.
-#[must_use]
-pub fn field_at(scale: Scale, x: i32, y: i32) -> Option<Field> {
-    Field::ALL
-        .into_iter()
-        .find(|field| field_rect(scale, *field).contains(tairix_geometry::Point::new(x, y)))
-}
+/// The two groups' captions, in layout order. The fields each holds are
+/// [`Field::ALL`] taken [`PER_GROUP`] at a time, so the order a date is
+/// written is the order it is tabbed through.
+const CAPTIONS: [&str; 2] = ["DATE", "TIME"];
 
 /// Build the dialog chrome for `editor`: the title, the format line, the
 /// status beneath, and the two actions.
@@ -116,42 +67,138 @@ pub fn field_at(scale: Scale, x: i32, y: i32) -> Option<Field> {
 pub fn dialog(editor: &Editor) -> Dialog {
     let base = Dialog::new(TITLE)
         .with_message(FORMAT_LINE)
-        .with_actions(alloc::vec![
-            Button::labelled("Close"),
-            Button::labelled("Set"),
-        ]);
+        .with_actions(vec![Button::labelled("Close"), Button::labelled("Set")]);
     match editor.status().message() {
         Some(reason) => base.with_reason(reason),
         None => base,
     }
 }
 
-/// Build the six fields for `editor`, in [`Field::ALL`] order.
+/// Build the two field groups for `editor`: the date above, the time below.
 ///
-/// Rebuilt from the model each frame rather than held as state, so the
-/// drawn text and the model can never disagree. The focused field is the
-/// only one drawn focused, so exactly one caret shows.
+/// Rebuilt from the model each frame rather than held as state, so the drawn
+/// text and the model can never disagree. The focused field is the only one
+/// drawn focused, so exactly one caret shows.
 #[must_use]
-pub fn fields(editor: &Editor) -> Vec<TextField> {
-    Field::ALL
-        .into_iter()
-        .map(|field| {
-            let mut control = TextField::new()
-                .with_text(editor.text(field))
-                .with_placeholder(String::from(field.label()))
-                .with_max_len(crate::FIELD_MAX);
-            control.set_focused(editor.focus() == field);
-            control
+pub fn groups(editor: &Editor) -> Vec<FieldGroup> {
+    CAPTIONS
+        .iter()
+        .enumerate()
+        .map(|(index, caption)| {
+            let first = index * PER_GROUP;
+            let rows = Field::ALL
+                .iter()
+                .skip(first)
+                .take(PER_GROUP)
+                .map(|field| {
+                    FieldRow::new(
+                        field.label(),
+                        FieldControl::Text(
+                            TextField::new()
+                                .with_text(editor.text(*field))
+                                .with_placeholder(String::from(field.label()))
+                                .with_max_len(crate::FIELD_MAX),
+                        ),
+                    )
+                })
+                .collect();
+            let mut group = FieldGroup::new(*caption, rows);
+            group.adopt_focus(
+                (editor.focus().index() / PER_GROUP == index)
+                    .then(|| editor.focus().index() % PER_GROUP),
+            );
+            group
         })
         .collect()
+}
+
+/// The height, in physical pixels, the window's content needs: the dialog's
+/// own bands plus both groups and the gap between them.
+///
+/// Measured from the groups themselves, so the window is sized by what it
+/// draws rather than by a figure that a wider type ladder outgrows.
+#[must_use]
+fn content_height(editor: &Editor, scale: Scale, theme: &Theme) -> u32 {
+    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+    let groups = groups(editor);
+    let gaps = gap.saturating_mul(u32::try_from(groups.len().saturating_sub(1)).unwrap_or(0));
+    groups
+        .iter()
+        .map(|group| group.measured_height(scale, theme))
+        .fold(gaps, u32::saturating_add)
+}
+
+/// The window's own rectangle at `scale`, which is where its pixels start.
+///
+/// The height is what the groups measure, turned into a plate extent by the
+/// dialog itself — so the band the groups are then laid out in is exactly the
+/// one they were sized for, at any density or type ladder.
+#[must_use]
+pub fn window_bounds(editor: &Editor, scale: Scale, theme: &Theme) -> Rect {
+    let content = content_height(editor, scale, theme);
+    Rect::new(
+        0,
+        0,
+        scale.scale_length(WIN_WIDTH),
+        dialog(editor).height_for_content(content, scale, theme),
+    )
+}
+
+/// The rectangle each group is drawn in within the dialog's content band, in
+/// layout order, and only for the groups that fit whole.
+///
+/// The one layout the paint and the hit test both read, so a press can never
+/// land on a group that was not drawn.
+#[must_use]
+fn group_rects(editor: &Editor, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+    let Some(band) = dialog(editor).content_rect(bounds, scale, theme) else {
+        return Vec::new();
+    };
+    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+    let mut top = band.top();
+    let mut rects = Vec::new();
+    for group in groups(editor) {
+        let height = group.measured_height(scale, theme);
+        let bottom = top.saturating_add(i32::try_from(height).unwrap_or(i32::MAX));
+        if bottom > band.bottom() {
+            break;
+        }
+        rects.push(Rect::new(band.left(), top, band.width, height));
+        top = bottom.saturating_add(i32::try_from(gap).unwrap_or(0));
+    }
+    rects
+}
+
+/// The field the window-local `point` is over, if any.
+///
+/// The theme is a parameter because the row a point lands on depends on the
+/// active type ladder and density, exactly as the paint does — resolving it
+/// from anywhere else is how a press comes to land beside the field it looked
+/// like it hit.
+#[must_use]
+pub fn field_at(editor: &Editor, scale: Scale, theme: &Theme, point: Point) -> Option<Field> {
+    let bounds = window_bounds(editor, scale, theme);
+    let rects = group_rects(editor, bounds, scale, theme);
+    groups(editor)
+        .iter()
+        .zip(rects)
+        .enumerate()
+        .find_map(|(index, (group, rect))| {
+            let row = group.row_at(rect, scale, theme, point)?;
+            Field::at(index * PER_GROUP + row)
+        })
 }
 
 /// Paint the whole window for `editor` at `scale` through `theme` into
 /// `surface`, which the caller retains for the life of the window.
 pub fn render_into(surface: &mut Surface, editor: &Editor, scale: Scale, theme: &Theme) {
-    let bounds = window_bounds(scale);
+    let bounds = window_bounds(editor, scale, theme);
     dialog(editor).render(surface, bounds, scale, theme);
-    for (field, control) in Field::ALL.into_iter().zip(fields(editor)) {
-        control.render(surface, field_rect(scale, field), scale, theme);
+    for (group, rect) in groups(editor)
+        .iter()
+        .zip(group_rects(editor, bounds, scale, theme))
+    {
+        let column = group.slot_column(rect, scale, theme);
+        group.render(surface, FieldLayout::new(rect, column), scale, theme);
     }
 }

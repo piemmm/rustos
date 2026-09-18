@@ -380,6 +380,27 @@ impl Toggle {
         self.core.state.focus.focused = focused;
     }
 
+    /// The width this toggle needs at `scale`: its track, plus the gap and the
+    /// label where it carries one.
+    ///
+    /// A toggle seated in a settings row is normally unlabelled — the row's own
+    /// label names the setting — so the common answer is the track alone.
+    /// Exposed for a container that lays a toggle out beside other controls
+    /// rather than across a row, which cannot size the slot without the figure
+    /// the toggle's own layout uses.
+    #[must_use]
+    pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let metrics = theme.metrics();
+        let track = scale.scale_length(metrics.toggle_track_length).max(1);
+        if self.core.label.is_empty() {
+            return track;
+        }
+        let font = role_font(theme, scale, TextRole::Body);
+        track
+            .saturating_add(scale.scale_length(metrics.control_gap).max(1))
+            .saturating_add(font.text_width(&self.core.label))
+    }
+
     /// Paint the toggle into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         if withheld(surface, bounds) {

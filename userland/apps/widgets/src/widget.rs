@@ -14,10 +14,10 @@
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    BandCorner, Button, Card, Checkbox, ComboBox, Dialog, HelpTip, IconButton, ListRow, Menu,
-    Panel, Progress, Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction,
-    Slider, SliderAction, SplitButton, TableRow, TextField, Toggle, Toolbar, Tooltip,
-    WindowControl,
+    BandCorner, Button, Card, Checkbox, ComboBox, Dialog, FieldAction, FieldControl, FieldGroup,
+    FieldGroupAction, FieldLayout, HelpTip, IconButton, ListRow, Menu, Panel, Progress, Radio,
+    ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider, SliderAction,
+    SplitButton, TableRow, TextField, Toggle, Toolbar, Tooltip, WindowControl,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::NoArtwork;
@@ -51,6 +51,7 @@ pub enum DemoWidget {
     TableRow(TableRow),
     Card(Card),
     Panel(Panel),
+    FieldGroup(FieldGroup),
     Dialog(Dialog),
     Tooltip(Tooltip),
     HelpTip(HelpTip),
@@ -65,6 +66,50 @@ pub enum DemoWidget {
 fn combo_popup_rect(combo: &ComboBox, field: Rect, scale: Scale, theme: &Theme) -> Rect {
     let (w, h) = combo.popup_size(field.width, scale, theme);
     Rect::new(field.left(), field.bottom(), w, h)
+}
+
+/// The layout a [`FieldGroup`] is drawn with in `rect`: the slot column the
+/// group resolves for its own rows, and any expanded slot's choice list placed
+/// below the slot it belongs to.
+///
+/// The group names the row and slot to anchor the list to; placing it is the
+/// owner's, because only the owner knows the surface it has to fit in. Here
+/// that is the same rule a standalone drop-down is placed by.
+fn field_layout(group: &FieldGroup, rect: Rect, scale: Scale, theme: &Theme) -> FieldLayout {
+    let layout = FieldLayout::new(rect, group.slot_column(rect, scale, theme));
+    match group
+        .popup_anchor(layout, scale, theme)
+        .and_then(|(row, slot)| Some((group.rows().get(row)?.control(), slot)))
+    {
+        Some((FieldControl::Combo(combo), slot)) => {
+            layout.with_popup(combo_popup_rect(combo, slot, scale, theme))
+        }
+        _ => layout,
+    }
+}
+
+/// Commit a row's request into the control that made it, so the demo reacts
+/// exactly as a pane's own commit would.
+///
+/// The gallery holds its values in memory and nothing else, so a live sample
+/// and the settle that follows it are the same acknowledgement; a real pane
+/// acts durably on the settle alone.
+fn commit_field(group: &mut FieldGroup, action: FieldGroupAction, rect: Rect, damage: &mut Region) {
+    let Some(row) = group.rows_mut().get_mut(action.row) else {
+        return;
+    };
+    match (row.control_mut(), action.action) {
+        (FieldControl::Toggle(c), FieldAction::Set { on }) => c.set_on(on),
+        (FieldControl::Combo(c), FieldAction::Selected { index }) => c.set_selected(index),
+        (
+            FieldControl::Slider(c),
+            FieldAction::SetValue { permille } | FieldAction::Settled { permille },
+        ) => c.set_value(permille),
+        // A text edit is already in the field's own buffer; a command press
+        // and a list opening or closing change no value.
+        _ => {}
+    }
+    damage.add(rect);
 }
 
 /// Equal-width column boundaries for a [`TableRow`] with `cells` cells across
@@ -135,6 +180,7 @@ impl DemoWidget {
             // The gallery reports this item's whole rectangle when the ring
             // moves, and the highlighted row is drawn inside it.
             DemoWidget::Menu(w) => w.adopt_current(focused.then_some(0)),
+            DemoWidget::FieldGroup(w) => w.adopt_focus(focused.then_some(0)),
             DemoWidget::Toolbar(w) => w.set_focus(focused.then_some(0), rect, damage),
             // No focus ring: split button, progress, card, panel, dialog,
             // tooltip, help tip. Focus is a no-op rather than an error.
@@ -178,6 +224,11 @@ impl DemoWidget {
             }
             DemoWidget::Card(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Panel(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::FieldGroup(w) => {
+                let layout = field_layout(w, rect, scale, theme);
+                w.render(surface, layout, scale, theme);
+                w.render_popup(surface, layout.popup, scale, theme);
+            }
             DemoWidget::Dialog(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Tooltip(w) => w.render(surface, rect, scale, theme),
             DemoWidget::HelpTip(w) => w.render(surface, rect, scale, theme),
@@ -261,6 +312,16 @@ impl DemoWidget {
             },
             DemoWidget::Card(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::Panel(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
+            DemoWidget::FieldGroup(w) => {
+                let before = field_layout(w, rect, scale, theme);
+                let acted = w.on_pointer(event, before, scale, theme, damage);
+                field_popup_moved(w, before, rect, scale, theme, damage, acted.is_some());
+                if let Some(action) = acted {
+                    commit_field(w, action, rect, damage);
+                    return true;
+                }
+                false
+            }
             DemoWidget::Dialog(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::HelpTip(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::Toolbar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
@@ -349,6 +410,16 @@ impl DemoWidget {
             },
             DemoWidget::Card(w) => w.on_key(key).is_some(),
             DemoWidget::Panel(w) => w.on_key(key).is_some(),
+            DemoWidget::FieldGroup(w) => {
+                let before = field_layout(w, rect, scale, theme);
+                let acted = w.on_key(key, modifiers, before, scale, theme, damage);
+                field_popup_moved(w, before, rect, scale, theme, damage, acted.is_some());
+                if let Some(action) = acted {
+                    commit_field(w, action, rect, damage);
+                    return true;
+                }
+                false
+            }
             DemoWidget::Dialog(w) => w.on_key(key).is_some(),
             DemoWidget::HelpTip(w) => w.on_key(key).is_some(),
             DemoWidget::Toolbar(w) => match w.on_key(key, rect, damage) {
@@ -367,6 +438,32 @@ impl DemoWidget {
             },
             DemoWidget::WindowControl(w) => w.on_key(key, rect, damage).is_some(),
         }
+    }
+}
+
+/// Report a choice list that has just appeared or vacated.
+///
+/// A list is drawn outside the group's own plate, so only the owner that
+/// placed it holds the rectangle it covered — and the *open* is reported from
+/// a layout that had no list in it yet, the *close* from one that no longer
+/// does. Reporting both the list that was there and the one that is now covers
+/// either transition; an absent list is an empty rectangle and covers nothing.
+fn field_popup_moved(
+    group: &FieldGroup,
+    before: FieldLayout,
+    rect: Rect,
+    scale: Scale,
+    theme: &Theme,
+    damage: &mut Region,
+    acted: bool,
+) {
+    if !acted {
+        return;
+    }
+    let after = field_layout(group, rect, scale, theme);
+    if before.popup != after.popup {
+        damage.add(before.popup);
+        damage.add(after.popup);
     }
 }
 

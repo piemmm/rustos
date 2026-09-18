@@ -292,7 +292,7 @@ mod program {
         declare_app_bar(window.client(), binding.endpoint());
         // Fixed size: the window is a short form, and a resizable one would
         // only stretch six fields across empty space.
-        let bounds = view::window_bounds(desktop.scale());
+        let bounds = view::window_bounds(&editor, desktop.scale(), themes.active());
         let mode = app::mode_for(bounds.width, bounds.height);
         let server = match window.open(binding.endpoint(), &mode, view::TITLE, WindowSizing::Fixed)
         {
@@ -345,7 +345,9 @@ mod program {
                     // actions are reached with Enter and Escape, which every
                     // form here answers to.
                     let at = pointer_point(x, y);
-                    if let Some(field) = view::field_at(desktop.scale(), at.x, at.y) {
+                    if let Some(field) =
+                        view::field_at(&editor, desktop.scale(), themes.active(), at)
+                    {
                         editor.set_focus(field);
                     }
                 }

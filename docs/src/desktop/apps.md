@@ -2329,7 +2329,7 @@ invited to correct. Empty fields compose nothing, so an unset clock
 cannot be committed by accident.
 
 **Validation refuses, never corrects.** All six fields — year, month and
-day on the first row, hour, minute and second on the second — are checked
+day in the first group, hour, minute and second in the second — are checked
 before anything is set, and the first fault is named in the window: a
 month outside 1–12, an hour outside 0–23, a minute or second outside
 0–59, or a day that does not exist in the month and year entered (31
@@ -2340,9 +2340,12 @@ a 64-bit `Time64`, and the reading is UTC because the system keeps no
 timezone offset.
 
 The host-tested engine holds the fields, the faults, the composition, and
-the one status line; `view` holds the window's geometry (a three-column
-grid, the date above the time) and its paint through the shared
-`lib/controls` dialog and text field. The `Run` binary is the usual
+the one status line; `view` holds the window's geometry and its paint
+through the shared `lib/controls` dialog and the form-field family — two
+captioned `FieldGroup`s, the date above the time, each row a label and a
+`TextField` in its slot. The window's extent is measured from what those
+groups need at the active density and type ladder, so a wider ladder is
+seated rather than pushed under the action band. The `Run` binary is the usual
 windowed-app composition: one granted frame region, one event mailbox
 parked on a wait-set, and the `WindowClient` calls.
 

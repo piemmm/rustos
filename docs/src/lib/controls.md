@@ -52,6 +52,7 @@ under the floor and are unchanged.
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
+| `form` | `FieldRow`, `FieldGroup` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
@@ -110,6 +111,62 @@ the chain that renders it — its clients are not all in the process that owns t
 chain. The wire model is a **bounded subset**, structurally: it has no field for
 an authority state, so a decoded row can never claim that *the system* refused a
 command (`plans/NEW-MENUS.md` §1.6).
+
+### One setting, and the group it lines up in
+
+A settings surface is a column of captioned groups of label/description/control
+rows, and that shape is the `form` family's, not each application's. A
+`FieldRow` is one setting: a leading label, an optional secondary description,
+and a trailing slot holding one real `Toggle`, `ComboBox`, `Slider`,
+`TextField`, `Button`, a read-only `Reading`, or a stated `Unmeasured` absence
+of one. A `FieldGroup` is the captioned plate those rows sit on, with an
+optional footnote beneath. Both compose the row chrome `ListRow` and `TableRow`
+draw — the hover wash, the leading pressure and selection rails, the activity
+seam, the trailing Signal Bead band, the focus ring — from the one shared
+recipe in the crate's paint core, so a change to how a selected or refused row
+reads cannot diverge between a list and a form.
+
+Three rules are the family's own, and each is what stops a settings pane lying
+about the machine:
+
+- **A row's disposition is the setting's.** `FieldRow::set_state` shares the
+  row's enablement, authority and validation — exactly what decides
+  actionability — with the control in its slot, so a denied or pending setting
+  cannot hold an actionable control and a pane states a refusal by
+  setting the *row* rather than remembering to set two states in step. A
+  disabled row mutes; a denied one wears the Authority Mark in a band that is
+  reserved either way, so becoming denied never moves the row's own control.
+- **Room is given out control, label, description.** The slot is served first
+  — never past half the row's content span, so a label always has room to be
+  read — the label elides into what remains, and the description draws only
+  while the label fits *whole*: once the setting's own name has had to be cut,
+  a second cut line beneath it is noise. Words are what a narrowing row loses,
+  because the control is what the reader came for.
+- **The owner places the choice popup.** An expanded `ComboBox` list is drawn
+  above every group, so a row cannot paint it — the group's later rows would
+  cover it. `FieldGroup::popup_anchor` names the row and the slot to anchor the
+  list to; the owner places it, hands it back through `FieldLayout::with_popup`,
+  and paints it with `render_popup` once every group is drawn. Only the owner
+  knows the viewport the list has to fit in.
+
+A group resolves the one slot column its controls line up in
+(`FieldGroup::slot_column`): the widest width any of its rows wants, or the
+half-span ceiling when a row's control takes whatever column it is given (a
+cramped slider cannot be aimed and a cramped entry cannot be read). Each
+control answers that width itself — `Button::measured_width`,
+`ComboBox::measured_width`, `Toggle::measured_width` — so the column comes from
+the controls' own layout rather than a second copy of it. A combo box measures
+its *widest* choice, not the selected one, so choosing a different value never
+resizes the field or moves the column.
+
+A row reports what the control in its slot asked for and commits nothing
+itself. `FieldAction::SetValue` is a slider's live value and
+`FieldAction::Settled` its settle point; a durable change — a document posted,
+a store written — is made on the settle alone.
+
+Present-day consumers: the widget gallery's Forms tab and the Date & Time
+window, whose two groups of three civil fields replaced a hand-rolled
+three-column grid.
 
 ### Reporting a reading, and standing beside a list
 

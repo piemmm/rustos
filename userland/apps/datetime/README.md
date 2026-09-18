@@ -12,11 +12,15 @@ editable civil fields and steps the clock to what they say
   validation, the `Time64` instant they compose, and the one `Status` line
   every surface states a result through. `no_std` + `alloc`, so it links
   unchanged into the freestanding binary and is unit-tested on the host.
-- **`src/view.rs` — the window.** Its geometry (a three-column grid: the
-  date on the first row, the time on the second) and its paint, composed
-  from the shared `lib/controls` dialog and text field. Every length is
-  authored in logical pixels and converted through the one shared
-  `tairix_geometry::Scale`.
+- **`src/view.rs` — the window.** Its geometry and its paint, composed
+  from the shared `lib/controls` dialog and the form-field family: two
+  captioned `FieldGroup`s — the date above, the time below — each holding
+  one `FieldRow` per field with a `TextField` in its slot. The family owns
+  the row chrome, the slot column the fields line up in, and the
+  label/field arithmetic, so this module holds only which fields each
+  group carries. The window's extent is *measured* from what those groups
+  need at the active density and type ladder rather than fixed, so a wider
+  ladder is seated rather than pushed under the action band.
 - **`src/run.rs` — the `Run` binary.** The on-disk bundle's entry point:
   one granted frame region, one event mailbox parked on a wait-set, and
   the `WindowClient` calls. An inert stub on the host.

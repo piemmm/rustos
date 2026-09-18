@@ -9,8 +9,8 @@ datetime — set the machine's date and time
 ## DESCRIPTION
 
 Opens a desktop window showing the machine's clock in six editable fields
-— year, month and day on the first row, hour, minute and second on the
-second — and sets the clock to what they say. Nothing changes until
+— year, month and day under **Date**, hour, minute and second under
+**Time** — and sets the clock to what they say. Nothing changes until
 **Set** is pressed.
 
 The reading is UTC. TAIRiX keeps no timezone offset, so there is no local
