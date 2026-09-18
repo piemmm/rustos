@@ -44,7 +44,7 @@ use crate::geometry::{Point, Rect, Region, Scale};
 use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::{blend_run, Surface};
 use crate::viewport::{FurnitureHit, RootViewport};
-use crate::window::{PointerCatch, Window, WindowId, WindowRow};
+use crate::window::{PointerCatch, ResizeBounds, Window, WindowId, WindowRow};
 
 /// The furniture a composite pass built for itself because the cache would
 /// not retain it, kept alive for exactly that pass.
@@ -2384,20 +2384,25 @@ impl Compositor {
         .flatten()
     }
 
-    /// Adopt the minimum client extent the application owning `id` declared
-    /// when it created its window, in physical pixels; `(0, 0)` declares
-    /// none. Returns `false` for an unknown id (fail closed).
+    /// Adopt the client-extent range the application owning `id` declared
+    /// when it created its window, in physical pixels; either half `(0, 0)`
+    /// declares none. Returns `false` for an unknown id (fail closed).
     ///
-    /// It bounds what a *user* may drag the window down to
-    /// ([`window_min_outer_size`](Self::window_min_outer_size)), not what the
+    /// It bounds what a *user* may drag the window to
+    /// ([`window_resize_bounds`](Self::window_resize_bounds)), not what the
     /// application may ask for itself: an application sizing its own window
-    /// is choosing that size, and a window already smaller than the minimum
-    /// is left where it is rather than grown under its owner.
-    pub fn set_window_min_client_size(&mut self, id: WindowId, min_w: u32, min_h: u32) -> bool {
+    /// is choosing that size, and one already outside the range is left
+    /// where it is rather than resized under its owner.
+    pub fn set_window_client_size_range(
+        &mut self,
+        id: WindowId,
+        min: (u32, u32),
+        max: (u32, u32),
+    ) -> bool {
         let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
             return false;
         };
-        window.set_min_client_size(min_w, min_h);
+        window.set_client_size_range(min, max);
         true
     }
 
@@ -2413,17 +2418,19 @@ impl Compositor {
         self.window(id)?.drag_surface(self.scale, &self.theme)
     }
 
-    /// The smallest outer size an interactive resize may take the window
-    /// named by `id` down to, at the active scale and theme — `None` for an
-    /// unknown id.
+    /// The outer extents an interactive resize may take the window named by
+    /// `id` between, at the active scale and theme — `None` for an unknown
+    /// id.
     ///
-    /// The greater of the window furniture's own floor (the title bar's
-    /// commands and a drag surface between them) and the owning
-    /// application's declared minimum client extent grown by the band.
+    /// The floor is the greater of the window furniture's own (the title
+    /// bar's commands and a drag surface between them) and the owning
+    /// application's declared minimum client extent grown by the band; the
+    /// ceiling is the application's declared maximum, where it declared one,
+    /// grown by the same band.
     #[must_use]
-    pub fn window_min_outer_size(&self, id: WindowId) -> Option<(u32, u32)> {
+    pub fn window_resize_bounds(&self, id: WindowId) -> Option<ResizeBounds> {
         let window = self.window(id)?;
-        Some(window.min_outer_size(self.scale, &self.theme))
+        Some(window.resize_bounds(self.scale, &self.theme))
     }
 
     /// The region an interactive resize of the window named by `id` may be

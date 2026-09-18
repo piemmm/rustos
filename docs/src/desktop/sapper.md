@@ -75,10 +75,26 @@ eyes on a loss.
 Every length is authored in logical pixels at the reference density and
 converted through the one shared `tairix_geometry::Scale`, so a dense display
 gets a bigger board rather than a smaller one. The window is resizable: the
-cell side is derived from the space available, and the application declares a
-resize floor from the board's smallest legible cell so the grid can never be
-squeezed away. A resize the *user* is dragging is adopted as given and never
-answered with a size of the application's own, which would fight the drag.
+cell side is derived from the space available, between a floor where the cell
+stops being legible and a ceiling where it stops growing.
+
+The size the window opens at and both ends of that range are one answer
+(`WindowGeometry::resolve`), because they are one decision read at three cell
+sides — and stating them separately is how a window comes to be opened
+outside its own declared range. The opening size is additionally capped to
+the display, since a board taller than the screen puts its own last rows out
+of reach. The window manager enforces the range, so a drag stops at the floor
+and a drag or a maximize stops at the ceiling rather than growing a window
+that is all margin.
+
+A resize the *user* is dragging is adopted as given and never answered with a
+size of the application's own, which would fight the drag — but adopting it
+means re-mapping the frame region onto it, so the board is always laid out in
+the extent it is actually drawn into. The board it asks for changes with the
+board being played and with the desktop's density, and each of those restates
+the range to the window manager as well as re-shaping the window; a window
+opened after one of them was chosen with no window on screen therefore opens
+at the size that board needs, laid out for it before its first frame.
 
 The two readouts are drawn as seven-segment instruments — a dark plate on
 either appearance, because unlit segments need a dark plate to read as unlit.

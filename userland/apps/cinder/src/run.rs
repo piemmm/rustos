@@ -938,6 +938,10 @@ mod program {
         WindowSizing::Resizable {
             min_width_px: scale.scale_length(layout::PEN_MIN_WIDTH),
             min_height_px: scale.scale_length(layout::PEN_MIN_HEIGHT),
+            // No ceiling: the pen is terrain the companion roams, and more
+            // of it is more to roam.
+            max_width_px: 0,
+            max_height_px: 0,
         }
     }
 

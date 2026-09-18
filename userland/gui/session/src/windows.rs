@@ -749,14 +749,15 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // reserving a visible band — are offered.
         self.shell
             .decorate_window(self.compositor, wm, title, sizing.resizable());
-        // The smallest client the app said it can lay out at bounds what a
-        // *user* may drag the window down to, so a drag never squeezes the app
-        // past the point where it resizes itself back and the two fight. The
-        // window manager still enforces its own furniture floor over the top.
-        self.compositor.set_window_min_client_size(
+        // The range of clients the app said it can lay out bounds what a
+        // *user* may drag the window to, so a drag never squeezes the app past
+        // the point where it resizes itself back and the two fight, and never
+        // grows a window past the size its content stops filling. The window
+        // manager still enforces its own furniture floor over the top.
+        self.compositor.set_window_client_size_range(
             wm,
-            sizing.min_width_px(),
-            sizing.min_height_px(),
+            (sizing.min_width_px(), sizing.min_height_px()),
+            (sizing.max_width_px(), sizing.max_height_px()),
         );
         // Placed once the decoration band is on and the outer rectangle is
         // therefore known, so the clamp measures the real window rather than
@@ -1068,6 +1069,37 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         }
     }
 
+    fn window_sizing_changed(&mut self, window_id: u64, sizing: WindowSizing) -> Result<(), Errno> {
+        // The engine attested the caller, validated that the window is its
+        // own, and refused a range naming no reachable size. What is left to
+        // check is the one thing only the session can see: whether the
+        // sizing agrees with the furniture the window was decorated with.
+        // Resizability decides whether there is a grabber and a live size
+        // toggle at all, so a window cannot change kind under a range
+        // restatement — it fails closed instead of ending up decorated one
+        // way and bounded the other.
+        let Some(record) = self.windows.records.get(&window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let wm = record.wm;
+        let decorated_resizable = self
+            .compositor
+            .window_frame(wm)
+            .is_some_and(|frame| frame.furniture().resizable);
+        if decorated_resizable != sizing.resizable() {
+            return Err(Errno::NotSupported);
+        }
+        if self.compositor.set_window_client_size_range(
+            wm,
+            (sizing.min_width_px(), sizing.min_height_px()),
+            (sizing.max_width_px(), sizing.max_height_px()),
+        ) {
+            Ok(())
+        } else {
+            Err(Errno::NotFound)
+        }
+    }
+
     fn tooltip_declared(
         &mut self,
         window_id: u64,
@@ -1274,6 +1306,8 @@ mod tests {
     const RESIZABLE: WindowSizing = WindowSizing::Resizable {
         min_width_px: 0,
         min_height_px: 0,
+        max_width_px: 0,
+        max_height_px: 0,
     };
 
     fn mode(width: u32, height: u32, format: DisplayFormat) -> DisplayMode {
@@ -2766,7 +2800,7 @@ mod tests {
     }
 
     #[test]
-    fn window_opened_gives_the_window_manager_the_declared_minimum() {
+    fn window_opened_gives_the_window_manager_the_declared_range() {
         // What the app said it needs, honoured by whoever drags the window —
         // never by the app clamping a size it was granted and resizing back,
         // which fights the drag once per pointer sample.
@@ -2791,23 +2825,89 @@ mod tests {
                     WindowSizing::Resizable {
                         min_width_px: 900,
                         min_height_px: 700,
+                        max_width_px: 1200,
+                        max_height_px: 1000,
                     },
                 ),
                 open_one_sized(&mut host, 4, RESIZABLE),
             )
         };
-        let floor = compositor
-            .window_min_outer_size(declared)
+        let bounds = compositor
+            .window_resize_bounds(declared)
             .expect("decorated");
         assert!(
-            floor.0 > 900 && floor.1 > 700,
-            "the floor holds the declared client and the furniture around it, not {floor:?}"
+            bounds.min_width > 900 && bounds.min_height > 700,
+            "the floor holds the declared client and the furniture around it, not {bounds:?}"
         );
         assert!(
-            compositor
-                .window_min_outer_size(bare)
-                .is_some_and(|bare| bare.0 < floor.0 && bare.1 < floor.1),
+            bounds.max_width.is_some_and(|width| width > 1200)
+                && bounds.max_height.is_some_and(|height| height > 1000),
+            "and the ceiling holds the declared client and the same furniture, not {bounds:?}"
+        );
+        let bare = compositor.window_resize_bounds(bare).expect("decorated");
+        assert!(
+            bare.min_width < bounds.min_width && bare.min_height < bounds.min_height,
             "a window declaring no minimum of its own is bounded by the furniture alone"
+        );
+        assert_eq!(
+            (bare.max_width, bare.max_height),
+            (None, None),
+            "and one declaring no maximum is bounded above by nothing"
+        );
+    }
+
+    #[test]
+    fn a_restated_range_replaces_the_declared_one_but_never_the_window_s_kind() {
+        // An app whose content constraints move restates its range on the
+        // window it already has: without this the window manager goes on
+        // enforcing the range of content the app has stopped showing — the
+        // defect a board switching to a larger board used to hit. What it
+        // may not restate is whether the window is resizable at all, which
+        // is what it was decorated for.
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            relay: &mut RefusingRelay,
+        };
+        let wm = open_one_sized(&mut host, 3, RESIZABLE);
+        assert_eq!(
+            host.window_sizing_changed(
+                3,
+                WindowSizing::Resizable {
+                    min_width_px: 300,
+                    min_height_px: 200,
+                    max_width_px: 800,
+                    max_height_px: 600,
+                },
+            ),
+            Ok(())
+        );
+        // A fixed sizing on a window decorated resizable would leave it with
+        // a grabber and no range to drag within, so it is refused whole.
+        assert_eq!(
+            host.window_sizing_changed(3, WindowSizing::Fixed),
+            Err(Errno::NotSupported)
+        );
+        // And a window the session does not know is not one to bound.
+        assert_eq!(
+            host.window_sizing_changed(99, RESIZABLE),
+            Err(Errno::NotFound)
+        );
+
+        let bounds = compositor.window_resize_bounds(wm).expect("decorated");
+        assert!(bounds.min_width > 300 && bounds.min_height > 200);
+        assert!(
+            bounds.max_width.is_some_and(|width| width > 800)
+                && bounds.max_height.is_some_and(|height| height > 600),
+            "the restated range is the one in force, not the one the create declared"
         );
     }
 

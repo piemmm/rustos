@@ -707,6 +707,10 @@ mod program {
         let sizing = WindowSizing::Resizable {
             min_width_px: desktop.scale().scale_length(MIN_WIN_WIDTH),
             min_height_px: desktop.scale().scale_length(MIN_WIN_HEIGHT),
+            // No ceiling: the chooser lays out more preview tiles per row as
+            // it grows, so no size of it is dead margin.
+            max_width_px: 0,
+            max_height_px: 0,
         };
         let server = match surface.window.open(event_endpoint, &mode, TITLE, sizing) {
             Ok(server) => server,

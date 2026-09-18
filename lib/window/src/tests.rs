@@ -178,6 +178,7 @@ struct RecordingHost {
     refuse_tooltip: Option<Errno>,
     blur_sets: Vec<(u64, u16)>,
     retitled: Vec<(u64, String)>,
+    resized_range: Vec<(u64, WindowSizing)>,
     app_bars: Vec<(ProcId, AppBar)>,
     app_bars_withdrawn: Vec<ProcId>,
     refuse_app_bar: Option<Errno>,
@@ -185,6 +186,7 @@ struct RecordingHost {
     refuse_popup: bool,
     refuse_resize: Option<Errno>,
     refuse_retitle: Option<Errno>,
+    refuse_sizing: Option<Errno>,
     refuse_pick: Option<Errno>,
     refuse_menu_open: Option<Errno>,
     hand_overs: Vec<(ProcId, String, Option<HandOverDocument>)>,
@@ -215,6 +217,7 @@ impl Default for RecordingHost {
             refuse_tooltip: None,
             blur_sets: Vec::new(),
             retitled: Vec::new(),
+            resized_range: Vec::new(),
             app_bars: Vec::new(),
             app_bars_withdrawn: Vec::new(),
             refuse_app_bar: None,
@@ -222,6 +225,7 @@ impl Default for RecordingHost {
             refuse_popup: false,
             refuse_resize: None,
             refuse_retitle: None,
+            refuse_sizing: None,
             refuse_pick: None,
             refuse_menu_open: None,
             hand_overs: Vec::new(),
@@ -329,6 +333,14 @@ impl WindowHost for RecordingHost {
             return Err(err);
         }
         self.resized.push((window_id, *surface));
+        Ok(())
+    }
+
+    fn window_sizing_changed(&mut self, window_id: u64, sizing: WindowSizing) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_sizing {
+            return Err(err);
+        }
+        self.resized_range.push((window_id, sizing));
         Ok(())
     }
 
@@ -453,6 +465,14 @@ impl WindowHost for MinimalHost {
     }
 
     fn window_resized(&mut self, _window_id: u64, _surface: &DisplayMode) -> Result<(), Errno> {
+        Ok(())
+    }
+
+    fn window_sizing_changed(
+        &mut self,
+        _window_id: u64,
+        _sizing: WindowSizing,
+    ) -> Result<(), Errno> {
         Ok(())
     }
 
@@ -840,6 +860,8 @@ fn create_forwards_the_sizing_contract_to_the_host() {
     let floor = WindowSizing::Resizable {
         min_width_px: 240,
         min_height_px: 160,
+        max_width_px: 0,
+        max_height_px: 0,
     };
 
     client
@@ -873,6 +895,8 @@ fn a_below_minimum_resize_is_not_answered_with_a_resize_of_the_client_s_own() {
     let floor = WindowSizing::Resizable {
         min_width_px: 240,
         min_height_px: 160,
+        max_width_px: 0,
+        max_height_px: 0,
     };
     let (window, _) = client
         .create(7, EVENTS_A, 1, &SURFACE, "Files", floor)
@@ -999,11 +1023,16 @@ fn a_caller_cannot_touch_another_clients_window() {
     );
     assert_eq!(client.close(window), Err(Errno::NotFound));
     assert_eq!(client.set_title(window, "B's"), Err(Errno::NotFound));
+    assert_eq!(
+        client.set_sizing(window, WindowSizing::Fixed),
+        Err(Errno::NotFound)
+    );
     {
         let inner = loopback.borrow();
         assert_eq!(inner.server.window_count(), 1);
         assert!(inner.host.closed.is_empty());
         assert!(inner.host.retitled.is_empty());
+        assert!(inner.host.resized_range.is_empty());
     }
 
     // A still owns it.
@@ -1011,6 +1040,44 @@ fn a_caller_cannot_touch_another_clients_window() {
     client
         .present(window, 0, full_damage())
         .expect("A presents");
+}
+
+#[test]
+fn an_owner_restates_its_window_s_range_and_a_refusal_changes_nothing() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "Sapper").expect("A creates");
+    let range = WindowSizing::Resizable {
+        min_width_px: 300,
+        min_height_px: 200,
+        max_width_px: 900,
+        max_height_px: 700,
+    };
+    client
+        .set_sizing(window, range)
+        .expect("the owner restates its range");
+    assert_eq!(loopback.borrow().host.resized_range, [(window, range)]);
+
+    // A range naming no reachable size never reaches the session.
+    assert_eq!(
+        client.set_sizing(
+            window,
+            WindowSizing::Resizable {
+                min_width_px: 300,
+                min_height_px: 200,
+                max_width_px: 100,
+                max_height_px: 700,
+            },
+        ),
+        Err(Errno::OutOfRange)
+    );
+    // An unknown window is refused, and a host refusal leaves the
+    // previous range standing.
+    assert_eq!(client.set_sizing(window + 1, range), Err(Errno::NotFound));
+    loopback.borrow_mut().host.refuse_sizing = Some(Errno::NotSupported);
+    assert_eq!(client.set_sizing(window, range), Err(Errno::NotSupported));
+    assert_eq!(loopback.borrow().host.resized_range.len(), 1);
 }
 
 #[test]
@@ -3787,6 +3854,14 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
         }
 
         fn window_resized(&mut self, _window_id: u64, _surface: &DisplayMode) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn window_sizing_changed(
+            &mut self,
+            _window_id: u64,
+            _sizing: WindowSizing,
+        ) -> Result<(), Errno> {
             Ok(())
         }
 

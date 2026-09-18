@@ -1362,7 +1362,7 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
 /// A `Vec` rather than an array: a `WindowRequest` carries a whole menu
 /// inline, so a dozen of them is more than belongs on a stack frame.
 fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
-    std::vec![
+    let mut seeds = std::vec![
         WindowRequest::Create {
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -1375,6 +1375,17 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             sizing: WindowSizing::Resizable {
                 min_width_px: 320,
                 min_height_px: 240,
+                max_width_px: 1920,
+                max_height_px: 1080,
+            },
+        },
+        WindowRequest::SetSizing {
+            window_id: 3,
+            sizing: WindowSizing::Resizable {
+                min_width_px: 320,
+                min_height_px: 240,
+                max_width_px: 1920,
+                max_height_px: 1080,
             },
         },
         WindowRequest::CreatePopup {
@@ -1418,6 +1429,16 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             window_id: 5,
             radius_px: 8,
         },
+    ];
+    seeds.extend(window_request_text_seeds());
+    seeds
+}
+
+/// The seeds carrying variable-width text — a menu, a hand-over path, a
+/// tooltip — in their narrowest and widest forms, so a flip lands on each
+/// length prefix.
+fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
+    std::vec![
         WindowRequest::OpenMenu {
             window_id: 3,
             anchor: WindowRegion::new(-12, 40, 96, 20).expect("a representable anchor"),
@@ -1431,7 +1452,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             open_id: 11,
         },
         // Both hand-over shapes: a bare launch, and one carrying a document,
-        // so a flip lands on the grant handle and on each length prefix.
+        // so a flip lands on the grant handle too.
         WindowRequest::HandOverLaunch {
             run_path: BundleRunPath::new("/System/Applications/view.app/Run")
                 .expect("a valid bundle path"),
@@ -1446,7 +1467,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             }),
         },
         // Both tooltip shapes: one carrying text, and the empty one that
-        // withdraws a declaration, so a flip lands on each length prefix.
+        // withdraws a declaration.
         WindowRequest::SetTooltip {
             window_id: 3,
             region: WindowRegion::new(-12, 40, 96, 20).expect("a representable region"),

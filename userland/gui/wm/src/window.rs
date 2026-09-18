@@ -209,6 +209,54 @@ pub struct Window {
     /// *user* dragging an edge is one the application cannot refuse without
     /// fighting the drag.
     min_client: (u32, u32),
+    /// The largest client extent the owning application declared its content
+    /// grows to, in physical pixels; `(0, 0)` for an application that
+    /// declared none and is content at any size.
+    ///
+    /// Bounds a resize on the same terms as
+    /// [`min_client`](Self::min_client), from the other end: an application
+    /// whose content stops growing gains only dead margin past it, so a drag
+    /// stops there and a maximize grows the window that far and no further.
+    max_client: (u32, u32),
+}
+
+/// The outer extents an interactive resize of one window is held between,
+/// in physical pixels.
+///
+/// One value rather than a floor read from one call and a ceiling from
+/// another: the two are one window's answer, and a drag that took them from
+/// two reads could clamp against a floor and a ceiling resolved at different
+/// scales or themes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ResizeBounds {
+    /// The smallest outer width a drag may reach; never zero.
+    pub min_width: u32,
+    /// The smallest outer height a drag may reach; never zero.
+    pub min_height: u32,
+    /// The largest outer width a drag may reach, or `None` where the owning
+    /// application declared no ceiling on that axis.
+    pub max_width: Option<u32>,
+    /// The largest outer height a drag may reach, on the same terms as
+    /// [`max_width`](Self::max_width).
+    pub max_height: Option<u32>,
+}
+
+impl ResizeBounds {
+    /// `outer` with each axis held inside these bounds.
+    ///
+    /// The floor wins a crossing, because a window below its floor cannot be
+    /// laid out at all while one below a ceiling merely has margin to spare.
+    #[must_use]
+    pub fn clamp(&self, outer: (u32, u32)) -> (u32, u32) {
+        let held = |extent: u32, min: u32, max: Option<u32>| match max {
+            Some(max) => extent.min(max).max(min),
+            None => extent.max(min),
+        };
+        (
+            held(outer.0, self.min_width, self.max_width),
+            held(outer.1, self.min_height, self.max_height),
+        )
+    }
 }
 
 impl Window {
@@ -271,6 +319,7 @@ impl Window {
             app_presented: false,
             parent: None,
             min_client: (0, 0),
+            max_client: (0, 0),
         }
     }
 
@@ -408,9 +457,11 @@ impl Window {
         self.size_state
     }
 
-    /// Adopt the owning application's declared minimum client extent.
-    pub(crate) fn set_min_client_size(&mut self, min_w: u32, min_h: u32) {
-        self.min_client = (min_w, min_h);
+    /// Adopt the owning application's declared client-extent range, each
+    /// half `(0, 0)` where it declared none.
+    pub(crate) fn set_client_size_range(&mut self, min: (u32, u32), max: (u32, u32)) {
+        self.min_client = min;
+        self.max_client = max;
     }
 
     /// The screen rectangle of this window's move surface: the span of title
@@ -422,17 +473,22 @@ impl Window {
         Some(frame.title_bar().layout(band, scale, theme).drag)
     }
 
-    /// The smallest outer rectangle this window may be resized to, in
-    /// physical pixels: the greater of its own furniture's floor and the
-    /// owning application's declared minimum client extent grown by the
-    /// furniture band.
+    /// The outer extents an interactive resize may take this window
+    /// between, in physical pixels.
     ///
-    /// Both floors are real. The furniture's is what keeps the title bar's
-    /// commands seated with a drag surface between them, so it holds even
-    /// for an application that declared nothing; the application's is what
-    /// keeps its content laying out, so it holds even where the furniture
-    /// would fit in less. Never zero on either axis.
-    pub(crate) fn min_outer_size(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
+    /// The floor is the greater of this window's own furniture floor and the
+    /// owning application's declared minimum client extent grown by the
+    /// furniture band. Both are real: the furniture's is what keeps the
+    /// title bar's commands seated with a drag surface between them, so it
+    /// holds even for an application that declared nothing; the
+    /// application's is what keeps its content laying out, so it holds even
+    /// where the furniture would fit in less. Never zero on either axis.
+    ///
+    /// The ceiling is the application's alone, grown by the same band — the
+    /// furniture has no maximum — and absent on an axis it declared none
+    /// for. It never falls below the floor: a window that cannot be laid out
+    /// smaller is not made smaller to honour a ceiling.
+    pub(crate) fn resize_bounds(&self, scale: Scale, theme: &Theme) -> ResizeBounds {
         let (band_w, band_h) = match self.band {
             Some(insets) => (
                 insets.left.saturating_add(insets.right),
@@ -444,10 +500,18 @@ impl Window {
             .frame
             .as_ref()
             .map_or((1, 1), |frame| frame.min_outer_size(scale, theme));
-        (
-            floor_w.max(self.min_client.0.saturating_add(band_w)).max(1),
-            floor_h.max(self.min_client.1.saturating_add(band_h)).max(1),
-        )
+        let min_width = floor_w.max(self.min_client.0.saturating_add(band_w)).max(1);
+        let min_height = floor_h.max(self.min_client.1.saturating_add(band_h)).max(1);
+        let ceiling = |declared: u32, band: u32, floor: u32| match declared {
+            0 => None,
+            client => Some(client.saturating_add(band).max(floor)),
+        };
+        ResizeBounds {
+            min_width,
+            min_height,
+            max_width: ceiling(self.max_client.0, band_w, min_width),
+            max_height: ceiling(self.max_client.1, band_h, min_height),
+        }
     }
 
     /// This window's window-manager-owned root-viewport scrollbars, if any.
@@ -1171,11 +1235,19 @@ impl Window {
     }
 
     /// Toggle a decorated, resizable window between restored and maximized,
-    /// resizing it to `work_area` (the session work rectangle) on maximize
-    /// and back to the geometry it had when maximized on restore. Returns
-    /// the new size state and the resulting client rectangle, or `None`
-    /// (changing nothing) for an undecorated window, a non-resizable one,
-    /// or when the resize itself fails closed.
+    /// resizing it to as much of `work_area` (the session work rectangle) as
+    /// its declared resize range allows on maximize, and back to the
+    /// geometry it had when maximized on restore. Returns the new size state
+    /// and the resulting client rectangle, or `None` (changing nothing) for
+    /// an undecorated window, a non-resizable one, or when the resize itself
+    /// fails closed.
+    ///
+    /// An application whose content stops growing declares a ceiling, and
+    /// maximize honours it: "as large as this window is useful" is a better
+    /// answer than a screen filled with its dead margin. The window still
+    /// takes the work area's origin, exactly as an unconstrained maximize
+    /// does, so where a maximized window appears does not depend on whether
+    /// it has a ceiling.
     ///
     /// The frame's furniture size is updated in step, so the size-toggle
     /// control shows the *next* action (Restore while maximized, Maximize
@@ -1191,7 +1263,15 @@ impl Window {
             return None;
         }
         let (target, next_state) = match self.size_state {
-            WindowSizeState::Restored => (work_area, WindowSizeState::Maximized),
+            WindowSizeState::Restored => {
+                let held = self
+                    .resize_bounds(scale, theme)
+                    .clamp((work_area.width, work_area.height));
+                (
+                    Rect::new(work_area.left(), work_area.top(), held.0, held.1),
+                    WindowSizeState::Maximized,
+                )
+            }
             WindowSizeState::Maximized => (
                 self.restore_outer.unwrap_or_else(|| self.bounds()),
                 WindowSizeState::Restored,

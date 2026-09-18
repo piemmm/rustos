@@ -8,14 +8,16 @@
 //! The window is one header band — mine counter, new-game button, clock — over
 //! a grid of square cells, centred in whatever is left. The cell side is
 //! derived from the space available rather than fixed, so a resized window
-//! shows the same board larger; the application declares a resize floor from
-//! [`Layout::minimum`] so the grid can never be squeezed smaller than its
-//! smallest legible cell.
+//! shows the same board larger, between the legibility floor and the ceiling
+//! the cell stops growing at. [`WindowGeometry`] is what the application asks
+//! the window manager for: the size it opens at and the range both of those
+//! bounds describe, as one value.
 //!
 //! Pure integer arithmetic with no division by a value that can be zero: a
 //! board always has at least one column and one row, and a cell side is clamped
 //! to at least one pixel.
 
+use tairix_abi::window_ipc::WindowSizing;
 use tairix_geometry::{Point, Rect, Scale};
 
 use crate::board::{Coord, Dimensions};
@@ -25,8 +27,9 @@ use crate::board::{Coord, Dimensions};
 const CELL_MIN: u32 = 18;
 /// The cell size a window opens at, in logical pixels.
 const CELL_IDEAL: u32 = 26;
-/// The largest a cell grows to in an over-sized window, in logical pixels.
-/// Past this the board stops growing and centres in the space instead.
+/// The largest a cell grows to, in logical pixels. The application's declared
+/// resize ceiling is the window this cell fills, because past it the board
+/// stops growing and every further pixel of window is margin.
 const CELL_MAX: u32 = 46;
 /// The space between two cells, in logical pixels.
 const GAP: u32 = 2;
@@ -120,19 +123,6 @@ impl Layout {
         }
     }
 
-    /// The client size a window of `dims` opens at, in physical pixels.
-    #[must_use]
-    pub fn preferred(dims: Dimensions, scale: Scale) -> (u32, u32) {
-        window_for(dims, scale.scale_length(CELL_IDEAL).max(1), scale)
-    }
-
-    /// The smallest client size the grid stays legible in, in physical pixels —
-    /// the resize floor the application declares to the window manager.
-    #[must_use]
-    pub fn minimum(dims: Dimensions, scale: Scale) -> (u32, u32) {
-        window_for(dims, scale.scale_length(CELL_MIN).max(1), scale)
-    }
-
     /// Where `at` is drawn. Off-board coordinates give an empty rectangle, so a
     /// stale coordinate paints nothing rather than somewhere wrong.
     #[must_use]
@@ -192,6 +182,74 @@ impl Layout {
         let row = index(point.y - self.grid.top(), step, self.rows)?;
         Some(Coord::new(col, row))
     }
+}
+
+/// The window a board asks the window manager for: the client size it opens
+/// at and the range a *user* may resize it within, all in physical pixels.
+///
+/// One value, because the three are one decision. The board's cell side is
+/// derived from the window, so the size it opens at, the size below which the
+/// cell stops being legible, and the size above which the cell stops growing
+/// are the same arithmetic read at three cell sides; stating them separately
+/// is how a window comes to be opened outside its own declared range.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct WindowGeometry {
+    /// The client width the window opens at.
+    pub width: u32,
+    /// The client height the window opens at.
+    pub height: u32,
+    /// The range the window manager holds an interactive resize to: the cell
+    /// stays legible at the floor and has stopped growing at the ceiling, so
+    /// a drag or a maximize past it would add only margin.
+    pub sizing: WindowSizing,
+}
+
+impl WindowGeometry {
+    /// The window a board of `dims` asks for at `scale`, on a display of
+    /// `screen` physical pixels.
+    ///
+    /// The opening size is capped to the display, because a window taller
+    /// than the screen puts its own last rows out of reach. The *ceiling* is
+    /// not: where a user drags a window is theirs to decide and the desktop
+    /// already bounds it. The floor follows the cap down, so a display too
+    /// small to hold even the smallest legible board gets a window it can be
+    /// dragged around rather than one the window manager would snap larger
+    /// than the screen on first touch — the grid clips at that size, which is
+    /// the best a screen that small affords.
+    #[must_use]
+    pub fn resolve(dims: Dimensions, scale: Scale, screen: Rect) -> Self {
+        let cell = |logical: u32| window_for(dims, scale.scale_length(logical).max(1), scale);
+        let (legible_width, legible_height) = cell(CELL_MIN);
+        let (max_width_px, max_height_px) = cell(CELL_MAX);
+        let (ideal_width, ideal_height) = cell(CELL_IDEAL);
+        let width = fits(ideal_width, screen.width);
+        let height = fits(ideal_height, screen.height);
+        Self {
+            width,
+            height,
+            sizing: WindowSizing::Resizable {
+                min_width_px: legible_width.min(width),
+                min_height_px: legible_height.min(height),
+                max_width_px,
+                max_height_px,
+            },
+        }
+    }
+
+    /// The client rectangle a window of this geometry opens with.
+    #[must_use]
+    pub const fn client(&self) -> Rect {
+        Rect::new(0, 0, self.width, self.height)
+    }
+}
+
+/// `wanted` held to `available`, and never nothing: a display that reports no
+/// extent at all is not a reason to ask for a window with no pixels.
+fn fits(wanted: u32, available: u32) -> u32 {
+    if available == 0 {
+        return wanted.max(1);
+    }
+    wanted.min(available).max(1)
 }
 
 /// The pixels `count` cells and the gaps between them occupy.

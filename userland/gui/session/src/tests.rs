@@ -10760,6 +10760,8 @@ fn resizable_sizing() -> WindowSizing {
     WindowSizing::Resizable {
         min_width_px: 0,
         min_height_px: 0,
+        max_width_px: 0,
+        max_height_px: 0,
     }
 }
 

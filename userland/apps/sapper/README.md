@@ -23,7 +23,10 @@ best-times store — so the binary only composes it over the window channel, as
   the last one ends.
 - `layout` — where everything is drawn, in physical pixels, from lengths
   authored at the desktop's reference density and converted through the one
-  shared scale.
+  shared scale. `WindowGeometry` is what the window channel is asked for: the
+  client size a board opens at and the range it may be resized within, as one
+  answer, so the window a board gets and the geometry the board is drawn in
+  cannot disagree.
 - `paint` — the drawing, composed from the shared raster primitives against the
   active theme.
 - `scores` — the best time on each preset board, in the app-data store.

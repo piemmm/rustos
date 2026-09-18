@@ -28,11 +28,19 @@ fn beginner() -> Dimensions {
     Difficulty::Beginner.dimensions()
 }
 
+/// The client rectangle a board's window opens with, on a display that caps
+/// nothing.
+fn opens_at(dims: Dimensions, scale: Scale) -> Rect {
+    crate::layout::WindowGeometry::resolve(dims, scale, Rect::new(0, 0, u32::MAX, u32::MAX))
+        .client()
+}
+
 /// A surface, layout and skin sized to a board, ready to draw into.
 fn canvas(dims: Dimensions, theme: &Theme) -> (Surface, Layout, Skin) {
-    let (width, height) = Layout::preferred(dims, Scale::ONE);
-    let surface = Surface::new(width, height).expect("a surface for the preferred window");
-    let layout = Layout::resolve(Rect::new(0, 0, width, height), dims, Scale::ONE);
+    let client = opens_at(dims, Scale::ONE);
+    let surface =
+        Surface::new(client.width, client.height).expect("a surface for the opening window");
+    let layout = Layout::resolve(client, dims, Scale::ONE);
     let skin = Skin::resolve(theme, Scale::ONE, layout.cell);
     (surface, layout, skin)
 }
@@ -609,9 +617,9 @@ fn every_scale_the_desktop_offers_draws() {
         let Some(scale) = Scale::from_percent(percent) else {
             continue;
         };
-        let (width, height) = Layout::preferred(dims, scale);
-        let mut surface = Surface::new(width, height).expect("a surface");
-        let layout = Layout::resolve(Rect::new(0, 0, width, height), dims, scale);
+        let client = opens_at(dims, scale);
+        let mut surface = Surface::new(client.width, client.height).expect("a surface");
+        let layout = Layout::resolve(client, dims, scale);
         let skin = Skin::resolve(&theme, scale, layout.cell);
         assert!(skin.radius >= 1);
         frame(

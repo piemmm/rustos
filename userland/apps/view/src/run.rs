@@ -664,6 +664,10 @@ mod program {
         let sizing = WindowSizing::Resizable {
             min_width_px: least.0,
             min_height_px: least.1,
+            // No ceiling: a picture or a page shows more of itself, or shows
+            // itself larger, at every size the window is given.
+            max_width_px: 0,
+            max_height_px: 0,
         };
         let (pane, replied) =
             match WindowPane::open(client, event_endpoint, &mode, APP_TITLE, sizing) {

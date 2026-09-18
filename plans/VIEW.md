@@ -429,7 +429,10 @@ tells the window manager at create is `min_client_size(theme, scale, font)`:
 the toolbar's own `Toolbar::min_width` across (a tool plus both overflow
 affordances) and the toolbar, status line, scrollbar and one control-height of
 canvas down, resolved at the desktop's density and declared in **physical**
-pixels, which is what the `WindowSizing::Resizable` field is in.
+pixels, which is what the `WindowSizing::Resizable` fields are in. The viewer
+declares no *ceiling*: a picture or a page shows more of itself, or shows
+itself larger, at every size the window is given, so no size of its window is
+dead margin.
 
 **The toolbar reserves its tools' strip before the zoom slider.** The tools are
 the strip's primary surface and the slider the incidental one, so

@@ -376,6 +376,21 @@ pub trait WindowHost {
     /// the client and the previous title stands.
     fn window_retitled(&mut self, window_id: u64, title: &str) -> Result<(), Errno>;
 
+    /// A validated `SetSizing`: the attested owner of live `window_id`
+    /// restated the range a *user* may resize it within. The host adopts it
+    /// as the range it enforces from here on, in place of the one the
+    /// `Create` declared.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot adopt the range for — it is tearing
+    /// down, its compositor no longer holds the window, or the sizing
+    /// contradicts how the window was decorated (a resizable window handed
+    /// a fixed sizing, or the reverse: what may change is the range, not
+    /// whether the window has a grabber at all). The refusal is relayed to
+    /// the client and the previous range stands.
+    fn window_sizing_changed(&mut self, window_id: u64, sizing: WindowSizing) -> Result<(), Errno>;
+
     /// `window_id` is gone — closed by its owner or torn down after the
     /// owner exited. Infallible: the window is already unmapped and
     /// forgotten by the engine, and the host must not resurrect it.
@@ -1118,6 +1133,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 reply,
                 self.set_title(host, caller, window_id, title.as_str()),
             ),
+            WindowRequest::SetSizing { window_id, sizing } => {
+                status(reply, self.set_sizing(host, caller, window_id, sizing))
+            }
             WindowRequest::SetAppBar(ref bar) => status(reply, self.set_app_bar(host, caller, bar)),
             WindowRequest::SetBackdropBlur {
                 window_id,
@@ -1787,6 +1805,24 @@ impl<M: ShmMapper> WindowServer<M> {
     ) -> Result<(), Errno> {
         owned_window(&self.windows, caller, window_id)?;
         host.window_retitled(window_id, title)
+    }
+
+    /// Restate `caller`'s window `window_id`'s resize range through the
+    /// host.
+    ///
+    /// Ownership is checked before the host is told anything, exactly as a
+    /// retitle is, so a range aimed at another client's window answers
+    /// `NotFound` and changes nothing. A host refusal leaves the previous
+    /// range standing.
+    fn set_sizing(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        sizing: WindowSizing,
+    ) -> Result<(), Errno> {
+        owned_window(&self.windows, caller, window_id)?;
+        host.window_sizing_changed(window_id, sizing)
     }
 
     /// Record `caller`'s icon-bar declaration and hand it to the host.

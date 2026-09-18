@@ -3794,8 +3794,9 @@ to its own extent. Every launch of it therefore ended at the window create,
 having drawn nothing. A caller could build a request the server was obliged to
 reject, which is a defect in the type, not in either party.
 
-**Fix.** `WindowSizing` is a sum type — `Fixed`, or `Resizable { min_width_px,
-min_height_px }` — carried whole in `Create`. The contradictory pair has no
+**Fix.** `WindowSizing` is a sum type — `Fixed`, or `Resizable` carrying the
+floor and the ceiling of the range it may be resized within — carried whole in
+`Create`. The contradictory pair has no
 spelling, so no app can construct it: `lib/abi`'s
 `every_sizing_an_app_can_ask_for_survives_the_round_trip` enumerates every
 sizing that exists and asserts each decodes back to itself. The wire decoder

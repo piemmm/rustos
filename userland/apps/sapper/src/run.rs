@@ -36,7 +36,7 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{
         AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
-        AppMenuShortcut, WindowEvent, WindowSizing,
+        AppMenuShortcut, WindowEvent,
     };
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
     use tairix_appdata::{RtHost, Settings};
@@ -47,6 +47,7 @@ mod program {
     use tairix_rt::io::{Stderr, Write};
     use tairix_sapper::board::Difficulty;
     use tairix_sapper::game::{Game, Reaction};
+    use tairix_sapper::layout::WindowGeometry;
     use tairix_sapper::scores::{BestTimes, SaveError};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_util::defer::JobDesk;
@@ -329,40 +330,125 @@ mod program {
     impl GameWindow {
         /// Open a window shaped to `game`'s board and present its first frame,
         /// answering the session's [`ProcId`] or the reserved exit code.
+        ///
+        /// The board is laid out in the window that actually opened before a
+        /// pixel of it is drawn: what a *previous* window was — a size the user
+        /// had dragged it to, or the smaller board that was being played when
+        /// it closed — says nothing about this one.
         fn open(
             &mut self,
             event_endpoint: u64,
-            game: &Game,
+            game: &mut Game,
+            desktop: &Desktop,
             theme: &Theme,
-            scale: Scale,
-        ) -> Result<(ProcId, DisplayMode), i32> {
-            let (width, height) = game.preferred_size();
-            let mode = app::mode_for(width, height);
-            let (min_width_px, min_height_px) = game.minimum_size();
+        ) -> Result<ProcId, i32> {
+            let asked = game.window_geometry(desktop.scale(), desktop.screen());
+            let mode = app::mode_for(asked.width, asked.height);
             let server = self
                 .window
-                .open(
-                    event_endpoint,
-                    &mode,
-                    "Sapper",
-                    WindowSizing::Resizable {
-                        min_width_px,
-                        min_height_px,
-                    },
-                )
+                .open(event_endpoint, &mode, "Sapper", asked.sizing)
                 .map_err(fail_shell)?;
+            // The first frame is the whole window, so the rectangles the
+            // relayout reports are already covered by it.
+            self.adopt(game, desktop.scale(), &mut tairix_controls::damage::sink());
             if self
-                .present(game, theme, scale, DamageRect::full(&mode), 0)
+                .present(game, theme, desktop.scale(), DamageRect::full(&mode), 0)
                 .is_err()
             {
                 self.close();
                 return Err(fail(EXIT_CHANNEL_LOST, "present refused"));
             }
-            Ok((server, mode))
+            Ok(server)
         }
 
         fn close(&mut self) {
             let _ = self.window.close();
+        }
+
+        /// This window's current client extent, or `None` with none open.
+        fn mode(&self) -> Option<DisplayMode> {
+            self.window.mode().copied()
+        }
+
+        /// Lay `game` out in the extent this window actually holds.
+        ///
+        /// The one place the board's geometry is set, and it reads the window
+        /// rather than being told: a second record of "how big is the window"
+        /// is a record that goes stale the first time a resize is refused or
+        /// happens while no window is open, and the board is then drawn for a
+        /// window it is not in.
+        fn adopt(&self, game: &mut Game, scale: Scale, damage: &mut Region) {
+            if let Some(mode) = self.mode() {
+                game.relayout(
+                    Rect::new(0, 0, mode.width_px, mode.height_px),
+                    scale,
+                    damage,
+                );
+            }
+        }
+
+        /// Adopt the client extent the window manager has given this window:
+        /// re-map the frame region onto it and lay `game` out in it.
+        ///
+        /// The re-map is not the app choosing a size — the size is already
+        /// the user's, and answering a drag with one of our own would fight
+        /// it. It is how the region the board is drawn into comes to *be*
+        /// that size; without it the window grows while its content stays the
+        /// old extent, and the board, laid out for the new one, is drawn
+        /// offset inside it.
+        ///
+        /// A refused re-map leaves the window at the extent it had, which is
+        /// still one it can be drawn at, so the refusal is stated and the
+        /// board follows the window that is really there. A size that arrives
+        /// for a window already closed names nothing to re-map, and is not a
+        /// refusal to report.
+        fn resized_to(
+            &mut self,
+            game: &mut Game,
+            mode: DisplayMode,
+            scale: Scale,
+            damage: &mut Region,
+        ) {
+            if self.mode().is_none() {
+                return;
+            }
+            if !self.window.resize(mode) {
+                report("the desktop refused a resize; the window keeps its size");
+            }
+            self.adopt(game, scale, damage);
+        }
+
+        /// Re-shape the window to what `game`'s board now asks for: restate
+        /// the range it may be dragged within, re-map onto the extent it
+        /// opens at, and lay the board out in whatever stands.
+        ///
+        /// For the changes that move the geometry the board *wants* — a board
+        /// of a different size, a desktop of a different density — never for
+        /// a resize the user is dragging. Both move the range as well as the
+        /// extent: the cell's legibility floor and its growth ceiling are
+        /// logical lengths of the board, so a new board or a new density
+        /// gives the window manager a range to enforce that the last one's
+        /// would have got wrong.
+        ///
+        /// With no window open there is nothing to re-shape and nothing to
+        /// lay out; the next open asks afresh.
+        fn reshape(&mut self, game: &mut Game, desktop: &Desktop, damage: &mut Region) {
+            let Some(mode) = self.mode() else {
+                return;
+            };
+            let asked = game.window_geometry(desktop.scale(), desktop.screen());
+            if let Err(err) = self.window.set_sizing(asked.sizing) {
+                report(&alloc::format!(
+                    "the desktop refused this window's resize range ({err}); \
+                     it keeps the range it had"
+                ));
+            }
+            let wanted = app::mode_for(asked.width, asked.height);
+            if wanted.width_px == mode.width_px && wanted.height_px == mode.height_px {
+                self.adopt(game, desktop.scale(), damage);
+                return;
+            }
+            self.resized_to(game, wanted, desktop.scale(), damage);
         }
 
         /// Draw `game` and present `damage`.
@@ -454,6 +540,7 @@ mod program {
 
     /// Apply one delivered event, reporting what it concluded.
     fn apply_event(
+        surface: &mut GameWindow,
         round: &mut Round<'_>,
         event: &WindowEvent,
         now_ns: u64,
@@ -463,13 +550,19 @@ mod program {
             WindowEvent::CloseRequested { .. } => Acted::Close,
             WindowEvent::AppBarMenu { item } => menu_chosen(round, *item, damage),
             WindowEvent::AppBarDefault => Acted::Open,
+            // The size is the user's, already applied to the window: it is
+            // adopted as given and never answered with one of our own, which
+            // would fight the drag. Adopting it *is* re-mapping the region,
+            // though — a board laid out for a size the region is not is the
+            // board drawn offset inside its own window.
             WindowEvent::Resized {
                 width_px,
                 height_px,
                 ..
             } => {
-                round.game.relayout(
-                    Rect::new(0, 0, *width_px, *height_px),
+                surface.resized_to(
+                    round.game,
+                    app::mode_for(*width_px, *height_px),
                     round.desktop.scale(),
                     damage,
                 );
@@ -570,7 +663,6 @@ mod program {
         surface: &mut GameWindow,
         round: &mut Round<'_>,
         event_endpoint: u64,
-        mode: &mut DisplayMode,
         deadline: &Cell<Option<u64>>,
         desktop_moved: &Cell<bool>,
         mut events: WindowEvents<RtEventSource<'_>>,
@@ -598,12 +690,12 @@ mod program {
             // reduced-motion policy everything below derives from are already
             // current — and adopted whether or not an event came with it.
             if desktop_moved.replace(false) {
-                acted = acted.or(adopt_desktop(round, mode, &mut damage));
+                acted = acted.or(adopt_desktop(surface, round, &mut damage));
             }
 
             match waited {
                 Ok(Some(event)) => {
-                    acted = acted.or(apply_event(round, &event, now, &mut damage));
+                    acted = acted.or(apply_event(surface, round, &event, now, &mut damage));
                     if matches!(event, WindowEvent::ContentReleased { .. }) {
                         surface.window.release_frames();
                         continue;
@@ -628,36 +720,20 @@ mod program {
                     continue;
                 }
                 // A refused open is already stated, and the slot is still
-                // there to try again from.
+                // there to try again from. The open lays the board out in the
+                // window it got and presents it whole, so this frame is done.
                 Acted::Open => {
-                    if let Ok((_, opened)) = surface.open(
+                    let _ = surface.open(
                         event_endpoint,
                         round.game,
+                        round.desktop,
                         round.themes.active(),
-                        round.desktop.scale(),
-                    ) {
-                        *mode = opened;
-                    }
+                    );
                     continue;
                 }
-                // A board of a new size: re-shape the frame region before
-                // anything is drawn into it. A resize the *user* dragged is
-                // already adopted and is deliberately not re-shaped here —
-                // answering a drag with a size of our own would fight it.
-                Acted::Reshaped => {
-                    let (width, height) = round.game.preferred_size();
-                    let reshaped = app::mode_for(width, height);
-                    if reshaped.width_px != mode.width_px || reshaped.height_px != mode.height_px {
-                        if surface.window.resize(reshaped) {
-                            *mode = reshaped;
-                        }
-                        round.game.relayout(
-                            Rect::new(0, 0, mode.width_px, mode.height_px),
-                            round.desktop.scale(),
-                            &mut damage,
-                        );
-                    }
-                }
+                // A board of a new size wants a window of a new size, and a
+                // range to be dragged within that suits it.
+                Acted::Reshaped => surface.reshape(round.game, round.desktop, &mut damage),
                 Acted::Idle | Acted::Changed | Acted::Relaid => {}
             }
 
@@ -677,7 +753,13 @@ mod program {
             } else {
                 Repaint::Nothing
             };
-            let Some(damage) = present_damage(mode, repaint, &damage) else {
+            // Resolved against the window's own extent, so a frame is never
+            // presented for a geometry the window has moved on from. With no
+            // window open there is nothing to present at all.
+            let Some(mode) = surface.mode() else {
+                continue;
+            };
+            let Some(damage) = present_damage(&mode, repaint, &damage) else {
                 continue;
             };
             if surface
@@ -695,21 +777,26 @@ mod program {
         }
     }
 
-    /// Adopt the desktop state the session published, re-laying the board at
-    /// the new scale and re-reading the reduced-motion policy with it.
+    /// Adopt the desktop state the session published, re-shaping the window
+    /// at the new density and re-reading the reduced-motion policy with it.
+    ///
+    /// The board's every length is logical, so a density change moves the
+    /// window it wants and the range it may be dragged within as surely as a
+    /// new board does — keeping the old physical extent would clamp the cell
+    /// to a floor the window can no longer hold and draw the grid clipped.
     ///
     /// A refused state is reported and the last good desktop stands, so the
     /// board keeps drawing correctly rather than at a nonsense density.
-    fn adopt_desktop(round: &mut Round<'_>, mode: &DisplayMode, damage: &mut Region) -> Acted {
+    fn adopt_desktop(
+        surface: &mut GameWindow,
+        round: &mut Round<'_>,
+        damage: &mut Region,
+    ) -> Acted {
         match app::adopt_desktop(round.desktop, round.themes) {
             Ok(true) => {
                 let reduced = round.themes.active().motion().reduced_motion();
                 round.game.set_reduced_motion(reduced, damage);
-                round.game.relayout(
-                    Rect::new(0, 0, mode.width_px, mode.height_px),
-                    round.desktop.scale(),
-                    damage,
-                );
+                surface.reshape(round.game, round.desktop, damage);
                 Acted::Relaid
             }
             Ok(false) => Acted::Idle,
@@ -782,14 +869,15 @@ mod program {
         let _guard = WriterGuard(Arc::clone(&writer));
 
         let reduced = themes.active().motion().reduced_motion();
-        let dims = Difficulty::Beginner.dimensions();
-        let (width, height) = tairix_sapper::layout::Layout::preferred(dims, desktop.scale());
+        let difficulty = Difficulty::Beginner;
+        let opening =
+            WindowGeometry::resolve(difficulty.dimensions(), desktop.scale(), desktop.screen());
         let mut game = Game::new(
-            Difficulty::Beginner,
+            difficulty,
             load_best_times(),
             true,
             reduced,
-            Rect::new(0, 0, width, height),
+            opening.client(),
             desktop.scale(),
         );
 
@@ -801,11 +889,10 @@ mod program {
         // The game was started to be played, so a first window that will not
         // open leaves it nothing to be and it ends fail-loud; every later one
         // is a click on its slot, which reports and carries on.
-        let (server, mut mode) =
-            match surface.open(event_endpoint, &game, themes.active(), desktop.scale()) {
-                Ok(opened) => opened,
-                Err(code) => return code,
-            };
+        let server = match surface.open(event_endpoint, &mut game, &desktop, themes.active()) {
+            Ok(server) => server,
+            Err(code) => return code,
+        };
 
         let deadline = Cell::new(None);
         let desktop_moved = Cell::new(false);
@@ -829,7 +916,6 @@ mod program {
             &mut surface,
             &mut round,
             event_endpoint,
-            &mut mode,
             &deadline,
             &desktop_moved,
             events,

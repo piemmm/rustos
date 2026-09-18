@@ -16,11 +16,28 @@ fn laid_out(width: u32, height: u32, dims: Dimensions, percent: u32) -> Layout {
     Layout::resolve(Rect::new(0, 0, width, height), dims, scale(percent))
 }
 
+/// A display large enough that it never caps what a board asks for, so a test
+/// about the board's own arithmetic is not measuring the screen.
+fn roomy() -> Rect {
+    Rect::new(0, 0, u32::MAX, u32::MAX)
+}
+
+/// The window `dims` asks for at `percent`, on a display that caps nothing.
+fn asked_for(dims: Dimensions, percent: u32) -> WindowGeometry {
+    WindowGeometry::resolve(dims, scale(percent), roomy())
+}
+
+/// The opening client size `dims` asks for at `percent`.
+fn opens_at(dims: Dimensions, percent: u32) -> (u32, u32) {
+    let asked = asked_for(dims, percent);
+    (asked.width, asked.height)
+}
+
 #[test]
 fn a_window_opens_large_enough_for_its_board() {
     for preset in Difficulty::PRESETS {
         let dims = preset.dimensions();
-        let (width, height) = Layout::preferred(dims, scale(100));
+        let (width, height) = opens_at(dims, 100);
         let layout = laid_out(width, height, dims, 100);
         assert!(
             layout.grid.width <= width && layout.grid.height <= height,
@@ -35,7 +52,8 @@ fn a_window_opens_large_enough_for_its_board() {
 fn the_resize_floor_still_fits_the_board() {
     for preset in Difficulty::PRESETS {
         let dims = preset.dimensions();
-        let (width, height) = Layout::minimum(dims, scale(100));
+        let asked = asked_for(dims, 100);
+        let (width, height) = (asked.sizing.min_width_px(), asked.sizing.min_height_px());
         let layout = laid_out(width, height, dims, 100);
         assert!(
             layout.grid.width <= width && layout.grid.height <= height,
@@ -47,20 +65,97 @@ fn the_resize_floor_still_fits_the_board() {
 }
 
 #[test]
-fn the_floor_is_never_larger_than_the_opening_size() {
+fn a_window_opens_inside_the_range_it_declares_on_every_display() {
+    // The three sizes are one decision, so a board can never ask to open at
+    // a size the window manager would refuse to let it be dragged to — and
+    // that has to hold on a display too small for the board as well, where
+    // the opening size is capped and the floor must follow it down.
+    for preset in Difficulty::PRESETS {
+        for percent in [75, 100, 150, 200] {
+            for screen in [
+                roomy(),
+                Rect::new(0, 0, 640, 480),
+                Rect::new(0, 0, 200, 120),
+            ] {
+                let asked = WindowGeometry::resolve(preset.dimensions(), scale(percent), screen);
+                let floor = (asked.sizing.min_width_px(), asked.sizing.min_height_px());
+                let ceiling = (asked.sizing.max_width_px(), asked.sizing.max_height_px());
+                let what = preset.title();
+                assert!(
+                    floor.0 <= asked.width && floor.1 <= asked.height,
+                    "{what} opens below its own floor at {percent}% on {screen:?}"
+                );
+                assert!(
+                    asked.width <= ceiling.0 && asked.height <= ceiling.1,
+                    "{what} opens above its own ceiling at {percent}% on {screen:?}"
+                );
+                assert!(
+                    floor.0 <= ceiling.0 && floor.1 <= ceiling.1,
+                    "{what} declares a ceiling under its floor at {percent}% on {screen:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_ceiling_is_the_size_the_board_stops_growing_at() {
+    // What the ceiling is *for*: at it the cell has reached its largest, so
+    // every further pixel of window would be margin and nothing else.
     for preset in Difficulty::PRESETS {
         let dims = preset.dimensions();
-        let (min_w, min_h) = Layout::minimum(dims, scale(100));
-        let (pref_w, pref_h) = Layout::preferred(dims, scale(100));
-        assert!(min_w <= pref_w && min_h <= pref_h, "{}", preset.title());
+        let asked = asked_for(dims, 100);
+        let (width, height) = (asked.sizing.max_width_px(), asked.sizing.max_height_px());
+        let ceiling = laid_out(width, height, dims, 100);
+        assert_eq!(
+            ceiling.cell,
+            scale(100).scale_length(CELL_MAX),
+            "{} does not reach its largest cell at its ceiling",
+            preset.title()
+        );
+        assert!(
+            ceiling.grid.width <= width && ceiling.grid.height <= height,
+            "{} does not fit its own ceiling",
+            preset.title()
+        );
+        // And a window past it gains the board nothing at all.
+        let larger = laid_out(width * 2, height * 2, dims, 100);
+        assert_eq!(larger.cell, ceiling.cell);
     }
+}
+
+#[test]
+fn a_window_never_opens_larger_than_the_display() {
+    // A board whose opening size exceeds the screen would put its own last
+    // rows out of reach, so the opening size is capped. The *ceiling* is
+    // not: where a user drags a window is theirs to decide.
+    let dims = Difficulty::Expert.dimensions();
+    let roomy = asked_for(dims, 100);
+    let screen = Rect::new(0, 0, roomy.width / 2, roomy.height / 2);
+    let cramped = WindowGeometry::resolve(dims, scale(100), screen);
+    assert_eq!(
+        (cramped.width, cramped.height),
+        (screen.width, screen.height)
+    );
+    assert_eq!(
+        (
+            cramped.sizing.max_width_px(),
+            cramped.sizing.max_height_px()
+        ),
+        (roomy.sizing.max_width_px(), roomy.sizing.max_height_px())
+    );
+
+    // A display that reports no extent at all is not a reason to ask for a
+    // window with no pixels in it.
+    let blind = WindowGeometry::resolve(dims, scale(100), Rect::new(0, 0, 0, 0));
+    assert_eq!((blind.width, blind.height), (roomy.width, roomy.height));
 }
 
 #[test]
 fn a_denser_display_gets_a_bigger_board_not_a_smaller_one() {
     let dims = beginner();
-    let (single, _) = Layout::preferred(dims, scale(100));
-    let (double, _) = Layout::preferred(dims, scale(200));
+    let (single, _) = opens_at(dims, 100);
+    let (double, _) = opens_at(dims, 200);
     assert!(double > single, "{double} should exceed {single}");
     let dense = laid_out(double, double, dims, 200);
     let plain = laid_out(single, single, dims, 100);
@@ -70,7 +165,7 @@ fn a_denser_display_gets_a_bigger_board_not_a_smaller_one() {
 #[test]
 fn a_bigger_window_grows_the_cells_then_centres_the_board() {
     let dims = beginner();
-    let (width, height) = Layout::preferred(dims, scale(100));
+    let (width, height) = opens_at(dims, 100);
     let small = laid_out(width, height, dims, 100);
     let large = laid_out(width * 2, height * 2, dims, 100);
     assert!(large.cell > small.cell, "the board grows with the window");
@@ -115,7 +210,7 @@ fn a_degenerate_window_still_answers() {
 #[test]
 fn every_cell_is_inside_the_grid_and_none_overlap() {
     let dims = beginner();
-    let (width, height) = Layout::preferred(dims, scale(100));
+    let (width, height) = opens_at(dims, 100);
     let layout = laid_out(width, height, dims, 100);
     let mut previous_right = layout.grid.left();
     for col in 0..dims.cols() {
@@ -230,7 +325,7 @@ fn the_header_reads_counter_then_button_then_clock() {
 fn the_header_never_overlaps_the_grid() {
     for percent in [75, 100, 150, 200] {
         let dims = beginner();
-        let (width, height) = Layout::preferred(dims, scale(percent));
+        let (width, height) = opens_at(dims, percent);
         let layout = laid_out(width, height, dims, percent);
         assert!(
             layout.grid.top() >= layout.header.bottom(),

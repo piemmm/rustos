@@ -930,6 +930,27 @@ impl AppWindow {
         true
     }
 
+    /// Restate the range the window manager may resize the open window
+    /// within, answering the session's word on it.
+    ///
+    /// For an app whose content constraints move while its window is open —
+    /// a board switching to a larger one, a layout remeasured at a new
+    /// desktop density — because the range declared at open describes
+    /// content it is no longer showing. With no window open there is no
+    /// range to restate, which is not a failure: the next open declares the
+    /// range that is current then.
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal, unchanged: the previously declared range
+    /// stands and the window is still resizable within it.
+    pub fn set_sizing(&mut self, sizing: WindowSizing) -> Result<(), Errno> {
+        let Some(held) = self.retained.as_ref() else {
+            return Ok(());
+        };
+        self.client.set_sizing(held.pane.id(), sizing)
+    }
+
     /// Answer the session's release of its own copy by giving this side's
     /// region back, so the pages are actually freed.
     pub fn release_frames(&mut self) {

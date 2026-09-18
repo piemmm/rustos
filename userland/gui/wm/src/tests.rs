@@ -3426,6 +3426,12 @@ fn decorated_compositor() -> (Compositor, WindowId) {
     (c, id)
 }
 
+/// The smallest outer extent a drag may take `id` down to.
+fn min_outer(c: &Compositor, id: WindowId) -> (u32, u32) {
+    let bounds = c.window_resize_bounds(id).expect("decorated");
+    (bounds.min_width, bounds.min_height)
+}
+
 #[test]
 fn the_frame_rim_is_one_quiet_tone_at_either_activation() {
     let (mut active, id) = decorated_compositor();
@@ -4503,7 +4509,7 @@ fn a_resize_grab_clamps_where_the_title_bar_still_works_and_escape_restores() {
     let (mut c, id) = decorated_compositor();
     let mut router = InputRouter::new();
     let before = c.window(id).unwrap().bounds();
-    let floor = c.window_min_outer_size(id).expect("decorated");
+    let floor = min_outer(&c, id);
     let corner = Point::new(before.right() - 1, before.bottom() - 1);
 
     router.handle(moved(corner.x, corner.y), &mut c, T0);
@@ -4546,10 +4552,10 @@ fn an_application_s_declared_minimum_raises_the_resize_floor() {
     // the app would either be squeezed into nonsense or fight the drag by
     // resizing itself back, which is the bounce this closes.
     let (mut c, id) = decorated_compositor();
-    let furniture = c.window_min_outer_size(id).expect("decorated");
+    let furniture = min_outer(&c, id);
     let declared = (furniture.0 + 60, furniture.1 + 40);
-    assert!(c.set_window_min_client_size(id, declared.0, declared.1));
-    let raised = c.window_min_outer_size(id).expect("decorated");
+    assert!(c.set_window_client_size_range(id, declared, (0, 0)));
+    let raised = min_outer(&c, id);
     assert!(
         raised.0 > furniture.0 && raised.1 > furniture.1,
         "a minimum larger than the furniture's own raises the floor"
@@ -4577,14 +4583,135 @@ fn a_declared_minimum_under_the_furniture_s_own_floor_cannot_lower_it() {
     // that asks for less: the title bar's commands must stay usable whatever
     // the application would settle for.
     let (mut c, id) = decorated_compositor();
-    let furniture = c.window_min_outer_size(id).expect("decorated");
-    assert!(c.set_window_min_client_size(id, 1, 1));
-    assert_eq!(c.window_min_outer_size(id), Some(furniture));
+    let furniture = min_outer(&c, id);
+    assert!(c.set_window_client_size_range(id, (1, 1), (0, 0)));
+    assert_eq!(min_outer(&c, id), furniture);
 
     assert!(
-        !c.set_window_min_client_size(WindowId(9999), 200, 200),
-        "a minimum for a window the compositor does not know changes nothing"
+        !c.set_window_client_size_range(WindowId(9999), (200, 200), (0, 0)),
+        "a range for a window the compositor does not know changes nothing"
     );
+}
+
+#[test]
+fn an_application_s_declared_maximum_caps_the_resize_ceiling() {
+    // The application states the largest client its content grows to; past
+    // it the window is all dead margin, which is what a game of fixed cells
+    // used to show when a drag could take its window to any size at all.
+    let (mut c, id) = decorated_compositor();
+    let before = c.window(id).expect("window").bounds();
+    let declared = (before.width + 20, before.height + 12);
+    assert!(c.set_window_client_size_range(id, (0, 0), declared));
+    let bounds = c.window_resize_bounds(id).expect("decorated");
+    let ceiling = (
+        bounds.max_width.expect("a declared width ceiling"),
+        bounds.max_height.expect("a declared height ceiling"),
+    );
+    assert!(
+        ceiling.0 >= declared.0 && ceiling.1 >= declared.1,
+        "the client ceiling reaches the app's own once the band is added"
+    );
+
+    let mut router = InputRouter::new();
+    let corner = Point::new(before.right() - 1, before.bottom() - 1);
+    router.handle(moved(corner.x, corner.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    // Dragging far past the ceiling stops at it rather than following.
+    router.handle(moved(corner.x + 4000, corner.y + 4000), &mut c, T0);
+
+    let grown = c.window(id).expect("window").bounds();
+    assert_eq!((grown.width, grown.height), ceiling);
+    assert_eq!(
+        grown.origin, before.origin,
+        "a bottom-right drag holds the top-left corner still at the ceiling"
+    );
+    let client = c.window_client_rect(id).expect("decorated");
+    assert!(
+        client.width <= declared.0 && client.height <= declared.1,
+        "the client never grows past what its application declared"
+    );
+}
+
+#[test]
+fn a_ceiling_stops_a_left_edge_drag_without_moving_the_right_one_or_the_height() {
+    // The un-grabbed edge anchors the result, so a ceiling reached on a
+    // leftward drag holds the right edge exactly where it was — the same
+    // rule the floor already follows. And only the dragged axis is held to
+    // the bounds: a window its application sized outside them is its
+    // application's choice, not something a sideways drag snaps.
+    let (mut c, id) = decorated_compositor();
+    let before = c.window(id).expect("window").bounds();
+    let client = c.window_client_rect(id).expect("decorated");
+    let declared = (before.width + 30, client.height - 10);
+    assert!(c.set_window_client_size_range(id, (0, 0), declared));
+    let bounds = c.window_resize_bounds(id).expect("decorated");
+    let ceiling = bounds.max_width.expect("a declared width ceiling");
+    assert!(
+        bounds
+            .max_height
+            .is_some_and(|height| height < before.height && height > bounds.min_height),
+        "the height ceiling must sit under the window and over its floor, or \
+         this proves nothing about the un-dragged axis"
+    );
+
+    let mut router = InputRouter::new();
+    let edge = Point::new(before.left(), centre(before).y);
+    router.handle(moved(edge.x, edge.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(moved(edge.x - 4000, edge.y), &mut c, T0);
+
+    let grown = c.window(id).expect("window").bounds();
+    assert_eq!(grown.width, ceiling);
+    assert_eq!(grown.right(), before.right());
+    assert_eq!(grown.height, before.height);
+}
+
+#[test]
+fn maximize_grows_a_capped_window_only_as_far_as_it_is_useful() {
+    // Filling the screen with an application's dead margin is a worse answer
+    // than growing the window as far as its content reaches, so the size
+    // toggle honours the ceiling — and restore still returns the window to
+    // exactly the geometry it was maximized from.
+    let (mut c, id) = decorated_compositor();
+    let work_area = c.screen_rect();
+    let before = c.window(id).expect("window").bounds();
+    let declared = (before.width + 16, before.height + 8);
+    assert!(c.set_window_client_size_range(id, (0, 0), declared));
+    let bounds = c.window_resize_bounds(id).expect("decorated");
+    assert!(
+        bounds.max_width.expect("a ceiling") < work_area.width
+            && bounds.max_height.expect("a ceiling") < work_area.height,
+        "the ceiling is the smaller of the two, or this proves nothing"
+    );
+
+    let (state, _) = c.toggle_window_size(id, work_area).expect("maximizable");
+    assert_eq!(state, tairix_controls::WindowSizeState::Maximized);
+    let maximized = c.window(id).expect("window").bounds();
+    assert_eq!(
+        (maximized.width, maximized.height),
+        (
+            bounds.max_width.expect("a ceiling"),
+            bounds.max_height.expect("a ceiling")
+        )
+    );
+    assert_eq!(maximized.origin, work_area.origin);
+
+    let (state, _) = c.toggle_window_size(id, work_area).expect("restorable");
+    assert_eq!(state, tairix_controls::WindowSizeState::Restored);
+    assert_eq!(c.window(id).expect("window").bounds(), before);
+}
+
+#[test]
+fn a_window_that_declares_no_maximum_still_maximizes_to_the_work_area() {
+    // The ceiling is opt-in: an application content at any size fills the
+    // work area exactly as it did before there was a ceiling to declare.
+    let (mut c, id) = decorated_compositor();
+    let work_area = c.screen_rect();
+    let bounds = c.window_resize_bounds(id).expect("decorated");
+    assert_eq!((bounds.max_width, bounds.max_height), (None, None));
+
+    c.toggle_window_size(id, work_area).expect("maximizable");
+    assert_eq!(c.window(id).expect("window").bounds(), work_area);
 }
 
 #[test]

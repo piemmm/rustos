@@ -617,9 +617,11 @@ by that pixel's coverage, so a corner repainted twice would otherwise opacify.
 Both are asserted by painting the same recipe both ways and comparing every
 pixel.
 
-**A window cannot be dragged smaller than its own furniture, or than its
-application declared.** `Compositor::window_min_outer_size` is the greater
-of two real floors, and an interactive resize captures it at grab start:
+**A window is dragged within a range, not down from nothing.**
+`Compositor::window_resize_bounds` answers that range as one value, and an
+interactive resize captures it at grab start.
+
+Its floor is the greater of two real floors:
 
 - the *furniture's* floor, `WindowFrame::min_outer_size` — a band wide
   enough to seat all four commands with one command's worth of drag surface
@@ -627,14 +629,34 @@ of two real floors, and an interactive resize captures it at grab start:
   standard control of client in height. It holds for every decorated
   window, including one whose application declared nothing.
 - the *application's* declared minimum client extent, adopted through
-  `Compositor::set_window_min_client_size` from what the app stated when it
+  `Compositor::set_window_client_size_range` from what the app stated when it
   created its window. Without it an app that cannot lay out below some size
   resizes itself back up while the drag keeps shrinking, and the two fight
   once per pointer sample — the window and its content visibly bouncing.
 
-The floor bounds a *user* resize. An application sizing its own window is
+Its ceiling is the application's alone, and absent unless it declared one.
+An application whose content stops growing — a board of square cells, a
+fixed-column instrument panel — gains only dead margin past a certain size,
+so a drag stops there and the size toggle maximizes to that extent instead
+of filling the work area with margin. A maximized window takes the work
+area's origin either way, so where it appears does not depend on whether it
+has a ceiling. The furniture has no ceiling of its own, and a declared one
+never falls below the floor: a window that cannot be laid out smaller is not
+made smaller to honour it.
+
+The range bounds a *user* resize. An application sizing its own window is
 choosing that size, so `resize_window_client` is not clamped and a window
-already smaller than the minimum is never grown under its owner.
+already outside the range is never resized under its owner.
+
+**The range is restatable, because content constraints move.** An app whose
+smallest and largest useful client change — a board switching to a larger
+board, a layout remeasured at a new desktop density — restates them with
+`WindowRequest::SetSizing`, and the session adopts them through the same
+`set_window_client_size_range`. Left unstated the window manager would go on
+enforcing the range of content the app has stopped showing. What may not
+change is whether the window is *resizable* at all, since that decided the
+furniture it was decorated with: a sizing whose kind differs from the
+window's is refused (`Errno::NotSupported`) rather than half-applied.
 
 **The frame is the window manager's; the pixels are the client's.** A
 window's content buffer is sized by the frame the *client* presents, never

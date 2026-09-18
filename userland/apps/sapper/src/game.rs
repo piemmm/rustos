@@ -25,7 +25,7 @@ use tairix_theme::Theme;
 
 use crate::anim::{Motion, WaveKind};
 use crate::board::{Board, Coord, Cover, Difficulty, Move, Outcome, Phase, Step};
-use crate::layout::Layout;
+use crate::layout::{Layout, WindowGeometry};
 use crate::paint::{self, Focus, Skin};
 use crate::scores::{BestTimes, MAX_TIME_SECS};
 
@@ -139,16 +139,15 @@ impl Game {
         self.questions
     }
 
-    /// The client size this game's board wants, in physical pixels.
+    /// The window this game's *current* board asks for at `scale`, on a
+    /// display of `screen` physical pixels.
+    ///
+    /// Read fresh from the board rather than remembered, so a difficulty
+    /// chosen while no window was open asks for the window that board needs
+    /// and not the one the last board had.
     #[must_use]
-    pub fn preferred_size(&self) -> (u32, u32) {
-        Layout::preferred(self.difficulty.dimensions(), self.scale)
-    }
-
-    /// The smallest client size this game's board stays legible in.
-    #[must_use]
-    pub fn minimum_size(&self) -> (u32, u32) {
-        Layout::minimum(self.difficulty.dimensions(), self.scale)
+    pub fn window_geometry(&self, scale: Scale, screen: Rect) -> WindowGeometry {
+        WindowGeometry::resolve(self.difficulty.dimensions(), scale, screen)
     }
 
     /// The clock's reading at `now_ns`, in seconds.

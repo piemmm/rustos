@@ -72,7 +72,7 @@ use tairix_controls::{
 
 use crate::geometry::{Point, Rect};
 use crate::viewport::FurnitureHit;
-use crate::window::{Window, WindowId};
+use crate::window::{ResizeBounds, Window, WindowId};
 use crate::{Compositor, PointerTarget};
 
 // The device-level pointer vocabulary the router consumes is shared with the
@@ -316,10 +316,10 @@ struct ResizeGrab {
     /// the frame's hit map accepted routinely lands outside the window, and
     /// arming against the window would refuse the whole outward half.
     grab_region: Rect,
-    /// The smallest outer size this window may be dragged down to, in
-    /// physical pixels, captured at grab start so the clamp never re-derives
-    /// the frame metrics mid-drag.
-    min_outer: (u32, u32),
+    /// The outer extents this window may be dragged between, in physical
+    /// pixels, captured at grab start so the clamp never re-derives the
+    /// frame metrics mid-drag.
+    bounds: ResizeBounds,
 }
 
 impl ResizeGrab {
@@ -1163,10 +1163,10 @@ impl InputRouter {
         edge: ResizeEdge,
         compositor: &Compositor,
     ) -> InputResponse {
-        let (Some(start_outer), Some(grab_region), Some(min_outer)) = (
+        let (Some(start_outer), Some(grab_region), Some(bounds)) = (
             compositor.window(window).map(Window::bounds),
             compositor.window_grab_region(window),
-            compositor.window_min_outer_size(window),
+            compositor.window_resize_bounds(window),
         ) else {
             return InputResponse::FurniturePressed { window };
         };
@@ -1177,7 +1177,7 @@ impl InputRouter {
             start_outer,
             start_pointer: self.pointer,
             grab_region,
-            min_outer,
+            bounds,
         };
         // Prime the grabber's pointer, then begin its gesture over the frame's
         // grab region, which the press is inside by construction: the shared
@@ -1296,11 +1296,16 @@ impl InputRouter {
 
 /// The new outer rectangle a resize-grab produces when the pointer is at `to`:
 /// the grabbed edge(s) of the captured `start_outer` move by the pointer
-/// delta, the un-grabbed edges stay put, and the result is clamped to the
-/// window's captured minimum outer size — the greater of what its title bar
-/// needs to seat its commands with a drag surface between them and what its
-/// application declared it can lay out at. The top edge is never a resize
-/// edge (the title bar lives there), so it is fixed.
+/// delta, the un-grabbed edges stay put, and the resulting extent is held
+/// inside the window's captured resize bounds — no smaller than what its
+/// title bar needs to seat its commands with a drag surface between them or
+/// what its application declared it can lay out at, and no larger than a
+/// ceiling the application declared its content grows to. The top edge is
+/// never a resize edge (the title bar lives there), so it is fixed.
+///
+/// The clamp is applied to the *extent* and the un-grabbed edge then anchors
+/// the result, so a drag on the left edge holds the right one still whether
+/// it is the floor or the ceiling that stops it.
 fn compute_resized_outer(grab: &ResizeGrab, to: Point) -> Rect {
     let start = grab.start_outer;
     let dx = to.x - grab.start_pointer.x;
@@ -1312,34 +1317,37 @@ fn compute_resized_outer(grab: &ResizeGrab, to: Point) -> Rect {
         ResizeEdge::BottomLeft => (true, false, true),
         ResizeEdge::BottomRight => (false, true, true),
     };
-    let min_w = i32::try_from(grab.min_outer.0).unwrap_or(i32::MAX);
-    let min_h = i32::try_from(grab.min_outer.1).unwrap_or(i32::MAX);
-
-    let top = start.top();
-    let mut left = start.left();
-    let mut right = start.right();
-    let mut bottom = start.bottom();
-    if left_edge {
-        left = start.left() + dx;
-        if right - left < min_w {
-            left = right - min_w;
-        }
-    }
-    if right_edge {
-        right = start.right() + dx;
-        if right - left < min_w {
-            right = left + min_w;
-        }
-    }
-    if bottom_edge {
-        bottom = start.bottom() + dy;
-        if bottom - top < min_h {
-            bottom = top + min_h;
-        }
-    }
-    let width = u32::try_from(right - left).unwrap_or(0);
-    let height = u32::try_from(bottom - top).unwrap_or(0);
-    Rect::new(left, top, width, height)
+    // A drag past the opposite edge asks for a negative extent, which is no
+    // size at all: the bounds' floor is what it becomes.
+    let extent = |span: i32| u32::try_from(span).unwrap_or(0);
+    let wanted_width = if left_edge {
+        extent(start.right() - (start.left() + dx))
+    } else if right_edge {
+        extent(start.right() + dx - start.left())
+    } else {
+        start.width
+    };
+    let wanted_height = if bottom_edge {
+        extent(start.bottom() + dy - start.top())
+    } else {
+        start.height
+    };
+    let held = grab.bounds.clamp((wanted_width, wanted_height));
+    // Only a dragged axis is held to the bounds. A window its application
+    // created outside them is its application's choice, and a drag sideways
+    // is not the moment to snap its height to a floor it never asked for.
+    let width = if left_edge || right_edge {
+        held.0
+    } else {
+        start.width
+    };
+    let height = if bottom_edge { held.1 } else { start.height };
+    let left = if left_edge {
+        start.right() - i32::try_from(width).unwrap_or(i32::MAX)
+    } else {
+        start.left()
+    };
+    Rect::new(left, start.top(), width, height)
 }
 
 /// `origin` clamped so `drag` — the title bar's move surface in window-local

@@ -21,15 +21,20 @@ fn game() -> Game {
 }
 
 fn game_of(difficulty: Difficulty) -> Game {
-    let (width, height) = Layout::preferred(difficulty.dimensions(), Scale::ONE);
+    let asked = WindowGeometry::resolve(difficulty.dimensions(), Scale::ONE, roomy());
     Game::new(
         difficulty,
         BestTimes::default(),
         true,
         false,
-        Rect::new(0, 0, width, height),
+        asked.client(),
         Scale::ONE,
     )
+}
+
+/// A display large enough to cap nothing a board asks for.
+fn roomy() -> Rect {
+    Rect::new(0, 0, u32::MAX, u32::MAX)
 }
 
 /// The centre of `at` in the game's own window coordinates.
@@ -642,13 +647,57 @@ fn a_resize_redraws_the_whole_window() {
 }
 
 #[test]
-fn the_preferred_size_fits_the_board_and_the_floor_is_no_larger() {
+fn the_window_a_game_asks_for_holds_the_board_it_is_playing() {
     for difficulty in Difficulty::PRESETS {
         let game = game_of(difficulty);
-        let (pref_w, pref_h) = game.preferred_size();
-        let (min_w, min_h) = game.minimum_size();
-        assert!(min_w <= pref_w && min_h <= pref_h);
+        let asked = game.window_geometry(Scale::ONE, roomy());
+        assert!(asked.sizing.min_width_px() <= asked.width);
+        assert!(asked.sizing.min_height_px() <= asked.height);
+        assert!(asked.width <= asked.sizing.max_width_px());
+        assert!(asked.height <= asked.sizing.max_height_px());
     }
+}
+
+#[test]
+fn the_window_a_game_asks_for_follows_the_board_it_is_now_playing() {
+    // The bug this closes: a difficulty chosen while no window was open left
+    // the game laid out for the *previous* board, so the window that opened
+    // next drew its grid at the old geometry — offset inside, or clipped by,
+    // the window it had actually been given. Asking again answers the new
+    // board, and adopting that answer puts the grid back inside the window.
+    let mut game = game_of(Difficulty::Beginner);
+    let mut region = damage::sink();
+    let before = game.window_geometry(Scale::ONE, roomy());
+    let reaction = game.set_difficulty(Difficulty::Expert, &mut region);
+    assert!(reaction.resized, "a board of a new size needs a new window");
+
+    let after = game.window_geometry(Scale::ONE, roomy());
+    assert!(
+        after.width > before.width && after.height > before.height,
+        "the harder board asks for the larger window"
+    );
+    // Laid out in the stale geometry the grid does not fit the window that
+    // would open; laid out in the window it asks for, it does.
+    game.relayout(before.client(), Scale::ONE, &mut region);
+    let stale = game.layout.grid;
+    assert!(
+        stale.right() > after.client().right() || stale.width > before.width,
+        "the stale layout is what the window would have drawn wrongly"
+    );
+    game.relayout(after.client(), Scale::ONE, &mut region);
+    let grid = game.layout.grid;
+    assert!(
+        grid.left() >= 0 && grid.top() >= 0,
+        "the grid starts inside the window"
+    );
+    assert!(
+        grid.right() <= after.client().right() && grid.bottom() <= after.client().bottom(),
+        "the grid ends inside the window"
+    );
+    assert!(
+        grid.top() >= game.layout.header.bottom(),
+        "and clear of the header band"
+    );
 }
 
 // --- Keyboard -----------------------------------------------------------
@@ -762,8 +811,8 @@ fn turning_the_question_mark_off_reaches_the_board() {
 fn a_game_renders_at_every_stage_without_panicking() {
     for theme in [Theme::dark(), Theme::light()] {
         let mut game = game();
-        let (width, height) = game.preferred_size();
-        let mut surface = Surface::new(width, height).expect("a surface");
+        let asked = game.window_geometry(Scale::ONE, roomy());
+        let mut surface = Surface::new(asked.width, asked.height).expect("a surface");
         let font = BitmapFont::monospace(14);
         game.render(&mut surface, &theme, font, 0);
         click(&mut game, Coord::new(4, 4), PointerButton::Primary, 0);

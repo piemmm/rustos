@@ -383,6 +383,10 @@ pub fn win_sizing(scale: Scale) -> WindowSizing {
     WindowSizing::Resizable {
         min_width_px: scale.scale_length(MIN_WIN_WIDTH),
         min_height_px: scale.scale_length(MIN_WIN_HEIGHT),
+        // No ceiling of its own: every section reflows into whatever width
+        // and height the window is given.
+        max_width_px: 0,
+        max_height_px: 0,
     }
 }
 

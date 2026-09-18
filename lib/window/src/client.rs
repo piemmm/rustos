@@ -763,6 +763,28 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&WindowRequest::SetTitle { window_id, title })
     }
 
+    /// Restate the range the window manager may resize window `window_id`
+    /// within, replacing the range given at creation.
+    ///
+    /// An app whose content constraints move — a board switching to a larger
+    /// one, a layout remeasured at a new desktop density — states the new
+    /// range here. Without it the window manager holds a drag to the range
+    /// of content the app is no longer showing.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] — a range naming no reachable size (a
+    ///   maximum below its own minimum), caught before any call.
+    /// * [`Errno::NotFound`] — `window_id` is not one of the caller's own
+    ///   windows.
+    /// * [`Errno::NotSupported`] — the sizing contradicts how the window was
+    ///   decorated; what may be restated is the range, not whether the
+    ///   window is resizable at all.
+    /// * A transport failure, or a corrupt status frame.
+    pub fn set_sizing(&mut self, window_id: u64, sizing: WindowSizing) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::SetSizing { window_id, sizing })
+    }
+
     /// Ask the session to run its trusted file picker for window
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6).
     ///

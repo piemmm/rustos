@@ -97,7 +97,7 @@ pub use select::{cursor_cache, desired_cursor, CursorController, CursorEpoch};
 pub use stats::FrameStats;
 pub use surface::Surface;
 pub use viewport::{FurnitureHit, FurnitureLayout, RootViewport, ScrollPolicy};
-pub use window::{PointerCatch, Window, WindowId};
+pub use window::{PointerCatch, ResizeBounds, Window, WindowId};
 
 pub use tairix_controls::{
     ResizeEdge, ScrollModel, ScrollOrientation, ScrollRange, TrackHit, WindowActivationState,

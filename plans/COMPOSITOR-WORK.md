@@ -423,15 +423,29 @@ it guarantees:
 
 - **The sizing request rides the existing create, no new syscall.**
   `WindowRequest::Create` carries a validated `WindowSizing` (the resizable
-  byte after the title and the minimum pair; decode refuses a dirty flag byte
-  and a minimum on a window that is never resized), threaded through
-  `WindowClient::create` → the engine's `CreateSpec` → `WindowHost::window_opened`
-  → `DesktopShell::decorate_window`. A resizable-requested window is decorated
+  byte after the title, then the floor pair and the ceiling pair; decode
+  refuses a dirty flag byte, a range on a window that is never resized, and a
+  ceiling below its own floor), threaded through `WindowClient::create` → the
+  engine's `CreateSpec` → `WindowHost::window_opened` →
+  `DesktopShell::decorate_window`. A resizable-requested window is decorated
   with the resize grabber and a live maximize/restore size toggle; a fixed-size
   app asks for `WindowSizing::Fixed` and is offered neither (and never
   receives a `Resized`).
   The mechanism is per-app opt-in, never forced on an app that renders at one
   size (`AGENTS.md` §2.4 — the app decides, the window manager honours it).
+- **The range bounds the drag from both ends, and is restatable.** The
+  declared floor and ceiling reach the compositor as one value
+  (`Compositor::set_window_client_size_range` →
+  `Compositor::window_resize_bounds`), which both the interactive drag and
+  `Window::toggle_size` clamp against: an app whose content stops growing
+  (a board of square cells) declares a ceiling and maximize grows its window
+  to that extent rather than filling the work area with the app's dead
+  margin. A ceiling is opt-in — `0` on an axis declares none — and never
+  falls below the floor. Because an app's constraints move with its content
+  and with the desktop's density, `WindowRequest::SetSizing` restates the
+  range on a live window (`WindowHost::window_sizing_changed`), mirroring
+  `SetTitle`; what it may not restate is *resizability*, which decided the
+  furniture, so a kind change is refused `NotSupported`.
 - **The picture and document viewer is the shipping resizable app.**
   `userland/apps/view` opens `WindowSizing::Resizable`, and on every
   `WindowEvent::Resized` (an interactive grab settling, or a maximize/restore)
@@ -519,14 +533,17 @@ window manager and the shared furniture:
   (`MIN_CLIENT_W`/`MIN_CLIENT_H`) are gone: they had no relation to the
   furniture they were meant to protect, and at 96 px the commands overlapped
   the title long before the clamp bit.
-- **An application declares the smallest client it can lay out at**, on the
-  existing create request, and the window manager honours the greater of that
-  and the furniture's floor (`Compositor::set_window_min_client_size`,
-  `window_min_outer_size`). Without it an app that clamps its own layout
+- **An application declares the range of clients it can lay out**, on the
+  existing create request and restatable thereafter, and the window manager
+  honours the greater of its floor and the furniture's, plus its ceiling where
+  it declared one (`Compositor::set_window_client_size_range`,
+  `window_resize_bounds`). Without the floor an app that clamps its own layout
   resizes its window back up while the drag keeps shrinking, and the two fight
   once per pointer sample — the visible "the folder bounces as the window
-  approaches its minimum" defect. The floor bounds a *user* resize only: an
-  application sizing its own window is choosing that size.
+  approaches its minimum" defect. Without the ceiling an app whose content
+  stops growing is dragged, or maximized, into a window that is mostly its own
+  dead margin. The range bounds a *user* resize only: an application sizing
+  its own window is choosing that size.
 - **A dragged window keeps a grabbable patch of its title bar on screen.**
   `TitleBarLayout::drag` publishes the span between the clusters — the move
   surface the bar already laid out — and the move-grab captures it and clamps

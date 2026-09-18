@@ -165,6 +165,10 @@ pub const fn win_sizing(min_width_px: u32, min_height_px: u32) -> WindowSizing {
     WindowSizing::Resizable {
         min_width_px,
         min_height_px,
+        // No ceiling: every further cell of window is another column or row
+        // of screen for the shell to use.
+        max_width_px: 0,
+        max_height_px: 0,
     }
 }
 

@@ -1556,16 +1556,17 @@ impl core::fmt::Debug for WindowTitle {
 }
 
 /// How the window manager may size one window: fixed at its create
-/// geometry, or resizable down to the smallest client the app can lay out.
+/// geometry, or resizable within the range of clients the app can lay out.
 ///
-/// The two facts travel as one value rather than as a flag beside a pair of
-/// numbers that could contradict it: a window that is never resized has no
-/// floor to be measured against, so "fixed, minimum 640×480" is a statement
-/// that cannot be built, encoded, or decoded.
+/// The facts travel as one value rather than as a flag beside numbers that
+/// could contradict it: a window that is never resized has no range to be
+/// measured against, so "fixed, minimum 640×480" is a statement that cannot
+/// be built, encoded, or decoded, and neither is a maximum below its own
+/// minimum.
 ///
-/// One definition serves both halves — the app fills it in for
+/// One definition serves every half — the app fills it in for
 /// [`WindowRequest::Create`] and the session's window engine hands its host
-/// the same value — so the two cannot drift.
+/// the same value — so they cannot drift.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum WindowSizing {
     /// Neither a resize grabber nor a live maximize/restore size toggle is
@@ -1590,6 +1591,20 @@ pub enum WindowSizing {
         /// Smallest client height, in physical pixels, on the same terms as
         /// [`min_width_px`](Self::Resizable::min_width_px).
         min_height_px: u32,
+        /// Largest client width, in physical pixels, an interactive resize
+        /// may reach; `0` declares no maximum of the app's own, so the drag
+        /// and the size toggle are bounded only by the desktop.
+        ///
+        /// An app whose content stops growing — a board of square cells, a
+        /// fixed-column instrument panel — gains nothing but dead margin
+        /// past a certain size, and a maximize that filled the screen with
+        /// margin is a worse answer than one that grows the window as far as
+        /// it is useful. The window manager is again the enforcer, so the
+        /// app never shrinks itself back and fights the drag.
+        max_width_px: u32,
+        /// Largest client height, in physical pixels, on the same terms as
+        /// [`max_width_px`](Self::Resizable::max_width_px).
+        max_height_px: u32,
     },
 }
 
@@ -1618,6 +1633,27 @@ impl WindowSizing {
         match self {
             Self::Fixed => 0,
             Self::Resizable { min_height_px, .. } => min_height_px,
+        }
+    }
+
+    /// The largest client width an interactive resize may reach, or `0`
+    /// where none is declared — including a fixed window, which is never
+    /// resized at all.
+    #[must_use]
+    pub const fn max_width_px(self) -> u32 {
+        match self {
+            Self::Fixed => 0,
+            Self::Resizable { max_width_px, .. } => max_width_px,
+        }
+    }
+
+    /// The largest client height an interactive resize may reach, on the
+    /// same terms as [`max_width_px`](Self::max_width_px).
+    #[must_use]
+    pub const fn max_height_px(self) -> u32 {
+        match self {
+            Self::Fixed => 0,
+            Self::Resizable { max_height_px, .. } => max_height_px,
         }
     }
 }
@@ -1776,6 +1812,30 @@ pub enum WindowRequest {
         window_id: u64,
         /// The window's new title.
         title: WindowTitle,
+    },
+    /// Restate window `window_id`'s sizing contract, replacing the range
+    /// given at [`Self::Create`].
+    ///
+    /// A window's resize range is no more fixed at birth than its title is:
+    /// an app whose content constraints change — a board of square cells
+    /// switching to a larger board, a terminal remeasuring its floor after
+    /// a font change, any layout whose smallest and largest useful client
+    /// move with the desktop's density — restates them here. Left unstated,
+    /// the window manager would go on enforcing the range of content the app
+    /// is no longer showing, and a drag would hold the window at a floor or
+    /// a ceiling that means nothing.
+    ///
+    /// What may change is the *range*, not whether the window is resizable
+    /// at all: that decides the frame furniture it was decorated with, so a
+    /// sizing whose kind differs from the window's is refused rather than
+    /// half-applied. The request acts only on a window the caller owns.
+    SetSizing {
+        /// The caller's own window whose range is restated (from the
+        /// `Create` reply).
+        window_id: u64,
+        /// The range the window manager is to hold an interactive resize
+        /// to from here on.
+        sizing: WindowSizing,
     },
     /// Ask the session to run its **trusted file picker** for window
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6). The reply is only the
@@ -2119,6 +2179,8 @@ const OP_OPEN_LAYER: u16 = 19;
 const OP_PLACE_LAYER: u16 = 20;
 /// Wire operation discriminant of [`WindowRequest::TakeTerrain`].
 const OP_TAKE_TERRAIN: u16 = 21;
+/// Wire operation of [`WindowRequest::SetSizing`].
+const OP_SET_SIZING: u16 = 22;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -2226,19 +2288,37 @@ const PLACE_LAYER_WIRE_LEN: usize = LAYER_PLACE_DEPTH + 1;
 
 /// Byte offset of a [`WindowRequest::Create`] title length, immediately
 /// after the shared frame-layout block. The create tail runs on from here:
-/// the title text, the resizable flag, and the declared minimum client
-/// size.
+/// the title text, the resizable flag, and the declared client-size range.
 const CREATE_TITLE_LEN_OFFSET: usize = FRAME_LAYOUT_END;
 /// Byte offset of a [`WindowRequest::Create`] title's text.
 const CREATE_TITLE_TEXT_OFFSET: usize = CREATE_TITLE_LEN_OFFSET + 1;
-/// Byte offset of a [`WindowSizing`]'s resizable flag.
-const CREATE_RESIZABLE_OFFSET: usize = CREATE_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
-/// Byte offset of [`WindowSizing::Resizable::min_width_px`].
-const CREATE_MIN_WIDTH_OFFSET: usize = CREATE_RESIZABLE_OFFSET + 1;
-/// Byte offset of [`WindowSizing::Resizable::min_height_px`].
-const CREATE_MIN_HEIGHT_OFFSET: usize = CREATE_MIN_WIDTH_OFFSET + 4;
+/// Byte offset of the [`WindowSizing`] block a [`WindowRequest::Create`]
+/// carries, just past the title.
+const CREATE_SIZING_OFFSET: usize = CREATE_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
 /// Encoded size of a [`WindowRequest::Create`].
-const CREATE_WIRE_LEN: usize = CREATE_MIN_HEIGHT_OFFSET + 4;
+const CREATE_WIRE_LEN: usize = CREATE_SIZING_OFFSET + SIZING_WIRE_LEN;
+
+/// Encoded size of a [`WindowSizing`]: the resizable flag, then the floor
+/// and the ceiling, each a width before its height.
+///
+/// One layout for every operation that carries a sizing contract, so a
+/// window's range cannot be written one way at create and read another way
+/// when it is restated ([`WindowRequest::SetSizing`]).
+const SIZING_WIRE_LEN: usize = 1 + 4 * 4;
+/// Offset of [`WindowSizing::Resizable::min_width_px`] within a sizing block.
+const SIZING_MIN_WIDTH: usize = 1;
+/// Offset of [`WindowSizing::Resizable::min_height_px`] within the block.
+const SIZING_MIN_HEIGHT: usize = SIZING_MIN_WIDTH + 4;
+/// Offset of [`WindowSizing::Resizable::max_width_px`] within the block.
+const SIZING_MAX_WIDTH: usize = SIZING_MIN_HEIGHT + 4;
+/// Offset of [`WindowSizing::Resizable::max_height_px`] within the block.
+const SIZING_MAX_HEIGHT: usize = SIZING_MAX_WIDTH + 4;
+
+/// Byte offset of a [`WindowRequest::SetSizing`]'s sizing block, immediately
+/// after the window id it restates the range of.
+const SET_SIZING_OFFSET: usize = 16;
+/// Encoded size of a [`WindowRequest::SetSizing`].
+const SET_SIZING_WIRE_LEN: usize = SET_SIZING_OFFSET + SIZING_WIRE_LEN;
 
 /// Byte offset of a [`WindowRequest::SetTitle`] title length, immediately
 /// after the window id it retitles.
@@ -2430,6 +2510,7 @@ impl WindowRequest {
             ),
             Self::Resize { .. } => RESIZE_WIRE_LEN,
             Self::SetTitle { .. } => SET_TITLE_WIRE_LEN,
+            Self::SetSizing { .. } => SET_SIZING_WIRE_LEN,
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
             Self::QueryDesktop => QUERY_DESKTOP_WIRE_LEN,
             Self::SetAppBar(ref bar) => {
@@ -2457,7 +2538,9 @@ impl WindowRequest {
     /// * [`Errno::OutOfRange`] — a [`SetAppBar`](Self::SetAppBar) whose menu
     ///   states a title of its own, which an icon-bar menu never does
     ///   ([`AppMenu::titled`]), or an [`OpenMenu`](Self::OpenMenu) carrying
-    ///   no rows, which would open nothing.
+    ///   no rows, which would open nothing, or a [`Create`](Self::Create) or
+    ///   [`SetSizing`](Self::SetSizing) whose declared resize maximum is
+    ///   below its own minimum.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         self.encodable()?;
         let len = self.wire_len();
@@ -2484,6 +2567,15 @@ impl WindowRequest {
             // that states its own is refused rather than silently retitled.
             Self::SetAppBar(ref bar) if !bar.menu.title.is_empty() => Err(Errno::OutOfRange),
             Self::OpenMenu { ref menu, .. } if menu.is_empty() => Err(Errno::OutOfRange),
+            // A ceiling under its own floor names no size the window could
+            // be dragged to. `0` is how "no ceiling" is spelled, so such a
+            // pair is a mistake on the app's side, refused here rather than
+            // sent for the session to reject.
+            Self::Create { sizing, .. } | Self::SetSizing { sizing, .. }
+                if crossed_sizing(sizing) =>
+            {
+                Err(Errno::OutOfRange)
+            }
             _ => Ok(()),
         }
     }
@@ -2499,6 +2591,7 @@ impl WindowRequest {
             Self::PickFile { .. } => OP_PICK_FILE,
             Self::Resize { .. } => OP_RESIZE,
             Self::SetTitle { .. } => OP_SET_TITLE,
+            Self::SetSizing { .. } => OP_SET_SIZING,
             Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
             Self::QueryDesktop => OP_QUERY_DESKTOP,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
@@ -2551,6 +2644,10 @@ impl WindowRequest {
             Self::TakeMenuText { window_id, open_id } => {
                 put_u64(out, 8, window_id);
                 put_u64(out, 16, open_id);
+            }
+            Self::SetSizing { window_id, sizing } => {
+                put_u64(out, 8, window_id);
+                write_sizing(out, SET_SIZING_OFFSET, sizing);
             }
             Self::HandOverLaunch {
                 ref run_path,
@@ -2711,9 +2808,7 @@ impl WindowRequest {
             },
         );
         encode_title(out, CREATE_TITLE_LEN_OFFSET, &title);
-        out[CREATE_RESIZABLE_OFFSET] = u8::from(sizing.resizable());
-        put_u32(out, CREATE_MIN_WIDTH_OFFSET, sizing.min_width_px());
-        put_u32(out, CREATE_MIN_HEIGHT_OFFSET, sizing.min_height_px());
+        write_sizing(out, CREATE_SIZING_OFFSET, sizing);
     }
 
     /// Decode from `bytes`, failing closed on any malformed input.
@@ -2805,6 +2900,7 @@ impl WindowRequest {
                 })
             }
             OP_SET_TITLE => read_set_title(bytes),
+            OP_SET_SIZING => read_set_sizing(bytes),
             OP_TAKE_OPEN_TARGET => {
                 exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN)?;
                 Ok(Self::TakeOpenTarget)
@@ -2949,6 +3045,15 @@ fn read_set_tooltip(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         region,
         text,
     })
+}
+
+/// Decode a [`WindowRequest::SetSizing`]: the window whose range is
+/// restated and the range itself, refused on the same terms a `Create`'s is.
+fn read_set_sizing(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, SET_SIZING_WIRE_LEN)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let sizing = read_sizing(bytes, SET_SIZING_OFFSET)?;
+    Ok(WindowRequest::SetSizing { window_id, sizing })
 }
 
 fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
@@ -3307,28 +3412,60 @@ fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         stride_bytes: layout.stride_bytes,
         format: layout.format,
         title,
-        sizing: read_sizing(bytes)?,
+        sizing: read_sizing(bytes, CREATE_SIZING_OFFSET)?,
     })
 }
 
-/// Decode a `Create`'s sizing contract from the resizable flag and the two
-/// minimum fields that follow it.
+/// Decode the sizing contract in the block at `at`: the resizable flag and
+/// the four range fields that follow it.
 ///
-/// A minimum stated by a window that is never resized is a contradiction
+/// A range stated by a window that is never resized is a contradiction
 /// [`WindowSizing`] cannot hold, so a frame carrying one is refused rather
-/// than silently stripped of the half that does not fit.
-fn read_sizing(bytes: &[u8]) -> Result<WindowSizing, Errno> {
-    let min_width_px = read_u32(bytes, CREATE_MIN_WIDTH_OFFSET);
-    let min_height_px = read_u32(bytes, CREATE_MIN_HEIGHT_OFFSET);
-    match bytes[CREATE_RESIZABLE_OFFSET] {
-        0 if min_width_px == 0 && min_height_px == 0 => Ok(WindowSizing::Fixed),
+/// than silently stripped of the half that does not fit. So is a maximum
+/// below its own minimum, which names no size at all: an unset maximum is
+/// spelled `0`, never a value the floor already excludes.
+fn read_sizing(bytes: &[u8], at: usize) -> Result<WindowSizing, Errno> {
+    let range = WindowSizing::Resizable {
+        min_width_px: read_u32(bytes, at + SIZING_MIN_WIDTH),
+        min_height_px: read_u32(bytes, at + SIZING_MIN_HEIGHT),
+        max_width_px: read_u32(bytes, at + SIZING_MAX_WIDTH),
+        max_height_px: read_u32(bytes, at + SIZING_MAX_HEIGHT),
+    };
+    let silent = range.min_width_px() == 0
+        && range.min_height_px() == 0
+        && range.max_width_px() == 0
+        && range.max_height_px() == 0;
+    match bytes[at] {
+        0 if silent => Ok(WindowSizing::Fixed),
         0 => Err(Errno::LengthOutOfRange),
-        1 => Ok(WindowSizing::Resizable {
-            min_width_px,
-            min_height_px,
-        }),
+        1 if crossed_sizing(range) => Err(Errno::OutOfRange),
+        1 => Ok(range),
         _ => Err(Errno::OutOfRange),
     }
+}
+
+/// Write `sizing` into `out` at `at`, in the one layout
+/// [`read_sizing`] reads (mirrors it).
+fn write_sizing(out: &mut [u8], at: usize, sizing: WindowSizing) {
+    out[at] = u8::from(sizing.resizable());
+    put_u32(out, at + SIZING_MIN_WIDTH, sizing.min_width_px());
+    put_u32(out, at + SIZING_MIN_HEIGHT, sizing.min_height_px());
+    put_u32(out, at + SIZING_MAX_WIDTH, sizing.max_width_px());
+    put_u32(out, at + SIZING_MAX_HEIGHT, sizing.max_height_px());
+}
+
+/// Whether `sizing` declares a resize maximum below its own minimum on
+/// either axis — a range naming no reachable size.
+///
+/// An absent maximum is spelled `0`, so it never reads as crossed. The one
+/// definition both the encoder's pre-check and the decoder consult, so a
+/// client can never send a range the session would only reject.
+const fn crossed_sizing(sizing: WindowSizing) -> bool {
+    const fn crossed(min: u32, max: u32) -> bool {
+        max != 0 && max < min
+    }
+    crossed(sizing.min_width_px(), sizing.max_width_px())
+        || crossed(sizing.min_height_px(), sizing.max_height_px())
 }
 
 /// Decode the operands of a [`WindowRequest::CreatePopup`]: the granted
@@ -4740,24 +4877,25 @@ mod tests {
         APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
         APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
         APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
-        APP_MENU_TEXT_BYTES, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
-        CREATE_POPUP_WIRE_LEN, CREATE_RESIZABLE_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
-        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_REPLY_SERVER_OFFSET, HAND_OVER_GRANT_OFFSET,
-        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET,
-        HAND_OVER_RUN_PATH_MAX, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
-        MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END,
-        MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET,
-        MENU_TEXT_REPLY_TEXT_OFFSET, OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET,
-        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
-        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PLACE_LAYER_WIRE_LEN,
-        PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET,
-        SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET,
-        SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN, TAKE_MENU_TEXT_WIRE_LEN,
-        TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX, WINDOW_BACKDROP_BLUR_MAX_PX,
-        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
-        WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
-        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
-        WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
+        APP_MENU_TEXT_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
+        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_REPLY_SERVER_OFFSET,
+        HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET,
+        HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH,
+        MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
+        MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
+        MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, OPEN_LAYER_WIRE_LEN,
+        OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET,
+        OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET,
+        PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_SIZING_OFFSET,
+        SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
+        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
+        SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT,
+        SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN,
+        WINDOW_MAX_FRAMES, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX,
+        WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -4842,12 +4980,34 @@ mod tests {
         }
     }
 
+    /// Where one field of a `Create`'s sizing block lands in the frame.
+    const fn create_sizing_at(within: usize) -> usize {
+        CREATE_SIZING_OFFSET + within
+    }
+
     /// The same window opened **resizable**, declaring the smallest client
-    /// size the window manager may resize it to.
+    /// size the window manager may resize it to and no ceiling of its own.
     fn sample_create_min(min_width_px: u32, min_height_px: u32) -> WindowRequest {
         sample_create_sized(WindowSizing::Resizable {
             min_width_px,
             min_height_px,
+            max_width_px: 0,
+            max_height_px: 0,
+        })
+    }
+
+    /// The same window opened **resizable** within a declared range.
+    fn sample_create_ranged(
+        min_width_px: u32,
+        min_height_px: u32,
+        max_width_px: u32,
+        max_height_px: u32,
+    ) -> WindowRequest {
+        sample_create_sized(WindowSizing::Resizable {
+            min_width_px,
+            min_height_px,
+            max_width_px,
+            max_height_px,
         })
     }
 
@@ -5099,6 +5259,19 @@ mod tests {
             height_px: 480,
             stride_bytes: 2560,
             format: DisplayFormat::Bgra8888,
+        });
+        visit(WindowRequest::SetSizing {
+            window_id: 3,
+            sizing: WindowSizing::Fixed,
+        });
+        visit(WindowRequest::SetSizing {
+            window_id: 3,
+            sizing: WindowSizing::Resizable {
+                min_width_px: 240,
+                min_height_px: 160,
+                max_width_px: 900,
+                max_height_px: 700,
+            },
         });
         visit(WindowRequest::SetTitle {
             window_id: 3,
@@ -6556,11 +6729,11 @@ mod tests {
         let bytes = resizable.frame();
         assert_eq!(WindowRequest::from_bytes(&bytes), Ok(resizable));
         // The flag lives at the byte just past the title.
-        assert_eq!(bytes[CREATE_RESIZABLE_OFFSET], 1);
-        assert_eq!(sample_create().frame()[CREATE_RESIZABLE_OFFSET], 0);
+        assert_eq!(bytes[CREATE_SIZING_OFFSET], 1);
+        assert_eq!(sample_create().frame()[CREATE_SIZING_OFFSET], 0);
         // A flag byte outside {0, 1} is refused, never coerced.
         let mut bad = sample_create().frame();
-        bad[CREATE_RESIZABLE_OFFSET] = 2;
+        bad[CREATE_SIZING_OFFSET] = 2;
         assert_eq!(WindowRequest::from_bytes(&bad), Err(Errno::OutOfRange));
     }
 
@@ -6571,11 +6744,11 @@ mod tests {
         assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
         // The pair follows the resizable flag, in that order.
         assert_eq!(
-            bytes[CREATE_MIN_WIDTH_OFFSET..CREATE_MIN_WIDTH_OFFSET + 4],
+            bytes[create_sizing_at(SIZING_MIN_WIDTH)..create_sizing_at(SIZING_MIN_WIDTH) + 4],
             240u32.to_le_bytes()
         );
         assert_eq!(
-            bytes[CREATE_MIN_HEIGHT_OFFSET..CREATE_MIN_HEIGHT_OFFSET + 4],
+            bytes[create_sizing_at(SIZING_MIN_HEIGHT)..create_sizing_at(SIZING_MIN_HEIGHT) + 4],
             160u32.to_le_bytes()
         );
         // Zero declares no minimum of the app's own, per axis, and the
@@ -6587,15 +6760,108 @@ mod tests {
     }
 
     #[test]
-    fn create_refuses_a_minimum_on_a_fixed_size_window() {
+    fn create_carries_the_declared_maximum_client_size() {
+        let request = sample_create_ranged(240, 160, 900, 700);
+        let bytes = request.frame();
+        assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
+        // The ceiling follows the floor, width before height.
+        assert_eq!(
+            bytes[create_sizing_at(SIZING_MAX_WIDTH)..create_sizing_at(SIZING_MAX_WIDTH) + 4],
+            900u32.to_le_bytes()
+        );
+        assert_eq!(
+            bytes[create_sizing_at(SIZING_MAX_HEIGHT)..create_sizing_at(SIZING_MAX_HEIGHT) + 4],
+            700u32.to_le_bytes()
+        );
+        // Zero declares no ceiling of the app's own, per axis; a ceiling
+        // equal to the floor is the window that may only be dragged to the
+        // one size, which is a range and not a contradiction.
+        for (max_w, max_h) in [(0, 0), (900, 0), (0, 700), (240, 160), (u32::MAX, u32::MAX)] {
+            let request = sample_create_ranged(240, 160, max_w, max_h);
+            assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
+        }
+    }
+
+    #[test]
+    fn create_refuses_a_maximum_below_its_own_minimum() {
+        // A ceiling under the floor names no size the window could be
+        // dragged to, so neither end of the channel accepts it: the encoder
+        // refuses to send one and the decoder refuses to read one.
+        for (max_w, max_h) in [(239u32, 160u32), (240, 159), (1, 1)] {
+            let request = sample_create_ranged(240, 160, max_w, max_h);
+            let mut out = [0u8; WindowRequest::MAX_WIRE_LEN];
+            assert_eq!(request.encode(&mut out), Err(Errno::OutOfRange));
+
+            let mut bytes = sample_create_min(240, 160).frame();
+            bytes[create_sizing_at(SIZING_MAX_WIDTH)..create_sizing_at(SIZING_MAX_WIDTH) + 4]
+                .copy_from_slice(&max_w.to_le_bytes());
+            bytes[create_sizing_at(SIZING_MAX_HEIGHT)..create_sizing_at(SIZING_MAX_HEIGHT) + 4]
+                .copy_from_slice(&max_h.to_le_bytes());
+            assert_eq!(WindowRequest::from_bytes(&bytes), Err(Errno::OutOfRange));
+        }
+    }
+
+    #[test]
+    fn restating_a_range_names_its_window_and_refuses_a_crossed_one() {
+        // A board that changes size changes the range it may be dragged
+        // within, so the range is restatable — on the same terms a create
+        // states it, and only ever for a window that is named.
+        let restated = WindowRequest::SetSizing {
+            window_id: 3,
+            sizing: WindowSizing::Resizable {
+                min_width_px: 240,
+                min_height_px: 160,
+                max_width_px: 900,
+                max_height_px: 700,
+            },
+        };
+        assert_eq!(
+            WindowRequest::from_bytes(&restated.frame()),
+            Ok(restated),
+            "a restated range survives the round trip"
+        );
+
+        let mut anonymous = restated.frame();
+        anonymous[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&anonymous),
+            Err(Errno::OutOfRange)
+        );
+
+        let crossed = WindowRequest::SetSizing {
+            window_id: 3,
+            sizing: WindowSizing::Resizable {
+                min_width_px: 240,
+                min_height_px: 160,
+                max_width_px: 100,
+                max_height_px: 700,
+            },
+        };
+        let mut out = [0u8; WindowRequest::MAX_WIRE_LEN];
+        assert_eq!(crossed.encode(&mut out), Err(Errno::OutOfRange));
+
+        // The same block layout as a create's, so a range written by one and
+        // read by the other cannot mean two different things.
+        let created = sample_create_ranged(240, 160, 900, 700).frame();
+        assert_eq!(
+            restated.frame()[SET_SIZING_OFFSET..SET_SIZING_WIRE_LEN],
+            created[CREATE_SIZING_OFFSET..CREATE_WIRE_LEN]
+        );
+    }
+
+    #[test]
+    fn create_refuses_a_resize_range_on_a_fixed_size_window() {
         // A window the window manager never resizes has nothing to measure
-        // a floor against, so the contradiction is refused, not ignored.
-        for (min_w, min_h) in [(240u32, 160u32), (240, 0), (0, 160)] {
+        // a floor or a ceiling against, so the contradiction is refused,
+        // not ignored.
+        for (offset, value) in [
+            (create_sizing_at(SIZING_MIN_WIDTH), 240u32),
+            (create_sizing_at(SIZING_MIN_HEIGHT), 160),
+            (create_sizing_at(SIZING_MAX_WIDTH), 900),
+            (create_sizing_at(SIZING_MAX_HEIGHT), 700),
+        ] {
             let mut bytes = sample_create().frame();
-            bytes[CREATE_MIN_WIDTH_OFFSET..CREATE_MIN_WIDTH_OFFSET + 4]
-                .copy_from_slice(&min_w.to_le_bytes());
-            bytes[CREATE_MIN_HEIGHT_OFFSET..CREATE_MIN_HEIGHT_OFFSET + 4]
-                .copy_from_slice(&min_h.to_le_bytes());
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             assert_eq!(
                 WindowRequest::from_bytes(&bytes),
                 Err(Errno::LengthOutOfRange)
@@ -6616,14 +6882,32 @@ mod tests {
             WindowSizing::Resizable {
                 min_width_px: 0,
                 min_height_px: 0,
+                max_width_px: 0,
+                max_height_px: 0,
             },
             WindowSizing::Resizable {
                 min_width_px: 240,
                 min_height_px: 160,
+                max_width_px: 0,
+                max_height_px: 0,
+            },
+            WindowSizing::Resizable {
+                min_width_px: 0,
+                min_height_px: 0,
+                max_width_px: 900,
+                max_height_px: 700,
+            },
+            WindowSizing::Resizable {
+                min_width_px: 240,
+                min_height_px: 160,
+                max_width_px: 900,
+                max_height_px: 700,
             },
             WindowSizing::Resizable {
                 min_width_px: u32::MAX,
                 min_height_px: u32::MAX,
+                max_width_px: u32::MAX,
+                max_height_px: u32::MAX,
             },
         ] {
             let request = sample_create_sized(sizing);
@@ -6643,7 +6927,7 @@ mod tests {
         let bytes = sample_create_min(240, 160).frame();
         // A frame cut short is refused whole, never decoded from the part
         // that arrived — including one cut inside the minimum itself.
-        for short in [CREATE_WIRE_LEN - 1, CREATE_MIN_WIDTH_OFFSET + 2] {
+        for short in [CREATE_WIRE_LEN - 1, create_sizing_at(SIZING_MIN_WIDTH) + 2] {
             assert_eq!(
                 WindowRequest::from_bytes(&bytes[..short]),
                 Err(Errno::BufferTooSmall)

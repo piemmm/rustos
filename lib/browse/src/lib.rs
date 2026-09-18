@@ -259,6 +259,10 @@ const fn sizing_of(min_width_px: u32, min_height_px: u32) -> WindowSizing {
     WindowSizing::Resizable {
         min_width_px,
         min_height_px,
+        // No ceiling: a listing shows more of itself at every size, so a
+        // browser window is never all margin however large it is dragged.
+        max_width_px: 0,
+        max_height_px: 0,
     }
 }
 
