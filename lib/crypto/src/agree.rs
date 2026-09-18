@@ -14,11 +14,13 @@
 //!
 //! # The agreement output is not a key
 //!
-//! [`X25519SharedSecret`] is raw Diffie–Hellman output: a uniformly-distributed
-//! *curve point coordinate*, not a uniformly-distributed bit string. It must be
-//! run through [`crate::kdf::derive_key`] — keyed by the agreement output, over
-//! a transcript and a domain-separating context — before any byte of it reaches
-//! a cipher. Using it directly as a cipher key is a defect.
+//! [`X25519SharedSecret`] is raw Diffie–Hellman output: a *curve point
+//! coordinate*, not a uniformly-distributed bit string. Condense it before any
+//! byte of it reaches a cipher — [`crate::mac::hmac_sha256`] over the
+//! agreement output as the *message*, keyed by the handshake transcript as the
+//! salt, then one [`crate::kdf::derive_key`] per use under a domain-separating
+//! context. The non-uniform value is that PRF's input, never its key. Using it
+//! directly as a cipher key is a defect.
 //!
 //! # Non-contributory results are refused
 //!
@@ -78,11 +80,12 @@ impl X25519PublicKey {
     }
 }
 
-/// An X25519 secret scalar, clamped on construction and wiped on drop.
+/// An X25519 secret scalar, wiped on drop.
 ///
-/// Clamping (RFC 7748 §5) is applied by the upstream crate when the scalar is
-/// built, so a caller cannot supply an unclamped scalar and land off the
-/// prime-order subgroup.
+/// The scalar is stored as the caller supplied it; clamping (RFC 7748 §5) is
+/// applied by the upstream crate at each *use* — deriving the public key and
+/// running the agreement — so arbitrary caller bytes can never reach the curve
+/// unclamped and land off the prime-order subgroup.
 pub struct X25519SecretKey {
     inner: StaticSecret,
 }
