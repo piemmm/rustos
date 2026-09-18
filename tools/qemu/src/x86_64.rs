@@ -34,7 +34,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{net_device_arg, netdev_dgram_arg, rtc_base_args, SessionKind, Spec};
+use crate::{net_device_arg, netdev_arg, rtc_base_args, SessionKind, Spec};
 
 /// Default guest RAM size in mebibytes for an x86_64 QEMU integration
 /// test.
@@ -166,18 +166,15 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     }
 
     // Attach each network interface as a modern virtio-net-pci function
-    // behind a `dgram` unix-datagram backend: QEMU binds the device's
-    // `qemu_sock` and forwards every guest frame as one raw Ethernet
-    // datagram to the harness-bound `peer_sock`, so the harness is the
-    // guest's link peer with no host privileges and a private per-run
-    // wire. `disable-legacy=on` pins the function to the modern
-    // virtio-1.x PCI layout the Stage 4.D boot walk decodes (device id
-    // 0x1041 = `0x1040 + virtio-net`), exactly as for virtio-blk above.
-    // An optional `filter-dump` mirrors every frame on the interface to
-    // a host pcap so the harness can verify the exchange after the run.
+    // behind the backend the spec chose (`netdev_arg`).
+    // `disable-legacy=on` pins the function to the modern virtio-1.x PCI
+    // layout the Stage 4.D boot walk decodes (device id 0x1041 =
+    // `0x1040 + virtio-net`), exactly as for virtio-blk above. An optional
+    // `filter-dump` mirrors every frame on the interface to a host pcap so
+    // the harness can verify the exchange after the run.
     for (i, dev) in spec.net_devices.iter().enumerate() {
         argv.push("-netdev".into());
-        argv.push(netdev_dgram_arg(i, dev));
+        argv.push(netdev_arg(i, dev));
         argv.push("-device".into());
         argv.push(net_device_arg(
             "virtio-net-pci",
@@ -475,14 +472,18 @@ mod tests {
         let mut spec = fixture_spec(1);
         spec.net_devices = vec![
             crate::NetDevice {
-                qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
-                peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
+                backend: crate::NetBackend::Dgram {
+                    qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
+                    peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
+                },
                 pcap: None,
                 mac: None,
             },
             crate::NetDevice {
-                qemu_sock: PathBuf::from("/tmp/net1.qemu.sock"),
-                peer_sock: PathBuf::from("/tmp/net1.peer.sock"),
+                backend: crate::NetBackend::Dgram {
+                    qemu_sock: PathBuf::from("/tmp/net1.qemu.sock"),
+                    peer_sock: PathBuf::from("/tmp/net1.peer.sock"),
+                },
                 pcap: Some(PathBuf::from("/tmp/cap1.pcap")),
                 mac: None,
             },

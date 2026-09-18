@@ -47,7 +47,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{net_device_arg, netdev_dgram_arg, rtc_base_args, Outcome, SessionKind, Spec};
+use crate::{net_device_arg, netdev_arg, rtc_base_args, Outcome, SessionKind, Spec};
 
 /// Default guest RAM size in mebibytes for a riscv64 QEMU integration
 /// test.
@@ -227,16 +227,15 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("none".into());
     }
 
-    // Attach each network interface as a virtio-mmio net device behind a
-    // `dgram` unix-datagram backend — the riscv64 analogue of the x86_64
-    // `virtio-net-pci` path. `virtio-net-device` binds to one of the
+    // Attach each network interface as a virtio-mmio net device behind the
+    // backend the spec chose (`netdev_arg`) — the riscv64 analogue of the
+    // x86_64 `virtio-net-pci` path. `virtio-net-device` binds to one of the
     // `virt` board's virtio-mmio transports, which the Stage 4.D
-    // `MmioTransport` drives; the dgram socket pair makes the harness
-    // the guest's link peer on a private per-run wire. An optional
-    // `filter-dump` mirrors every frame to a host pcap.
+    // `MmioTransport` drives. An optional `filter-dump` mirrors every frame
+    // to a host pcap.
     for (i, dev) in spec.net_devices.iter().enumerate() {
         argv.push("-netdev".into());
-        argv.push(netdev_dgram_arg(i, dev));
+        argv.push(netdev_arg(i, dev));
         argv.push("-device".into());
         argv.push(net_device_arg("virtio-net-device", i, dev, ""));
         if let Some(pcap) = &dev.pcap {
@@ -559,14 +558,18 @@ mod tests {
         let mut spec = fixture_spec(1);
         spec.net_devices = vec![
             crate::NetDevice {
-                qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
-                peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
+                backend: crate::NetBackend::Dgram {
+                    qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
+                    peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
+                },
                 pcap: None,
                 mac: None,
             },
             crate::NetDevice {
-                qemu_sock: PathBuf::from("/tmp/net1.qemu.sock"),
-                peer_sock: PathBuf::from("/tmp/net1.peer.sock"),
+                backend: crate::NetBackend::Dgram {
+                    qemu_sock: PathBuf::from("/tmp/net1.qemu.sock"),
+                    peer_sock: PathBuf::from("/tmp/net1.peer.sock"),
+                },
                 pcap: Some(PathBuf::from("/tmp/cap1.pcap")),
                 mac: None,
             },

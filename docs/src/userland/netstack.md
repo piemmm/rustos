@@ -184,8 +184,12 @@ re-pushed (`devmgr` events `13_014`/`13_015`).
 An image ships the addressing default its own hardware warrants, validated
 at build time through the same `lib/netconfig` engine the stack reads it
 with, so an image can never ship a document its own parser would reject.
-The Raspberry Pi image binds the board's on-board GENET NIC by its register
-aperture and selects DHCPv4 + SLAAC; an image that plants no NIC driver
+The Raspberry Pi image declares one interface per NIC it can meet, both
+DHCPv4 + SLAAC: the board's on-board GENET by its register aperture, and
+the virtio-net NIC of an emulated or virtualised boot by the MAC the runner
+pins (`docs/src/platform/aarch64.md`). Only one is ever discovered, so the
+other is simply never configured — the `NotFound` retry above, indefinitely,
+which is what an unbound node costs. An image that plants no NIC driver
 ships the canonical **empty** document ("no managed interfaces beyond
 loopback").
 

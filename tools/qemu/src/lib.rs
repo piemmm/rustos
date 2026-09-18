@@ -234,18 +234,39 @@ pub struct BlockDevice {
     pub image: PathBuf,
 }
 
+/// How a guest NIC's frames leave the machine.
+///
+/// Both backends work with no host privileges and no host network setup,
+/// so neither a test nor a developer session depends on a `tap` interface
+/// or a bridge existing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NetBackend {
+    /// A private unix-datagram wire to the harness-side link peer. QEMU
+    /// binds `qemu_sock` and sends every guest frame as one raw Ethernet
+    /// datagram to `peer_sock`, which the harness binds and answers on.
+    /// Each concurrent run gets its own wire, so runs share no port space
+    /// and cannot collide.
+    Dgram {
+        /// Unix datagram socket path QEMU binds (the guest end of the wire).
+        qemu_sock: PathBuf,
+        /// Unix datagram socket path the harness binds (the peer end); QEMU
+        /// sends every guest frame here.
+        peer_sock: PathBuf,
+    },
+    /// QEMU's built-in user-mode network: a DHCP server, a DNS forwarder,
+    /// and NAT out through the host's own routing, all inside the QEMU
+    /// process. This is what an interactive session needs — a human's guest
+    /// must reach a network that answers, and no harness peer is running to
+    /// be one.
+    User,
+}
+
 /// A virtio network interface attached to the guest.
 ///
-/// The attachment is a modern virtio-net device backed by QEMU's
-/// `dgram` netdev over a pair of unix datagram sockets: a
-/// `virtio-net-pci` function on x86_64 (driven by the Stage 4.D
-/// `PciTransport`) or a `virtio-net-device` on the aarch64/riscv64
-/// `virt` boards' virtio-mmio bus (driven by `MmioTransport`). QEMU
-/// binds [`qemu_sock`](Self::qemu_sock) and sends every guest frame as
-/// one raw Ethernet datagram to [`peer_sock`](Self::peer_sock); the
-/// harness binds `peer_sock` and answers as the guest's link peer.
-/// Datagram sockets need no host privileges and give each concurrent
-/// run its own private wire (no flaky tests, no port collisions).
+/// The attachment is a modern virtio-net device — a `virtio-net-pci`
+/// function on x86_64 (driven by the Stage 4.D `PciTransport`) or a
+/// `virtio-net-device` on the aarch64/riscv64 `virt` boards' virtio-mmio
+/// bus (driven by `MmioTransport`) — over one of the two [`NetBackend`]s.
 ///
 /// When [`NetDevice::pcap`] is set the runner attaches a
 /// `filter-dump` that writes every frame on the interface to that host
@@ -254,30 +275,42 @@ pub struct BlockDevice {
 /// the guest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NetDevice {
-    /// Unix datagram socket path QEMU binds (the guest end of the wire).
-    pub qemu_sock: PathBuf,
-    /// Unix datagram socket path the harness binds (the peer end); QEMU
-    /// sends every guest frame here.
-    pub peer_sock: PathBuf,
+    /// What the interface's frames are carried over.
+    pub backend: NetBackend,
     /// Optional host path for a `pcap` capture of all traffic on this
     /// interface. `None` attaches no capture.
     pub pcap: Option<PathBuf>,
     /// Optional fixed MAC address for the device (`"aa:bb:cc:dd:ee:ff"`).
-    /// `None` lets QEMU assign its default. A vertical whose guest derives
-    /// its IPv6 link-local address from the device MAC (EUI-64) pins this
-    /// so the host peer can address the guest deterministically.
+    /// `None` lets QEMU assign its default. A guest that derives its IPv6
+    /// link-local address from the device MAC (EUI-64), or whose
+    /// `network.conf` binds the interface by `match.mac`, needs this pinned
+    /// so the identity is known ahead of the run.
     pub mac: Option<String>,
 }
 
-/// Render the `-netdev dgram,…` argument for net device `i` — the one
-/// definition every per-arch argv builder shares, so the socket wiring
-/// can never drift between transports.
-pub(crate) fn netdev_dgram_arg(i: usize, dev: &NetDevice) -> OsString {
-    let mut arg = OsString::from(format!("dgram,id=net{i},local.type=unix,local.path="));
-    arg.push(dev.qemu_sock.as_os_str());
-    arg.push(",remote.type=unix,remote.path=");
-    arg.push(dev.peer_sock.as_os_str());
-    arg
+/// Render the `-netdev …` argument for net device `i` — the one definition
+/// every per-arch argv builder shares, so the backend wiring can never
+/// drift between transports.
+pub(crate) fn netdev_arg(i: usize, dev: &NetDevice) -> OsString {
+    match &dev.backend {
+        NetBackend::Dgram {
+            qemu_sock,
+            peer_sock,
+        } => {
+            let mut arg = OsString::from(format!("dgram,id=net{i},local.type=unix,local.path="));
+            arg.push(qemu_sock.as_os_str());
+            arg.push(",remote.type=unix,remote.path=");
+            arg.push(peer_sock.as_os_str());
+            arg
+        }
+        // Both families are named, and naming *both* is the point: QEMU
+        // defaults them on only while neither is mentioned, so `ipv6=on`
+        // alone silently turns IPv4 off — the guest then leases nothing and
+        // the server never says why, while its SLAAC address comes up
+        // normally. Spelling both out states what the session needs and
+        // cannot be flipped by a future default.
+        NetBackend::User => OsString::from(format!("user,id=net{i},ipv4=on,ipv6=on")),
+    }
 }
 
 /// Render a `-device <driver>,netdev=net{i}[,mac=…][,<extra>]` argument —
@@ -1089,8 +1122,10 @@ impl Spec {
         pcap: impl Into<PathBuf>,
     ) -> Self {
         self.net_devices.push(NetDevice {
-            qemu_sock: qemu_sock.into(),
-            peer_sock: peer_sock.into(),
+            backend: NetBackend::Dgram {
+                qemu_sock: qemu_sock.into(),
+                peer_sock: peer_sock.into(),
+            },
             pcap: Some(pcap.into()),
             mac: None,
         });
@@ -1110,9 +1145,33 @@ impl Spec {
         mac: impl Into<String>,
     ) -> Self {
         self.net_devices.push(NetDevice {
-            qemu_sock: qemu_sock.into(),
-            peer_sock: peer_sock.into(),
+            backend: NetBackend::Dgram {
+                qemu_sock: qemu_sock.into(),
+                peer_sock: peer_sock.into(),
+            },
             pcap: Some(pcap.into()),
+            mac: Some(mac.into()),
+        });
+        self
+    }
+
+    /// Attach a virtio network interface on QEMU's built-in user-mode
+    /// network ([`NetBackend::User`]): the guest leases an address from
+    /// QEMU's own DHCP server, resolves through its DNS forwarder, and
+    /// reaches the outside world through its NAT — with no host
+    /// privileges and no host network setup.
+    ///
+    /// The device MAC is pinned to `mac` (a QEMU MAC string,
+    /// `"aa:bb:cc:dd:ee:ff"`), so a guest whose `network.conf` binds the
+    /// interface by `match.mac` finds the identity it was configured
+    /// against. No `pcap` is attached: unlike a bounded vertical, a
+    /// session on this backing runs as long as a human keeps it open, and
+    /// a capture of it would grow without bound.
+    #[must_use]
+    pub fn with_virtio_net_user(mut self, mac: impl Into<String>) -> Self {
+        self.net_devices.push(NetDevice {
+            backend: NetBackend::User,
+            pcap: None,
             mac: Some(mac.into()),
         });
         self
@@ -3864,14 +3923,26 @@ mod tests {
         );
         assert_eq!(s.net_devices.len(), 1);
         assert_eq!(
-            s.net_devices[0].qemu_sock,
-            PathBuf::from("/tmp/net.qemu.sock")
-        );
-        assert_eq!(
-            s.net_devices[0].peer_sock,
-            PathBuf::from("/tmp/net.peer.sock")
+            s.net_devices[0].backend,
+            NetBackend::Dgram {
+                qemu_sock: PathBuf::from("/tmp/net.qemu.sock"),
+                peer_sock: PathBuf::from("/tmp/net.peer.sock"),
+            }
         );
         assert_eq!(s.net_devices[0].pcap, Some(PathBuf::from("/tmp/cap.pcap")));
+    }
+
+    /// An interactive session's interface is user-mode-backed, MAC-pinned
+    /// (its guest binds the interface by `match.mac`), and deliberately
+    /// uncaptured — a session runs as long as a human keeps it open, so a
+    /// pcap of it would grow without bound.
+    #[test]
+    fn with_virtio_net_user_pins_the_mac_and_captures_nothing() {
+        let s = Spec::for_aarch64_kernel("/tmp/k").with_virtio_net_user("52:54:00:12:34:56");
+        assert_eq!(s.net_devices.len(), 1);
+        assert_eq!(s.net_devices[0].backend, NetBackend::User);
+        assert_eq!(s.net_devices[0].mac.as_deref(), Some("52:54:00:12:34:56"));
+        assert_eq!(s.net_devices[0].pcap, None);
     }
 
     #[test]
@@ -3915,26 +3986,26 @@ mod tests {
             .with_virtio_net_dgram("/tmp/a.qemu.sock", "/tmp/a.peer.sock", "/tmp/a.pcap")
             .with_virtio_net_dgram("/tmp/b.qemu.sock", "/tmp/b.peer.sock", "/tmp/b.pcap");
         assert_eq!(s.net_devices.len(), 2);
-        assert_eq!(
-            s.net_devices[0].qemu_sock,
-            PathBuf::from("/tmp/a.qemu.sock")
-        );
-        assert_eq!(
-            s.net_devices[1].qemu_sock,
-            PathBuf::from("/tmp/b.qemu.sock")
-        );
+        let sock = |dev: &NetDevice| match &dev.backend {
+            NetBackend::Dgram { qemu_sock, .. } => qemu_sock.clone(),
+            NetBackend::User => panic!("expected a dgram wire"),
+        };
+        assert_eq!(sock(&s.net_devices[0]), PathBuf::from("/tmp/a.qemu.sock"));
+        assert_eq!(sock(&s.net_devices[1]), PathBuf::from("/tmp/b.qemu.sock"));
     }
 
     #[test]
-    fn netdev_dgram_arg_renders_both_socket_paths() {
+    fn netdev_arg_renders_both_socket_paths_for_a_dgram_wire() {
         let dev = NetDevice {
-            qemu_sock: PathBuf::from("/tmp/net7.qemu.sock"),
-            peer_sock: PathBuf::from("/tmp/net7.peer.sock"),
+            backend: NetBackend::Dgram {
+                qemu_sock: PathBuf::from("/tmp/net7.qemu.sock"),
+                peer_sock: PathBuf::from("/tmp/net7.peer.sock"),
+            },
             pcap: None,
             mac: None,
         };
         assert_eq!(
-            netdev_dgram_arg(7, &dev),
+            netdev_arg(7, &dev),
             OsString::from(
                 "dgram,id=net7,local.type=unix,local.path=/tmp/net7.qemu.sock,\
                  remote.type=unix,remote.path=/tmp/net7.peer.sock"
@@ -3942,11 +4013,37 @@ mod tests {
         );
     }
 
+    /// The user-mode backend names **both** address families.
+    ///
+    /// QEMU defaults them on only while neither is mentioned: naming just
+    /// one turns the other off. An earlier `ipv6=on` on its own therefore
+    /// left the guest with no IPv4 at all — every DISCOVER unanswered, no
+    /// diagnostic from either side — while its SLAAC address came up
+    /// normally and made the interface look healthy. Both or neither; this
+    /// pins both.
+    #[test]
+    fn netdev_arg_names_both_address_families_on_the_user_backend() {
+        let dev = NetDevice {
+            backend: NetBackend::User,
+            pcap: None,
+            mac: None,
+        };
+        let arg = netdev_arg(3, &dev);
+        assert_eq!(arg, OsString::from("user,id=net3,ipv4=on,ipv6=on"));
+        let rendered = arg.to_string_lossy();
+        assert!(
+            rendered.contains("ipv4=on") && rendered.contains("ipv6=on"),
+            "naming one family without the other disables that other"
+        );
+    }
+
     #[test]
     fn net_device_arg_renders_driver_mac_and_extra() {
         let base = NetDevice {
-            qemu_sock: PathBuf::from("/tmp/n.qemu.sock"),
-            peer_sock: PathBuf::from("/tmp/n.peer.sock"),
+            backend: NetBackend::Dgram {
+                qemu_sock: PathBuf::from("/tmp/n.qemu.sock"),
+                peer_sock: PathBuf::from("/tmp/n.peer.sock"),
+            },
             pcap: None,
             mac: None,
         };

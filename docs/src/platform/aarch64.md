@@ -631,15 +631,67 @@ the same production kernel crate** (`TAIRIX_KERNEL_BOARD=virt` →
 the `virt` link address and enters with the generated device tree in
 `x0` — the same hand-off shape as the Pi firmware. The session attaches
 the image as the virtio-blk root disk, `-device ramfb` for the windowed
-display the boot console renders on, and virtio keyboard + mouse
+display the boot console renders on, virtio keyboard + mouse
 devices for input from the QEMU window (the autoloaded
 `drivers/input/virtio_kbd` bundle the image ships binds the discovered
 virtio-input nodes and injects decoded keys into the input-focus
-arbiter). The invoking terminal is the guest's serial console: type the
+arbiter), and a virtio-net NIC on QEMU's user-mode network (below). The
+invoking terminal is the guest's serial console: type the
 encrypted-root unlock passphrase there (`root` for the `debug` profile;
 empty — just press Enter — for `installer`). The session has no
 deadline; it ends when the QEMU window is closed or the guest powers
 off.
+
+### Networking in the interactive session
+
+The session's NIC is a `virtio-net-device` on QEMU's **user-mode**
+network (`-netdev user,ipv4=on,ipv6=on`): QEMU itself is the guest's link
+peer, serving DHCPv4, IPv6 router advertisements, a DNS forwarder, and
+NAT out through the host's own routing, inside the QEMU process and with
+no host privileges. The `dgram` unix-datagram backing the netstack
+verticals use is deliberately *not* what a session gets — its link peer
+is a harness thread that only exists during a test, so a session on it
+would have a NIC that nothing answers.
+
+**Both address families are named, and naming both is the point.** QEMU
+defaults them on only while *neither* is mentioned; naming one turns the
+other off. A `-netdev user,ipv6=on` therefore leaves the guest with no
+IPv4 whatsoever — every DHCPDISCOVER goes unanswered, with no diagnostic
+from the guest (its client is retransmitting correctly) and none from
+QEMU (a disabled family drops the frame) — while SLAAC comes up normally
+over the same netdev and makes the interface look healthy. The asymmetry
+is what makes it expensive to find, so the argv names both.
+
+One image boots on two different machines, so the `network.conf` it ships
+declares a managed interface for each NIC, both DHCPv4 + SLAAC and both
+bound by stable hardware identity as the configuration store requires:
+
+| Interface | NIC | Bound by |
+|---|---|---|
+| `wan` | the Pi 4B's on-board GENET | `match.node` — the GENET register aperture |
+| `vwan` | the virtio-net of an emulated or virtualised boot | `match.mac` — the MAC the runner pins |
+
+Only one is ever discovered on a given machine: a Pi has no virtio-net
+NIC and the `virt` board has no GENET, so the other interface is simply
+never configured, which is the ordinary treatment of an unbound node
+rather than an error. The driver store ships both drivers for the same
+reason, exactly as it ships the virtio keyboard alongside the USB HID
+one.
+
+The MAC is one constant (`VIRT_SESSION_NIC_MAC`) read by both the runner
+that creates the device and the image builder that writes the
+configuration binding it, so the session can never boot a NIC that no
+managed interface claims — the silent no-network failure that shape
+removes.
+
+QEMU's user-mode network is a fixed topology: the guest leases
+`10.0.2.15/24`, the gateway and DNS forwarder are `10.0.2.2` and
+`10.0.2.3`, and IPv6 SLAAC forms an address in `fec0::/64`. Pinging the
+gateway exercises the guest's whole stack (lease, route, neighbour
+resolution, ICMP) without leaving the QEMU process; reaching beyond it,
+and DNS through `10.0.2.3`, additionally depend on the host's own
+connectivity. Inbound connections need a `hostfwd` rule, which the
+session does not add.
 
 The windowed display backend is chosen **explicitly**, not left to
 QEMU's implicit default. A QEMU built without a windowing backend (a

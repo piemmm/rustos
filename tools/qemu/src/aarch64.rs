@@ -34,7 +34,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{net_device_arg, netdev_dgram_arg, rtc_base_args, Outcome, SessionKind, Spec};
+use crate::{net_device_arg, netdev_arg, rtc_base_args, Outcome, SessionKind, Spec};
 
 /// Default guest RAM size in mebibytes for an aarch64 QEMU integration
 /// test. Matches the x86_64 and riscv64 defaults so all three ports
@@ -160,12 +160,11 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("none".into());
     }
 
-    // Attach each network interface as a virtio-mmio net device behind a
-    // `dgram` unix-datagram backend (the harness is the guest's link
-    // peer), with an optional pcap mirror.
+    // Attach each network interface as a virtio-mmio net device behind the
+    // backend the spec chose (`netdev_arg`), with an optional pcap mirror.
     for (i, dev) in spec.net_devices.iter().enumerate() {
         argv.push("-netdev".into());
-        argv.push(netdev_dgram_arg(i, dev));
+        argv.push(netdev_arg(i, dev));
         argv.push("-device".into());
         argv.push(net_device_arg("virtio-net-device", i, dev, ""));
         if let Some(pcap) = &dev.pcap {
@@ -421,8 +420,10 @@ mod tests {
             image: PathBuf::from("/tmp/disk0.img"),
         }];
         spec.net_devices = vec![crate::NetDevice {
-            qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
-            peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
+            backend: crate::NetBackend::Dgram {
+                qemu_sock: PathBuf::from("/tmp/net0.qemu.sock"),
+                peer_sock: PathBuf::from("/tmp/net0.peer.sock"),
+            },
             pcap: Some(PathBuf::from("/tmp/cap0.pcap")),
             mac: None,
         }];

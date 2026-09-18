@@ -285,11 +285,12 @@ exercises it.
 
 Key facts for the next worker:
 - **The document** is composed by `tools/xtask`
-  (`image_drivers::genet_network_conf`) and binds one `ethernet` interface by
-  `match.node` — the GENET register aperture taken from the driver's own
-  `tairix_drv_network_genet::GENET_REGS_CPU_BASE`, so the planted default and
-  the location `devmgr` resolves from the discovered node cannot drift. It
-  selects `ipv4.method dhcp` plus `ipv6.method slaac`.
+  (`image_drivers::platform_network_conf`) and binds the board's `wan`
+  interface by `match.node` — the GENET register aperture taken from the
+  driver's own `tairix_drv_network_genet::GENET_REGS_CPU_BASE`, so the planted
+  default and the location `devmgr` resolves from the discovered node cannot
+  drift. It selects `ipv4.method dhcp` plus `ipv6.method slaac`. D6 adds the
+  document's second interface, for the NIC an emulated boot presents.
 - **Binding by alias is not an option**, by design: `devmgr`'s
   `interface_configs_from_config` refuses an `ethernet` interface carrying
   neither `match.mac` nor `match.node` rather than guessing, and
@@ -311,14 +312,53 @@ Key facts for the next worker:
 - **It is validated at build time through the one engine that reads it**:
   `mkimage` parses the document with `tairix_netconfig` and re-renders it, so
   an image can never ship an addressing default its own stack would reject
-  (`MkimageError::NetworkConfig`); `tools/xtask` additionally asserts the
-  parsed result is exactly one DHCPv4+SLAAC interface bound to the GENET
-  aperture with no static address.
+  (`MkimageError::NetworkConfig`); `tools/xtask` additionally asserts each
+  parsed interface is DHCPv4+SLAAC, bound by identity, with no static
+  address.
 - **Acceptance is on metal** (`plans/PI.md`): a flashed Pi 4B must log
   `devmgr` `NETSTACK_BOUND`, `netstack` `DRIVER_BOUND` and
   `DHCP_LEASE_ACQUIRED`, and answer a ping at its leased address. QEMU models
   no GENET, so there is no emulated form of this vertical; the lease machinery
   itself stays covered by D3's three virtio verticals.
+
+### D6 — DHCPv4 reaches the emulated image too: the interactive session `[x]`
+
+D5 gave the flashable image an addressing default for the board's own NIC.
+`cargo xtask run` boots that *same* image on the QEMU `virt` board, which has
+no GENET — and attached no network device at all, so an emulated boot had no
+interface to configure and no way to exercise any of this without a Pi on the
+desk.
+
+Key facts for the next worker:
+- **The shipped `network.conf` declares two interfaces, one per NIC the image
+  can meet:** `wan` by `match.node` (the GENET aperture, D5) and `vwan` by
+  `match.mac`. Exactly one is ever discovered, and the other is never
+  configured — `netstack` answers `NotFound` for an interface whose hardware
+  is absent and `devmgr` retries, which is the ordinary treatment of an
+  unbound node. A MAC rather than a location identifies `vwan` because the
+  virtio-mmio slot a NIC lands in moves with the number of other virtio
+  devices the session attaches, while the MAC is the runner's to fix.
+- **One constant is the whole interlock**: `image_drivers::VIRT_SESSION_NIC_MAC`
+  is read by the runner that creates the device *and* by the builder that
+  writes the document binding it. A second copy would let a session boot a NIC
+  no managed interface claims, which is the silent no-network failure this
+  shape removes. The driver store ships the virtio-net bundle beside the GENET
+  one for the same reason it ships the virtio keyboard beside the USB HID one.
+- **The QEMU user-mode netdev must name *both* address families.** QEMU
+  defaults `ipv4`/`ipv6` on only while neither is mentioned; naming one
+  disables the other. `-netdev user,ipv6=on` therefore leaves the guest with
+  no IPv4 at all, and the failure is mute at both ends — the client
+  retransmits a perfectly well-formed DISCOVER on RFC 2131 backoff, and a
+  disabled family drops the frame without a word — while SLAAC comes up
+  normally over the same netdev and makes the interface look healthy. The
+  renderer (`tairix_qemu::netdev_arg`) names both and a unit test pins it.
+- **The client itself needed no change.** Its 300-octet message is RFC 1542's
+  floor, and the real server on the Pi and QEMU's built-in one both accept it;
+  a padding theory pursued here was disproved by capture and reverted.
+- **Acceptance**: `cargo xtask run --target aarch64-rpi` logs `devmgr`
+  `NETSTACK_BOUND`, `netstack`'s configuration-applied record for `vwan`, and
+  `DHCP_LEASE_ACQUIRED` for the `10.0.2.15` QEMU leases; the guest then reaches
+  the `10.0.2.2` gateway. Diagnosis is by `-object filter-dump` on the netdev.
 
 ## 4. Tests, docs, and gate (binding)
 

@@ -1640,10 +1640,16 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 /// Signed driver bundles paired with their `/System/Drivers/` store paths.
 type DriverBundles = Vec<(&'static [&'static [u8]], Vec<u8>)>;
 
-/// Cross-compile and sign every autoloaded `/System/Drivers/` bundle the
-/// image ships, paired with its store path. They all run in user space
-/// (the floor stays storage-only), so `devmgr` autoloads each against its
-/// discovered node — and the bus chain is recursive: the PCIe root-complex
+/// Cross-compiles and signs one driver's bundle for an image profile.
+type DriverBundleBuilder =
+    fn(&Context, PieArch, tairix_mkimage::ImageProfile) -> Result<Vec<u8>, String>;
+
+/// Every `/System/Drivers/` store path the platform image ships, paired with
+/// the builder that cross-compiles and signs its bundle.
+///
+/// They all run in user space (the floor stays storage-only), so `devmgr`
+/// autoloads each against its discovered node — and the bus chain is
+/// recursive: the PCIe root-complex
 /// driver binds the discovered `brcm,bcm2711-pcie` node and emits the
 /// VL805 PCI function; the VL805 driver binds that, reloads the controller
 /// firmware over the mailbox, and emits the `usb,xhci` node; the xHCI
@@ -1656,13 +1662,102 @@ type DriverBundles = Vec<(&'static [&'static [u8]], Vec<u8>)>;
 /// (`plans/DEVICES.md` D2). The GENET NIC needs no bus chain: it hangs
 /// straight off the platform bus, so its driver binds the discovered
 /// `brcm,bcm2711-genet-v5` node and hands `netstack` its frame channel. The
-/// Pi RTC hangs off no bus at all — the firmware owns it — so its driver
-/// binds the discovered `raspberrypi,rpi-rtc` node and reaches the chip
+/// virtio-net bundle rides alongside it for the same reason the virtio
+/// keyboard does: an emulated or virtualised boot of this image
+/// (`cargo xtask run`) presents a virtio-net NIC rather than a GENET, and
+/// only one of the two is ever discovered, so whichever it is binds and the
+/// other bundle stays unbound. The Pi RTC hangs off no bus at all — the
+/// firmware owns it — so its driver binds the discovered `raspberrypi,rpi-rtc` node and reaches the chip
 /// through the mailbox service; on a Pi 3 or Pi 4 there is no such node and
 /// the bundle simply stays unbound. The frequency driver hangs off no bus
 /// either: it binds the discovered `raspberrypi,firmware-clocks` node, takes
 /// the kernel's frequency mechanism role, and applies the governor's targets
 /// over the same mailbox service.
+const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
+    (
+        image_drivers::VCMAILBOX_STORE_PATH,
+        image_drivers::build_vcmailbox_bundle,
+    ),
+    (
+        image_drivers::PCIE_BRCM_STORE_PATH,
+        image_drivers::build_pcie_brcm_bundle,
+    ),
+    (
+        image_drivers::VL805_STORE_PATH,
+        image_drivers::build_vl805_bundle,
+    ),
+    (
+        image_drivers::USB_XHCI_STORE_PATH,
+        image_drivers::build_xhci_bundle,
+    ),
+    (
+        image_drivers::USB_KBD_STORE_PATH,
+        image_drivers::build_usb_kbd_bundle,
+    ),
+    (
+        image_drivers::USB_MOUSE_STORE_PATH,
+        image_drivers::build_usb_mouse_bundle,
+    ),
+    (
+        image_drivers::VIRTIO_KBD_STORE_PATH,
+        image_drivers::build_virtio_kbd_bundle,
+    ),
+    (
+        image_drivers::GENET_STORE_PATH,
+        image_drivers::build_genet_bundle,
+    ),
+    (
+        image_drivers::VIRTIO_NET_STORE_PATH,
+        image_drivers::build_virtio_net_bundle,
+    ),
+    (
+        image_drivers::FRAMEBUFFER_STORE_PATH,
+        image_drivers::build_framebuffer_bundle,
+    ),
+    (
+        image_drivers::RPI_RTC_STORE_PATH,
+        image_drivers::build_rpi_rtc_bundle,
+    ),
+    (
+        image_drivers::RPI_CPUFREQ_STORE_PATH,
+        image_drivers::build_rpi_cpufreq_bundle,
+    ),
+    (
+        image_drivers::I2C_BCM2835_STORE_PATH,
+        image_drivers::build_i2c_bcm2835_bundle,
+    ),
+    (
+        image_drivers::DS3231_STORE_PATH,
+        image_drivers::build_ds3231_bundle,
+    ),
+    (
+        image_drivers::PCF8523_STORE_PATH,
+        image_drivers::build_pcf8523_bundle,
+    ),
+    (
+        image_drivers::PCF85063A_STORE_PATH,
+        image_drivers::build_pcf85063a_bundle,
+    ),
+    (
+        image_drivers::USB_MSD_STORE_PATH,
+        image_drivers::build_usb_msd_bundle,
+    ),
+    (
+        image_drivers::VOLMGR_STORE_PATH,
+        image_drivers::build_volmgr_bundle,
+    ),
+    (
+        image_drivers::RAID_MEMBER_STORE_PATH,
+        image_drivers::build_raid_member_bundle,
+    ),
+    (
+        image_drivers::RAID_STORE_PATH,
+        image_drivers::build_raid_bundle,
+    ),
+];
+
+/// Build every bundle in [`PLATFORM_IMAGE_DRIVER_STORE`], each paired with
+/// its store path, or fail on the first that does not.
 fn build_image_driver_bundles(
     ctx: &Context,
     profile: tairix_mkimage::ImageProfile,
@@ -1670,84 +1765,10 @@ fn build_image_driver_bundles(
     // The flashable Raspberry Pi image is an aarch64 target, so every bundle
     // is cross-compiled for that arch.
     let arch = PieArch::Aarch64;
-    Ok(vec![
-        (
-            image_drivers::VCMAILBOX_STORE_PATH,
-            image_drivers::build_vcmailbox_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::PCIE_BRCM_STORE_PATH,
-            image_drivers::build_pcie_brcm_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::VL805_STORE_PATH,
-            image_drivers::build_vl805_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::USB_XHCI_STORE_PATH,
-            image_drivers::build_xhci_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::USB_KBD_STORE_PATH,
-            image_drivers::build_usb_kbd_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::USB_MOUSE_STORE_PATH,
-            image_drivers::build_usb_mouse_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::VIRTIO_KBD_STORE_PATH,
-            image_drivers::build_virtio_kbd_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::GENET_STORE_PATH,
-            image_drivers::build_genet_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::FRAMEBUFFER_STORE_PATH,
-            image_drivers::build_framebuffer_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::RPI_RTC_STORE_PATH,
-            image_drivers::build_rpi_rtc_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::RPI_CPUFREQ_STORE_PATH,
-            image_drivers::build_rpi_cpufreq_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::I2C_BCM2835_STORE_PATH,
-            image_drivers::build_i2c_bcm2835_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::DS3231_STORE_PATH,
-            image_drivers::build_ds3231_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::PCF8523_STORE_PATH,
-            image_drivers::build_pcf8523_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::PCF85063A_STORE_PATH,
-            image_drivers::build_pcf85063a_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::USB_MSD_STORE_PATH,
-            image_drivers::build_usb_msd_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::VOLMGR_STORE_PATH,
-            image_drivers::build_volmgr_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::RAID_MEMBER_STORE_PATH,
-            image_drivers::build_raid_member_bundle(ctx, arch, profile)?,
-        ),
-        (
-            image_drivers::RAID_STORE_PATH,
-            image_drivers::build_raid_bundle(ctx, arch, profile)?,
-        ),
-    ])
+    PLATFORM_IMAGE_DRIVER_STORE
+        .iter()
+        .map(|(path, build)| build(ctx, arch, profile).map(|bytes| (*path, bytes)))
+        .collect()
 }
 
 /// Build the platform image and return the written whole-disk image's
@@ -1849,7 +1870,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
             profile,
             &drivers,
             app_files,
-            &image_drivers::genet_network_conf(),
+            &image_drivers::platform_network_conf(),
         )
     })
     .map_err(|e| format!("image: {e}"))?;
@@ -1973,15 +1994,41 @@ fn build_virt_run_kernel(
     Ok(out)
 }
 
+/// The QEMU machine an interactive session presents: the image as the
+/// virtio-blk root disk, a `ramfb` scan-out surface for the windowed
+/// display, and a virtio-net NIC on QEMU's user-mode network pinned to
+/// the MAC the image's shipped `network.conf` binds its `vwan` interface
+/// by ([`image_drivers::VIRT_SESSION_NIC_MAC`]).
+///
+/// Pure, so the shape a human's session gets is a checkable contract
+/// rather than something only a windowed run reveals.
+fn run_session_spec(kernel: &Path, disk_image: &Path, cpus: u32) -> tairix_qemu::Spec {
+    tairix_qemu::Spec::for_aarch64_kernel(kernel)
+        .with_cpus(cpus)
+        .with_virtio_blk(disk_image)
+        .with_ramfb()
+        .with_virtio_net_user(image_drivers::VIRT_SESSION_NIC_MAC)
+        .windowed_interactive()
+}
+
 /// Build the platform image for the requested profile, then boot it as
 /// an **interactive** QEMU `virt` session: a windowed display driven by
 /// the kernel's ramfb boot console, virtio keyboard + mouse devices for
-/// input from the window, and the image attached as the virtio-blk root
-/// disk (the same encrypted-root unlock → store-scan → driver-autoload
-/// chain the `-M virt` verticals prove). The kernel itself boots as the
+/// input from the window, a virtio-net NIC on QEMU's user-mode network,
+/// and the image attached as the virtio-blk root disk (the same
+/// encrypted-root unlock → store-scan → driver-autoload chain the
+/// `-M virt` verticals prove). The kernel itself boots as the
 /// `virt`-board build of the same production crate
 /// ([`build_virt_run_kernel`]), so QEMU hands it the real runtime
 /// device tree.
+///
+/// The NIC's MAC is pinned to [`image_drivers::VIRT_SESSION_NIC_MAC`],
+/// which is the identity the image's own shipped `network.conf` binds its
+/// `vwan` interface by — so the autoloaded virtio-net driver's device is
+/// the one `netstack` was configured to address, and the session leases an
+/// address from QEMU's own DHCP server and reaches the outside world
+/// through its NAT. The board's GENET interface in that same document
+/// stays unbound here, as this NIC does on real hardware.
 ///
 /// The invoking terminal is the guest's serial console: the encrypted
 /// root's unlock passphrase is typed there (`root` for the `debug`
@@ -1994,11 +2041,7 @@ fn run_run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let profile = parsed.profile;
     let disk_image = build_platform_image(ctx, parsed)?;
     let virt_kernel = build_virt_run_kernel(ctx, profile)?;
-    let spec = tairix_qemu::Spec::for_aarch64_kernel(&virt_kernel)
-        .with_cpus(cpus)
-        .with_virtio_blk(&disk_image)
-        .with_ramfb()
-        .windowed_interactive();
+    let spec = run_session_spec(&virt_kernel, &disk_image, cpus);
     let passphrase_hint = match profile {
         tairix_mkimage::ImageProfile::Debug => "`root`",
         tairix_mkimage::ImageProfile::Installer => "empty — press Enter",
@@ -2053,9 +2096,10 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, dir_size, format_bytes, host_order_args, kernel_build_profile,
-        kernel_diag_feature_args, parse_run_args, parse_test_options, Command, RunBudget,
-        CI_STAGES, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, TEST_SOAK_SECS,
+        cargo_subcommand_available, dir_size, format_bytes, host_order_args, image_drivers,
+        kernel_build_profile, kernel_diag_feature_args, parse_run_args, parse_test_options,
+        run_session_spec, Command, Path, RunBudget, CI_STAGES, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
+        PLATFORM_IMAGE_DRIVER_STORE, TEST_SOAK_SECS,
     };
     use crate::Context;
     use std::ffi::OsString;
@@ -2134,6 +2178,65 @@ mod tests {
         let (cpus, rest) = parse_run_args(&args).expect("--cpus parses");
         assert_eq!(cpus, 2);
         assert_eq!(rest, argv(&["--target", "aarch64-rpi"]));
+    }
+
+    /// A human's session gets a NIC, and it is the one the image it boots
+    /// was configured for.
+    ///
+    /// The session once attached no network device at all, which the
+    /// windowed run could not report — the guest simply had no interface
+    /// and nothing said so. Three things have to agree for it to work, and
+    /// all three are asserted here: a NIC is attached, its backing answers
+    /// (user-mode, not a dgram wire whose harness peer only exists in a
+    /// vertical), and its MAC is the identity the shipped `network.conf`
+    /// binds by.
+    #[test]
+    fn the_interactive_session_attaches_a_nic_the_shipped_config_claims() {
+        let spec = run_session_spec(
+            Path::new("/tmp/kernel.img"),
+            Path::new("/tmp/disk.img"),
+            DEFAULT_RUN_CPUS,
+        );
+        assert_eq!(spec.net_devices.len(), 1, "exactly one NIC");
+        assert_eq!(
+            spec.net_devices[0].backend,
+            tairix_qemu::NetBackend::User,
+            "a session's wire must answer: QEMU's own DHCP/DNS/NAT, not a \
+             harness peer that is not running"
+        );
+        let mac = spec.net_devices[0]
+            .mac
+            .as_deref()
+            .expect("the MAC is pinned, not left to QEMU");
+        assert_eq!(mac, image_drivers::VIRT_SESSION_NIC_MAC);
+        let config =
+            tairix_netconfig::NetworkConfig::parse(&image_drivers::platform_network_conf())
+                .expect("the shipped config parses");
+        assert_eq!(
+            config
+                .interface(image_drivers::PLATFORM_VIRT_ALIAS)
+                .and_then(|i| i.match_mac)
+                .map(|m| m.render()),
+            Some(mac.to_string()),
+            "the interface the guest configures must be the device the \
+             session creates"
+        );
+    }
+
+    /// The shipped driver store carries a driver for the NIC of either way
+    /// this image boots — the board's GENET and the virtio-net an emulated
+    /// or virtualised boot presents — so whichever is discovered binds.
+    #[test]
+    fn the_platform_driver_store_covers_both_nics() {
+        for path in [
+            image_drivers::GENET_STORE_PATH,
+            image_drivers::VIRTIO_NET_STORE_PATH,
+        ] {
+            assert!(
+                PLATFORM_IMAGE_DRIVER_STORE.iter().any(|(p, _)| *p == path),
+                "the image must ship the driver for every NIC it declares"
+            );
+        }
     }
 
     /// A missing, non-numeric, or zero `--cpus` value is rejected rather

@@ -188,7 +188,8 @@ cargo xtask test        # Host-side unit and integration tests
 cargo xtask docs-check  # rustdoc + mdBook (with link checking)
 cargo xtask run --target aarch64-rpi --profile debug
                         # Build the image and boot it in a QEMU window
-                        # (display + keyboard/mouse; also --profile installer)
+                        # (display, keyboard/mouse, and a NIC on QEMU's
+                        # user-mode network; also --profile installer)
 cargo xtask --help      # All subcommands
 ```
 

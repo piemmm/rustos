@@ -1078,38 +1078,91 @@ pub fn rtc_driver_store_files(
         .map_err(Clone::clone)
 }
 
-/// The per-interface network configuration the flashable Raspberry Pi image
-/// ships: DHCPv4 plus IPv6 SLAAC on the board's on-board gigabit NIC.
+/// The admin alias the platform image's network configuration binds the
+/// board's on-board gigabit NIC to.
+const PLATFORM_WAN_ALIAS: &str = "wan";
+
+/// The admin alias the platform image's network configuration binds the
+/// virtio-net NIC of an emulated or virtualised boot to.
+pub const PLATFORM_VIRT_ALIAS: &str = "vwan";
+
+/// The MAC address the interactive QEMU session pins its virtio-net NIC to,
+/// and the identity [`platform_network_conf`] binds [`PLATFORM_VIRT_ALIAS`]
+/// by. Locally administered and unicast (bit 1 of the first octet set, bit 0
+/// clear), in QEMU's own `52:54:00` range.
 ///
-/// The interface is bound by its **stable hardware location** — the GENET
-/// register aperture the discovered node names, taken from the driver's own
-/// [`tairix_drv_network_genet::GENET_REGS_CPU_BASE`], so the planted default
-/// and the location the device manager resolves cannot drift. Binding by
-/// location rather than by discovery order is `plans/NETWORK.md` §6.1's rule,
-/// and it is what `devmgr` requires: an `ethernet` interface carrying neither
-/// `match.mac` nor `match.node` is refused rather than guessed at.
+/// It is one definition because the two halves must agree exactly: the runner
+/// creates the device with this MAC and the guest's shipped `network.conf`
+/// finds the interface by it. A second copy would let the session boot with a
+/// NIC no managed interface claims — the silent no-networking failure this
+/// constant removes.
+///
+/// Deliberately *not* QEMU's own default first-NIC address
+/// (`52:54:00:12:34:56`): were it that, a dropped `mac=` would still match by
+/// accident and the pin would stop being load-bearing.
+pub const VIRT_SESSION_NIC_MAC: &str = "52:54:00:00:00:01";
+
+/// The per-interface network configuration the flashable Raspberry Pi image
+/// ships: DHCPv4 plus IPv6 SLAAC on whichever of its two declared NICs the
+/// machine actually presents.
+///
+/// Both interfaces are bound by **stable hardware identity**, which is
+/// `plans/NETWORK.md` §6.1's rule and what `devmgr` requires — an `ethernet`
+/// interface carrying neither `match.mac` nor `match.node` is refused rather
+/// than guessed at:
+///
+/// * `wan` is the board's on-board gigabit NIC, bound by the GENET register
+///   aperture the discovered node names, taken from the driver's own
+///   [`tairix_drv_network_genet::GENET_REGS_CPU_BASE`] so the planted default
+///   and the location the device manager resolves cannot drift.
+/// * `vwan` is the virtio-net NIC an emulated or virtualised boot of this
+///   same image presents (`cargo xtask run`), bound by the
+///   [`VIRT_SESSION_NIC_MAC`] the runner pins on the device. A MAC rather
+///   than a location because the virtio-mmio slot a NIC lands in depends on
+///   how many other virtio devices the session attaches, while the MAC is
+///   the runner's to fix.
+///
+/// Exactly one of the two ever binds: the machine that has a GENET has no
+/// virtio-net NIC and vice versa. The absent one costs a `NotFound` refusal
+/// that the device manager re-pushes on each hardware-tree generation bump
+/// and `netstack` records — bounded by the tree settling, not a retry loop,
+/// and the honest statement that a configured interface's hardware is not
+/// there. Shipping both is what lets this one image boot on the board and
+/// under emulation with networking either way, rather than only on the board.
 ///
 /// DHCPv4 + SLAAC is the addressing every desktop system defaults to, and it
-/// is what makes the DHCP client (`plans/DHCP.md`) reachable on real
-/// hardware: a booted Pi 4 acquires its address without an operator editing
-/// anything. `mkimage` re-parses the document through the same
-/// `tairix_netconfig` engine `netstack` reads it with, so a malformed default
-/// fails the image build rather than the boot, and plants it on the read-only
-/// `/System` volume — the one place the device manager's pre-unlock read
-/// resolves it.
+/// is what makes the DHCP client (`plans/DHCP.md`) reachable without an
+/// operator editing anything. `mkimage` re-parses the document through the
+/// same `tairix_netconfig` engine `netstack` reads it with, so a malformed
+/// default fails the image build rather than the boot, and plants it on the
+/// read-only `/System` volume — the one place the device manager's pre-unlock
+/// read resolves it.
 #[must_use]
-pub fn genet_network_conf() -> String {
+pub fn platform_network_conf() -> String {
     format!(
         "# TAIRiX Raspberry Pi network configuration.\n\
-         # The board's on-board gigabit NIC, bound by the stable bus location\n\
-         # of its GENET register aperture, addressed by DHCPv4 with IPv6\n\
-         # stateless autoconfiguration -- the default every desktop system\n\
-         # ships.\n\
-         wan.kind ethernet\n\
-         wan.match.node {:#x}\n\
-         wan.ipv4.method dhcp\n\
-         wan.ipv6.method slaac\n",
-        tairix_drv_network_genet::GENET_REGS_CPU_BASE
+         # Two NICs, one per way this image boots; whichever the machine\n\
+         # presents binds, the other is never configured. Both take DHCPv4\n\
+         # with IPv6 stateless autoconfiguration -- the default every desktop\n\
+         # system ships.\n\
+         #\n\
+         # The board's on-board gigabit NIC, by the stable bus location of\n\
+         # its GENET register aperture.\n\
+         {wan}.kind ethernet\n\
+         {wan}.match.node {genet:#x}\n\
+         {wan}.ipv4.method dhcp\n\
+         {wan}.ipv6.method slaac\n\
+         #\n\
+         # The virtio-net NIC an emulated or virtualised boot presents, by\n\
+         # the MAC the runner pins on it.\n\
+         {virt}.kind ethernet\n\
+         {virt}.match.mac {mac}\n\
+         {virt}.ipv4.method dhcp\n\
+         {virt}.ipv6.method slaac\n",
+        wan = PLATFORM_WAN_ALIAS,
+        virt = PLATFORM_VIRT_ALIAS,
+        genet = tairix_drv_network_genet::GENET_REGS_CPU_BASE,
+        mac = VIRT_SESSION_NIC_MAC,
     )
 }
 
@@ -1279,15 +1332,21 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_pi_network_default_parses_and_binds_the_genet_nic() {
+    fn the_shipped_pi_network_default_parses_and_binds_both_nics_by_identity() {
         // The document the image plants is validated through the very engine
         // `netstack` reads it with, so a shipped default can never fail the
         // parser at boot.
-        let config = tairix_netconfig::NetworkConfig::parse(&genet_network_conf())
+        let config = tairix_netconfig::NetworkConfig::parse(&platform_network_conf())
             .expect("the shipped default parses");
-        let ifaces = config.interfaces();
-        assert_eq!(ifaces.len(), 1, "one managed interface");
-        let wan = &ifaces[0];
+        assert_eq!(
+            config.interfaces().len(),
+            2,
+            "the board's NIC and the virtio-net NIC an emulated boot presents"
+        );
+
+        let wan = config
+            .interface(PLATFORM_WAN_ALIAS)
+            .expect("the board's NIC is declared");
         assert_eq!(wan.kind(), tairix_netconfig::IfaceKind::Ethernet);
         // Bound by the GENET aperture the driver itself declares, so the
         // planted default and the discovered location cannot drift.
@@ -1296,20 +1355,30 @@ mod tests {
             Some(tairix_drv_network_genet::GENET_REGS_CPU_BASE)
         );
         assert_eq!(wan.match_mac, None);
-        assert_eq!(wan.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
-        assert_eq!(wan.ipv6_method(), tairix_netconfig::Ipv6Method::Slaac);
-        // DHCP leases the address, so no static one is pinned.
-        assert_eq!(wan.ipv4_address, None);
-        assert_eq!(wan.ipv6_address, None);
 
-        // `devmgr` maps it to a deliverable interface configuration rather
-        // than refusing it for want of a hardware identity.
+        let virt = config
+            .interface(PLATFORM_VIRT_ALIAS)
+            .expect("the emulated boot's NIC is declared");
+        assert_eq!(virt.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        // Bound by the MAC the runner pins on the device it creates; the
+        // interactive session and this document read the one constant, so a
+        // session can never boot a NIC no managed interface claims.
         assert_eq!(
-            config
-                .interface("wan")
-                .map(|i| i.match_node.is_some() || i.match_mac.is_some()),
-            Some(true)
+            virt.match_mac.map(|m| m.render()),
+            Some(VIRT_SESSION_NIC_MAC.to_string())
         );
+        assert_eq!(virt.match_node, None);
+
+        for iface in config.interfaces() {
+            assert_eq!(iface.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
+            assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Slaac);
+            // DHCP/SLAAC form the addresses, so no static one is pinned.
+            assert_eq!(iface.ipv4_address, None);
+            assert_eq!(iface.ipv6_address, None);
+            // `devmgr` maps each to a deliverable interface configuration
+            // rather than refusing it for want of a hardware identity.
+            assert!(iface.match_node.is_some() || iface.match_mac.is_some());
+        }
     }
 
     #[test]
