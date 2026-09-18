@@ -102,8 +102,8 @@ pub const LIBRARY_ICON_MAX: usize = 64;
 /// The bar otherwise gives a slot to any process that owns a window, so a
 /// window is always reachable from it. A bundle the desktop already reaches
 /// by another route — the Switchboard, which the bar's own permanent capsule
-/// stands for, or the wallpaper chooser, which the backdrop menu opens —
-/// would get a second, duplicate route, so it says so here. The claim is in
+/// stands for, or Settings, which the system menu and the backdrop menu
+/// open — would get a second, duplicate route, so it says so here. The claim is in
 /// the *signed* manifest rather than on the window channel because a running
 /// process must not be able to hide itself from the bar.
 pub const APPINFO_FLAG_NO_ICON_BAR: u32 = 1 << 0;

@@ -5,10 +5,10 @@
 //! in the desktop session's **published** app-data scope
 //! (`plans/APPDATA.md` §3.11). This crate is the **single definition** of
 //! that document's closed registry ([`settings`]), of the shipped default
-//! wallpaper set and the bounded listing model a chooser draws its
+//! wallpaper set and the bounded listing model a gallery draws its
 //! thumbnail grid from ([`catalog`]), and of the one pure
-//! wallpaper-placement geometry the desktop renderer and the chooser's
-//! preview both draw through ([`fit`]) — so no two consumers can ever
+//! wallpaper-placement geometry the desktop renderer and every preview
+//! draw through ([`fit`]) — so no two consumers can ever
 //! disagree about what the settings say, which wallpapers exist, or how a
 //! fit places one.
 //!
@@ -16,17 +16,18 @@
 //!
 //! The session is the store's only writer, by construction rather than by
 //! convention: an application publishes only *its own* scope, so no other
-//! program the user launches — including the wallpaper chooser — can write
-//! the desktop's document at all. A chooser asks the session to adopt a
-//! change over the pinboard channel, and the session decides.
+//! program the user launches — including the Settings application, where
+//! the desktop picture is chosen — can write the desktop's document at
+//! all. A surface asks the session to adopt a change over the pinboard
+//! channel, and the session decides.
 //!
 //! Reading is the sanctioned channel the same store provides: any
 //! application may read what the desktop publishes about itself by naming
 //! [`PINBOARD_PUBLISHER`] on a request shape that carries no scope field, so
 //! "read the desktop's private settings" is not a request that exists. That
 //! replaces the hand-rolled `~/Settings/Pinboard/pinboard.conf` path the
-//! chooser used to open directly, which every application of that user could
-//! also read *and rewrite*.
+//! a settings surface used to open directly, which every application of
+//! that user could also read *and rewrite*.
 //!
 //! # Security
 //!
@@ -64,8 +65,8 @@ pub mod settings;
 pub use apply::apply;
 pub use apply::ApplyOutcome;
 pub use catalog::{
-    catalog_categories, catalog_entries, category_path, default_wallpaper_path,
-    is_wallpaper_category_name, is_wallpaper_file_name, wallpaper_path, CatalogEntry,
+    catalog_categories, catalog_entries, category_path, default_wallpaper_path, desktop_catalog,
+    is_wallpaper_category_name, is_wallpaper_file_name, wallpaper_path, CatalogEntry, CatalogItem,
     DEFAULT_WALLPAPER, DEFAULT_WALLPAPER_CATEGORY, MAX_WALLPAPER_BYTES,
     MAX_WALLPAPER_CATALOG_ENTRIES, MAX_WALLPAPER_CATEGORIES, WALLPAPER_STORE,
 };
@@ -87,3 +88,16 @@ pub use settings::{
 /// another application's private one, because a foreign read is a request
 /// shape with no scope field at all (`plans/APPDATA.md` §3.6).
 pub const PINBOARD_PUBLISHER: &str = "os.tairix.desktop";
+
+/// The name of the Settings pane where the desktop picture is chosen —
+/// what the backdrop menu's *Change Background…* row hands over as its
+/// launch target.
+///
+/// The one place it is spelled, because two principals need it and they
+/// must agree: the desktop session names it on the hand-over, and the
+/// settings application resolves it against its own closed pane registry.
+/// It lives here, beside the rest of the wallpaper vocabulary those two
+/// already share, rather than in either of them — neither may depend on
+/// the other. It confers nothing, so a name the application does not
+/// recognise simply leaves its window on the pane it already showed.
+pub const WALLPAPER_PANE: &str = "wallpaper";

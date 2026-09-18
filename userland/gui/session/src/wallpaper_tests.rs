@@ -29,6 +29,16 @@ fn colour_only() -> WallpaperSource {
     }
 }
 
+/// The backdrop source the desk handed out, failing the test for any other
+/// kind of job.
+fn backdrop(desk: &mut WallpaperDesk) -> Option<WallpaperSource> {
+    match desk.next_job() {
+        Some(WallpaperJob::Backdrop(source)) => Some(source),
+        Some(WallpaperJob::Preview(_)) => panic!("a preview was handed out, not the backdrop"),
+        None => None,
+    }
+}
+
 fn screen(source: &WallpaperSource) -> Surface {
     Surface::filled(
         source.width,
@@ -49,7 +59,7 @@ fn a_colour_only_choice_never_reaches_a_preparer() {
         }
     ));
     assert!(!desk.has_work(), "a colour-only backdrop asked for work");
-    assert!(desk.next_job().is_none());
+    assert!(backdrop(&mut desk).is_none());
 }
 
 #[test]
@@ -58,7 +68,7 @@ fn a_first_ask_records_the_request_and_answers_pending() {
     let wanted = image("/System/Graphics/Wallpapers/Space/low-orbit.jpg");
     assert!(matches!(desk.take(&wanted), Prepared::Pending));
     assert!(desk.has_work());
-    assert_eq!(desk.next_job(), Some(wanted));
+    assert_eq!(backdrop(&mut desk), Some(wanted));
 }
 
 #[test]
@@ -66,10 +76,10 @@ fn asking_again_while_a_preparer_holds_it_starts_no_second_preparation() {
     let mut desk = WallpaperDesk::new();
     let wanted = image("/a.png");
     assert!(matches!(desk.take(&wanted), Prepared::Pending));
-    assert!(desk.next_job().is_some());
+    assert!(backdrop(&mut desk).is_some());
     assert!(matches!(desk.take(&wanted), Prepared::Pending));
     assert!(
-        desk.next_job().is_none(),
+        backdrop(&mut desk).is_none(),
         "a preparation in progress was handed out twice"
     );
 }
@@ -79,7 +89,7 @@ fn a_prepared_surface_is_served_once_and_installed() {
     let mut desk = WallpaperDesk::new();
     let wanted = image("/a.png");
     assert!(matches!(desk.take(&wanted), Prepared::Pending));
-    let job = desk.next_job().expect("a job");
+    let job = backdrop(&mut desk).expect("a job");
     let painted = screen(&job);
     let pixels = painted.pixels().to_vec();
     assert!(desk.deliver(job, Ok(painted)));
@@ -102,7 +112,7 @@ fn a_refusal_is_served_as_the_backdrop_colour() {
     let mut desk = WallpaperDesk::new();
     let wanted = image("/missing.png");
     assert!(matches!(desk.take(&wanted), Prepared::Pending));
-    let job = desk.next_job().expect("a job");
+    let job = backdrop(&mut desk).expect("a job");
     assert!(desk.deliver(job, Err(String::from("unreadable"))));
     let Prepared::Ready {
         surface: None,
@@ -123,7 +133,7 @@ fn a_surface_prepared_for_a_screen_the_desktop_left_is_never_painted() {
     large.height = 1080;
 
     assert!(matches!(desk.take(&small), Prepared::Pending));
-    let job = desk.next_job().expect("a job");
+    let job = backdrop(&mut desk).expect("a job");
     // The screen mode changes while the picture is being fitted to the old one.
     assert!(matches!(desk.take(&large), Prepared::Pending));
     assert!(
@@ -132,7 +142,7 @@ fn a_surface_prepared_for_a_screen_the_desktop_left_is_never_painted() {
     );
     assert!(matches!(desk.take(&large), Prepared::Pending));
     assert_eq!(
-        desk.next_job(),
+        backdrop(&mut desk),
         Some(large),
         "the new screen was not queued"
     );
@@ -143,7 +153,7 @@ fn switching_to_a_colour_only_backdrop_discards_a_prepared_picture() {
     let mut desk = WallpaperDesk::new();
     let wanted = image("/a.png");
     assert!(matches!(desk.take(&wanted), Prepared::Pending));
-    let job = desk.next_job().expect("a job");
+    let job = backdrop(&mut desk).expect("a job");
     assert!(desk.deliver(job.clone(), Ok(screen(&job))));
 
     // The user turns the wallpaper off before the answer is collected: the
@@ -166,7 +176,7 @@ fn stopping_hands_out_no_more_work() {
     desk.stop();
     assert!(desk.stopping());
     assert!(!desk.has_work());
-    assert!(desk.next_job().is_none());
+    assert!(backdrop(&mut desk).is_none());
 }
 
 #[test]
@@ -194,7 +204,7 @@ fn an_answered_preparation_is_never_handed_out_again() {
     let mut desk = WallpaperDesk::new();
     let wanted = image("/a.png");
     assert!(matches!(desk.take(&wanted), Prepared::Pending));
-    let job = desk.next_job().expect("a job");
+    let job = backdrop(&mut desk).expect("a job");
     let painted = screen(&job);
     assert!(desk.deliver(job, Ok(painted)));
 
@@ -203,7 +213,7 @@ fn an_answered_preparation_is_never_handed_out_again() {
         "the answered preparation must not make the desk workable again"
     );
     assert!(
-        desk.next_job().is_none(),
+        backdrop(&mut desk).is_none(),
         "a preparer looking for work after answering must find none and park"
     );
 
@@ -225,7 +235,7 @@ fn a_stale_preparation_does_not_clear_the_newer_request() {
     let first = image("/a.png");
     let second = image("/b.png");
     assert!(matches!(desk.take(&first), Prepared::Pending));
-    let job = desk.next_job().expect("a job");
+    let job = backdrop(&mut desk).expect("a job");
     let painted = screen(&job);
 
     assert!(matches!(desk.take(&second), Prepared::Pending));
@@ -235,5 +245,116 @@ fn a_stale_preparation_does_not_clear_the_newer_request() {
     );
 
     assert!(desk.has_work(), "the newer request is still owed a decode");
-    assert_eq!(desk.next_job(), Some(second));
+    assert_eq!(backdrop(&mut desk), Some(second));
+}
+
+fn preview(window_id: u64, index: u16) -> PreviewJob {
+    PreviewJob {
+        request: PreviewRequest {
+            window_id,
+            index,
+            side: 96,
+        },
+        path: String::from("/System/Graphics/Wallpapers/Space/low-orbit.jpg"),
+    }
+}
+
+/// The picture the user is looking at never waits behind a thumbnail.
+#[test]
+fn the_backdrop_is_handed_out_before_a_waiting_preview() {
+    let mut desk = WallpaperDesk::new();
+    assert!(desk.want_preview(preview(7, 0)));
+    let wanted = image("/a.png");
+    assert!(matches!(desk.take(&wanted), Prepared::Pending));
+
+    assert_eq!(
+        backdrop(&mut desk),
+        Some(wanted),
+        "a thumbnail was preferred to the desktop's own picture"
+    );
+    assert!(matches!(desk.next_job(), Some(WallpaperJob::Preview(_))));
+}
+
+#[test]
+fn only_one_preview_is_in_flight_at_a_time() {
+    let mut desk = WallpaperDesk::new();
+    assert!(desk.want_preview(preview(7, 0)));
+    assert!(
+        !desk.want_preview(preview(7, 1)),
+        "a second preview was queued behind the first"
+    );
+    let Some(WallpaperJob::Preview(job)) = desk.next_job() else {
+        panic!("the preview was not handed out");
+    };
+    assert_eq!(job.request.index, 0);
+    assert!(
+        !desk.want_preview(preview(7, 1)),
+        "a preview was accepted while one was still rendering"
+    );
+
+    assert!(desk.deliver_preview(PreviewDone {
+        request: job.request,
+        pixels: Some(alloc::vec![0; 96 * 96 * 4]),
+    }));
+    assert!(desk.want_preview(preview(7, 1)), "the slot never freed");
+}
+
+#[test]
+fn a_rendered_preview_is_handed_over_once() {
+    let mut desk = WallpaperDesk::new();
+    assert!(desk.want_preview(preview(7, 3)));
+    let Some(WallpaperJob::Preview(job)) = desk.next_job() else {
+        panic!("the preview was not handed out");
+    };
+    assert!(desk.deliver_preview(PreviewDone {
+        request: job.request.clone(),
+        pixels: Some(alloc::vec![9; 4]),
+    }));
+    let done = desk.take_preview().expect("the rendered preview");
+    assert_eq!(done.request, job.request);
+    assert_eq!(done.pixels.as_deref(), Some(&[9u8, 9, 9, 9][..]));
+    assert!(
+        desk.take_preview().is_none(),
+        "the same preview was handed over twice"
+    );
+}
+
+/// Nothing is recalled, so the slot has to free itself: an answer to a
+/// request whose window has since closed is still the answer to it.
+#[test]
+fn an_answer_frees_the_slot_however_stale_its_window() {
+    let mut desk = WallpaperDesk::new();
+    assert!(desk.want_preview(preview(7, 0)));
+    let Some(WallpaperJob::Preview(job)) = desk.next_job() else {
+        panic!("the preview was not handed out");
+    };
+    assert!(desk.deliver_preview(PreviewDone {
+        request: job.request,
+        pixels: None,
+    }));
+    assert!(desk.take_preview().is_some());
+    assert!(
+        desk.want_preview(preview(8, 1)),
+        "a refused render left the slot stuck"
+    );
+}
+
+/// An answer the desk is not rendering is dropped rather than handed over,
+/// so a preparer answering twice cannot conclude a request nobody made.
+#[test]
+fn an_answer_to_nothing_is_dropped() {
+    let mut desk = WallpaperDesk::new();
+    assert!(!desk.deliver_preview(PreviewDone {
+        request: preview(7, 0).request,
+        pixels: Some(alloc::vec![0; 4]),
+    }));
+    assert!(desk.take_preview().is_none());
+}
+
+#[test]
+fn a_stopped_desk_takes_no_preview() {
+    let mut desk = WallpaperDesk::new();
+    desk.stop();
+    assert!(!desk.want_preview(preview(7, 0)));
+    assert!(desk.next_job().is_none());
 }

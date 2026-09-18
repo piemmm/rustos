@@ -45,13 +45,14 @@ use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
     encode_create_reply, encode_desktop_reply, encode_hand_over_reply, encode_menu_text_reply,
-    encode_minted_id_reply, encode_open_target_reply, encode_terrain_reply, AppBar, AppMenu,
-    HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, TerrainPlate, WindowEvent,
-    WindowRegion, WindowRequest, WindowTitle, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
-    DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES, WINDOW_CREATE_REPLY_LEN,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
-    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
-    WINDOW_TERRAIN_REPLY_MAX,
+    encode_minted_id_reply, encode_open_target_reply, encode_terrain_reply,
+    encode_wallpapers_reply, AppBar, AppMenu, HandOverDocument, HandOverOutcome, LayerDepth,
+    OpenTarget, TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
+    WindowTitle, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT,
+    DESKTOP_LAYER_MAX_PLATES, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
+    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
+    WINDOW_WALLPAPERS_REPLY_MAX,
 };
 use tairix_abi::{CapabilityId, Errno};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -83,7 +84,7 @@ pub const WINDOW_REPLY_MAX: usize = {
             wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN),
             wider(
                 wider(WINDOW_MINTED_ID_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX),
-                WINDOW_TERRAIN_REPLY_MAX,
+                wider(WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX),
             ),
         ),
     )
@@ -568,6 +569,57 @@ pub trait WindowHost {
     /// refusal is relayed to the client, which then knows it does not
     /// know rather than drawing to a guess.
     fn desktop(&mut self) -> Result<DesktopInfo, Errno>;
+
+    /// The shipped wallpaper catalog this host offers, in catalog order.
+    ///
+    /// The host is the authority because it is the only party that may
+    /// read the store; it lists that store once — `/System` is read-only,
+    /// so the catalog is fixed for the life of the boot — and holds the
+    /// result, so answering a query costs no I/O on the serve loop.
+    ///
+    /// The default is empty: a host that has listed no store has none to
+    /// describe, which is the honest "this desktop offers no shipped
+    /// pictures" rather than a refusal.
+    fn wallpaper_catalog(&mut self) -> &[WallpaperName] {
+        &[]
+    }
+
+    /// A validated `RenderWallpaper`: render catalog entry `index` as a
+    /// `side`x`side` straight-alpha RGBA8 picture into the region granted
+    /// as `shm_handle`, concluding to `window_id`.
+    ///
+    /// The engine has checked that the caller owns the window, that no
+    /// render is already pending on it, and that the side is within the
+    /// ABI bound. The host owns what is left, because only it holds the
+    /// catalog and the parser sandbox: resolving the index against its own
+    /// listing, mapping the region and checking it holds `side * side * 4`
+    /// bytes, and doing the read and the decode **off** its compositing
+    /// loop. It concludes by delivering exactly one
+    /// [`WindowEvent::WallpaperRendered`] naming the same `index` and
+    /// `side`.
+    ///
+    /// The default refuses: a host with no store to read cannot render a
+    /// picture, and saying so is more honest than accepting a request that
+    /// would never conclude.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host refuses the render with — a catalog position
+    /// that does not exist ([`Errno::NotFound`]), a region too small or
+    /// ungranted ([`Errno::LengthOutOfRange`], [`Errno::NotFound`]). A
+    /// refusal leaves no render pending, so the caller may ask again.
+    ///
+    /// [`WindowEvent::WallpaperRendered`]: tairix_abi::window_ipc::WindowEvent::WallpaperRendered
+    fn wallpaper_render_requested(
+        &mut self,
+        window_id: u64,
+        shm_handle: u64,
+        index: u16,
+        side: u16,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, shm_handle, index, side);
+        Err(Errno::NotSupported)
+    }
 }
 
 /// The event-delivery seam — the session's app-ward send (`ipc_send` to
@@ -743,6 +795,26 @@ pub enum OpenEntry {
         /// The `fd_redeem` handle. Never zero.
         grant: u64,
     },
+    /// A place inside the application, resolved against its own closed set
+    /// of places. Confers nothing.
+    Pane(String),
+}
+
+/// One entry of the shipped wallpaper catalog, owned by the host that
+/// listed the store — the session's owned form of
+/// [`tairix_abi::window_ipc::WallpaperEntry`], which
+/// borrows from the frame it is encoded into.
+///
+/// Two names rather than a path, because the *caller* builds the path from
+/// them through the one shared spelling, so the catalog and the settings
+/// document a chosen wallpaper produces cannot disagree about where it
+/// lives.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WallpaperName {
+    /// The store category directory this wallpaper is filed under.
+    pub category: String,
+    /// The wallpaper's own file name inside that category.
+    pub file: String,
 }
 
 impl OpenEntry {
@@ -754,6 +826,7 @@ impl OpenEntry {
                 name: name.as_bytes(),
                 grant: *grant,
             },
+            Self::Pane(pane) => OpenTarget::Pane(pane.as_bytes()),
         }
     }
 }
@@ -778,6 +851,10 @@ struct WindowRecord<R> {
     /// clears it when the conclusion is delivered, so the protocol's
     /// one-conclusion-per-acceptance shape is enforced in one place.
     pick_pending: bool,
+    /// A `RenderWallpaper` was accepted and its conclusion is still owed.
+    /// One at a time, as a pick is, so a client cannot queue the session's
+    /// sandbox full of decodes.
+    render_pending: bool,
     /// The id of an accepted `OpenMenu` whose outcome has not been
     /// delivered yet, or `None`. At most one open is unanswered per window;
     /// the engine mints the id on acceptance and clears it when the
@@ -1040,6 +1117,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 let taken = self.take_open_target(caller);
                 open_target_reply(reply, Ok(taken.as_ref().map(OpenEntry::as_wire)))
             }
+            WindowRequest::QueryWallpapers { from } => wallpapers_reply(reply, host, from),
             WindowRequest::TakeMenuText { window_id, open_id } => {
                 let taken = self.take_menu_text(caller, window_id, open_id);
                 menu_text_reply(
@@ -1144,6 +1222,15 @@ impl<M: ShmMapper> WindowServer<M> {
                 reply,
                 self.set_backdrop_blur(host, caller, window_id, radius_px),
             ),
+            WindowRequest::RenderWallpaper {
+                window_id,
+                shm_handle,
+                index,
+                side,
+            } => status(
+                reply,
+                self.render_wallpaper(host, caller, window_id, shm_handle, index, side),
+            ),
             // Read-only and ungated: the reply describes the caller's own
             // seat, holding nothing another principal owns and granting
             // no authority, so every client on the desktop may ask.
@@ -1161,6 +1248,8 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(Errno::NotSupported)),
             // ...and a target pull, which answers with its own frame.
             WindowRequest::TakeOpenTarget => open_target_reply(reply, Err(Errno::NotSupported)),
+            // ...and a catalog page, likewise.
+            WindowRequest::QueryWallpapers { .. } => wallpapers_refusal(reply, Errno::NotSupported),
             // ...and a committed-text pull, likewise.
             WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
             // ...and a hand-over, likewise.
@@ -1229,6 +1318,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
+                render_pending: false,
                 menu_open: None,
                 menu_text: None,
                 parent: None,
@@ -1295,6 +1385,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
+                render_pending: false,
                 menu_open: None,
                 menu_text: None,
                 parent: Some(spec.parent_window_id),
@@ -1349,6 +1440,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
+                render_pending: false,
                 menu_open: None,
                 menu_text: None,
                 parent: None,
@@ -1542,6 +1634,32 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(())
     }
 
+    /// Accept a wallpaper-render request for `caller`'s window
+    /// `window_id`: at most one render pends per window, and the host must
+    /// accept it before anything is recorded (fail closed — a refused
+    /// request leaves no pending state, so the caller may ask again).
+    fn render_wallpaper(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        shm_handle: u64,
+        index: u16,
+        side: u16,
+    ) -> Result<(), Errno> {
+        let record = self
+            .windows
+            .get_mut(&window_id)
+            .filter(|record| record.owner == caller)
+            .ok_or(Errno::NotFound)?;
+        if record.render_pending {
+            return Err(Errno::AlreadyExists);
+        }
+        host.wallpaper_render_requested(window_id, shm_handle, index, side)?;
+        record.render_pending = true;
+        Ok(())
+    }
+
     /// Relay `caller`'s tooltip declaration for its own window `window_id`.
     ///
     /// The window and the bounds are the engine's to check; the declaration
@@ -1635,6 +1753,11 @@ impl<M: ShmMapper> WindowServer<M> {
             OpenEntry::Document { grant, .. } => {
                 if *grant == 0 {
                     return Err(Errno::OutOfRange);
+                }
+            }
+            OpenEntry::Pane(pane) => {
+                if pane.is_empty() || pane.len() > tairix_abi::window_ipc::WINDOW_PANE_NAME_MAX {
+                    return Err(Errno::LengthOutOfRange);
                 }
             }
         }
@@ -2019,6 +2142,10 @@ impl<M: ShmMapper> WindowServer<M> {
         if concludes_pick && !record.pick_pending {
             return Err(Errno::OutOfRange);
         }
+        let concludes_render = matches!(event, WindowEvent::WallpaperRendered { .. });
+        if concludes_render && !record.render_pending {
+            return Err(Errno::OutOfRange);
+        }
         let names_open = match *event {
             WindowEvent::MenuClosed { open_id, .. } => Some(open_id),
             _ => None,
@@ -2032,6 +2159,9 @@ impl<M: ShmMapper> WindowServer<M> {
         if let Some(record) = self.windows.get_mut(&window_id) {
             if concludes_pick {
                 record.pick_pending = false;
+            }
+            if concludes_render {
+                record.render_pending = false;
             }
             if concludes_open {
                 record.menu_open = None;
@@ -2164,6 +2294,46 @@ fn open_target_reply(
 ) -> usize {
     let mut frame = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
     let len = encode_open_target_reply(&mut frame, result);
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
+}
+
+/// Write one page of `host`'s wallpaper catalog from `from` into `reply`,
+/// answering its length.
+///
+/// The page is as long as the entries it carried, not the widest one the
+/// channel admits, and the total lets the caller decide whether to ask
+/// again.
+fn wallpapers_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    host: &mut dyn WindowHost,
+    from: u16,
+) -> usize {
+    let catalog = host.wallpaper_catalog();
+    let total = u16::try_from(catalog.len()).unwrap_or(u16::MAX);
+    let page = catalog.get(usize::from(from)..).unwrap_or(&[]);
+    let mut frame = [0u8; WINDOW_WALLPAPERS_REPLY_MAX];
+    let len = encode_wallpapers_reply(
+        &mut frame,
+        Ok((
+            total,
+            page.iter().map(|name| WallpaperEntry {
+                category: name.category.as_bytes(),
+                file: name.file.as_bytes(),
+            }),
+        )),
+    );
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
+}
+
+/// Write a wallpaper-catalog refusal into `reply`, answering its length.
+fn wallpapers_refusal(reply: &mut [u8; WINDOW_REPLY_MAX], err: Errno) -> usize {
+    let mut frame = [0u8; WINDOW_WALLPAPERS_REPLY_MAX];
+    let len = encode_wallpapers_reply(
+        &mut frame,
+        Err::<(u16, core::iter::Empty<WallpaperEntry<'_>>), Errno>(err),
+    );
     reply[..len].copy_from_slice(&frame[..len]);
     len
 }

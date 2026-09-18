@@ -86,11 +86,11 @@ use tairix_abi::users_admin::{
 };
 use tairix_abi::window_ipc::{
     decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_menu_text_reply,
-    decode_minted_id_reply, decode_open_target_reply, AppBar, AppBarClick, AppMenu, AppMenuBundle,
-    AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
-    AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, BundleRunPath, DocumentName,
-    HandOverDocument, MenuOutcome, MenuRefusal, TooltipText, WindowEvent, WindowRegion,
-    WindowRequest, WindowSizing, WindowTitle,
+    decode_minted_id_reply, decode_open_target_reply, decode_wallpapers_reply, AppBar, AppBarClick,
+    AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
+    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
+    BundleRunPath, DocumentName, HandOverDocument, MenuOutcome, MenuRefusal, TooltipText,
+    WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
@@ -649,6 +649,11 @@ fn exercise_window_ipc(bytes: &[u8]) {
     let _ = decode_open_target_reply(bytes);
     let _ = decode_menu_text_reply(bytes);
     let _ = decode_hand_over_reply(bytes);
+    // A catalog page walks a length-prefixed body, so a frame lying about
+    // its own entries must refuse rather than read past it.
+    if let Ok(page) = decode_wallpapers_reply(bytes) {
+        assert_eq!(page.entries().count(), page.len());
+    }
 }
 
 /// Drive the notification-channel decoder on `bytes` (one arm of
@@ -1412,6 +1417,13 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
         },
         WindowRequest::Close { window_id: 3 },
         WindowRequest::PickFile { window_id: 3 },
+        WindowRequest::QueryWallpapers { from: 7 },
+        WindowRequest::RenderWallpaper {
+            window_id: 3,
+            shm_handle: 11,
+            index: 5,
+            side: 64,
+        },
         WindowRequest::Resize {
             window_id: 3,
             shm_handle: 11,

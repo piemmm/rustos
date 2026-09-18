@@ -34,7 +34,7 @@ use crate::client::{
 use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, CallerIdentity, EventSink, HandOverDesk, LayerSpec, OpenEntry,
-    PopupSpec, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
+    PopupSpec, WallpaperName, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -196,6 +196,11 @@ struct RecordingHost {
     /// The desktop this host composites, or the refusal a host with no
     /// screen to describe answers with.
     desktop: Result<DesktopInfo, Errno>,
+    /// The shipped wallpapers this host offers, and every render asked of
+    /// it.
+    wallpapers: Vec<WallpaperName>,
+    renders: Vec<(u64, u64, u16, u16)>,
+    refuse_render: Option<Errno>,
 }
 
 impl Default for RecordingHost {
@@ -212,6 +217,9 @@ impl Default for RecordingHost {
             resized: Vec::new(),
             closed: Vec::new(),
             picks: Vec::new(),
+            wallpapers: Vec::new(),
+            renders: Vec::new(),
+            refuse_render: None,
             menu_opens: Vec::new(),
             tooltips: Vec::new(),
             refuse_tooltip: None,
@@ -435,6 +443,24 @@ impl WindowHost for RecordingHost {
 
     fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
         self.desktop
+    }
+
+    fn wallpaper_catalog(&mut self) -> &[WallpaperName] {
+        &self.wallpapers
+    }
+
+    fn wallpaper_render_requested(
+        &mut self,
+        window_id: u64,
+        shm_handle: u64,
+        index: u16,
+        side: u16,
+    ) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_render {
+            return Err(err);
+        }
+        self.renders.push((window_id, shm_handle, index, side));
+        Ok(())
     }
 }
 
@@ -2008,6 +2034,128 @@ fn event_routing_fails_closed() {
         Err(Errno::OutOfRange)
     );
     assert!(sink.delivered.is_empty());
+}
+
+/// The catalog is the host's, paged into a bounded reply, and a caller
+/// asking past its end gets an honest empty page rather than a refusal.
+#[test]
+fn the_wallpaper_catalog_is_answered_as_pages_of_the_hosts_own_listing() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    loopback.borrow_mut().host.wallpapers = alloc::vec![
+        WallpaperName {
+            category: String::from("TAIRiX"),
+            file: String::from("a.jpg"),
+        },
+        WallpaperName {
+            category: String::from("Space"),
+            file: String::from("b.png"),
+        },
+    ];
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut page = [0u8; tairix_abi::window_ipc::WINDOW_WALLPAPERS_REPLY_MAX];
+
+    let answered = client.wallpapers(0, &mut page).expect("a catalog page");
+    assert_eq!(answered.total, 2);
+    let entries: Vec<(String, String)> = answered
+        .entries()
+        .map(|entry| {
+            (
+                String::from_utf8_lossy(entry.category).into_owned(),
+                String::from_utf8_lossy(entry.file).into_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        alloc::vec![
+            (String::from("TAIRiX"), String::from("a.jpg")),
+            (String::from("Space"), String::from("b.png")),
+        ]
+    );
+
+    // Asking from the second entry answers only the remainder, and asking
+    // past the end answers nothing rather than refusing.
+    let answered = client.wallpapers(1, &mut page).expect("a catalog page");
+    assert_eq!(answered.len(), 1);
+    let answered = client.wallpapers(9, &mut page).expect("a catalog page");
+    assert_eq!(answered.total, 2);
+    assert!(answered.is_empty());
+}
+
+/// A desktop that listed no store answers an empty catalog, not an error:
+/// offering no shipped pictures is a fact, not a failure.
+#[test]
+fn a_host_with_no_catalog_answers_an_empty_page() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut page = [0u8; tairix_abi::window_ipc::WINDOW_WALLPAPERS_REPLY_MAX];
+    let answered = client.wallpapers(0, &mut page).expect("a catalog page");
+    assert_eq!(answered.total, 0);
+    assert!(answered.is_empty());
+}
+
+/// The same discipline a pick has: owner-bound, one pending per window,
+/// and concluded exactly once by its own event.
+#[test]
+fn a_wallpaper_render_is_owner_bound_single_pending_and_concluded_by_delivery() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.render_wallpaper(window, 0x99, 0, 64),
+        Err(Errno::NotFound)
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    client
+        .render_wallpaper(window, 0x99, 0, 64)
+        .expect("render accepted");
+    assert_eq!(
+        loopback.borrow().host.renders,
+        alloc::vec![(window, 0x99, 0, 64)]
+    );
+    assert_eq!(
+        client.render_wallpaper(window, 0x99, 1, 64),
+        Err(Errno::AlreadyExists)
+    );
+    assert_eq!(loopback.borrow().host.renders.len(), 1);
+
+    let mut sink = QueueSink::default();
+    let concluded = WindowEvent::WallpaperRendered {
+        window_id: window,
+        index: 0,
+        side: 64,
+        rendered: true,
+    };
+    deliver(&loopback, &mut sink, &concluded).expect("conclusion delivered");
+    assert_eq!(sink.delivered.len(), 1);
+    // Exactly one conclusion per acceptance.
+    assert_eq!(
+        deliver(&loopback, &mut sink, &concluded),
+        Err(Errno::OutOfRange)
+    );
+    client
+        .render_wallpaper(window, 0x99, 1, 64)
+        .expect("a fresh render is accepted");
+}
+
+/// A refused render leaves nothing pending, so the caller may ask again.
+#[test]
+fn a_refused_render_leaves_no_pending_conclusion() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    loopback.borrow_mut().host.refuse_render = Some(Errno::LengthOutOfRange);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    assert_eq!(
+        client.render_wallpaper(window, 0x99, 0, 64),
+        Err(Errno::LengthOutOfRange)
+    );
+    loopback.borrow_mut().host.refuse_render = None;
+    client
+        .render_wallpaper(window, 0x99, 0, 64)
+        .expect("the window was left free to ask again");
 }
 
 #[test]

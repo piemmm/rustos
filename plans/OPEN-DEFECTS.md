@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 28 open, 107 closed, 135 total.
+table normalises all three to **closed**. 29 open, 107 closed, 136 total.
 
 ### Open (28)
 
@@ -55,6 +55,7 @@ table normalises all three to **closed**. 28 open, 107 closed, 135 total.
 | D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static; `kernel/sched/api::park` would need one too. Distinct from D123, which is the UB oracle |
 | D132 | no run states whether a *double-click* in a file-manager window reaches `activate` on a guest | coverage gap with an unexplained observation behind it, not a confirmed defect. The `handover_qemu_aarch64` vertical originally injected the pair as one four-edge burst and never passed. The burst **was** delivered: four window events reached the manager's own event mailbox (`0xE117…` tagged with the `files` task) in the 60 ms after that window's first frame, and the manager repainted twice after them — yet no `fd_grant` followed. The aim was verified independently against the run's screendump and round-trips to the intended entry through the production hit-test, and the shared pairing rule accepts two presses 32 ms apart on one subject (neither `Moved` nor `Released` resets the tracker). So either the burst yielded one press rather than two, or the two resolved to different subjects — and **no existing record can tell them apart**: `MessageDelivered` carries a port, a sender and a length, every window event is 40 bytes, and no audit event anywhere names a pointer action. Answering it needs a witness that names the delivered event kind, plus re-adding injection (`PointerAction::DoubleClick` was deleted with its last consumer). The vertical now activates through the item's context-menu *Open* row, which runs the same `activate`, so the delegation chain is covered and only the pairing path is host-tested only |
 | D133 | a task can grow another task's kernel-side pending-`fd_grant` table without bound | noticed while re-pointing the hand-over vertical; not absorbed. Fail-closed refusal, not a capacity |
+| D139 | `lib/rt` is not under the UB oracle, and cannot be enrolled as the registry's scopes stand | noticed while adding a granted-region mapping; the allocator's pager seam hands it fabricated addresses, which strict provenance refuses as *unsupported* — a reason `Scope::LibExcept` does not currently admit |
 
 ### Closed (107)
 
@@ -7907,6 +7908,39 @@ consume what it cannot hand on, so an honest refusal leaves nothing pending.
 Its regression test is part of the fix: mint past the ceiling and assert the
 typed refusal with the earlier delegations still redeemable, plus the session
 answering `NotRunning` leaving no pending entry.
+
+## D139 — `lib/rt` is not under the UB oracle, and cannot be enrolled as the registry's scopes stand (OPEN)
+
+`tairix-rt` carries a large hand-written `unsafe` core — the process heap,
+the syscall wrappers' pointer marshalling, the shared-memory mappings — and
+appears in no `miri::TARGETS` row, so none of it has ever been interpreted.
+
+Pointing the oracle at the crate aborts the whole run on the first heap test:
+`Heap::alloc` turns the address its pager seam answered into a pointer, which
+`-Zmiri-strict-provenance` refuses as an **unsupported operation**. That is
+what the crate *is* — a userland allocator over a seam whose host double
+fabricates addresses — not a provenance bug in it, and the same refusal that
+`kernel/mem` resolved (D123/D126) by giving its direct physical map a
+provenance root does not obviously transfer: there is no real allocation on
+the host for a fabricated arena address to be derived from.
+
+Enrolling it therefore needs the registry to admit a *second* reason for
+scoping a target to less than its crate. `Scope::LibExcept`'s contract today
+is explicitly budget-only ("a skipped module carries no `unsafe` and passes
+when it is run"), while the charter's own rule admits excluding what the
+interpreter **refuses** as well as what it cannot afford — only excluding a
+module that *reports* undefined behaviour is forbidden. Widening that
+contract, and then owning whatever the remaining ~250 interpreted tests
+surface, is the work.
+
+Noticed while adding `MappedGrant` (the granted-region mapping the desktop
+writes a wallpaper preview into). Not absorbed: that mapping's own `unsafe`
+is unreachable from a host build — the trap seam answers `HOST_NO_TRAP`, so
+both `MappedGrant::map` and `SharedRegion::create` refuse before any slice is
+built, which `shm`'s own two host tests pin and which the oracle confirms
+(`MIRIFLAGS=-Zmiri-strict-provenance cargo miri test -p tairix-rt shm::`,
+2 passed) — so the change adds no uninterpreted reachable `unsafe`, and the
+enrolment gap is the crate's, not this change's.
 
 ## D137 — the blocking `wait` parked the calling thread but registered its process (FIXED)
 

@@ -7,8 +7,8 @@ document** (the backdrop keys — wallpaper choice, fit, backdrop colour, icon
 flow, sort order — and the appearance keys — light/dark, contrast, density,
 motion, interface scale), the shipped default wallpaper catalog and its
 bounded fail-closed listing model, the one pure wallpaper-placement geometry
-the desktop renderer and the chooser's preview both draw through, and the one
-client every surface asks the session to adopt a change with. It defines the
+the desktop renderer and every preview draw through, and the one client
+every surface asks the session to adopt a change with. It defines the
 validated settings model (`DesktopSettings`) and the closed key registry over
 the store's document (`SettingsKey`) — plus the shipped wallpaper identity
 (`WALLPAPER_STORE`, `DEFAULT_WALLPAPER`), the placement geometry (`place`,
@@ -22,9 +22,10 @@ In the desktop session's **published** app-data scope
 properties follow from the store rather than from convention:
 
 - The session is the only **writer**. An application publishes only its
-  own scope, so no other program the user launches — including the chooser
-  (`wallpaper.app`) — can write the desktop's document at all. The chooser
-  *asks* over the pinboard channel and the session decides.
+  own scope, so no other program the user launches — including the Settings
+  application, where the desktop picture is chosen — can write the desktop's
+  document at all. Settings *asks* over the pinboard channel and the session
+  decides.
 - Any application may **read** it, by naming `PINBOARD_PUBLISHER` on a
   request shape that carries no scope field, so "read the desktop's private
   settings" is not a request that exists.
@@ -104,16 +105,17 @@ The shipped wallpaper masters ship read-only at `WALLPAPER_STORE`
 **categories** (`Space`, `Nature`, `City`, `Abstract`, `TAIRiX`) and
 discovered at build time from `lib/wallpaper/assets/` by `tools/syshelp` —
 never a hand-maintained list. A category's directory name *is* the label a
-chooser draws, so adding a category is authoring a directory and there is no
+gallery draws, so adding a category is authoring a directory and there is no
 name → label table to drift. `catalog_categories` filters and orders a
 listing of the store's own subdirectories exactly as `catalog_entries` does a
-listing of one category's files.
+listing of one category's files, and `desktop_catalog` flattens a whole walk
+into the one bounded list a gallery offers.
 Each master is authored no larger than `lib/sandbox`'s
 `MAX_DESTINATION_WIDTH`×`MAX_DESTINATION_HEIGHT` (3840×2160): JPEG entropy
 decoding cannot skip blocks, so a source pixel beyond what the renderer
 will ever draw costs decode time no screen can use. `catalog_entries` is
 the one bounded, fail-closed definition of which files in a directory
-listing a chooser may offer: it performs no I/O of its own, filtering to
+listing a gallery may offer: it performs no I/O of its own, filtering to
 the decodable extensions, rejecting illegal names, skipping oversized
 files, and capping and sorting the result.
 

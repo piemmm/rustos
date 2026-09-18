@@ -161,7 +161,7 @@ pub struct Settings {
 /// The three always travel together down the input-routing chain — a control's
 /// own layout needs all of them, and the tab strip needs the theme to say
 /// where its own entries are — so a routing path carries one parameter rather
-/// than three, exactly as the wallpaper chooser's own style bundle does.
+/// than three.
 #[derive(Copy, Clone)]
 struct Style<'a> {
     scale: Scale,

@@ -166,6 +166,13 @@ pub enum PaneBacking {
 pub struct PaneRow {
     /// Which pane this row is.
     pub pane: Pane,
+    /// The stable name a launch target uses to reach this pane.
+    ///
+    /// Not the title: a title is what a reader reads and may be reworded,
+    /// while this is what another program names, so the two are separate
+    /// on purpose. Lower-case, no spaces, and unique across the registry,
+    /// which the registry's own test holds.
+    pub name: &'static str,
     /// The pane's own title: the trailing crumb of the location trail, and the
     /// sidebar label of a disclosed pane. Equal to its category's label for a
     /// category that holds one pane.
@@ -186,8 +193,15 @@ impl PaneRow {
         match self.pane {
             Pane::Appearance => Some(Composition::Appearance),
             Pane::Accessibility => Some(Composition::Accessibility),
+            Pane::Wallpaper => Some(Composition::Wallpaper),
             _ => None,
         }
+    }
+
+    /// Whether this pane draws a picture gallery beneath its form.
+    #[must_use]
+    pub const fn has_gallery(&self) -> bool {
+        matches!(self.pane, Pane::Wallpaper)
     }
 }
 
@@ -230,6 +244,22 @@ impl Category {
 }
 
 impl Pane {
+    /// The pane a hand-over's name identifies, or `None` for a name the
+    /// registry does not carry.
+    ///
+    /// The closed set is the whole vocabulary: a launch that names a place
+    /// inside this application confers nothing and can reach nothing but a
+    /// pane the registry already lists, so an unknown name is simply not a
+    /// pane rather than an error.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        CATEGORIES
+            .iter()
+            .flat_map(|row| row.panes)
+            .find(|row| row.name == name)
+            .map(|row| row.pane)
+    }
+
     /// The category that holds this pane, and its row.
     #[must_use]
     pub fn locate(self) -> Option<(Category, &'static PaneRow)> {
@@ -261,6 +291,17 @@ impl Location {
         Some(Self {
             category: row.category,
             pane: row.first_pane()?.pane,
+        })
+    }
+
+    /// The location a hand-over's pane name identifies, or `None` for a
+    /// name the registry does not carry.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        let (category, pane) = Pane::named(name)?.locate()?;
+        Some(Self {
+            category,
+            pane: pane.pane,
         })
     }
 
@@ -404,6 +445,16 @@ const ACCESSIBILITY_SETTINGS: &[&str] = &[
     POINTER_SIZE_LABEL,
 ];
 
+/// The Wallpaper pane's setting labels: its four rows, plus the picture
+/// the gallery beneath them chooses.
+const WALLPAPER_SETTINGS: &[&str] = &[
+    "Desktop picture",
+    Setting::Fit.label(),
+    Setting::Backdrop.label(),
+    Setting::Icons.label(),
+    Setting::Sort.label(),
+];
+
 /// Every category, in sidebar order, with its panes.
 ///
 /// The single definition of the whole surface. The order is the reading order
@@ -418,6 +469,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         panes: &[
             PaneRow {
                 pane: Pane::About,
+                name: "about",
                 title: "About",
                 backing: PaneBacking::Elsewhere {
                     shows: "What this system is: its name, its version, how long it has been \
@@ -429,6 +481,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             },
             PaneRow {
                 pane: Pane::LoginStartup,
+                name: "login-startup",
                 title: "Login & startup",
                 backing: PaneBacking::Elsewhere {
                     shows: "Whether this system starts at a text login or a graphical one.",
@@ -439,6 +492,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             },
             PaneRow {
                 pane: Pane::Caching,
+                name: "caching",
                 title: "Caching",
                 backing: PaneBacking::Elsewhere {
                     shows: "How much memory this system may keep as caches, and which caches it \
@@ -450,6 +504,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             },
             PaneRow {
                 pane: Pane::DateTime,
+                name: "date-time",
                 title: "Date & Time",
                 backing: PaneBacking::Elsewhere {
                     shows: "The wall clock, and whether it is set from the network.",
@@ -466,6 +521,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Appearance,
         panes: &[PaneRow {
             pane: Pane::Appearance,
+            name: "appearance",
             title: "Appearance",
             backing: PaneBacking::Composed,
             settings: APPEARANCE_SETTINGS,
@@ -477,13 +533,10 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Wallpaper,
         panes: &[PaneRow {
             pane: Pane::Wallpaper,
+            name: "wallpaper",
             title: "Wallpaper",
-            backing: PaneBacking::Elsewhere {
-                shows: "The desktop picture, how it is placed on the screen, and how the \
-                        desktop's own icons are arranged.",
-                elsewhere: "Chosen from the desktop backdrop's Change Background row.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed,
+            settings: WALLPAPER_SETTINGS,
         }],
     },
     CategoryRow {
@@ -492,6 +545,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Display,
         panes: &[PaneRow {
             pane: Pane::Displays,
+            name: "displays",
             title: "Displays",
             backing: PaneBacking::None {
                 missing: "This system cannot change how a screen is driven: the display \
@@ -510,6 +564,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::LockScreen,
         panes: &[PaneRow {
             pane: Pane::LockScreen,
+            name: "lock-screen",
             title: "Lock Screen",
             backing: PaneBacking::None {
                 missing: "This desktop keeps no idle time, so there is no moment for it to lock \
@@ -526,6 +581,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Screensaver,
         panes: &[PaneRow {
             pane: Pane::Screensaver,
+            name: "screensaver",
             title: "Screensaver",
             backing: PaneBacking::None {
                 missing: "This desktop keeps no idle time, so there is no moment for it to blank \
@@ -541,6 +597,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Power,
         panes: &[PaneRow {
             pane: Pane::Power,
+            name: "power",
             title: "Power",
             backing: PaneBacking::None {
                 missing: "This system reads no power supply, battery or temperature, and has no \
@@ -558,6 +615,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         panes: &[
             PaneRow {
                 pane: Pane::Ethernet,
+                name: "ethernet",
                 title: "Ethernet",
                 backing: PaneBacking::Elsewhere {
                     shows: "Each wired interface's link state, addresses and throughput, and how \
@@ -569,6 +627,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             },
             PaneRow {
                 pane: Pane::WiFi,
+                name: "wifi",
                 title: "Wi-Fi",
                 backing: PaneBacking::None {
                     missing: "This system has no wireless driver, nothing that could join a \
@@ -579,6 +638,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             },
             PaneRow {
                 pane: Pane::Dns,
+                name: "dns",
                 title: "DNS",
                 backing: PaneBacking::Elsewhere {
                     shows: "The name servers this system resolves through.",
@@ -589,6 +649,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             },
             PaneRow {
                 pane: Pane::TcpIp,
+                name: "tcp-ip",
                 title: "TCP/IP",
                 backing: PaneBacking::Elsewhere {
                     shows: "Whether IPv4 and IPv6 are enabled, and the options the whole stack \
@@ -606,6 +667,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Bluetooth,
         panes: &[PaneRow {
             pane: Pane::Bluetooth,
+            name: "bluetooth",
             title: "Bluetooth",
             backing: PaneBacking::None {
                 missing: "This system has no Bluetooth support at all: nothing to reach a radio \
@@ -622,6 +684,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Sound,
         panes: &[PaneRow {
             pane: Pane::Sound,
+            name: "sound",
             title: "Sound",
             backing: PaneBacking::None {
                 missing: "This system has no audio support at all: no sound-device driver, \
@@ -639,6 +702,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Notifications,
         panes: &[PaneRow {
             pane: Pane::Notifications,
+            name: "notifications",
             title: "Notifications",
             backing: PaneBacking::None {
                 missing: "The desktop shows notifications but keeps no policy for them, so there \
@@ -654,6 +718,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Keyboard,
         panes: &[PaneRow {
             pane: Pane::Keyboard,
+            name: "keyboard",
             title: "Keyboard",
             backing: PaneBacking::None {
                 missing: "This system has one built-in key layout, keeps no key-repeat setting, \
@@ -670,6 +735,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Mouse,
         panes: &[PaneRow {
             pane: Pane::Mouse,
+            name: "mouse",
             title: "Mouse",
             backing: PaneBacking::None {
                 missing: "The desktop keeps no pointer policy, so there is no button order, no \
@@ -685,6 +751,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Trackpad,
         panes: &[PaneRow {
             pane: Pane::Trackpad,
+            name: "trackpad",
             title: "Trackpad",
             backing: PaneBacking::None {
                 missing: "This system has no touchpad driver: the shared input decode \
@@ -700,6 +767,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Touchscreen,
         panes: &[PaneRow {
             pane: Pane::Touchscreen,
+            name: "touchscreen",
             title: "Touchscreen",
             backing: PaneBacking::None {
                 missing: "No touch reaches the desktop: there is no touch driver, and the shared \
@@ -716,6 +784,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Printer,
         panes: &[PaneRow {
             pane: Pane::Printers,
+            name: "printers",
             title: "Printers & Scanners",
             backing: PaneBacking::None {
                 missing: "This system cannot print or scan: there is nothing to hold a print \
@@ -732,6 +801,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Accessibility,
         panes: &[PaneRow {
             pane: Pane::Accessibility,
+            name: "accessibility",
             title: "Accessibility",
             backing: PaneBacking::Composed,
             settings: ACCESSIBILITY_SETTINGS,
@@ -743,6 +813,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Language,
         panes: &[PaneRow {
             pane: Pane::Language,
+            name: "language",
             title: "Language & Region",
             backing: PaneBacking::None {
                 missing: "This system ships its help in several languages but keeps no language, \
@@ -758,6 +829,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Sharing,
         panes: &[PaneRow {
             pane: Pane::Sharing,
+            name: "sharing",
             title: "Sharing",
             backing: PaneBacking::None {
                 missing: "This system offers nothing to other machines: it runs no file server, \
@@ -773,6 +845,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Users,
         panes: &[PaneRow {
             pane: Pane::Users,
+            name: "users",
             title: "Users & Groups",
             backing: PaneBacking::Elsewhere {
                 shows: "Every account on this system, its groups, and what it is allowed to do.",
@@ -788,6 +861,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         icon: IconKind::Storage,
         panes: &[PaneRow {
             pane: Pane::Storage,
+            name: "storage",
             title: "Storage",
             backing: PaneBacking::Elsewhere {
                 shows: "Each mounted volume: its label, its filesystem, how full it is, and \

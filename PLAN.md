@@ -4635,8 +4635,8 @@ per-app recipes (§2.2).
 
 **Status: in progress.** The desktop backdrop becomes a real pinboard: a
 wallpaper drawn behind everything, the user's `Desktop` folder over it, a
-backdrop context menu, and a per-user settings document the chooser app
-edits. `plans/PINBOARD.md` is the binding design and carries the
+backdrop context menu, and a per-user settings document the Settings
+application's Wallpaper pane edits. `plans/PINBOARD.md` is the binding design and carries the
 deliverable list (P1–P10) and its current state; it is not repeated here.
 
 Load-bearing decisions a future contributor needs:
@@ -4647,8 +4647,8 @@ Load-bearing decisions a future contributor needs:
   spells a path to it — the wallpaper catalog, the fit geometry, and the
   shipped masters in its `assets/<Category>/`, which `tools/syshelp` plants
   at `/System/Graphics/Wallpapers/<Category>/`. A category directory's own
-  name is the label a chooser draws, so the store's children are directories
-  and only their children are files. The default is
+  name is the label a gallery draws, so the store's children are
+  directories and only their children are files. The default is
   `TAIRiX/tairix-dark.jpg`.
 - **`lib/image` decodes JPEG** (baseline and progressive) as well as PNG,
   with a reduced-scale decode so an 8.3-megapixel master is never materialised
@@ -4659,17 +4659,17 @@ Load-bearing decisions a future contributor needs:
   wallpaper prepare/band/release ops, so untrusted wallpaper bytes are
   decoded only in the capability-empty worker and a screenful of pixels
   crosses the fixed 8 MiB frame bound in bands rather than raising it.
-- **The desktop session is the settings document's only writer.** The
-  chooser (`wallpaper.app`) and the backdrop menu both *ask*, over the
-  reserved seat-scoped `PINBOARD_ENDPOINT`, whose request carries the
-  rendered document itself rather than a second encoding of the model.
+- **The desktop session is the settings document's only writer.**
+  Settings and the backdrop menu both *ask*, over the reserved seat-scoped
+  `PINBOARD_ENDPOINT`, whose request carries the rendered document itself
+  rather than a second encoding of the model.
 - **The icon arrangement is a setting**, which is why
   `tairix_browse::GridFlow` gained `ColumnsFromLeading` beside its existing
   mirror image.
-- **Open follow-up — the chooser screenshot.** The `README.md` gallery's
-  `docs/screenshots/wallpaper.png` still shows the chooser before it gained
-  its category rail. Regenerating it needs an interactive graphical session
-  capture, not a code change.
+- **Open follow-up — a screenshot of the Wallpaper pane.** The
+  `README.md` gallery's row for choosing a picture is removed with the
+  application it showed; replacing it with the Settings pane needs an
+  interactive graphical session capture, not a code change.
 
 ### Stage 7 follow-up — civil time zones (`plans/TIMEZONES.md`)
 
@@ -8354,9 +8354,7 @@ decision 3.
   building a `BitmapFont` is a theme read and arithmetic — no lock, client
   call or cache lookup — so hoisting it cannot buy measurable time. Every
   windowed app now holds its surface for the window's life, clips each round's
-  draw to what it reported and presents that rectangle; the wallpaper chooser
-  also reports the single tile a sandbox-rendered thumbnail fills, so filling
-  its grid costs one square per artwork rather than one window. `files` and
+  draw to what it reported and presents that rectangle. `files` and
   `switchboard` closed last. `lib/browse`'s renderer became `render_into` over
   a caller-owned surface (the allocating `render` is deleted; the session's
   picker allocates its own), and because the file view retains no controls —
@@ -8705,7 +8703,7 @@ future contributor needs from this file:
   omission.
 - **Landed (AD10):** the remaining migrations, which between them consumed every
   scope. `fstree` on the private scope; the desktop pinboard on the *session's*
-  published scope, with the wallpaper chooser's unmediated read of
+  published scope, with a settings surface's unmediated read of
   `~/Settings/Pinboard/pinboard.conf` replaced by a foreign read; the program
   library's per-user overlay on *`applib`'s* published scope, with the desktop
   session as the foreign reader. Every hand-rolled path is deleted, and with

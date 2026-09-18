@@ -1534,7 +1534,7 @@ You are not exempt from any rule above. In addition:
     | Sound: the one audio path (client stream ABI, the `audiod` mixer/router, the `audiochan-v1` device channel), the exported device clock and latency grant, seat-leased sinks and gated capture, the file decoders (`lib/sound`) and their sandboxed decode, the audio driver class, and the two players (`play`, `music.app`) | `plans/SOUND.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
     | Diagnosing a desktop pause: the per-thread frame budget, the overrun report, the user-stack backtrace of the stalling call | `plans/FIX-STALLTRACE.md` |
-    | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, the per-user settings the session publishes), the `Desktop` folder's icon arrangement and sort order, the backdrop context menu, and the wallpaper chooser app | `plans/PINBOARD.md` |
+    | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, the per-user settings the session publishes), the `Desktop` folder's icon arrangement and sort order, and the backdrop context menu | `plans/PINBOARD.md` |
     | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, the per-application slot strip with its app-declared menu and hover window picker, the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
     | The Switchboard window: its sections, chrome, the controls it composes, and which readings are real measurements versus awaiting an interface | `plans/NEW-SWITCHBOARD.md` |
     | The Settings application: its pane registry, the authority map (who owns each write), the three write paths, and which categories state an absent interface | `plans/NEW-DESKTOP-SETTINGS.md` |
@@ -1583,6 +1583,7 @@ You are not exempt from any rule above. In addition:
     | USB stack and hot-removal | `plans/USB.md` |
     | Networking: the IPv4/IPv6 stack, sockets, transports, multicast, NIC drivers, offloads | `plans/NETWORK.md` |
     | Dynamic address configuration: the DHCPv4 client (RFC 2131/2132) engine and its stack integration | `plans/DHCP.md` |
+    | The interactive network terminal client: the `telnet` command, its Network Virtual Terminal option negotiation, and the terminal relay | `plans/TELNET.md` |
     | Name resolution: the DNS stub resolver (RFC 1035/RFC 5452) engine and its socket integration | `plans/DNS.md` |
     | Device inventory commands (`lspci`/`lsusb`), USB mass storage, hotplug automount | `plans/DEVICES.md` |
     | Storage/media I/O fault isolation: per-request deadlines, the per-device health state machine, the recovery **grace window** (blip ride-through before failing closed), fault-domain (hub/controller) quiesce/resume, RAID/ARXFS composition | `plans/FIX-IO.md` |

@@ -5034,7 +5034,7 @@ fn a_slot_carries_the_declaration_its_own_process_made() {
 
 /// A bundle whose signed manifest presents no icon-bar slot gets none, by
 /// either of the two routes onto the strip — the Switchboard and the
-/// wallpaper chooser are already reached another way, so a slot would be a
+/// Settings are already reached another way, so a slot would be a
 /// duplicate.
 #[test]
 fn a_bundle_that_presents_no_icon_bar_slot_is_off_the_strip_either_way() {
@@ -5202,6 +5202,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             menu: &mut MenuChain::new(),
             seat_held: false,
             relay: &mut RecordingRelay::default(),
+            wallpapers: &mut NoGallery,
         };
         tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(AppBarClick::Open))
             .expect("the session lists it");
@@ -5222,6 +5223,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             menu: &mut MenuChain::new(),
             seat_held: false,
             relay: &mut RecordingRelay::default(),
+            wallpapers: &mut NoGallery,
         };
         tairix_window::WindowHost::app_bar_withdrawn(&mut host, owner);
     }
@@ -6504,6 +6506,21 @@ fn relaunching_the_monitor_with_none_live_spawns() {
         Launch::Spawn
     );
     assert_eq!(host.asked, 0, "there is no instance to ask");
+}
+
+/// A desktop offering no shipped wallpapers: this suite exercises the icon
+/// bar and the hand-over, and the gallery's own policy is
+/// `crate::wallpaper`'s suite.
+struct NoGallery;
+
+impl crate::wallpaper::WallpaperService for NoGallery {
+    fn catalog(&self) -> &[tairix_window::WallpaperName] {
+        &[]
+    }
+
+    fn render(&mut self, _window: u64, _shm: u64, _index: u16, _side: u16) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
 }
 
 /// The session's document relay, recording every hand-on and answering with
@@ -10855,6 +10872,7 @@ fn desktop_info_reports_compositor_state() {
         menu: &mut MenuChain::new(),
         seat_held: false,
         relay: &mut RecordingRelay::default(),
+        wallpapers: &mut NoGallery,
     };
 
     // What an application is actually handed, whole: the record is one
@@ -10906,6 +10924,7 @@ fn with_window_host<R>(
         menu: &mut MenuChain::new(),
         seat_held: false,
         relay: &mut RecordingRelay::default(),
+        wallpapers: &mut NoGallery,
     };
     body(&mut host)
 }

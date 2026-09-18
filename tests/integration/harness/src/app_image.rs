@@ -1139,7 +1139,6 @@ mod tests {
                 "users",
                 "view",
                 "vim",
-                "wallpaper",
                 "wc",
                 "whoami",
                 "widgets",

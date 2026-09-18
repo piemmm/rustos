@@ -22,9 +22,9 @@
 //! write it, because an application publishes only its own scope, and any
 //! application of that user may read it through one request shape that
 //! cannot name a private one. That is what replaces the hand-rolled
-//! `~/Settings/Pinboard/pinboard.conf` path the chooser used to open
-//! directly — the concrete instance of the app-from-app defect the store
-//! exists to close.
+//! `~/Settings/Pinboard/pinboard.conf` path a settings surface used to
+//! open directly — the concrete instance of the app-from-app defect the
+//! store exists to close.
 //!
 //! # Two readings, deliberately different
 //!
@@ -186,8 +186,8 @@ impl WallpaperChoice {
 /// How a wallpaper's pixels are mapped onto the screen.
 ///
 /// Shared by the settings document and [`crate::fit::place`], so the
-/// desktop renderer and the chooser's preview can never disagree about
-/// what a fit means.
+/// desktop renderer and every preview can never disagree about what a fit
+/// means.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum WallpaperFit {
     /// Cover the screen, cropping the overflow, centred.
@@ -204,6 +204,15 @@ pub enum WallpaperFit {
 }
 
 impl WallpaperFit {
+    /// Every fit, in the canonical listing order a gallery offers them in.
+    pub const ALL: [Self; 5] = [
+        Self::Fill,
+        Self::Fit,
+        Self::Stretch,
+        Self::Centre,
+        Self::Tile,
+    ];
+
     /// The canonical value spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -329,6 +338,9 @@ pub enum IconFlow {
 }
 
 impl IconFlow {
+    /// Every flow, in the canonical listing order a gallery offers them in.
+    pub const ALL: [Self; 2] = [Self::Leading, Self::Trailing];
+
     /// The canonical value spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -364,6 +376,10 @@ pub enum IconSort {
 }
 
 impl IconSort {
+    /// Every order, in the canonical listing order a gallery offers them
+    /// in.
+    pub const ALL: [Self; 4] = [Self::Name, Self::Kind, Self::Size, Self::Date];
+
     /// The canonical value spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -443,7 +459,8 @@ impl SettingsKey {
     ];
 
     /// The keys describing the backdrop and the icons standing on it: what
-    /// the wallpaper chooser and the backdrop menu edit.
+    /// the backdrop menu and the Settings application's Wallpaper pane
+    /// edit.
     pub const PINBOARD: [Self; 5] = [
         Self::Wallpaper,
         Self::Fit,
@@ -628,9 +645,9 @@ impl DesktopSettings {
     /// What a surface posts to the session: an apply is *merged* over what
     /// the desktop currently holds ([`merge`]), so a surface that renders
     /// only the keys it edits cannot reset a setting it never showed. The
-    /// wallpaper chooser rendering the whole document is exactly how a
-    /// wallpaper change would otherwise undo an appearance change made
-    /// while the chooser was open.
+    /// Wallpaper pane rendering the whole document is exactly how a
+    /// picture change would otherwise undo an appearance change made on
+    /// another pane.
     #[must_use]
     pub fn document_of(&self, keys: &[SettingsKey]) -> Document {
         let mut document = Document::new();
@@ -764,9 +781,9 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
 /// nobody chose.
 ///
 /// It **merges** rather than replaces, because the desktop has more than one
-/// surface asking it to change: the wallpaper chooser edits the backdrop, the
-/// Settings application edits how everything is drawn, and neither shows the
-/// other's settings. A sender renders only the keys it edits
+/// surface asking it to change: the backdrop menu edits the pinboard keys,
+/// the Settings application's panes edit one group each, and none of them
+/// shows every setting. A sender renders only the keys it edits
 /// ([`DesktopSettings::document_of`]) and a key it did not name keeps the
 /// value the desktop already has, so one surface can never silently undo the
 /// other's change — which taking the absent keys as their *defaults* would

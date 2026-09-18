@@ -288,6 +288,7 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::WallpaperRendered { .. }
             // The gallery shows its own controls, so it declares no file
             // association and has no document an open target could name.
             | WindowEvent::OpenRequested => Acted::Idle,

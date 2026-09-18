@@ -1,6 +1,6 @@
 [package]
 name = "tairix-wallpaper"
-description = "TAIRiX desktop pinboard wallpaper engine: the closed registry over the per-user pinboard settings document (wallpaper choice, fit, backdrop colour, icon flow, sort order) the desktop session keeps in its published app-data scope, the shipped default wallpaper catalog and its bounded fail-closed listing model, and the one pure wallpaper-placement geometry the desktop renderer and the chooser's preview both draw through."
+description = "TAIRiX desktop pinboard wallpaper engine: the closed registry over the per-user pinboard settings document (wallpaper choice, fit, backdrop colour, icon flow, sort order) the desktop session keeps in its published app-data scope, the shipped default wallpaper catalog and its bounded fail-closed listing model, and the one pure wallpaper-placement geometry the desktop renderer and every preview draws through."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

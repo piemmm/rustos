@@ -1,10 +1,10 @@
 //! The pinboard-apply IPC protocol (`plans/PINBOARD.md` §6): the reserved
 //! rendezvous the desktop session binds to accept a new pinboard settings
-//! document from the wallpaper chooser (and, later, any other tool the user
-//! runs to change their desktop backdrop).
+//! document from the Settings application (and, later, any other tool the
+//! user runs to change their desktop).
 //!
-//! The chooser and the backdrop's own context menu both **ask**; the
-//! session **decides, applies, and persists** (`plans/PINBOARD.md` §6). A
+//! Settings and the backdrop's own context menu both **ask**; the session
+//! **decides, applies, and persists** (`plans/PINBOARD.md` §6). A
 //! caller renders its intended settings into the `key value` document
 //! `lib/wallpaper` owns and posts it here; the session is the one engine
 //! that parses that grammar, applies the result, and rewrites the user's

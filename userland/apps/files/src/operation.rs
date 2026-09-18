@@ -106,7 +106,8 @@ pub fn operation_control(
         | WindowEvent::Resized { .. }
         | WindowEvent::Scrolled { .. }
         | WindowEvent::FilePicked { .. }
-        | WindowEvent::PickCancelled { .. } => OperationControl::Ignore,
+        | WindowEvent::PickCancelled { .. }
+        | WindowEvent::WallpaperRendered { .. } => OperationControl::Ignore,
     }
 }
 

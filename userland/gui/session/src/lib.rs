@@ -232,8 +232,8 @@ pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};
 pub use clock::{spell as spell_clock, SessionClock};
 pub use config::{
-    DATETIME_LABEL, DATETIME_RUN_PATH, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL,
-    SWITCHBOARD_RUN_PATH, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
+    DATETIME_LABEL, DATETIME_RUN_PATH, FILES_LABEL, FILES_RUN_PATH, SETTINGS_LABEL,
+    SETTINGS_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
 };
 pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
 pub use desktop::{
@@ -292,7 +292,10 @@ pub use switchuser::{
 pub use tasks::TaskBridge;
 pub use thumbs::WindowThumbnails;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
-pub use wallpaper::{Prepared, WallpaperDesk, WallpaperSource};
+pub use wallpaper::{
+    Prepared, PreviewDone, PreviewJob, PreviewRequest, WallpaperDesk, WallpaperJob,
+    WallpaperService, WallpaperSource,
+};
 pub use windows::{
     chain_geometry, desktop_info, resolve_window_identities, seat_menu_refusal,
     window_control_alternate_event, window_control_event, SessionWindows, ShellWindowHost,

@@ -601,8 +601,12 @@ fn shell_at(location: Location) -> Shell {
 }
 
 #[test]
-fn the_two_composed_panes_draw_a_form_rather_than_a_statement() {
-    for (pane, groups) in [(Pane::Appearance, 2), (Pane::Accessibility, 3)] {
+fn the_composed_panes_draw_a_form_rather_than_a_statement() {
+    for (pane, groups) in [
+        (Pane::Appearance, 2),
+        (Pane::Accessibility, 3),
+        (Pane::Wallpaper, 1),
+    ] {
         let category = pane.locate().expect("a located pane").0;
         let shell = shell_at(Location { category, pane });
         let form = shell

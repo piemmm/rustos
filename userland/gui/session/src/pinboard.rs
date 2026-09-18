@@ -52,7 +52,7 @@ pub enum PinboardCommand {
     Refresh,
     /// Show the desktop folder in the file manager.
     OpenDesktopFolder,
-    /// Open the wallpaper chooser.
+    /// Open the settings surface where the desktop picture is chosen.
     ChangeBackground,
 }
 

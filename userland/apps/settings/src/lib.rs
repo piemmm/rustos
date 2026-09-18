@@ -23,12 +23,14 @@ extern crate alloc;
 
 mod appearance;
 mod frame;
+mod gallery;
 mod registry;
 mod shell;
 mod statement;
 
 pub use appearance::{Composition, Form, FormOutcome, FormPlace, Setting, POINTER_SIZE_LABEL};
 pub use frame::{resolve_frame, Overflow, ShellFrame, CONTENT_FLOOR, SIDEBAR_WIDTH};
+pub use gallery::{Gallery, GalleryOutcome, PictureWanted, NONE_LABEL};
 pub use registry::{
     strip_rows, Category, CategoryRow, Location, Pane, PaneBacking, PaneRow, StripRow, CATEGORIES,
 };

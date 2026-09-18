@@ -1,9 +1,10 @@
 //! Stable [`tairix_log::EventId`] constants emitted by `timed`.
 //!
 //! Per `lib/log` convention every subsystem owns a 1 000-wide reserved range.
-//! The time service occupies `23000..24000` (following the wallpaper chooser's
-//! `22000..23000`). Once shipped the numeric values must never be re-used or
-//! re-numbered — external audit-log consumers rely on them.
+//! The time service occupies `23000..24000`. Once shipped the numeric values
+//! must never be re-used or re-numbered — external audit-log consumers rely
+//! on them, so the `22000..23000` range a deleted subsystem held stays
+//! retired rather than being handed to another.
 
 use tairix_log::EventId;
 

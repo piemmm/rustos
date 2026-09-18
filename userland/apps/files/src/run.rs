@@ -1361,6 +1361,16 @@ mod program {
                     );
                     continue;
                 }
+                // A window on a folder is what this opens; it has no panes
+                // for a launch to name.
+                Ok(Some(Target::Pane(pane))) => {
+                    let _ = writeln!(
+                        Stderr,
+                        "files: {pane} was handed over, but this is a file manager and has no \
+                         places of that name"
+                    );
+                    continue;
+                }
                 Ok(None) => return,
                 Err(err) => {
                     let _ = writeln!(Stderr, "files: cannot take an open target: {err}");
@@ -3254,6 +3264,7 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::WallpaperRendered { .. }
             // An open target opens a *new* window rather than moving this
             // one, so it is answered where the window set is (`bar_routed`)
             // and repaints nothing here.

@@ -1,11 +1,17 @@
-//! The desktop's appearance registry as form rows.
+//! The desktop's settings registry as form rows.
 //!
-//! One definition of each settable, and two panes that each select a subset
-//! of it: Appearance also offers light/dark, Accessibility groups the same
-//! rows the way a reader looking for them would. A reader looks for contrast
-//! in either place, so neither pane may carry its own copy of what contrast
+//! One definition of each settable, and the panes that each select a subset
+//! of it: Appearance offers light/dark and the interface axes, Accessibility
+//! groups the same rows the way a reader looking for them would, and
+//! Wallpaper the pinboard's own four. A reader looks for contrast in either
+//! of the first two, so neither pane may carry its own copy of what contrast
 //! *is* — the label, the sentence beneath it, the choices it offers, and the
 //! key it writes all live here once.
+//!
+//! A composition also names the **group of keys** its rows write, because
+//! the session merges an apply over what the desktop holds: a pane that
+//! posted the whole document would reimpose whatever the *other* panes
+//! happened to hold when it opened.
 //!
 //! Nothing here performs I/O or holds authority. A row reports the choice the
 //! reader made; the pane renders the document that choice implies and the
@@ -22,7 +28,9 @@ use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
-use tairix_wallpaper::{DesktopSettings, SettingsKey};
+use tairix_wallpaper::{
+    Backdrop, DesktopSettings, IconFlow, IconSort, Rgb, SettingsKey, WallpaperFit,
+};
 
 /// The UI scales the surface offers, as percentages of the reference
 /// density.
@@ -35,7 +43,25 @@ use tairix_wallpaper::{DesktopSettings, SettingsKey};
 /// to look at.
 const SCALE_LADDER: [u32; 7] = [100, 125, 150, 175, 200, 250, 300];
 
-/// One settable of the desktop's appearance registry.
+/// The backdrop colours the backdrop row offers: the active theme's own
+/// desktop colour first, then a small fixed palette of named flat colours.
+///
+/// A named palette rather than a free-form colour entry: the settings
+/// document's backdrop is one opaque `rrggbb` value, and a closed set is a
+/// complete choice with no text field to validate. A backdrop already in
+/// effect that this palette does not carry is still offered, under its own
+/// bare `rrggbb` spelling, so opening the pane never quietly changes the
+/// colour that is already on screen.
+const BACKDROP_PALETTE: [(&str, Backdrop); 6] = [
+    ("Theme", Backdrop::Theme),
+    ("Black", Backdrop::Colour(Rgb::new(0x00, 0x00, 0x00))),
+    ("Slate", Backdrop::Colour(Rgb::new(0x2e, 0x34, 0x40))),
+    ("Ocean", Backdrop::Colour(Rgb::new(0x1b, 0x3a, 0x5c))),
+    ("Moss", Backdrop::Colour(Rgb::new(0x2c, 0x40, 0x2c))),
+    ("Linen", Backdrop::Colour(Rgb::new(0xe8, 0xe0, 0xd8))),
+];
+
+/// One settable of the desktop's settings registry.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Setting {
     /// Light or dark.
@@ -48,6 +74,14 @@ pub enum Setting {
     Motion,
     /// The UI scale every logical length is resolved through.
     Scale,
+    /// How the desktop picture is placed on the screen.
+    Fit,
+    /// The flat colour shown wherever the picture does not reach.
+    Backdrop,
+    /// The corner the desktop's icon grid grows from.
+    Icons,
+    /// The order the `Desktop` folder's icons are sorted in.
+    Sort,
 }
 
 impl Setting {
@@ -60,6 +94,10 @@ impl Setting {
             Self::Density => SettingsKey::Density,
             Self::Motion => SettingsKey::Motion,
             Self::Scale => SettingsKey::Scale,
+            Self::Fit => SettingsKey::Fit,
+            Self::Backdrop => SettingsKey::Backdrop,
+            Self::Icons => SettingsKey::Icons,
+            Self::Sort => SettingsKey::Sort,
         }
     }
 
@@ -72,6 +110,10 @@ impl Setting {
             Self::Density => "Density",
             Self::Motion => "Motion",
             Self::Scale => "Interface scale",
+            Self::Fit => "Fit",
+            Self::Backdrop => "Backdrop",
+            Self::Icons => "Icons",
+            Self::Sort => "Sort",
         }
     }
 
@@ -92,6 +134,12 @@ impl Setting {
                  once rather than over time."
             }
             Self::Scale => "How large every length on the desktop is drawn.",
+            Self::Fit => "How the picture is placed on the screen.",
+            Self::Backdrop => {
+                "The flat colour behind the picture, and instead of it wherever it does not reach."
+            }
+            Self::Icons => "The corner the desktop's icons are arranged from.",
+            Self::Sort => "The order the Desktop folder's icons are listed in.",
         }
     }
 
@@ -107,6 +155,10 @@ impl Setting {
             Self::Density => pick(&Density::ALL, settings.density, density_label),
             Self::Motion => pick(&Motion::ALL, settings.motion, motion_label),
             Self::Scale => scale_choices(settings.scale),
+            Self::Fit => pick(&WallpaperFit::ALL, settings.fit, fit_label),
+            Self::Backdrop => backdrop_choices(settings.backdrop),
+            Self::Icons => pick(&IconFlow::ALL, settings.icons, icon_flow_label),
+            Self::Sort => pick(&IconSort::ALL, settings.sort, icon_sort_label),
         }
     }
 
@@ -129,6 +181,16 @@ impl Setting {
                 }
                 None => false,
             },
+            Self::Fit => set(&WallpaperFit::ALL, index, &mut settings.fit),
+            Self::Backdrop => match backdrop_ladder(settings.backdrop).get(index) {
+                Some((_, backdrop)) => {
+                    settings.backdrop = *backdrop;
+                    true
+                }
+                None => false,
+            },
+            Self::Icons => set(&IconFlow::ALL, index, &mut settings.icons),
+            Self::Sort => set(&IconSort::ALL, index, &mut settings.sort),
         }
     }
 
@@ -231,6 +293,65 @@ const fn motion_label(motion: Motion) -> &'static str {
     }
 }
 
+/// The display label of a wallpaper fit.
+///
+/// The document spells a fit as its own bare keyword; a person reading a
+/// row is owed a phrase that says what will happen to their picture, so the
+/// two vocabularies are deliberately separate.
+const fn fit_label(fit: WallpaperFit) -> &'static str {
+    match fit {
+        WallpaperFit::Fill => "Fill screen",
+        WallpaperFit::Fit => "Fit to screen",
+        WallpaperFit::Stretch => "Stretch",
+        WallpaperFit::Centre => "Centre",
+        WallpaperFit::Tile => "Tile",
+    }
+}
+
+/// The display label of an icon flow: the corner the first icon takes.
+const fn icon_flow_label(flow: IconFlow) -> &'static str {
+    match flow {
+        IconFlow::Leading => "Top left",
+        IconFlow::Trailing => "Top right",
+    }
+}
+
+/// The display label of an icon sort order.
+const fn icon_sort_label(sort: IconSort) -> &'static str {
+    match sort {
+        IconSort::Name => "Name",
+        IconSort::Kind => "Kind",
+        IconSort::Size => "Size",
+        IconSort::Date => "Date",
+    }
+}
+
+/// The backdrops offered to a desktop currently showing `current`:
+/// [`BACKDROP_PALETTE`], plus `current` under its bare `rrggbb` spelling
+/// when the palette does not carry it.
+fn backdrop_ladder(current: Backdrop) -> Vec<(String, Backdrop)> {
+    let mut ladder: Vec<(String, Backdrop)> = BACKDROP_PALETTE
+        .iter()
+        .map(|(label, backdrop)| (String::from(*label), *backdrop))
+        .collect();
+    if let Backdrop::Colour(rgb) = current {
+        if !ladder.iter().any(|(_, offered)| *offered == current) {
+            ladder.push((rgb.to_hex(), current));
+        }
+    }
+    ladder
+}
+
+/// The backdrop choices and which one is in effect.
+fn backdrop_choices(current: Backdrop) -> (Vec<String>, usize) {
+    let ladder = backdrop_ladder(current);
+    let at = ladder
+        .iter()
+        .position(|(_, backdrop)| *backdrop == current)
+        .unwrap_or(0);
+    (ladder.into_iter().map(|(label, _)| label).collect(), at)
+}
+
 /// The label of the row stating that the desktop keeps no pointer size.
 pub const POINTER_SIZE_LABEL: &str = "Pointer size";
 
@@ -280,6 +401,18 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 2] = [
     },
 ];
 
+/// The Wallpaper pane's one group: how the picture is placed, and how the
+/// icons standing on it are arranged.
+const WALLPAPER_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "DESKTOP",
+    settings: &[
+        Setting::Fit,
+        Setting::Backdrop,
+        Setting::Icons,
+        Setting::Sort,
+    ],
+}];
+
 /// Which settings a pane composes, in the order its groups list them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Composition {
@@ -288,6 +421,8 @@ pub enum Composition {
     /// The Accessibility pane, which additionally states that the desktop
     /// keeps no pointer size.
     Accessibility,
+    /// The Wallpaper pane's settings rows, beneath its picture gallery.
+    Wallpaper,
 }
 
 impl Composition {
@@ -296,6 +431,19 @@ impl Composition {
         match self {
             Self::Appearance => &APPEARANCE_GROUPS,
             Self::Accessibility => &ACCESSIBILITY_GROUPS,
+            Self::Wallpaper => &WALLPAPER_GROUPS,
+        }
+    }
+
+    /// The registry keys an apply from this composition renders.
+    ///
+    /// Only its own, because the session merges an apply over what the
+    /// desktop holds: a pane that rendered the whole document would
+    /// reimpose whatever the other panes happened to hold when it opened.
+    const fn keys(self) -> &'static [SettingsKey] {
+        match self {
+            Self::Appearance | Self::Accessibility => &SettingsKey::APPEARANCE,
+            Self::Wallpaper => &SettingsKey::PINBOARD,
         }
     }
 
@@ -386,8 +534,8 @@ pub enum FormOutcome {
     ///
     /// Only the keys this surface edits are rendered, because the session
     /// merges an apply over what the desktop holds: a pane that posted the
-    /// whole document would reimpose the wallpaper it happened to read at
-    /// start-up.
+    /// whole document would reimpose whatever the other panes happened to
+    /// hold when it opened.
     Apply(String),
 }
 
@@ -628,7 +776,13 @@ impl Form {
         if !setting.adopt(index, &mut self.settings) {
             return FormOutcome::Changed;
         }
-        FormOutcome::Apply(self.settings.document_of(&SettingsKey::APPEARANCE).render())
+        FormOutcome::Apply(self.applied())
+    }
+
+    /// The document this form's current values mean, over its own keys
+    /// alone.
+    pub(crate) fn applied(&self) -> String {
+        self.settings.document_of(self.composition.keys()).render()
     }
 
     /// Where each group is drawn, with the shared slot column and any

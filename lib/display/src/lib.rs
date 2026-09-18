@@ -28,11 +28,7 @@
 //! defined beside it rather than re-derived by every app.
 
 #![no_std]
-// The engine is unsafe-free by construction; only the feature-gated `rt`
-// module's single audited mapping view (its `SAFETY` block) is exempt, so
-// the crate keeps the outright forbid whenever that module is not built.
-#![cfg_attr(not(feature = "rt"), forbid(unsafe_code))]
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 extern crate alloc;

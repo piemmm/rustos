@@ -850,7 +850,8 @@ mod program {
             // The monitor shows the machine, not a document: it declares no
             // file association, so no open target can name anything here.
             | WindowEvent::OpenRequested
-            | WindowEvent::PickCancelled { .. } => return,
+            | WindowEvent::PickCancelled { .. }
+            | WindowEvent::WallpaperRendered { .. } => return,
         };
         if let Some(action) = action {
             service.panel_mut().act(host, action, authority);

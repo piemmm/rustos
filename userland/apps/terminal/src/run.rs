@@ -2225,7 +2225,8 @@ mod program {
                 | WindowEvent::OpenRequested
                 | WindowEvent::Resized { .. }
                 | WindowEvent::FilePicked { .. }
-                | WindowEvent::PickCancelled { .. } => {}
+                | WindowEvent::PickCancelled { .. }
+                | WindowEvent::WallpaperRendered { .. } => {}
             }
         }
     }

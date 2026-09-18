@@ -132,17 +132,18 @@ mod program {
         FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource,
         KeyboardInputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LayerDecision,
         LayerFeed, LoadedPinboard, LoadedPrograms, LockedDrain, OwnerBundleGate, OwnerWindow,
-        PickConclusion, Prepared, PresentedOwners, PromptOutcome, ScreenFade, ScreenLock,
-        SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader, SessionPicker,
-        SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
-        WallpaperDesk, WallpaperSource, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
-        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
-        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        PickConclusion, Prepared, PresentedOwners, PreviewDone, PreviewJob, PreviewRequest,
+        PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock,
+        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox,
+        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService,
+        WallpaperSource, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
+        APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
+        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH,
+        LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
-        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN,
+        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SETTINGS_LABEL, SETTINGS_RUN_PATH,
+        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WINDOW_SHOWN,
         WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
@@ -161,9 +162,10 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
     use tairix_theme::Accessibility;
-    use tairix_wallpaper::{DesktopSettings, MAX_WALLPAPER_BYTES};
+    use tairix_wallpaper::{DesktopSettings, MAX_WALLPAPER_BYTES, WALLPAPER_STORE};
     use tairix_window::{
-        event_endpoint_for, CallerIdentity, EventSink, OpenEntry, WindowServer, WINDOW_REPLY_MAX,
+        event_endpoint_for, CallerIdentity, EventSink, OpenEntry, WallpaperName, WindowServer,
+        WINDOW_REPLY_MAX,
     };
     use tairix_wm::{
         chrome_cache, frost_cache, Compositor, InputResponse, Point, Rect, Region, Surface,
@@ -238,8 +240,8 @@ mod program {
     /// Exit code when the reserved `PINBOARD_ENDPOINT` could not be bound.
     /// It is authorised by this session's kernel-attested live seat lease —
     /// the same lease/rendezvous anomaly as the other three — so the session
-    /// exits fail-loud rather than run a desktop whose wallpaper chooser can
-    /// never apply anything.
+    /// exits fail-loud rather than run a desktop whose settings surfaces
+    /// can never apply anything.
     ///
     /// Out of sequence with its neighbours because the slot it would have
     /// taken is [`tairix_rt::EXIT_PANIC`], and a session that exits with the
@@ -292,8 +294,8 @@ mod program {
     const PRESSURE_TOKEN: u64 = 6;
 
     /// The wait-set token of the served `PINBOARD_ENDPOINT` member: a tool
-    /// the user ran (the wallpaper chooser) asking the session to adopt new
-    /// pinboard settings wakes the loop to apply them.
+    /// the user ran (the Settings application) asking the session to adopt
+    /// new pinboard settings wakes the loop to apply them.
     const PINBOARD_TOKEN: u64 = 7;
 
     /// The wait-set token every held-back destination's room member carries:
@@ -1768,6 +1770,15 @@ mod program {
         if workers.catalog.is_none() {
             catalogs.stop();
         }
+        // The shipped wallpaper store, walked once: `/System` is read-only,
+        // so this is the catalog for the life of the boot and the query that
+        // answers it never reaches a directory again. Bring-up, not a frame:
+        // a browsing application must never make the compositor walk a
+        // store.
+        let wallpaper_catalog = list_wallpaper_store();
+        // The client region the one preview in flight will be written into.
+        let mut preview_in_flight: Option<tairix_rt::shm::MappedGrant> = None;
+
         // Every way out of this function stops every worker. The guard is
         // declared after the handles, so it runs first: the desks stop, then the
         // handles detach.
@@ -2397,6 +2408,11 @@ mod program {
                             menu: &mut menu,
                             seat_held,
                             relay: &mut RtDocumentRelay,
+                            wallpapers: &mut Gallery {
+                                catalog: &wallpaper_catalog,
+                                desk: &wallpapers,
+                                in_flight: &mut preview_in_flight,
+                            },
                         };
                         server.serve(
                             &mut bridge,
@@ -2589,6 +2605,11 @@ mod program {
                             menu: &mut menu,
                             seat_held: true,
                             relay: &mut RtDocumentRelay,
+                            wallpapers: &mut Gallery {
+                                catalog: &wallpaper_catalog,
+                                desk: &wallpapers,
+                                in_flight: &mut preview_in_flight,
+                            },
                         };
                         server.client_exited(&mut bridge, client);
                         if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -2670,6 +2691,20 @@ mod program {
                 if let Some(concluded) = picker.resume(&mut shell, &mut compositor) {
                     conclude_pick(
                         concluded,
+                        &mut server,
+                        &mut sink,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut picker,
+                        &mut apps,
+                        &mut menu,
+                    );
+                }
+                if let Some(done) = wallpapers.take_preview() {
+                    settle_wallpaper_preview(
+                        done,
+                        &mut preview_in_flight,
                         &mut server,
                         &mut sink,
                         &mut shell,
@@ -2773,6 +2808,11 @@ mod program {
                                 menu: &mut menu,
                                 seat_held: true,
                                 relay: &mut RtDocumentRelay,
+                                wallpapers: &mut Gallery {
+                                    catalog: &wallpaper_catalog,
+                                    desk: &wallpapers,
+                                    in_flight: &mut preview_in_flight,
+                                },
                             };
                             server.client_exited(&mut bridge, client);
                             if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -3402,11 +3442,42 @@ mod program {
                 };
                 // The read and the sandbox round trip, with no lock held: these
                 // are the calls that used to stall the desktop.
-                let outcome = prepare_wallpaper_surface(&mut sandbox, &job);
-                if self.desk.lock().deliver(job, outcome) {
+                let kept = match job {
+                    WallpaperJob::Backdrop(source) => {
+                        let outcome = prepare_wallpaper_surface(&mut sandbox, &source);
+                        self.desk.lock().deliver(source, outcome)
+                    }
+                    WallpaperJob::Preview(job) => {
+                        let pixels = render_wallpaper_preview(&mut sandbox, &job);
+                        self.desk.lock().deliver_preview(PreviewDone {
+                            request: job.request,
+                            pixels,
+                        })
+                    }
+                };
+                if kept {
                     self.wake.nudge();
                 }
             }
+        }
+
+        /// Record `job` as the preview to render and wake a preparer,
+        /// answering whether the desk took it.
+        ///
+        /// `false` is "the desktop is already rendering one": the caller
+        /// asks again once its answer lands, which is what bounds how much
+        /// sandboxed decoding a browsing application can set going.
+        fn want_preview(&self, job: PreviewJob) -> bool {
+            let taken = self.desk.lock().want_preview(job);
+            if taken {
+                self.work.notify_one();
+            }
+            taken
+        }
+
+        /// Take the rendered preview waiting to be handed over, if any.
+        fn take_preview(&self) -> Option<PreviewDone> {
+            self.desk.lock().take_preview()
         }
 
         /// Record `source` as wanted and wake a preparer.
@@ -3501,6 +3572,125 @@ mod program {
                 "desktop: wallpaper {path} did not fill the screen; using the backdrop colour"
             )
         })
+    }
+
+    /// The session's shipped-wallpaper service: the catalog it listed at
+    /// bring-up, the desk its worker renders through, and the client
+    /// region the render in flight will be written into.
+    ///
+    /// The region is mapped when the request is *accepted*, not when the
+    /// pixels arrive, so a client that granted something unusable learns so
+    /// from its own call rather than from a conclusion that never comes.
+    /// Which preview is in flight is the desk's to know and nobody else's,
+    /// so this holds the mapping alone: the two cannot disagree about a
+    /// fact only one of them records.
+    struct Gallery<'a> {
+        catalog: &'a [WallpaperName],
+        desk: &'a Wallpapers,
+        in_flight: &'a mut Option<tairix_rt::shm::MappedGrant>,
+    }
+
+    impl WallpaperService for Gallery<'_> {
+        fn catalog(&self) -> &[WallpaperName] {
+            self.catalog
+        }
+
+        fn render(
+            &mut self,
+            window_id: u64,
+            shm_handle: u64,
+            index: u16,
+            side: u16,
+        ) -> Result<(), Errno> {
+            if self.in_flight.is_some() {
+                return Err(Errno::AlreadyExists);
+            }
+            let name = self
+                .catalog
+                .get(usize::from(index))
+                .ok_or(Errno::NotFound)?;
+            let least = preview_bytes(side).ok_or(Errno::LengthOutOfRange)?;
+            let region = tairix_rt::shm::MappedGrant::map(shm_handle, least)?;
+            // Nothing is recorded until the desk has taken the work, so a
+            // refusal leaves no mapping held and no conclusion owed.
+            if !self.desk.want_preview(PreviewJob {
+                request: PreviewRequest {
+                    window_id,
+                    index,
+                    side,
+                },
+                path: tairix_wallpaper::wallpaper_path(&name.category, &name.file),
+            }) {
+                return Err(Errno::AlreadyExists);
+            }
+            *self.in_flight = Some(region);
+            Ok(())
+        }
+    }
+
+    /// The gallery a teardown bridge carries: it serves no request, so it
+    /// offers no catalog and accepts no render.
+    ///
+    /// A bridge built only to tear a dead client's windows down never
+    /// reaches either, exactly as it never serves an `OpenMenu` and says
+    /// so by refusing to vouch for the seat.
+    struct NoGallery;
+
+    impl WallpaperService for NoGallery {
+        fn catalog(&self) -> &[WallpaperName] {
+            &[]
+        }
+
+        fn render(
+            &mut self,
+            _window: u64,
+            _shm: u64,
+            _index: u16,
+            _side: u16,
+        ) -> Result<(), Errno> {
+            Err(Errno::NotSupported)
+        }
+    }
+
+    /// The square side a gallery tile's picture is rendered to *as a
+    /// screen*.
+    ///
+    /// A tile shows the picture, not a scale model of the desktop: the
+    /// modelled screen is the tile itself, so the placement fills it and
+    /// centre-crops whatever does not fit. How the picture will actually
+    /// be placed on the real screen is the Fit row's business, which says
+    /// so in words rather than in a square thumbnail that could not show
+    /// it honestly.
+    const PREVIEW_FIT: tairix_wallpaper::WallpaperFit = tairix_wallpaper::WallpaperFit::Fill;
+
+    /// Read the shipped master `job` names and render it square, for one
+    /// gallery tile.
+    ///
+    /// Every refusal answers `None`: the asking window draws its
+    /// placeholder rather than waiting for pixels that are not coming, and
+    /// nothing about the store is disclosed beyond the catalog the session
+    /// already answered. The reason is not written here — this runs on a
+    /// worker thread, where a formatted line would interleave with the
+    /// session's own `stderr`.
+    fn render_wallpaper_preview<L: tairix_sandbox::Launcher, S: tairix_log::Sink>(
+        sandbox: &mut ParserSandbox<L, S>,
+        job: &PreviewJob,
+    ) -> Option<alloc::vec::Vec<u8>> {
+        let side = u32::from(job.request.side);
+        let bytes = read_file(&job.path, MAX_WALLPAPER_BYTES).ok()?;
+        if bytes.len() > MAX_WALLPAPER_BYTES {
+            return None;
+        }
+        let placed = render_wallpaper(sandbox, side, side, PREVIEW_FIT, &bytes).ok()?;
+        (placed.len() == preview_bytes(job.request.side)?).then_some(placed)
+    }
+
+    /// How many bytes a `side`x`side` straight-alpha RGBA8 picture is, or
+    /// `None` when that does not fit this target's address width.
+    fn preview_bytes(side: u16) -> Option<usize> {
+        usize::from(side)
+            .checked_mul(usize::from(side))?
+            .checked_mul(4)
     }
 
     /// The desktop's icon artwork, decoded on a worker thread that owns its
@@ -5537,6 +5727,7 @@ mod program {
                 // `OpenMenu`, so it cannot vouch for the seat and says so.
                 seat_held: true,
                 relay: &mut RtDocumentRelay,
+                wallpapers: &mut NoGallery,
             };
             server.client_exited(&mut bridge, owner);
         }
@@ -5967,14 +6158,18 @@ mod program {
             Some(DesktopAction::AdoptSettings(settings)) => request_pinboard_settings(
                 settings, publisher, None, pinboard, wallpapers, desktop, shell, compositor, now_ns,
             ),
+            // Wallpaper is a section of Settings, not an application beside
+            // it. A Settings already running is handed the pane and
+            // navigates; a fresh one is given the same pane as its argument
+            // and opens on it.
             Some(DesktopAction::ChangeBackground) => {
                 let _ = launch.launch(
                     shell,
                     compositor,
-                    WALLPAPER_RUN_PATH,
-                    WALLPAPER_LABEL,
-                    &[],
-                    None,
+                    SETTINGS_RUN_PATH,
+                    SETTINGS_LABEL,
+                    &[tairix_wallpaper::WALLPAPER_PANE.as_bytes()],
+                    Some(LaunchTarget::Pane(tairix_wallpaper::WALLPAPER_PANE)),
                 );
                 false
             }
@@ -6016,8 +6211,8 @@ mod program {
     /// Ask for `settings` to be published, and adopt them if the answer comes
     /// back on this thread.
     ///
-    /// Both routes into the settings — a chosen menu row and an apply from the
-    /// wallpaper chooser — come through here, so neither can adopt something
+    /// Both routes into the settings — a chosen menu row and an apply from
+    /// Settings — come through here, so neither can adopt something
     /// the other would not have. Nothing is adopted at the point of asking:
     /// the store round trip happens on the settings worker, and the answer is
     /// adopted by [`collect_publish`] on the wake it nudges. With no worker to
@@ -6322,6 +6517,91 @@ mod program {
         outcome
     }
 
+    /// Walk the read-only shipped wallpaper store and build the one flat
+    /// catalog the desktop offers a browsing application.
+    ///
+    /// Done once, at bring-up: `/System` is mounted read-only, so the store
+    /// cannot change under a running session and the answer is fixed for
+    /// the life of the boot. That is what lets the catalog query be served
+    /// from memory, with no directory walk anywhere near the compositing
+    /// loop.
+    ///
+    /// A store that cannot be listed is not fatal — a desktop simply offers
+    /// no shipped pictures — and one unreadable category costs only its own
+    /// wallpapers. Every refusal is stated on `stderr`.
+    fn list_wallpaper_store() -> Vec<WallpaperName> {
+        let Some(entries) = list_store_dir(WALLPAPER_STORE) else {
+            return Vec::new();
+        };
+        // The store's own children are the categories; a stray file there is
+        // planted by nothing and offered by nothing.
+        let categories = tairix_wallpaper::catalog_categories(
+            entries
+                .iter()
+                .filter(|entry| entry.is_directory_backed())
+                .map(tairix_browse::Entry::name),
+        );
+        let mut listings: Vec<(alloc::string::String, Vec<tairix_wallpaper::CatalogEntry>)> =
+            Vec::with_capacity(categories.len());
+        for category in categories {
+            let Some(listing) = list_store_dir(&tairix_wallpaper::category_path(&category)) else {
+                continue;
+            };
+            // The shared catalog builder decides what counts as a wallpaper
+            // (name shape, extension, ordering, and the listing bound); this
+            // only drops the directories, which are never candidates.
+            let entries = tairix_wallpaper::catalog_entries(
+                listing
+                    .iter()
+                    .filter(|entry| !entry.is_directory_backed())
+                    .map(|entry| {
+                        (
+                            entry.name(),
+                            usize::try_from(entry.size()).unwrap_or(usize::MAX),
+                        )
+                    }),
+            );
+            listings.push((category, entries));
+        }
+        tairix_wallpaper::desktop_catalog(
+            listings
+                .iter()
+                .map(|(category, entries)| (category.as_str(), entries.as_slice())),
+        )
+        .into_iter()
+        .map(|item| WallpaperName {
+            category: item.category,
+            file: item.file,
+        })
+        .collect()
+    }
+
+    /// One wallpaper-store directory's entries, or `None` with the reason
+    /// stated on `stderr`.
+    fn list_store_dir(path: &str) -> Option<Vec<Entry>> {
+        let stream = match tairix_rt::read_dir_all(path.as_bytes()) {
+            Ok(stream) => stream,
+            Err(ret) => {
+                let _ = writeln!(
+                    Stderr,
+                    "desktop: {path}: {}; its wallpapers are not offered",
+                    Errno::from_syscall(ret)
+                );
+                return None;
+            }
+        };
+        let Ok(entries) =
+            tairix_browse::vfs::entries_from_dir_stream(path, &stream, &mut RtLinkReader)
+        else {
+            let _ = writeln!(
+                Stderr,
+                "desktop: {path}: listing not readable; its wallpapers are not offered"
+            );
+            return None;
+        };
+        Some(entries)
+    }
+
     /// Spawn a desktop app under the session's own identity and console,
     /// forwarding the **user's environment** to it (`HOME`, `LANG`, …). Plain
     /// [`tairix_rt::spawn`] hands a child an *empty* environment; the desktop is
@@ -6416,6 +6696,7 @@ mod program {
                         return false;
                     }
                 },
+                LaunchTarget::Pane(pane) => OpenEntry::Pane(alloc::string::String::from(pane)),
             };
             match self
                 .ctx
@@ -6588,6 +6869,60 @@ mod program {
                     WindowEvent::PickCancelled { window_id }
                 }
             }
+        };
+        deliver(
+            server,
+            sink,
+            shell,
+            compositor,
+            windows,
+            picker,
+            &mut apps.service,
+            menu,
+            &event,
+        );
+    }
+
+    /// Hand a rendered gallery preview over: copy its pixels into the
+    /// client's own region, let the mapping go, and tell the asking window.
+    ///
+    /// A render that produced no pixels still concludes, so the tile draws
+    /// its placeholder rather than waiting for a picture that is not
+    /// coming; a window that has closed under one is simply not there to
+    /// deliver to, and the mapping goes either way.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn settle_wallpaper_preview<S: DirectorySource, F: FnMut() -> S>(
+        done: PreviewDone,
+        in_flight: &mut Option<tairix_rt::shm::MappedGrant>,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
+    ) {
+        let Some(mut region) = in_flight.take() else {
+            return;
+        };
+        let rendered = done.pixels.is_some_and(|pixels| {
+            region
+                .bytes_mut()
+                .get_mut(..pixels.len())
+                .is_some_and(|slot| {
+                    slot.copy_from_slice(&pixels);
+                    true
+                })
+        });
+        // Before the conclusion, so the client's own mapping is the only one
+        // left by the time it is told the pixels are there.
+        drop(region);
+        let event = WindowEvent::WallpaperRendered {
+            window_id: done.request.window_id,
+            index: done.request.index,
+            side: done.request.side,
+            rendered,
         };
         deliver(
             server,
@@ -6814,6 +7149,7 @@ mod program {
                 // free.
                 seat_held: true,
                 relay: &mut RtDocumentRelay,
+                wallpapers: &mut NoGallery,
             };
             server.client_exited(&mut bridge, owner);
         }

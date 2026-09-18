@@ -17,7 +17,7 @@
 //! A bundle whose *signed* manifest sets `APPINFO_FLAG_NO_ICON_BAR` is the
 //! one exception, and it overrides both: the desktop already reaches it
 //! another way — the Switchboard through the bar's own permanent capsule,
-//! the wallpaper chooser through the backdrop menu — so a slot would be a
+//! Settings through the system and backdrop menus — so a slot would be a
 //! second route to the same window. The claim lives in the manifest and not
 //! on the window channel because a running process must not be able to hide
 //! itself from the bar; and its windows stay ordinary tasks, so the capsule's

@@ -2672,6 +2672,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-appdata",
+ "tairix-browse",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -5935,27 +5936,6 @@ dependencies = [
  "tairix-geometry",
  "tairix-path",
  "tairix-rt",
-]
-
-[[package]]
-name = "tairix-wallpaper-chooser"
-version = "0.0.0"
-dependencies = [
- "tairix-abi",
- "tairix-appdata",
- "tairix-browse",
- "tairix-controls",
- "tairix-font",
- "tairix-geometry",
- "tairix-icon",
- "tairix-input",
- "tairix-log",
- "tairix-raster",
- "tairix-rt",
- "tairix-sandbox",
- "tairix-theme",
- "tairix-wallpaper",
- "tairix-window",
 ]
 
 [[package]]

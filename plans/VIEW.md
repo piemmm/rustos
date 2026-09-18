@@ -930,7 +930,7 @@ read this paragraph first; the rustdoc on both types points here.
   self-contained round trip, and passing the job by value is what lets the
   loop lend the work its pixel buffer and have it handed back, so an
   interactive re-render allocates nothing once the geometry has settled. Both
-  existing consumers (the wallpaper applier, the terminal publisher) are
+  existing consumers (the settings applier, the terminal publisher) are
   `S = ()`.
 
   Two `lib/raster` primitives carry the app's zero-allocation paint, both the

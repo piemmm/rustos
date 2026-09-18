@@ -100,9 +100,9 @@ dropped on the floor instead of being retained beside them.
 Two of a user's applications sometimes have to agree on a value — a terminal's
 font and an app that embeds one, a chooser and the surface it configures. The
 tree already has one: the desktop session owns and writes
-`~/Settings/Pinboard/pinboard.conf`, and the wallpaper chooser — a separate
-bundle — opens that path directly under `CAP_FS_ACCESS` to show the user what is
-currently applied. (Its *write* already goes through the session's own endpoint,
+`~/Settings/Pinboard/pinboard.conf`, and the settings surface that edited
+it — a separate bundle — opened that path directly under `CAP_FS_ACCESS` to
+show the user what is currently applied. (Its *write* already goes through the session's own endpoint,
 so only the read is unmediated — which is exactly the half a published scope
 replaces.)
 
@@ -116,7 +116,7 @@ has exactly one shape, that shape is opt-in by the *publishing* app, and it
 cannot be widened into the private scope.
 
 **Closed (AD6 built it, AD10 consumed it.)** Both in-tree instances of the
-defect are gone: the wallpaper chooser reads the session's *published*
+defect are gone: the Settings application reads the session's *published*
 pinboard document, and the desktop session reads `applib`'s *published*
 library overlay. Neither reader can write what it reads, and neither can name
 the publisher's private scope, because a foreign read is a request shape with
@@ -1188,7 +1188,7 @@ AD4 landed `confd` before AD5's first client existed. What holds it honest in
 the meantime is that every property above is tested through the *real* codec, on
 both sides (the daemon's dispatcher over an in-memory volume, and the client
 over the shared fake), rather than through a mock. The first in-tree consumer is AD10's
-`pinboard` document, which the wallpaper chooser reads today by opening the
+`pinboard` document, which a settings surface read by opening the
 session's file directly (§1.5) — the concrete instance of the defect this scope
 closes. It is left to that stage rather than pulled in here because it also has
 to replace `lib/wallpaper`'s own `key = value` engine (§1.3) and settle whether

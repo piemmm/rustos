@@ -1,5 +1,5 @@
 //! The shipped default wallpaper set, and the bounded, fail-closed listing
-//! model a chooser draws its category rail and thumbnail grid from.
+//! model a gallery draws its thumbnail grid from.
 //!
 //! The desktop ships its read-only wallpaper masters under
 //! [`WALLPAPER_STORE`], filed one directory level deep in **categories**
@@ -7,7 +7,7 @@
 //! time from `lib/wallpaper/assets/` by `tools/syshelp` — never a
 //! hand-maintained list. [`catalog_categories`] and [`catalog_entries`] are
 //! the one definition of which directories and which files in a listing a
-//! chooser may offer: neither performs I/O of its own — the caller lists the
+//! gallery may offer: neither performs I/O of its own — the caller lists the
 //! directory — and both only filter, validate, and order what they are
 //! given.
 //!
@@ -65,7 +65,7 @@ pub const MAX_WALLPAPER_BYTES: usize = 8 * 1024 * 1024;
 
 /// Largest number of wallpapers a catalog listing may return.
 ///
-/// A chooser's thumbnail grid is a bounded surface, so this is a fixed
+/// A gallery's thumbnail grid is a bounded surface, so this is a fixed
 /// security and format bound, not a growable capacity: a directory holding
 /// more candidates than this yields only the first [`MAX_WALLPAPER_CATALOG_ENTRIES`]
 /// in name order, rather than growing the listing without bound.
@@ -73,7 +73,7 @@ pub const MAX_WALLPAPER_CATALOG_ENTRIES: usize = 256;
 
 /// Largest number of categories a catalog listing may return.
 ///
-/// A chooser's category rail is a bounded surface exactly as its grid is, so
+/// A category list is a bounded surface exactly as a grid is, so
 /// this is a fixed bound too: a store holding more category directories than
 /// this yields only the first [`MAX_WALLPAPER_CATEGORIES`] in name order.
 pub const MAX_WALLPAPER_CATEGORIES: usize = 64;
@@ -108,10 +108,10 @@ pub fn is_wallpaper_file_name(name: &str) -> bool {
 /// name (no control character, no path separator, non-empty, not `.`/`..`).
 ///
 /// The name carries no extension and no case convention, because it is the
-/// label the chooser draws: `TAIRiX` reads as `TAIRiX`. [`catalog_categories`]
+/// label a gallery draws: `TAIRiX` reads as `TAIRiX`. [`catalog_categories`]
 /// applies this at runtime to silently drop anything that fails it;
 /// `tools/syshelp`'s build-time discovery applies the same definition to fail
-/// the image build closed on a category directory no chooser could offer.
+/// the image build closed on a category directory no gallery could offer.
 #[must_use]
 pub fn is_wallpaper_category_name(name: &str) -> bool {
     tairix_path::validate_file_name(name).is_ok()
@@ -127,7 +127,7 @@ pub struct CatalogEntry {
     pub bytes: usize,
 }
 
-/// Build the wallpaper catalog a chooser may offer, from a directory
+/// Build the wallpaper catalog a gallery may offer, from a directory
 /// listing.
 ///
 /// `entries` is the caller's own directory listing — `(name, byte length)`
@@ -162,7 +162,7 @@ where
     out
 }
 
-/// Build the category list a chooser may offer, from the directory names
+/// Build the category list a gallery may offer, from the directory names
 /// found directly inside [`WALLPAPER_STORE`].
 ///
 /// `entries` is the caller's own listing of that store's *subdirectories* —
@@ -174,7 +174,7 @@ where
 /// [`catalog_entries`] is, and capped at [`MAX_WALLPAPER_CATEGORIES`].
 ///
 /// Each returned name is both the directory to list and the label to draw,
-/// so a chooser needs no second vocabulary for the categories it offers.
+/// so a gallery needs no second vocabulary for the categories it offers.
 #[must_use]
 pub fn catalog_categories<'a, I>(entries: I) -> Vec<String>
 where
@@ -187,6 +187,61 @@ where
         .collect();
     out.sort();
     out.truncate(MAX_WALLPAPER_CATEGORIES);
+    out
+}
+
+/// One wallpaper of the flat catalog the desktop offers a gallery.
+///
+/// The category and the file name rather than a path, because the path is
+/// built from them through [`wallpaper_path`] — the one spelling, so the
+/// picture a gallery shows and the settings document choosing it produces
+/// can never disagree about where it lives.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogItem {
+    /// The category directory this wallpaper is filed under.
+    pub category: String,
+    /// The wallpaper's own file name inside that category.
+    pub file: String,
+}
+
+impl CatalogItem {
+    /// This wallpaper's absolute path in the shipped store.
+    #[must_use]
+    pub fn path(&self) -> String {
+        wallpaper_path(&self.category, &self.file)
+    }
+}
+
+/// Flatten a walk of the shipped store into the one catalog a gallery
+/// offers: every category's entries, category by category, in the order
+/// the walk supplies them.
+///
+/// `listings` pairs each category — as [`catalog_categories`] ordered them
+/// — with that category's entries as [`catalog_entries`] validated and
+/// ordered them, so this adds no filtering of its own and performs no I/O.
+///
+/// The result is capped at [`MAX_WALLPAPER_CATALOG_ENTRIES`] **in total**,
+/// because that bound is the gallery's, not one directory's: a store
+/// holding more pictures than a grid may offer yields the first that many
+/// in walk order, so the cut is deterministic and the categories past it
+/// are simply not offered.
+#[must_use]
+pub fn desktop_catalog<'a, I>(listings: I) -> Vec<CatalogItem>
+where
+    I: IntoIterator<Item = (&'a str, &'a [CatalogEntry])>,
+{
+    let mut out = Vec::new();
+    for (category, entries) in listings {
+        for entry in entries {
+            if out.len() >= MAX_WALLPAPER_CATALOG_ENTRIES {
+                return out;
+            }
+            out.push(CatalogItem {
+                category: category.to_string(),
+                file: entry.name.clone(),
+            });
+        }
+    }
     out
 }
 

@@ -22,7 +22,6 @@ Here are some screenshots of TAIRiX running, showcasing the current state of the
   <tr>
     <td align="center"><a href="docs/screenshots/boot-filesystem-unlock.png"><img src="docs/screenshots/boot-filesystem-unlock.png" alt="Boot: encrypted filesystem unlock" width="140"></a><br><sub>Filesystem unlock</sub></td>
     <td align="center"><a href="docs/screenshots/basic-desktop.png"><img src="docs/screenshots/basic-desktop.png" alt="Basic desktop" width="140"></a><br><sub>The desktop</sub></td>
-    <td align="center"><a href="docs/screenshots/wallpaper.png"><img src="docs/screenshots/wallpaper.png" alt="Wallpaper selector" width="140"></a><br><sub>The wallpaper chooser</sub></td>
     <td align="center"><a href="docs/screenshots/filemanager.png"><img src="docs/screenshots/filemanager.png" alt="File manager PoC" width="140"></a><br><sub>File manager PoC</sub></td>
     <td align="center"><a href="docs/screenshots/switchboard.png"><img src="docs/screenshots/switchboard.png" alt="Switchboard" width="140"></a><br><sub>Switchboard (task&nbsp;manager)</sub></td>
 

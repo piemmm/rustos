@@ -176,6 +176,54 @@ fn a_pane_only_declares_settings_it_could_show() {
     }
 }
 
+/// A launch target names a pane by this, so two panes sharing a name
+/// would make the hand-over ambiguous.
+#[test]
+fn every_pane_has_a_unique_reachable_name() {
+    let mut seen: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    for pane in CATEGORIES.iter().flat_map(|row| row.panes) {
+        assert!(!pane.name.is_empty(), "{:?} has no name", pane.pane);
+        assert!(
+            pane.name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "{:?}'s name is not a plain identifier",
+            pane.pane
+        );
+        assert!(
+            !seen.contains(&pane.name),
+            "`{}` names more than one pane",
+            pane.name
+        );
+        seen.push(pane.name);
+        assert_eq!(Pane::named(pane.name), Some(pane.pane));
+        assert_eq!(
+            Location::named(pane.name).map(|at| at.pane),
+            Some(pane.pane)
+        );
+    }
+}
+
+/// A launch target confers nothing and resolves against the closed set, so
+/// a name the registry does not carry is simply not a pane.
+#[test]
+fn an_unknown_pane_name_resolves_to_nothing() {
+    for name in ["", "Wallpaper", "../../etc", "wallpaper "] {
+        assert_eq!(Pane::named(name), None, "`{name}` resolved to a pane");
+        assert_eq!(Location::named(name), None, "`{name}` resolved to a place");
+    }
+}
+
+/// The desktop's *Change Background…* hands this name over, so the one
+/// spelling both sides share must reach the pane that shows the picture.
+#[test]
+fn the_shared_wallpaper_pane_name_reaches_the_wallpaper_pane() {
+    assert_eq!(
+        Pane::named(tairix_wallpaper::WALLPAPER_PANE),
+        Some(Pane::Wallpaper)
+    );
+}
+
 #[test]
 fn the_registry_locates_every_category_and_pane() {
     for category in EVERY_CATEGORY {

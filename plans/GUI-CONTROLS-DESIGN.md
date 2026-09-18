@@ -1876,9 +1876,9 @@ the parts it is made of. The bar is a read-only instrument, like both of them.
 
 A settings surface is a column of captioned groups of label/description/control
 rows. That shape is the language's, not each application's: before this family
-the file manager hand-rolled a permissions grid, the wallpaper chooser a column
-of four drop-downs, and the Date & Time window a three-column grid of six
-fields. A `FieldRow` is one setting; a `FieldGroup` is the captioned plate its
+the file manager hand-rolled a permissions grid, the wallpaper surface a
+column of four drop-downs, and the Date & Time window a three-column grid of
+six fields. A `FieldRow` is one setting; a `FieldGroup` is the captioned plate its
 rows sit on.
 
 - **A row composes the row chrome, it does not restate it.** The hover wash,

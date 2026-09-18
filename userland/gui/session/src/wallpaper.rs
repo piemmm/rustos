@@ -22,6 +22,23 @@
 //! by any of this. The cost is one more capability-empty process per session; it
 //! buys a desktop that comes up without waiting for a picture.
 //!
+//! # The gallery's previews share the same worker
+//!
+//! The Settings application browses the shipped store through the desktop
+//! rather than reading it itself, so a tile's picture is prepared here too:
+//! the same read, the same sandbox, the same thread. One preview is in
+//! flight at a time across the whole desktop — a bound on how much decoding
+//! any set of clients can queue, and the reason the backdrop is always taken
+//! first: the picture the user is actually looking at never waits behind a
+//! thumbnail.
+//!
+//! Nothing is ever recalled. A render already taken cannot be, and every
+//! accepted one answers exactly once, so a window that closes mid-render
+//! costs one wasted decode into a region only the desktop still maps, and
+//! the slot frees itself. Recalling it would mean a second record of which
+//! preview is in flight, and two records of one fact are a fact that can
+//! disagree with itself.
+//!
 //! # A wallpaper is never load-bearing
 //!
 //! Every refusal — an unreadable file, one larger than any wallpaper, a
@@ -34,6 +51,7 @@
 //! fails over a picture.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_geometry::Rect;
 use tairix_raster::Surface;
@@ -85,6 +103,51 @@ impl WallpaperSource {
     }
 }
 
+/// One gallery preview the desktop has been asked to render: which
+/// catalog entry, at what square side, for which window.
+///
+/// The picture is named by its **catalog position** rather than by a path,
+/// because the asking application named it that way: it browses a store it
+/// cannot read, so it can only point at what the desktop listed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreviewRequest {
+    /// The asking window, which the conclusion is delivered to.
+    pub window_id: u64,
+    /// The catalog position asked for.
+    pub index: u16,
+    /// The square side, in physical pixels, to render at.
+    pub side: u16,
+}
+
+/// A preview the worker has taken: the request, and the file to read for
+/// it, resolved against the catalog before it left the serve loop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreviewJob {
+    /// What was asked for.
+    pub request: PreviewRequest,
+    /// The absolute path of the shipped master to read.
+    pub path: String,
+}
+
+/// A rendered preview: the request it answers, and the straight-alpha
+/// RGBA8 pixels, or `None` for a refusal the asking window is told about
+/// rather than left waiting on.
+pub struct PreviewDone {
+    /// What was asked for.
+    pub request: PreviewRequest,
+    /// `side * side * 4` bytes, or `None` when the picture could not be
+    /// read, decoded, or placed.
+    pub pixels: Option<Vec<u8>>,
+}
+
+/// One unit of work a wallpaper preparer takes.
+pub enum WallpaperJob {
+    /// The desktop's own backdrop, which is always taken first.
+    Backdrop(WallpaperSource),
+    /// One gallery tile for a browsing application.
+    Preview(PreviewJob),
+}
+
 /// What the desk has for a wallpaper request right now.
 pub enum Prepared {
     /// The preparation finished.
@@ -117,6 +180,12 @@ pub struct WallpaperDesk {
     /// The prepared surface (or the reason there is none), kept until the
     /// desktop asks for that same source.
     done: Option<(WallpaperSource, Result<Surface, String>)>,
+    /// The one preview asked for and not yet taken by a preparer.
+    wanted_preview: Option<PreviewJob>,
+    /// The preview a preparer has taken and not yet answered.
+    rendering: Option<PreviewRequest>,
+    /// The rendered preview waiting for the serve loop to hand it over.
+    preview_done: Option<PreviewDone>,
     /// Set once the embedder is tearing down, so a parked preparer leaves.
     stopping: bool,
 }
@@ -171,16 +240,67 @@ impl WallpaperDesk {
     /// Whether a wallpaper is wanted that no preparer has taken.
     #[must_use]
     pub const fn has_work(&self) -> bool {
-        !self.stopping && self.wanted.is_some() && !self.preparing
+        !self.stopping && ((self.wanted.is_some() && !self.preparing) || self.has_preview_work())
     }
 
-    /// Take the wallpaper to prepare, or `None` when there is nothing to do.
-    pub fn next_job(&mut self) -> Option<WallpaperSource> {
-        if !self.has_work() {
+    /// Whether a preview is wanted that no preparer has taken.
+    const fn has_preview_work(&self) -> bool {
+        self.wanted_preview.is_some() && self.rendering.is_none()
+    }
+
+    /// Take the next thing to prepare, or `None` when there is nothing to
+    /// do.
+    ///
+    /// The desktop's own backdrop is always taken first: it is the picture
+    /// the user is looking at, and a gallery of thumbnails must never make
+    /// it wait.
+    pub fn next_job(&mut self) -> Option<WallpaperJob> {
+        if self.stopping {
             return None;
         }
-        self.preparing = true;
-        self.wanted.clone()
+        if self.wanted.is_some() && !self.preparing {
+            self.preparing = true;
+            return self.wanted.clone().map(WallpaperJob::Backdrop);
+        }
+        if !self.has_preview_work() {
+            return None;
+        }
+        let job = self.wanted_preview.take()?;
+        self.rendering = Some(job.request.clone());
+        Some(WallpaperJob::Preview(job))
+    }
+
+    /// Record a wanted preview, answering whether the desk took it.
+    ///
+    /// `false` is "one is already in flight": the desktop renders one
+    /// preview at a time, so a second ask is refused rather than queued —
+    /// a bound on how much sandboxed decoding a browsing application can
+    /// set going, and the caller asks again once its answer arrives.
+    pub fn want_preview(&mut self, job: PreviewJob) -> bool {
+        if self.stopping || self.wanted_preview.is_some() || self.rendering.is_some() {
+            return false;
+        }
+        self.wanted_preview = Some(job);
+        true
+    }
+
+    /// Record the result of rendering a preview, answering whether the desk
+    /// kept it (and so owes the serve loop a wake).
+    ///
+    /// An answer to a request the desk is no longer rendering is dropped:
+    /// the asking window has gone, or the desk was stopped under it.
+    pub fn deliver_preview(&mut self, done: PreviewDone) -> bool {
+        if self.rendering.as_ref() != Some(&done.request) {
+            return false;
+        }
+        self.rendering = None;
+        self.preview_done = Some(done);
+        true
+    }
+
+    /// Take the rendered preview waiting to be handed over, if any.
+    pub fn take_preview(&mut self) -> Option<PreviewDone> {
+        self.preview_done.take()
     }
 
     /// Record the result of preparing `source`.
@@ -213,6 +333,44 @@ impl WallpaperDesk {
     pub const fn stopping(&self) -> bool {
         self.stopping
     }
+}
+
+/// The desktop's shipped-wallpaper service as the window channel reaches
+/// it: the catalog a browsing application may list, and the render it may
+/// ask for.
+///
+/// A seam because the two answers need the session's own filesystem reach,
+/// its parser sandbox, and its shared-memory mapping — none of which the
+/// host-testable bridge has — while the rules around them (who owns the
+/// catalog, one render at a time, a closed window owes nothing) are policy
+/// worth testing without any of it.
+pub trait WallpaperService {
+    /// The flat catalog of shipped wallpapers this desktop offers, in
+    /// catalog order. Empty for a desktop whose store could not be listed.
+    fn catalog(&self) -> &[tairix_window::WallpaperName];
+
+    /// Render catalog entry `index` at `side` square into the region
+    /// granted as `shm_handle`, concluding to `window_id`.
+    ///
+    /// Accepting is all this does: the read and the decode happen off the
+    /// compositing loop, and the conclusion is delivered later.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`](tairix_abi::Errno::NotFound) — no such catalog
+    ///   entry, or the granted handle names no region for this task.
+    /// * [`Errno::LengthOutOfRange`](tairix_abi::Errno::LengthOutOfRange) —
+    ///   the region is too small for the side asked for.
+    /// * [`Errno::AlreadyExists`](tairix_abi::Errno::AlreadyExists) — the
+    ///   desktop is already rendering a preview; the caller asks again once
+    ///   its answer arrives.
+    fn render(
+        &mut self,
+        window_id: u64,
+        shm_handle: u64,
+        index: u16,
+        side: u16,
+    ) -> Result<(), tairix_abi::Errno>;
 }
 
 #[cfg(test)]

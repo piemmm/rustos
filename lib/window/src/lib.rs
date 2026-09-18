@@ -68,7 +68,7 @@ pub use frames::WindowFrames;
 pub use mailbox::EventMailbox;
 pub use server::{
     client_frame_budget_bytes, CallerIdentity, EventSink, HandOverDesk, LayerSpec, OpenEntry,
-    PopupSpec, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
+    PopupSpec, WallpaperName, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 #[cfg(test)]

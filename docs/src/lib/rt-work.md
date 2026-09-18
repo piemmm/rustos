@@ -61,5 +61,5 @@ again on a source that is still ready.
 ## Consumers
 
 * The terminal's settings publisher — a settled slider edit's store write.
-* The wallpaper chooser's applier — the desktop session's *Apply* round trip,
-  which the session answers only once it has written the store.
+* The Settings application's applier — the desktop session's *Apply* round
+  trip, which the session answers only once it has written the store.

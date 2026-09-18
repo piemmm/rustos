@@ -10,9 +10,9 @@
 //!
 //! - The session is the store's only **writer**, by construction: an
 //!   application publishes only its own scope, so no other program the user
-//!   launches — including the wallpaper chooser — can write the desktop's
-//!   document at all. Every change, whether the backdrop menu asked for it or
-//!   the chooser did, is applied by the session and the desktop adopts it
+//!   launches — including the Settings application — can write the
+//!   desktop's document at all. Every change, whether the backdrop menu
+//!   asked for it or Settings did, is applied by the session and the desktop adopts it
 //!   **only after the write succeeded** — and the write happens on the
 //!   session's settings worker, never on its serve loop, so the compositor
 //!   does not stop while a disk is written. Memory and disk can never diverge,
@@ -434,9 +434,9 @@ mod tests {
 
     #[test]
     fn an_apply_keeps_every_key_the_caller_did_not_name() {
-        // The defect this forecloses: the wallpaper chooser posts only the
-        // backdrop keys, so adopting its request must not reset the
-        // appearance the user set from Settings (and the reverse).
+        // The defect this forecloses: the Wallpaper pane posts only the
+        // pinboard keys, so adopting its request must not reset the
+        // appearance another pane set (and the reverse).
         let in_effect = DesktopSettings {
             appearance: tairix_abi::desktop::Appearance::Light,
             density: tairix_abi::desktop::Density::Compact,

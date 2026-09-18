@@ -33,7 +33,7 @@ settings, or a re-list that moved the icons. See
 | [`lib/sandbox`](../security/sandbox.md) | decoding and placing a wallpaper inside a capability-empty worker |
 | `lib/browse` | the icon grid, its two arrangements, the shared sort, and the new-folder naming rule |
 | `userland/gui/session` | the pinboard itself: the layer, the backdrop menu's row model, the settings, and the apply service |
-| `userland/apps/wallpaper` | the chooser the user actually clicks |
+| [`userland/apps/settings`](settings.md) | the Wallpaper pane the user actually clicks, over the session's two served requests |
 
 Nothing about the pinboard lives in the kernel or in a driver.
 
@@ -55,20 +55,20 @@ Three properties matter more than the format:
   intent or refusing to start.
 - **The session is the only writer, by construction.** An application
   publishes only its *own* scope, so no other program the user launches —
-  including the chooser — can write the desktop's document at all. The
+  including Settings — can write the desktop's document at all. The
   in-memory settings adopt an edit only *after* the publish succeeded, so
   what is on screen and what is stored cannot diverge.
 - **Any application may read it**, by naming the session's bundle identifier
-  on a request shape that carries no scope field — so the chooser can show
+  on a request shape that carries no scope field — so Settings can show
   what is in effect without being able to reach anything else the session
   keeps. That replaces the hand-rolled `~/Settings/Pinboard/pinboard.conf`
-  the chooser used to open directly, a file every application of that user
-  could also rewrite.
+  a settings surface used to open directly, a file every application of
+  that user could also rewrite.
 
 ## Changing the settings
 
-The chooser app, the backdrop menu and the Settings application all **ask**;
-the session decides, applies, and persists. The rendezvous is
+The backdrop menu and the Settings application both **ask**; the session
+decides, applies, and persists. The rendezvous is
 `PINBOARD_ENDPOINT`, a reserved, seat-scoped call endpoint in `lib/abi`,
 bound like the notification and window rendezvous: the session that owns the
 seat serves the pinboard shown on it, and nothing else may.
@@ -80,10 +80,12 @@ and the two would eventually disagree.
 
 The session **merges** the request over what it currently holds rather than
 replacing it. More than one surface asks the desktop to change and none of
-them shows every setting: the chooser edits the backdrop keys, Settings edits
-the appearance keys. Each renders only the keys it edits, and a key a sender
-did not name keeps the value the desktop has — so choosing a wallpaper cannot
-reimpose whatever appearance the chooser happened to open on, and vice versa.
+them shows every setting: the backdrop menu and Settings' Wallpaper pane
+edit the pinboard keys, its Appearance and Accessibility panes edit the
+appearance keys. Each renders only the keys it edits, and a key a sender did
+not name keeps the value the desktop has — so choosing a picture cannot
+reimpose whatever appearance another pane happened to open on, and vice
+versa.
 Taking the absent keys as their *defaults* would do exactly that, on every
 single apply. A document the registry refuses is refused whole: the merge
 runs on a copy, so a refusal partway through leaves the desktop untouched.
@@ -100,8 +102,8 @@ wrong:
   could not read itself — the classic confused-deputy shape, closed by
   construction.
 
-Reading is not brokered at all: the chooser reads the user's own document
-directly, because a reader needs no coordination.
+Reading is not brokered at all: a surface reads the user's own published
+document directly, because a reader needs no coordination.
 
 ## Drawing the wallpaper
 
@@ -138,13 +140,11 @@ A wallpaper that will not decode is not fatal: the desktop falls back to
 the backdrop colour, reports why on `stderr`, and remembers the refusal, so
 a bad file costs one attempt rather than one per frame.
 
-The chooser reports each placement's cost with its two halves apart — the
-file read and the sandboxed render — on the `RENDER_TIMED` log record, with
-the source byte count and the destination extent. A gallery that crawls on
-real storage is diagnosed from that record rather than guessed at: the two
-halves have unrelated causes, and the decode is already a known quantity
-(the 26 shipped masters decode in 404 ms *total* at thumbnail scale, ~90 ms
-each full-screen), so a placement costing seconds is never the decoder.
+A gallery that crawls on real storage is diagnosed by taking the file read
+and the sandboxed render apart rather than by guessing: the two halves have
+unrelated causes, and the decode is already a known quantity (the 26 shipped
+masters decode in 404 ms *total* at thumbnail scale, ~90 ms each
+full-screen), so a placement costing seconds is never the decoder.
 
 The prepared picture is never cut to. Because it arrives whenever the worker
 finishes — a second or so into the session at login, or mid-session when the
@@ -164,8 +164,8 @@ the picture it replaces when the user picks another. See
 | `tile` | 1:1, repeated from the origin |
 
 The geometry is one pure function in `lib/wallpaper`, shared by the desktop
-and by the chooser's preview, so a preview can never disagree with the
-desktop about what a fit will do.
+and by every preview, so a preview can never disagree with the desktop about
+what a fit will do.
 
 ## The icons
 
@@ -207,108 +207,52 @@ copy of them here would be duplication.
 
 The menu never acts on its own authority. It names a command; the session
 carries it out, and reports on `stderr` anything it could not do — a
-refused folder creation, a chooser that would not launch — leaving the
+refused folder creation, a Settings window that would not launch — leaving
+the
 desktop unchanged rather than failing silently or dying over a refusal. Where
 each row's command is resolved, and how its one answer reaches the session,
 is [the session's own page](./session.md#the-backdrop-menu).
 
-## The chooser
+## Choosing a picture
 
-`wallpaper.app` is an ordinary graphical application bundle: it is launched
-from the menu, typeable by name, and holds no special authority. It offers
-the fit, backdrop, arrangement, and sort, and applies by sending the
-rendered document to the session. A refusal is reported in its own window;
-it never fabricates success and never exits over one.
+The desktop picture is a **section of Settings**, not an application beside
+it: the menu's `Change Background…` opens
+[the Settings application](./settings.md) at its Wallpaper pane, where the
+fit, backdrop, arrangement and sort are four form rows above a gallery of
+the shipped pictures. A Settings already running is handed the pane and
+navigates to it; a fresh one is given the same pane and opens on it.
 
-**Apply does not block the window.** The session answers only once its own
-publisher has written the store, so the click encodes the document (in memory,
-and refusable on the spot) and hands the round trip to a worker
-(`tairix_rt::work`). The footer reads `Applying…` meanwhile — never the
-previous attempt's answer, so it cannot report a result the store has not
-given — and the gallery, the preview and the controls stay live throughout. The
-answer replaces it the moment it lands. A machine that grants no worker makes
-the call on the loop, exactly as it used to: slower under load, never wrong.
+**Settings holds no authority over any of it, and gains none for the
+gallery.** Listing the shipped store needs a filesystem capability and
+decoding a picture needs a parser sandbox, and Settings requests neither —
+an application that will later carry Networking, Users and Storage must not
+also hold the reach to read arbitrary files. So the gallery is *served*: the
+session lists the read-only store once at its own bring-up and answers a
+catalog page on request, and renders one candidate at a time into a
+shared-memory region Settings created and granted. There is one sandboxed
+decode path on the desktop instead of two, and no picture is ever decoded in
+the address space of the application that browses them.
 
-The window is a large preview beside the four settings, then the category
-rail and a scrolling gallery of the shipped wallpapers, and the two actions
-in the footer:
+A render names a **catalog position**, never a path, so the request cannot
+make the session read a file the caller chose. A picture in effect that the
+catalog does not hold — one set before it was removed from the store — is
+still offered and still selectable; it simply has no position to be rendered
+at, so its tile draws its built-in glyph and its name.
 
-```text
-+--------------------------------------------------------------+
-|  +---------------------------+  Fit      [ Fill screen   v ] |
-|  |       live preview        |  Backdrop [ Theme         v ] |
-|  |                           |  Icons    [ Top left      v ] |
-|  +---------------------------+  Sort     [ Name          v ] |
-|  Wallpapers                     tairix-dark.jpg              |
-|  +--------+ +--------------------------------------+ +--+    |
-|  | All    | |  [tile]  [tile]  [tile]  [tile]      | |##|    |
-|  |Abstract| |  [tile]  [tile]                      | |  |    |
-|  | Space  | |                                      | |  |    |
-|  | TAIRiX | |                                      | |  |    |
-|  +--------+ +--------------------------------------+ +--+    |
-|  Applied.                                  [Close] [Apply]   |
-+--------------------------------------------------------------+
-```
+The desktop renders one preview at a time, which is what bounds how much
+decoding a browsing application can set going, and its own backdrop is
+always prepared first: the picture the user is looking at never waits behind
+a thumbnail. Every tile is requested and never awaited — a paint draws what
+has come back and a placeholder for what has not — so the pane is usable
+from its first frame and fills in as the answers land.
 
-It is **driven by the pointer**, with the keyboard as a complete secondary
-path: click a category to narrow the gallery, click a tile to select it and
-the preview follows, click a setting to
-open its list, wheel or drag the gallery, click Apply. Every interactive
-part is a shared control from [the control set](./widgets.md) — the
-drop-downs, the buttons, the scrollbar, the rail's own vertical tab strip —
-held for the life of the window so
-each owns its own hover, press and drag state, and the gallery is the
-shared icon-grid engine the file manager and the desktop's own icon field
-use. The chooser therefore defines no control and no grid of its own.
-
-### The categories
-
-The rail is **discovered, not written down**: its entries are the store's own
-category directories, each drawn under the directory's own name, so adding a
-category to the OS is authoring a directory and no list anywhere needs
-editing. `All` leads the rail; a rail with nothing to choose between is not
-drawn at all and the tiles take its width.
-
-Narrowing filters what the gallery *shows*; it never changes what is
-selected. The wallpaper in effect stays selected, stays in the preview and
-stays what Apply would send, even while a category that does not hold it is
-being browsed — and the chooser opens on the category that does hold it. Two
-candidates belong to *every* entry rather than to one: the "no wallpaper"
-choice, so a plain backdrop is always one click away, and a wallpaper already
-in effect from outside the shipped store, so narrowing can never hide the
-very thing that is applied. The gallery returns to its top on a change, since
-the rows it was scrolled to belong to the category being left.
-
-The preview and every tile are rendered through the same sandboxed path the
-desktop uses, so the chooser decodes nothing itself. A tile is the
-wallpaper at tile size, always placed to fill its square — it says *which*
-wallpaper it is — and the preview panel is where the chosen fit is shown.
-
-The preview is a **scale model of the real screen**. The chooser asks the
-session for the seat's desktop before it opens its window, so it knows the
-screen's exact extent; inside the preview panel it draws the largest box
-with the screen's aspect ratio that fits, centred, and renders the
-wallpaper into it as the desktop would. The sandboxed render is told the
-screen it models as well as the surface it writes and scales the source
-accordingly, so `centre` and `tile` — which are defined in screen pixels —
-model correctly instead of drawing at 1:1. The extent is part of the
-preview request, so a preview rendered for one screen can never be shown as
-if it were for another, and a change of screen re-renders it. What the
-preview shows is what the desktop will show (`plans/PINBOARD.md` §8).
-
-The chooser holds one window-sized surface for the life of its window and
-repaints only the rectangle a round reported: a hover redraws the tile
-entered and the tile left, a selection adds the preview model and its
-caption, and a thumbnail arriving from the sandbox redraws its own square
-rather than the window. A re-theme and a resize still redraw everything,
-because no report could describe either.
-
-Moving the gallery is the one round that reports the whole viewport, and it
-is the chooser's to report rather than the scrollbar's: a bar reports its own
-pixels alone, so a wheel tick, a thumb drag, a track or end-button step, and
-a keyboard reveal each add the tile area and the gutter beside it. Narrowing
-by category reports them too, whether or not the offset moved — a gallery
-already at its top still shows a different candidate in every tile.
+**An apply does not block the window.** The session answers only once its own
+publisher has written the store, so the choice is rendered into the pinboard
+half of the settings document (in memory, and refusable on the spot) and the
+round trip is handed to a worker. The rows and the gallery stay live
+throughout, and the answer is what becomes durable: a refusal puts the
+selection back rather than leaving a picture on screen the next login would
+not restore.
 
 ## Headless
 

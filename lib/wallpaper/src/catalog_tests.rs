@@ -76,7 +76,7 @@ fn every_shipped_master_is_filed_under_an_offerable_category() {
         );
     }
     // Every shipped category must survive the rail it will be listed
-    // through: one the chooser would silently drop is a whole shipped
+    // through: one a gallery would silently drop is a whole shipped
     // folder no user could ever reach.
     let listing = catalog_categories(categories.iter().map(String::as_str));
     assert_eq!(listing, categories);

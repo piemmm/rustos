@@ -1,5 +1,5 @@
 //! The one wallpaper placement geometry: pure, total, and shared by the
-//! desktop renderer and the chooser's preview.
+//! desktop renderer and every preview of one.
 //!
 //! [`place`] answers, for a source image of a given pixel size and a screen
 //! of a given pixel size, exactly how a [`WallpaperFit`] draws it: the

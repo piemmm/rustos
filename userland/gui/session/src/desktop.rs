@@ -157,8 +157,9 @@ pub enum DesktopAction {
     /// there is exactly one place settings are adopted and the persisted
     /// document and the live desktop can never drift apart.
     AdoptSettings(DesktopSettings),
-    /// Open the wallpaper chooser, which is an installed application the
-    /// embedder resolves and launches (the model knows no bundle paths).
+    /// Open the settings surface where the desktop picture is chosen,
+    /// which is an installed application the embedder resolves and launches
+    /// (the model knows no bundle paths).
     ChangeBackground,
     /// The gesture was refused. The line is complete and newline-terminated,
     /// ready for `stderr`: a refused action always says why rather than

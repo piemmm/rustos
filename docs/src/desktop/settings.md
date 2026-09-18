@@ -103,10 +103,10 @@ adding a category is adding a row and a renderer, never editing the shell.
 
 ## Appearance and Accessibility
 
-The two panes that compose real controls today. They are two views of one
-registry: light/dark is Appearance's alone, and contrast, density, motion and
-the interface scale appear in both — from one definition, because a reader
-looks for them in either place.
+Two of the three panes that compose real controls today. They are two views
+of one registry: light/dark is Appearance's alone, and contrast, density,
+motion and the interface scale appear in both — from one definition, because
+a reader looks for them in either place.
 
 | Setting | What it changes |
 |---|---|
@@ -133,6 +133,29 @@ Accessibility additionally states, in a row of its own, that this desktop
 keeps **no pointer size**: the pointer is drawn at the interface scale, and a
 size of its own would need a factor in the session's cursor controller. It is
 stated rather than drawn as a control that would change nothing.
+
+## Wallpaper
+
+The third composed pane, and the desktop picture's only home: the backdrop
+menu's `Change Background…` opens Settings here rather than a second
+application. Its four rows — fit, backdrop, icon arrangement, icon sort —
+come from the same one registry as Appearance's, and post the *pinboard*
+half of the desktop's document, so a picture change and an appearance change
+cannot undo each other.
+
+Beneath them is a gallery of the shipped pictures, and Settings holds no
+authority over any of it. Listing the store needs a filesystem capability
+and decoding a picture needs a parser sandbox; this application requests
+neither, so the desktop session serves both — it answers a catalog page from
+the listing it took at its own bring-up, and renders one candidate at a time
+into a shared-memory region Settings created and granted. A render names a
+catalog position rather than a path, so it cannot be used to make the
+session read a file the caller chose.
+
+Every tile is requested and never awaited: a paint draws the pictures that
+have come back and a built-in glyph for those that have not, so the pane is
+usable from its first frame. A picture the desktop refuses is not asked for
+again. [The pinboard's page](./pinboard.md) has the whole arrangement.
 
 ## Absence is stated, never mimed
 

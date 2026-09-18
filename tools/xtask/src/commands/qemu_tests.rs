@@ -9784,9 +9784,12 @@ const MIN_APP_GLYPH_SHARE: f64 = 0.05;
 /// Zero: the bar is translucent chrome over a blurred backdrop, so an empty
 /// slot's pixels are a function of the wallpaper and of whatever is behind
 /// the bar — and the vertical's windows cascade from the top left and never
-/// reach it. Nothing else moves there, so reading the same empty slot in two
-/// frames of one run gives the same bytes, and any difference at all is a
-/// slot the bar drew.
+/// reach it. The one thing that *can* reach it is the pointer, which the
+/// compositor draws above every surface and which the script itself moves,
+/// so the script parks it clear of the bar ([`pointer_rest`]) before every
+/// frame this reads. Nothing else moves there, so reading the same empty
+/// slot in two frames of one run gives the same bytes, and any difference at
+/// all is a slot the bar drew.
 const MAX_BARE_APP_SLOT_SHARE: f64 = 0.0;
 
 /// The strip index the icon-bar vertical's launched application occupies.
@@ -11314,6 +11317,20 @@ fn handover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// be photographed: it opens the third window, which is the create that
 /// completes the guest's PASS, and the runner sends no pointer step until
 /// every dump already asked for has been read back and parsed.
+/// Where a bar script parks the pointer while it waits on a marker.
+///
+/// Clear of the bar along the bottom edge and of the window cascade in the
+/// top left, so the pointer waits over bare wallpaper: nothing there dwells,
+/// hovers, or is raised by a pointer resting on it — and, because the
+/// compositor draws the cursor above every surface, nothing a dump taken
+/// while it waits reads the cursor instead of the pixels it means to
+/// measure.
+fn pointer_rest() -> tairix_geometry::Point {
+    let (width, height) = ramfb_screen();
+    #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+    tairix_geometry::Point::new(width as i32 - 1, height as i32 / 2)
+}
+
 fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_input::PointerButton;
     use tairix_qemu::MouseButton;
@@ -11347,18 +11364,26 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let new_window = rect_centre(row, "New window row")?;
 
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let rest = pointer_rest();
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
     pen.click(ready, 1, MouseButton::Primary, entry_row);
+    // Off the bar before the frame that measures it. A dump taken with the
+    // pointer left on the row it just clicked reads the cursor wherever the
+    // popup happened to place that row — and the popup's rows move whenever
+    // the installed set does, so the slot a cursor clips is not this
+    // script's to predict.
+    pen.aim(ready, 1, rest);
     // The application's first window is on screen, so its slot is drawn and
     // carries the declaration it made before opening that window.
     pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, slot);
     pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Primary, new_window);
+    pen.aim(WINDOW_SHOWN_MARKER, 1, rest);
     // The chosen row's window is on screen too — the frame the third dump
-    // reads. The pointer is still on that row, so this walks back to the slot
-    // and presses it: the declaration claims the application handles a primary
-    // click, so this is its default action rather than a raise, and the window
-    // it opens is the guest's last witness.
+    // reads. This walks back to the slot and presses it: the declaration
+    // claims the application handles a primary click, so this is its default
+    // action rather than a raise, and the window it opens is the guest's last
+    // witness.
     pen.click(WINDOW_SHOWN_MARKER, 2, MouseButton::Primary, slot);
     Ok(pen.steps())
 }
@@ -11391,12 +11416,7 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         slot,
         ..
     } = reconstruct_bar_launch()?;
-    let (width, height) = ramfb_screen();
-    // Clear of the bar along the bottom edge and of the window cascade in the
-    // top left, so the pointer waits over bare wallpaper: nothing there dwells,
-    // hovers, or is raised by a pointer resting on it.
-    #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
-    let rest = tairix_geometry::Point::new(width as i32 - 1, height as i32 / 2);
+    let rest = pointer_rest();
 
     let ready = APPBAR_SETTLED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());

@@ -847,8 +847,8 @@ Each stage is independently reviewable and must leave the whole-project
   undrawn preview staying owed, adopt and a refusal owing the difference from
   the screen.
 
-### DESK-14 — The wallpaper chooser's *Apply* off its loop
-- **Done.** The chooser's click no longer waits on the session's store write,
+### DESK-14 — A settings *Apply* off its loop
+- **Done.** Choosing a setting no longer waits on the session's store write,
   and the arrangement that takes such work is now one shared thing rather than
   a copy per app.
   - **`tairix_rt::work`** is the runtime half of `tairix_util::defer`: the
@@ -862,10 +862,9 @@ Each stage is independently reviewable and must leave the whole-project
     out on the caller's thread and leave the answer where `collect` looks,
     answering `true` so the caller collects at once. `NoWorker` says which
     refusal it was, so each app words its own message.
-  - **The chooser** encodes the document on the loop (in memory, refusable on
-    the spot) and submits only the round trip. `ApplyOutcome::Applying` is what
-    the footer shows meanwhile, so it can never report a result the store has
-    not given.
+  - **The asking surface** encodes the document on the loop (in memory,
+    refusable on the spot) and submits only the round trip, so it can never
+    report a result the store has not given.
 - **A wait can now end without an event.** `EventSource::park` answers
   `Parked::{Served, Interrupted}` and `WindowEvents::wait` answers
   `Option<WindowEvent>`. This is what a worker's answer needs: a wait-set
@@ -1325,7 +1324,7 @@ Each stage is independently reviewable and must leave the whole-project
 - **DESK-13 — done.** A profile change costs only the work the field that moved
   implies; the terminal is the last surface off the shared damage discipline
   and was the only one with this coupling.
-- **DESK-14 — done.** The wallpaper chooser's *Apply* runs on a worker; the
+- **DESK-14 — done.** A settings *Apply* runs on a worker; the
   desk-plus-worker arrangement is one shared `lib/rt::work`; and the wait a
   worker's answer arrives on can end without an event, which also closed a
   busy-spin in the file manager.

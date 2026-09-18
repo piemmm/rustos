@@ -1,8 +1,8 @@
 //! Asking the desktop session to adopt a settings document.
 //!
 //! The one client of the pinboard rendezvous, shared by every surface that
-//! edits the desktop's own settings — the wallpaper chooser's backdrop keys
-//! and the Settings application's appearance keys. A second copy of this
+//! edits the desktop's own settings — the backdrop menu's pinboard keys
+//! and the Settings application's panes. A second copy of this
 //! round trip would be two places for "what did the session say" to drift
 //! apart.
 //!

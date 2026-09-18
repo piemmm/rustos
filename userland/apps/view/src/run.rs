@@ -1556,6 +1556,15 @@ mod program {
                     ));
                     continue;
                 }
+                // This viewer is one place: it shows a document, and has no
+                // pane a launch could name.
+                Target::Pane(pane) => {
+                    report(&alloc::format!(
+                        "{pane} was handed over, but this viewer shows a document and has no \
+                         places to go to"
+                    ));
+                    continue;
+                }
             };
             let Some(mut opened) = open_window(
                 app.client,

@@ -2,10 +2,10 @@
 
 `lib/wallpaper` is the shared engine behind the desktop's own user-scope
 configuration: the per-user **desktop settings document**, the shipped
-wallpaper set and the listing model a chooser draws its thumbnail grid from,
-the one wallpaper placement geometry the desktop renderer and the chooser's
-preview both draw through, and the one client every surface asks the session
-to adopt a change with. The settings are **data on the volume**, never a compiled-in table:
+wallpaper set and the listing model a gallery draws its thumbnail grid from,
+the one wallpaper placement geometry the desktop renderer and every preview
+draw through, and the one client every surface asks the session to adopt a
+change with. The settings are **data on the volume**, never a compiled-in table:
 one document per user, in the desktop session's **published** app-data scope
 ([the app-data store](./appdata.md), `plans/APPDATA.md` §3.11).
 Because there is exactly one definition of the registry, of the catalog, and
@@ -21,9 +21,10 @@ app-data service; no program spells a path to it. Two properties follow from
 the store rather than from convention:
 
 - **The session is the only writer.** An application publishes only its own
-  scope, so no other program the user launches — including the chooser — can
-  write the desktop's document at all. The chooser asks over the pinboard
-  channel and the session decides.
+  scope, so no other program the user launches — including the Settings
+  application, where the desktop picture is chosen — can write the desktop's
+  document at all. Settings asks over the pinboard channel and the session
+  decides.
 - **Any application may read it**, by naming `PINBOARD_PUBLISHER` on a
   request shape that carries no scope field, so "read the desktop's private
   settings" is not a request that exists. That is the sanctioned sharing
@@ -54,11 +55,12 @@ than refusing it. `DocumentRefusal` names which. It refuses whole — the merge
 runs on a copy, so a refusal partway through leaves the base untouched.
 
 It **merges** rather than replaces, because the desktop has more than one
-surface asking it to change and no surface shows every setting: the wallpaper
-chooser edits the backdrop keys, Settings edits the appearance keys. A key a
-sender did not name keeps the value the desktop already has, so one surface
-cannot undo the other's change by staying silent about it — which taking the
-absent keys as their *defaults* would do on every single apply.
+surface asking it to change and no surface shows every setting: the backdrop
+menu and Settings' Wallpaper pane edit the pinboard keys, its Appearance and
+Accessibility panes edit the appearance keys. A key a sender did not name
+keeps the value the desktop already has, so one surface cannot undo the
+other's change by staying silent about it — which taking the absent keys as
+their *defaults* would do on every single apply.
 
 `DesktopSettings::document` renders the canonical form both readings accept:
 every registry key, in registry order, so a render/read round trip is exact.
@@ -119,8 +121,7 @@ store.
 
 `apply` (behind the crate's `rt` feature) is the one client of the pinboard
 rendezvous, shared by every surface that edits the desktop's settings — the
-wallpaper chooser's backdrop keys and the Settings application's appearance
-keys. A second copy of the round trip would be two places for "what did the
+backdrop menu's pinboard keys and the Settings application's panes. A second copy of the round trip would be two places for "what did the
 session say" to drift apart. `ApplyOutcome` distinguishes an adopted change,
 a typed refusal with its reason, and a rendezvous nobody answered.
 
@@ -168,7 +169,7 @@ The OS ships its wallpaper masters read-only under `WALLPAPER_STORE`
 **categories** — `Abstract`, `City`, `Nature`, `Space`, `TAIRiX` — and
 discovered at build time from `lib/wallpaper/assets/<Category>/` by
 `tools/syshelp`, planted by the image builder; never a hand-maintained list.
-A category's directory name *is* the label a chooser draws, so adding a
+A category's directory name *is* the label a gallery draws, so adding a
 category is authoring a directory and no name → label table can drift out of
 step. `DEFAULT_WALLPAPER_CATEGORY` and `DEFAULT_WALLPAPER` name the default
 master's category and file, `category_path(category)` and
@@ -177,7 +178,7 @@ master's category and file, `category_path(category)` and
 the default `wallpaper` setting.
 
 `catalog_categories` and `catalog_entries` are the one definition of which
-directories and which files a chooser may offer. Neither performs **any**
+directories and which files a gallery may offer. Neither performs **any**
 I/O — the caller lists the store's subdirectories, or one category's files,
 and passes the names in. `catalog_entries` admits an entry only when its name
 is a legal plain file name (no path separator, no control character, not
@@ -186,17 +187,25 @@ is a legal plain file name (no path separator, no control character, not
 `catalog_categories` admits a name on the leaf-name rule alone, since a
 category carries no extension and no case convention. Anything else is
 silently dropped, so a store holding a stray file beside its categories, or a
-category mixing wallpapers with unrelated files, yields only what a chooser
+category mixing wallpapers with unrelated files, yields only what a gallery
 can offer rather than a refusal of the whole listing. Both results are sorted
 by name and capped — at `MAX_WALLPAPER_CATALOG_ENTRIES` and
 `MAX_WALLPAPER_CATEGORIES`.
+
+`desktop_catalog` flattens a whole store walk into the one list the desktop
+offers: each category's entries, category by category, in walk order, capped
+at `MAX_WALLPAPER_CATALOG_ENTRIES` **in total** because that bound is the
+gallery's rather than one directory's. A `CatalogItem` names its category
+and its file rather than carrying a path, and `CatalogItem::path` is the one
+spelling that turns the two into one — so the picture a gallery shows and
+the settings document choosing it cannot disagree about where it lives.
 
 `is_wallpaper_file_name` and `is_wallpaper_category_name` are those name
 contracts on their own, so `tools/syshelp`'s build-time discovery applies
 exactly the definitions the runtime applies: it walks one category level, and
 a master the desktop could never offer, one over the byte bound, a stray file
 at the store root, or an illegal category name fails the **build** rather than
-quietly never appearing in the chooser.
+quietly never appearing in the gallery.
 
 ## Placement geometry
 
@@ -269,3 +278,12 @@ The crate is `no_std` + `alloc`, forbids `unsafe`, performs no I/O, holds no
 authority, is host-unit-tested beside the code, and is fuzzed by
 `tests/fuzz_wallpaper_settings.rs`. Stability tier: experimental
 (`lib/wallpaper/README.md`). The staged design is `plans/PINBOARD.md`.
+
+## The pane the desktop hands over
+
+`WALLPAPER_PANE` is the name the backdrop menu's *Change Background…* row
+hands to the Settings application as its launch target. It lives here, with
+the rest of the wallpaper vocabulary those two already share, because
+neither may depend on the other: the session names it, and Settings resolves
+it against its own closed pane registry. It confers nothing, so a name that
+application does not recognise leaves its window where it was.

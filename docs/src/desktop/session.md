@@ -116,8 +116,8 @@ A bundle whose **signed** manifest sets `APPINFO_FLAG_NO_ICON_BAR`
 of the two facts above put it there. Two ship that way, both because the
 desktop already reaches them another route, so a slot would be a duplicate:
 the **Switchboard**, which the bar's own permanent trailing capsule stands
-for, and the **wallpaper chooser**, which the backdrop menu's *Change
-Background* row opens.
+for, and **Settings**, which the system menu and the backdrop menu's
+*Change Background* row both open.
 
 The claim lives in the manifest rather than on the window channel because a
 *running process* must not be able to hide itself from the bar: the manifest
@@ -580,8 +580,9 @@ names `DesktopAction::CreateFolder` with the name already chosen through
 `lib/browse`'s shared new-directory naming over the listing on screen;
 *Refresh* re-lists there and then; *Open Desktop Folder* is an ordinary
 `OpenFolder` activation; and *Change Background…* names
-`DesktopAction::ChangeBackground`, which the embedder resolves to the installed
-wallpaper chooser (the model knows no bundle paths).
+`DesktopAction::ChangeBackground`, which the embedder resolves to the
+installed Settings application at its Wallpaper pane (the model knows no
+bundle paths).
 
 The answer arrives at the chain's **one** delivery point, alongside every
 application's, and is put through that same action path — so a chosen row and
@@ -1784,8 +1785,8 @@ folder about 150 times a second, waking the compositor on every completion
   exactly where it used to be. Slower under load, never wrong.
 - **A settings change is published off the loop, and adopted only once it
   landed.** Both routes into the desktop's settings — a row chosen from the
-  backdrop menu, and an `Apply` from the wallpaper chooser or the Settings
-  application — submit to the settings worker and adopt nothing. The worker publishes to the desktop's own
+  backdrop menu, and an `Apply` from the Settings application — submit to
+  the settings worker and adopt nothing. The worker publishes to the desktop's own
   app-data scope and answers with what the store then holds; the serve loop
   adopts *that* on the wake it nudges, and re-lays-out, re-lists, and re-prepares
   the wallpaper only for the change the answer actually names. So the adopted

@@ -11,7 +11,7 @@ publish.workspace = true
 # The host-testable shell. Everything with behaviour worth testing lives here
 # — which pane is on show, what the strip holds, how the frame sheds a region
 # a narrow window cannot seat, and what a routed event changes — exactly as
-# the widget gallery and the wallpaper chooser keep their logic in a
+# the widget gallery keeps its logic in a
 # host-tested engine and only *compose* it in the `Run` binary. It is
 # `no_std` + `alloc`, so it links unchanged into the freestanding binary and
 # runs under the host test harness.
@@ -56,6 +56,10 @@ tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
 # The four closed value sets the appearance rows offer, read from the one
 # place the document and the window channel both take them from.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared wrapping tile-grid geometry the Wallpaper pane's gallery lays
+# its pictures out with — the same one the file manager's icon view and the
+# desktop's own icon column use, so no second grid exists.
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 
 # Everything only the freestanding `Run` binary links is pulled in for the
 # bare-metal targets it is actually built for; on the host the binary is an

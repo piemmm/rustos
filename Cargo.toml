@@ -257,7 +257,6 @@ members = [
     "userland/apps/useradd",
     "userland/apps/view",
     "userland/apps/vim",
-    "userland/apps/wallpaper",
     "userland/apps/wc",
     "userland/apps/whoami",
     "userland/apps/widgets",

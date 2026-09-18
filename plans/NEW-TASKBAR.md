@@ -755,8 +755,8 @@ application is one kernel-attested process. What now stands:
   for the life of its process, drops a slot when it has neither a declaration
   nor a window — and whenever the bundle's *signed* manifest sets
   `APPINFO_FLAG_NO_ICON_BAR` (`icon-bar = false`), which the Switchboard and
-  the wallpaper chooser do because the trailing capsule and the backdrop menu
-  already reach them, bounds the strip at `MAX_BAR_APPS`, and resolves each
+  Settings do because the trailing capsule, the system menu and the backdrop
+  menu already reach them, bounds the strip at `MAX_BAR_APPS`, and resolves each
   slot's label, icon, and information-panel identity from the **signed**
   `AppInfo` of the bundle the *kernel* attested that process runs (T19) — read
   once per bundle. A process with no attested identity states no version,

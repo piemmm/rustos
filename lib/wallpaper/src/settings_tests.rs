@@ -555,7 +555,7 @@ fn a_tolerant_read_leaves_exactly_the_refused_appearance_key_at_its_default() {
 #[test]
 fn a_merge_leaves_every_key_the_sender_did_not_name() {
     // The defect this forecloses: choosing a wallpaper must not reimpose
-    // the appearance the chooser happened to open on.
+    // the appearance the surface happened to open on.
     let in_effect = DesktopSettings {
         appearance: Appearance::Light,
         contrast: Contrast::High,

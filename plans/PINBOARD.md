@@ -26,13 +26,15 @@ This spec defers to its companions and MUST stay consistent with them:
   sandboxed decode, and the artwork cache. Wallpapers reuse that decode
   posture; they are *not* icons and do not enter the icon vocabulary.
 - **Controls** — `plans/GUI-CONTROLS-DESIGN.md` owns every control the menu
-  and the chooser are built from. No new control family is defined here.
+  and the Wallpaper pane are built from. No new control family is defined
+  here.
 - **Menus** — `plans/NEW-MENUS.md` owns the menu chain the backdrop menu is
   one client of (M3.2). This document states the menu's *rows and commands*
   (§7); the plate, the band, the placement, the grab and the dismissal are
   that document's, and no menu shell is defined here.
-- **Bundles / help / resolution** — `plans/APPS.md` owns the `.app` bundle
-  the chooser ships as.
+- **Settings** — `plans/NEW-DESKTOP-SETTINGS.md` owns the application the
+  picture is chosen in, and DS4 owns the pane and the two served requests
+  §8 describes.
 - **Settings stores** — the shared per-user store pattern the settings
   document follows: a bounded, fail-closed, line-grammar text document under
   the user's own `Settings/` tree, exactly as `lib/proglib`'s user overlay
@@ -51,8 +53,8 @@ requirements.
   (`fill`, `fit`, `stretch`, `centre`, `tile`).
 - **Backdrop** — the flat colour shown wherever the wallpaper does not
   reach, and the whole backdrop when no wallpaper is set.
-- **Chooser** — `wallpaper.app`, the graphical application that edits the
-  pinboard settings.
+- **Gallery** — the picture grid in the Settings application's Wallpaper
+  pane, which is where the pinboard settings are edited.
 
 ## Status
 
@@ -74,8 +76,8 @@ lib/abi        pinboard_ipc: the apply rendezvous                (P6)
 lib/browse     GridFlow::ColumnsFromLeading                      (P7)
 userland/gui/session
                the pinboard: layer, menu, settings, service      (P8)
-userland/apps/wallpaper
-               the chooser                                       (P9)
+userland/apps/settings
+               the Wallpaper pane and its served gallery         (P9)
 docs           the pinboard page and every touched page          (P10)
 ```
 
@@ -124,7 +126,7 @@ One document, one engine, one writer.
   program the user launches can write this one at all. The session loads at
   bring-up and publishes on every change; the in-memory settings adopt an
   edit **only after the publish succeeded**, so memory and the store never
-  diverge. The chooser and the backdrop menu do not write it — they ask the
+  diverge. Settings and the backdrop menu do not write it — they ask the
   session to (§6).
 
 ## 3. The wallpaper
@@ -134,10 +136,10 @@ One document, one engine, one writer.
   **categories** `Abstract`, `City`, `Nature`, `Space`, and `TAIRiX`, and
   discovered at build time from `lib/wallpaper/assets/<Category>/` by
   `tools/syshelp` — never a hand-maintained list. A category's directory
-  name *is* the label a chooser draws, so adding a category is authoring a
+  name *is* the label a gallery draws, so adding a category is authoring a
   directory and there is no name → label table to drift out of step.
   Discovery walks exactly one category level and fails the build closed on a
-  stray file at the store root or a category name no chooser could offer
+  stray file at the store root or a category name no gallery could offer
   (`tairix_wallpaper::is_wallpaper_category_name`). The default is
   `TAIRiX/tairix-dark.jpg`, named once by
   `tairix_wallpaper::{DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER}` and
@@ -156,9 +158,9 @@ One document, one engine, one writer.
   (§5). A wallpaper that will not decode falls back to the backdrop colour,
   reports why on `stderr`, and is remembered as refused so a bad file costs
   one attempt, not one per frame.
-- **The read is a streamed whole-file read, not a per-kilobyte one.** Both the
-  session and the chooser stage a wallpaper through `tairix_rt`'s one
-  whole-file policy (`read_fd_to_end`, 64 KiB per `fs_read`), so a multi-
+- **The read is a streamed whole-file read, not a per-kilobyte one.** The
+  session stages every wallpaper — its own backdrop and every gallery
+  preview — through `tairix_rt`'s one whole-file policy (`read_fd_to_end`, 64 KiB per `fs_read`), so a multi-
   megabyte master costs on the order of a hundred syscalls rather than
   thousands. This is the load path's dominant cost on real storage, not the
   decode: a 3840×2160 JPEG decodes in tens of milliseconds, while reading it a
@@ -173,16 +175,14 @@ One document, one engine, one writer.
     that.** Both cache layers admit by memory budget, never by request
     length (`docs/src/architecture/memory.md` §7g/§7m): a size-based
     bypass in either one silently made every run re-read the card and
-    re-run the AEAD, which is what left a warm re-open of the chooser
+    re-run the AEAD, which is what left a warm re-open of the gallery
     costing hundreds of milliseconds per master. A whole-file read of a
     hot wallpaper now costs one memory copy per 64 KiB and no device I/O
     at all.
-  - **Which half is slow is measured, never inferred.** Each placement
-    reports its read span and its render span apart, on the chooser's
-    `RENDER_TIMED` record (`userland/apps/wallpaper/src/events.rs`), with the
-    source byte count and the destination. The two halves have unrelated
-    causes when a gallery crawls — a cold cache or a store behind an SD card
-    on one side, the sandbox pipe transfer and the decode on the other — and
+  - **Which half is slow is measured, never inferred.** The two halves have
+    unrelated causes when a gallery crawls — a cold cache or a store behind
+    an SD card on one side, the sandbox pipe transfer and the decode on the
+    other — and
     the decode is the one thing already known: the 26 shipped masters decode
     in 404 ms *total* at thumbnail scale and ~90 ms each full-screen, so a
     placement costing seconds is never the decoder.
@@ -206,8 +206,8 @@ One document, one engine, one writer.
   deadline, so an arrived backdrop arms no timer
   (`docs/src/desktop/session.md`).
 - **Fit geometry** is one pure function in `lib/wallpaper`, shared by the
-  renderer and the chooser's preview, so a preview can never disagree with
-  the desktop about what a fit does.
+  renderer and every preview, so a preview can never disagree with the
+  desktop about what a fit does.
 
 ## 4. The icons
 
@@ -275,7 +275,7 @@ costs correctness or memory safety.
 
 ## 6. Applying a change
 
-The chooser and the backdrop menu both **ask**; the session **decides,
+Settings and the backdrop menu both **ask**; the session **decides,
 applies, and persists**.
 
 - **Rendezvous** — `PINBOARD_ENDPOINT`, a reserved, seat-scoped call
@@ -292,8 +292,9 @@ applies, and persists**.
   discriminants beside the document's own grammar would be two definitions of
   one thing.
   - **The session merges it over what it holds.** More than one surface asks
-    the desktop to change and none shows every setting: the chooser and the
-    backdrop menu edit the backdrop keys, Settings edits the appearance keys
+    the desktop to change and none shows every setting: the backdrop menu
+    and Settings' Wallpaper pane edit the pinboard keys, its Appearance and
+    Accessibility panes edit the appearance keys
     (`plans/NEW-DESKTOP-SETTINGS.md` DS3). Each renders only the keys it
     edits (`DesktopSettings::document_of`) and a key the sender did not name
     keeps the value the desktop has, so one surface cannot undo the other's
@@ -304,13 +305,13 @@ applies, and persists**.
   kernel-attested `Origin` carries the session's own uid; anything else is
   refused and logged. The document is display/config data, never a
   credential: it names a path, and the session then reads that path **under
-  its own identity**, so the chooser cannot use the pinboard to read a file
-  it could not read itself.
+  its own identity**, so an asking surface cannot use the pinboard to read
+  a file it could not read itself.
 - **Reply** — the shared status frame: applied, or a typed refusal. The
   identity check happens *before* the document is decoded, so an
   unattested caller cannot even reach the parser. The reply waits for the
   *store*, not for the serve loop: it is sent when the publish lands, so the
-  chooser still learns whether its document was actually written.
+  asking surface still learns whether its document was actually written.
 - **One adopt path, and it is off the loop** (`AGENTS.md` §28). A request
   adopted over IPC and a change made from the backdrop menu run through the
   very same persist-then-adopt code, so the two routes cannot diverge in what
@@ -324,8 +325,8 @@ applies, and persists**.
   - A ticketed request the user's next gesture overtakes before any worker
     took it is answered right there, so no caller is left parked on an answer
     nobody will produce.
-- **Reading** is not brokered: the chooser reads the document itself, since
-  it is the user's own file and a reader needs no coordination.
+- **Reading** is not brokered: a surface reads the published document
+  itself, since it is the user's own and a reader needs no coordination.
 
 ## 7. The backdrop menu
 
@@ -343,7 +344,7 @@ application's. Its item set is closed:
 | `Arrange …` | set `icons` (two marked items) |
 | `Refresh` | re-list `Desktop/` now |
 | `Open Desktop Folder` | open the file manager on `Desktop/` |
-| `Change Background…` | launch the chooser |
+| `Change Background…` | open Settings at its Wallpaper pane |
 
 `Open` resolves through the very same activation the double-click path uses,
 so the two can never disagree. Managing an entry — rename, copy, delete,
@@ -364,93 +365,60 @@ Escape, a click elsewhere, or an activated item closes it, and the chain
 clamps it wholly onto the screen, so one opened at the bottom-right corner
 opens inward rather than off the edge. It obeys the service's seat rule: a
 menu never appears over the lock screen or the trusted picker.
-Every item the session cannot carry out (a refused `fs_mkdir`, a chooser
-that will not launch) reports why on `stderr` and leaves the desktop
+Every item the session cannot carry out (a refused `fs_mkdir`, a Settings
+window that will not launch) reports why on `stderr` and leaves the desktop
 unchanged — the menu never fails silently and never dies over a refusal.
 
-## 8. The chooser (`wallpaper.app`)
+## 8. Choosing a picture
 
-A graphical application bundle (`kind = application`, so it installs into
-the system application store and is typeable by name). It:
+The desktop picture is a **section of Settings**
+(`plans/NEW-DESKTOP-SETTINGS.md` DS4), not an application beside it. There
+is no wallpaper application: `userland/apps/wallpaper` is deleted, and the
+backdrop menu's *Change Background…* launches `settings.app` with the
+Wallpaper pane as its target.
 
-- lists the shipped store through the shared catalog builders — its category
-  directories through `catalog_categories`, and one category's masters
-  through `catalog_entries` — and offers a "no wallpaper" candidate that
-  shows the backdrop alone;
-- draws a **live preview** of the selection at the top of the window, and
-  every candidate as a tile in a scrolling gallery beneath it — all of them
-  rendered through the same sandboxed wallpaper path, so the chooser decodes
-  nothing in its own address space. A candidate the worker refuses is marked
-  `unreadable` and is not asked for again, so a bad file costs one attempt;
-- offers the fit, the backdrop colour, the icon arrangement, and the sort
-  order as four `lib/controls` drop-downs beside the preview — the fit shown
-  through the shared placement geometry in the preview, the backdrop as the
-  theme default plus a fixed named palette, which also carries whatever
-  colour is already in effect under its own `rrggbb` spelling so opening the
-  chooser never changes it;
-- applies by rendering the settings document and sending it to the session
-  (§6), reporting applied / refused-with-reason / no-session beside the
-  buttons rather than exiting;
-- ships its own `AppInfo`, `Run`, `Help/en-US/wallpaper.md`, and its own
-  icon (authored as SVG), all on disk inside the bundle.
+**Settings holds no authority over the store, and gains none for this.**
+Listing the shipped store needs `CAP_FS_ACCESS` and decoding an untrusted
+picture needs a `CAP_PROC_SPAWN` sandbox worker. Granting either to the
+application that will later carry Networking, Users and Storage is the
+ambient-authority god-app that plan's §0 exists to prevent, so the gallery
+is **served** rather than hosted:
 
-**Pointer first.** The window is driven by the mouse; the keyboard is a
-complete secondary path (Tab/Shift-Tab through the regions, arrows within
-the gallery or the focused list, Enter applies, Escape closes). Clicking a
-tile selects it and the preview follows; clicking a field opens its list;
-the wheel, the scrollbar thumb and its track scroll the gallery. Every
-interactive part is a shared control held for the life of the window, so
-each owns its own hover, press and drag state, and a press released away
-from the control it started on activates nothing. The gallery is
-`lib/browse`'s icon-grid engine and its tiles are `IconTile`s: the view
-hit-tests the pointer against the very geometry it painted, exactly as
-`plans/GUI-CONTROLS-DESIGN.md` §11.34 requires of an icon view. No control,
-grid or hit-test is defined in this app.
+- the session walks the store once at its own bring-up — `/System` is
+  read-only, so the catalog is fixed for the life of the boot — through
+  `catalog_categories`, `catalog_entries` and `desktop_catalog`, and answers
+  `WindowRequest::QueryWallpapers` from memory, so no directory walk is ever
+  on the compositing loop;
+- `WindowRequest::RenderWallpaper` names a **catalog position** and a square
+  side, and the session renders that candidate through its own sandboxed
+  wallpaper path into a shared-memory region Settings created and granted —
+  the one thing its existing `CAP_SHM` already allows. Naming a position
+  rather than a path is what stops the request being used to make the
+  session read a file the caller chose.
 
-A **tile** is the wallpaper itself at tile size, always placed to fill its
-square, so it answers *which* wallpaper it is; the preview panel is where
-the chosen fit is shown. A fit change therefore re-renders the preview
-alone, never the gallery.
+Both are of the same posture as `QueryDesktop`: seat-scoped,
+capability-free, describing the caller's own desktop and granting nothing.
+Both are *reads*: the only write is still the §6 apply.
 
-**Visible first, and the window never blocks.** `Chooser::next_thumbnail`
-returns the nearest wanted candidate **on screen**, taken from the gallery's
-own `GridView::visible_range` — the same geometry the painter lays the tiles
-out with, so the scheduler and the painter can never disagree about what is
-visible — and reaches past it only once the visible set is complete. The
-masters are 4K, so index order meant the window showed placeholders for every
-visible tile until candidates the user cannot see had been read and decoded;
-it also meant a tile-side change (a resize or a UI-scale change, which makes
-every held thumbnail stale) repeated the whole pass. Both are now bounded by
-what is on screen, with the rest filled in behind it. The serve loop drains
-queued input *before* each render (`WindowEvents::try_wait`) and parks on its
-wait-set once the gallery is full, so a click or a key waits at most one
-picture and an idle chooser spins on nothing.
+The desktop renders **one preview at a time** and always prepares its own
+backdrop first, so a gallery of thumbnails can neither flood the sandbox nor
+make the picture the user is looking at wait. Nothing is recalled: every
+accepted render answers exactly once, so a window that closes mid-render
+costs one wasted decode and the slot frees itself.
 
-**The preview is a scale model of the real screen.** The chooser asks the
-session for the seat's desktop before it opens its window
-(`WindowRequest::QueryDesktop`, read-only and ungated — it describes the
-caller's own seat and authorises nothing), so it knows the screen's exact
-extent. Inside the preview panel it draws the largest box with the
-*screen's* aspect ratio that fits, centred, and renders the wallpaper into
-it as the desktop would — `lib/sandbox`'s render is told the screen it
-models as well as the surface it writes, and scales the source through
-`tairix_wallpaper::nominal_source_size` so `Centre` and `Tile`, which are
-defined in screen pixels, model correctly instead of drawing at 1:1. What
-the preview shows is therefore what the desktop will show. The screen
-extent is part of the preview request, so a preview rendered for one screen
-can never be displayed as if it were for another, and a published desktop
-that alters the extent re-renders it.
+A picture in effect that the catalog does not hold — one set before it was
+removed from the store — is still offered and still selectable; it has no
+catalog position, so its tile draws its built-in glyph and its name.
 
-**Outstanding — listing a user-picked directory.** Offering an image from
-outside the shipped store needs a seam that does not exist yet, so the
-capability is absent rather than half-built. Two things block it, and both
-are decisions for the ABI owners rather than the chooser:
+**Outstanding — offering a picture from outside the shipped store.** The
+seam does not exist, so the capability is absent rather than half-built, and
+both blockers are decisions for the ABI owners:
 
 - the trusted picker's conclusion (`WindowEvent::FilePicked`) carries only a
-  one-shot, owner-bound `fd_redeem` handle and **no path**, so the chooser
-  cannot learn what to write into the settings document; and
+  one-shot, owner-bound `fd_redeem` handle and **no path**, so the asking
+  surface cannot learn what to write into the settings document; and
 - the document names a path the session re-reads under its own identity at
-  every login (§6), while the picked handle is owner-bound to the chooser's
+  every login (§6), while the picked handle is owner-bound to the asking
   task and cannot be forwarded — so even a known path would only be readable
   by the session if it can reach it itself.
 
@@ -469,7 +437,7 @@ nothing in the settings model needs to change.
 | P6 | `lib/abi`: `pinboard_ipc` | done |
 | P7 | `lib/browse`: `GridFlow::ColumnsFromLeading` | done |
 | P8 | `userland/gui/session`: the pinboard | done (its menu is the shared chain, `plans/NEW-MENUS.md` M3.2) |
-| P9 | `userland/apps/wallpaper`: the chooser | done, except the picked-directory listing (§8) |
+| P9 | the Wallpaper pane in `userland/apps/settings`, over the session's two served requests | done, except the picked-directory listing (§8) |
 | P10 | docs, `AGENTS.md` §3, the `plans/` jump-sheet | done |
 
 ## 10. Tests
@@ -494,7 +462,10 @@ nothing in the settings model needs to change.
   arithmetic, out-of-range bands, a band before a prepare, an oversize
   destination, and a malformed image.
 - **`lib/abi`** — wire round-trip and every decode refusal.
-- **`userland/gui/session`** — the pinboard's gestures against the existing
+- **`userland/gui/session`** — the preview desk's policy (the backdrop
+  taken before a thumbnail, one preview in flight, an answer freeing the
+  slot, an answer to nothing dropped), and the pinboard's gestures against
+  the existing
   fakes: the backdrop menu's row model (its closed row set, the marks on the
   settings in force, the id↔command inverse, the group breaks, and the rows a
   gesture leaves out shifting no id), each item's action, flow and sort changes
@@ -505,13 +476,14 @@ nothing in the settings model needs to change.
   frame part-way through is the mix of the two grounds (including in the
   outgoing picture's margins), the copy of the ground being left is released on
   arrival, and reduced motion arrives before it draws.
-- **`userland/apps/wallpaper`** — the chooser engine on the host: the
-  candidate model (the "no wallpaper" entry, a current wallpaper from
-  outside the catalog, a refused thumbnail), every key's movement and the
-  whole tab order, each option group including the backdrop palette and an
-  in-effect colour outside it, a fit change re-rendering previews but
-  remembering refusals, the rendered document matching the UI state
-  exactly, each apply outcome shown, and the layout's non-overlap and
-  containment at degenerate and small window sizes.
+- **`userland/apps/settings`** — the gallery on the host: the candidate
+  model (the "no picture" entry, a picture in effect from outside the
+  catalog, which is offered but never asked for), one picture asked for at a
+  time, a refusal remembered so a scale change does not retry it, a
+  malformed answer refused rather than drawn, a pending tile drawing its
+  placeholder, a press released away from its tile choosing nothing, and a
+  choice reporting the picture without disturbing any other pinboard value.
+  The pane name a launch target carries is unique, resolvable, and unknown
+  names resolve to nothing.
 - **QEMU** — the desktop vertical comes up with the default wallpaper drawn
   and the `Desktop` folder's icons over it.

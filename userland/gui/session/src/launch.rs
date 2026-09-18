@@ -57,11 +57,15 @@ pub enum Handover {
 
 /// What a launch names for the application to open, if anything.
 ///
-/// Two forms, because the authority differs. A **path** is a name the
+/// Three forms, because what is named differs. A **path** is a name the
 /// application resolves under its own authority. A **document** is a file
 /// already opened by whoever asked for the launch, handed on as a one-shot
 /// delegation — the only form an application that requests no filesystem
-/// capability can act on.
+/// capability can act on. A **pane** is neither: it names a place inside
+/// the application, resolved against its own closed set of places, and
+/// confers nothing at all — which is what lets the desktop send an
+/// application holding no filesystem capability to a particular part of
+/// itself.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum LaunchTarget<'a> {
     /// A path the application opens itself.
@@ -75,6 +79,9 @@ pub enum LaunchTarget<'a> {
         /// relay redeems and hands on to the instance.
         grant: u64,
     },
+    /// A place inside the application. One it does not recognise leaves it
+    /// showing what it already showed.
+    Pane(&'a str),
 }
 
 /// What a launch of a bundle resolved to.
@@ -431,6 +438,7 @@ mod tests {
             let named = match target {
                 LaunchTarget::Path(path) => String::from(path),
                 LaunchTarget::Document { name, grant } => alloc::format!("{name}#{grant}"),
+                LaunchTarget::Pane(pane) => alloc::format!("pane:{pane}"),
             };
             self.queued.push((app, named));
             self.takes_target

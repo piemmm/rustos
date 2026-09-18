@@ -1,6 +1,17 @@
 //! The `settings.app` bundle's `Run` entry point: the windowed Settings
 //! application (`plans/NEW-DESKTOP-SETTINGS.md`).
 //!
+//! # It browses pictures it may not read
+//!
+//! The Wallpaper pane offers the shipped store, and this application holds
+//! no filesystem capability and no sandbox to decode a picture with. Both
+//! are *served*: the desktop session lists the store once and answers a
+//! catalog page, and renders one candidate at a time into a shared-memory
+//! region this program created and granted — which is the one thing its
+//! `CAP_SHM` already allows. So there is one sandboxed decode path on the
+//! desktop rather than two, and no untrusted picture is ever decoded in the
+//! address space of the application that browses them.
+//!
 //! Everything with behaviour worth testing lives in the host-tested shell
 //! (`tairix_settings`); this binary only composes it over the live window
 //! channel, exactly as `userland/apps/widgets` composes its gallery:
@@ -29,6 +40,7 @@ mod program {
     extern crate alloc;
 
     use alloc::string::String;
+    use alloc::vec::Vec;
     use core::cell::Cell;
 
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
@@ -44,11 +56,11 @@ mod program {
     use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{Shell, ShellOutcome};
     use tairix_theme::{Theme, ThemeRegistry};
-    use tairix_wallpaper::{ApplyOutcome, DesktopSettings, PINBOARD_PUBLISHER};
+    use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
-        EventError, EventMailbox, EventSource, Parked, Repaint, WindowEvents,
+        EventError, EventMailbox, EventSource, Parked, Repaint, Target, WindowEvents,
     };
 
     /// The wait-set token of the applier's wake pipe: readable exactly when
@@ -158,6 +170,179 @@ mod program {
             }
         }
         shell.adopt_settings(settings_in_effect());
+    }
+
+    /// The shipped picture catalog the desktop offers, read once.
+    ///
+    /// The store is on the read-only `/System` volume, so the session
+    /// listed it at bring-up and answers from memory: this costs a round
+    /// trip per page and no I/O either side, which is why it is done here
+    /// rather than deferred. A page that cannot be read leaves the gallery
+    /// with whatever arrived — an empty gallery still offers "no picture"
+    /// — and states the reason once.
+    fn fetch_catalog(
+        client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+    ) -> Vec<CatalogItem> {
+        let mut page = [0u8; tairix_abi::window_ipc::WINDOW_WALLPAPERS_REPLY_MAX];
+        let mut catalog: Vec<CatalogItem> = Vec::new();
+        loop {
+            let Ok(from) = u16::try_from(catalog.len()) else {
+                return catalog;
+            };
+            let answered = match client.wallpapers(from, &mut page) {
+                Ok(answered) => answered,
+                Err(err) => {
+                    let _ = writeln!(
+                        Stderr,
+                        "settings: the desktop's picture catalog could not be read ({err}); the \
+                         gallery shows what arrived"
+                    );
+                    return catalog;
+                }
+            };
+            let total = answered.total;
+            // An empty page with entries still outstanding is a session
+            // that cannot answer them, not a queue to keep asking: stop
+            // rather than turn the read into a spin.
+            if answered.is_empty() {
+                return catalog;
+            }
+            for entry in answered.entries() {
+                let (Ok(category), Ok(file)) = (
+                    core::str::from_utf8(entry.category),
+                    core::str::from_utf8(entry.file),
+                ) else {
+                    continue;
+                };
+                catalog.push(CatalogItem {
+                    category: String::from(category),
+                    file: String::from(file),
+                });
+            }
+            if catalog.len() >= usize::from(total) {
+                return catalog;
+            }
+        }
+    }
+
+    /// The picture gallery's client half: the region the desktop renders
+    /// into, and which render is outstanding.
+    ///
+    /// One region, created once at the side the tiles are drawn at and
+    /// re-created when that side moves, because a grant is cheap only if it
+    /// is not taken per tile. One render outstanding, because the desktop
+    /// serves one at a time.
+    struct Pictures {
+        region: Option<tairix_rt::shm::SharedRegion>,
+        /// The square side `region` was sized for.
+        side: u16,
+        /// The catalog position awaiting its answer.
+        pending: Option<u16>,
+    }
+
+    impl Pictures {
+        const fn new() -> Self {
+            Self {
+                region: None,
+                side: 0,
+                pending: None,
+            }
+        }
+
+        /// Ask the desktop for the next picture the shell wants, if any.
+        ///
+        /// Requested, never awaited: the answer arrives as an ordinary
+        /// window event. A refusal is stated once and the tile is marked
+        /// refused, so a picture the desktop will not render never becomes
+        /// a request loop.
+        fn request(
+            &mut self,
+            shell: &mut Shell,
+            surface: &mut SettingsWindow,
+            theme: &Theme,
+            scale: Scale,
+        ) {
+            if self.pending.is_some() {
+                return;
+            }
+            let viewport = surface.viewport();
+            let Some(wanted) = shell.next_picture_wanted(viewport, scale, theme) else {
+                return;
+            };
+            let Some(window_id) = surface.window.window_id() else {
+                return;
+            };
+            let Some(grant) = self.grant(wanted.side) else {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: no shared region for a picture preview; the gallery shows its \
+                     placeholders"
+                );
+                shell.mark_picture_refused(wanted.index);
+                return;
+            };
+            match surface.window.client().render_wallpaper(
+                window_id,
+                grant,
+                wanted.index,
+                wanted.side,
+            ) {
+                Ok(()) => self.pending = Some(wanted.index),
+                Err(err) => {
+                    let _ = writeln!(
+                        Stderr,
+                        "settings: the desktop refused a picture preview ({err}); it is not \
+                         shown"
+                    );
+                    shell.mark_picture_refused(wanted.index);
+                }
+            }
+        }
+
+        /// The grant handle of a region big enough for a `side` square,
+        /// creating one when the side has moved.
+        fn grant(&mut self, side: u16) -> Option<u64> {
+            let want = usize::from(side)
+                .checked_mul(usize::from(side))?
+                .checked_mul(4)?;
+            if self.side != side || self.region.is_none() {
+                // Dropped before the new one is mapped, so a gallery that
+                // re-renders at a new scale holds one region, not two.
+                self.region = None;
+                self.region = tairix_rt::shm::SharedRegion::create(want);
+                self.side = side;
+            }
+            let region = self.region.as_ref()?;
+            let handle = tairix_rt::shm_grant(region.id(), tairix_abi::window_ipc::WINDOW_ENDPOINT);
+            u64::try_from(handle).ok().filter(|grant| *grant >= 1)
+        }
+
+        /// Adopt the conclusion of a render, answering whether the gallery
+        /// changed.
+        ///
+        /// An answer for a position this program is not waiting on, or at a
+        /// side its region is not, is dropped: the tile keeps waiting rather
+        /// than drawing pixels of the wrong shape.
+        fn settle(&mut self, shell: &mut Shell, index: u16, side: u16, rendered: bool) -> bool {
+            if self.pending != Some(index) || self.side != side {
+                return false;
+            }
+            self.pending = None;
+            if !rendered {
+                return shell.mark_picture_refused(index);
+            }
+            let Some(region) = self.region.as_mut() else {
+                return shell.mark_picture_refused(index);
+            };
+            let pixels = region.bytes_mut();
+            shell.set_picture(index, side, pixels)
+        }
+
+        /// Forget the outstanding render, because the desktop it was asked
+        /// of has moved and every tile is being asked for again.
+        const fn restart(&mut self) {
+            self.pending = None;
+        }
     }
 
     /// State the abnormal-exit reason on `stderr` (fail loud) and hand back
@@ -293,6 +478,19 @@ mod program {
         /// The reader chose a setting: ask the desktop to adopt it, then
         /// re-read what it holds.
         Apply(String),
+        /// The desktop queued a target: drain the queue and show what it
+        /// named.
+        Opened,
+        /// A picture the gallery asked for is in the shared region, or was
+        /// refused.
+        Rendered {
+            /// The catalog position that was asked for.
+            index: u16,
+            /// The square side it was rendered at.
+            side: u16,
+            /// Whether the region holds the picture.
+            rendered: bool,
+        },
         /// End the program.
         Quit,
     }
@@ -359,6 +557,20 @@ mod program {
                 let scroll = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
                 concluded(shell.on_pointer(&scroll, viewport, scale, theme, damage))
             }
+            // The desktop queued at least one target for this instance.
+            WindowEvent::OpenRequested => Acted::Opened,
+            // A picture the gallery asked for. Answered by the loop, which
+            // holds the region it was rendered into.
+            WindowEvent::WallpaperRendered {
+                index,
+                side,
+                rendered,
+                ..
+            } => Acted::Rendered {
+                index: *index,
+                side: *side,
+                rendered: *rendered,
+            },
             // A redraw needs nothing here: the client library re-presents the
             // last frame and the shell it drew has not changed. The rest are
             // events this surface does not act on — it opens no chain of the
@@ -382,8 +594,61 @@ mod program {
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
-            | WindowEvent::PickCancelled { .. }
-            | WindowEvent::OpenRequested => Acted::Idle,
+            | WindowEvent::PickCancelled { .. } => Acted::Idle,
+        }
+    }
+
+    /// Drain every target the desktop queued for this instance and show the
+    /// last pane it named, answering whether the window moved.
+    ///
+    /// One event may cover several targets, and another may arrive while
+    /// this drain is running, so it loops until the queue answers empty. A
+    /// target that is not a pane is not one this application can act on —
+    /// it declares no file association and holds no filesystem capability —
+    /// and is stated rather than silently dropped. A pane it does not carry
+    /// leaves the window where it is, which is the whole point of a target
+    /// that confers nothing.
+    fn drain_open_targets(
+        shell: &mut Shell,
+        surface: &mut SettingsWindow,
+        theme: &Theme,
+        scale: Scale,
+    ) -> bool {
+        let viewport = surface.viewport();
+        let mut moved = false;
+        loop {
+            match surface.window.client().take_open_target() {
+                Ok(Some(Target::Pane(pane))) => {
+                    let mut sink = tairix_controls::damage::sink();
+                    if shell.go_to_pane(&pane, viewport, scale, theme, &mut sink) {
+                        moved = true;
+                    } else {
+                        let _ = writeln!(
+                            Stderr,
+                            "settings: there is no `{pane}` here; the window stays where it is"
+                        );
+                    }
+                }
+                Ok(Some(Target::Path(path))) => {
+                    let _ = writeln!(
+                        Stderr,
+                        "settings: {path} was handed over, but this window shows settings, not \
+                         files"
+                    );
+                }
+                Ok(Some(Target::Document { name, .. })) => {
+                    let _ = writeln!(
+                        Stderr,
+                        "settings: {name} was handed over as a document, which this window has \
+                         nowhere to show"
+                    );
+                }
+                Ok(None) => return moved,
+                Err(err) => {
+                    let _ = writeln!(Stderr, "settings: cannot take an open target: {err}");
+                    return moved;
+                }
+            }
         }
     }
 
@@ -432,6 +697,61 @@ mod program {
         }
     }
 
+    /// Ask the gallery for every picture again, because the desktop's
+    /// scale or theme moved and a rendered picture is square at one side
+    /// only.
+    ///
+    /// The outstanding render is forgotten rather than waited for: its
+    /// answer would be at the old side and the settle drops it, so the
+    /// gallery asks afresh instead of stalling behind an answer it cannot
+    /// use.
+    fn restart_pictures(
+        shell: &mut Shell,
+        surface: &mut SettingsWindow,
+        pictures: &mut Pictures,
+        theme: &Theme,
+        scale: Scale,
+    ) {
+        shell.invalidate_pictures();
+        pictures.restart();
+        pictures.request(shell, surface, theme, scale);
+    }
+
+    /// Present the whole client, answering whether the session took it.
+    fn present_whole(
+        surface: &mut SettingsWindow,
+        shell: &Shell,
+        themes: &ThemeRegistry,
+        desktop: &Desktop,
+    ) -> bool {
+        let whole = DamageRect::full(&surface.mode);
+        surface
+            .present(shell, themes.active(), desktop.scale(), whole)
+            .is_ok()
+    }
+
+    /// Adopt a desktop change the park reported, answering whether the
+    /// window is still presentable.
+    ///
+    /// A new density or theme re-measures every length the layout is
+    /// derived from, and stales every rendered picture — a picture is
+    /// square at one side only.
+    fn adopt_desktop_round(
+        surface: &mut SettingsWindow,
+        shell: &mut Shell,
+        themes: &mut ThemeRegistry,
+        desktop: &mut Desktop,
+        moved: &Cell<bool>,
+        pictures: &mut Pictures,
+    ) -> bool {
+        if !adopt_desktop(desktop, themes, moved) {
+            return true;
+        }
+        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+        restart_pictures(shell, surface, pictures, themes.active(), desktop.scale());
+        present_whole(surface, shell, themes, desktop)
+    }
+
     /// The event loop: park, apply, repaint.
     /// The long-lived state one turn of the event loop reads and writes.
     ///
@@ -445,6 +765,7 @@ mod program {
         shell: &'a mut Shell,
         desktop_moved: &'a Cell<bool>,
         applier: &'a Applier,
+        pictures: &'a mut Pictures,
     }
 
     fn run_event_loop(session: Session<'_>, mut events: WindowEvents<RtEventSource<'_>>) -> i32 {
@@ -455,6 +776,7 @@ mod program {
             shell,
             desktop_moved,
             applier,
+            pictures,
         } = session;
         loop {
             // An answer the park drained is the loop's to adopt, whether or
@@ -462,11 +784,7 @@ mod program {
             if let Some(outcome) = applier.collect() {
                 adopt_apply(shell, outcome);
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-                let whole = DamageRect::full(&surface.mode);
-                if surface
-                    .present(shell, themes.active(), desktop.scale(), whole)
-                    .is_err()
-                {
+                if !present_whole(surface, shell, themes, desktop) {
                     return fail(EXIT_CHANNEL_LOST, "present refused");
                 }
             }
@@ -477,17 +795,15 @@ mod program {
                 // rather than guessed at. Either way the round is the
                 // re-theme alone.
                 Ok(None) | Err(EventError::Undecodable(_)) => {
-                    if adopt_desktop(desktop, themes, desktop_moved) {
-                        // A new density or theme re-measures every length the
-                        // layout is derived from.
-                        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-                        let whole = DamageRect::full(&surface.mode);
-                        if surface
-                            .present(shell, themes.active(), desktop.scale(), whole)
-                            .is_err()
-                        {
-                            return fail(EXIT_CHANNEL_LOST, "present refused");
-                        }
+                    if !adopt_desktop_round(
+                        surface,
+                        shell,
+                        themes,
+                        desktop,
+                        desktop_moved,
+                        pictures,
+                    ) {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
                     }
                     continue;
                 }
@@ -499,6 +815,7 @@ mod program {
             let redraw = adopt_desktop(desktop, themes, desktop_moved);
             if redraw {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+                restart_pictures(shell, surface, pictures, themes.active(), desktop.scale());
             }
             let mut damage = tairix_controls::damage::sink();
             let acted = apply_event(
@@ -523,8 +840,24 @@ mod program {
                         shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
                     }
                 }
+                Acted::Opened => {
+                    if drain_open_targets(shell, surface, themes.active(), desktop.scale()) {
+                        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+                    }
+                }
+                Acted::Rendered {
+                    index,
+                    side,
+                    rendered,
+                } => {
+                    pictures.settle(shell, index, side, rendered);
+                }
                 Acted::Idle | Acted::Changed | Acted::Whole => {}
             }
+            // Ask for the next picture the gallery wants, whatever this
+            // round was: a navigation, a resize and an answered render all
+            // change what it is waiting for.
+            pictures.request(shell, surface, themes.active(), desktop.scale());
             if matches!(event, WindowEvent::ContentReleased { .. }) {
                 surface.window.release_frames();
                 continue;
@@ -532,7 +865,11 @@ mod program {
             // An apply re-read the desktop, so every row may have moved:
             // the whole client is redrawn rather than the one row the
             // choice reported.
-            let whole = redraw || matches!(acted, Acted::Whole | Acted::Apply(_));
+            let whole = redraw
+                || matches!(
+                    acted,
+                    Acted::Whole | Acted::Apply(_) | Acted::Opened | Acted::Rendered { .. }
+                );
             let repaint = match (whole, matches!(acted, Acted::Changed)) {
                 (true, _) => Repaint::Whole,
                 (false, true) => Repaint::Reported,
@@ -610,6 +947,26 @@ mod program {
             }
         }
 
+        // Before the window opens, so the Wallpaper pane has its pictures
+        // to offer on its first frame rather than on a later wake. The
+        // session lists the read-only store once at its own bring-up and
+        // answers this from memory.
+        shell.adopt_catalog(fetch_catalog(surface.window.client()));
+        // A pane the launch named, if it named one: a fresh process is
+        // given it as its one argument, exactly as a running instance is
+        // handed it over the channel.
+        if let Some(pane) = tairix_rt::args().as_deref().and_then(|argv| argv.get(1)) {
+            let mut sink = tairix_controls::damage::sink();
+            let viewport = surface.viewport();
+            if !shell.go_to_pane(pane, viewport, desktop.scale(), themes.active(), &mut sink) {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: there is no `{pane}` here; the window opens where it always does"
+                );
+            }
+        }
+        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+
         let server = match surface.open(event_endpoint, &shell, themes.active(), desktop.scale()) {
             Ok(server) => server,
             Err(code) => return code,
@@ -630,6 +987,7 @@ mod program {
                 shell: &mut shell,
                 desktop_moved: &desktop_moved,
                 applier: &applier,
+                pictures: &mut Pictures::new(),
             },
             events,
         )

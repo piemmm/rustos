@@ -24,12 +24,12 @@ use tairix_abi::input::{
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     decode_create_reply, decode_desktop_reply, decode_hand_over_reply, decode_menu_text_reply,
-    decode_minted_id_reply, decode_open_target_reply, decode_terrain_reply, AppBar, AppMenu,
-    BundleRunPath, HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, PointerAction,
-    TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
-    WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
-    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
-    WINDOW_TERRAIN_REPLY_MAX,
+    decode_minted_id_reply, decode_open_target_reply, decode_terrain_reply,
+    decode_wallpapers_reply, AppBar, AppMenu, BundleRunPath, HandOverDocument, HandOverOutcome,
+    LayerDepth, OpenTarget, PointerAction, TerrainPlate, TooltipText, WallpaperPage, WindowEvent,
+    WindowRegion, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+    WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
@@ -55,6 +55,10 @@ pub enum Target {
         /// The `fd_redeem` handle. Never zero.
         grant: u64,
     },
+    /// A place inside this application, to be resolved against its own
+    /// closed set of places. Confers nothing, and one this application does
+    /// not recognise leaves it showing what it already showed.
+    Pane(String),
 }
 
 /// High tag of an app's event-mailbox endpoint id (see
@@ -67,10 +71,18 @@ const EVENT_ENDPOINT_TAG: u64 = 0xE117_0000_0000_0000;
 /// Derived from the pulls the channel has rather than from whichever is
 /// widest today, so a pull whose reply outgrew the buffer could not slip
 /// past.
-const PULL_REPLY_MAX: usize = if WINDOW_OPEN_TARGET_REPLY_MAX > WINDOW_MENU_TEXT_REPLY_MAX {
-    WINDOW_OPEN_TARGET_REPLY_MAX
-} else {
-    WINDOW_MENU_TEXT_REPLY_MAX
+const PULL_REPLY_MAX: usize = {
+    const fn wider(a: usize, b: usize) -> usize {
+        if a > b {
+            a
+        } else {
+            b
+        }
+    }
+    wider(
+        wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_MENU_TEXT_REPLY_MAX),
+        WINDOW_WALLPAPERS_REPLY_MAX,
+    )
 };
 
 /// Why a round of input repaints, which is what decides the rectangle it
@@ -807,6 +819,65 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&WindowRequest::PickFile { window_id })
     }
 
+    /// One page of the shipped wallpaper catalog, from entry `from`.
+    ///
+    /// The session lists the read-only shipped store once and answers from
+    /// what it holds, so this costs no I/O either side. `into` is the
+    /// caller's own page buffer, held once rather than taken per call, and
+    /// the answer borrows from it: the catalog's total length and the
+    /// entries this page carried. A caller with more entries than one page
+    /// holds asks again from where the page ended.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal ([`Errno::NotSupported`] from a session
+    /// that serves no catalog), a transport failure, or a malformed reply
+    /// (fail closed, never a guessed catalog).
+    pub fn wallpapers<'a>(
+        &mut self,
+        from: u16,
+        into: &'a mut [u8; WINDOW_WALLPAPERS_REPLY_MAX],
+    ) -> Result<WallpaperPage<'a>, Errno> {
+        let request = WindowRequest::QueryWallpapers { from };
+        let len = request.encode(&mut self.frame)?;
+        let n = self.transport.call(&self.frame[..len], into)?;
+        let frame = into.get(..n).ok_or(Errno::LengthOutOfRange)?;
+        decode_wallpapers_reply(frame)
+    }
+
+    /// Ask the session to render catalog entry `index` as a `side`x`side`
+    /// picture into the region granted as `shm_handle`, concluding to
+    /// window `window_id`.
+    ///
+    /// A success is only the acceptance: the session decodes the untrusted
+    /// picture in its own parser sandbox, off its compositing loop, and
+    /// concludes with a [`WindowEvent::WallpaperRendered`] on the app's
+    /// event endpoint, so the app keeps parking on its ordinary event wait.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal ([`Errno::AlreadyExists`] while a render
+    /// is already pending on the window; [`Errno::NotFound`] for a window
+    /// the caller does not own or a catalog position that does not exist;
+    /// [`Errno::LengthOutOfRange`] for a region too small for the side), a
+    /// transport failure, or a corrupt status frame.
+    ///
+    /// [`WindowEvent::WallpaperRendered`]: tairix_abi::window_ipc::WindowEvent::WallpaperRendered
+    pub fn render_wallpaper(
+        &mut self,
+        window_id: u64,
+        shm_handle: u64,
+        index: u16,
+        side: u16,
+    ) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::RenderWallpaper {
+            window_id,
+            shm_handle,
+            index,
+            side,
+        })
+    }
+
     /// Ask the desktop to open `menu` as a menu chain for this app's window
     /// `window_id`, anchored at `anchor` in that window's own client pixels
     /// (`plans/NEW-MENUS.md`).
@@ -896,6 +967,7 @@ impl<T: WindowTransport> WindowClient<T> {
                 name: text(name)?,
                 grant,
             })),
+            Some(OpenTarget::Pane(pane)) => Ok(Some(Target::Pane(text(pane)?))),
         }
     }
 

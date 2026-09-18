@@ -8,9 +8,9 @@
 //! Only the desktop's four fixed companions are wired by constant: the
 //! file manager (autostarted at bring-up as a core desktop component), the
 //! Switchboard monitor service (spawned at bring-up to feed the tray
-//! capsule, `plans/NEW-TASKBAR.md` T10), the wallpaper chooser (the
-//! backdrop menu's *Change Background* row opens it, `plans/PINBOARD.md`
-//! §8), and the Date & Time app (the clock menu's set-time row runs it
+//! capsule, `plans/NEW-TASKBAR.md` T10), the Settings application (the
+//! backdrop menu's *Change Background* row opens it at its Wallpaper pane,
+//! `plans/PINBOARD.md` §8), and the Date & Time app (the clock menu's set-time row runs it
 //! through the console's elevation broker, `plans/NEW-TASKBAR.md` T17),
 //! because the session must know their bundles without consulting the
 //! program-library catalog — and the Date & Time app is deliberately absent
@@ -39,15 +39,16 @@ pub const SWITCHBOARD_LABEL: &str = "Switchboard";
 /// calm.
 pub const SWITCHBOARD_RUN_PATH: &str = "/System/Services/switchboard.app/Run";
 
-/// Label of the wallpaper chooser, for launch diagnostics.
-pub const WALLPAPER_LABEL: &str = "Wallpaper";
+/// Label of the Settings application, for launch diagnostics.
+pub const SETTINGS_LABEL: &str = "Settings";
 
-/// The wallpaper chooser bundle's entry-point path in the system
-/// application store (`kind = "application"`, like the file manager). The
-/// backdrop menu's *Change Background* row launches it; the chooser then
-/// asks the session to adopt what the user picked over the pinboard
-/// rendezvous, holding no authority to write the store itself.
-pub const WALLPAPER_RUN_PATH: &str = "/System/Applications/wallpaper.app/Run";
+/// The Settings bundle's entry-point path in the system application store
+/// (`kind = "application"`, like the file manager). The backdrop menu's
+/// *Change Background* row launches it at its Wallpaper pane; Settings
+/// then asks the session to adopt what the user picked over the pinboard
+/// rendezvous, holding no authority to write the store — or even to read
+/// the shipped pictures — itself.
+pub const SETTINGS_RUN_PATH: &str = "/System/Applications/settings.app/Run";
 
 /// Label of the Date & Time app, for launch diagnostics.
 pub const DATETIME_LABEL: &str = "Date & Time";

@@ -97,8 +97,9 @@ and panic-free throughout.
   left waiting for an answer that will never come. The desk is only the
   bookkeeping; the exclusion, the parked worker thread, and the wake that
   reaches a loop's wait-set are `tairix_rt::work`, which every app-side
-  consumer drives it through. Consumed by the terminal's settings publisher and
-  the wallpaper chooser's applier (both via `tairix_rt::work`), the desktop
+  consumer drives it through. Consumed by the terminal's settings publisher
+  and the Settings application's applier (both via `tairix_rt::work`), the
+  desktop
   session's settings publisher, the session's program-catalogue scan, and the
   file manager's bundle scan.
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"

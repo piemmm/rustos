@@ -24,10 +24,11 @@ use tairix_icon::{IconArtwork, IconKind};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
-use tairix_wallpaper::DesktopSettings;
+use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::appearance::{Form, FormOutcome, FormPlace};
 use crate::frame::{resolve_frame, Overflow, ShellFrame};
+use crate::gallery::{Gallery, GalleryOutcome, PictureWanted};
 use crate::registry::{strip_rows, CategoryRow, Location, StripRow, CATEGORIES};
 use crate::statement;
 
@@ -130,6 +131,11 @@ pub struct Shell {
     /// The form the pane on show composes, or `None` for one that states an
     /// absence instead.
     form: Option<Form>,
+    /// The shipped pictures the desktop answered, empty until it has.
+    catalog: Vec<CatalogItem>,
+    /// The picture gallery the pane on show draws beneath its form, for the
+    /// one pane that has one.
+    gallery: Option<Gallery>,
 }
 
 impl Shell {
@@ -157,10 +163,85 @@ impl Shell {
             pointer: Point::ORIGIN,
             settings,
             form: None,
+            catalog: Vec::new(),
+            gallery: None,
         };
         shell.restate_trail();
         shell.restate_form();
         Some(shell)
+    }
+
+    /// Adopt the shipped picture catalog the desktop answered.
+    ///
+    /// Requested, never awaited: the Wallpaper pane opens on whatever has
+    /// arrived — nothing at all, at first — and rebuilds when it lands.
+    pub fn adopt_catalog(&mut self, catalog: Vec<CatalogItem>) {
+        self.catalog = catalog;
+        if self.gallery.is_some() {
+            self.gallery = Some(Gallery::new(&self.catalog, &self.settings));
+        }
+    }
+
+    /// The next picture the caller should ask the desktop to render for the
+    /// gallery, or `None` when there is nothing to ask for.
+    #[must_use]
+    pub fn next_picture_wanted(
+        &self,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<PictureWanted> {
+        let frame = self.frame(viewport, scale, theme);
+        let band = self.gallery_band(&frame, scale, theme)?;
+        self.gallery.as_ref()?.next_wanted(band, scale, theme)
+    }
+
+    /// Adopt the pixels the desktop rendered for catalog position `index`,
+    /// answering whether anything on screen changed.
+    pub fn set_picture(&mut self, index: u16, side: u16, pixels: &[u8]) -> bool {
+        self.gallery
+            .as_mut()
+            .is_some_and(|gallery| gallery.set_picture(index, side, pixels))
+    }
+
+    /// Record that the desktop refused catalog position `index`, answering
+    /// whether anything on screen changed.
+    pub fn mark_picture_refused(&mut self, index: u16) -> bool {
+        self.gallery
+            .as_mut()
+            .is_some_and(|gallery| gallery.mark_refused(index))
+    }
+
+    /// Ask for every rendered picture again, because a picture is square
+    /// at one side only and the desktop's scale has moved.
+    pub fn invalidate_pictures(&mut self) {
+        if let Some(gallery) = &mut self.gallery {
+            gallery.invalidate_pictures();
+        }
+    }
+
+    /// Show the pane `name` identifies, answering whether it named one.
+    ///
+    /// The desktop hands this over when it sends the reader here to change
+    /// a particular setting. It confers nothing and names nothing outside
+    /// the closed registry, so an unknown name leaves the window on the
+    /// pane it already showed.
+    pub fn go_to_pane(
+        &mut self,
+        name: &str,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        let Some(location) = Location::named(name) else {
+            return false;
+        };
+        if location == self.location {
+            return true;
+        }
+        self.go_to(location, viewport, scale, theme, damage);
+        true
     }
 
     /// Adopt the desktop settings the session now holds.
@@ -186,15 +267,45 @@ impl Shell {
             Some(form) => form.adopt(&self.settings),
             None => self.restate_form(),
         }
+        if let Some(gallery) = &mut self.gallery {
+            gallery.adopt(&self.settings);
+        }
     }
 
-    /// Build the form the pane on show composes, if it composes one.
+    /// Build the form the pane on show composes, and the gallery it draws
+    /// beneath it, if it has either.
     fn restate_form(&mut self) {
         self.form = self
             .location
             .rows()
             .and_then(|(_, pane)| pane.composition())
             .map(|composition| Form::new(composition, &self.settings));
+        self.gallery = self
+            .location
+            .rows()
+            .is_some_and(|(_, pane)| pane.has_gallery())
+            .then(|| Gallery::new(&self.catalog, &self.settings));
+    }
+
+    /// The band the gallery is drawn in: what `frame.content` has left
+    /// below the form that sits fixed at its top.
+    ///
+    /// The rows are the part the reader came for, so they keep their place
+    /// and the pictures are what scrolls — and a window too short for both
+    /// still shows the rows.
+    fn gallery_band(&self, frame: &ShellFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
+        self.gallery.as_ref()?;
+        let header = self
+            .form
+            .as_ref()
+            .map_or(0, |form| form.measured_height(scale, theme));
+        let height = frame.content.height.checked_sub(header)?;
+        Some(Rect::new(
+            frame.content.left(),
+            frame.content.top().saturating_add(to_i32(header)),
+            frame.content.width,
+            height,
+        ))
     }
 
     /// Where the surface is.
@@ -250,21 +361,36 @@ impl Shell {
             strip: bare
                 .sidebar
                 .is_some_and(|rect| self.strip.seated(rect, scale, theme) < self.rows.len()),
-            pane: self.content_height(bare.content.width, scale, theme) > bare.content.height,
+            pane: self.gallery.as_ref().map_or_else(
+                || self.content_height(bare.content.width, scale, theme) > bare.content.height,
+                |gallery| {
+                    self.gallery_band(&bare, scale, theme).is_some_and(|band| {
+                        gallery.scroll_range(band, scale, theme, 0).is_scrollable()
+                    })
+                },
+            ),
         };
         // A column that needs a bar is the narrower for it, and a narrower
         // pane column wraps its statement into more lines — so the columns
         // the ranges are set from are the ones a bar has already been taken
         // out of.
         let frame = resolve_frame(viewport, scale, theme, overflow);
-        // Groups for a form, because that is the unit a placed plate moves
-        // in; pixels for a statement, which is drawn at any offset.
-        let (extent, seen) = match &self.form {
-            Some(form) => (
+        // Tile lines for a gallery, groups for a form — each is the unit
+        // the thing that scrolls actually moves in — and pixels for a
+        // statement, which is drawn at any offset.
+        let (extent, seen) = match (&self.gallery, &self.form) {
+            (Some(gallery), _) => {
+                let band = self
+                    .gallery_band(&frame, scale, theme)
+                    .unwrap_or(frame.content);
+                let range = gallery.scroll_range(band, scale, theme, self.scroll.model().offset());
+                (range.content_extent(), range.viewport_extent())
+            }
+            (None, Some(form)) => (
                 groups_as_extent(form.groups_len()),
                 groups_as_extent(form.seated(place(frame.content, viewport, scale, theme))),
             ),
-            None => (
+            (None, None) => (
                 u64::from(self.content_height(frame.content.width, scale, theme)),
                 u64::from(frame.content.height),
             ),
@@ -384,9 +510,25 @@ impl Shell {
                 u32::try_from(frame.content.top()).unwrap_or(0),
                 frame.content.width,
                 frame.content.height,
-                |clipped| match &self.form {
-                    Some(form) => form.render(clipped, place(column, viewport, scale, theme)),
-                    None => statement::render(clipped, pane, column, scale, theme),
+                |clipped| match (&self.gallery, &self.form) {
+                    (Some(gallery), form) => {
+                        if let Some(form) = form {
+                            form.render(clipped, place(frame.content, viewport, scale, theme));
+                        }
+                        if let Some(band) = self.gallery_band(&frame, scale, theme) {
+                            gallery.render(
+                                clipped,
+                                band,
+                                self.scroll.model().offset(),
+                                scale,
+                                theme,
+                            );
+                        }
+                    }
+                    (None, Some(form)) => {
+                        form.render(clipped, place(column, viewport, scale, theme));
+                    }
+                    (None, None) => statement::render(clipped, pane, column, scale, theme),
                 },
             );
         }
@@ -493,6 +635,31 @@ impl Shell {
                 if !matches!(acted, FormOutcome::Idle) {
                     self.focus_on(Focus::Content, viewport, scale, theme, damage);
                     return outcome_of(acted);
+                }
+            }
+            // Under the form, never over it: an open choice list hangs over
+            // the gallery and keeps the pointer until it resolves, which
+            // the form has already answered for above.
+            if let Some(band) = self.gallery_band(&frame, scale, theme) {
+                let offset = self.scroll.model().offset();
+                if let Some(gallery) = &mut self.gallery {
+                    let acted = gallery.on_pointer(event, band, offset, scale, theme, damage);
+                    if acted.changed() {
+                        self.focus_on(Focus::Content, viewport, scale, theme, damage);
+                    }
+                    return match acted {
+                        GalleryOutcome::Idle => ShellOutcome::Idle,
+                        GalleryOutcome::Changed => ShellOutcome::Changed,
+                        GalleryOutcome::Chose(settings) => {
+                            self.settings = settings;
+                            if let Some(form) = &mut self.form {
+                                form.adopt(&self.settings);
+                                ShellOutcome::Apply(form.applied())
+                            } else {
+                                ShellOutcome::Changed
+                            }
+                        }
+                    };
                 }
             }
         }
@@ -615,8 +782,10 @@ impl Shell {
             Some(ScrollAction::ScrollTo { offset }) => {
                 self.scroll.set_model(self.scroll.model().scroll_to(offset));
                 // A form's scroll is counted in groups, because that is the
-                // unit a placed plate can move in.
-                if let Some(form) = &mut self.form {
+                // unit a placed plate can move in — but on a pane whose
+                // gallery is what scrolls, the form is the fixed header and
+                // the offset is in tile lines, not groups.
+                if let (None, Some(form)) = (&self.gallery, &mut self.form) {
                     form.set_first(usize::try_from(offset).unwrap_or(usize::MAX));
                 }
                 damage.add(column);

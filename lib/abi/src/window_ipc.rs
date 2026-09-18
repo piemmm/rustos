@@ -1896,6 +1896,50 @@ pub enum WindowRequest {
     /// gating it would only force every application to guess at facts the
     /// user can see by looking at their monitor.
     QueryDesktop,
+    /// Ask the session for a page of the shipped wallpaper catalog, from
+    /// entry `from` onward.
+    ///
+    /// The same posture as [`Self::QueryDesktop`]: it describes the seat's
+    /// own read-only shipped store, carries no capability, and grants
+    /// nothing. The session lists that store once — `/System` is read-only,
+    /// so its catalog is fixed for the life of the boot — and answers from
+    /// what it holds, so the reply costs no I/O.
+    ///
+    /// The reply is a page rather than the whole catalog because the
+    /// channel's reply frame is bounded: it carries the catalog's total
+    /// length and as many entries from `from` as fit
+    /// ([`decode_wallpapers_reply`]), so a caller asks again from where the
+    /// page ended until it has them all.
+    QueryWallpapers {
+        /// The first catalog entry the page answers, counted from zero.
+        from: u16,
+    },
+    /// Ask the session to render catalog entry `index` of the shipped
+    /// wallpaper store as a `side`×`side` straight-alpha RGBA8 picture in
+    /// the region granted as `shm_handle`.
+    ///
+    /// The candidate is named by its **catalog position**, never by a path:
+    /// the session resolves it against the store it listed itself, so this
+    /// can never make the session read a file the caller chose.
+    ///
+    /// The reply is only the acceptance. The render is asynchronous — the
+    /// session decodes untrusted picture bytes in its own parser sandbox,
+    /// off its compositing loop — and concludes with a
+    /// [`WindowEvent::WallpaperRendered`] delivered to `window_id`'s event
+    /// endpoint. One render may be pending per window; a second request
+    /// while one is pending is refused ([`Errno::AlreadyExists`]).
+    RenderWallpaper {
+        /// The requesting app's own window the conclusion is delivered to.
+        window_id: u64,
+        /// The granted region the picture is written into, which must hold
+        /// at least `side * side * 4` bytes.
+        shm_handle: u64,
+        /// The catalog position of the wallpaper to render.
+        index: u16,
+        /// The square side, in physical pixels, to render at. Within
+        /// `1..=`[`WINDOW_WALLPAPER_PREVIEW_MAX_SIDE`].
+        side: u16,
+    },
     /// Declare (or re-declare) the calling **application's** presence on
     /// the desktop's icon bar: where its bar events reach it, whether it
     /// handles the primary click itself, and the menu a secondary press
@@ -2181,6 +2225,10 @@ const OP_PLACE_LAYER: u16 = 20;
 const OP_TAKE_TERRAIN: u16 = 21;
 /// Wire operation of [`WindowRequest::SetSizing`].
 const OP_SET_SIZING: u16 = 22;
+/// Wire operation discriminant of [`WindowRequest::QueryWallpapers`].
+const OP_QUERY_WALLPAPERS: u16 = 23;
+/// Wire operation discriminant of [`WindowRequest::RenderWallpaper`].
+const OP_RENDER_WALLPAPER: u16 = 24;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -2223,6 +2271,30 @@ const QUERY_DESKTOP_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 /// Encoded size of a [`WindowRequest::TakeMenuText`]: the header, the window
 /// the chain belonged to, and the open whose commit is being pulled.
 const TAKE_MENU_TEXT_WIRE_LEN: usize = REQUEST_HEADER_LEN + 16;
+
+/// Encoded size of a [`WindowRequest::QueryWallpapers`]: the header and the
+/// page's first entry. It names no window — the catalog is the seat's, not
+/// any one window's.
+const QUERY_WALLPAPERS_WIRE_LEN: usize = REQUEST_HEADER_LEN + 2;
+
+/// Byte offset of a [`WindowRequest::RenderWallpaper`]'s granted region.
+const RENDER_WALLPAPER_SHM_OFFSET: usize = REQUEST_HEADER_LEN + 8;
+/// Byte offset of the catalog position being rendered.
+const RENDER_WALLPAPER_INDEX_OFFSET: usize = RENDER_WALLPAPER_SHM_OFFSET + 8;
+/// Byte offset of the square destination side.
+const RENDER_WALLPAPER_SIDE_OFFSET: usize = RENDER_WALLPAPER_INDEX_OFFSET + 2;
+/// Encoded size of a [`WindowRequest::RenderWallpaper`].
+const RENDER_WALLPAPER_WIRE_LEN: usize = RENDER_WALLPAPER_SIDE_OFFSET + 2;
+
+/// Largest square side, in physical pixels, a
+/// [`WindowRequest::RenderWallpaper`] may name.
+///
+/// A fixed validation bound on what one request may make the session
+/// rasterise and map, not a capacity: it is the same ceiling the parser
+/// sandbox already puts on an icon raster, and a gallery tile at the widest
+/// UI scale is well inside it. A caller wanting a bigger picture wants the
+/// wallpaper itself, which is the session's own business.
+pub const WINDOW_WALLPAPER_PREVIEW_MAX_SIDE: u16 = 512;
 
 /// Encoded size of a [`WindowRequest::TakeOpenTarget`]: the header alone.
 /// The queue it pulls from is the calling application's, whose identity the
@@ -2513,6 +2585,8 @@ impl WindowRequest {
             Self::SetSizing { .. } => SET_SIZING_WIRE_LEN,
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
             Self::QueryDesktop => QUERY_DESKTOP_WIRE_LEN,
+            Self::QueryWallpapers { .. } => QUERY_WALLPAPERS_WIRE_LEN,
+            Self::RenderWallpaper { .. } => RENDER_WALLPAPER_WIRE_LEN,
             Self::SetAppBar(ref bar) => {
                 app_bar_wire_len(bar.menu.len(), bar.menu.text_len as usize)
             }
@@ -2594,6 +2668,8 @@ impl WindowRequest {
             Self::SetSizing { .. } => OP_SET_SIZING,
             Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
             Self::QueryDesktop => OP_QUERY_DESKTOP,
+            Self::QueryWallpapers { .. } => OP_QUERY_WALLPAPERS,
+            Self::RenderWallpaper { .. } => OP_RENDER_WALLPAPER,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
             Self::OpenMenu { .. } => OP_OPEN_MENU,
             Self::TakeOpenTarget => OP_TAKE_OPEN_TARGET,
@@ -2695,12 +2771,36 @@ impl WindowRequest {
             // The two header-only operations: both name the caller, whose
             // identity the kernel attests, so neither carries an operand.
             Self::TakeOpenTarget | Self::QueryDesktop => {}
+            Self::QueryWallpapers { .. } | Self::RenderWallpaper { .. } => {
+                self.write_wallpaper_operands(out);
+            }
             Self::SetAppBar(ref bar) => write_app_bar(out, bar),
             Self::OpenMenu {
                 window_id,
                 anchor,
                 ref menu,
             } => write_open_menu(out, window_id, anchor, menu),
+        }
+    }
+
+    /// Write a wallpaper operation's operand block: a catalog page's first
+    /// entry, or a render's window, region, catalog position and side. A
+    /// no-op for any other request.
+    fn write_wallpaper_operands(&self, out: &mut [u8]) {
+        match *self {
+            Self::QueryWallpapers { from } => put_u16(out, REQUEST_HEADER_LEN, from),
+            Self::RenderWallpaper {
+                window_id,
+                shm_handle,
+                index,
+                side,
+            } => {
+                put_u64(out, 8, window_id);
+                put_u64(out, RENDER_WALLPAPER_SHM_OFFSET, shm_handle);
+                put_u16(out, RENDER_WALLPAPER_INDEX_OFFSET, index);
+                put_u16(out, RENDER_WALLPAPER_SIDE_OFFSET, side);
+            }
+            _ => {}
         }
     }
 
@@ -2931,9 +3031,35 @@ impl WindowRequest {
                 exact_len(bytes, QUERY_DESKTOP_WIRE_LEN)?;
                 Ok(Self::QueryDesktop)
             }
+            OP_QUERY_WALLPAPERS => read_query_wallpapers(bytes),
+            OP_RENDER_WALLPAPER => read_render_wallpaper(bytes),
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode a [`WindowRequest::QueryWallpapers`] frame.
+fn read_query_wallpapers(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, QUERY_WALLPAPERS_WIRE_LEN)?;
+    Ok(WindowRequest::QueryWallpapers {
+        from: read_u16(bytes, REQUEST_HEADER_LEN),
+    })
+}
+
+/// Decode a [`WindowRequest::RenderWallpaper`] frame.
+fn read_render_wallpaper(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, RENDER_WALLPAPER_WIRE_LEN)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let side = read_u16(bytes, RENDER_WALLPAPER_SIDE_OFFSET);
+    if side == 0 || side > WINDOW_WALLPAPER_PREVIEW_MAX_SIDE {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(WindowRequest::RenderWallpaper {
+        window_id,
+        shm_handle: read_u64(bytes, RENDER_WALLPAPER_SHM_OFFSET),
+        index: read_u16(bytes, RENDER_WALLPAPER_INDEX_OFFSET),
+        side,
+    })
 }
 
 /// Write a [`WindowRequest::HandOverLaunch`]'s operands into the already-
@@ -3767,13 +3893,16 @@ pub fn decode_terrain_reply<'a>(
 
 /// What the desktop has queued for an application to open.
 ///
-/// Two forms, because two things can be handed over and they are not the
-/// same kind of thing. A **path** names a file or folder and confers
+/// Three forms, because three things can be handed over and they are not
+/// the same kind of thing. A **path** names a file or folder and confers
 /// nothing: the application opens it under its own authority, exactly as it
 /// would an argument. A **document** is a file that has *already* been
 /// opened by whoever handed it over, reachable through a one-shot
 /// delegation — which is the only form an application holding no filesystem
-/// capability at all can act on.
+/// capability at all can act on. A **pane** names a place *inside* the
+/// application: it is neither authority nor a file, just a name the
+/// application resolves against its own closed set of places, and one it
+/// does not recognise leaves it showing whatever it already showed.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum OpenTarget<'a> {
     /// A path the user named. Bounded by [`crate::FS_PATH_MAX`].
@@ -3786,7 +3915,18 @@ pub enum OpenTarget<'a> {
         /// The `fd_redeem` handle, minted to this application. Never zero.
         grant: u64,
     },
+    /// A place inside the application. Bounded by
+    /// [`WINDOW_PANE_NAME_MAX`].
+    Pane(&'a [u8]),
 }
+
+/// Longest pane name an [`OpenTarget::Pane`] may carry, in bytes.
+///
+/// A fixed validation bound, not a capacity: a pane name is resolved
+/// against an application's own closed set of places, so it is a short
+/// identifier and never user text. Thirty-two bytes is more than any such
+/// identifier needs and keeps the queued entry small.
+pub const WINDOW_PANE_NAME_MAX: usize = 32;
 
 /// Encoded length of a [`WindowRequest::TakeOpenTarget`] reply: a status
 /// word, the entry's kind, the text length, a grant handle, then room for
@@ -3815,6 +3955,8 @@ const OPEN_TARGET_KIND_EMPTY: u16 = 0;
 const OPEN_TARGET_KIND_PATH: u16 = 1;
 /// Wire kind of an [`OpenTarget::Document`].
 const OPEN_TARGET_KIND_DOCUMENT: u16 = 2;
+/// Wire kind of an [`OpenTarget::Pane`].
+const OPEN_TARGET_KIND_PANE: u16 = 3;
 
 /// Encode a [`WindowRequest::TakeOpenTarget`] outcome into `out`, answering
 /// the number of bytes written.
@@ -3837,17 +3979,19 @@ pub fn encode_open_target_reply(
         Ok(None) => (OPEN_TARGET_KIND_EMPTY, &[][..], 0),
         Ok(Some(OpenTarget::Path(path))) => (OPEN_TARGET_KIND_PATH, path, 0),
         Ok(Some(OpenTarget::Document { name, grant })) => (OPEN_TARGET_KIND_DOCUMENT, name, grant),
+        Ok(Some(OpenTarget::Pane(pane))) => (OPEN_TARGET_KIND_PANE, pane, 0),
     };
     let bound = match kind {
         OPEN_TARGET_KIND_DOCUMENT => crate::FS_NAME_MAX,
+        OPEN_TARGET_KIND_PANE => WINDOW_PANE_NAME_MAX,
         _ => crate::FS_PATH_MAX,
     };
     if text.len() > bound || u16::try_from(text.len()).is_err() {
         return refuse(out, Errno::LengthOutOfRange);
     }
-    // An empty path is not a target and a zero handle names no delegation;
-    // either would be an answer the puller could not act on.
-    if (kind == OPEN_TARGET_KIND_PATH && text.is_empty())
+    // An empty path or pane name is not a target and a zero handle names no
+    // delegation; any of them would be an answer the puller could not act on.
+    if ((kind == OPEN_TARGET_KIND_PATH || kind == OPEN_TARGET_KIND_PANE) && text.is_empty())
         || (kind == OPEN_TARGET_KIND_DOCUMENT && grant == 0)
     {
         return refuse(out, Errno::OutOfRange);
@@ -3889,6 +4033,7 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
         OPEN_TARGET_KIND_EMPTY => 0,
         OPEN_TARGET_KIND_PATH => crate::FS_PATH_MAX,
         OPEN_TARGET_KIND_DOCUMENT => crate::FS_NAME_MAX,
+        OPEN_TARGET_KIND_PANE => WINDOW_PANE_NAME_MAX,
         _ => return Err(Errno::OutOfRange),
     };
     if len > bound || OPEN_TARGET_REPLY_TEXT_OFFSET + len > bytes.len() {
@@ -3901,8 +4046,209 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
         OPEN_TARGET_KIND_DOCUMENT if grant != 0 => {
             Ok(Some(OpenTarget::Document { name: text, grant }))
         }
+        OPEN_TARGET_KIND_PANE if grant == 0 && len != 0 => Ok(Some(OpenTarget::Pane(text))),
         _ => Err(Errno::OutOfRange),
     }
+}
+
+/// One entry of the shipped wallpaper catalog as the session answers it:
+/// the store category directory it is filed under, and its own file name.
+///
+/// Two names rather than a path, because a path is what the *caller* then
+/// builds from them through the one shared spelling
+/// (`tairix_wallpaper::wallpaper_path`) — so the catalog and the settings
+/// document a chosen wallpaper produces can never disagree about where it
+/// lives.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct WallpaperEntry<'a> {
+    /// The category directory, which is also the label the store files it
+    /// under. Never empty.
+    pub category: &'a [u8],
+    /// The wallpaper's own file name inside that category. Never empty.
+    pub file: &'a [u8],
+}
+
+/// Bytes of catalog text one [`WindowRequest::QueryWallpapers`] reply
+/// carries.
+///
+/// A page bound, not a capacity: it holds every entry of any store a
+/// desktop ships in one reply while keeping the channel's shared reply
+/// buffer the size the widest existing reply already made it. A caller
+/// with more entries than one page holds asks again from where the page
+/// ended.
+pub const WINDOW_WALLPAPERS_PAGE_BYTES: usize = 2048;
+
+/// Byte offset of the catalog's total entry count in a
+/// [`WindowRequest::QueryWallpapers`] reply.
+const WALLPAPERS_REPLY_TOTAL_OFFSET: usize = 4;
+/// Byte offset of this page's entry count.
+const WALLPAPERS_REPLY_COUNT_OFFSET: usize = WALLPAPERS_REPLY_TOTAL_OFFSET + 2;
+/// Byte offset of the first packed entry.
+const WALLPAPERS_REPLY_ENTRIES_OFFSET: usize = WALLPAPERS_REPLY_COUNT_OFFSET + 2;
+
+/// Encoded length of the longest [`WindowRequest::QueryWallpapers`] reply:
+/// a status word, the catalog total, this page's count, then one page of
+/// packed entries.
+///
+/// The frame is *variable* length on the wire ([`encode_wallpapers_reply`]
+/// writes only what the page holds), so an empty catalog costs eight bytes.
+pub const WINDOW_WALLPAPERS_REPLY_MAX: usize =
+    WALLPAPERS_REPLY_ENTRIES_OFFSET + WINDOW_WALLPAPERS_PAGE_BYTES;
+
+/// Encoded length of one packed catalog entry: a length byte per name,
+/// then the two names.
+const fn wallpaper_entry_wire_len(category: usize, file: usize) -> usize {
+    2 + category + file
+}
+
+/// Encode a [`WindowRequest::QueryWallpapers`] outcome into `out`,
+/// answering the number of bytes written.
+///
+/// `total` is the whole catalog's length and `entries` the page starting at
+/// the request's `from`; only as many of them as the page holds are
+/// written, and the count says how many that was, so a caller knows to ask
+/// again. An entry either name of which is empty or over-long is the
+/// session contradicting its own catalog model, so the whole reply is
+/// refused rather than a partial catalog offered.
+///
+/// A refusal is the shared status frame, so a client issues one receive
+/// whatever the answer.
+#[must_use]
+pub fn encode_wallpapers_reply<'a, I>(
+    out: &mut [u8; WINDOW_WALLPAPERS_REPLY_MAX],
+    result: Result<(u16, I), Errno>,
+) -> usize
+where
+    I: IntoIterator<Item = WallpaperEntry<'a>>,
+{
+    *out = [0u8; WINDOW_WALLPAPERS_REPLY_MAX];
+    let refuse = |out: &mut [u8; WINDOW_WALLPAPERS_REPLY_MAX], err: Errno| {
+        out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+        4
+    };
+    let (total, entries) = match result {
+        Ok(page) => page,
+        Err(err) => return refuse(out, err),
+    };
+    let mut at = WALLPAPERS_REPLY_ENTRIES_OFFSET;
+    let mut written: u16 = 0;
+    for entry in entries {
+        if entry.category.is_empty()
+            || entry.file.is_empty()
+            || entry.category.len() > crate::FS_NAME_MAX
+            || entry.file.len() > crate::FS_NAME_MAX
+        {
+            return refuse(out, Errno::LengthOutOfRange);
+        }
+        let len = wallpaper_entry_wire_len(entry.category.len(), entry.file.len());
+        if at + len > WINDOW_WALLPAPERS_REPLY_MAX {
+            break;
+        }
+        // Both lengths are `1..=FS_NAME_MAX`, checked above, so each fits a
+        // byte.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            out[at] = entry.category.len() as u8;
+            out[at + 1] = entry.file.len() as u8;
+        }
+        out[at + 2..at + 2 + entry.category.len()].copy_from_slice(entry.category);
+        out[at + 2 + entry.category.len()..at + len].copy_from_slice(entry.file);
+        at += len;
+        written = written.saturating_add(1);
+    }
+    put_u16(out, WALLPAPERS_REPLY_TOTAL_OFFSET, total);
+    put_u16(out, WALLPAPERS_REPLY_COUNT_OFFSET, written);
+    at
+}
+
+/// One page of a decoded [`WindowRequest::QueryWallpapers`] reply: the
+/// catalog's total length, and the entries this page carried.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct WallpaperPage<'a> {
+    /// How many entries the whole catalog holds, so a caller knows whether
+    /// to ask again.
+    pub total: u16,
+    /// The packed entries this page carried, still in their frame.
+    body: &'a [u8],
+    /// How many entries `body` holds.
+    count: u16,
+}
+
+impl<'a> WallpaperPage<'a> {
+    /// How many entries this page carried.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// Whether this page carried no entries.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The entries this page carried, in catalog order.
+    pub fn entries(&self) -> impl Iterator<Item = WallpaperEntry<'a>> + '_ {
+        let mut at = 0usize;
+        (0..self.count).filter_map(move |_| {
+            let category_len = usize::from(*self.body.get(at)?);
+            let file_len = usize::from(*self.body.get(at + 1)?);
+            let names = self
+                .body
+                .get(at + 2..at + wallpaper_entry_wire_len(category_len, file_len))?;
+            at += wallpaper_entry_wire_len(category_len, file_len);
+            Some(WallpaperEntry {
+                category: names.get(..category_len)?,
+                file: names.get(category_len..)?,
+            })
+        })
+    }
+}
+
+/// Decode a [`WindowRequest::QueryWallpapers`] reply.
+///
+/// Every declared length is checked against the frame it arrived in before
+/// any of it is read, so a reply claiming more entries or longer names than
+/// it carries is refused rather than read past.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame too short to hold its own header.
+/// * [`Errno::LengthOutOfRange`] for a page whose entries do not fit the
+///   frame, a count the body cannot hold, or a page longer than the catalog
+///   it claims to be part of.
+/// * [`Errno::OutOfRange`] for an entry naming an empty category or file.
+pub fn decode_wallpapers_reply(bytes: &[u8]) -> Result<WallpaperPage<'_>, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < WALLPAPERS_REPLY_ENTRIES_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let total = read_u16(bytes, WALLPAPERS_REPLY_TOTAL_OFFSET);
+    let count = read_u16(bytes, WALLPAPERS_REPLY_COUNT_OFFSET);
+    if count > total {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let body = &bytes[WALLPAPERS_REPLY_ENTRIES_OFFSET..];
+    // Walk the declared entries once, here, so `entries()` can never read
+    // past the frame and needs no error path of its own.
+    let mut at = 0usize;
+    for _ in 0..count {
+        let (Some(&category_len), Some(&file_len)) = (body.get(at), body.get(at + 1)) else {
+            return Err(Errno::LengthOutOfRange);
+        };
+        if category_len == 0 || file_len == 0 {
+            return Err(Errno::OutOfRange);
+        }
+        let len = wallpaper_entry_wire_len(usize::from(category_len), usize::from(file_len));
+        if at + len > body.len() {
+            return Err(Errno::LengthOutOfRange);
+        }
+        at += len;
+    }
+    Ok(WallpaperPage { total, body, count })
 }
 
 /// Encoded length of the longest [`WindowRequest::TakeMenuText`] reply: a
@@ -4172,6 +4518,8 @@ const EV_OPEN_REQUESTED: u16 = 17;
 const EV_TERRAIN_CHANGED: u16 = 18;
 /// Wire kind discriminant of [`WindowEvent::LayerPointer`].
 const EV_LAYER_POINTER: u16 = 19;
+/// Wire kind of [`WindowEvent::WallpaperRendered`].
+const EV_WALLPAPER_RENDERED: u16 = 20;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -4280,6 +4628,26 @@ pub enum WindowEvent {
     PickCancelled {
         /// The window whose pick was dismissed.
         window_id: u64,
+    },
+    /// A [`WindowRequest::RenderWallpaper`] concluded.
+    ///
+    /// `rendered` says whether the granted region now holds the picture:
+    /// the session refuses a candidate it cannot read or whose bytes its
+    /// parser sandbox will not decode, and says so here so the tile shows
+    /// its placeholder instead of waiting for pixels that are never
+    /// coming. The region is the caller's throughout — the session maps it
+    /// for the render and lets go of it before this is delivered.
+    WallpaperRendered {
+        /// The window that asked.
+        window_id: u64,
+        /// The catalog position that was asked for, echoed so an answer
+        /// cannot be adopted for the wrong tile.
+        index: u16,
+        /// The square side the picture was rendered at, echoed for the
+        /// same reason.
+        side: u16,
+        /// Whether the region holds the picture.
+        rendered: bool,
     },
     /// The window manager minimized the window (the user pressed the
     /// title-bar minimize control, or clicked the taskbar entry): it is
@@ -4472,6 +4840,24 @@ impl WindowEvent {
     /// (the embedded [`KeyInput`] record is the widest).
     pub const WIRE_LEN: usize = 40;
 
+    /// Write a [`Self::WallpaperRendered`]'s block into the already-headed
+    /// frame `out`. A no-op for any other event.
+    fn write_wallpaper_render(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let Self::WallpaperRendered {
+            index,
+            side,
+            rendered,
+            ..
+        } = *self
+        else {
+            return;
+        };
+        put_u16(out, 6, EV_WALLPAPER_RENDERED);
+        put_u16(out, 16, index);
+        put_u16(out, 18, side);
+        out[20] = u8::from(rendered);
+    }
+
     /// The window this event addresses, or `None` for an event addressed
     /// to the whole application rather than to one of its windows (the
     /// icon-bar events, which an application with no window open still
@@ -4486,6 +4872,7 @@ impl WindowEvent {
             | Self::AlternateCloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
             | Self::PickCancelled { window_id }
+            | Self::WallpaperRendered { window_id, .. }
             | Self::Minimized { window_id }
             | Self::Resized { window_id, .. }
             | Self::RedrawRequested { window_id }
@@ -4546,6 +4933,7 @@ impl WindowEvent {
             Self::PickCancelled { .. } => {
                 put_u16(&mut out, 6, EV_PICK_CANCELLED);
             }
+            Self::WallpaperRendered { .. } => self.write_wallpaper_render(&mut out),
             Self::Scrolled { dx, dy, .. } => {
                 put_u16(&mut out, 6, EV_SCROLLED);
                 put_i32(&mut out, 16, dx);
@@ -4679,6 +5067,7 @@ impl WindowEvent {
                 }
                 Ok(Self::FilePicked { window_id, handle })
             }
+            EV_WALLPAPER_RENDERED => read_wallpaper_render_event(window_id, bytes),
             EV_SCROLLED => {
                 event_reserved_zero(bytes, 24)?;
                 let dx = read_i32(bytes, 16);
@@ -4850,6 +5239,28 @@ fn read_menu_outcome(bytes: &[u8]) -> Result<MenuOutcome, Errno> {
 
 /// Refuse an event whose reserved tail (from `from` to the end of the
 /// fixed frame) carries any non-zero byte.
+/// Decode a [`WindowEvent::WallpaperRendered`] frame for `window_id`.
+fn read_wallpaper_render_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, 21)?;
+    let side = read_u16(bytes, 18);
+    // The echoed side is the one the request named, so a zero or over-bound
+    // value is a frame no accepted request could have produced.
+    if side == 0 || side > WINDOW_WALLPAPER_PREVIEW_MAX_SIDE {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let rendered = match bytes[20] {
+        0 => false,
+        1 => true,
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(WindowEvent::WallpaperRendered {
+        window_id,
+        index: read_u16(bytes, 16),
+        side,
+        rendered,
+    })
+}
+
 fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
     if bytes[from..WindowEvent::WIRE_LEN].iter().any(|&b| b != 0) {
         return Err(Errno::BadMagic);
@@ -4862,15 +5273,16 @@ mod tests {
     use super::{
         app_bar_wire_len, decode_create_reply, decode_desktop_reply, decode_hand_over_reply,
         decode_menu_text_reply, decode_minted_id_reply, decode_open_target_reply,
-        decode_terrain_reply, encode_create_reply, encode_desktop_reply, encode_hand_over_reply,
-        encode_menu_text_reply, encode_minted_id_reply, encode_open_target_reply,
-        encode_terrain_reply, hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64,
-        read_u16, AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText,
-        AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
-        AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath, DocumentName, HandOverDocument,
+        decode_terrain_reply, decode_wallpapers_reply, encode_create_reply, encode_desktop_reply,
+        encode_hand_over_reply, encode_menu_text_reply, encode_minted_id_reply,
+        encode_open_target_reply, encode_terrain_reply, encode_wallpapers_reply,
+        hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_u16, AppBar,
+        AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem,
+        AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
+        AppMenuRowView, AppMenuShortcut, BundleRunPath, DocumentName, HandOverDocument,
         HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PointerAction,
-        TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing,
-        WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
+        TerrainPlate, TooltipText, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
+        WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
         APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
         APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
         APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
@@ -4886,16 +5298,18 @@ mod tests {
         MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, OPEN_LAYER_WIRE_LEN,
         OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET,
         OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET,
-        PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_SIZING_OFFSET,
-        SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
-        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
-        SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT,
-        SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
-        WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
-        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN,
-        WINDOW_MAX_FRAMES, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
-        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX,
-        WINDOW_TITLE_MAX,
+        PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
+        RENDER_WALLPAPER_SIDE_OFFSET, RENDER_WALLPAPER_WIRE_LEN, REQUEST_HEADER_LEN,
+        SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET,
+        SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET,
+        SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH,
+        SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN,
+        TOOLTIP_TEXT_MAX, WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
+        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
+        WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
+        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+        WINDOW_PANE_NAME_MAX, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
+        WINDOW_WALLPAPERS_REPLY_MAX, WINDOW_WALLPAPER_PREVIEW_MAX_SIDE,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -7486,6 +7900,202 @@ mod tests {
         );
         put_u16(&mut out, 4, 9);
         assert_eq!(decode_open_target_reply(&out[..n]), Err(Errno::OutOfRange));
+    }
+
+    /// A pane confers nothing and names a place, so it carries no grant
+    /// and an empty one is not a target.
+    #[test]
+    fn a_pane_target_round_trips_and_is_bounded_to_an_identifier() {
+        let mut out = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
+        let n = encode_open_target_reply(&mut out, Ok(Some(OpenTarget::Pane(b"wallpaper"))));
+        assert_eq!(
+            decode_open_target_reply(&out[..n]),
+            Ok(Some(OpenTarget::Pane(b"wallpaper")))
+        );
+
+        let n = encode_open_target_reply(&mut out, Ok(Some(OpenTarget::Pane(b""))));
+        assert_eq!(decode_open_target_reply(&out[..n]), Err(Errno::OutOfRange));
+
+        let n = encode_open_target_reply(
+            &mut out,
+            Ok(Some(OpenTarget::Pane(&[b'p'; WINDOW_PANE_NAME_MAX + 1]))),
+        );
+        assert_eq!(
+            decode_open_target_reply(&out[..n]),
+            Err(Errno::LengthOutOfRange),
+            "a pane name is an identifier, not a path"
+        );
+    }
+
+    #[test]
+    fn the_two_wallpaper_requests_round_trip_and_refuse_a_side_no_request_could_name() {
+        let page = WindowRequest::QueryWallpapers { from: 7 };
+        assert_eq!(page.wire_len(), QUERY_WALLPAPERS_WIRE_LEN);
+        assert_eq!(WindowRequest::from_bytes(&page.frame()), Ok(page));
+
+        let render = WindowRequest::RenderWallpaper {
+            window_id: 3,
+            shm_handle: 0x99,
+            index: 5,
+            side: 64,
+        };
+        assert_eq!(render.wire_len(), RENDER_WALLPAPER_WIRE_LEN);
+        assert_eq!(WindowRequest::from_bytes(&render.frame()), Ok(render));
+
+        // The window is named, so a zero id is refused like every other
+        // window-scoped request, and the side is bounded at the wire.
+        for bad in [0, WINDOW_WALLPAPER_PREVIEW_MAX_SIDE + 1] {
+            let mut frame = render.frame();
+            put_u16(&mut frame, RENDER_WALLPAPER_SIDE_OFFSET, bad);
+            assert_eq!(
+                WindowRequest::from_bytes(&frame),
+                Err(Errno::LengthOutOfRange),
+                "side {bad} was admitted"
+            );
+        }
+        let mut frame = render.frame();
+        put_u64(&mut frame, 8, 0);
+        assert_eq!(WindowRequest::from_bytes(&frame), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_wallpaper_catalog_page_round_trips_and_refuses_what_it_cannot_carry() {
+        let mut out = [0u8; WINDOW_WALLPAPERS_REPLY_MAX];
+        let entries = [
+            WallpaperEntry {
+                category: b"TAIRiX",
+                file: b"a.jpg",
+            },
+            WallpaperEntry {
+                category: b"Space",
+                file: b"b.png",
+            },
+        ];
+        let n = encode_wallpapers_reply(&mut out, Ok((9, entries.iter().copied())));
+        let page = decode_wallpapers_reply(&out[..n]).expect("a page");
+        assert_eq!(page.total, 9);
+        assert_eq!(page.len(), 2);
+        for (answered, sent) in page.entries().zip(entries) {
+            assert_eq!(answered, sent);
+        }
+
+        // An empty catalog is an answer, not a refusal.
+        let n =
+            encode_wallpapers_reply(&mut out, Ok((0, core::iter::empty::<WallpaperEntry<'_>>())));
+        let page = decode_wallpapers_reply(&out[..n]).expect("a page");
+        assert_eq!(page.total, 0);
+        assert!(page.is_empty());
+
+        // A refusal is the shared status frame.
+        let n = encode_wallpapers_reply(
+            &mut out,
+            Err::<(u16, core::iter::Empty<WallpaperEntry<'_>>), Errno>(Errno::NotSupported),
+        );
+        assert_eq!(
+            decode_wallpapers_reply(&out[..n]).err(),
+            Some(Errno::NotSupported)
+        );
+
+        // A session contradicting its own catalog model is refused whole
+        // rather than offering a partial one.
+        let n = encode_wallpapers_reply(
+            &mut out,
+            Ok((
+                1,
+                core::iter::once(WallpaperEntry {
+                    category: b"",
+                    file: b"a.jpg",
+                }),
+            )),
+        );
+        assert_eq!(
+            decode_wallpapers_reply(&out[..n]).err(),
+            Some(Errno::LengthOutOfRange)
+        );
+    }
+
+    /// A page is bounded by the frame, so a store larger than one page
+    /// answers what fits and says how many there are in all.
+    #[test]
+    fn a_catalog_larger_than_one_page_is_truncated_and_says_so() {
+        let mut out = [0u8; WINDOW_WALLPAPERS_REPLY_MAX];
+        let long = core::iter::repeat_n(
+            WallpaperEntry {
+                category: b"TAIRiX",
+                file: b"wallpaper-master.jpg",
+            },
+            4096,
+        );
+        let n = encode_wallpapers_reply(&mut out, Ok((4096, long)));
+        let page = decode_wallpapers_reply(&out[..n]).expect("a page");
+        assert_eq!(page.total, 4096);
+        assert!(page.len() < 4096 && !page.is_empty());
+        assert_eq!(page.entries().count(), page.len());
+    }
+
+    /// A frame claiming more entries or longer names than it carries is
+    /// refused rather than read past.
+    #[test]
+    fn a_wallpaper_page_that_lies_about_its_body_is_refused() {
+        let mut out = [0u8; WINDOW_WALLPAPERS_REPLY_MAX];
+        let n = encode_wallpapers_reply(
+            &mut out,
+            Ok((
+                1,
+                core::iter::once(WallpaperEntry {
+                    category: b"TAIRiX",
+                    file: b"a.jpg",
+                }),
+            )),
+        );
+        assert_eq!(
+            decode_wallpapers_reply(&out[..n - 1]).err(),
+            Some(Errno::LengthOutOfRange)
+        );
+        // A count above the catalog's own total cannot be part of it.
+        put_u16(&mut out, WALLPAPERS_REPLY_COUNT_OFFSET, 2);
+        assert_eq!(
+            decode_wallpapers_reply(&out[..n]).err(),
+            Some(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_render_conclusion_round_trips_and_refuses_a_frame_no_render_produced() {
+        let concluded = WindowEvent::WallpaperRendered {
+            window_id: 3,
+            index: 5,
+            side: 64,
+            rendered: true,
+        };
+        let frame = concluded.to_le_bytes();
+        assert_eq!(WindowEvent::from_bytes(&frame), Ok(concluded));
+
+        let refused = WindowEvent::WallpaperRendered {
+            window_id: 3,
+            index: 5,
+            side: 64,
+            rendered: false,
+        };
+        assert_eq!(WindowEvent::from_bytes(&refused.to_le_bytes()), Ok(refused));
+
+        let mut bad = frame;
+        put_u16(&mut bad, 18, 0);
+        assert_eq!(
+            WindowEvent::from_bytes(&bad),
+            Err(Errno::LengthOutOfRange),
+            "a zero side is a frame no accepted request produced"
+        );
+        let mut bad = frame;
+        bad[20] = 2;
+        assert_eq!(WindowEvent::from_bytes(&bad), Err(Errno::OutOfRange));
+        let mut bad = frame;
+        bad[21] = 1;
+        assert_eq!(
+            WindowEvent::from_bytes(&bad),
+            Err(Errno::BadMagic),
+            "a dirty reserved tail is refused"
+        );
     }
 
     #[test]
