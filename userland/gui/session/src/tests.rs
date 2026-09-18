@@ -4712,6 +4712,117 @@ fn a_slot_is_announced_once_it_is_on_screen_and_again_only_if_it_returns() {
 }
 
 #[test]
+fn the_bar_settles_only_once_it_is_revealed_and_holding_its_resolved_pictures() {
+    const SIDE: u32 = 24;
+
+    // The witness a reader comparing the bar's pixels across two frames keys
+    // on, and the two races that made the slot witness unusable for it: the
+    // screen may still be dark when a slot first appears, and the slot may
+    // still hold its built-in glyph while its bundle's artwork is decoded.
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
+    let mut resolver = Deferring(Rc::clone(&desk));
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let mut art = ArtworkFileReader(identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[EDITOR_TINT],
+    ));
+    let mut manifests = MemoryAssets::default().with(
+        &format!("{EDITOR_BUNDLE}/AppInfo"),
+        &manifest_fixture(EDITOR_ID, "Editor", Some("icon.svg")),
+    );
+    let bundle = String::from(EDITOR_BUNDLE);
+
+    let owner = window_owner(1);
+    let mut service = AppBarService::new();
+    let mut settled = 0usize;
+    service.report_settled(true, || settled += 1);
+    assert_eq!(settled, 0, "an empty bar has not finished coming up");
+
+    service
+        .declare(owner, &app_bar(AppBarClick::Open))
+        .expect("declared");
+    let strip = service.strip(&[], |_| Some(bundle.clone()), &mut manifests);
+    service.report_settled(true, || settled += 1);
+    assert_eq!(
+        settled, 0,
+        "a strip just re-seated has had no picture resolved for it yet"
+    );
+
+    let slots = service.slots(&strip, &mut manifests, (&mut resolver, &mut cache, SIDE));
+    assert!(
+        slots[0].artwork().is_none(),
+        "the decode is in flight, so the slot draws its built-in glyph"
+    );
+    service.report_settled(true, || settled += 1);
+    assert_eq!(
+        settled, 0,
+        "a slot whose picture is still coming is not the picture it settles on"
+    );
+
+    // The decode lands, exactly as the serve loop's worker delivers it.
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    while let Some(job) = {
+        let taken = desk.borrow_mut().next_job();
+        taken
+    } {
+        let artwork = tairix_icon::render_artwork(&mut art, &mut rasteriser, &job.key, job.side);
+        assert!(desk.borrow_mut().deliver(&job, artwork).kept());
+    }
+    let slots = service.slots(&strip, &mut manifests, (&mut resolver, &mut cache, SIDE));
+    assert_eq!(
+        slots[0]
+            .artwork()
+            .and_then(|art| art.pixels().first().map(|pixel| pixel.r)),
+        Some(EDITOR_TINT),
+        "the slot now holds the bundle's own artwork"
+    );
+
+    service.report_settled(false, || settled += 1);
+    assert_eq!(
+        settled, 0,
+        "the screen is still dark, so nothing on it has been seen"
+    );
+    service.report_settled(true, || settled += 1);
+    assert_eq!(settled, 1, "revealed, seated, and resolved");
+    service.report_settled(true, || settled += 1);
+    assert_eq!(settled, 1, "and said once");
+}
+
+#[test]
+fn a_bar_slot_whose_artwork_is_refused_settles_on_its_glyph() {
+    // A bundle that ships no icon the desktop can draw never gets artwork, so
+    // waiting for one would hold the witness back for ever. Its glyph *is*
+    // the settled picture.
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let owner = window_owner(1);
+    let mut service = AppBarService::new();
+    service
+        .declare(owner, &app_bar(AppBarClick::Open))
+        .expect("declared");
+
+    let mut manifests = MemoryAssets::default().with(
+        &format!("{EDITOR_BUNDLE}/AppInfo"),
+        &manifest_fixture(EDITOR_ID, "Editor", Some("icon.svg")),
+    );
+    let bundle = String::from(EDITOR_BUNDLE);
+    let slots = with_artwork_over(
+        identity_bundle(MemoryAssets::default(), EDITOR_BUNDLE, "Editor", &[]),
+        |resolver, cache| {
+            let strip = service.strip(&[], |_| Some(bundle.clone()), &mut manifests);
+            service.slots(&strip, &mut manifests, (resolver, cache, 24))
+        },
+    );
+    assert!(slots[0].artwork().is_none(), "the asset is undecodable");
+
+    let mut settled = 0usize;
+    service.report_settled(true, || settled += 1);
+    assert_eq!(settled, 1, "a final refusal is a settled picture");
+}
+
+#[test]
 fn a_resident_instance_is_found_by_the_bundle_it_was_launched_from() {
     // What a hand-over resolves a live instance through: the bundle each
     // slot-holder was launched from, which the strip already records for its

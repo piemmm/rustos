@@ -407,15 +407,30 @@ why `View::cancelled` became `View::no_document(why)`: a refused *ask* is the
 one outcome with nothing coming after it, so a window withheld on it would
 never appear.
 
-**A document opens at 100%, and the window shrinks to hug it.** The viewport's
-default fit is `Fit::Actual`, so a picture is first shown at the size it was
-authored at rather than fitted to whatever window happened to open — the fit
-and fit-width *commands* are untouched and still available. The window then
-gives way to the picture rather than the other way round:
+**A document opens at 100% if it fits, and zoomed out to fit if it does not.**
+A picture the window can hold is first shown at the size it was authored at
+rather than fitted to whatever window happened to open (`Fit::Actual`); one too
+big for the window is shown whole, zoomed out (`Fit::Window`), because opening
+part-shown hides the picture behind its own corner. The fit and fit-width
+*commands* are untouched and still available either way.
+
+**One predicate decides both halves**, `View::fits_canvas` — asked through the
+fitted zoom the engine already computes rather than a second comparison of
+extents, so what "fits" means and what a fit resolves to cannot disagree. It
+reads the canvas *as it is*, so "too big for the window" means the window the
+document is being loaded into, and a page container reports its **largest**
+page until one decodes, so the decision covers every page it holds and is never
+revisited.
+
+**The window gives way only to a picture that fits.**
 `View::preferred_client_size` answers the client whose canvas is exactly the
-selected page's own pixels, **capped per axis at the size the viewer opens at**
-(shrink-only, so a photograph keeps the default window and pans inside it) and
-floored at `Layout::min_client`. `Run` applies it **once per document open** —
+selected page's own pixels, and answers *nothing* for a picture zoomed out to
+fit — hugging one axis of that would only leave the fitted picture smaller. It
+is therefore shrink-only by construction rather than by a separate cap: a
+picture that fits is no larger than the canvas and the canvas-to-client mapping
+only grows with its argument, so what it asks for is never bigger than the
+window already is. Floored at `Layout::min_client`, which the window manager
+already holds every window to, so the floor cannot grow one either. `Run` applies it **once per document open** —
 in the `Answer::Opened { Ok }` arm alone, never on a render, a zoom, or a
 resize — so it can never fight the user's own resize drag; a refused re-map
 leaves the window at the size it had. It runs *before* that window's first
@@ -543,8 +558,9 @@ clients, and their exit-code sets are their own.
 ## Status
 
 - `plans/VIEW.md` and the jump-sheet row — **done**.
-- **A document opens at 100% and the window hugs it; the toolbar fits at every
-  size** — **done**, as specified above. The window is sized before its first
+- **A document opens at 100% if it fits and zoomed out to fit if it does not;
+  the window hugs a picture that fits; the toolbar fits at every size** —
+  **done**, as specified above. The window is sized before its first
   present rather than after, so loading a picture shows one window at one size
   and never the default extent flashing to the picture's. The third document failing to appear
   after a window was closed was not the app: the kernel's blocking `wait`

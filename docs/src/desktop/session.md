@@ -1296,6 +1296,49 @@ the third window is aimed from a slot only a script that waited for the first
 two can name. The three-principal hand-over vertical
 ([apps](apps.md#rendering)) is built on exactly that.
 
+### And the icon bar's two: a slot on screen, and the strip settled
+
+`WINDOW_SHOWN` cannot speak for an application that owns no window, and the
+resident single-instance application — launched, sitting on the bar, opening a
+window only when told to — is exactly that shape. `APP_BAR_SLOT_SHOWN`
+("icon-bar slot on screen") is its witness, naming the application's opaque
+`ProcId` in an `app` field: emitted after a present that reached the display,
+once per application while it lives, and afresh if its process leaves the bar
+and comes back. It is the session's to state for the same reason its siblings
+are — the bar is the session's own pixels, and an application's own
+declaration reply says only that the declaration was *accepted*, not that a
+slot was drawn to press.
+
+`APP_BAR_SETTLED` ("icon-bar slots drawn on the revealed desktop") is the
+stronger, one-shot statement a reader of the bar's *pixels* needs, and the
+distance between the two is the point. A slot's own witness fires on the first
+frame that carries it, which is enough to click but not to photograph:
+
+* the screen may still be dark. `DESKTOP_REVEALED` and an application's
+  bring-up are unordered — the leading slot belongs to the file manager the
+  session autostarts, a separate process — and either may win. A reader keyed
+  on the reveal has been seen to photograph the strip 24 ms before the slot
+  reached it.
+* the slot may still hold its built-in glyph. A bundle's icon is read and
+  decoded through the sandboxed pipeline off the serve loop, so the artwork
+  lands a frame or two behind the slot that asked for it
+  ([icons](../lib/icon.md)).
+
+So the settled witness waits for all three facts at once: the reveal witness
+has been given, the strip seats at least one slot, and no slot is still
+waiting on a decode that is coming. The last is read from the artwork cache's
+own answer, which distinguishes a decode in flight from a final refusal — so a
+bundle that ships no drawable icon settles on its glyph instead of holding the
+witness back for ever, and a bar that never seats a slot stays silent rather
+than claiming a desktop that has not finished coming up.
+
+Two readers depend on them, as with the siblings. A user diagnosing an
+application that launched but showed nothing can tell "no slot" from "slot
+drawn, no window". And the desktop QEMU verticals gate on whichever is honest
+for what they do: a *click* on a resident slot on `APP_BAR_SLOT_SHOWN`, and a
+*screendump* whose pixels a later frame is compared against on
+`APP_BAR_SETTLED`.
+
 ### The chooser is a dialog
 
 The trusted picker wears the window manager's frame like anything else on

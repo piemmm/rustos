@@ -129,12 +129,16 @@ const PAN_STEP_PERCENT: u32 = 12;
 /// changes, because the whole point of a fit is that it holds; [`Free`] is
 /// the user's own factor and survives a resize.
 ///
-/// The default is [`Actual`]: a document opens at 100%, the size it was
-/// authored at, and the *window* gives way to the picture rather than the
-/// picture to the window.
+/// The default is [`Actual`], which is what a document the window can hold
+/// opens at: the size it was authored at, with the *window* giving way to the
+/// picture rather than the picture to the window. A document too big for its
+/// window opens [`Window`] instead — zoomed out until the whole of it is
+/// inside the canvas — because opening part-shown hides the picture behind
+/// its own corner.
 ///
 /// [`Free`]: Fit::Free
 /// [`Actual`]: Fit::Actual
+/// [`Window`]: Fit::Window
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum Fit {
     /// The whole picture inside the canvas.

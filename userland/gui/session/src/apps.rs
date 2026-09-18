@@ -58,8 +58,8 @@ use tairix_abi::{AppIdentity as AttestedApp, Errno, ProcId, PublisherId};
 use tairix_appstore::{decode_manifest, manifest_path};
 use tairix_geometry::Scale;
 use tairix_icon::{
-    ArtworkCache, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconKind, IconPicture,
-    IconRequest,
+    ArtworkCache, ArtworkOutcome, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconKind,
+    IconPicture, IconRequest,
 };
 use tairix_proglib::{Catalog, EntryId, IconAsset};
 use tairix_raster::{Region, Surface};
@@ -85,8 +85,7 @@ pub const BUNDLE_RUN_SUFFIX: &str = "/Run";
 pub const APP_BAR_RELAYED: tairix_log::EventId = tairix_log::EventId(20_007);
 
 /// Log event: an application's icon-bar slot reached the display for the
-/// first time, in the desktop session's reserved range. Id `20_009` is the
-/// next free slot.
+/// first time, in the desktop session's reserved range.
 ///
 /// The sibling of [`WINDOW_SHOWN`](crate::WINDOW_SHOWN), for an application
 /// that may own no window at all: a resident single-instance application sits
@@ -101,6 +100,30 @@ pub const APP_BAR_SLOT_SHOWN: tairix_log::EventId = tairix_log::EventId(20_009);
 /// The exact message [`APP_BAR_SLOT_SHOWN`] is emitted with. A log consumer
 /// keys on this constant rather than on a copy of its text.
 pub const APP_BAR_SLOT_SHOWN_MESSAGE: &str = "icon-bar slot on screen";
+
+/// One-shot: a *revealed* desktop frame has reached the display carrying the
+/// application strip, every slot drawn with the picture it will keep. Id
+/// `20_014` is the next free slot.
+///
+/// Neither half of that is [`APP_BAR_SLOT_SHOWN`], and the difference is the
+/// whole reason this exists. A slot's own witness fires on the first frame
+/// that carries it, which is enough to *click* it but not to photograph it:
+/// the screen may still be dark, because a reveal and an application's
+/// bring-up are unordered; and the slot may still hold its built-in glyph,
+/// because a bundle's artwork is read and decoded off the serve loop and
+/// lands a frame or two behind the slot that asked for it. So a reader
+/// wanting the bar's steady-state picture — a user judging whether the
+/// desktop finished coming up, a QEMU vertical taking a baseline it will
+/// compare pixels against — has no honest earlier record to key on.
+///
+/// Only the session can state it: the reveal is the fade's own fact, the
+/// decode's completion is the artwork cache's, and whether either reached
+/// the screen is the present's.
+pub const APP_BAR_SETTLED: tairix_log::EventId = tairix_log::EventId(20_014);
+
+/// The exact message [`APP_BAR_SETTLED`] is emitted with. A log consumer keys
+/// on this constant rather than on a copy of its text.
+pub const APP_BAR_SETTLED_MESSAGE: &str = "icon-bar slots drawn on the revealed desktop";
 
 /// One application's icon-bar declaration, exactly as the window engine
 /// attested and bounded it.
@@ -281,6 +304,14 @@ pub struct AppBarService {
     /// is announced once. An entry goes when its process does, so one that
     /// comes back is announced afresh.
     shown: BTreeSet<ProcId>,
+    /// Whether a slot on the strip is still waiting on a decode that is
+    /// coming, so the bar on screen is not yet the picture it settles on
+    /// ([`AppBarService::report_settled`]). Set by re-seating the strip and
+    /// answered by resolving its pictures, so between the two — and before
+    /// either — the conservative reading stands.
+    resolving: bool,
+    /// Whether the settled witness has been given, so it is given once.
+    announced: bool,
     dirty: bool,
 }
 
@@ -419,6 +450,9 @@ impl AppBarService {
             .collect();
         self.shown.retain(|owner| live.contains(owner));
         self.seated = groups.iter().map(|group| group.owner).collect();
+        // No picture has been resolved for *these* slots yet; only resolving
+        // them can say they have settled.
+        self.resolving = true;
         groups
     }
 
@@ -480,7 +514,8 @@ impl AppBarService {
         R: SessionFileReader + ?Sized,
     {
         let (resolver, cache, side) = artwork;
-        groups
+        let mut resolving = false;
+        let slots = groups
             .iter()
             .map(|group| {
                 let identity = self.identity(group.bundle.as_deref(), reader);
@@ -489,12 +524,15 @@ impl AppBarService {
                     .with_identity(identity);
                 if let Some(bundle) = group.bundle.as_deref() {
                     let request = IconRequest::bundle(IconKind::AppBundle, bundle);
-                    if let Some(art) = cache
-                        .artwork(resolver, request, side)
-                        .and_then(IconPicture::artwork)
-                        .cloned()
-                    {
-                        slot = slot.with_artwork(art);
+                    // A slot *stores* its picture, so this is the storing
+                    // caller's lookup, as a window's title band is: it keeps
+                    // a decode the cache had no room to retain, and says
+                    // whether a missing one is still coming or finally
+                    // refused — which the glyph the slot then draws cannot.
+                    match cache.owned_artwork(resolver, request, side) {
+                        ArtworkOutcome::Ready(art) => slot = slot.with_artwork(art),
+                        ArtworkOutcome::Pending => resolving = true,
+                        ArtworkOutcome::Refused => {}
                     }
                 }
                 if let Some(declared) = self.declared.get(&group.owner) {
@@ -502,7 +540,32 @@ impl AppBarService {
                 }
                 slot
             })
-            .collect()
+            .collect();
+        self.resolving = resolving;
+        slots
+    }
+
+    /// Report, once, that a revealed desktop frame has just carried the
+    /// application strip with every slot's own picture drawn.
+    ///
+    /// Called immediately after a frame reached the display, exactly as
+    /// [`report_newly_shown`](Self::report_newly_shown) is, with `revealed`
+    /// being whether the screen's own reveal witness has been given
+    /// ([`ScreenFade::revealed`](crate::ScreenFade::revealed)) — the fade's
+    /// fact, not the bar's, so it is handed in rather than guessed at.
+    ///
+    /// An empty strip says nothing: the desktop autostarts its components onto
+    /// the bar, so a bar with no slot at all has not finished coming up, and
+    /// announcing there would state the opposite of what a reader wants. Nor
+    /// does a strip still waiting on a decode, whose slot is drawn as its
+    /// built-in glyph and will change under a reader who took that for the
+    /// settled picture.
+    pub fn report_settled(&mut self, revealed: bool, report: impl FnOnce()) {
+        if self.announced || !revealed || self.resolving || self.seated.is_empty() {
+            return;
+        }
+        self.announced = true;
+        report();
     }
 
     /// The identity `bundle`'s signed manifest states, resolved once and

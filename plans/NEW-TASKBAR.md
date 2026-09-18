@@ -778,6 +778,16 @@ application is one kernel-attested process. What now stands:
   registry entry from one call (`TaskBridge::retitle` → `TaskList::retitle`),
   so the two can never name different subjects, and the picker's caption
   follows.
+- **The strip says when it is on screen, and when it has settled there.**
+  `APP_BAR_SLOT_SHOWN` names each application whose slot a presented frame
+  first carried — the only honest witness that a *resident* application, which
+  may never open a window, has become clickable. `APP_BAR_SETTLED` is the
+  stronger one-shot a reader comparing the bar's *pixels* needs: a frame that
+  was both fully revealed and carried every slot drawn as the picture it
+  keeps. The two differ because a slot appears before its bundle's artwork
+  finishes decoding, and because the screen's reveal is unordered against the
+  bring-up of the separate process that holds the leading slot
+  (`plans/OPEN-DEFECTS.md` D138).
 
 Tested in the taskbar suite (strip span and slot layout on all four edges,
 hit-testing, degenerate clipping, a slot's square matching a launcher's at

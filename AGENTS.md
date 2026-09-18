@@ -615,6 +615,7 @@ tairix/
 │   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb helper.
 │   ├── geometry/        # Shared screen geometry + desktop DPI/UI scale.
 │   ├── glob/            # Shared filename-glob matcher.
+│   ├── gpu/             # Device-neutral GPU render seam + named kernel registry.
 │   ├── greeter/         # Shared screen-authentication surface (login/lock).
 │   ├── hash/            # Keyed SipHash-1-3 + fast mixer + the per-boot seed.
 │   ├── help/            # Shared command-help engine.
@@ -643,7 +644,9 @@ tairix/
 │   ├── proglib/         # Program-library catalog registry (folders/entries).
 │   ├── raid/            # RAID composition engines (levels, dispatch, maintenance).
 │   ├── raidmeta/        # RAID array-member superblock format + reassembly.
-│   ├── raster/          # Shared software rasterisation.
+│   ├── raster/          # Shared software rasterisation + the parametric
+│   │                    #   outline primitives its scan converter fills.
+│   ├── recdb/           # Durable B+tree record store: WAL, recovery, indexes.
 │   ├── reclaim/         # Reclaimable-memory model: classification, budgets,
 │   │                    #   pressure bands, and the one bounded cache.
 │   ├── resolver/        # Userland DNS stub-resolver client (drives lib/net dns).
@@ -693,7 +696,18 @@ tairix/
 │   │   └── switchboard/ # System-overview monitor service (tray feed).
 │   ├── net/             # Userland networking services.
 │   │   └── netstack/    # The dual-stack network service (IPv4/IPv6/TCP/UDP).
-│   └── apps/            # Default apps. Each app is its own crate.
+│   ├── apps/            # Default apps. Each app is its own crate.
+│   └── games/           # Games. A leaf subtree: its crates compose each other
+│       │                #   and `lib/*`, and NOTHING outside it may depend on
+│       │                #   them, so game code never enters the OS libraries.
+│       └── wintersun/   #   The WinterSun RPG (plans/WINTERSUN.md).
+│           ├── app/     #     Client `Run` + the three realm server binaries.
+│           ├── art/     #     Material synthesis, decals, particles, palette.
+│           ├── ctl/     #     `wintersunctl`, the admin command bundle.
+│           ├── figure/  #     Rigs, sockets, pose clips, motion layers, presets.
+│           ├── net/     #     The realm wire protocol and session handshake.
+│           ├── rules/   #     The authoritative simulation and the game rules.
+│           └── world/   #     The seed-pure procedural world generator.
 │
 ├── docs/                # Long-form documentation (mdBook).
 │   ├── src/
@@ -1539,6 +1553,7 @@ You are not exempt from any rule above. In addition:
     | Menus: who owns a menu's pixels and behaviour, the one-menu-at-a-time rule, the app's request/outcome contract | `plans/NEW-MENUS.md` |
     | Tooltips: what an app declares (a window-local region and one line) versus what the seat owns (the dwell, the placement, the pixels, the lifetime), and the input-transparent overlay a plate is drawn in | `plans/TOOLTIPS.md` |
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |
+    | Reaching a GPU for *render* work: the device-neutral `lib/gpu` seam, the closed named-kernel registry that replaces a shader compiler, the virtio-gpu and V3D backends, and why OpenGL is refused | `plans/GPU.md` |
     | Desktop redraw speed without hardware acceleration: compositor occlusion/opaque runs, per-control damage, the frosted-backdrop cache, present batching, frame pacing, and CPU-dispatched raster kernels | `plans/FIX-DESKTOP-SPEEDUP.md` |
     | Civil time zones: the vendored IANA rules, the compiled zone store, the `lib/tz` engine, the `TZ`/machine-setting/UTC resolution order, and local rendering | `plans/TIMEZONES.md` |
     | Setting the clock: the NTP client service, the sync-decision policy (unset/implausible/stale-boot/refresh cadence), NTP-server politeness, RTC drivers and the wall clock's provenance ladder, and the enable/disable surfaces | `plans/TIMESYNC.md` |
@@ -1575,6 +1590,9 @@ You are not exempt from any rule above. In addition:
     | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The desktop companion (`cinder.app`) and the desktop-layer authority every companion-shaped app needs: `CAP_DESKTOP_LAYER`, the layer surface's containment controls, the terrain and pointer feeds, the elevated camera | `plans/CINDER.md` |
+    | The WinterSun RPG (`userland/games/wintersun`): the procedural world, the authoritative fixed-tick simulation, magic and combat, the realm server's gateway/zone/store split, interest management, the self-balancing economy, chat, the console and admin surfaces | `plans/WINTERSUN.md` |
+    | Parametric outline primitives in `lib/raster` (the one piece `cinder` and the game share), and the game-side figure engine above them: rigs, equipment sockets, pose-parameter clips and blending, procedural motion layers, and the contact-sheet harness that gates art quality | `plans/FIGURE.md` |
+    | Durable structured storage: the `lib/recdb` B+tree record store, its write-ahead log and commit barrier, recovery, snapshot transactions, secondary indexes, and per-page encryption at rest | `plans/RECDB.md` |
     | The `vim` app | `plans/VIM.md` |
     | Shared containers and hashing: the heap-backed tiers in `lib/collections`, the allocation-free tier in `lib/inline`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
     | Randomness: the non-cryptographic vs fast-secure vs DRBG tier split, the buffered ChaCha12 fast-key-erasure generator, the kernel output reserve's backing, task-id and scheduler draws, and the statistical test battery | `plans/FIX-RANDOMNESS.md` |
@@ -2357,6 +2375,7 @@ kernel/core                 → all of the above (the single selection point)
 drivers/*                   → lib/abi, lib/*               (NEVER kernel/*)
 userland/*                  → lib/* and the public syscall ABI only
 userland/gui/*              → no reverse dependents (see §17.3)
+userland/games/*            → lib/*, userland/games/*; no reverse dependents
 ```
 
 In particular: no kernel subsystem outside `kernel/core` may depend

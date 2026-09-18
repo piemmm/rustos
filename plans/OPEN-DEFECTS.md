@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 28 open, 106 closed, 134 total.
+table normalises all three to **closed**. 28 open, 107 closed, 135 total.
 
 ### Open (28)
 
@@ -54,10 +54,9 @@ table normalises all three to **closed**. 28 open, 106 closed, 134 total.
 | D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
 | D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static; `kernel/sched/api::park` would need one too. Distinct from D123, which is the UB oracle |
 | D132 | no run states whether a *double-click* in a file-manager window reaches `activate` on a guest | coverage gap with an unexplained observation behind it, not a confirmed defect. The `handover_qemu_aarch64` vertical originally injected the pair as one four-edge burst and never passed. The burst **was** delivered: four window events reached the manager's own event mailbox (`0xE117…` tagged with the `files` task) in the 60 ms after that window's first frame, and the manager repainted twice after them — yet no `fd_grant` followed. The aim was verified independently against the run's screendump and round-trips to the intended entry through the production hit-test, and the shared pairing rule accepts two presses 32 ms apart on one subject (neither `Moved` nor `Released` resets the tracker). So either the burst yielded one press rather than two, or the two resolved to different subjects — and **no existing record can tell them apart**: `MessageDelivered` carries a port, a sender and a length, every window event is 40 bytes, and no audit event anywhere names a pointer action. Answering it needs a witness that names the delivered event kind, plus re-adding injection (`PointerAction::DoubleClick` was deleted with its last consumer). The vertical now activates through the item's context-menu *Open* row, which runs the same `activate`, so the delegation chain is covered and only the pairing path is host-tested only |
-
 | D133 | a task can grow another task's kernel-side pending-`fd_grant` table without bound | noticed while re-pointing the hand-over vertical; not absorbed. Fail-closed refusal, not a capacity |
 
-### Closed (106)
+### Closed (107)
 
 | ID | Subject |
 |---|---|
@@ -167,6 +166,7 @@ table normalises all three to **closed**. 28 open, 106 closed, 134 total.
 | D129 | the `SleepLock` releaser deleted a live waiter's re-registered row, stranding it on a free lock |
 | D130 | a thread killed while parked left its row in every wait queue, where a counted wake spent itself on it |
 | D137 | the blocking `wait` registered the calling thread's *process* on the wait queue and parked the *thread*, so a non-leader reaper slept for the rest of the boot |
+| D138 | `desktop-pressure-qemu-aarch64` photographed its artwork baseline on the desktop's reveal, which orders against neither the bar seating a slot nor that slot's artwork landing |
 
 ## Scope
 
@@ -184,6 +184,12 @@ The open items, in priority order:
   `kernel/sched/api::park` with an honest error contract, and the enrolment
   gained a four-CPU row for the unlock -> store-scan -> autoload chain. The
   authoritative record is `plans/FIX-SLEEPLOCK.md` (S1, S3, S4, S6).
+- **D138 — the desktop-pressure vertical photographs its baseline before the
+  bar has drawn a slot.** A test defect, not a desktop one: the reveal marker
+  and the slot-drawn marker have no ordering, so under parallel load the
+  artwork baseline is taken with the slot empty and the vertical reports the
+  desktop as having dropped artwork it had not yet drawn. Proved in the
+  preserved dumps; see the section.
 - **D137 — the blocking `wait` parked the calling thread but registered its
   process — FIXED.** A non-leader thread reaping a child registered the
   group's *leader* on `PROCWAIT_WAITQ` and parked *itself*, so the exit woke
@@ -7960,3 +7966,71 @@ eighth argv-selected role in `tests/integration/threads_program`
 (`reapchild`) spawns a child from a non-leader thread and reaps it there;
 before the fix the role never returns and the three `threads_qemu_*` verticals
 fail on their step budget, after it they exit `0`.
+
+## D138 — the desktop-pressure vertical photographed its baseline before the bar had drawn a slot (FIXED)
+
+**Mechanism.** `tairix-test-desktop-pressure-qemu-aarch64` requires the bar's
+leading application slot to be byte-identical between an artwork baseline and
+the frame the guest's `PRESSURE_LEFT_NORMAL_MARKER` announces
+(`MAX_UNDER_PRESSURE_SLOT_DRIFT = 0.0`). Slot 0 is chosen because the script
+never points at, clicks, hovers, or launches it — the autostarted file manager
+holds it — so a picture that moves between the frames moved because of what the
+desktop did to its own caches. The baseline was gated on `desktop fully
+revealed on screen`, and the assertion's rationale quietly assumed the slot was
+drawn by then.
+
+It is not. *The desktop being revealed* and *the file manager's slot reaching
+the screen* are separate events with **no ordering between them**: the fade is
+the session's own, the slot waits on a separate process's bring-up. Both orders
+occur — under the 8-way parallel `test --qemu` stage the reveal won by 24 ms
+(12.179 against 12.203) where the vertical run alone had the slot 1.65 s
+earlier — so the baseline was photographed with slot 0 **empty** and the drift
+read 33.4%. Demonstrated in the pixels of the 48×46 rectangle at (71, 716)
+that `appbar_slot_rect(theme, 0)` resolves: 4 colours, all bar fill, in the
+baseline against 93 including the icon's blue in the later frame. The artwork
+was *absent in the baseline and present afterwards* — the opposite of the
+"stopped drawing its decoded icon artwork" the message asserted.
+
+**A second race behind it, closed by the same fix.** `APP_BAR_SLOT_SHOWN` is
+not the missing gate either, and not only because it drops the revealed half:
+a bundle's icon is read and decoded off the serve loop, so the frame a slot
+*first* appears in may hold its built-in glyph, with the artwork arriving a
+frame or two later. A baseline gated on the slot alone could therefore
+photograph the glyph and read the artwork's later arrival as drift, failing
+the same assertion from the other direction.
+
+**The fix.** One session-side witness for the conjunction the assertion
+actually needs, `APP_BAR_SETTLED` (`userland/gui/session/src/apps.rs`,
+"icon-bar slots drawn on the revealed desktop"): one-shot, given on a present
+when the screen's own reveal witness has been given (`ScreenFade::revealed`),
+the strip seats at least one slot, and no slot is still waiting on a decode
+that is coming. `AppBarService::slots` learns the last through the artwork
+cache's `owned_artwork`, whose `ArtworkOutcome` distinguishes a decode in
+flight from a final refusal — so a bundle that ships no drawable icon settles
+on its glyph rather than holding the witness back for ever — and re-seating
+the strip returns the fact to its conservative reading until the next
+resolution answers it.
+
+The vertical gates both its baseline **and** its pointer script's launch on
+that witness, which is what orders them: the runner holds every unsent
+pointer step while a dump whose marker has appeared is unverified, so the
+baseline is on disk before the first click can put a popup over the wallpaper
+the assertion reads. The bound stays 0.0 — it was always right; the gate was
+what was wrong. The failure message now names both candidate reasons and how
+to tell them apart, instead of asserting the one the evidence contradicted.
+
+**The same assumption in a sibling, fixed with it.**
+`autoload_desktop_pointer_script`'s click on the file manager's slot was gated
+on the reveal alone, on the reasoning that the autostarted app "holds the slot
+by then". It does not, for the same reason; a press into a strip that has not
+seated it hits nothing. That click now waits on `APP_BAR_SLOT_SHOWN`, as the
+hand-over and file-pick scripts already did. The other bar-reading verticals
+were checked and are not exposed: the icon-bar vertical's byte-identity claim
+is over slot 2, empty in both of its frames, and the hover vertical takes no
+dump and reads no slot.
+
+**Its regression test is the vertical itself**, under the parallel load that
+exposed it. The two halves of the witness are host-tested beside the service
+(`the_bar_settles_only_once_it_is_revealed_and_holding_its_resolved_pictures`,
+`a_bar_slot_whose_artwork_is_refused_settles_on_its_glyph`), each guard
+verified to fail the test when removed.
