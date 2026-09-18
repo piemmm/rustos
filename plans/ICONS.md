@@ -335,6 +335,21 @@ so the first reading above normal is mild — and the zero-drift bound therefore
 applies on **every** run rather than being relaxed on the deep ones. There is
 no scope-out left to read a transcript for.
 
+**Both frames are photographed in the state the bound is about.** A
+byte-identity claim over a slot needs the slot's *settled* picture in the
+baseline too, and the desktop's reveal witness supplies neither half of that:
+the slot's application is a separate process whose bring-up is unordered
+against the fade, and the bundle's icon is decoded off the serve loop and
+lands a frame or two behind the slot that asked for it. So the baseline is
+gated on the bar's own `APP_BAR_SETTLED` — a revealed frame carrying the strip
+with no slot still waiting on a decode — which the session can state because
+it holds all three facts. `AppBarService::slots` learns the last of them from
+`ArtworkOutcome`, so a bundle shipping no drawable icon settles on its glyph
+instead of holding the witness back for ever. The vertical's launch gesture
+waits on the same witness, so the runner's unverified-dump hold puts the
+baseline on disk before any click can change the screen it read
+(`plans/OPEN-DEFECTS.md` D138).
+
 ## 10. Open — one surface still rasterises its glyphs per frame
 
 The glyph tier is cached and the draw path blits, but a control only benefits

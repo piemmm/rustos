@@ -179,6 +179,18 @@ impl ScreenFade {
         );
     }
 
+    /// Whether the reveal witness above has been given, so a frame the screen
+    /// has since presented is one a user can see the desktop in.
+    ///
+    /// The precondition anything announcing a *later* bring-up milestone needs:
+    /// a surface reaching the display says nothing about whether the screen it
+    /// went out on was still dark, or still carrying the backdrop colour in
+    /// place of the wallpaper.
+    #[must_use]
+    pub const fn revealed(&self) -> bool {
+        self.announced
+    }
+
     /// Point the fade at `to`, starting from the strength on screen now, and
     /// put that first frame up.
     ///

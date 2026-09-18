@@ -26,9 +26,9 @@ use tairix_theme::Theme;
 
 use crate::layout::TOOL_COUNT;
 use crate::{
-    slider_at_zoom, window_in_page_space, zoom_at_slider, zoom_rung_above, zoom_rung_below, Answer,
-    Document, Fit, Layout, Picture, Request, Viewport, ZOOM_SLIDER_LINE_STEP,
-    ZOOM_SLIDER_PAGE_STEP,
+    fitted_zoom, slider_at_zoom, window_in_page_space, zoom_at_slider, zoom_rung_above,
+    zoom_rung_below, Answer, Document, Fit, Layout, Picture, Request, Viewport,
+    ZOOM_ACTUAL_PER_MILLE, ZOOM_SLIDER_LINE_STEP, ZOOM_SLIDER_PAGE_STEP,
 };
 
 /// The toolbar's tools, in the order they are drawn.
@@ -438,13 +438,17 @@ impl View {
     }
 
     /// The client size whose canvas is exactly the selected page's own pixels,
-    /// or `None` with nothing open.
+    /// or `None` where the window should keep the size it has.
     ///
-    /// **Shrink-only**: capped per axis at the window the viewer opens at, so
-    /// a small picture hugs its own size while a photograph keeps the default
-    /// window and pans inside it; floored at the smallest client the viewer is
-    /// laid out for, so hugging a tiny picture can never leave the tools or
-    /// the status line without room.
+    /// Only a picture the window can already hold has a preference: one
+    /// zoomed out to fit keeps its window, because hugging one axis of it
+    /// would only leave the fitted picture smaller. **It therefore only ever
+    /// shrinks** — a picture that fits is no larger than the canvas, and the
+    /// canvas-to-client mapping only grows with its argument, so what this
+    /// asks for is never wider or taller than the window already is. Floored
+    /// at the smallest client the viewer is laid out for, which the window
+    /// manager already holds every window to, so the floor cannot grow one
+    /// either.
     #[must_use]
     pub fn preferred_client_size(
         &self,
@@ -452,18 +456,27 @@ impl View {
         scale: Scale,
         font: BitmapFont,
     ) -> Option<(u32, u32)> {
+        if !self.fits_canvas() {
+            return None;
+        }
         let natural = self.natural()?;
         let (want_w, want_h) = Layout::client_for_canvas(natural, theme, scale, font, self.info);
         let (floor_w, floor_h) =
             Layout::min_client(theme, scale, font, self.toolbar.min_width(scale, theme));
-        let (cap_w, cap_h) = (
-            scale.scale_length(crate::WIN_WIDTH),
-            scale.scale_length(crate::WIN_HEIGHT),
-        );
-        Some((
-            want_w.clamp(floor_w.min(cap_w), cap_w),
-            want_h.clamp(floor_h.min(cap_h), cap_h),
-        ))
+        Some((want_w.max(floor_w), want_h.max(floor_h)))
+    }
+
+    /// Whether the picture fits the canvas at its own size.
+    ///
+    /// Asked through the fitted zoom the engine already computes rather than
+    /// a second comparison of extents, so what "fits" means and what a fit
+    /// resolves to cannot disagree: a picture needing no shrinking fits at or
+    /// above actual size. A page container reports its *largest* page until
+    /// one decodes, so deciding on that covers every page it holds.
+    fn fits_canvas(&self) -> bool {
+        self.natural()
+            .and_then(|natural| fitted_zoom(Fit::Window, natural, self.canvas))
+            .is_some_and(|fitted| fitted >= ZOOM_ACTUAL_PER_MILLE)
     }
 
     /// The selected page's natural pixel size, or `None` with nothing open.
@@ -877,7 +890,16 @@ impl View {
                 self.refusal = None;
                 self.viewport = Viewport::new();
                 if let Some(natural) = self.natural() {
-                    self.viewport.set_fit(Fit::Actual, natural, self.canvas);
+                    // A picture the window can hold opens at the size it was
+                    // authored at; one too big for it is zoomed out to fit,
+                    // because opening part-shown hides the picture behind its
+                    // own corner.
+                    let fit = if self.fits_canvas() {
+                        Fit::Actual
+                    } else {
+                        Fit::Window
+                    };
+                    self.viewport.set_fit(fit, natural, self.canvas);
                     self.viewport.cap_zoom(natural);
                 }
                 self.sync_controls();

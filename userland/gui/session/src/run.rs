@@ -135,10 +135,11 @@ mod program {
         PresentedOwners, PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
         SessionClock, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
         SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource,
-        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
-        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
+        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
         PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
         SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN,
@@ -953,6 +954,20 @@ mod program {
                                 key: "app",
                                 value: LogFieldValue::Str(owner.write_hex(&mut hex)),
                             }],
+                        },
+                    );
+                });
+                // After the reveal witness above, because that is the half of
+                // this fact the fade owns and this frame may be the one that
+                // gave it.
+                apps.report_settled(fade.revealed(), || {
+                    log(
+                        &LOG_SINK,
+                        &LogEvent {
+                            level: LogLevel::Info,
+                            id: APP_BAR_SETTLED,
+                            message: APP_BAR_SETTLED_MESSAGE,
+                            fields: &[],
                         },
                     );
                 });

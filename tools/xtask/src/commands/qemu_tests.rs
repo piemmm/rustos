@@ -808,6 +808,30 @@ const WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
 /// [`APPBAR_LAUNCHED_SLOT`]-th after it.
 const APPBAR_SLOT_MARKER: &str = tairix_desktop_session::APP_BAR_SLOT_SHOWN_MESSAGE;
 
+/// Serial marker a vertical gates a dump *of a slot's pixels* on: the session's
+/// own announcement that a fully-revealed frame carried the application strip
+/// with every slot drawn as the picture it keeps. Imported from the session
+/// crate's own definition, so the emitter and this consumer cannot drift.
+///
+/// The only honest gate for a frame a later one is compared against, and
+/// neither of the two markers above will do. [`APPBAR_SLOT_MARKER`] says a
+/// slot is on screen, which is enough to click but not to photograph: a
+/// reveal and an application's bring-up are unordered, so it can land on a
+/// screen still dark. [`AUTOLOAD_DESKTOP_REVEALED_MARKER`] says the desktop is
+/// visible, which says nothing about the bar — the leading slot's application
+/// is a *separate process* the session autostarts, and a dump taken there
+/// photographed a bare slot whose artwork then appeared in the later frame,
+/// reading as artwork the desktop had dropped. And neither says the slot's
+/// artwork has arrived at all: a bundle's icon is read and decoded off the
+/// serve loop, so the frame a slot first appears in may hold its built-in
+/// glyph.
+///
+/// A vertical also gates the pointer script's first gesture on it, which is
+/// what orders the two: the runner holds every unsent step while a dump whose
+/// marker has appeared is unverified, so the baseline is on disk before
+/// anything can change the screen it photographed.
+const APPBAR_SETTLED_MARKER: &str = tairix_desktop_session::APP_BAR_SETTLED_MESSAGE;
+
 /// Serial marker the picker-delegation vertical gates its pick-click on: the
 /// session's own announcement that a frame carrying the trusted picker — with
 /// its listing landed — reached the display. Imported from the session crate's
@@ -7491,15 +7515,21 @@ static TESTS: &[QemuTest] = &[
     // is a fraction of free memory, so a fixed spend either never reaches it
     // or runs the machine out, and thirty-two windows sat on that boundary.
     //
-    // The two dumps are the bare revealed desktop and the frame the guest's
-    // `PRESSURE_LEFT_NORMAL_MARKER` announces. The assertion reads the *file
-    // manager's* slot across them: the script never touches that slot, so a
-    // picture that changes between the frames changed because of what the
-    // desktop did to its own caches under pressure — a desktop that dropped
-    // its decoded icons draws built-in glyphs instead. Photographing at the
-    // marker is what keeps the frame in the bands that artwork is promised
-    // through, so the bound is asserted on every run rather than scoped out of
-    // the deep ones a fixed count used to reach.
+    // The two dumps are the settled bar on the revealed desktop and the frame
+    // the guest's `PRESSURE_LEFT_NORMAL_MARKER` announces. The assertion reads
+    // the *file manager's* slot across them: the script never touches that
+    // slot, so a picture that changes between the frames changed because of
+    // what the desktop did to its own caches under pressure — a desktop that
+    // dropped its decoded icons draws built-in glyphs instead. Photographing
+    // at the marker is what keeps the frame in the bands that artwork is
+    // promised through, so the bound is asserted on every run rather than
+    // scoped out of the deep ones a fixed count used to reach.
+    //
+    // The baseline is gated on the bar's own settled witness rather than on
+    // the desktop's reveal, because a byte-identity claim over a slot needs
+    // the slot's *settled* picture in both frames and the reveal implies
+    // neither that the slot exists nor that its artwork has landed
+    // (`plans/OPEN-DEFECTS.md` D138).
     //
     // Single CPU and the same 300-second *inactivity* budget as its siblings:
     // the longest the guest may fall silent, never a runtime deadline, so
@@ -7528,7 +7558,7 @@ static TESTS: &[QemuTest] = &[
         ],
         screendumps: &[
             ScreendumpPlan {
-                marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
+                marker: APPBAR_SETTLED_MARKER,
                 occurrences: 1,
                 suffix: DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
                 assert: assert_icons_drawn_dark_screendump,
@@ -9992,6 +10022,11 @@ const DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP: &str = "under-pressure";
 /// or launches, and its application neither opens nor closes a window for the
 /// whole run — so its picture is a function of the desktop's own state and of
 /// nothing the run did to it.
+///
+/// That holds only from the moment the bar has *settled* on it, which is what
+/// [`APPBAR_SETTLED_MARKER`] gates the baseline on: before then the slot's
+/// picture is also a function of how far the file manager's own bring-up and
+/// its icon's decode have got.
 const DESKTOP_PRESSURE_UNTOUCHED_SLOT: usize = 0;
 
 /// The most of the untouched slot that may differ between the two frames.
@@ -9999,9 +10034,11 @@ const DESKTOP_PRESSURE_UNTOUCHED_SLOT: usize = 0;
 /// Zero. The slot is the same screen position in two frames of one run, with
 /// the same wallpaper behind it, the same bar fill over it, the same
 /// application in it, and no pointer near it; the vertical's windows cascade
-/// from the top left and never reach the bar. So the bytes are the same bytes
-/// — unless the desktop drew something else there, which under pressure means
-/// it gave up the decoded artwork and fell back to a built-in glyph.
+/// from the top left and never reach the bar. Both frames are taken after the
+/// bar settled on that slot's picture, so nothing of the desktop's own
+/// bring-up is still in flight either. So the bytes are the same bytes —
+/// unless the desktop drew something else there, which under pressure means it
+/// gave up the decoded artwork and fell back to a built-in glyph.
 ///
 /// It is the right bound for the bands `plans/ICONS.md` promises the artwork
 /// through — mild and moderate leave the cache alone — and the frame it judges
@@ -10011,11 +10048,14 @@ const DESKTOP_PRESSURE_UNTOUCHED_SLOT: usize = 0;
 const MAX_UNDER_PRESSURE_SLOT_DRIFT: f64 = 0.0;
 
 /// [`ScreendumpPlan`] assertion for the desktop-under-pressure vertical's
-/// **first** dump, taken on the first fully-revealed desktop frame: a real
-/// composited dark-theme desktop, with the autostarted file manager already
-/// holding the leading slot.
+/// **first** dump, taken on the first revealed frame whose icon bar has
+/// settled ([`APPBAR_SETTLED_MARKER`]): a real composited dark-theme desktop,
+/// with the autostarted file manager holding the leading slot and drawing the
+/// picture it keeps.
 ///
-/// This frame is the artwork baseline the second one is read against.
+/// This frame is the artwork baseline the second one is read against, so what
+/// it samples is the wallpaper — the slot itself is judged by the comparison,
+/// not here.
 fn assert_icons_drawn_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
@@ -10048,11 +10088,15 @@ fn assert_bar_artwork_survived_screendump(t: &QemuTest, path: &Path) -> Result<(
     if drift > MAX_UNDER_PRESSURE_SLOT_DRIFT {
         return Err(format!(
             "test --qemu ({}): screendump {}: {:.1}% of the icon bar's untouched application \
-             slot changed while the machine was under memory pressure (at most {:.1}% may) — \
-             the desktop stopped drawing its decoded icon artwork",
+             slot differs from the {} frame (at most {:.1}% may). Either the desktop gave up \
+             the slot's decoded artwork under pressure and fell back to its built-in glyph, or \
+             the baseline was photographed before the slot held the picture it settles on — \
+             compare the two frames at the slot to tell them apart: artwork in the baseline and \
+             a glyph in this frame is the first, the reverse is the second",
             t.package,
             path.display(),
             drift * 100.0,
+            DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
             MAX_UNDER_PRESSURE_SLOT_DRIFT * 100.0,
         ));
     }
@@ -11328,6 +11372,11 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// screen. So the script never runs ahead of the desktop, however slowly a
 /// guest short of memory opens the next one.
 ///
+/// The launch itself waits on [`APPBAR_SETTLED_MARKER`] — the same witness the
+/// artwork baseline is gated on, so the runner's rule that an unverified dump
+/// holds every unsent step puts the baseline on disk before the first click
+/// can put a popup over the wallpaper it reads.
+///
 /// Between clicks the pointer is walked off the bar. Resting it on a slot is
 /// the gesture that opens that application's hover window picker, and from the
 /// second window onwards there is a picker to open; parking the pointer away
@@ -11349,7 +11398,7 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
     let rest = tairix_geometry::Point::new(width as i32 - 1, height as i32 / 2);
 
-    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let ready = APPBAR_SETTLED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
     pen.click(ready, 1, MouseButton::Primary, entry_row);
@@ -11740,11 +11789,12 @@ fn pointer_button_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// catalog are composed from ([`reconstructed_library`]) — so the script
 /// and the rendered desktop cannot drift.
 ///
-/// Step gating: the guest processes injected events strictly in device
-/// order and the bar model updates synchronously on the press, so the
-/// Files-slot click keys on the session's `DESKTOP_REVEALED`
-/// witness alone (the runner already held it back until the first dump
-/// verified). Each click *into* a served window waits on that window's own
+/// Step gating: the guest processes injected events strictly in device order
+/// and the bar model updates synchronously on the press, so the Files-slot
+/// click needs only that the strip already holds that slot — which is the
+/// session's [`APPBAR_SLOT_MARKER`] and not its reveal, because the
+/// autostarted app's bring-up is unordered against the fade. Each click
+/// *into* a served window waits on that window's own
 /// [`WINDOW_SHOWN_MARKER`] occurrence — the session's statement that a frame
 /// carrying it reached the display — because a served window is shown by its
 /// client's first present, so nothing about the create round-trip says the
@@ -11882,21 +11932,23 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         action,
     };
     Ok(vec![
-        // Pin, then click the autostarted file manager's own icon-bar slot.
-        // Files declares that it handles the primary click itself, so the
-        // session relays it and the app opens a window at the user's home.
-        // This first motion is also the run's `kind=pointer` delivery
-        // witness; the slot click needs no extra gate — the guest applies
-        // the injected events strictly in order, and the desktop-revealed
-        // witness it keys on is raised after bring-up, by which point the
-        // autostarted app has declared its presence and holds the slot.
+        // Pin and aim on the desktop's reveal — the first motion is the run's
+        // `kind=pointer` delivery witness, and neither step touches anything.
         step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, pin),
         step(
             AUTOLOAD_DESKTOP_REVEALED_MARKER,
             1,
             move_by(Point::ORIGIN, files_slot),
         ),
-        step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, click),
+        // The click itself waits on the slot's own witness. Files declares
+        // that it handles the primary click, so the session relays it and the
+        // app opens a window at the user's home — but only if the strip holds
+        // the slot when the press is hit-tested, and the reveal does not say
+        // it does: the autostarted app is a separate process whose bring-up
+        // is unordered against the fade, and it has been seen to take its
+        // slot *after* the reveal (`plans/OPEN-DEFECTS.md` D138). A press
+        // into a strip that has not seated it yet hits nothing at all.
+        step(APPBAR_SLOT_MARKER, 1, click),
         // A frame carrying the files window reached the display, so click its
         // body; the session delivers `Focus` + `Pressed` to that window, which
         // is the second dump's key. The session's own per-window witness is
@@ -12718,12 +12770,13 @@ mod tests {
         desktop_hover_pointer_script, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
         qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest, BOOT_DISK_HEALTH_MARKER,
-        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX,
-        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
-        SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX,
-        TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
-        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
-        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER,
+        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX, STALLTRACE_COMMAND_LINE,
+        STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
+        SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
+        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
+        VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -13911,27 +13964,24 @@ mod tests {
         "sender=",
     ];
 
-    /// Regression guard: a scripted marker must be a line some process prints
-    /// and leaves standing, never a transient line from a concurrent one.
+    /// The pressure vertical's two frames are each gated on the fact its own
+    /// half of the artwork claim needs, and its clicks are a bound.
     ///
-    /// The harness matches each marker at or after the previous step's match,
-    /// so a marker naming an audit record — which whichever task happens to
-    /// syscall emits, once — is unreachable the moment that record precedes
-    /// the cursor. The `stress` vertical gated its final `exit` on the
-    /// detached controller's `comm=stress` exit line and hung for the whole
-    /// runtime ceiling whenever the monitor dialogue outlasted the load, since
-    /// the controller had already exited and no further such line could
-    /// appear. Wait on a prompt, a banner, or a program's own message instead.
-    /// The pressure vertical's under-pressure frame is gated on the band
-    /// leaving normal, and its clicks are a bound.
+    /// A count would put the under-pressure frame at whatever band that many
+    /// windows happened to reach — including the severe ones where dropping
+    /// the artwork is correct, which is how the assertion came to be skipped
+    /// on the runs worth judging.
     ///
-    /// A count would put the frame at whatever band that many windows
-    /// happened to reach — including the severe ones where dropping the
-    /// artwork is correct, which is how the assertion came to be skipped on
-    /// the runs worth judging. Pinned here because the alternative is
-    /// discovering it from a transcript months later.
+    /// The baseline is the other half, and the desktop's reveal is **not** its
+    /// gate: a byte-identity claim over a slot needs that slot's settled
+    /// picture in this frame too, and the reveal orders against neither the
+    /// bar seating the slot nor its artwork landing. Gated there, the baseline
+    /// photographed a bare slot 24 ms early and the later frame's artwork read
+    /// as artwork the desktop had dropped
+    /// (`plans/OPEN-DEFECTS.md` D138). Both are pinned here because the
+    /// alternative is discovering it from a transcript months later.
     #[test]
-    fn the_pressure_frame_is_gated_on_the_band_and_its_clicks_are_a_bound() {
+    fn the_pressure_frames_are_gated_on_the_facts_they_are_judged_by() {
         let pressure = TESTS
             .iter()
             .find(|t| t.package == "tairix-test-desktop-pressure-qemu-aarch64")
@@ -13954,8 +14004,46 @@ mod tests {
             pressure.bounded_pointer_script,
             "the clicks repeat until the band moves, so their tail is slack",
         );
+
+        let baseline = pressure
+            .screendumps
+            .iter()
+            .find(|plan| plan.suffix == DESKTOP_PRESSURE_ICONS_DRAWN_DUMP)
+            .expect("the artwork baseline is planned");
+        assert_eq!(
+            baseline.marker,
+            tairix_desktop_session::APP_BAR_SETTLED_MESSAGE,
+            "the baseline is taken once the bar holds the picture it settles on, which the \
+             desktop's reveal does not imply",
+        );
+        assert_eq!(baseline.occurrences, 1, "the witness is one-shot");
+
+        // And the script's launch waits on the same witness, which is what
+        // orders the two: the runner holds every unsent step while a dump
+        // whose marker has appeared is unverified, so the baseline is on disk
+        // before the first click can put the library popup over the wallpaper
+        // the baseline's own assertion samples.
+        let script = super::desktop_pressure_pointer_script().expect("build the pointer script");
+        let launch = script
+            .first()
+            .expect("the script opens with the pin at the origin");
+        assert_eq!(
+            launch.ready_marker, baseline.marker,
+            "the first gesture and the baseline share a gate, so the dump cannot be outrun",
+        );
     }
 
+    /// Regression guard: a scripted marker must be a line some process prints
+    /// and leaves standing, never a transient line from a concurrent one.
+    ///
+    /// The harness matches each marker at or after the previous step's match,
+    /// so a marker naming an audit record — which whichever task happens to
+    /// syscall emits, once — is unreachable the moment that record precedes
+    /// the cursor. The `stress` vertical gated its final `exit` on the
+    /// detached controller's `comm=stress` exit line and hung for the whole
+    /// runtime ceiling whenever the monitor dialogue outlasted the load, since
+    /// the controller had already exited and no further such line could
+    /// appear. Wait on a prompt, a banner, or a program's own message instead.
     #[test]
     fn no_serial_marker_waits_on_an_audit_record() {
         for t in TESTS {
