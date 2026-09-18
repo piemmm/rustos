@@ -20,8 +20,9 @@
 //!
 //! Adding a harness means adding a [`Target`] here, never teaching `ci`
 //! about it directly. The burn-down now covers the wire decoders,
-//! the syscall dispatcher, the `lib/net` protocol parsers, and the
-//! capability-checked IPC port endpoint.
+//! the syscall dispatcher, the `lib/net` protocol parsers, the
+//! capability-checked IPC port endpoint, and the realm protocol's decoders,
+//! handshake, and record transport.
 
 use std::ffi::OsString;
 use std::time::Duration;
@@ -459,6 +460,24 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-sandbox",
         test: "fuzz_sandbox",
         description: "lib/sandbox decode seam (hostile input files and NTP replies through the sandboxed decode/timesync services, and hostile worker replies into the fail-closed client decoders)",
+    },
+    Target {
+        package: "tairix-wintersun-net",
+        test: "fuzz_wire",
+        description:
+            "WinterSun realm message decoders (hostile client/server frames: bounds, canonical re-encode, never panics)",
+    },
+    Target {
+        package: "tairix-wintersun-net",
+        test: "fuzz_handshake",
+        description:
+            "WinterSun session handshake (hostile pre-key bytes: transcript binding, realm-identity pinning, stated refusals)",
+    },
+    Target {
+        package: "tairix-wintersun-net",
+        test: "fuzz_session",
+        description:
+            "WinterSun sealed record transport (reorder/replay/truncate/oversize/reflect/flip: refused, and the session ends)",
     },
     Target {
         package: "tairix-supervisor",

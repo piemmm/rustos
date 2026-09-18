@@ -3,8 +3,9 @@
 //! This crate exists for one purpose: to keep cryptography out of the rest
 //! of the codebase. Per no hand-rolled primitives are allowed;
 //! everything here is a thin wrapper over a vetted upstream implementation
-//! ([`sha2`], [`ed25519_dalek`], [`chacha20poly1305`], and [`chacha20`])
-//! selected so that the audit footprint never exceeds a handful of crates.
+//! ([`sha2`], [`ed25519_dalek`], [`x25519_dalek`], [`chacha20poly1305`], and
+//! [`chacha20`]) selected so that the audit footprint never exceeds a handful
+//! of crates.
 //!
 //! The wrappers intentionally expose a *narrower* API than the upstream
 //! crates: callers receive fixed-size byte arrays, not opaque types whose
@@ -16,6 +17,7 @@
 #![deny(missing_docs)]
 
 pub mod aead;
+pub mod agree;
 pub mod backend;
 pub mod constant_time;
 pub mod hash;
@@ -27,6 +29,10 @@ pub mod stream;
 pub use aead::{
     open, seal, AeadError, AeadKey, AeadNonce, AeadTag, AEAD_KEY_LEN, AEAD_NONCE_LEN, AEAD_TAG_LEN,
 };
+pub use agree::{
+    KeyAgreementError, X25519PublicKey, X25519SecretKey, X25519SharedSecret, X25519_PUBLIC_KEY_LEN,
+    X25519_SECRET_LEN, X25519_SHARED_SECRET_LEN,
+};
 pub use backend::{self_test_passed, CryptoBackend};
 pub use constant_time::ct_eq;
 pub use hash::{sha256, Sha256Digest, Sha256Stream, SHA256_OUTPUT_LEN};
@@ -37,7 +43,10 @@ pub use kdf::{
 pub use mac::{
     hmac_sha256, hmac_sha256_parts, hmac_sha256_verify, MacKey, MacTag, MAC_KEY_LEN, MAC_TAG_LEN,
 };
-pub use sign::{Ed25519PublicKey, Ed25519Signature, SignatureError};
+pub use sign::{
+    Ed25519PublicKey, Ed25519Signature, SignatureError, ED25519_PUBLIC_KEY_LEN,
+    ED25519_SIGNATURE_LEN,
+};
 pub use stream::{
     chacha12_keystream, StreamKey, StreamNonce, CHACHA12_MAX_KEYSTREAM_BYTES, STREAM_KEY_LEN,
     STREAM_NONCE_LEN,

@@ -921,6 +921,7 @@ dependencies = [
  "sha2",
  "tairix-abi",
  "tairix-cpuops",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -6008,6 +6009,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-wintersun-net"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "tairix-abi",
+ "tairix-crypto",
+ "tairix-fuzzseed",
+ "zeroize",
+]
+
+[[package]]
 name = "tairix-wm"
 version = "0.0.0"
 dependencies = [
@@ -6262,6 +6274,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core",
+ "zeroize",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6286,3 +6309,17 @@ name = "zeroize"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ced3678a2879b30306d323f4542626697a464a97c0a07c9aebf7ebca65cd4dde"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]

@@ -268,6 +268,11 @@ members = [
     "userland/gui/switchboard",
     "userland/net/netstack",
 
+    # Userland — games. A leaf subtree: its crates compose each other and
+    # `lib/*`, and nothing outside it may depend on them, so game code never
+    # enters the OS libraries (`cargo xtask deps-check` enforces it).
+    "userland/games/wintersun/net",
+
     # Tooling
     "tools/xtask",
     "tools/qemu",

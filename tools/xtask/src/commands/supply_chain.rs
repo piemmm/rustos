@@ -413,8 +413,12 @@ pub fn render_policy(pins: &[SourcePin], advisories: &[AdvisoryEntry]) -> String
     out
 }
 
+// The emitted header names `PLAN.md` but not the charter's own section
+// number: the file is regenerated in place and is not stamped as generated,
+// so `charter-cite` scans it like any hand-written manifest and a charter
+// citation here would fail the gate on the next `--write-pins`.
 const POLICY_HEADER: &str = "\
-# TAIRiX supply-chain policy (AGENTS.md §19.3, PLAN.md §19 item 4).
+# TAIRiX supply-chain policy (PLAN.md §19 item 4).
 #
 # Verified by `cargo xtask supply-chain` (run as part of `cargo xtask ci`).
 #
@@ -492,6 +496,16 @@ pub fn run(workspace_root: &Path, write_pins: bool) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::commands::sbom::parse_cargo_lock;
+
+    #[test]
+    fn emitted_policy_header_does_not_cite_the_charter() {
+        // Regression: the header named the charter beside a section number, so
+        // every `--write-pins` wrote a `charter-cite` failure back into a file
+        // that scan treats as hand-written — and the committed copy had been
+        // corrected by hand instead of here.
+        assert!(!POLICY_HEADER.contains("AGENTS.md"));
+        assert!(POLICY_HEADER.contains("PLAN.md"));
+    }
 
     fn registry_pkg(name: &str, version: &str, checksum: &str) -> LockedPackage {
         LockedPackage {

@@ -43,6 +43,17 @@ chacha20 = { version = "=0.9.1", default-features = false, features = ["zeroize"
 # `zeroize` crate (we expose verification only, no private-key handling),
 # so it is *not* a direct dependency here — adding one would violate
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+# The dalek X25519 key agreement, the sibling of the Ed25519 signature above.
+# It is the agreement half of an authenticated session handshake (the realm
+# protocol in `plans/WINTERSUN.md` is the first consumer). Pinned to the 2.x
+# line deliberately: 2.0.1 builds on the `curve25519-dalek` 4.x and `rand_core`
+# 0.6 already in the tree beneath `ed25519-dalek`, so the audit surface grows
+# by exactly this one crate, where the 3.x line would add a second major
+# version of the curve arithmetic itself. `default-features = false` keeps it
+# `no_std` and drops `alloc`; `static_secrets` is what lets a caller supply the
+# scalar (this crate sources no randomness), and `zeroize` wires the scalar and
+# the agreement output to a volatile wipe on drop.
+x25519-dalek = { version = "=2.0.1", default-features = false, features = ["static_secrets", "zeroize"] }
 # The generic self-optimising dispatch framework: the capability gate,
 # mandatory self-verify, and fail-closed baseline selection are written once
 # there and reused for the crypto backend-availability decision, never

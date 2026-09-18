@@ -14,17 +14,28 @@ needed to read it — and rejects three classes of defect:
 
 - **Layering (§17.4).** Each crate is classified into a stratum from its
   directory (`lib`, the Arch HAL api/impl, the scheduler api/impl, kernel
-  subsystems, `kernel/core`, drivers, userland, and the GUI). An edge is
-  permitted only if the source stratum is allowed to depend on the target
-  stratum. `lib/*` may depend only on `lib/*`; drivers and non-GUI
-  userland may depend only on `lib/*`; only `kernel/core` may name a
+  subsystems, `kernel/core`, drivers, userland, the GUI, and the games
+  subtree). An edge is permitted only if the source stratum is allowed to
+  depend on the target stratum. `lib/*` may depend only on `lib/*`; drivers
+  and plain userland may depend only on `lib/*`; only `kernel/core` may name a
   concrete architecture or scheduler crate.
 - **Concrete-scheduler naming (§17.1).** A kernel crate outside
   `kernel/core` and `kernel/sched/*` may not name a concrete scheduler
   crate; the rest of the kernel depends on the policy trait instead.
-- **Optional desktop (§17.3).** No non-GUI crate may reach any
-  `userland/gui/*` crate, even transitively. This edge is checked with no
-  exceptions: the desktop boundary is clean and must stay clean.
+- **Leaf subtrees with no reverse dependents (§17.3, §17.4).** Two strata are
+  leaves: `userland/gui/*`, which keeps the desktop omittable, and
+  `userland/games/*`, which keeps game code out of the OS libraries. Crates
+  inside a leaf compose each other and `lib/*`; nothing outside may reach one,
+  even transitively, and nothing outside includes the *other* leaf. Both are
+  checked with no exceptions.
+
+  The games arm precedes the generic `userland/` one in `classify`, or every
+  game crate would fall through to plain `Userland` and its own internal edges
+  would be refused. The subtree is nested under `userland/` rather than made
+  top-level for a fail-safe reason: `classify`'s fallthrough is
+  `Layer::Tooling`, which is layering-*exempt*, so a forgotten arm on a
+  top-level tree would silently let game code name kernel internals, where a
+  forgotten arm under `userland/` merely over-restricts and fails loudly.
 
 Only build-graph dependencies are considered; `[dev-dependencies]` are
 test scaffolding and are excluded.

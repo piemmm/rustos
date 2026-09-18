@@ -4,7 +4,8 @@
 //! fails the build when any of these holds:
 //!
 //! 1. the layering graph is violated,
-//! 2. a non-GUI crate transitively depends on `userland/gui/*`, or
+//! 2. anything outside a leaf subtree — `userland/gui/*`, `userland/games/*`
+//!    — transitively depends on a crate inside it, or
 //! 3. a kernel crate outside `kernel/sched/*` / `kernel/core` names a
 //!    concrete scheduler crate.
 //!
@@ -33,8 +34,8 @@
 //! (`PLAN.md`). The list is append-never: it may only shrink, and a *new*
 //! violating edge is always rejected. It is now empty — the layering is
 //! satisfied (see [`GRANDFATHERED`] for how the last edges were retired).
-//! The transitive non-GUI → GUI rule has no exceptions — the desktop
-//! boundary is clean and must stay clean.
+//! The transitive rule into a leaf subtree has no exceptions — the desktop
+//! boundary and the games boundary are clean and must stay clean.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -53,6 +54,7 @@ pub enum Layer {
     Driver,
     Userland,
     UserGui,
+    UserGame,
     /// Tooling and integration tests: outside the product layering.
     Tooling,
 }
@@ -70,6 +72,7 @@ impl Layer {
             Layer::Driver => "drivers/*",
             Layer::Userland => "userland/*",
             Layer::UserGui => "userland/gui/*",
+            Layer::UserGame => "userland/games/*",
             Layer::Tooling => "tooling/tests",
         }
     }
@@ -98,6 +101,11 @@ pub struct Crate {
 /// the downstream `tests/integration/riscv64_boot` consumer — rather than
 /// grandfathered.
 const GRANDFATHERED: &[(&str, &str)] = &[];
+
+/// The strata nothing outside may depend on, even transitively: the optional
+/// desktop, and the games tree whose crates compose each other without game
+/// code ever entering the OS libraries.
+const LEAF_SUBTREES: &[Layer] = &[Layer::UserGui, Layer::UserGame];
 
 /// Classify a crate by its workspace-relative directory.
 pub fn classify(rel_dir: &str) -> Layer {
@@ -128,6 +136,11 @@ pub fn classify(rel_dir: &str) -> Layer {
         Layer::Driver
     } else if rel_dir.starts_with("userland/gui/") {
         Layer::UserGui
+    } else if rel_dir.starts_with("userland/games/") {
+        // Must precede the generic `userland/` arm below: classified as plain
+        // `Userland` a game crate could not name its siblings, and the whole
+        // subtree's internal edges would be refused.
+        Layer::UserGame
     } else if rel_dir.starts_with("userland/") {
         Layer::Userland
     } else {
@@ -140,7 +153,7 @@ pub fn classify(rel_dir: &str) -> Layer {
 pub fn layer_allows(from: Layer, to: Layer) -> bool {
     use Layer::{
         ArchApi, ArchImpl, Driver, KernelCore, KernelSubsystem, Lib, SchedApi, SchedImpl, Tooling,
-        UserGui, Userland,
+        UserGame, UserGui, Userland,
     };
     match from {
         // Leaf strata that may consume only shared libraries: `lib/*`
@@ -158,6 +171,9 @@ pub fn layer_allows(from: Layer, to: Layer) -> bool {
         ),
         // GUI crates compose with each other and `lib/*` only.
         UserGui => matches!(to, Lib | UserGui),
+        // Game crates likewise: the client, the realm binaries and the admin
+        // command share one simulation without game code entering the OS.
+        UserGame => matches!(to, Lib | UserGame),
         // Tooling and tests sit outside the product layering.
         Tooling => true,
     }
@@ -265,19 +281,24 @@ pub fn analyze(crates: &[Crate]) -> Vec<String> {
         }
     }
 
-    // Transitive non-GUI → GUI rule. No exceptions.
-    for c in crates {
-        if matches!(c.layer, Layer::UserGui | Layer::Tooling) {
-            continue;
-        }
-        if let Some(path) = reaches_gui(c, &by_name) {
-            violations.push(format!(
-                "non-GUI crate {} [{}] transitively depends on userland/gui/* \
-                 via {} (§17.3)",
-                c.name,
-                c.layer.name(),
-                path.join(" -> "),
-            ));
+    // The leaf subtrees have no reverse dependents, transitively. No
+    // exceptions: the desktop must stay omittable and game code must stay out
+    // of the OS.
+    for leaf in LEAF_SUBTREES {
+        for c in crates {
+            if c.layer == *leaf || c.layer == Layer::Tooling {
+                continue;
+            }
+            if let Some(path) = reaches_leaf(c, &by_name, *leaf) {
+                violations.push(format!(
+                    "{} [{}] transitively depends on the leaf subtree {} \
+                     via {} (§17.3, §17.4)",
+                    c.name,
+                    c.layer.name(),
+                    leaf.name(),
+                    path.join(" -> "),
+                ));
+            }
         }
     }
 
@@ -286,9 +307,13 @@ pub fn analyze(crates: &[Crate]) -> Vec<String> {
     violations
 }
 
-/// Return a dependency path from `start` to a `userland/gui/*` crate, or
-/// `None` if the desktop is unreachable.
-fn reaches_gui(start: &Crate, by_name: &BTreeMap<&str, &Crate>) -> Option<Vec<String>> {
+/// Return a dependency path from `start` into the `leaf` subtree, or `None`
+/// when no crate in it is reachable.
+fn reaches_leaf(
+    start: &Crate,
+    by_name: &BTreeMap<&str, &Crate>,
+    leaf: Layer,
+) -> Option<Vec<String>> {
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut stack: Vec<Vec<String>> = vec![vec![start.name.clone()]];
     while let Some(path) = stack.pop() {
@@ -301,7 +326,7 @@ fn reaches_gui(start: &Crate, by_name: &BTreeMap<&str, &Crate>) -> Option<Vec<St
         }
         for dep in &node.deps {
             if let Some(target) = by_name.get(dep.as_str()) {
-                if target.layer == Layer::UserGui {
+                if target.layer == leaf {
                     let mut found = path.clone();
                     found.push(dep.clone());
                     return Some(found);
@@ -750,6 +775,11 @@ mod tests {
         assert_eq!(classify("kernel/mem"), Layer::KernelSubsystem);
         assert_eq!(classify("drivers/bus/mmio"), Layer::Driver);
         assert_eq!(classify("userland/gui/wm"), Layer::UserGui);
+        assert_eq!(
+            classify("userland/games/wintersun/net"),
+            Layer::UserGame,
+            "the games arm must win over the generic userland one"
+        );
         assert_eq!(classify("userland/system/init"), Layer::Userland);
         assert_eq!(classify("tools/xtask"), Layer::Tooling);
     }
@@ -769,6 +799,111 @@ mod tests {
                 name: "tairix-init".into(),
                 rel_dir: "userland/system/init".into(),
                 layer: Layer::Userland,
+                deps: vec!["tairix-wm".into()],
+            },
+            Crate {
+                name: "tairix-wm".into(),
+                rel_dir: "userland/gui/wm".into(),
+                layer: Layer::UserGui,
+                deps: vec![],
+            },
+        ];
+        let violations = analyze(&crates);
+        assert!(
+            violations.iter().any(|v| v.contains("userland/gui")),
+            "{violations:#?}"
+        );
+    }
+
+    #[test]
+    fn game_crates_compose_each_other_and_lib_only() {
+        assert!(layer_allows(Layer::UserGame, Layer::UserGame));
+        assert!(layer_allows(Layer::UserGame, Layer::Lib));
+        assert!(!layer_allows(Layer::UserGame, Layer::Userland));
+        assert!(!layer_allows(Layer::UserGame, Layer::UserGui));
+        assert!(!layer_allows(Layer::UserGame, Layer::KernelSubsystem));
+        assert!(!layer_allows(Layer::UserGame, Layer::Driver));
+        // Nothing outside the subtree may name it.
+        assert!(!layer_allows(Layer::Userland, Layer::UserGame));
+        assert!(!layer_allows(Layer::UserGui, Layer::UserGame));
+        assert!(!layer_allows(Layer::Lib, Layer::UserGame));
+        assert!(!layer_allows(Layer::Driver, Layer::UserGame));
+    }
+
+    #[test]
+    fn synthetic_app_dependency_on_a_game_crate_is_flagged() {
+        let crates = vec![
+            Crate {
+                name: "tairix-ls".into(),
+                rel_dir: "userland/apps/ls".into(),
+                layer: Layer::Userland,
+                deps: vec!["wintersun-net".into()],
+            },
+            Crate {
+                name: "wintersun-net".into(),
+                rel_dir: "userland/games/wintersun/net".into(),
+                layer: Layer::UserGame,
+                deps: vec![],
+            },
+        ];
+        let violations = analyze(&crates);
+        assert!(
+            violations.iter().any(|v| v.contains("userland/games")),
+            "{violations:#?}"
+        );
+    }
+
+    #[test]
+    fn synthetic_transitive_dependency_on_a_game_crate_is_flagged() {
+        // The reverse-dependent ban is transitive: a hop through another
+        // userland crate must not launder the edge.
+        let crates = vec![
+            Crate {
+                name: "tairix-init".into(),
+                rel_dir: "userland/system/init".into(),
+                layer: Layer::Userland,
+                deps: vec!["tairix-ls".into()],
+            },
+            Crate {
+                name: "tairix-ls".into(),
+                rel_dir: "userland/apps/ls".into(),
+                layer: Layer::Userland,
+                deps: vec!["wintersun-rules".into()],
+            },
+            Crate {
+                name: "wintersun-rules".into(),
+                rel_dir: "userland/games/wintersun/rules".into(),
+                layer: Layer::UserGame,
+                deps: vec!["wintersun-net".into()],
+            },
+            Crate {
+                name: "wintersun-net".into(),
+                rel_dir: "userland/games/wintersun/net".into(),
+                layer: Layer::UserGame,
+                deps: vec![],
+            },
+        ];
+        let violations = analyze(&crates);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.starts_with("tairix-init") && v.contains("userland/games")),
+            "{violations:#?}"
+        );
+        // The intra-subtree edge is legitimate and must not be reported.
+        assert!(
+            !violations.iter().any(|v| v.starts_with("wintersun-rules")),
+            "{violations:#?}"
+        );
+    }
+
+    #[test]
+    fn synthetic_game_crate_reaching_the_desktop_is_flagged() {
+        let crates = vec![
+            Crate {
+                name: "wintersun-app".into(),
+                rel_dir: "userland/games/wintersun/app".into(),
+                layer: Layer::UserGame,
                 deps: vec!["tairix-wm".into()],
             },
             Crate {

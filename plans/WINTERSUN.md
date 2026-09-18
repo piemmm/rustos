@@ -32,7 +32,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | # | Item | Status |
 |---|---|---|
 | WS0 | This plan, `plans/FIGURE.md`, `plans/RECDB.md`, `plans/GPU.md`, the jump-sheet rows, the §3 map entries, the `PLAN.md` stage | done |
-| WS1 | `Layer::UserGame` in `deps-check`, the `userland/games/` subtree, and `wintersun/net`: the wire vocabulary, framing, the authenticated session handshake, bounded decode, the fuzz target | planned |
+| WS1 | `Layer::UserGame` in `deps-check`, the `userland/games/` subtree, and `wintersun/net`: the wire vocabulary, framing, the authenticated session handshake, bounded decode, the fuzz target | done |
 | WS2 | `wintersun/world`: the seed-pure chunked generator — uplift, hydrology, climate, biomes, roads, sites — and its cross-architecture determinism vertical | planned |
 | WS3 | `wintersun/rules`: the fixed-tick authoritative step, space and collision, stats, damage, status effects | planned |
 | WS4 | `wintersun/art`: material synthesis, the splat field, the decal and particle vocabulary, the WinterSun palette | planned |
@@ -65,7 +65,7 @@ milestone whose exit criterion is unmet.
 
 | Milestone | Items | Exit criterion |
 |---|---|---|
-| **M0 — the ground** | WS1 | The `userland/games/` subtree exists, `deps-check` enforces `Layer::UserGame`, and the wire protocol round-trips and fuzzes clean. |
+| **M0 — the ground** *(met)* | WS1 | The `userland/games/` subtree exists, `deps-check` enforces `Layer::UserGame`, and the wire protocol round-trips and fuzzes clean. |
 | **M1 — a world you can walk in** *(the vertical slice)* | WS2, WS3, WS4, WS5, WS6 | One character walks over generated terrain, in a window and in exclusive fullscreen, inside the §3 frame budget, with the state hash identical on all four Tier-1 targets. This is the milestone that proves or kills the software renderer. |
 | **M2 — a world you share** | WS7, WS8 | Two clients on one realm see each other move, characters persist across a restart, a zone handover works, and an uncleanly disconnected client leaves the realm intact at the last committed state. |
 | **M3 — a game** | WS9, WS10, WS11 | The core loop is playable end to end — fight, win, level, equip, spend — and the §5 game-feel budget is met at a simulated 100 ms round trip. |
@@ -87,7 +87,7 @@ discovered late.
 | P1 | The audio stack exists at all: the PCM vocabulary, `audio_ring`, `audio-v1`, `audiochan-v1`, the engine, one driver, `audiod` | `plans/SOUND.md` SND2–SND4 | WS14 |
 | P2 | `lib/sound`'s decoder registry and the sandboxed decode seam | `plans/SOUND.md` SND9 | WS14 |
 | P3 | Window **size states** — `Normal` / `Maximised` / `Fullscreen` — on the window channel, and the compositor promoting a scanout-sized fullscreen surface to a single layer | `plans/COMPOSITOR-WORK.md` | WS5 |
-| P4 | `lib/crypto` gains X25519 key agreement (the audited `x25519-dalek`, the same family as the present `ed25519-dalek`, so the audit footprint grows by one vetted crate) | `lib/crypto` | WS1 |
+| P4 | `lib/crypto` gains X25519 key agreement (`lib/crypto::agree`, over `x25519-dalek` 2.0.1 — pinned to the 2.x line so it shares the `curve25519-dalek` 4.x and `rand_core` 0.6 already beneath `ed25519-dalek`; its `zeroize` feature also pulls the compile-time `zeroize_derive`, so the footprint is that crate plus one proc macro rather than the single crate first estimated) | `lib/crypto` | WS1 — **done** |
 | P5 | Durable storage: `lib/recdb` through its transactional and recovery items | `plans/RECDB.md` RD1–RD6 | WS7 |
 | P6 | The figure engine: shapes, rig, clips, blending, and the art harness | `plans/FIGURE.md` FG1–FG5 | WS6 |
 | P7 | The GPU seam with a live backend | `plans/GPU.md` GP1–GP4 | WS19 |
@@ -659,6 +659,27 @@ total and fails closed — the `lib/abi` discipline applied to a game
 (§24.4: the frame and field bounds are security bounds and stay fixed). One
 fuzz harness per decoder (§19.6), and the corpus keeps every crash ever found.
 
+Built (WS1) in `userland/games/wintersun/net`; `docs/src/userland/wintersun-net.md`
+is the reference. Four settled points the rest of the game builds on:
+
+- **The handshake is two plaintext messages plus a refusal**, and the realm
+  always answers — `Hello` / `ServerHello`, or a `Refused` naming its reason,
+  because a refusal before any key exists still has to say why. The encrypted
+  session begins after them, and `Welcome` is its first realm message.
+- **A record's nonce is its sequence in its direction and its length header is
+  the associated data**, which is what refuses a reordered, replayed,
+  truncated, extended or reflected record with no extra check. Any such
+  failure *ends* the session and the end latches, so a peer cannot probe the
+  transport one bad record at a time.
+- **Every encoding is canonical.** A narrow variant is zero-padded and the
+  padding is checked, an absent optional's id must be zero, and trailing bytes
+  are refused — so a value has exactly one spelling and a decoded frame
+  re-encodes to the bytes it came from. That equality is what the fuzz
+  harnesses assert.
+- **An entity on the wire is identity, kind, position, motion and facing.**
+  Health, resources, equipment and status join it with the item that
+  introduces them; a field with no consumer is surface nobody has reviewed.
+
 - **Client → server:** `Hello`, `Authenticate`, `SelectCharacter`, `Intent`
   (movement, action, cast, interact, item), `Chat`, `ConsoleCommand`, `Ping`.
 - **Server → client:** `Welcome` (realm seed, parameters, protocol version,
@@ -748,8 +769,14 @@ blind to.
 
 The session is wrapped in an authenticated encrypted channel built from
 `lib/crypto`'s audited primitives — X25519 (P4) for agreement, ChaCha20-Poly1305
-for the transcript, Ed25519 for the realm's identity, HKDF for the schedule —
-composed as a Noise-style handshake. Composing audited primitives is the
+for the records, Ed25519 for the realm's identity, and HMAC-SHA256 over the
+transcript as the key schedule — composed as a Noise-style handshake. The realm
+signs the transcript rather than a fresh challenge, so its signature
+authenticates *that* exchange and cannot be lifted onto another; the ephemeral
+keys mean a later compromise of the identity key does not open a recorded
+session. Signing stays outside the crate: `lib/crypto` exposes verification
+only, so the responder takes a signer callback and the realm's secret never
+enters the protocol code. Composing audited primitives is the
 charter's crypto rule; inventing a primitive is not (§2.12). The realm's public
 key is pinned by the client on first connect and a change is surfaced, so a
 credential cannot be harvested by a substituted server.
