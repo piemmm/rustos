@@ -5,15 +5,18 @@ procedurally generated world, server-authoritative multiplayer, and a
 self-balancing economy. This plan owns the game: what it simulates, what it
 draws, how a client and a realm server speak, and where each piece lives.
 
-Three companion plans own the cross-cutting pieces the game is the first
-consumer of, because each has consumers beyond it and a single definition is
-the charter's rule (§2.2, §6):
+These companion plans own the cross-cutting pieces the game is a consumer of,
+because each has consumers beyond it and a single definition is the charter's
+rule (§2.2, §6). The GPU and shader plans are no longer driven by this game —
+they are an OS workstream in their own right, and the game is one demanding
+consumer of them:
 
 | Concern | Plan |
 |---|---|
 | The parametric figure, its rig, its clips, and the art-quality harness | `plans/FIGURE.md` |
 | Durable, crash-safe, indexed record storage | `plans/RECDB.md` |
-| The device-neutral GPU render seam and its backends | `plans/GPU.md` |
+| The device-neutral GPU render and compute seam, and its backends | `plans/GPU.md` |
+| Shader programs: the IR, the validator, and the sandboxed compiler | `plans/SHADER.md` |
 
 Read first (§15.18): `AGENTS.md` §10 (asset tiers, DPI), §16.5 (bundles),
 §17.3 (the optional-desktop edge), §19.5 (parser sandboxing), §24 and §26
@@ -90,7 +93,7 @@ discovered late.
 | P4 | `lib/crypto` gains X25519 key agreement (`lib/crypto::agree`, over `x25519-dalek` 2.0.1 — pinned to the 2.x line so it shares the `curve25519-dalek` 4.x and `rand_core` 0.6 already beneath `ed25519-dalek`; its `zeroize` feature also pulls the compile-time `zeroize_derive`, so the footprint is that crate plus one proc macro rather than the single crate first estimated) | `lib/crypto` | WS1 — **done** |
 | P5 | Durable storage: `lib/recdb` through its transactional and recovery items | `plans/RECDB.md` RD1–RD6 | WS7 |
 | P6 | The figure engine: shapes, rig, clips, blending, and the art harness | `plans/FIGURE.md` FG1–FG5 | WS6 |
-| P7 | The GPU seam with a live backend | `plans/GPU.md` GP1–GP4 | WS19 |
+| P7 | The GPU seam with a live backend | `plans/GPU.md` GP1–GP6 | WS19 |
 
 P3 is the only prerequisite that changes a shipped desktop contract, and it is
 desktop work the charter already wants: `SizeToggle` is a specified control
@@ -1083,12 +1086,12 @@ Stating these once stops each being re-proposed.
 - **A scripting VM for content** (Lua or otherwise) — untrusted code execution,
   a JIT surface, and a C dependency. Content is data over a closed vocabulary
   (decision 5).
-- **An OpenGL implementation.** It is a hand-authored C API surface, which §1
-  and §15.11 forbid and §9 permits only as *generated* output of `lib/abi`;
-  there is no first-party GPU driver to run it on; and its shader compiler is a
-  large untrusted-code attack surface. The modern explicit seam in
-  `plans/GPU.md` is what a GPU is reached through instead, and the software
-  renderer is complete without it.
+- **A private GPU path, or a second renderer.** The game reaches a GPU through
+  `plans/GPU.md`'s seam like every other consumer, and the software renderer
+  stays complete and mandatory without it. OpenGL specifically is refused there,
+  on the grounds that no GPU is tied to it and its object model aged badly —
+  not on the withdrawn argument that a C-specified API cannot be implemented in
+  Rust.
 - **A client-authoritative anything.** Including "trusted" clients, host
   migration, and client-side hit detection.
 - **A second renderer, rasteriser, or blend path** for the game, and a private

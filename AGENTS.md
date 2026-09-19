@@ -615,7 +615,7 @@ tairix/
 │   ├── fwcfg/           # Shared QEMU fw_cfg DMA client + ramfb helper.
 │   ├── geometry/        # Shared screen geometry + desktop DPI/UI scale.
 │   ├── glob/            # Shared filename-glob matcher.
-│   ├── gpu/             # Device-neutral GPU render seam + named kernel registry.
+│   ├── gpu/             # Device-neutral GPU render + compute seam and backends.
 │   ├── greeter/         # Shared screen-authentication surface (login/lock).
 │   ├── hash/            # Keyed SipHash-1-3 + fast mixer + the per-boot seed.
 │   ├── help/            # Shared command-help engine.
@@ -655,6 +655,7 @@ tairix/
 │   ├── rt/              # The pure-Rust userland runtime.
 │   ├── sandbox/         # The parser-sandbox seam.
 │   ├── seat/            # Arch-neutral seat model.
+│   ├── spirv/           # SPIR-V shader module: decode, validate, build.
 │   ├── supervisor/      # Pre-boot Supervisor REPL engine + built-in commands.
 │   ├── svg/             # Shared fail-closed no_std SVG decoder.
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
@@ -674,6 +675,7 @@ tairix/
 │   ├── wallpaper/       # Desktop user-scope settings document, wallpaper
 │   │                    #   catalog, fit geometry, the apply client, and the
 │   │                    #   shipped masters in `assets/`.
+│   ├── wgsl/            # WGSL shader front end: source to SPIR-V.
 │   └── window/          # Window-channel protocol engine.
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.
@@ -1553,7 +1555,8 @@ You are not exempt from any rule above. In addition:
     | Menus: who owns a menu's pixels and behaviour, the one-menu-at-a-time rule, the app's request/outcome contract | `plans/NEW-MENUS.md` |
     | Tooltips: what an app declares (a window-local region and one line) versus what the seat owns (the dwell, the placement, the pixels, the lifetime), and the input-transparent overlay a plate is drawn in | `plans/TOOLTIPS.md` |
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |
-    | Reaching a GPU for *render* work: the device-neutral `lib/gpu` seam, the closed named-kernel registry that replaces a shader compiler, the virtio-gpu and V3D backends, and why OpenGL is refused | `plans/GPU.md` |
+    | Reaching a GPU for *render and compute* work: the device-neutral `lib/gpu` seam, the memory/submission/isolation model, the virtio-gpu, Venus and V3D backends, presentation, and why the object model is Vulkan's rather than OpenGL's | `plans/GPU.md` |
+    | Shader programs: the SPIR-V IR, the validator that admits a module, the Rust builder and the pinned first-party set, the WGSL front end, and the sandbox the compiling path runs in | `plans/SHADER.md` |
     | Desktop redraw speed without hardware acceleration: compositor occlusion/opaque runs, per-control damage, the frosted-backdrop cache, present batching, frame pacing, and CPU-dispatched raster kernels | `plans/FIX-DESKTOP-SPEEDUP.md` |
     | Civil time zones: the vendored IANA rules, the compiled zone store, the `lib/tz` engine, the `TZ`/machine-setting/UTC resolution order, and local rendering | `plans/TIMEZONES.md` |
     | Setting the clock: the NTP client service, the sync-decision policy (unset/implausible/stale-boot/refresh cadence), NTP-server politeness, RTC drivers and the wall clock's provenance ladder, and the enable/disable surfaces | `plans/TIMESYNC.md` |

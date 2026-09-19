@@ -8987,12 +8987,13 @@ app's private path.
 
 ---
 
-## WINTERSUN — the desktop RPG and its three enabling libraries  **[IN PROGRESS — WS1, WS2 done (M0 met); WS3 onward planned]**
+## WINTERSUN — the desktop RPG and its enabling libraries  **[IN PROGRESS — WS1, WS2 done (M0 met); WS3 onward planned]**
 
 Plans: `plans/WINTERSUN.md` (the game), `plans/FIGURE.md` (characters and
-animation), `plans/RECDB.md` (durable storage), `plans/GPU.md` (the render
-seam). Each carries its own ledger; this section states only what the body of
-work is, what it depends on, and what it changes outside itself.
+animation), `plans/RECDB.md` (durable storage). Each carries its own ledger;
+this section states only what the body of work is, what it depends on, and what
+it changes outside itself. The GPU stack the game offloads to is its own
+workstream (**GPU**, below).
 
 **What it is.** WinterSun is a 2D top-down isekai action-RPG: a procedurally
 generated world with real hydrology, climate-derived biomes, weather and a
@@ -9023,15 +9024,10 @@ game, so a single definition is the charter's rule (§2.2, §6):
   app-data blob index are named as follow-on consumers with their own staging —
   named so they are not assumed, staged separately because each is new work
   with its own risk.
-- `lib/gpu` is the answer to the OpenGL question, which is **no**: GL is a
-  hand-authored C API surface (§1, §15.11, and §9 permits a C surface only as
-  generated output of `lib/abi`), its shader compiler is a large
-  untrusted-code surface needing `CAP_JIT_MAP_EXEC` (§19.2), there is no
-  first-party driver to run it on, and a partial implementation would be a
-  misleading compatibility claim (§2.19). Instead: an explicit device-neutral
-  render seam whose kernels are a **closed registry of first-party Rust
-  operations** rather than a shading language, landing *with* its first backend
-  and never before it (§2.4).
+- `lib/gpu` is no longer a WinterSun enabler and has its own section below
+  (**GPU**): the game is one demanding consumer of a general OS graphics stack,
+  not its driver. WS19 depends on it reaching a live backend; nothing else here
+  does, and the game is fully playable with the stack absent.
 
 **Dependencies outside these four plans.** Each is named in
 `plans/WINTERSUN.md` §"Prerequisites owned by other plans" so none is
@@ -9123,3 +9119,104 @@ surface); OpenGL; client authority of any kind; a second renderer, rasteriser,
 blend or present path; a second system audio mixer (the game composes one
 stream); anti-cheat by inspecting a player's processes or memory; tile-grid
 terrain; a `/proc`-style telemetry file; and real-money or wagering mechanics.
+
+---
+
+## GPU — the graphics stack: device seam, shaders, and hardware backends  **[PLANNED, NOT STARTED]**
+
+Plans: `plans/GPU.md` (the device seam, memory/submission model, backends,
+presentation) and `plans/SHADER.md` (the SPIR-V IR, its validator, the Rust
+builder, the WGSL front end, and the sandbox). Each carries its own ledger;
+this section states what the body of work is and what it changes outside
+itself.
+
+**What it is.** A real GPU stack: programmable render *and* compute pipelines,
+arbitrary shader modules, and enough performance to carry a modern game. Today
+`drivers/display/gpu_virtio` is a two-line placeholder, `lib/gpu` does not
+exist, and the desktop's accelerated display path is therefore unreachable on
+every target.
+
+**The decision that shapes it, and the one that was reversed.** An earlier
+draft refused shader support outright and offered a closed registry of
+first-party render operations in its place. That is superseded. The stack now
+supports shaders fully, on one principle: **one API and one IR, with the only
+variable being *when* a shader was compiled.** `lib/gpu` is a Vulkan-altitude
+seam and SPIR-V is the single IR; the OS's chrome and the game's passes compile
+at TAIRiX build time into pinned, drift-checked artefacts, while third-party
+modules compile at run time through a sandboxed compiler. Both become the same
+pipeline object on the same path.
+
+Two arguments from the earlier draft are **withdrawn as wrong**, and are deleted
+rather than softened:
+
+- *"OpenGL is a C API, so §1 forbids it."* `GLES31` is a Java class, WebGL is a
+  JavaScript binding, `wgpu` is Rust. The language a specification is written in
+  says nothing about the language of an implementation, and §1/§15.11 forbid
+  *authoring* C, not implementing a spec that was specified in C.
+- *"A shader compiler needs `CAP_JIT_MAP_EXEC` (§19.2)."* Shader ISA is executed
+  by the GPU's shader cores from GPU-visible memory and is never mapped
+  executable in a CPU address space. §19.2's W^X transition does not apply.
+
+What survives as the reason not to adopt GL: no GPU has been tied to it since
+roughly the GeForce 3 era — hardware is tied to its command stream, registers,
+ISA and memory model, and GL is itself a translation layer over those — so
+adopting it means writing the per-chip translation needed anyway *plus* a
+thirty-year compatibility state machine on top. Its object model is also the
+part that aged worst, which is precisely what the explicit model replaces.
+
+**Why the security position is better than the stacks it replaces.** The
+compiling path runs in a §19.5 minimum-capability sandbox — source in, module
+out, no filesystem, no network, no spawn — and validation happens in the
+*caller* after the sandbox returns, so a compromised compiler still cannot get
+an invalid module admitted. Admitted modules use SPIR-V's logical addressing
+model only, which removes raw pointers and pointer arithmetic outright; every
+access is bounds-enforced; every submission is validated against the submitting
+context's own resources and refused whole rather than clamped; and a hung
+submission loses its context and resets the device while every other context
+survives. Where an IOMMU exists the device is behind it, and where a platform
+genuinely lacks one that is a recorded per-platform limitation.
+
+**Reachability is the reason for the build order.** The strategic unlock is
+virtio-gpu's **Venus** capset, which forwards serialised Vulkan commands and
+SPIR-V to the host's real driver — so arbitrary shaders run on real hardware
+with *no instruction-set back end written at all*. That is why the Venus backend
+precedes the Raspberry Pi V3D back end, which is the genuinely large per-chip
+compiler work and whose value is measured rather than assumed.
+
+**What it changes outside itself.** New `lib/*` crates `lib/gpu`, `lib/spirv`
+and `lib/wgsl`, and a real `drivers/display/gpu_virtio` (plus, later,
+`drivers/display/v3d`) — all recorded in §3. It is layered on
+`plans/FIX-DISPLAY-ACCELERATION.md`, not beside it: rendering produces a
+surface and presentation goes through the one existing display path, so there
+is no second present path and no private back-channel to the device. The
+headless build is unaffected, and the software backend stays mandatory and
+complete on every Tier-1 target including `wasm32`.
+
+**Two charter amendments are required and are not assumed.** Neither is made in
+advance of the item that needs it:
+
+1. **§16.4** gains a curated shared-library class for the application-facing
+   GPU library, so a third-party game links it dynamically and one security
+   update covers every consumer. Blocks `plans/GPU.md` GP10 only; until then the
+   seam is statically linked by first-party consumers.
+2. **A capability gating GPU context creation.** Against §5.2's tests it guards
+   a class of resources (all device allocation, submission and DMA-capable
+   mapping), arrives with its enforcement point and a live holder, and is
+   expressed by no existing capability. Blocks GP2.
+
+**What is deliberately left open**, rather than guessed: what GP10 publishes to
+third-party software (a generated Vulkan-shaped C surface is the obvious answer
+and is enormous; a smaller native surface is tractable but is a porting burden),
+whether compute is exposed to applications at all, and the initial contents of
+the SPIR-V capability allow-list.
+
+**The claims this work is judged on**, all tests rather than assertions:
+`gpu_virtio` autoloads by discovery-match on all three bare-metal QEMU targets
+and flips a scanout on an interrupt; every seam method has a software
+implementation and a consumer runs unchanged with no device present; the pinned
+shader set is byte-reproducible and drift-checked in `ci`; the same pipelines
+execute through Venus and match the software reference within tolerance; a
+hostile module is refused or contained and the fuzz corpus is clean; a
+submission naming another context's resource is refused rather than clamped; an
+overrunning submission loses its context while every other survives; and the
+accelerated path's gain is a recorded measurement, not a claim.

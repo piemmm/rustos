@@ -141,8 +141,9 @@ where reachable, **does not actually save work**:
 **Non-goal (explicitly out of scope, not deferred work):** a virgl/3D
 (GPU-rendered) path. 2D transfer/flush + blob/`dmabuf` zero-copy layer
 scanout is the complete, meaningful desktop-composition win; a
-programmable-3D pipeline is a separate, larger effort with its own future
-plan and is deliberately **not** part of this deliverable. Everything
+programmable-3D pipeline is a separate, larger effort owned by
+`plans/GPU.md`, which is layered on this one, and is deliberately **not** part
+of this deliverable. Everything
 *this* plan lists is done in full, with no no-ops.
 
 ---
