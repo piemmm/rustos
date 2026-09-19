@@ -20,6 +20,10 @@ tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 # transcript, ChaCha20-Poly1305 for the records. Composed here, never
 # re-implemented.
 tairix-crypto = { path = "../../../../lib/crypto", version = "=0.0.0" }
+# TAIRiX's own libm, for the one trigonometric conversion on this wire: a
+# heading to a unit vector. A platform libm would make the same heading
+# resolve differently per target.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
 # The audited optimisation-resistant wipe. Session keys and every opened
 # record's plaintext (which may hold an account password) are wiped on drop; a
 # hand-rolled loop would be elided.

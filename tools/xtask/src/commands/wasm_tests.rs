@@ -1,18 +1,22 @@
 //! `cargo xtask test --wasm` implementation.
 //!
 //! The wasm32 counterpart of [`super::qemu_tests`]. Where the bare-metal
-//! verticals boot under QEMU, the wasm32 verticals boot in a real
-//! (headless) browser: this module builds each wasm32 vertical `cdylib`
-//! for `wasm32-unknown-unknown` and launches its puppeteer harness
-//! against the compiled module. Each harness decides PASS/FAIL from the
-//! kernel's console markers and propagates its exit status here. The
+//! verticals boot under QEMU, these run on `wasm32-unknown-unknown` —
+//! most in a real (headless) browser, because what they test *is* the
+//! browser: this module builds each wasm32 vertical `cdylib`
+//! for `wasm32-unknown-unknown` and launches its harness against the
+//! compiled module. Each harness decides PASS/FAIL — from the kernel's
+//! console markers where it drives a browser, or from the module's own
+//! exports where the subject is pure computation and a browser would only
+//! narrow where the vertical can run — and propagates its exit status
+//! here. The
 //! enrolled verticals are listed in [`VERTICALS`]; adding a wasm32
 //! vertical is one row there (one driver, not a
 //! per-vertical copy of the build/run glue).
 //!
-//! Kept opt-in behind `test --wasm` (mirroring `test --qemu`) because it
-//! needs `node`, `puppeteer`, and a Chrome binary; a host lacking them
-//! fails loudly rather than skipping (never silently
+//! Kept opt-in behind `test --wasm` (mirroring `test --qemu`) because the
+//! browser verticals need `node`, `puppeteer`, and a Chrome binary; a
+//! host lacking them fails loudly rather than skipping (never silently
 //! skip a test).
 
 use std::path::PathBuf;
@@ -22,7 +26,7 @@ use crate::Context;
 /// Rust target every wasm32 vertical is built for.
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
-/// One enrolled wasm32 browser vertical.
+/// One enrolled wasm32 vertical.
 struct Vertical {
     /// Workspace package name.
     package: &'static str,
@@ -32,9 +36,10 @@ struct Vertical {
     harness: &'static str,
 }
 
-/// The wasm32 browser verticals `cargo xtask test --wasm` builds and runs,
-/// in order. Each boots the compiled module in a headless browser and
-/// scrapes its own console markers.
+/// The wasm32 verticals `cargo xtask test --wasm` builds and runs, in
+/// order. Each instantiates the compiled module and decides its own
+/// verdict — from console markers in a headless browser, or from the
+/// module's exports where no browser is needed.
 const VERTICALS: &[Vertical] = &[
     // Stage 3d + W8: boot, per-worker isolation, live scheduler ticks,
     // multi-worker SMP + cross-context IPI.
@@ -42,6 +47,17 @@ const VERTICALS: &[Vertical] = &[
         package: "tairix-test-kernel-arch-boot-wasm32",
         artifact: "tairix_test_kernel_arch_boot_wasm32.wasm",
         harness: "tests/integration/kernel_arch_boot_wasm32/web/harness.mjs",
+    },
+    // WinterSun's world generator under a real WebAssembly engine
+    // (`plans/WINTERSUN.md` WS2): the wasm32 leg of the cross-architecture
+    // determinism vertical whose bare-metal siblings run under QEMU. Its
+    // harness needs no browser — the subject is arithmetic, and wasm32 is
+    // the only Tier-1 target with a 32-bit `usize`, so an index that had
+    // quietly become part of an answer shows up here and nowhere else.
+    Vertical {
+        package: "tairix-test-world-determinism-wasm32",
+        artifact: "tairix_test_world_determinism_wasm32.wasm",
+        harness: "tests/integration/world_determinism_wasm32/web/harness.mjs",
     },
     // The `display`-row parity vertical: signed framebuffer `.rxe`
     // lifecycle presenting to a real canvas (`plans/WIRING.md`).
@@ -61,17 +77,18 @@ pub fn packages() -> (&'static str, Vec<&'static str>) {
     (WASM_TARGET, VERTICALS.iter().map(|v| v.package).collect())
 }
 
-/// Check the browser toolchain is present and build every wasm32
+/// Check the harness toolchain is present and build every wasm32
 /// vertical once.
 ///
 /// Call this before the (possibly repeated) [`run_once`] passes. A host
 /// lacking `node` fails loudly here rather than skipping (never silently skip a test).
 pub fn prepare(ctx: &Context) -> Result<(), String> {
-    eprintln!("xtask: [test --wasm] building the wasm32 browser verticals");
+    eprintln!("xtask: [test --wasm] building the wasm32 verticals");
 
     if !node_available() {
         return Err(
-            "node is not on PATH; the wasm32 browser harness needs Node.js + puppeteer + Chrome"
+            "node is not on PATH; the wasm32 harnesses need Node.js, and the \
+             browser ones additionally need puppeteer and a Chrome binary"
                 .to_string(),
         );
     }

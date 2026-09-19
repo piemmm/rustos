@@ -5732,6 +5732,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-world-determinism-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+ "tairix-wintersun-world",
+]
+
+[[package]]
+name = "tairix-test-world-determinism-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+ "tairix-wintersun-world",
+]
+
+[[package]]
+name = "tairix-test-world-determinism-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-wintersun-world",
+]
+
+[[package]]
+name = "tairix-test-world-determinism-wasm32"
+version = "0.0.0"
+dependencies = [
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-wintersun-world",
+]
+
+[[package]]
 name = "tairix-theme"
 version = "0.0.0"
 dependencies = [
@@ -6003,7 +6046,20 @@ dependencies = [
  "tairix-abi",
  "tairix-crypto",
  "tairix-fuzzseed",
+ "tairix-util",
  "zeroize",
+]
+
+[[package]]
+name = "tairix-wintersun-world"
+version = "0.0.0"
+dependencies = [
+ "tairix-hash",
+ "tairix-log",
+ "tairix-reclaim",
+ "tairix-rng",
+ "tairix-util",
+ "tairix-wintersun-net",
 ]
 
 [[package]]

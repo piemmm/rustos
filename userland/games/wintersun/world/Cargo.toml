@@ -1,0 +1,31 @@
+[package]
+name = "tairix-wintersun-world"
+description = "WinterSun's seed-pure procedural world (plans/WINTERSUN.md §2): a realm is a u64 seed and a validated parameter document, and every chunk of terrain is a pure function of the two. Uplift, relief, hydrology, climate, biomes, scatter, settlements and roads, over a two-level scale ladder — one bounded global coarse field per realm, then halo-bounded fine detail per chunk — so resident cost is O(working set) and never O(world extent). no_std, forbids unsafe, and bit-identical on every Tier-1 target."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `WorldPoint`, `ChunkCoord` and the sub-unit scale are the wire's, not a
+# second coordinate vocabulary. The chunk *geometry* below them is this
+# crate's, defined once here.
+tairix-wintersun-net = { path = "../net", version = "=0.0.0" }
+# The deterministic non-cryptographic tier. Every stage's randomness is a
+# keyed stream from here; nothing in generation may be unpredictable.
+tairix-rng = { path = "../../../../lib/rng", version = "=0.0.0" }
+# TAIRiX's own libm. A platform libm would make the same source produce
+# different bits per target, which is exactly what the determinism claim
+# forbids.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
+# The chunk cache is governed, budgeted and reclaimed like every other
+# bounded cache in the system rather than holding memory on its own terms.
+tairix-reclaim = { path = "../../../../lib/reclaim", version = "=0.0.0" }
+# The cache's hasher and the audit sink the reclaim model charges through.
+tairix-hash = { path = "../../../../lib/hash", version = "=0.0.0" }
+tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }

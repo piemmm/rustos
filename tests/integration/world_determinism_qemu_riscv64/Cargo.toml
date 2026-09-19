@@ -1,0 +1,37 @@
+[package]
+name = "tairix-test-world-determinism-qemu-riscv64"
+description = "QEMU integration test: WinterSun's world generator produces the digest tairix_wintersun_world::digest::REFERENCE_DIGEST on riscv64. The whole seed-pure pipeline — plates, relief, depression-filled drainage, stream-power erosion, climate advection, Whittaker blending, jittered-grid scatter, settlement placement and least-cost road routing — runs in the guest and its output is folded into one number, which must equal the constant every other Tier-1 target asserts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU loads with `-kernel` on the riscv64 `virt`
+# board. It links the riscv64 port for boot and console, a heap for the
+# generator's working vectors, and the world crate itself. The point of
+# running it here rather than on the host is that the arithmetic is
+# compiled by a different backend for a different ISA: a divergence in
+# f64 lowering, in an integer narrowing, or in a sort's tie-break shows up
+# as a different digest and nowhere else.
+#
+# On the host target the crate has no test source and contributes nothing
+# to `cargo test`; the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-world-determinism-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-wintersun-world = { path = "../../../userland/games/wintersun/world", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

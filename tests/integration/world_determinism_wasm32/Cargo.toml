@@ -1,0 +1,33 @@
+[package]
+name = "tairix-test-world-determinism-wasm32"
+description = "wasm32 integration test: WinterSun's world generator produces the digest tairix_wintersun_world::digest::REFERENCE_DIGEST under a real WebAssembly engine. The wasm32 leg of the cross-architecture determinism vertical whose bare-metal siblings are world_determinism_qemu_{aarch64,riscv64,x86_64}."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# A `cdylib` the harness instantiates directly. Unlike the other wasm32
+# verticals this one needs no browser and no DOM: the claim is about
+# arithmetic, so the module exports one function returning the digest and
+# the harness compares it against the constant. That keeps the fourth
+# Tier-1 leg runnable wherever a WebAssembly engine exists, rather than
+# only where a headless Chrome does.
+#
+# On a host build it compiles to an inert empty `cdylib`, exactly as the
+# bare-metal verticals are inert host stubs, so `cargo build --workspace`
+# stays green without the wasm toolchain.
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-wintersun-world = { path = "../../../userland/games/wintersun/world", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

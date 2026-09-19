@@ -12,6 +12,8 @@
 //! [`WorldPoint`] therefore counts sub-units, and the sub-unit is a power of
 //! two so the conversion is exact in both directions.
 
+use tairix_util::mathf;
+
 use crate::bounds::{
     ENTITY_ID_LEN, ENTITY_STATE_LEN, GAME_EVENT_LEN, MAX_DIRECTION_MAGNITUDE_SQ,
     PLAY_EVENT_PAYLOAD_LEN, WORLD_CHANGE_PAYLOAD_LEN, WORLD_EDIT_LEN,
@@ -93,6 +95,21 @@ pub struct ChunkCoord {
 /// decoder has to check one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default, Ord, PartialOrd)]
 pub struct Facing(pub u16);
+
+impl Facing {
+    /// This heading as a unit vector on the world axes.
+    ///
+    /// Zero is east and the turn advances toward south, which is the sense
+    /// [`WorldPoint`]'s axes already have. Stated here, with the type,
+    /// because a heading and a position disagreeing about which way round
+    /// the world is would be a defect no single crate could see.
+    #[must_use]
+    pub fn unit_vector(self) -> (f64, f64) {
+        let turn = f64::from(self.0) / f64::from(1_u32 << 16);
+        let radians = turn * core::f64::consts::TAU;
+        (mathf::cos(radians), mathf::sin(radians))
+    }
+}
 
 /// A position *within* an authoritative tick, as a fraction of it.
 ///

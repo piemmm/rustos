@@ -33,7 +33,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 |---|---|---|
 | WS0 | This plan, `plans/FIGURE.md`, `plans/RECDB.md`, `plans/GPU.md`, the jump-sheet rows, the §3 map entries, the `PLAN.md` stage | done |
 | WS1 | `Layer::UserGame` in `deps-check`, the `userland/games/` subtree, and `wintersun/net`: the wire vocabulary, framing, the authenticated session handshake, bounded decode, the fuzz target | done |
-| WS2 | `wintersun/world`: the seed-pure chunked generator — uplift, hydrology, climate, biomes, roads, sites — and its cross-architecture determinism vertical | planned |
+| WS2 | `wintersun/world`: the seed-pure chunked generator — uplift, hydrology, climate, biomes, roads, sites — and its cross-architecture determinism vertical | done |
 | WS3 | `wintersun/rules`: the fixed-tick authoritative step, space and collision, stats, damage, status effects | planned |
 | WS4 | `wintersun/art`: material synthesis, the splat field, the decal and particle vocabulary, the WinterSun palette | planned |
 | WS5 | The client shell: window, the three size states, input, frame pacing, camera, terrain draw | planned |
@@ -272,6 +272,24 @@ pipeline of pure stages over a chunk grid; each stage reads its inputs at a
 coarser scale than it writes, so a chunk needs only a bounded halo of its
 neighbours and never the whole world.
 
+**"A coarser scale" is one scale, fixed, and global.** Stages 1–5 and 7 are
+not local questions — discharge depends on the whole upstream basin, a rain
+shadow on everything the wind crossed, a road on reaching the town at its far
+end — and a window *centred on the asking chunk* gives a different answer per
+query, which is a river that flows uphill across a seam. So they are solved
+once over a **realm field**: a coarse grid of a fixed sample count, global and
+exact, and therefore seam-free by construction rather than by a halo that
+happens to be wide enough. A fixed sample count, never a step in world units,
+is also what keeps its cost the same for a realm four chunks across and one
+four thousand chunks across.
+
+The chunk stage is the fine one: it reads the realm field, adds everything
+below the coarse step, and depends on nothing outside a fixed ring of cells.
+Only one quantity it computes has a neighbourhood dependence at all — the
+shore distance, a distance transform — which is why the ring exists and why
+its radius is that band's width. Scatter (6) is inherently fine and runs
+there, last, because it reads the structure stamp: nothing grows on a road.
+
 1. **Uplift.** Continental plates as a Voronoi partition of the sphere-mapped
    plane with per-plate drift; boundary convergence gives mountain belts,
    divergence gives rifts and inland seas. This is what stops a heightfield
@@ -323,6 +341,39 @@ correct runner). A client never blocks a frame on generation: a chunk not yet
 ready draws as the coarse relief the previous stage already answered (§28.5 —
 a paint reads nothing and draws a meaningful placeholder for what has not
 arrived).
+
+**What WS2 now guarantees.** The realm field solves plates, relief with a
+sea-level cut that honours the requested submerged fraction, Priority-Flood
+drainage with stream-power incision and hillslope diffusion, climate by wind
+advection, settlements, minimum-spanning-tree roads routed by integer-cost
+A\* that reuses existing road, and landmark entrances. The chunk adds detail
+relief, the channel carve, the structure stamp, the climate correction, the
+Whittaker blend and the scatter. Determinism is staked on one constant,
+`digest::REFERENCE_DIGEST`, asserted by the host suite and by one vertical per
+Tier-1 target (`tests/integration/world_determinism_qemu_{aarch64,riscv64,
+x86_64}` and `tests/integration/world_determinism_wasm32`, the last under a
+plain WebAssembly engine because its subject is arithmetic and a browser would
+narrow where it can run). The crate decodes no bytes — a parameter document's
+wire form belongs with the protocol in `wintersun/net` — so it has no
+untrusted-input parser and no fuzz target of its own.
+
+`Facing` gained `unit_vector` in `wintersun/net`, with the type, because the
+wind is the first consumer to need an angle convention and two crates picking
+opposite ones would be a defect neither could see.
+
+**Where `lib/parallel` attaches, and why not inside this crate.** The
+parallelism worth having is over *chunks*, not within one: a chunk's phases
+are sequential by dependency, so a runner inside the build would have nothing
+to overlap. `ChunkBuild` is therefore exactly the unit a `JobRunner` runs —
+`for_each` over a slice of them, one `step` per visit — and the composition
+belongs to the client that owns the runner and the frame budget (WS5). Adding
+the wrapper here before that caller exists would be speculative surface, and
+each build is already independent of every other, so the composition needs
+nothing from this crate that it does not already have.
+
+Still WS3's, not deferred here: the *simulation's* determinism vertical, which
+is a different claim over a different subject (a fixed intent log over N
+ticks) and belongs with the code that ticks.
 
 ## 3. WS4/WS5 — what it looks like
 
