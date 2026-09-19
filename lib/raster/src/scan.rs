@@ -197,8 +197,16 @@ impl SampleSpace {
         )
     }
 
+    /// How many contour units one pixel spans, horizontally then vertically.
+    ///
+    /// What a pattern sizes its tile from, so the tile is rendered at the
+    /// density the fill reads it back at.
+    pub(crate) fn contour_per_pixel(self) -> (f64, f64) {
+        self.contour_per_pixel
+    }
+
     /// The contour-space coordinate of pixel `(x, y)`'s centre — where a
-    /// gradient is sampled for that pixel.
+    /// gradient or a pattern is sampled for that pixel.
     pub(crate) fn pixel_centre(self, x: u32, y: u32) -> (f64, f64) {
         (
             (f64::from(x.saturating_sub(self.origin.0)) + 0.5) * self.contour_per_pixel.0,
@@ -400,7 +408,6 @@ pub(crate) struct ScanFill {
     cover: Vec<i64>,
     area: Vec<i64>,
     rule: FillRule,
-    space: SampleSpace,
     /// The sub-unit bounding box of every vertex.
     extent: Extent,
 }
@@ -465,7 +472,6 @@ impl ScanFill {
             cover: Vec::new(),
             area: Vec::new(),
             rule,
-            space,
             extent,
         })
     }
@@ -555,13 +561,6 @@ impl ScanFill {
             running += cover * 2 * UNIT;
             *alpha = rule.alpha(running - area);
         }
-    }
-
-    /// The space this fill's vertices reach sample sub-units through, copied
-    /// out so a caller can map pixel centres back while the fill itself is
-    /// mutably borrowed by the row walk.
-    pub(crate) fn space(&self) -> SampleSpace {
-        self.space
     }
 }
 

@@ -8,8 +8,9 @@ use tairix_util::mathf;
 
 use super::FillRule;
 use crate::affine::Affine;
+use crate::artwork::{Group, Layer, Node};
 use crate::color::{Color, Pixel};
-use crate::paint::{Gradient, GradientKind, GradientStop, Paint, SpreadMethod};
+use crate::paint::{Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod};
 use crate::surface::Surface;
 
 const RED: Color = Color::rgb(255, 0, 0);
@@ -517,4 +518,127 @@ fn wild_coordinates_neither_panic_nor_paint_outside_the_surface() {
     // Nothing to assert about the pixels beyond that the calls returned; the
     // point is that no arithmetic overflowed and no index went out of bounds.
     assert_eq!(surface.width(), 8);
+}
+
+/// A pattern whose tile is `content` and whose repeat is `period` design
+/// units square.
+fn tiled(period: f64, content: Vec<Node>) -> Paint {
+    Paint::Pattern(Pattern {
+        content,
+        to_tile: Affine::scale(1.0 / period, 1.0 / period),
+    })
+}
+
+/// One flat layer covering the left `fraction` of its own tile.
+fn tile_stripe(fraction: i32, color: Color) -> Node {
+    Node::Fill(Layer::filled(
+        Paint::Solid(color),
+        FillRule::NonZero,
+        vec![square(0, fraction)],
+    ))
+}
+
+#[test]
+fn a_pattern_repeats_its_tile_across_the_shape() {
+    // A design grid of 16 over a 16-pixel surface, so one design unit is one
+    // pixel; the tile repeats every 4.
+    let mut surface = Surface::new(16, 16).expect("allocates");
+    let paint = tiled(4.0, vec![tile_stripe(8, RED)]);
+    assert!(surface.fill_contours(&[square(0, 16)], 16, FillRule::NonZero, &paint));
+
+    // The tile's own grid is 16 wide and its stripe covers half of it, so the
+    // left two pixels of every four-pixel repeat are red and the right two
+    // are clear.
+    for tile in 0..4 {
+        let base = tile * 4;
+        assert_eq!(
+            surface.get(base, 5),
+            Some(RED.premultiply()),
+            "repeat {tile} should start painted"
+        );
+        assert_eq!(
+            surface.get(base + 3, 5),
+            Some(Pixel::TRANSPARENT),
+            "repeat {tile} should end clear"
+        );
+    }
+}
+
+#[test]
+fn a_pattern_paints_only_inside_the_shape_it_fills() {
+    let mut surface = Surface::new(16, 16).expect("allocates");
+    let paint = tiled(4.0, vec![tile_stripe(16, RED)]);
+    assert!(surface.fill_contours(&[square(4, 8)], 16, FillRule::NonZero, &paint));
+
+    assert_eq!(surface.get(6, 6), Some(RED.premultiply()), "inside fills");
+    assert_eq!(
+        surface.get(1, 1),
+        Some(Pixel::TRANSPARENT),
+        "outside stays untouched"
+    );
+}
+
+#[test]
+fn an_empty_tile_paints_nothing_but_is_still_drawn() {
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    let paint = tiled(4.0, Vec::new());
+    assert!(surface.fill_contours(&[square(0, 8)], 8, FillRule::NonZero, &paint));
+    assert!(surface
+        .pixels()
+        .iter()
+        .all(|pixel| *pixel == Pixel::TRANSPARENT));
+}
+
+#[test]
+fn a_tiling_that_collapses_paints_nothing_and_says_so() {
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    let paint = Paint::Pattern(Pattern {
+        content: vec![tile_stripe(16, RED)],
+        to_tile: Affine::scale(0.0, 1.0),
+    });
+    assert!(!surface.fill_contours(&[square(0, 8)], 8, FillRule::NonZero, &paint));
+    assert!(surface
+        .pixels()
+        .iter()
+        .all(|pixel| *pixel == Pixel::TRANSPARENT));
+}
+
+#[test]
+fn a_pattern_nested_past_the_composite_bound_is_refused() {
+    // Each tile paints itself with a pattern, so every level is one more live
+    // buffer; the renderer refuses rather than descending forever.
+    let mut paint = tiled(4.0, vec![tile_stripe(16, RED)]);
+    for _ in 0..crate::artwork::MAX_GROUP_DEPTH {
+        paint = tiled(
+            4.0,
+            vec![Node::Fill(Layer::filled(
+                paint,
+                FillRule::NonZero,
+                vec![square(0, 16)],
+            ))],
+        );
+    }
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    assert!(!surface.fill_contours(&[square(0, 8)], 8, FillRule::NonZero, &paint));
+}
+
+#[test]
+fn a_group_and_a_tile_share_one_nesting_budget() {
+    // A tile drawn inside the deepest group the renderer admits has no level
+    // left of its own, so the drawing reports that it was not whole.
+    let paint = tiled(4.0, vec![tile_stripe(16, RED)]);
+    let mut nodes = vec![Node::Fill(Layer::filled(
+        paint,
+        FillRule::NonZero,
+        vec![square(0, 8)],
+    ))];
+    for _ in 0..crate::artwork::MAX_GROUP_DEPTH {
+        nodes = vec![Node::Group(Group {
+            opacity: u8::MAX,
+            mask: None,
+            children: nodes,
+        })];
+    }
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    assert!(!surface.draw_artwork(&nodes, 8));
 }

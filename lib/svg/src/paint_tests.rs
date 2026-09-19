@@ -36,10 +36,14 @@ fn only_paint(svg: &str) -> Paint {
     layer.paint.clone()
 }
 
-/// The colour a paint gives at a point in *user* coordinates.
+/// The colour a gradient paint gives at a point in *user* coordinates.
 #[track_caller]
 fn sample(paint: &Paint, user: (f64, f64)) -> Color {
-    paint.sample((user.0 * scale(), user.1 * scale()))
+    match paint {
+        Paint::Solid(color) => *color,
+        Paint::Gradient(gradient) => gradient.sample((user.0 * scale(), user.1 * scale())),
+        Paint::Pattern(_) => panic!("expected a colour, not a tile"),
+    }
 }
 
 #[track_caller]

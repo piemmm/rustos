@@ -31,12 +31,13 @@ use crate::color::{Color, Pixel};
 use crate::paint::Paint;
 use crate::scan::FillRule;
 
-/// The deepest nesting of [`Group`]s a renderer will descend.
+/// The deepest nesting of composited levels a renderer will descend: a
+/// [`Group`], or the tile of a [`Pattern`](crate::paint::Pattern) fill.
 ///
 /// A fixed containment bound, not a capacity: each level in flight holds one
-/// full-extent isolation buffer (two under a mask), and the recursion is on
-/// the stack. Artwork nests a handful of groups; a tree past this is refused
-/// rather than allocated for.
+/// buffer of its own (two under a mask) and a stack frame, which is as true
+/// of a tile as of a group. Artwork nests a handful; a tree past this is
+/// refused rather than allocated for.
 pub const MAX_GROUP_DEPTH: usize = 8;
 
 /// One filled layer: what it is painted with, which points it encloses, and
@@ -167,6 +168,12 @@ impl MaskKind {
 ///
 /// A group's own mask content is visited after its children, and nesting past
 /// [`MAX_GROUP_DEPTH`] is not visited at all, because it is not drawn either.
+///
+/// A [`Pattern`](crate::paint::Pattern) fill's tile content is *not* visited:
+/// it is a drawing in the tile's own space rather than this one, so its
+/// layers neither land on this grid nor meet these edges. The two callers
+/// both want the layers of *this* drawing — the extent its vertices reach,
+/// and how many edges can meet in one pixel.
 pub fn for_each_fill(nodes: &[Node], visit: &mut impl FnMut(&Layer)) {
     walk(nodes, 0, visit);
 }

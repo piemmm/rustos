@@ -34,14 +34,14 @@
 
 use alloc::vec::Vec;
 
-use tairix_raster::{Affine, Color, FillRule, Group, Layer, Mask, MaskKind, Node, Paint};
+use tairix_raster::{Affine, Color, FillRule, Group, Layer, Mask, MaskKind, Node, Paint, Pattern};
 use tairix_util::mathf::{round_i32, sqrt};
 
 use crate::css::{Declaration, Stylesheet};
 use crate::error::SvgError;
 use crate::geom::{bounds, Point, SubPath};
 use crate::number::{opacity_to_alpha, parse_length, parse_number};
-use crate::paint::PaintServers;
+use crate::paint::{PaintServers, PatternTile, Resolved};
 use crate::shape::{is_shape, shape_subpaths};
 use crate::stroke::stroke_outline;
 use crate::style::{scale_alpha, Overflow, PaintOrder, PaintSpec, Style};
@@ -62,7 +62,11 @@ pub const DESIGN_GRID: u32 = 2048;
 /// How far a flattened curve may deviate from the true one, in design units.
 ///
 /// A fixed accuracy target rather than a segment count, so a large arc is
-/// subdivided more than a small one and neither is over-tessellated.
+/// subdivided more than a small one and neither is over-tessellated. It is
+/// resolved against the placement each shape is actually drawn under
+/// ([`flatten_tolerance`]), not against the document's own: a subtree inside
+/// `scale(10)` reaches the grid ten times larger, and flattening it to the
+/// root's tolerance would facet it by ten times the error.
 const FLATTEN_TOLERANCE: f64 = 0.4;
 
 /// The largest number of filled layers a single document may contribute.
@@ -221,7 +225,6 @@ pub fn decode(bytes: &[u8], viewport: Viewport) -> Result<SvgImage, SvgError> {
         path: Vec::new(),
         extents: Vec::new(),
         viewport: view_box.size,
-        tolerance: FLATTEN_TOLERANCE / to_design.max_scale().max(f64::MIN_POSITIVE),
         vertices_left: MAX_TOTAL_VERTICES,
         layers_left: MAX_LAYERS,
         nesting: 0,
@@ -318,7 +321,6 @@ struct Decoder<'a> {
     path: Vec<&'a Element<'a>>,
     extents: Vec<Extent>,
     viewport: (f64, f64),
-    tolerance: f64,
     vertices_left: usize,
     layers_left: usize,
     nesting: usize,
@@ -521,7 +523,7 @@ impl<'a> Decoder<'a> {
         out: &mut Vec<Node>,
     ) -> Result<bool, SvgError> {
         if is_shape(element.name) {
-            self.draw(element, style, transform, opacity, out)?;
+            self.draw(element, style, transform, depth, opacity, out)?;
             return Ok(true);
         }
         match element.name {
@@ -792,10 +794,12 @@ impl<'a> Decoder<'a> {
         element: &'a Element<'a>,
         style: &Style,
         transform: Affine,
+        depth: usize,
         opacity: u8,
         out: &mut Vec<Node>,
     ) -> Result<(), SvgError> {
-        let subpaths = shape_subpaths(element, self.viewport, self.tolerance, self.vertices_left)?;
+        let tolerance = flatten_tolerance(transform);
+        let subpaths = shape_subpaths(element, self.viewport, tolerance, self.vertices_left)?;
         if subpaths.is_empty() {
             return Ok(());
         }
@@ -804,52 +808,60 @@ impl<'a> Decoder<'a> {
             return Ok(());
         }
         let box_of = bounds(&subpaths);
-        let group = f64::from(opacity) / 255.0;
         let stroked = style.stroke_style.width > 0.0 && !matches!(style.stroke, PaintSpec::None);
 
-        let mut fill = self.paint_of(
+        // Two layers of one element overlap, so folding the element's opacity
+        // into each would show the fill through its own stroke. Those two are
+        // composited as a unit instead, at their own opacities. One layer
+        // needs no buffer: painting it at the product is the same pixels.
+        //
+        // Decided from the style rather than from the resolved paints, so
+        // each is resolved exactly once — resolving twice to learn whether to
+        // isolate would walk a pattern's whole tile twice against one vertex
+        // budget. A paint that turns out to resolve to nothing then costs an
+        // isolation buffer it did not need, which is the same picture.
+        let isolate = opacity != u8::MAX
+            && paints(&style.fill, style.fill_opacity)
+            && stroked
+            && style.stroke_opacity > 0.0;
+        if isolate {
+            self.fits_group()?;
+        }
+        let group = if isolate {
+            1.0
+        } else {
+            f64::from(opacity) / 255.0
+        };
+
+        let painted = self.paint_of(
             &style.fill,
             style,
             style.fill_opacity * group,
             box_of,
             transform,
+            depth,
         )?;
-        let mut stroke = if stroked {
+        let outlined = if stroked {
             self.paint_of(
                 &style.stroke,
                 style,
                 style.stroke_opacity * group,
                 box_of,
                 transform,
+                depth,
             )?
         } else {
             None
         };
-        // Two layers of one element overlap, so folding the element's opacity
-        // into each would show the fill through its own stroke. Those two are
-        // composited as a unit instead, at their own opacities. One layer
-        // needs no buffer: painting it at the product is the same pixels.
-        let isolate = opacity != u8::MAX && fill.is_some() && stroke.is_some();
-        if isolate {
-            self.fits_group()?;
-            fill = self.paint_of(&style.fill, style, style.fill_opacity, box_of, transform)?;
-            stroke = self.paint_of(
-                &style.stroke,
-                style,
-                style.stroke_opacity,
-                box_of,
-                transform,
-            )?;
-        }
 
         let fill =
-            fill.map(|paint| Layer::filled(paint, style.fill_rule, place(&subpaths, transform)));
-        let stroke = match stroke {
+            painted.map(|paint| Layer::filled(paint, style.fill_rule, place(&subpaths, transform)));
+        let stroke = match outlined {
             Some(paint) => {
                 let outline = stroke_outline(
                     &subpaths,
                     &style.stroke_style,
-                    self.tolerance,
+                    tolerance,
                     self.vertices_left,
                 )?;
                 // A stroke outline is a union of overlapping pieces, so only
@@ -889,29 +901,22 @@ impl<'a> Decoder<'a> {
         alpha: f64,
         box_of: Option<(Point, Point)>,
         transform: Affine,
+        depth: usize,
     ) -> Result<Option<Paint>, SvgError> {
         let alpha = alpha.clamp(0.0, 1.0);
         if let PaintSpec::Reference(id, fallback) = spec {
-            if let Some(extent) = box_of {
-                // A `currentColor` stop stands for the `color` the gradient's
-                // own ancestry gives it, exactly as a clip or a mask takes its
-                // style from where it sits rather than from its user.
-                let current = match self.servers.node(id) {
-                    Some(node) => self.definition_color(node)?,
-                    None => style.color,
-                };
-                let resolved =
-                    self.servers
-                        .resolve(id, extent, transform, self.viewport, alpha, current)?;
-                if let Some(paint) = resolved {
-                    return Ok(Some(paint));
+            match self.server_paint(id, alpha, box_of, transform, depth)? {
+                Resolved::Paint(paint) => return Ok(Some(paint)),
+                Resolved::Nothing => return Ok(None),
+                // A reference that names nothing falls back to the colour
+                // written beside it, and to nothing at all when there is
+                // none.
+                Resolved::Unresolved => {
+                    return Ok(fallback
+                        .and_then(|color| scale_alpha(color, alpha))
+                        .map(Paint::Solid))
                 }
             }
-            // An unresolvable server falls back to the colour written beside
-            // it, and to nothing at all when there is none.
-            return Ok(fallback
-                .and_then(|color| scale_alpha(color, alpha))
-                .map(Paint::Solid));
         }
         let color = match spec {
             PaintSpec::Color(color) => *color,
@@ -919,6 +924,135 @@ impl<'a> Decoder<'a> {
             PaintSpec::None | PaintSpec::Reference(_, _) => return Ok(None),
         };
         Ok(scale_alpha(color, alpha).map(Paint::Solid))
+    }
+
+    /// What the paint server named `id` comes to for this shape.
+    ///
+    /// A shape with no bounding box has no bounding-box units to resolve a
+    /// server in, so the reference is treated as unresolved and its fallback
+    /// applies.
+    fn server_paint(
+        &mut self,
+        id: &str,
+        alpha: f64,
+        box_of: Option<(Point, Point)>,
+        transform: Affine,
+        depth: usize,
+    ) -> Result<Resolved, SvgError> {
+        let (Some(extent), Some(node)) = (box_of, self.servers.node(id)) else {
+            return Ok(Resolved::Unresolved);
+        };
+        if node.name == "pattern" {
+            return self.pattern_paint(node, extent, transform, alpha, depth);
+        }
+        // A `currentColor` stop stands for the `color` the gradient's own
+        // ancestry gives it, exactly as a clip or a mask takes its style from
+        // where it sits rather than from its user.
+        let current = self.definition_color(node)?;
+        self.servers
+            .gradient(node, extent, transform, self.viewport, alpha, current)
+    }
+
+    /// The paint a `<pattern>` reference resolves to for one shape.
+    ///
+    /// The tile's content becomes artwork of its own, on a design grid of
+    /// which the whole is one tile, so the renderer draws a repeat exactly as
+    /// it draws any other drawing. A tile is a buffer in flight just as a
+    /// group is, so it costs a level of the same bound — which is what keeps
+    /// what this decoder admits to what the renderer will draw.
+    fn pattern_paint(
+        &mut self,
+        node: &'a Element<'a>,
+        box_of: (Point, Point),
+        transform: Affine,
+        alpha: f64,
+        depth: usize,
+    ) -> Result<Resolved, SvgError> {
+        let grid = f64::from(DESIGN_GRID);
+        let Some(tile) = self
+            .servers
+            .pattern(node, box_of, transform, self.viewport, grid)?
+        else {
+            return Ok(Resolved::Nothing);
+        };
+        self.enter(1)?;
+        let outer = core::mem::take(&mut self.path);
+        let built = self.tile_paint(node, &tile, alpha, depth);
+        self.path = outer;
+        self.leave(1);
+        built
+    }
+
+    /// Walk a pattern's tile content and wrap it as the paint a shape fills
+    /// with.
+    ///
+    /// The caller has set the selector path aside and charged the tile's
+    /// nesting level. Like every referenced definition the content inherits
+    /// from its own place in the document; only the geometry comes from the
+    /// shape being filled.
+    fn tile_paint(
+        &mut self,
+        node: &'a Element<'a>,
+        tile: &PatternTile<'a>,
+        alpha: f64,
+        depth: usize,
+    ) -> Result<Resolved, SvgError> {
+        let own = self.enter_definition(node)?;
+        let overflow = own.overflow;
+        let inherited = if core::ptr::eq(tile.content, node) {
+            own
+        } else {
+            // `href` inherits content as well as attributes, and content
+            // taken from another pattern inherits where *that* one sits.
+            self.path.clear();
+            self.enter_definition(tile.content)?
+        };
+        // A tile is a drawing in its own space: its geometry is no part of
+        // the bounding box of whatever element is being filled, and its
+        // percentages resolve against the viewport the tile establishes
+        // rather than the document's.
+        let measuring = core::mem::take(&mut self.extents);
+        let outer_viewport = core::mem::replace(&mut self.viewport, tile.content_viewport);
+        let mut content = Vec::new();
+        let walked = self.walk_children(
+            tile.content,
+            &inherited,
+            tile.content_to_design,
+            depth,
+            &mut content,
+        );
+        self.viewport = outer_viewport;
+        self.extents = measuring;
+        walked?;
+        if content.is_empty() {
+            return Ok(Resolved::Nothing);
+        }
+        // The tile buffer is what confines the content to the tile, which is
+        // the `overflow: hidden` a pattern is drawn under. Content an author
+        // asked to spill into the neighbouring repeats is a picture built
+        // from overlapping tiles, which a sampled tile cannot express — so
+        // the reference takes its fallback rather than being silently
+        // clipped to something the author did not draw.
+        let grid = f64::from(DESIGN_GRID);
+        if overflow == Overflow::Visible
+            && !rect_contains((0.0, 0.0, grid, grid), Affine::IDENTITY, &content)
+        {
+            return Ok(Resolved::Unresolved);
+        }
+        let opacity = opacity_to_alpha(alpha);
+        if opacity == 0 {
+            return Ok(Resolved::Nothing);
+        }
+        if opacity != u8::MAX {
+            // The tile is weakened as a unit rather than layer by layer: two
+            // of its layers weakened apart would show through each other.
+            self.fits_group()?;
+            content = grouped(opacity, None, content);
+        }
+        Ok(Resolved::Paint(Paint::Pattern(Pattern {
+            content,
+            to_tile: tile.to_tile,
+        })))
     }
 
     /// The mask a `clip-path` reference resolves to, or `None` when the
@@ -996,8 +1130,12 @@ impl<'a> Decoder<'a> {
                 name if is_shape(name) => (child, placed),
                 _ => continue,
             };
-            let subpaths =
-                shape_subpaths(shape, self.viewport, self.tolerance, self.vertices_left)?;
+            let subpaths = shape_subpaths(
+                shape,
+                self.viewport,
+                flatten_tolerance(placed),
+                self.vertices_left,
+            )?;
             if subpaths.is_empty() {
                 continue;
             }
@@ -1279,6 +1417,31 @@ fn mask_region(
         extent("width", basis.0, default.2)?,
         extent("height", basis.1, default.3)?,
     ))
+}
+
+/// Whether a paint spec can contribute a layer at all, before anything it
+/// references is resolved.
+///
+/// Deliberately generous: a reference is counted even though it may resolve
+/// to nothing, because the one caller wants an answer that never *under*
+/// states what an element draws.
+fn paints(spec: &PaintSpec, opacity: f64) -> bool {
+    !matches!(spec, PaintSpec::None) && opacity > 0.0
+}
+
+/// [`FLATTEN_TOLERANCE`] expressed in the local units `transform` places on
+/// the design grid.
+///
+/// A placement that collapses draws a point however finely a curve on it is
+/// subdivided, so it takes the coarsest tolerance there is rather than an
+/// infinite one, which the flattener would read as the finest.
+fn flatten_tolerance(transform: Affine) -> f64 {
+    let local = FLATTEN_TOLERANCE / transform.max_scale();
+    if local.is_finite() {
+        local
+    } else {
+        f64::MAX
+    }
 }
 
 /// The length a percentage with no axis of its own resolves against.

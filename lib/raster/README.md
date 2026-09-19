@@ -27,7 +27,7 @@ This crate owns:
 - `Surface::fill_contours` — the anti-aliased fill for real vector artwork:
   any number of implicitly-closed contours, resolved under a `FillRule`
   (`NonZero`, SVG's initial value, or `EvenOdd`) and painted with a `Paint` —
-  a flat colour or a gradient. Nesting is what makes a hole, so a glyph or an
+  a flat colour, a gradient, or a repeated tile. Nesting is what makes a hole, so a glyph or an
   SVG path fills in one call rather than as a stack of layers, and a gradient
   is sampled once per pixel at that pixel's centre mapped back into the
   contours' own coordinates. A pixel's alpha is the **exact fraction of its
@@ -89,7 +89,8 @@ This crate owns:
   placement and stays smooth. The shape is *placed*, not stretched, so a glyph
   needs no square scratch surface and blit to position it.
 - `FillRule` / `Paint` — what a contour fill resolves and paints with. A
-  `Paint` is a flat `Color` or a `Gradient`: linear or radial (with a focal
+  `Paint` is a flat `Color`, a `Gradient`, or a `Pattern`. A `Gradient` is
+  linear or radial (with a focal
   point), a stop list, a `SpreadMethod` (`Pad`/`Reflect`/`Repeat`), and the
   `Affine` mapping a shape's coordinates into *canonical* gradient space,
   where a linear ramp runs along x from 0 to 1 and a radial one is the unit
@@ -98,6 +99,21 @@ This crate owns:
   total: no stops paints nothing, one stop paints it everywhere, a focal point
   outside the circle is pulled just inside it as SVG requires, and an extreme
   or degenerate transform resolves to an end colour rather than a `NaN`.
+- `Pattern` — the paint whose colour at a point is *pixels*: a tile of
+  artwork and the `Affine` mapping a shape's coordinates into tile space,
+  where one tile is the unit square. It carries the tile as **artwork**
+  rather than as an image, because the resolution the tile wants is the one
+  the drawing is being rasterised at — which a resolution-independent
+  producer such as the SVG decoder does not know. The fill sizes one repeat
+  from the density it will read it back at (bounded by `MAX_TILE_EXTENT`, so
+  an absurd tile blurs rather than allocating), draws it, and samples it
+  bilinearly with a wrap at both edges: the tile grid and the device grid
+  share a density but not a phase, so reading the nearest texel would shift
+  a tiled feature differently in each repeat. Rendering a tile costs a level
+  of the same nesting bound a group does, and a tile that cannot be realised
+  paints **nothing** and says so — `fill_contours` answers whether the paint
+  was realised, so a caller falls back rather than showing the shape in some
+  other colour.
 - `Affine` — SVG's `matrix(a b c d e f)`, the transform vector artwork is
   placed by and a gradient carries: `translate`, `scale`, `rotate_degrees`
   (and about a centre), `skew_x_degrees`/`skew_y_degrees`, `then` composition

@@ -1,8 +1,8 @@
-//! What a fill is painted with: a flat colour or a gradient.
+//! What a fill is painted with: a flat colour, a gradient, or a tile.
 //!
-//! A [`Paint`] answers one question — the colour at a point — so the scan
-//! converter fills a shape without knowing whether the paint is flat or a
-//! ramp, and a new paint kind never touches the fill.
+//! A [`Paint`] answers one question — what colour goes at a point — so the
+//! scan converter fills a shape without knowing which kind it holds, and a
+//! new kind never touches the fill's own walk.
 //!
 //! A [`Gradient`] is defined in its own *canonical* space and carries the
 //! [`Affine`] that maps a shape's coordinates into it
@@ -12,6 +12,15 @@
 //! origin, so its parameter is the distance from the origin. Every ellipse,
 //! rotation, and `gradientUnits` convention a document can express is then one
 //! matrix rather than a special case in the sampler.
+//!
+//! A [`Pattern`] is the third kind, and the one whose colour at a point is
+//! *pixels*: a tile of artwork repeated across the shape. It carries the tile
+//! as artwork rather than as a rendered image, because the resolution the
+//! tile must be rendered at is the one the drawing is being rasterised at,
+//! which the producer of a resolution-independent drawing cannot know. The
+//! renderer sizes it from the fill ([`Pattern::tile_extent`]), draws it once,
+//! and reads it back at the repeated position this module resolves
+//! ([`Pattern::tile_position`]).
 //!
 //! Sampling is total: no input produces a `NaN`, a division by zero, or a
 //! panic. A gradient with no stops paints nothing, one with a single stop
@@ -23,6 +32,7 @@ use alloc::vec::Vec;
 use tairix_util::mathf;
 
 use crate::affine::Affine;
+use crate::artwork::Node;
 use crate::color::Color;
 
 /// How far from the centre of the unit circle a radial gradient's focal point
@@ -34,6 +44,20 @@ use crate::color::Color;
 /// length, and the parameter would divide by zero.
 const FOCAL_LIMIT: f64 = 0.99;
 
+/// The largest a pattern tile is rendered, in pixels along each axis.
+///
+/// A fixed containment bound, not a capacity: a tile is rendered at the
+/// resolution the drawing is being rasterised at, so a document is free to
+/// ask for one the size of the whole picture. Clamping the *render* costs
+/// only sharpness, because a tile's period is its geometry and not its
+/// resolution, so an absurd tile blurs rather than allocating.
+///
+/// A megabyte at the limit, against the full-extent isolation buffer a group
+/// already costs — and a repeat larger than this on screen is barely a
+/// repeat, so the blur is confined to the case where the tiling itself has
+/// stopped meaning much.
+pub const MAX_TILE_EXTENT: u32 = 512;
+
 /// What a fill is painted with.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Paint {
@@ -41,17 +65,71 @@ pub enum Paint {
     Solid(Color),
     /// A colour that varies with position.
     Gradient(Gradient),
+    /// A tile of artwork repeated across the shape.
+    Pattern(Pattern),
 }
 
-impl Paint {
-    /// The straight-alpha colour this paint puts at `point`, in the
-    /// coordinate space the filled geometry is authored in.
+/// A tile of artwork repeated across a fill.
+///
+/// The tile is held as *artwork* rather than as an image because the
+/// resolution it wants is the one the drawing is being rasterised at, which a
+/// resolution-independent producer does not know. The renderer sizes the tile
+/// from the fill it is drawing ([`tile_extent`](Self::tile_extent)), draws the
+/// content into a buffer of that size, and reads it back with the repeat
+/// [`to_tile`](Self::to_tile) implies.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pattern {
+    /// The tile's own artwork, on the drawing's design grid: the whole grid
+    /// is one tile.
+    pub content: Vec<Node>,
+    /// Maps a point in the filled geometry's own coordinates into tile space,
+    /// where one tile is the unit square.
+    pub to_tile: Affine,
+}
+
+impl Pattern {
+    /// The pixel size to render one tile at, given how many of the filled
+    /// geometry's units one device pixel spans on each axis.
+    ///
+    /// One tile edge in device pixels, so the tile is drawn at the density it
+    /// is read back at and neither blurs nor aliases. `None` when the tiling
+    /// collapses: a degenerate or non-finite map has no tile to draw, and the
+    /// fill fails closed rather than inventing one.
     #[must_use]
-    pub fn sample(&self, point: (f64, f64)) -> Color {
-        match self {
-            Self::Solid(color) => *color,
-            Self::Gradient(gradient) => gradient.sample(point),
+    pub fn tile_extent(&self, contour_per_pixel: (f64, f64)) -> Option<(u32, u32)> {
+        let from_tile = self.to_tile.invert()?;
+        let per_x = mathf::fabs(contour_per_pixel.0);
+        let per_y = mathf::fabs(contour_per_pixel.1);
+        if per_x <= 0.0 || per_y <= 0.0 || !per_x.is_finite() || !per_y.is_finite() {
+            return None;
         }
+        let side = |dx: f64, dy: f64| {
+            let pixels = mathf::ceil(mathf::hypot(dx / per_x, dy / per_y));
+            let whole = if pixels.is_finite() {
+                mathf::round_i32(pixels)
+            } else {
+                i32::MAX
+            };
+            u32::try_from(whole).unwrap_or(1).clamp(1, MAX_TILE_EXTENT)
+        };
+        Some((
+            side(from_tile.a, from_tile.b),
+            side(from_tile.c, from_tile.d),
+        ))
+    }
+
+    /// Where in the unit tile `point` falls, both axes brought into `0..=1`
+    /// by the repeat.
+    ///
+    /// `None` for a point the map sends nowhere finite, which paints nothing
+    /// rather than indexing the tile with a `NaN`.
+    #[must_use]
+    pub fn tile_position(&self, point: (f64, f64)) -> Option<(f64, f64)> {
+        let (u, v) = self.to_tile.apply(point);
+        if !u.is_finite() || !v.is_finite() {
+            return None;
+        }
+        Some((u - mathf::floor(u), v - mathf::floor(v)))
     }
 }
 

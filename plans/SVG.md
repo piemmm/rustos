@@ -34,12 +34,12 @@ opens a drawing as a document.
 | S16 | `<symbol>` / `<use>` viewport, and `overflow` clipping of a nested viewport | done |
 | S17 | `<switch>` conditional processing: `systemLanguage`, empty conditions, drawable children only | done |
 | S18 | `paint-order` | done |
-| S19 | `<pattern>` as a paint server | planned |
+| S19 | `<pattern>` as a paint server | done |
 | S20 | `<marker>`: `marker-start` / `-mid` / `-end` | planned |
 | S21 | `vector-effect="non-scaling-stroke"` | planned |
 
-`planned` items are not started; none of them is a half-built part of a
-`done` one. Each needs something this crate does not yet have, stated under
+`planned` items are not started; neither is a half-built part of a `done`
+one. Each needs something this crate does not yet have, stated under
 [What is left](#what-is-left).
 
 ---
@@ -54,7 +54,8 @@ An `SvgImage` is a design grid (`DESIGN_GRID`, 2048 units a side) plus an
 ordered artwork tree, bottom first: `tairix_raster::artwork::Node`s, each
 either a `Layer` (a `Paint`, a `FillRule`, and a list of **contours** in
 design-grid coordinates) or a `Group` (a subtree composited as a unit through
-an opacity and an optional mask).
+an opacity and an optional mask). A `Paint` is a colour, a gradient, or a
+`Pattern` — a tile of artwork and the map into tile space.
 
 Four decisions shape everything else:
 
@@ -75,7 +76,10 @@ Four decisions shape everything else:
 - **One design grid for every asset, and a `Viewport` that chooses its
   shape.** Whatever a document's own `viewBox` says, it is fitted to the same
   grid, so a consumer never rescales between assets and curve flattening has a
-  single known accuracy target (0.4 design units). `Viewport::Square` fits it
+  single known accuracy target (0.4 design units, resolved against the
+  placement each shape is actually drawn under rather than the document's own
+  root map — a subtree inside `scale(10)` reaches the grid ten times larger,
+  and the root's tolerance would facet it by ten times the error). `Viewport::Square` fits it
   under `preserveAspectRatio`, so non-square artwork is letter-boxed into the
   square slot rather than stretched or refused — the desktop's asset form.
   `Viewport::Natural` normalises the drawing across both axes for a consumer
@@ -106,7 +110,7 @@ Four decisions shape everything else:
 | `stroke` | Stroke outline: segment quads, joins, caps, dashes |
 | `transform` | The `transform` grammar, `viewBox`, `preserveAspectRatio`, viewport fitting |
 | `style` | The presentation-property cascade: attribute, stylesheet, `style` declaration, inheritance |
-| `paint` | Gradients: definitions, `href` inheritance, units, spread, per-use resolution |
+| `paint` | Paint servers: gradient definitions and pattern placement, `href` inheritance, units, spread, per-use resolution, and the three answers a `url(#id)` can come to |
 | `document` | The tree walk that turns all of the above into the artwork tree |
 
 The `no_std` float maths (`sqrt`, `sin`, `atan2`, rounding) lives in
@@ -136,6 +140,12 @@ Mask  { kind: Alpha | Luminance, content: Vec<Node> }
   own region rectangle, and a clip or a nested mask inside it, all fall out
   of the model rather than being special cases.
 
+A pattern's tile is the same kind of level: a buffer in flight holding a
+drawing of its own, so it is charged against the same nesting bound as a
+group. That is what makes a cycle of patterns painting one another terminate,
+and what keeps "whatever the decoder admits, the renderer draws" true without
+a second bound to keep in step.
+
 The decoder emits a group **only where one changes the picture**: full
 opacity, no clip, and no mask means the children are spliced into the parent
 list and nothing is allocated. A shape that produces a single layer folds its
@@ -145,9 +155,10 @@ isolation buffer is allocated only where two layers of the same element (a
 fill and its stroke) actually overlap.
 
 Rendering is `Surface::draw_artwork`, and it fails closed: a group whose
-isolation buffer cannot be allocated, or a tree deeper than the renderer's
-own bound, draws **nothing** and reports it, so the caller falls back to the
-tier below rather than showing a half-composited picture.
+isolation buffer cannot be allocated, a pattern whose tile cannot be
+rendered, or a tree deeper than the renderer's own bound draws **nothing**
+and reports it, so the caller falls back to the tier below rather than
+showing a half-composited picture.
 
 ## What a reference inherits
 
@@ -159,6 +170,11 @@ fill its own ancestors give it, a clip takes its `clip-rule` the same way, and
 a `currentColor` stop stands for the `color` the gradient sits in. The chain
 from the root down to a definition is found once per definition a document
 actually references, and memoised.
+
+A `<pattern>`'s tile content is the same: it takes the fill, colour and
+`overflow` its own ancestry gives it, and only its *geometry* comes from the
+shape being filled. Where `href` inherits the content from another pattern,
+the content inherits from where *that* one sits.
 
 A `<use>` is the exception, and deliberately: SVG defines its content as
 inheriting from the `<use>` itself, which is what lets one symbol be tinted
@@ -194,32 +210,72 @@ a `type` that is neither absent nor `text/css` is ignored.
 Every asset is hostile until proven otherwise. `decode` is total for any byte
 string: no panic, no unbounded loop, no unbounded allocation, and no NaN or
 infinity reaching the geometry. The fixed bounds — element count, nesting
-depth, layer count, total vertices, group depth, stylesheet rules and
-declarations, segments per curve, dash-pattern length, gradient stops, `use`
-and `href` chain depth — are **security bounds, not capacities**: they do not
-scale with the machine and must not be raised to make an asset fit.
+depth, layer count, total vertices, group depth, tile extent, stylesheet
+rules and declarations, segments per curve, dash-pattern length, gradient
+stops, `use` and `href` chain depth — are **security bounds, not
+capacities**: they do not scale with the machine and must not be raised to
+make an asset fit.
 
-Isolation buffers are what a clip, a mask, and a group opacity cost, so the
-group-depth bound is also a memory bound: it caps how many full-extent
+Isolation buffers are what a clip, a mask, a group opacity and a pattern
+tile cost, so the nesting bound is also a memory bound: it caps how many
 surfaces one asset can have live at once, and the renderer refuses rather
-than allocating past it.
+than allocating past it. A tile's own extent is bounded separately, because
+a tile is sized from the drawing's resolution rather than from the tile's
+nesting.
 
 A document that is malformed, or whose numbers, colours, or transforms are
 outside the grammar, is refused **whole** with a precise `SvgError`; the
 caller falls back to the tier below (`plans/ICONS.md`). Nothing is
 half-applied.
 
+## Patterns
+
+A pattern is a tile of artwork repeated across a shape, so it is a paint
+whose colour at a point is *pixels*. `tairix_raster::Paint::Pattern` carries
+the tile as **artwork**, not as an image, and the renderer draws one repeat
+per fill into a buffer sized from the density that fill reads it back at.
+
+That is the whole of the design decision. A tile baked to pixels at decode
+time would fix a resolution the decoder does not know: an `SvgImage` is
+resolution-independent and is rasterised per (asset, pixel side), so a tile
+rendered at some grid-derived size would alias when the asset is drawn small
+and blur when it is drawn large — and it would be the one aliased thing in a
+pipeline whose whole point is exact area coverage at the target size.
+Rendering the tile at draw time costs one small buffer per patterned fill and
+keeps the picture correct at every size.
+
+- **Tile space is the unit square**, exactly as canonical gradient space is
+  the x axis or the unit circle: `Pattern::to_tile` maps the filled
+  geometry's coordinates into it, so `patternUnits`, `patternTransform` and a
+  bounding-box placement are one matrix rather than cases in the sampler. The
+  tile's own content is drawn on the shared design grid, of which the whole
+  grid is one tile, so a repeat is rendered by the same `draw_artwork` walk
+  as any other drawing.
+- **The tile buffer is the clip.** A surface writes nothing outside itself,
+  so confining the content to the tile needs no mask. That is the
+  `overflow: hidden` a pattern is drawn under. `overflow: visible` whose
+  content actually escapes its tile is a picture built from *overlapping*
+  tiles, which one sampled tile cannot express, so that reference takes its
+  fallback rather than being silently clipped to something the author did not
+  draw.
+- **Sampling is bilinear with a wrap.** The tile grid and the device grid
+  share a density by construction but not a phase, so reading the nearest
+  texel would shift a tiled feature by up to half a pixel, differently in
+  each repeat. A sample reaching past an edge reads the opposite edge, so a
+  tile whose content meets itself still does.
+- **`MAX_TILE_EXTENT` bounds the render, not the repeat.** A tile's period is
+  geometry; its resolution is not, so clamping the render costs sharpness and
+  never distorts the picture. A hostile document therefore cannot ask for a
+  tile the size of the drawing.
+- **A tile costs a nesting level.** It is a buffer in flight like a group, so
+  both are charged against `MAX_GROUP_DEPTH`, which is what ends a cycle of
+  patterns painting one another.
+
 ## What is left
 
-Each needs a capability the crate does not have; none is a thinner version of
-something already done.
+Each needs a capability the crate does not have; neither is a thinner version
+of something already done.
 
-- **S19 `<pattern>`.** A pattern is a tile of rendered artwork repeated
-  across a shape, so it is a *paint* whose source is pixels rather than a
-  colour ramp. `tairix_raster::Paint` has no such kind, and adding one means
-  the scan converter's paint sampler gains a tiled-surface source and the
-  tile gains a render of its own. That is `lib/raster` work with its own
-  fixed bounds on tile extent, not decoder work.
 - **S20 `<marker>`.** Markers are placed at a path's *command* vertices with
   the direction bisecting the segments that meet there. The decoder flattens
   curves before anything downstream sees them, so the command vertices and
@@ -256,6 +312,11 @@ unsupported decoration not lose a whole asset, and it is the behaviour the
 desktop has today. Whether the drawable-element case should instead fail the
 document closed is recorded as an open item in `plans/ICONS.md`; it is a
 deliberate decision to make, not an oversight. The set at stake is now
-smaller than it was — clipping, masking, and group opacity are honoured
-rather than ignored, so the cases that render a *wrong* picture are the three
-`planned` items above and the non-goals.
+smaller than it was — clipping, masking, group opacity and patterns are
+honoured rather than ignored, so the cases that render a *wrong* picture are
+the two `planned` items above and the non-goals. Patterns also drew the
+distinction that answers part of the question: a reference naming a server
+the document does not define takes its fallback colour, while a server that
+is defined and paints nothing is `none` and takes none — so an *empty*
+pattern or gradient no longer renders as a fallback colour it was never
+given.

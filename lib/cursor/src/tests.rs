@@ -25,7 +25,7 @@ const NATIVE: u32 = CURSOR_BASE_SIDE_PX;
 fn solid(shape: &Shape) -> Color {
     match shape.paint {
         Paint::Solid(color) => color,
-        Paint::Gradient(_) => panic!("expected a flat fill"),
+        Paint::Gradient(_) | Paint::Pattern(_) => panic!("expected a flat fill"),
     }
 }
 

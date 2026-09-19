@@ -40,14 +40,14 @@
 //! grammar, `viewBox` with `preserveAspectRatio`, strokes (width, caps,
 //! joins, miter limit, dashes), the property cascade with the document's own
 //! `<style>` sheets, the `style` attribute and inheritance, CSS colour syntax
-//! with named colours, linear and radial gradients, `clip-path`, `mask`, and
-//! group opacity.
+//! with named colours, linear and radial gradients, `<pattern>` fills,
+//! `clip-path`, `mask`, and group opacity.
 //!
 //! It is a *renderer* for artwork, not a browser: text, embedded images,
-//! filters, patterns, markers, animation, and scripting are not drawn. An
-//! element it cannot draw is skipped rather than refused, so one unsupported
-//! decoration does not lose the whole asset; the open question of whether
-//! such an element should instead fail the document closed is recorded in
+//! filters, markers, animation, and scripting are not drawn. An element it
+//! cannot draw is skipped rather than refused, so one unsupported decoration
+//! does not lose the whole asset; the open question of whether such an
+//! element should instead fail the document closed is recorded in
 //! `plans/ICONS.md`.
 //!
 //! ```

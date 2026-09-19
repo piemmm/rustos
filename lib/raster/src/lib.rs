@@ -14,7 +14,8 @@
 //!
 //! Vector artwork fills through one scan converter ([`scan`]): any number of
 //! closed contours resolved under a [`FillRule`] and painted with a flat
-//! colour or a gradient ([`paint`]), reached as [`Surface::fill_contours`].
+//! colour, a gradient, or a repeated tile ([`paint`]), reached as
+//! [`Surface::fill_contours`].
 //! [`Affine`] is the transform that places such artwork, and the one a
 //! gradient carries. A whole drawing — a cursor, an icon glyph, a decoded
 //! SVG document — is an [`artwork`] tree of such layers, with the [`Group`]s
@@ -62,7 +63,9 @@ pub use artwork::{
 pub use blur::{box_blur, BlurScratch};
 pub use color::{blend_solid_span, blend_span, div255, div255_biased, Color, Pixel, ROUND_NEAREST};
 pub use dither::DitherRow;
-pub use paint::{Gradient, GradientKind, GradientStop, Paint, SpreadMethod};
+pub use paint::{
+    Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod, MAX_TILE_EXTENT,
+};
 pub use reorient::Reorient;
 pub use resample::{resample, resample_window, Region, ResampleError, Rgba8Image};
 pub use round::{round_rect_coverage, round_rect_radius};

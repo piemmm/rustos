@@ -2,7 +2,7 @@
 
 use alloc::vec;
 
-use super::{Gradient, GradientKind, GradientStop, Paint, SpreadMethod};
+use super::{Gradient, GradientKind, GradientStop, Pattern, SpreadMethod, MAX_TILE_EXTENT};
 use crate::affine::Affine;
 use crate::color::Color;
 
@@ -41,13 +41,6 @@ fn ramp(spread: SpreadMethod) -> Gradient {
         spread,
         to_gradient: Affine::IDENTITY,
     }
-}
-
-#[test]
-fn a_solid_paint_ignores_the_point() {
-    let paint = Paint::Solid(Color::rgba(1, 2, 3, 4));
-    assert_eq!(paint.sample((0.0, 0.0)), Color::rgba(1, 2, 3, 4));
-    assert_eq!(paint.sample((-1e9, 7.5)), Color::rgba(1, 2, 3, 4));
 }
 
 #[test]
@@ -177,10 +170,6 @@ fn a_ramp_with_no_stops_paints_nothing() {
         ..ramp(SpreadMethod::Pad)
     };
     assert_eq!(gradient.sample((0.5, 0.0)), Color::TRANSPARENT);
-    assert_eq!(
-        Paint::Gradient(gradient).sample((0.5, 0.0)),
-        Color::TRANSPARENT
-    );
 }
 
 #[test]
@@ -241,4 +230,81 @@ fn a_degenerate_transform_or_wild_point_still_answers_a_colour() {
     let sampled = radial.sample((f64::MAX, f64::MAX));
     assert!(sampled == BLACK || sampled == WHITE, "{sampled:?}");
     assert_eq!(radial.sample((f64::NAN, 0.0)), BLACK);
+}
+
+/// A pattern whose unit tile is the design-grid square `to_tile` maps back to.
+fn tiling(to_tile: Affine) -> Pattern {
+    Pattern {
+        content: vec![],
+        to_tile,
+    }
+}
+
+#[test]
+fn a_tile_is_rendered_at_the_density_it_is_read_at() {
+    // One tile spans 64 contour units and a pixel spans 2, so the tile wants
+    // 32 pixels a side.
+    let pattern = tiling(Affine::scale(1.0 / 64.0, 1.0 / 64.0));
+    assert_eq!(pattern.tile_extent((2.0, 2.0)), Some((32, 32)));
+    // Half the density on one axis alone halves that axis alone.
+    assert_eq!(pattern.tile_extent((2.0, 4.0)), Some((32, 16)));
+}
+
+#[test]
+fn a_rotated_tile_is_sized_along_its_own_axes() {
+    // A tile 80 contour units square, turned a quarter turn: its edges are
+    // still 80 units long whichever way they point.
+    let placement = Affine::scale(80.0, 80.0).then(Affine::rotate_degrees(90.0));
+    let pattern = tiling(placement.invert().expect("a rotation inverts"));
+    assert_eq!(pattern.tile_extent((1.0, 1.0)), Some((80, 80)));
+}
+
+#[test]
+fn an_absurd_tile_is_clamped_rather_than_allocated_for() {
+    let pattern = tiling(Affine::scale(1e-5, 1e-5));
+    assert_eq!(
+        pattern.tile_extent((1.0, 1.0)),
+        Some((MAX_TILE_EXTENT, MAX_TILE_EXTENT))
+    );
+    // A tile smaller than a pixel still has a pixel to be drawn in.
+    let tiny = tiling(Affine::scale(1e6, 1e6));
+    assert_eq!(tiny.tile_extent((1.0, 1.0)), Some((1, 1)));
+}
+
+#[test]
+fn a_collapsed_or_unreadable_tiling_has_no_tile() {
+    assert_eq!(
+        tiling(Affine::scale(0.0, 1.0)).tile_extent((1.0, 1.0)),
+        None
+    );
+    // A tile so large the map back from it reads as collapsed area has no
+    // repeat to render either.
+    assert_eq!(
+        tiling(Affine::scale(1e-9, 1e-9)).tile_extent((1.0, 1.0)),
+        None
+    );
+    let pattern = tiling(Affine::IDENTITY);
+    assert_eq!(pattern.tile_extent((0.0, 1.0)), None);
+    assert_eq!(pattern.tile_extent((f64::NAN, 1.0)), None);
+    assert_eq!(pattern.tile_extent((1.0, f64::INFINITY)), None);
+}
+
+#[test]
+fn a_tile_position_repeats_in_both_directions() {
+    let pattern = tiling(Affine::scale(0.25, 0.5));
+    assert_eq!(pattern.tile_position((0.0, 0.0)), Some((0.0, 0.0)));
+    assert_eq!(pattern.tile_position((2.0, 1.0)), Some((0.5, 0.5)));
+    // Four units on is the next tile at the same place, and so is four back.
+    assert_eq!(pattern.tile_position((6.0, 1.0)), Some((0.5, 0.5)));
+    assert_eq!(pattern.tile_position((-2.0, -1.0)), Some((0.5, 0.5)));
+}
+
+#[test]
+fn a_tile_position_refuses_a_point_the_map_sends_nowhere() {
+    let pattern = tiling(Affine::scale(f64::MAX, f64::MAX));
+    assert_eq!(pattern.tile_position((f64::MAX, 0.0)), None);
+    assert_eq!(
+        tiling(Affine::IDENTITY).tile_position((f64::NAN, 0.0)),
+        None
+    );
 }

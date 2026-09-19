@@ -28,12 +28,12 @@ use core::slice;
 use alloc::vec::Vec;
 
 use tairix_reclaim::CachedBytes;
-use tairix_util::fallible;
+use tairix_util::{fallible, mathf};
 
 use crate::artwork::{Group, MaskKind, Node, MAX_GROUP_DEPTH};
 use crate::color::{blend_span, blend_span_mapped, dither_tiles, div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
-use crate::paint::Paint;
+use crate::paint::{Paint, Pattern};
 use crate::resample::{resample_pixels, Region, ResampleError};
 use crate::round::round_rect_coverage;
 use crate::scan::{FillRule, SampleSpace, ScanFill, MAX_DRAWING_EXTENT};
@@ -1003,12 +1003,7 @@ impl Surface {
     /// [`Pixel::over`]: crate::color::Pixel::over
     pub fn fill_polygon(&mut self, polygon: &[(i32, i32)], design: u32, color: Color) {
         let space = SampleSpace::design(design, self.space_rect());
-        self.fill_scan(
-            slice::from_ref(&polygon),
-            space,
-            FillRule::EvenOdd,
-            &Paint::Solid(color),
-        );
+        self.fill_solid(slice::from_ref(&polygon), space, FillRule::EvenOdd, color);
     }
 
     /// Fill anti-aliased vector artwork: any number of closed contours, under
@@ -1027,14 +1022,20 @@ impl Surface {
     /// zero is read as `1`. A gradient is sampled once per pixel, at that
     /// pixel's centre mapped back into the contours' own coordinates, so the
     /// paint costs a sample per pixel rather than one per sub-sample.
+    ///
+    /// Returns whether the paint was realised. A flat colour and a gradient
+    /// always are; a [`Pattern`] needs a tile rendered at this fill's own
+    /// resolution, so an allocator refusal or a tiling that collapses paints
+    /// **nothing** and says so, rather than showing the shape in some other
+    /// colour.
     pub fn fill_contours(
         &mut self,
         contours: &[Vec<(i32, i32)>],
         design: u32,
         rule: FillRule,
         paint: &Paint,
-    ) {
-        self.fill_contours_over(self.space_rect_region(), contours, design, rule, paint);
+    ) -> bool {
+        self.fill_contours_over(self.space_rect_region(), contours, design, rule, paint)
     }
 
     /// Fill anti-aliased vector artwork whose design grid is stretched
@@ -1059,9 +1060,47 @@ impl Surface {
         design: u32,
         rule: FillRule,
         paint: &Paint,
-    ) {
+    ) -> bool {
+        self.fill_painted(over, contours, design, rule, paint, 0)
+    }
+
+    /// [`fill_contours_over`](Self::fill_contours_over) at a stated nesting
+    /// depth, which is what a pattern's own tile is rendered one level below.
+    fn fill_painted(
+        &mut self,
+        over: Region,
+        contours: &[Vec<(i32, i32)>],
+        design: u32,
+        rule: FillRule,
+        paint: &Paint,
+        depth: usize,
+    ) -> bool {
         let space = SampleSpace::design(design, (over.x, over.y, over.width, over.height));
-        self.fill_scan(contours, space, rule, paint);
+        let Some(fill) = ScanFill::new(contours, space, rule) else {
+            return true;
+        };
+        match paint {
+            Paint::Solid(color) => {
+                let source = color.premultiply();
+                self.fill_coverage(fill, |_, _| source);
+                true
+            }
+            Paint::Gradient(gradient) => {
+                self.fill_coverage(fill, |x, y| {
+                    gradient.sample(space.pixel_centre(x, y)).premultiply()
+                });
+                true
+            }
+            Paint::Pattern(pattern) => {
+                let Some(tile) = render_tile(pattern, space, design, depth) else {
+                    return false;
+                };
+                self.fill_coverage(fill, |x, y| {
+                    sample_tile(pattern, &tile, space.pixel_centre(x, y))
+                });
+                true
+            }
+        }
     }
 
     /// Draw an artwork tree: filled layers bottom first, each [`Group`]
@@ -1096,12 +1135,13 @@ impl Surface {
         for node in nodes {
             match node {
                 Node::Fill(layer) => {
-                    self.fill_contours_over(
+                    whole &= self.fill_painted(
                         over,
                         &layer.contours,
                         design,
                         layer.rule,
                         &layer.paint,
+                        depth,
                     );
                 }
                 Node::Group(group) => whole &= self.draw_group(over, group, design, depth),
@@ -1209,11 +1249,11 @@ impl Surface {
     /// stretched: it is drawn where its coordinates say, so a glyph needs no
     /// square scratch surface and blit to be positioned.
     pub fn fill_polygon_subpixel(&mut self, polygon: &[(i32, i32)], color: Color) {
-        self.fill_scan(
+        self.fill_solid(
             slice::from_ref(&polygon),
             SampleSpace::device(),
             FillRule::EvenOdd,
-            &Paint::Solid(color),
+            color,
         );
     }
 
@@ -1324,47 +1364,39 @@ impl Surface {
     }
 
     /// Scan-convert `contours`, whose vertices reach sample sub-units through
-    /// `space`, and composite `paint` scaled by each pixel's coverage.
+    /// `space`, and composite one flat `color` scaled by each pixel's
+    /// coverage.
     ///
-    /// The one entry every fill on this surface goes through: a design-grid
-    /// ring, grid-fitted device-space chrome, and multi-contour artwork differ
-    /// only in how their vertices reach those units and in the rule that
-    /// decides which enclosed region is inside.
-    fn fill_scan<C: AsRef<[(i32, i32)]>>(
+    /// The plain case of [`fill_painted`](Self::fill_painted), for the entry
+    /// points that take a colour rather than a [`Paint`] and so can never
+    /// fail to realise one.
+    fn fill_solid<C: AsRef<[(i32, i32)]>>(
         &mut self,
         contours: &[C],
         space: SampleSpace,
         rule: FillRule,
-        paint: &Paint,
+        color: Color,
     ) {
         if let Some(fill) = ScanFill::new(contours, space, rule) {
-            self.fill_coverage(fill, paint);
+            let source = color.premultiply();
+            self.fill_coverage(fill, |_, _| source);
         }
     }
 
-    /// Composite `paint` over every pixel `fill` covers, scaled by that
-    /// pixel's own coverage.
-    fn fill_coverage(&mut self, mut fill: ScanFill, paint: &Paint) {
-        // A flat colour is the same premultiplied pixel everywhere, so it is
-        // converted once rather than per pixel; a gradient is sampled per
-        // pixel below, through a copy of the space so the walk keeps its own
-        // mutable borrow of the fill.
-        let solid = match paint {
-            Paint::Solid(color) => Some(color.premultiply()),
-            Paint::Gradient(_) => None,
-        };
-        let space = fill.space();
+    /// Composite the premultiplied pixel `source` reports for each covered
+    /// pixel's surface position, scaled by that pixel's own coverage.
+    ///
+    /// One walk whatever the paint: a flat colour hands back a constant, a
+    /// gradient samples its ramp, a pattern reads its tile — so the fill's
+    /// plumbing never learns which it is drawing, and the flat case pays no
+    /// per-pixel branch for the others.
+    fn fill_coverage(&mut self, mut fill: ScanFill, source: impl Fn(u32, u32) -> Pixel) {
         self.scan_rows(&mut fill, |pixel, dst| {
-            let source = match solid {
-                Some(pixel) => pixel,
-                None => paint
-                    .sample(space.pixel_centre(pixel.x, pixel.y))
-                    .premultiply(),
-            };
+            let ink = source(pixel.x, pixel.y);
             // A premultiplied pixel of zero alpha leaves the destination
             // exactly as it found it.
-            if source.a != 0 {
-                *dst = source.scale_alpha(pixel.coverage).over(*dst);
+            if ink.a != 0 {
+                *dst = ink.scale_alpha(pixel.coverage).over(*dst);
             }
         });
     }
@@ -1943,6 +1975,105 @@ fn scaled(rect: Region, factor: u32) -> Option<Region> {
         width: rect.width.checked_mul(factor)?,
         height: rect.height.checked_mul(factor)?,
     })
+}
+
+/// The fixed-point scale one axis of a bilinear tile weight is carried in.
+const TILE_WEIGHT: u32 = 256;
+
+/// The shift that takes a product of two [`TILE_WEIGHT`]s back to a channel,
+/// derived from it so the two cannot drift apart.
+const TILE_SHIFT: u32 = 2 * TILE_WEIGHT.trailing_zeros();
+
+/// Render one repeat of `pattern` at the density `space` reads pixels at.
+///
+/// A tile is a small drawing of its own: the design grid stretched across the
+/// tile's own buffer. That buffer is also what confines the content to the
+/// tile, since a surface writes nothing outside itself — which is the
+/// `overflow: hidden` a pattern is drawn under.
+///
+/// A level of tile nesting holds a live buffer and a stack frame exactly as a
+/// group does, so it is charged against the same bound and refuses past it.
+fn render_tile(
+    pattern: &Pattern,
+    space: SampleSpace,
+    design: u32,
+    depth: usize,
+) -> Option<Surface> {
+    if depth >= MAX_GROUP_DEPTH {
+        return None;
+    }
+    let (width, height) = pattern.tile_extent(space.contour_per_pixel())?;
+    let mut tile = Surface::new(width, height)?;
+    let over = tile.space_rect_region();
+    tile.draw_nodes(over, &pattern.content, design, depth + 1)
+        .then_some(tile)
+}
+
+/// The tile pixel `pattern` puts at `point`, interpolated and wrapping at
+/// both edges.
+///
+/// The tile grid and the device grid share a density but not a phase, so
+/// reading the nearest texel would shift a tiled feature by up to half a
+/// pixel, and differently in each repeat. Premultiplied channels interpolate
+/// directly, and a sample reaching past an edge reads the opposite one, so a
+/// tile whose content meets itself still does.
+fn sample_tile(pattern: &Pattern, tile: &Surface, point: (f64, f64)) -> Pixel {
+    let Some((u, v)) = pattern.tile_position(point) else {
+        return Pixel::TRANSPARENT;
+    };
+    let (left, right, across) = tile_axis(u, tile.width);
+    let (top, bottom, down) = tile_axis(v, tile.height);
+    let at = |x: u32, y: u32| tile.get(x, y).unwrap_or(Pixel::TRANSPARENT);
+    let corners = [
+        at(left, top),
+        at(right, top),
+        at(left, bottom),
+        at(right, bottom),
+    ];
+    let (back, up) = (TILE_WEIGHT - across, TILE_WEIGHT - down);
+    let weights = [back * up, across * up, back * down, across * down];
+    let channel = |of: fn(Pixel) -> u8| {
+        let sum: u32 = corners
+            .iter()
+            .zip(weights)
+            .map(|(pixel, weight)| weight * u32::from(of(*pixel)))
+            .sum();
+        // The weights sum to exactly `TILE_WEIGHT²`, so this is a convex
+        // combination: the result keeps `r`, `g`, `b` no greater than `a` and
+        // stays premultiplied.
+        u8::try_from((sum + (1 << (TILE_SHIFT - 1))) >> TILE_SHIFT).unwrap_or(u8::MAX)
+    };
+    Pixel {
+        r: channel(|pixel| pixel.r),
+        g: channel(|pixel| pixel.g),
+        b: channel(|pixel| pixel.b),
+        a: channel(|pixel| pixel.a),
+    }
+}
+
+/// The two texel indices a `0..=1` tile coordinate falls between on one axis
+/// of an `extent`-texel tile, and how far it lies toward the second in
+/// [`TILE_WEIGHT`]ths.
+///
+/// Texel centres sit half a texel in, so the sample is taken half a texel
+/// back; a coordinate inside the first half-texel therefore reads across the
+/// wrap to the last one, which is what leaves the repeat seamless.
+fn tile_axis(fraction: f64, extent: u32) -> (u32, u32, u32) {
+    let last = extent.saturating_sub(1);
+    let scaled = fraction * f64::from(extent) - 0.5;
+    let base = mathf::floor(scaled);
+    let weight = mathf::round_i32((scaled - base) * f64::from(TILE_WEIGHT));
+    let first = if base < 0.0 {
+        last
+    } else {
+        u32::try_from(mathf::round_i32(base)).unwrap_or(0).min(last)
+    };
+    let second = if first == last { 0 } else { first + 1 };
+    (
+        first,
+        second,
+        u32::try_from(weight).unwrap_or(0).min(TILE_WEIGHT),
+    )
 }
 
 /// How much a `layers`-deep composite `side` pixels across is enlarged by.

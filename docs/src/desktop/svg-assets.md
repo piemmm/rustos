@@ -112,6 +112,11 @@ nothing off its content adds no group at all. A group whose buffer cannot be
 allocated draws nothing and says so, so the caller falls back to the tier
 below rather than showing half a composite (`AGENTS.md` §2.9).
 
+A pattern's tile is the same kind of level: a buffer in flight, holding a
+drawing of its own, so it is charged against the same nesting bound and
+refused past it rather than descending into a cycle of patterns painting one
+another.
+
 ## Loading a whole asset set
 
 A cursor or icon *set* is one SVG asset per kind. Reading the bytes from
@@ -281,6 +286,16 @@ authored rather than traced into a simpler form:
   spellings, and the CSS named colours.
 - **Gradients**: linear and radial, with units, spread, `gradientTransform`,
   and `href` inheritance between definitions.
+- **Patterns**: `<pattern>` as a paint server, with `patternUnits`,
+  `patternContentUnits`, `patternTransform`, its own `viewBox` and
+  `preserveAspectRatio`, and `href` inheritance of both attributes and
+  content. The tile is drawn once at the resolution the drawing is being
+  rasterised at and repeated across the shape, so a patterned fill is as
+  sharp at any size as the rest of the artwork. A tile is confined to
+  itself, which is the `overflow: hidden` a pattern is drawn under; content
+  an author asked to spill into the neighbouring repeats is a picture built
+  from overlapping tiles, which one repeated tile cannot express, so such a
+  reference takes its fallback colour rather than being silently clipped.
 - **Compositing**: `clip-path` and `<clipPath>` (`clip-rule`,
   `clipPathUnits`, nesting), `mask` and `<mask>` (`maskUnits`,
   `maskContentUnits`, `mask-type`, the mask region), and group opacity.
@@ -291,13 +306,17 @@ authored rather than traced into a simpler form:
 
 A reference to a `<clipPath>` or `<mask>` the document does not define means
 the element is **not rendered**, rather than rendered unclipped: an empty
-picture is an honest refusal where a wrong one is not (`AGENTS.md` §5.4).
+picture is an honest refusal where a wrong one is not (`AGENTS.md` §5.4). A
+reference to a *paint server* the document does not define takes the fallback
+colour written beside it, which is what a fallback is for; a paint server
+that is defined but paints nothing — a gradient with no stops, a pattern with
+no tile — is `none`, and takes no fallback.
 
 What it does **not** draw, because an artwork decoder is not a browser: text,
-embedded images, filters, patterns, markers, and animation. An element it
-cannot draw is skipped rather than refusing the document, so one unsupported
-decoration does not lose a whole asset; the open question about that choice is
-recorded in `plans/ICONS.md`. There is still exactly one rasterisation path
+embedded images, filters, markers, and animation. An element it cannot draw
+is skipped rather than refusing the document, so one unsupported decoration
+does not lose a whole asset; the open question about that choice is recorded
+in `plans/ICONS.md`. There is still exactly one rasterisation path
 (`AGENTS.md` §2.2), and pre-rasterised bitmap assets may exist as a cache or
 fallback but are never the only path. The staged design, and what is left, are
 in `plans/SVG.md`.

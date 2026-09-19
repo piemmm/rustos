@@ -449,24 +449,26 @@ question this plan has not settled.
 
 `lib/svg` now decodes the drawable part of SVG 1.1 in full (`plans/SVG.md`),
 so an authored master ships as its designer drew it. What it still cannot
-draw — text, embedded images, filters, patterns, markers — it **skips**,
-rendering the rest of the document rather than refusing it.
+draw — text, embedded images, filters, markers — it **skips**, rendering the
+rest of the document rather than refusing it.
 
 That is deliberate: one unsupported decoration should not lose a whole asset,
 and it is the behaviour every surface has today. But it cuts against failing
-closed, because a master carrying a `<pattern>` fill renders in that paint's
-fallback colour — a wrong picture — instead of falling back to the tier below.
-The alternative is to refuse the document when it carries a drawable element
-the decoder cannot honour, so a wrong picture becomes a clean fallback. Which
-of the two the desktop wants is a decision this plan has not taken; the build
-gate already refuses a master that draws nothing, so only the *partially*
-drawable case is at stake.
+closed, because a master carrying an element the decoder cannot honour
+renders without it — a wrong picture — instead of falling back to the tier
+below. The alternative is to refuse the document when it carries a drawable
+element the decoder cannot honour, so a wrong picture becomes a clean
+fallback. Which of the two the desktop wants is a decision this plan has not
+taken; the build gate already refuses a master that draws nothing, so only
+the *partially* drawable case is at stake.
 
-The set at stake is smaller than it was. Clipping, masking, and group opacity
-are now honoured, and a `clip-path` or `mask` naming something the document
-does not define makes the element **not rendered** rather than rendered
-unclipped — which is this question already answered, for the one case where
-the decoder can tell that the author meant a composite it could not build.
+The set at stake keeps shrinking. Clipping, masking, group opacity and
+`<pattern>` fills are now honoured; a `clip-path` or `mask` naming something
+the document does not define makes the element **not rendered** rather than
+rendered unclipped, and a paint server that is defined but paints nothing is
+`none` rather than the fallback colour written beside the reference — which
+is this question already answered, for the cases where the decoder can tell
+what the author meant.
 
 ## 13. What this plan deliberately does not cover
 

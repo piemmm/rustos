@@ -67,6 +67,23 @@ const TEMPLATES: &[&[u8]] = &[
             <g class="k"><g><rect class="j" width="20" height="20" clip-path="url(#d)"/></g></g>
           </svg>"##,
     br##"<svg viewBox="0 0 24 24">
+            <pattern id="p" width="0.25" height="0.25" patternTransform="rotate(20) scale(1.5)">
+              <circle cx="2" cy="2" r="1.5" fill="#c33"/></pattern>
+            <pattern id="q" href="#p" patternUnits="userSpaceOnUse" width="6" height="6"
+              viewBox="0 0 4 4" preserveAspectRatio="xMidYMid meet" overflow="visible"/>
+            <rect width="24" height="24" fill="url(#q) #048" fill-opacity="0.6"/>
+            <circle cx="12" cy="12" r="8" fill="url(#p)" stroke="#000" stroke-width="2"
+              opacity="0.5"/></svg>"##,
+    br##"<svg viewBox="0 0 16 16">
+            <pattern id="a" width="4" height="4" patternUnits="userSpaceOnUse"
+              patternContentUnits="objectBoundingBox">
+              <rect width=".2" height=".2" fill="#0a0"/></pattern>
+            <pattern id="b" width="8" height="8" patternUnits="userSpaceOnUse">
+              <rect width="8" height="8" fill="url(#a)" clip-path="url(#c)"/>
+              <path d="M0 0 L8 8" stroke="#a00" stroke-width="1"/></pattern>
+            <clipPath id="c"><circle cx="4" cy="4" r="3"/></clipPath>
+            <rect width="16" height="16" fill="url(#b)"/></svg>"##,
+    br##"<svg viewBox="0 0 24 24">
             <mask id="m" maskContentUnits="objectBoundingBox" style="mask-type:alpha">
               <rect width=".5" height="1" fill="#fff"/></mask>
             <mask id="n" maskUnits="userSpaceOnUse" x="1" y="1" width="8" height="8" mask="url(#m)">
@@ -155,23 +172,65 @@ fn decode_never_panics(bytes: &[u8]) {
         "the viewports disagreed other than about complexity"
     );
     for image in [square, natural].into_iter().flatten() {
-        let mut vertices = 0usize;
-        let mut layers = 0usize;
-        tairix_raster::for_each_fill(image.nodes(), &mut |layer| {
-            assert!(!layer.contours.is_empty(), "a layer with nothing to fill");
-            vertices += layer.contours.iter().map(Vec::len).sum::<usize>();
-            layers += 1;
-        });
-        assert!(vertices <= 65_536, "{vertices} vertices past the bound");
-        assert!(layers <= 1024, "{layers} layers past the bound");
         // Whatever the decoder accepts, the one renderer draws: a tree nested
-        // past the renderer's bound would decode and then refuse to appear.
+        // past the renderer's bound, or a pattern whose tile cannot be
+        // realised, would decode and then refuse to appear. Asserted first,
+        // because it is also what bounds the walk below.
         let mut surface =
             tairix_raster::Surface::new(RENDER_SIDE, RENDER_SIDE).expect("a small surface");
         assert!(
             surface.draw_artwork(image.nodes(), image.design()),
             "the renderer refused artwork the decoder accepted"
         );
+        let mut tally = Tally::default();
+        tally.walk(image.nodes());
+        assert!(
+            tally.vertices <= 65_536,
+            "{} vertices past the bound",
+            tally.vertices
+        );
+        assert!(
+            tally.layers <= 1024,
+            "{} layers past the bound",
+            tally.layers
+        );
+    }
+}
+
+/// What a decoded document charged against the decoder's budgets.
+#[derive(Default)]
+struct Tally {
+    layers: usize,
+    vertices: usize,
+}
+
+impl Tally {
+    /// Count every filled layer, *including* the ones inside a pattern's own
+    /// tile.
+    ///
+    /// The shared walk deliberately leaves a tile out, because a tile is a
+    /// drawing in its own space rather than this one — but the decoder
+    /// charges its geometry against the same budget, so the invariant under
+    /// test has to see it.
+    fn walk(&mut self, nodes: &[tairix_raster::Node]) {
+        for node in nodes {
+            match node {
+                tairix_raster::Node::Fill(layer) => {
+                    assert!(!layer.contours.is_empty(), "a layer with nothing to fill");
+                    self.layers += 1;
+                    self.vertices += layer.contours.iter().map(Vec::len).sum::<usize>();
+                    if let tairix_raster::Paint::Pattern(pattern) = &layer.paint {
+                        self.walk(&pattern.content);
+                    }
+                }
+                tairix_raster::Node::Group(group) => {
+                    self.walk(&group.children);
+                    if let Some(mask) = &group.mask {
+                        self.walk(&mask.content);
+                    }
+                }
+            }
+        }
     }
 }
 

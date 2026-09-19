@@ -11,7 +11,9 @@ use core::fmt::Write as _;
 use alloc::format;
 use alloc::vec::Vec;
 
-use tairix_raster::{for_each_fill, Color, FillRule, Group, Layer, MaskKind, Node, Paint};
+use tairix_raster::{
+    for_each_fill, Color, FillRule, Group, Layer, MaskKind, Node, Paint, Pattern, Surface,
+};
 
 use crate::error::SvgError;
 use crate::{decode, Viewport, DESIGN_GRID};
@@ -21,6 +23,9 @@ use crate::{decode, Viewport, DESIGN_GRID};
 fn decode_square(bytes: &[u8]) -> Result<crate::SvgImage, SvgError> {
     decode(bytes, Viewport::Square)
 }
+
+/// The nesting bound the decoder and the renderer share.
+const DESIGN_NESTING: usize = tairix_raster::MAX_GROUP_DEPTH;
 
 /// The design grid as a contour coordinate.
 fn grid() -> i32 {
@@ -60,7 +65,7 @@ fn document(body: &str) -> alloc::string::String {
 fn solid(layer: &Layer) -> Color {
     match layer.paint {
         Paint::Solid(color) => color,
-        Paint::Gradient(_) => panic!("expected a solid paint"),
+        Paint::Gradient(_) | Paint::Pattern(_) => panic!("expected a solid paint"),
     }
 }
 
@@ -1109,4 +1114,343 @@ fn a_gradient_stops_current_color_comes_from_the_gradient_not_its_user() {
     for stop in &gradient.stops {
         assert_eq!(stop.color, Color::rgb(0, 255, 0));
     }
+}
+
+// --- patterns -------------------------------------------------------------
+
+/// The pattern a document's only layer fills with.
+#[track_caller]
+fn only_pattern(svg: &str) -> Pattern {
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
+    let [Node::Fill(layer)] = image.nodes() else {
+        panic!("expected one plain layer, got {:?}", image.nodes());
+    };
+    match &layer.paint {
+        Paint::Pattern(pattern) => pattern.clone(),
+        other => panic!("expected a pattern, got {other:?}"),
+    }
+}
+
+/// One row of a document rasterised `side` pixels square, `#` where the
+/// pixel is more than half opaque.
+#[track_caller]
+fn rendered_row(svg: &str, side: u32, row: u32) -> alloc::string::String {
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
+    let mut surface = Surface::new(side, side).expect("a small surface");
+    assert!(
+        surface.draw_artwork(image.nodes(), image.design()),
+        "the renderer refused artwork the decoder accepted"
+    );
+    (0..side)
+        .map(|x| {
+            if surface.get(x, row).map_or(0, |pixel| pixel.a) > 128 {
+                '#'
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
+/// A tile stated in user space repeats across the shape at its own period,
+/// and the tile's own content is clipped to it.
+#[test]
+fn a_user_space_tile_repeats_at_its_stated_period() {
+    let svg = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect width="2" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    // Eight user units across sixteen pixels: the tile is eight pixels and
+    // its half-covering stripe four.
+    assert_eq!(rendered_row(&svg, 16, 8), "####....####....");
+}
+
+/// Bounding-box units are the initial ones, and they are fractions of the
+/// filled shape rather than of the document.
+#[test]
+fn a_bounding_box_tile_is_a_fraction_of_the_shape() {
+    let svg = document(
+        r##"<pattern id="p" width="0.5" height="0.5">
+              <rect width="1" height="4" fill="#f00"/></pattern>
+            <rect x="0" y="0" width="4" height="4" fill="url(#p)"/>"##,
+    );
+    // The shape is four of the document's eight units, so half of it is a
+    // two-unit tile — four pixels of a sixteen-pixel render — and the tile's
+    // own one-unit stripe covers half of each repeat.
+    assert_eq!(rendered_row(&svg, 16, 2), "##..##..........");
+}
+
+/// A `patternTransform` moves the tiling lattice, not just the content.
+#[test]
+fn a_pattern_transform_places_the_lattice() {
+    let plain = only_pattern(&document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect width="2" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    ));
+    let shifted = only_pattern(&document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              patternTransform="translate(2 0)">
+              <rect width="2" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    ));
+    // Half a tile on: the same point in the drawing lands half a tile later.
+    let at = (0.0, 0.0);
+    assert_eq!(plain.tile_position(at), Some((0.0, 0.0)));
+    assert_eq!(shifted.tile_position(at), Some((0.5, 0.0)));
+}
+
+/// `patternContentUnits` states the content in fractions of the filled
+/// shape's box instead of in user space.
+#[test]
+fn pattern_content_units_scale_the_tile_content() {
+    let svg = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              patternContentUnits="objectBoundingBox">
+              <rect width="0.25" height="1" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    // A quarter of the eight-unit box is two user units, which is half of
+    // the four-unit tile: the same stripe the user-space case draws.
+    assert_eq!(rendered_row(&svg, 16, 8), "####....####....");
+}
+
+/// A pattern's own `viewBox` fits its content to the tile, which is what
+/// lets one drawing tile at any period.
+#[test]
+fn a_pattern_view_box_fits_its_content_to_the_tile() {
+    let svg = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              viewBox="0 0 10 10" preserveAspectRatio="none">
+              <rect width="5" height="10" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    assert_eq!(rendered_row(&svg, 16, 8), "####....####....");
+}
+
+/// `href` inherits a pattern's content as well as its attributes.
+#[test]
+fn a_pattern_inherits_the_content_it_references() {
+    let svg = document(
+        r##"<pattern id="base" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect width="2" height="4" fill="#f00"/></pattern>
+            <pattern id="p" href="#base"/>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    assert_eq!(rendered_row(&svg, 16, 8), "####....####....");
+}
+
+/// A pattern that paints nothing is `none`, not the fallback colour beside
+/// the reference: the reference was valid and the author's answer was empty.
+#[test]
+fn an_empty_pattern_paints_nothing_rather_than_the_fallback() {
+    for pattern in [
+        r#"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"/>"#,
+        // A zero extent disables the pattern, which SVG states outright.
+        r##"<pattern id="p" width="0" height="4" patternUnits="userSpaceOnUse">
+              <rect width="2" height="4" fill="#f00"/></pattern>"##,
+    ] {
+        let svg = document(&format!(
+            r#"{pattern}<rect width="8" height="8" fill="url(#p) #00f"/>"#
+        ));
+        assert!(
+            layers(&svg).is_empty(),
+            "an empty pattern should paint nothing: {pattern}"
+        );
+    }
+}
+
+/// The same distinction for a gradient: no stops is `none`, while a name the
+/// document never defines is what the fallback is for.
+#[test]
+fn a_stopless_gradient_paints_nothing_but_a_missing_one_falls_back() {
+    let stopless =
+        document(r#"<linearGradient id="g"/><rect width="8" height="8" fill="url(#g) #00f"/>"#);
+    assert!(layers(&stopless).is_empty());
+
+    let missing = document(r#"<rect width="8" height="8" fill="url(#nothing) #00f"/>"#);
+    assert_eq!(solid(&layers(&missing)[0]), Color::rgb(0, 0, 255));
+}
+
+/// A tile whose content an author asked to spill past it cannot be drawn by
+/// repeating one tile, so the reference takes its fallback rather than being
+/// silently clipped to a picture the author did not draw.
+#[test]
+fn a_tile_that_overflows_its_own_bounds_falls_back() {
+    let svg = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              overflow="visible">
+              <rect width="6" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p) #00f"/>"##,
+    );
+    assert_eq!(solid(&layers(&svg)[0]), Color::rgb(0, 0, 255));
+
+    // Content that stays inside its tile draws the same either way, so an
+    // `overflow` that cuts nothing off costs nothing.
+    let inside = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              overflow="visible">
+              <rect width="2" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    assert_eq!(rendered_row(&inside, 16, 8), "####....####....");
+}
+
+/// A pattern's tile inherits from where the pattern sits, not from the shape
+/// that used it — the rule every referenced definition follows.
+#[test]
+fn a_tile_inherits_from_its_own_place_in_the_document() {
+    let svg = document(
+        r##"<g fill="#f00"><pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect width="2" height="4"/></pattern></g>
+            <rect width="8" height="8" fill="url(#p)" color="#0f0"/>"##,
+    );
+    let pattern = only_pattern(&svg);
+    let [Node::Fill(layer)] = pattern.content.as_slice() else {
+        panic!("expected one tile layer, got {:?}", pattern.content);
+    };
+    assert_eq!(solid(layer), Color::rgb(255, 0, 0));
+}
+
+/// A fill opacity weakens the whole tile as a unit, so two of its layers do
+/// not show through one another.
+#[test]
+fn a_fill_opacity_weakens_the_tile_as_a_unit() {
+    let pattern = only_pattern(&document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect width="2" height="4" fill="#f00"/>
+              <rect width="4" height="2" fill="#0f0"/></pattern>
+            <rect width="8" height="8" fill="url(#p)" fill-opacity="0.5"/>"##,
+    ));
+    let [Node::Group(group)] = pattern.content.as_slice() else {
+        panic!("expected one composited tile, got {:?}", pattern.content);
+    };
+    assert_eq!(group.opacity, 128);
+    assert_eq!(group.children.len(), 2);
+}
+
+/// A tile is a buffer in flight exactly as a group is, so the two share one
+/// nesting bound and a document past it is refused rather than decoding into
+/// artwork the renderer would turn away.
+#[test]
+fn patterns_nested_past_the_composite_bound_are_refused() {
+    let mut body = alloc::string::String::from(
+        r##"<pattern id="p0" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect width="2" height="4" fill="#f00"/></pattern>"##,
+    );
+    for level in 1..=DESIGN_NESTING {
+        let _ = write!(
+            body,
+            r#"<pattern id="p{level}" width="4" height="4" patternUnits="userSpaceOnUse">
+                  <rect width="4" height="4" fill="url(#p{})"/></pattern>"#,
+            level - 1
+        );
+    }
+    let _ = write!(
+        body,
+        r#"<rect width="8" height="8" fill="url(#p{DESIGN_NESTING})"/>"#
+    );
+    assert_eq!(
+        decode_square(document(&body).as_bytes()),
+        Err(SvgError::TooComplex)
+    );
+}
+
+/// A pattern that references itself is a cycle the nesting bound ends.
+#[test]
+fn a_self_referential_pattern_is_refused() {
+    let svg = document(
+        r#"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect width="4" height="4" fill="url(#p)"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"#,
+    );
+    assert_eq!(decode_square(svg.as_bytes()), Err(SvgError::TooComplex));
+}
+
+/// A tile is a drawing in its own space, so its geometry is no part of the
+/// bounding box of the shape being filled: a bounding-box clip on a
+/// patterned shape is sized from the shape alone.
+#[test]
+fn a_tile_does_not_reach_the_filled_shapes_bounding_box() {
+    let group = only_group(&document(
+        r##"<clipPath id="c" clipPathUnits="objectBoundingBox">
+              <rect width="0.5" height="1"/></clipPath>
+            <pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect x="900" y="900" width="1" height="1" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)" clip-path="url(#c)"/>"##,
+    ));
+    let mask = group.mask.expect("a clip mask");
+    let shapes = flatten(&mask.content);
+    assert_eq!(box_of(&shapes[0]), (0, 0, 4 * UNIT, 8 * UNIT));
+}
+
+/// A tile establishes a viewport of its own, so a percentage in its content
+/// is a fraction of the tile rather than of the document.
+#[test]
+fn a_tile_percentage_resolves_against_the_tile() {
+    let svg = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              viewBox="0 0 10 10" preserveAspectRatio="none">
+              <rect width="50%" height="100%" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    assert_eq!(rendered_row(&svg, 16, 8), "####....####....");
+}
+
+/// A pattern's own geometry is charged against the document's vertex budget
+/// exactly once, however the shape that uses it is composited.
+#[test]
+fn a_tile_is_charged_against_the_budget_once() {
+    let svg = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
+              <circle cx="2" cy="2" r="1" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)" stroke="#00f" stroke-width="1"
+              opacity="0.5"/>"##,
+    );
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
+    let [Node::Group(group)] = image.nodes() else {
+        panic!("expected one composited element, got {:?}", image.nodes());
+    };
+    let [Node::Fill(fill), Node::Fill(_stroke)] = group.children.as_slice() else {
+        panic!("expected a fill and a stroke, got {:?}", group.children);
+    };
+    let Paint::Pattern(pattern) = &fill.paint else {
+        panic!("expected a pattern, got {:?}", fill.paint);
+    };
+    assert_eq!(pattern.content.len(), 1, "the tile is built exactly once");
+}
+
+// --- curve flattening ------------------------------------------------------
+
+/// A curve is flattened to the accuracy the *design grid* needs, so the
+/// placement it is drawn under decides the tolerance — not the document's own
+/// root map. The same arc drawn directly and drawn ten times smaller inside
+/// `scale(10)` reaches the grid at the same size, so it must be subdivided the
+/// same; taking the root's tolerance would facet the scaled one tenfold.
+#[test]
+fn a_scaled_subtree_is_flattened_as_finely_as_the_grid_needs() {
+    let direct = layers(r#"<svg viewBox="0 0 80 80"><path d="M0 40 A40 40 0 0 1 80 40"/></svg>"#);
+    let scaled = layers(
+        r#"<svg viewBox="0 0 80 80"><g transform="scale(10)">
+             <path d="M0 4 A4 4 0 0 1 8 4"/></g></svg>"#,
+    );
+    assert_eq!(direct[0].vertices(), scaled[0].vertices());
+}
+
+/// A placement that collapses draws a point however finely a curve on it is
+/// subdivided, so it takes the coarsest tolerance rather than an infinite one
+/// the flattener would read as the finest and spend the whole vertex budget
+/// on.
+#[test]
+fn a_collapsed_placement_does_not_subdivide_a_curve() {
+    let svg =
+        document(r#"<g transform="scale(0)"><path d="M0 4 A4 4 0 0 1 8 4 A4 4 0 0 1 0 4 Z"/></g>"#);
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
+    assert!(
+        flatten(image.nodes())
+            .iter()
+            .all(|layer| layer.vertices() <= 8),
+        "a collapsed arc should not be subdivided"
+    );
 }

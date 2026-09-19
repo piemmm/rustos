@@ -41,6 +41,12 @@ factor, so a clip is a mask whose content is the clip's shapes filled opaque
 white. A group is emitted only where it changes the picture, so a flat asset
 decodes to a flat list.
 
+A `<pattern>` fill is artwork of its own rather than a colour: the layer
+carries the tile's nodes and the map from the drawing into tile space, and
+`lib/raster` renders one repeat at the density the fill reads it back at. A
+tile is a buffer in flight exactly as a group is, so both are charged against
+one nesting bound and a cycle of patterns painting one another ends at it.
+
 ## Untrusted input
 
 On-disk assets under `/System/Graphics` are untrusted (`AGENTS.md` §19.5).
@@ -69,15 +75,20 @@ The drawable part of SVG 1.1, in full:
 - CSS colour syntax — every hex form, `rgb()`/`rgba()`/`hsl()`/`hsla()` in
   both spellings, the named-colour table, and `currentColor`;
 - linear and radial gradients, with units, spread, and `href` inheritance;
+- `<pattern>` as a paint server — `patternUnits`, `patternContentUnits`,
+  `patternTransform`, its own `viewBox`, and `href` inheritance of both
+  attributes and content — whose tile is rendered at the resolution the
+  drawing is being rasterised at, so a patterned fill stays as sharp as the
+  rest of the artwork;
 - `clip-path` and `<clipPath>` (`clip-rule`, `clipPathUnits`, nesting),
   `mask` and `<mask>` (`maskUnits`, `maskContentUnits`, `mask-type`, the mask
   region), and group opacity, each composited in isolation;
 - `paint-order`, and a `<switch>`'s conditional-processing attributes.
 
 It is a renderer for artwork, not a browser. Text, embedded images, filters,
-patterns, markers, and animation are **not drawn**; an element it cannot draw
-is skipped rather than refusing the document, so one unsupported decoration
-does not lose a whole asset. The staged design, what is left, and the open
+markers, and animation are **not drawn**; an element it cannot draw is
+skipped rather than refusing the document, so one unsupported decoration does
+not lose a whole asset. The staged design, what is left, and the open
 question about that choice are in `plans/SVG.md`.
 
 ## Layout
@@ -97,7 +108,8 @@ question about that choice are in `plans/SVG.md`.
 - `stroke` — stroke outline: segment quads, joins, caps, dashes.
 - `transform` — the `transform` grammar and viewport fitting.
 - `style` — the property cascade.
-- `paint` — gradients and paint-server resolution.
+- `paint` — gradients, pattern placement, and what a `url(#id)` reference
+  comes to.
 - `color` — CSS colour syntax → a `lib/raster` `Color`.
 - `error` — the closed `SvgError` rejection set.
 
