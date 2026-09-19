@@ -213,6 +213,59 @@ comes on show, draws whatever has already arrived, and rebuilds when the
 answer lands as an ordinary wake. Coming back to the pane asks afresh, because
 unlike the shipped picture store the mount table moves.
 
+## Networking
+
+Two composed panes and two stated absences, and the split between them is the
+authority line the whole application is built on.
+
+**TCP/IP** is the stack-wide policy: whether the machine speaks IPv4 and IPv6
+at all, whether it forms temporary IPv6 source addresses, and the three
+behaviours every TCP connection shares — the connection-flood defence, whether
+an idle connection is probed, and whether routers may signal congestion
+instead of dropping packets. These are the `net.*` keys of the same
+`system.conf` store Login & startup and Caching stage, so the pane is a third
+composition over the same rows and the same one `configure` run; it adds no
+form machinery and no second writer. Applying it takes effect **without a
+reboot**: `configure` writes the store and then hands the policy to the
+running stack over its `CAP_NET_ADMIN` admin endpoint, and a refusal there
+(no stack running, or an account that may not) leaves the saved setting
+standing for the next boot and says so rather than claiming it applied.
+
+A row whose effect something above it has taken away says so and keeps its own
+value, exactly as a cache class does under the master switch: the temporary-
+address row states that IPv6 is off, and the three connection rows state that
+a machine with neither family makes no connections at all. The value is still
+what the store holds — that is what would apply if the switch above came back
+on — but a reader who saw `On` alone would believe it was running.
+
+**DNS** states the recursive name servers the stack is actually resolving
+through: the statically configured and the DHCP-learned servers, aggregated
+and deduplicated by the stack into the one answer a userland resolver client
+reads too. One row per server, discovered rather than declared, from the
+ungated `NET_RESOLVER_SERVERS` query — public host configuration, the TAIRiX
+analogue of a world-readable `resolv.conf`. An empty set and a reading that
+could not be taken are kept apart: the first says the machine resolves no
+names, the second says the reading is not measured. The walk is an IPC round
+trip, so it runs on a worker like the mount walk, and returning to the pane
+asks afresh because leases come and go.
+
+**Ethernet states where its readings live, and does not take them.** An
+interface's link state, bound addresses and throughput need
+`CAP_SYSINFO_GLOBAL`, and its hardware identity needs `CAP_SYSINFO_HW` — the
+MAC is stable hardware identity and the address book is system-wide,
+cross-principal state. Settings holds neither and never will, so those
+readings stay the [Switchboard](switchboard.md)'s, exactly as the per-device
+I/O counters do for Storage. The pane says so, names where the readings are
+reported and which tool writes the addressing, and draws no row: a row refused
+on every machine for ever is a dead row, not a denied action. `network.conf`
+cannot be served ungated for the same reason — it carries the `match.mac`
+identity and the static addressing the two gated queries exist to protect, so
+serving the document would be a way round the gate rather than an answer to
+it.
+
+**Wi-Fi** states the absence of the subsystem: no 802.11 driver, no
+supplicant, and no vocabulary for a scan or an association.
+
 ## Absence is stated, never mimed
 
 A control that would change nothing is never drawn. Each pane declares what
@@ -259,7 +312,7 @@ the staged source of truth; the shape of it is:
   desktop session, which validates it, applies it and persists it to its own
   published app-data scope; the desktop adopts a change only after the write
   succeeded, so memory and disk cannot diverge;
-- **machine-scope panes** (Login & startup, Caching, TCP/IP, Ethernet, DNS,
+- **machine-scope panes** (Login & startup, Caching, TCP/IP,
   Language & Region) ask the console's elevation broker to re-authenticate an
   account that may, and run the same `configure` program the command line
   uses, so the CLI and the GUI are literally the same writer. They read the

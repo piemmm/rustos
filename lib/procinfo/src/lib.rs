@@ -39,6 +39,9 @@
 //! * [`for_each_resolver_server`] and [`for_each_time_server`], the
 //!   recursive-resolver and network-time server walks the
 //!   `state:net/resolver/servers` and `state:net/time/servers` reads render.
+//! * [`render_ip`], [`render_server`] and [`render_if_addr`] — the one text
+//!   spelling of a network address every surface prints, so a desktop never
+//!   spells one address two ways.
 //! * [`kstats`] — the shared kernel-statistics fetches (memory pressure,
 //!   reclaim ledger, `ramzip` counters, per-CPU load) consumed by both the
 //!   resolver and the `sysmon` monitor, plus [`for_each_net_interface`] and
@@ -112,6 +115,7 @@ pub mod hwtree;
 pub mod kstats;
 pub mod list;
 pub mod mount;
+pub mod netaddr;
 pub mod netservers;
 pub mod netsock;
 pub mod pressure;
@@ -142,6 +146,7 @@ pub use kstats::{
 };
 pub use list::{field_lossy, walk_pages, ListError, WalkStep};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
+pub use netaddr::{render_if_addr, render_ip, render_server};
 pub use netservers::{
     for_each_resolver_server, for_each_time_server, RESOLVER_SERVER_PAGE, TIME_SERVER_PAGE,
 };

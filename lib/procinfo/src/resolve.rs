@@ -45,9 +45,8 @@ use alloc::vec::Vec;
 use tairix_abi::origin::{Origin, TrustDomain};
 
 use tairix_abi::net_ipc::{
-    NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
-    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, NetServerAddr, IF_NAME_LEN,
+    NetBondMemberRecord, NetIfKind, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
     reclaim_class_from_name, CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord,
@@ -64,6 +63,7 @@ use crate::human::cpu_feature_flags;
 use crate::kstats;
 use crate::kstats::{for_each_net_bond_member, for_each_net_interface};
 use crate::list::{field_lossy, ListError, WalkStep};
+use crate::netaddr::{render_if_addr, render_server};
 use crate::netservers::{for_each_resolver_server, for_each_time_server};
 use crate::request::{call, CallError};
 use crate::resinfo::{
@@ -241,7 +241,7 @@ fn resolve_state(
                 if !rendered.is_empty() {
                     rendered.push_str(", ");
                 }
-                push_if_addr(&mut rendered, entry);
+                rendered.push_str(&render_if_addr(entry));
             }
             if rendered.is_empty() {
                 rendered.push_str("none");
@@ -1329,30 +1329,12 @@ fn render_server_addrs(servers: &[NetServerAddr]) -> String {
         if !rendered.is_empty() {
             rendered.push_str(", ");
         }
-        rendered.push_str(&resolver_server_string(server));
+        rendered.push_str(&render_server(server));
     }
     if rendered.is_empty() {
         rendered.push_str("none");
     }
     rendered
-}
-
-/// Render one resolver server's address as plain text (dotted-quad for a
-/// V4 server, RFC 5952 canonical text for a V6 server).
-fn resolver_server_string(server: &NetServerAddr) -> String {
-    match server.family {
-        NetAddrFamily::V4 => {
-            let mut out = String::new();
-            for (index, byte) in server.addr[..4].iter().enumerate() {
-                if index > 0 {
-                    out.push('.');
-                }
-                out.push_str(&byte.to_string());
-            }
-            out
-        }
-        NetAddrFamily::V6 => ipv6_string(&server.addr),
-    }
 }
 
 /// The NUL-padded interface-alias field as an owned display string.
@@ -1767,87 +1749,6 @@ fn mac_string(mac: [u8; 6]) -> String {
         out.push(char::from_digit(u32::from(byte & 0xF), 16).unwrap_or('0'));
     }
     out
-}
-
-/// Append one bound address as `addr/prefix`, suffixed with its DAD/SLAAC
-/// state when it is not simply preferred.
-fn push_if_addr(out: &mut String, entry: &NetIfAddr) {
-    match entry.family {
-        NetAddrFamily::V4 => {
-            for (index, byte) in entry.addr[..4].iter().enumerate() {
-                if index > 0 {
-                    out.push('.');
-                }
-                out.push_str(&byte.to_string());
-            }
-        }
-        NetAddrFamily::V6 => out.push_str(&ipv6_string(&entry.addr)),
-    }
-    out.push('/');
-    out.push_str(&entry.prefix.to_string());
-    match entry.state {
-        NetAddrState::Preferred => {}
-        NetAddrState::Tentative => out.push_str(" (tentative)"),
-        NetAddrState::Deprecated => out.push_str(" (deprecated)"),
-    }
-}
-
-/// Render an IPv6 address in RFC 5952 canonical text: lowercase hex
-/// groups with leading zeros suppressed and the leftmost longest run of
-/// two or more zero groups compressed to `::`.
-fn ipv6_string(octets: &[u8; 16]) -> String {
-    let mut groups = [0u16; 8];
-    for (index, group) in groups.iter_mut().enumerate() {
-        *group = u16::from_be_bytes([octets[index * 2], octets[index * 2 + 1]]);
-    }
-    // Find the leftmost longest zero run of length >= 2.
-    let (mut best_start, mut best_len) = (0usize, 0usize);
-    let mut index = 0;
-    while index < groups.len() {
-        if groups[index] == 0 {
-            let start = index;
-            while index < groups.len() && groups[index] == 0 {
-                index += 1;
-            }
-            let len = index - start;
-            if len >= 2 && len > best_len {
-                best_start = start;
-                best_len = len;
-            }
-        } else {
-            index += 1;
-        }
-    }
-    let mut out = String::new();
-    let mut index = 0;
-    while index < groups.len() {
-        if best_len >= 2 && index == best_start {
-            out.push_str("::");
-            index += best_len;
-            continue;
-        }
-        if !out.is_empty() && !out.ends_with(':') {
-            out.push(':');
-        }
-        push_u16_hex(&mut out, groups[index]);
-        index += 1;
-    }
-    if out.is_empty() {
-        out.push_str("::");
-    }
-    out
-}
-
-/// Append `value` as minimal lowercase hex (no leading zeros).
-fn push_u16_hex(out: &mut String, value: u16) {
-    let mut started = false;
-    for shift in [12u32, 8, 4, 0] {
-        let nibble = (value >> shift) & 0xF;
-        if nibble != 0 || started || shift == 0 {
-            started = true;
-            out.push(char::from_digit(u32::from(nibble), 16).unwrap_or('0'));
-        }
-    }
 }
 
 /// Issue [`SysinfoQueryId::SYSTEM_IDENTITY`] and decode the reply.

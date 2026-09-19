@@ -46,6 +46,14 @@ The crate provides:
   `mount(8)` listing, `availability_name` for a fact list), `medium_name`,
   and `volume_health_name`. `df`'s GNU `Use%` is a fraction of `usable()`
   rather than of the medium, which is why both shares are named.
+- `render_ip` / `render_server` / `render_if_addr` — the one text spelling of
+  a network address every surface prints: dotted-quad for IPv4, RFC 5952
+  canonical for IPv6 (lowercase, leading zeros dropped, the leftmost longest
+  run of two or more zero groups compressed to `::`), and `addr/prefix` with
+  a DAD/SLAAC suffix for a bound interface address. One definition because a
+  desktop that spelled one address two ways would be asking a reader which is
+  the machine's — the `info:`/`state:` reads, the Switchboard's interface
+  section and the Settings DNS pane all render through this.
 - `system_config` — the machine's boot-time configuration store, read through
   the ungated `SYSTEM_CONFIG` query and parsed by `lib/sysconfig`, the engine
   `configure` writes through. `Ok(None)` is an installation that has never had

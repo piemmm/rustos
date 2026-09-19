@@ -40,6 +40,7 @@ mod program {
     extern crate alloc;
 
     use alloc::string::String;
+    use alloc::sync::Arc;
     use alloc::vec::Vec;
     use core::cell::Cell;
 
@@ -47,6 +48,7 @@ mod program {
     use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
+    use tairix_abi::net_ipc::MAX_RESOLVER_SERVERS;
     use tairix_abi::pinboard_ipc::PinboardDocument;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowSizing};
@@ -58,7 +60,8 @@ mod program {
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{
-        ElevateRefusal, Elevation, MachineFacts, Pane, Shell, ShellOutcome, VolumeReading,
+        ElevateRefusal, Elevation, MachineFacts, NetworkFacts, Pane, Shell, ShellOutcome,
+        VolumeReading,
     };
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
@@ -96,6 +99,14 @@ mod program {
     /// would stop answering for the whole of an authentication and a store
     /// write.
     const ELEVATE_TOKEN: u64 = app::FIRST_APP_TOKEN + 3;
+
+    /// The wait-set token of the network-reading desk's wake: readable
+    /// exactly when a fresh reading of the stack's resolver set has landed.
+    ///
+    /// Its own desk rather than the machine desk's: the two are wanted by
+    /// different panes, and folding them together would spend a network
+    /// round trip every time the About pane came on show.
+    const NETWORK_TOKEN: u64 = app::FIRST_APP_TOKEN + 4;
 
     /// The window's logical width at the reference density: the strip plus a
     /// content column wide enough for a pane's widest row.
@@ -194,6 +205,43 @@ mod program {
             }
         };
         (config, machine_facts())
+    }
+
+    /// The network readings: the resolver set the stack is actually using.
+    ///
+    /// Carried out on a worker thread because it is a paged IPC round trip
+    /// like the mount walk, and a window that waited on it would stop
+    /// answering for as long as the service took.
+    type Network = tairix_rt::work::Worker<(), (), NetworkFacts>;
+
+    /// The network readings' body.
+    ///
+    /// A refused or undecodable walk leaves the set absent rather than
+    /// empty: "no server answered the question" and "the stack holds no
+    /// server" are different facts, and the pane states which it has.
+    fn read_network(_: &mut (), (): &mut ()) -> NetworkFacts {
+        let mut resolvers = Vec::with_capacity(MAX_RESOLVER_SERVERS);
+        match tairix_procinfo::for_each_resolver_server(&IpcTransport, |record| {
+            resolvers.push(*record);
+            // The stack bounds its own set, so a reply that keeps going
+            // past the bound is a service this window will not grow a heap
+            // for. Stopping is an ordinary success, not a failure.
+            if resolvers.len() >= MAX_RESOLVER_SERVERS {
+                return Ok(tairix_procinfo::WalkStep::Stop);
+            }
+            Ok(tairix_procinfo::WalkStep::Continue)
+        }) {
+            Ok(()) => NetworkFacts {
+                resolvers: Some(resolvers),
+            },
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: the name servers could not be read ({err:?}); the pane says so"
+                );
+                NetworkFacts { resolvers: None }
+            }
+        }
     }
 
     /// The machine facts the About and Date & Time panes state, each taken
@@ -378,6 +426,40 @@ mod program {
             self.pending = false;
             shell.adopt_config(config);
             shell.adopt_machine(facts);
+            true
+        }
+    }
+
+    /// The network-reading desk's client half.
+    ///
+    /// One reading at a time, for the same reason the machine desk holds
+    /// one: a pane only ever wants the latest.
+    struct NetworkRead<'a> {
+        worker: &'a Network,
+        pending: bool,
+    }
+
+    impl NetworkRead<'_> {
+        /// Ask for a fresh reading if a pane wants one and none is
+        /// outstanding, answering whether anything on screen changed.
+        fn request(&mut self, shell: &mut Shell) -> bool {
+            if self.pending || !shell.network_wanted() {
+                return false;
+            }
+            if self.worker.submit(()) {
+                return self.settle(shell);
+            }
+            self.pending = true;
+            false
+        }
+
+        /// Adopt a landed reading, answering whether anything changed.
+        fn settle(&mut self, shell: &mut Shell) -> bool {
+            let Some(facts) = self.worker.collect() else {
+                return false;
+            };
+            self.pending = false;
+            shell.adopt_network(facts);
             true
         }
     }
@@ -669,6 +751,8 @@ mod program {
         mounts: &'a Mounts,
         /// The machine readings' wake, drained on a [`MACHINE_TOKEN`] wake.
         machine: &'a Machine,
+        /// The network readings' wake, drained on a [`NETWORK_TOKEN`] wake.
+        network: &'a Network,
         /// The elevated run's wake, drained on an [`ELEVATE_TOKEN`] wake.
         elevator: &'a Elevator,
         /// Set when the park woke for a desktop change, cleared when the loop
@@ -701,6 +785,11 @@ mod program {
                 // The machine readings landed.
                 Wake::App(MACHINE_TOKEN) => {
                     self.machine.wake().drain();
+                    Ok(Parked::Interrupted)
+                }
+                // The network readings landed.
+                Wake::App(NETWORK_TOKEN) => {
+                    self.network.wake().drain();
                     Ok(Parked::Interrupted)
                 }
                 // The broker answered an offered account.
@@ -1107,6 +1196,8 @@ mod program {
         mounts: MountWalk<'a>,
         /// The machine's configuration and facts the General panes state.
         machine: MachineRead<'a>,
+        /// The network readings the DNS pane states.
+        network: NetworkRead<'a>,
         /// The broker round trip an offered account costs.
         elevator: &'a Elevator,
     }
@@ -1131,6 +1222,7 @@ mod program {
         }
         landed |= desks.mounts.settle(shell);
         landed |= desks.machine.settle(shell);
+        landed |= desks.network.settle(shell);
         if let Some(verdict) = desks.elevator.collect() {
             shell.adopt_elevation(verdict);
             landed = true;
@@ -1261,7 +1353,10 @@ mod program {
             // And for the machine's own readings, if this round put a pane
             // that states them on show.
             let machine_landed = desks.machine.request(shell);
-            if volumes_landed || machine_landed {
+            // And for the stack's resolver set, if this round put the pane
+            // that states it on show.
+            let network_landed = desks.network.request(shell);
+            if volumes_landed || machine_landed || network_landed {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
             }
             if matches!(event, WindowEvent::ContentReleased { .. }) {
@@ -1342,11 +1437,93 @@ mod program {
     }
 
     /// Put `worker` on a desk of its own and start it.
+    /// Every worker desk this window runs, started and owned together.
+    ///
+    /// One desk per kind of work rather than one shared desk: the five
+    /// carry different jobs and a latest-wins desk would let any of them
+    /// evict another's answer. Each would otherwise stall the window for a
+    /// round trip.
+    struct Workers {
+        applier: Arc<Applier>,
+        mounts: Arc<Mounts>,
+        machine: Arc<Machine>,
+        network: Arc<Network>,
+        elevator: Arc<Elevator>,
+    }
+
+    impl Workers {
+        /// Start every desk. A machine that grants no thread runs the work
+        /// on the event loop instead, which each start states for itself.
+        fn started() -> Self {
+            Self {
+                applier: started(
+                    Applier::new(send_apply, (), tairix_rt::sync::WorkerWake::create()),
+                    "apply",
+                ),
+                mounts: started(
+                    Mounts::new(read_mounts, (), tairix_rt::sync::WorkerWake::create()),
+                    "mount-table",
+                ),
+                machine: started(
+                    Machine::new(read_machine, (), tairix_rt::sync::WorkerWake::create()),
+                    "machine-readings",
+                ),
+                network: started(
+                    Network::new(read_network, (), tairix_rt::sync::WorkerWake::create()),
+                    "network-readings",
+                ),
+                elevator: started(
+                    Elevator::new(send_elevate, (), tairix_rt::sync::WorkerWake::create()),
+                    "elevated-run",
+                ),
+            }
+        }
+
+        /// Put every desk's wake on `set`, so a landed answer ends the park
+        /// the loop is already in.
+        fn watched(&self, set: u64) -> Result<(), i32> {
+            watch_wakes(
+                set,
+                &[
+                    (self.applier.wake(), APPLY_TOKEN, "apply wake refused"),
+                    (self.mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
+                    (
+                        self.machine.wake(),
+                        MACHINE_TOKEN,
+                        "machine-readings wake refused",
+                    ),
+                    (
+                        self.network.wake(),
+                        NETWORK_TOKEN,
+                        "network-readings wake refused",
+                    ),
+                    (
+                        self.elevator.wake(),
+                        ELEVATE_TOKEN,
+                        "elevated-run wake refused",
+                    ),
+                ],
+            )
+        }
+    }
+
+    impl Drop for Workers {
+        /// Ask every desk to leave. What the per-worker guards did
+        /// individually, in the one place that owns them all.
+        fn drop(&mut self) {
+            self.applier.stop();
+            self.mounts.stop();
+            self.machine.stop();
+            self.network.stop();
+            self.elevator.stop();
+        }
+    }
+
     fn started<S: Send + 'static, Req: Send + 'static, Ans: Send + 'static>(
         worker: tairix_rt::work::Worker<S, Req, Ans>,
         what: &str,
-    ) -> alloc::sync::Arc<tairix_rt::work::Worker<S, Req, Ans>> {
-        let worker = alloc::sync::Arc::new(worker);
+    ) -> Arc<tairix_rt::work::Worker<S, Req, Ans>> {
+        let worker = Arc::new(worker);
         start_worker(&worker, what);
         worker
     }
@@ -1357,7 +1534,7 @@ mod program {
     /// Not a failure: a program with no thread is exactly as correct and
     /// only as responsive as it was before there was a worker at all.
     fn start_worker<S: Send + 'static, Req: Send + 'static, Ans: Send + 'static>(
-        worker: &alloc::sync::Arc<tairix_rt::work::Worker<S, Req, Ans>>,
+        worker: &Arc<tairix_rt::work::Worker<S, Req, Ans>>,
         what: &str,
     ) {
         if let Err(reason) = tairix_rt::work::Worker::start(worker) {
@@ -1425,44 +1602,17 @@ mod program {
                 "the settings registry holds no categories",
             );
         };
-        // Two desks, each its own: an apply and a mount walk carry
-        // different work, and one latest-wins desk would let either evict
-        // the other. Each would otherwise stall the window for a round trip.
-        let applier = started(
-            Applier::new(send_apply, (), tairix_rt::sync::WorkerWake::create()),
-            "apply",
-        );
-        let _applier_guard = tairix_rt::work::WorkerGuard::new(&applier);
-        let mounts = started(
-            Mounts::new(read_mounts, (), tairix_rt::sync::WorkerWake::create()),
-            "mount-table",
-        );
-        let _mounts_guard = tairix_rt::work::WorkerGuard::new(&mounts);
-        let machine = started(
-            Machine::new(read_machine, (), tairix_rt::sync::WorkerWake::create()),
-            "machine-readings",
-        );
-        let _machine_guard = tairix_rt::work::WorkerGuard::new(&machine);
-        let elevator = started(
-            Elevator::new(send_elevate, (), tairix_rt::sync::WorkerWake::create()),
-            "elevated-run",
-        );
-        let _elevator_guard = tairix_rt::work::WorkerGuard::new(&elevator);
-        if let Err(code) = watch_wakes(
-            binding.set(),
-            &[
-                (applier.wake(), APPLY_TOKEN, "apply wake refused"),
-                (mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
-                (
-                    machine.wake(),
-                    MACHINE_TOKEN,
-                    "machine-readings wake refused",
-                ),
-                (elevator.wake(), ELEVATE_TOKEN, "elevated-run wake refused"),
-            ],
-        ) {
+        let workers = Workers::started();
+        if let Err(code) = workers.watched(binding.set()) {
             return code;
         }
+        let Workers {
+            applier,
+            mounts,
+            machine,
+            network,
+            elevator,
+        } = &workers;
 
         seat_first_frame(&mut shell, &mut surface, &desktop, &themes);
 
@@ -1475,10 +1625,11 @@ mod program {
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
-            applier: &applier,
-            mounts: &mounts,
-            machine: &machine,
-            elevator: &elevator,
+            applier,
+            mounts,
+            machine,
+            network,
+            elevator,
             desktop_moved: &desktop_moved,
         });
         run_event_loop(
@@ -1490,16 +1641,20 @@ mod program {
                 desktop_moved: &desktop_moved,
                 pictures: &mut Pictures::new(),
                 desks: Desks {
-                    applier: &applier,
+                    applier,
                     mounts: MountWalk {
-                        worker: &mounts,
+                        worker: mounts,
                         pending: false,
                     },
                     machine: MachineRead {
-                        worker: &machine,
+                        worker: machine,
                         pending: false,
                     },
-                    elevator: &elevator,
+                    network: NetworkRead {
+                        worker: network,
+                        pending: false,
+                    },
+                    elevator,
                 },
             },
             events,

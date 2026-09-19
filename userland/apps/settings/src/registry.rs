@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use tairix_icon::IconKind;
 
-use crate::facts::{ABOUT_FACTS, CLOCK_FACTS};
+use crate::facts::{ABOUT_FACTS, CLOCK_FACTS, RESOLVER_FACTS};
 use crate::form::{Composition, Posture, Setting};
 use crate::machine::MachineSetting;
 use crate::volumes::VOLUME_FACTS;
@@ -185,6 +185,10 @@ pub enum PaneContent {
     /// The wall clock and where its reading came from, read-only, with the
     /// one command that changes it beneath.
     Clock,
+    /// The recursive name servers the stack resolves through, discovered at
+    /// runtime and read-only: one row per server rather than a fixed table
+    /// of slots.
+    Dns,
 }
 
 /// One pane's registry row.
@@ -240,7 +244,7 @@ impl PaneRow {
                 }
             }
             Some(PaneContent::Clock) => Some("Set Date & Time…"),
-            Some(PaneContent::About | PaneContent::Volumes) | None => None,
+            Some(PaneContent::About | PaneContent::Volumes | PaneContent::Dns) | None => None,
         }
     }
 }
@@ -487,6 +491,16 @@ fn contains_fold(haystack: &str, needle: &str) -> bool {
 /// The Login & startup pane's setting labels.
 const LOGIN_SETTINGS: &[&str] = &[MachineSetting::LoginType.label()];
 
+/// The TCP/IP pane's setting labels.
+const TCP_IP_SETTINGS: &[&str] = &[
+    MachineSetting::NetIpv4Enabled.label(),
+    MachineSetting::NetIpv6Enabled.label(),
+    MachineSetting::NetIpv6Privacy.label(),
+    MachineSetting::NetTcpSynCookies.label(),
+    MachineSetting::NetTcpKeepalive.label(),
+    MachineSetting::NetTcpEcn.label(),
+];
+
 /// The Caching pane's setting labels.
 const CACHING_SETTINGS: &[&str] = &[
     MachineSetting::CacheAll.label(),
@@ -671,10 +685,15 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 name: "ethernet",
                 title: "Ethernet",
                 backing: PaneBacking::Elsewhere {
-                    shows: "Each wired interface's link state, addresses and throughput, and how \
-                            it is addressed.",
-                    elsewhere: "Interface state is reported by the Switchboard's Network \
-                                section. Addressing is written when this system is installed.",
+                    shows: "How each wired interface is addressed: its method, static address, \
+                            gateway and MTU.",
+                    elsewhere: "Link state, addresses and throughput are reported by the \
+                                Switchboard, which is the surface that may read them: an \
+                                interface's hardware identity and this machine's address book \
+                                are privileged readings, and Settings deliberately holds no \
+                                authority of any kind. Addressing is written with the \
+                                `configure` command, by an account that may write the system \
+                                configuration.",
                 },
                 settings: &[],
             },
@@ -693,24 +712,15 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::Dns,
                 name: "dns",
                 title: "DNS",
-                backing: PaneBacking::Elsewhere {
-                    shows: "The name servers this system resolves through.",
-                    elsewhere: "Reported by the Switchboard's Network section. Written when this \
-                                system is installed.",
-                },
-                settings: &[],
+                backing: PaneBacking::Composed(PaneContent::Dns),
+                settings: RESOLVER_FACTS,
             },
             PaneRow {
                 pane: Pane::TcpIp,
                 name: "tcp-ip",
                 title: "TCP/IP",
-                backing: PaneBacking::Elsewhere {
-                    shows: "Whether IPv4 and IPv6 are enabled, and the options the whole stack \
-                            shares.",
-                    elsewhere: "Set with the `configure` command, by an account that may write \
-                                the system configuration.",
-                },
-                settings: &[],
+                backing: PaneBacking::Composed(PaneContent::Form(Composition::TcpIp)),
+                settings: TCP_IP_SETTINGS,
             },
         ],
     },

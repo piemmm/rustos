@@ -29,7 +29,7 @@ use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::body::{self, Body, Drawn};
-use crate::facts::MachineFacts;
+use crate::facts::{MachineFacts, NetworkFacts, Subject};
 use crate::footer::{Footer, FooterAction, Standing};
 use crate::form::{FormOutcome, FormPlace};
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
@@ -232,6 +232,8 @@ pub struct Shell {
     config: Option<SystemConfig>,
     /// The machine readings the About and Date & Time panes state.
     machine: MachineFacts,
+    /// The network readings the DNS pane states.
+    network: NetworkFacts,
     /// Set while a pane that reads the machine's store is on show and the
     /// caller has not yet answered a fresh read for it.
     config_wanted: bool,
@@ -246,6 +248,9 @@ pub struct Shell {
     /// The walk is an IPC round trip, so the pane never makes it: it says
     /// it wants one and draws what has already arrived.
     volumes_wanted: bool,
+    /// Set while a pane that states a network reading is on show and the
+    /// caller has not yet answered a fresh read for it.
+    network_wanted: bool,
 }
 
 impl Shell {
@@ -279,6 +284,8 @@ impl Shell {
             volumes_wanted: false,
             config: None,
             machine: MachineFacts::default(),
+            network: NetworkFacts::default(),
+            network_wanted: false,
             config_wanted: false,
             footer: None,
             asking: None,
@@ -374,6 +381,36 @@ impl Shell {
         if matches!(self.body, Body::Volumes(_)) {
             self.restate_body();
         }
+    }
+
+    /// Whether the caller should read the network stack's resolver set for
+    /// this window.
+    ///
+    /// Set when a pane that states a network reading comes on show and
+    /// cleared when one is answered, exactly as the mount walk is: the set
+    /// moves as leases come and go, so a pane the reader returns to shows
+    /// what the stack holds now rather than what it held last time.
+    #[must_use]
+    pub const fn network_wanted(&self) -> bool {
+        self.network_wanted
+    }
+
+    /// Adopt the network readings the caller took.
+    ///
+    /// Requested, never awaited: the pane opens on whatever has arrived —
+    /// nothing at all, at first — and rebuilds when it lands.
+    pub fn adopt_network(&mut self, network: NetworkFacts) {
+        self.network = network;
+        self.network_wanted = false;
+        if self.states_network() {
+            self.restate_body();
+        }
+    }
+
+    /// Whether the body on show states a reading taken from the network
+    /// stack.
+    fn states_network(&self) -> bool {
+        matches!(&self.body, Body::Facts(facts) if facts.subject() == Subject::Network)
     }
 
     /// The next picture the caller should ask the desktop to render for the
@@ -486,6 +523,7 @@ impl Shell {
     /// Build what the pane on show draws.
     fn restate_body(&mut self) {
         let listed = matches!(self.body, Body::Volumes(_));
+        let resolved = self.states_network();
         let answered = body::Answered {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
@@ -493,6 +531,7 @@ impl Shell {
             volumes: &self.volumes,
             config: self.config.as_ref(),
             machine: &self.machine,
+            network: &self.network,
         };
         self.body = match self.location.rows() {
             Some((_, pane)) => Body::of(pane, &answered),
@@ -504,6 +543,13 @@ impl Shell {
         // ask again for the table just handed over.
         if !listed && matches!(self.body, Body::Volumes(_)) {
             self.volumes_wanted = true;
+        }
+        // The resolver set is live state the stack changes on its own, so
+        // it is re-read when its pane *comes* on show for the same reason
+        // the mount table is, and not on the rebuild that adopting one
+        // causes.
+        if !resolved && self.states_network() {
+            self.network_wanted = true;
         }
         // Rebuilt rather than kept: a band belongs to the pane that offers
         // it, and one carried across a navigation would state the last

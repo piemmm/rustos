@@ -17,7 +17,7 @@ use tairix_sysconfig::SystemConfig;
 use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
-use crate::facts::{Facts, MachineFacts};
+use crate::facts::{Facts, MachineFacts, NetworkFacts};
 use crate::form::{Documents, Form, FormPlace};
 use crate::gallery::Gallery;
 use crate::registry::{PaneContent, PaneRow};
@@ -44,6 +44,8 @@ pub(crate) struct Answered<'a> {
     pub(crate) config: Option<&'a SystemConfig>,
     /// The machine readings the caller took for the panes that state them.
     pub(crate) machine: &'a MachineFacts,
+    /// The network readings the caller took for the panes that state them.
+    pub(crate) network: &'a NetworkFacts,
 }
 
 impl<'a> Answered<'a> {
@@ -95,6 +97,7 @@ impl Body {
             Some(PaneContent::Volumes) => Self::Volumes(Readings::new(answered.volumes)),
             Some(PaneContent::About) => Self::Facts(Facts::about(answered.machine)),
             Some(PaneContent::Clock) => Self::Facts(Facts::clock(answered.machine)),
+            Some(PaneContent::Dns) => Self::Facts(Facts::resolvers(answered.network)),
         }
     }
 

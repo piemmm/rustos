@@ -39,9 +39,10 @@ dropped is a category the surface then has to lie about.
 | **DS5a** | The shared volume view model: the mount record → capacity/health derivation in `lib/procinfo`, the `VolumeHealth` banding in `lib/abi`, the one band→role binding in `lib/theme`, and every private copy collapsed onto them | — | DS5a | done |
 | **DS5** | Storage — one card per mount with its capacity track and health pill, over the DS5a model | DS2, DS5a | DS5 | done |
 | **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | done |
-| **DS7** | Networking read — per-interface facts, link state, addresses and rates through the Switchboard's own client, plus the stack-wide `net.*` options | DS2, DS6 | DS7 | planned |
-| **DS8** | Networking write — `configure` grows the `lib/netconfig` registry, Ethernet and DNS stage and apply through it, and the stack adopts the change without a reboot | DS6, DS7 | DS8 | planned |
-| **DS9** | Users & Groups — the ungated `GROUP_DIRECTORY` sibling, the caller's own record, the admin-authenticated read of every other account, and the user-admin operations the syscall carries but no tool spells | DS6 | DS9 | planned |
+| **DS7** | Networking read — the stack-wide `net.*` options staged and applied live, the ungated resolver set stated, and the gated per-interface readings left where they may be taken | DS2, DS6 | DS7 | done |
+| **DS8** | Networking write — the elevated-**read** seam, then `configure` grows the `lib/netconfig` registry and Ethernet and DNS stage and apply through it | DS6, DS7, DS8a | DS8 | blocked — needs DS8a, the broker reply that carries a run's output |
+| **DS8a** | The elevated-read seam: an `ElevateRequest` whose reply carries the bounded output of the run, so an authenticated account can *show* a store no unprivileged caller may read | DS6 | DS8a | planned |
+| **DS9** | Users & Groups — the ungated `GROUP_DIRECTORY` sibling, the caller's own record, the admin-authenticated read of every other account, and the user-admin operations the syscall carries but no tool spells | DS6, DS8a | DS9 | planned |
 | **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | planned |
 | **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | planned |
 | **DS12** | Lock Screen and Screensaver — the session's single idle deadline and the one timer armed only while a policy has one pending | DS3 | DS12 | planned |
@@ -303,10 +304,10 @@ owner the change goes to; the last column is what a refusal looks like.
 | Lock Screen | session's lock policy document | session apply | apply refused, stated |
 | Screensaver | session's idle policy document | session apply | apply refused, stated |
 | Power | — | — (no policy interface, §3) | pane states absence |
-| Networking → Ethernet | `NET_INTERFACE_FACTS`/`_STATE`/`_RATES` | elevated `configure` (DS8) + netstack reload | Authority Mark, config unchanged |
+| Networking → Ethernet | nothing ungated exists: the live readings need `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL` and stay the Switchboard's, and `network.conf` carries the very identity and addressing those gates protect. The configured addressing is read by the admin-authenticated run (DS8, needs DS8a) | elevated `configure` (DS8) + netstack reload | pane states where the readings live; after DS8, Authority Mark and config unchanged |
 | Networking → Wi-Fi | — | — | pane states absence (§3) |
-| Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` (DS8) | Authority Mark |
-| Networking → TCP/IP | `lib/sysconfig` `net.*` | elevated `configure` | Authority Mark |
+| Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` (DS8) | reading renders unmeasured; after DS8, Authority Mark |
+| Networking → TCP/IP | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which also hands the policy to the running stack | working copy stands, refusal stated; a stack that did not take it keeps the saved value for next boot and says so |
 | Bluetooth | — | — | pane states absence (§3) |
 | Sound | — | — | pane states absence (§3) |
 | Notifications | session's notification policy document | session apply | apply refused, stated |
@@ -900,25 +901,88 @@ authentication and a store write.
 
 ### DS7 — Networking: read, and the stack-wide options
 
-Per-interface facts, link state, addresses, and rates from
-`NET_INTERFACE_FACTS`/`_STATE`/`_RATES` — the same queries the Switchboard's
-Network page reads, through the same client, with no second sampler. The
-stack-wide `net.*` sysconfig keys (IPv4/IPv6 enable, IPv6 privacy addresses,
-SYN cookies, keepalive, ECN) are staged and applied through DS6. Wi-Fi is a
-pane stating §3's absence.
+**Done.** Two composed panes, and the authority line between them and the
+third is the point of the stage.
+
+**TCP/IP** is the six stack-wide `net.*` keys (IPv4/IPv6 enable, IPv6 privacy
+addresses, SYN cookies, keepalive, ECN) as six more `MachineSetting`s in a
+third `Composition` — the same staged posture, the same ungated
+`SYSTEM_CONFIG` read, and the same single elevated `configure` run as
+Login & startup and Caching, with no new form machinery and no second writer.
+It applies **live**: `configure` already hands a changed `net.*` policy to the
+running stack over `CAP_NET_ADMIN` after writing the store, and reports a
+refusal there as a saved-but-not-applied notice rather than a success. The
+ceiling rule DS6 established for caching generalises here — the
+temporary-address row states that IPv6 is off, and the three connection rows
+state that a machine with neither family makes no connections at all — with
+one shared mechanism rather than a second special case.
+
+**DNS** states the live aggregated resolver set from the ungated
+`NET_RESOLVER_SERVERS` query: one row per server, discovered rather than
+declared, re-read when the pane comes on show because leases move. An empty
+set ("this machine resolves no names") and an unavailable reading ("not
+measured") stay distinct facts.
+
+**Ethernet takes no reading, and that is the finding of this stage.** The plan
+originally had it read `NET_INTERFACE_FACTS`/`_STATE`/`_RATES`; those need
+`CAP_SYSINFO_HW` and `CAP_SYSINFO_GLOBAL`, which §0 says this application
+never holds, so every row would have been refused on every machine for ever —
+a dead row, not a denied action. Nor can `network.conf` be the ungated way
+round: it carries the `match.mac` hardware identity and the static addressing
+those two gates exist to protect, so serving it ungated would defeat them.
+The pane therefore does what the Storage row already does for
+`VOLUME_IO_HEALTH` — states that the live readings are the Switchboard's,
+names the tool that writes the addressing, and draws nothing it cannot back.
+Wi-Fi keeps its §3 absence.
+
+**One shared address spelling.** Rendering an address was duplicated three
+ways and two of them disagreed — `lib/procinfo` printed RFC 5952 canonical
+IPv6 while the Switchboard wrote all eight groups uncompressed, so one machine
+spelled one address two ways. `lib/procinfo::netaddr` is now the single
+definition (`render_ip`, `render_server`, `render_if_addr`), RFC 5952
+throughout, and every surface reads it.
+
+### DS8a — the elevated-read seam
+
+**The prerequisite DS8 and DS9 both wait on, and neither can be built
+without.** `ElevateReply::Completed` carries an exit code and nothing else, so
+there is today no way for an authenticated run to *show* a caller anything.
+Both remaining stages need exactly that: DS8's Ethernet pane must show the
+addressing it is about to change, and DS9's plan already says every other
+account's fields "are answered by the administrator-authenticated run the
+write path already performs".
+
+The seam is an `ElevateRequest` form whose reply carries the run's **bounded**
+output: the broker binds the child's `stdout` to a pipe it owns
+(`pipe_create`), reads it under a fixed byte ceiling, and answers the bytes
+beside the exit code. It keeps every check `Run` has — the same
+re-authentication, the same signed load gate, the same audit — and it is
+deliberately a *separate* request form rather than a flag on `Run`, because
+relaying a program's output to an unprivileged caller is a new information
+flow and should be visible as one at the call site. The design owes an
+explicit answer on what a caller can induce a named program to print, and the
+audit record says that output was returned and how much, never what it was.
 
 ### DS8 — Networking: write, and the store's missing writer
 
-`configure` grows the `lib/netconfig` registry, which that engine's own
-contract already names it the writer of and which nothing but the installer
-writes today: per-interface kind, match, IPv4/IPv6 method, static addresses,
-gateway, DNS servers, MTU, and bond members, over the same closed-key,
-fail-closed engine. Settings' Ethernet and DNS panes then stage a change and
-apply it by elevating `configure`, which writes the store **and** asks the
-network stack to adopt it over its existing `CAP_NET_ADMIN` admin surface, so
-a change takes effect without a reboot and without Settings holding
-`CAP_NET_ADMIN`. Devmgr's static-only note (`netcfg.rs`) is retired in the same
-stage: the runtime-reload increment it defers is this one.
+**Blocked on DS8a.** `configure` grows the `lib/netconfig` registry, which
+that engine's own contract already names it the writer of and which nothing
+but the installer writes today: per-interface kind, match, IPv4/IPv6 method,
+static addresses, gateway, DNS servers, MTU, and bond members, over the same
+closed-key, fail-closed engine. That needs `lib/netconfig` to grow a mutation
+API beside its parse and render, and `configure` to resolve two key
+namespaces — the flat `lib/sysconfig` registry first, then `<iface>.<suffix>`
+— with a test pinning the two sets disjoint, since an interface alias is
+`[a-z0-9]+` and could otherwise be spelled to collide with a `net.*` key.
+
+Settings' Ethernet and DNS panes then stage a change and apply it by elevating
+`configure`, which writes the store **and** asks the network stack to adopt it
+over its existing `CAP_NET_ADMIN` admin surface (the `NetInterfaceConfigMsg` /
+`NetBondConfigMsg` frames `devmgr` already pushes), so a change takes effect
+without a reboot and without Settings holding `CAP_NET_ADMIN`. Devmgr's
+static-only caching of the interface plan (`netcfg.rs` reads it once and
+caches it, so a runtime edit is never seen) is retired in the same stage: the
+runtime-reload increment it defers is this one.
 
 ### DS9 — Users & Groups
 
@@ -1054,7 +1118,7 @@ weakened, and the QEMU verticals that dump those surfaces re-baselined.
 ## 6. Sequencing and dependencies
 
 The graph is the ledger's `Depends on` column; this is the reasoning behind the
-four edges that are not obvious from it.
+five edges that are not obvious from it.
 
 **DS1 does not land alone.** It is host-provable by itself, but a shared family
 whose only caller is its own gallery tab is one caller, not the two independent
@@ -1075,6 +1139,16 @@ it has.
 **Shared machinery lands with its consumer.** DS6's argv extension and DS8's
 `configure` extension are each in the same increment as the pane that uses
 them, so nothing speculative is added ahead of a caller (`AGENTS.md` §2.4).
+
+**DS8a is the edge DS7 discovered, and it gates two stages rather than one.**
+A pane may only show what its own authority can read, and neither DS8's
+interface addressing nor DS9's other-account fields can be read by an
+application holding two capabilities. Both plans answer that the same way —
+the administrator-authenticated run shows what it may — and neither can do it
+while the broker's reply carries an exit code alone. So the seam is its own
+increment ahead of both, rather than being half-built inside whichever of
+them lands first. It is not speculative interface: it is added with the first
+of its two callers, and DS8 cannot begin without it.
 
 **DS5a is the exception that proves that edge, and is not speculative.** It
 moves a derivation that already had a caller rather than adding one for a

@@ -14,7 +14,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_controls::{ComboBox, FieldControl, FieldRow};
-use tairix_sysconfig::{CacheClass, CacheMode, CacheSwitch, Key, LoginType, SystemConfig};
+use tairix_sysconfig::{
+    CacheMode, CacheSwitch, Key, LoginType, NetToggle, SynCookies, SystemConfig,
+};
 
 /// What a row states while the machine's configuration has not been read.
 const UNREAD: &str = "not read yet";
@@ -34,6 +36,18 @@ pub enum MachineSetting {
     CacheTransform,
     /// The launch cache's own switch.
     CacheSemantic,
+    /// Whether the stack uses IPv4 at all.
+    NetIpv4Enabled,
+    /// Whether the stack uses IPv6 at all.
+    NetIpv6Enabled,
+    /// Whether the stack also forms temporary IPv6 source addresses.
+    NetIpv6Privacy,
+    /// How the stack answers a flood of half-open TCP connections.
+    NetTcpSynCookies,
+    /// Whether an idle TCP connection is probed.
+    NetTcpKeepalive,
+    /// Whether TCP negotiates explicit congestion notification.
+    NetTcpEcn,
 }
 
 impl MachineSetting {
@@ -47,17 +61,12 @@ impl MachineSetting {
             Self::CacheBlock => Key::CacheBlock,
             Self::CacheTransform => Key::CacheTransform,
             Self::CacheSemantic => Key::CacheSemantic,
-        }
-    }
-
-    /// The cache class this setting governs, for the five that govern one.
-    const fn class(self) -> Option<CacheClass> {
-        match self {
-            Self::CacheFilesystem => Some(CacheClass::Filesystem),
-            Self::CacheBlock => Some(CacheClass::Block),
-            Self::CacheTransform => Some(CacheClass::Transform),
-            Self::CacheSemantic => Some(CacheClass::Semantic),
-            Self::LoginType | Self::CacheAll => None,
+            Self::NetIpv4Enabled => Key::NetIpv4Enabled,
+            Self::NetIpv6Enabled => Key::NetIpv6Enabled,
+            Self::NetIpv6Privacy => Key::NetIpv6Privacy,
+            Self::NetTcpSynCookies => Key::NetTcpSynCookies,
+            Self::NetTcpKeepalive => Key::NetTcpKeepalive,
+            Self::NetTcpEcn => Key::NetTcpEcn,
         }
     }
 
@@ -71,6 +80,12 @@ impl MachineSetting {
             Self::CacheBlock => "Disk cache",
             Self::CacheTransform => "Decoded-data cache",
             Self::CacheSemantic => "Application-launch cache",
+            Self::NetIpv4Enabled => "IPv4",
+            Self::NetIpv6Enabled => "IPv6",
+            Self::NetIpv6Privacy => "Temporary IPv6 addresses",
+            Self::NetTcpSynCookies => "Connection-flood defence",
+            Self::NetTcpKeepalive => "Keepalive probes",
+            Self::NetTcpEcn => "Congestion notification",
         }
     }
 
@@ -94,26 +109,82 @@ impl MachineSetting {
                 "Data the machine has already decrypted or decompressed, kept in that form."
             }
             Self::CacheSemantic => "What an application needs to start, kept ready for next time.",
+            Self::NetIpv4Enabled => {
+                "Whether this machine uses IPv4. With it off no interface takes an IPv4 address \
+                 and no program can open an IPv4 connection."
+            }
+            Self::NetIpv6Enabled => {
+                "Whether this machine uses IPv6. With it off no interface forms an IPv6 address \
+                 and no program can open an IPv6 connection."
+            }
+            Self::NetIpv6Privacy => {
+                "Whether this machine also forms short-lived IPv6 addresses to start outgoing \
+                 connections from, so its traffic is harder to follow between sites."
+            }
+            Self::NetTcpSynCookies => {
+                "How this machine answers a flood of half-finished connections. Automatic keeps a \
+                 queue and replies without one once it fills; Always never keeps a queue."
+            }
+            Self::NetTcpKeepalive => {
+                "Whether a connection with nothing to send is probed, so one whose other end has \
+                 gone is noticed rather than held open."
+            }
+            Self::NetTcpEcn => {
+                "Whether connections let a congested router say so, instead of it having to drop \
+                 packets to signal the same thing."
+            }
         }
     }
 
-    /// What a per-class row states while the master switch is off.
-    ///
-    /// The row keeps its own value, because that is what the store says and
-    /// what would take effect if the master switch came back on — but a
-    /// reader who saw `Automatic` and nothing else would reasonably believe
-    /// the cache was running.
-    const OVERRIDDEN: &'static str = "Caching is off for the whole machine, so this has no effect.";
+    /// What a per-class caching row states while the master switch is off.
+    const CACHING_OFF: &'static str =
+        "Caching is off for the whole machine, so this has no effect.";
+
+    /// What the temporary-address row states while IPv6 itself is off.
+    const IPV6_OFF: &'static str = "IPv6 is off for this machine, so this has no effect.";
+
+    /// What a TCP row states while neither address family is on.
+    const NO_FAMILY: &'static str =
+        "Both IPv4 and IPv6 are off, so this machine makes no connections at all.";
 
     /// The sentence this row shows against `config`: its own, plus the
-    /// ceiling where the master switch has taken it away.
+    /// ceiling where something above it has taken its effect away.
     fn stated(self, config: &SystemConfig) -> String {
         let mut text = String::from(self.description());
-        if self.class().is_some() && config.cache_all == CacheSwitch::Off {
+        if let Some(ceiling) = self.overridden(config) {
             text.push(' ');
-            text.push_str(Self::OVERRIDDEN);
+            text.push_str(ceiling);
         }
         text
+    }
+
+    /// The sentence stating that something above this row has taken its
+    /// effect away, or `None` while the row's own value is what applies.
+    ///
+    /// The row keeps its own value either way, because that is what the
+    /// store says and what would take effect if the thing above it came
+    /// back on — but a reader who saw `On` and nothing else would
+    /// reasonably believe it was running.
+    fn overridden(self, config: &SystemConfig) -> Option<&'static str> {
+        let (taken, sentence) = match self {
+            Self::LoginType | Self::CacheAll | Self::NetIpv4Enabled | Self::NetIpv6Enabled => {
+                return None
+            }
+            Self::CacheFilesystem
+            | Self::CacheBlock
+            | Self::CacheTransform
+            | Self::CacheSemantic => (config.cache_all == CacheSwitch::Off, Self::CACHING_OFF),
+            Self::NetIpv6Privacy => (
+                config.net_ipv6_enabled == NetToggle::Disabled,
+                Self::IPV6_OFF,
+            ),
+            Self::NetTcpSynCookies | Self::NetTcpKeepalive | Self::NetTcpEcn => (
+                config.net_ipv4_enabled == NetToggle::Disabled
+                    && config.net_ipv6_enabled == NetToggle::Disabled,
+                Self::NO_FAMILY,
+            ),
+        };
+        taken.then_some(sentence)
     }
 
     /// The choices this setting offers, in order, and which of them the
@@ -138,6 +209,42 @@ impl MachineSetting {
                 self.mode(config),
                 mode_label,
             ),
+            Self::NetIpv4Enabled
+            | Self::NetIpv6Enabled
+            | Self::NetIpv6Privacy
+            | Self::NetTcpKeepalive
+            | Self::NetTcpEcn => pick(
+                &[NetToggle::Enabled, NetToggle::Disabled],
+                self.toggle(config),
+                toggle_label,
+            ),
+            Self::NetTcpSynCookies => pick(
+                &[SynCookies::Auto, SynCookies::Always],
+                config.net_tcp_syncookies,
+                syncookies_label,
+            ),
+        }
+    }
+
+    /// The stack-wide switch this setting holds in `config`.
+    ///
+    /// Its own value, not its effective one, for the same reason a cache
+    /// class keeps its own: an effective value would silently rewrite what
+    /// the store says the moment the switch above it went off.
+    fn toggle(self, config: &SystemConfig) -> NetToggle {
+        match self {
+            Self::NetIpv4Enabled => config.net_ipv4_enabled,
+            Self::NetIpv6Enabled => config.net_ipv6_enabled,
+            Self::NetIpv6Privacy => config.net_ipv6_privacy,
+            Self::NetTcpKeepalive => config.net_tcp_keepalive,
+            Self::NetTcpEcn => config.net_tcp_ecn,
+            Self::LoginType
+            | Self::CacheAll
+            | Self::CacheFilesystem
+            | Self::CacheBlock
+            | Self::CacheTransform
+            | Self::CacheSemantic
+            | Self::NetTcpSynCookies => NetToggle::Disabled,
         }
     }
 
@@ -152,7 +259,14 @@ impl MachineSetting {
             Self::CacheBlock => config.cache_block,
             Self::CacheTransform => config.cache_transform,
             Self::CacheSemantic => config.cache_semantic,
-            Self::LoginType | Self::CacheAll => CacheMode::Auto,
+            Self::LoginType
+            | Self::CacheAll
+            | Self::NetIpv4Enabled
+            | Self::NetIpv6Enabled
+            | Self::NetIpv6Privacy
+            | Self::NetTcpSynCookies
+            | Self::NetTcpKeepalive
+            | Self::NetTcpEcn => CacheMode::Auto,
         }
     }
 
@@ -178,6 +292,16 @@ impl MachineSetting {
             Self::CacheBlock => modes(index, &mut config.cache_block),
             Self::CacheTransform => modes(index, &mut config.cache_transform),
             Self::CacheSemantic => modes(index, &mut config.cache_semantic),
+            Self::NetIpv4Enabled => toggles(index, &mut config.net_ipv4_enabled),
+            Self::NetIpv6Enabled => toggles(index, &mut config.net_ipv6_enabled),
+            Self::NetIpv6Privacy => toggles(index, &mut config.net_ipv6_privacy),
+            Self::NetTcpKeepalive => toggles(index, &mut config.net_tcp_keepalive),
+            Self::NetTcpEcn => toggles(index, &mut config.net_tcp_ecn),
+            Self::NetTcpSynCookies => set(
+                &[SynCookies::Auto, SynCookies::Always],
+                index,
+                &mut config.net_tcp_syncookies,
+            ),
         }
     }
 
@@ -192,6 +316,12 @@ impl MachineSetting {
             | Self::CacheBlock
             | Self::CacheTransform
             | Self::CacheSemantic => self.mode(config).as_str(),
+            Self::NetIpv4Enabled
+            | Self::NetIpv6Enabled
+            | Self::NetIpv6Privacy
+            | Self::NetTcpKeepalive
+            | Self::NetTcpEcn => self.toggle(config).as_str(),
+            Self::NetTcpSynCookies => config.net_tcp_syncookies.as_str(),
         }
     }
 
@@ -246,6 +376,11 @@ fn modes(index: usize, field: &mut CacheMode) -> bool {
     set(&[CacheMode::Auto, CacheMode::Off], index, field)
 }
 
+/// The on/off ladder, shared by every stack-wide network switch.
+fn toggles(index: usize, field: &mut NetToggle) -> bool {
+    set(&[NetToggle::Enabled, NetToggle::Disabled], index, field)
+}
+
 /// The display label of a login type. Distinct from the document spelling
 /// on purpose: one is what a reader reads, the other what the store holds.
 const fn login_label(kind: LoginType) -> &'static str {
@@ -272,5 +407,25 @@ const fn mode_label(mode: CacheMode) -> &'static str {
     match mode {
         CacheMode::Auto => "Automatic",
         CacheMode::Off => "Off",
+    }
+}
+
+/// The display label of a stack-wide network switch.
+const fn toggle_label(toggle: NetToggle) -> &'static str {
+    match toggle {
+        NetToggle::Enabled => "On",
+        NetToggle::Disabled => "Off",
+    }
+}
+
+/// The display label of the connection-flood defence policy.
+///
+/// `Always` is spelled as what it costs rather than as a bare word: a
+/// reader choosing it is giving up the half-open queue, and the choice list
+/// is the only place that is said.
+const fn syncookies_label(mode: SynCookies) -> &'static str {
+    match mode {
+        SynCookies::Auto => "Automatic",
+        SynCookies::Always => "Always, keeping no queue",
     }
 }

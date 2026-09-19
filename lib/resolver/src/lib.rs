@@ -124,6 +124,12 @@ pub fn configured_servers(sysinfo: &dyn Transport) -> Result<Vec<IpAddr>, Errno>
     let mut servers = Vec::with_capacity(MAX_RESOLVER_SERVERS);
     for_each_resolver_server(sysinfo, |record| {
         servers.push(ip_from_parts(record.family, record.addr));
+        // The bound is the stack's own, so a service that kept answering
+        // past it is one this client stops reading rather than grows a
+        // heap for. Stopping is an ordinary success, not a failure.
+        if servers.len() >= MAX_RESOLVER_SERVERS {
+            return Ok(WalkStep::Stop);
+        }
         Ok(WalkStep::Continue)
     })
     .map_err(list_error_to_errno)?;

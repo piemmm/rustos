@@ -494,6 +494,27 @@ const CACHING_GROUPS: [GroupSpec; 2] = [
     },
 ];
 
+/// The TCP/IP pane's groups: which address families the machine speaks,
+/// then the behaviour every connection over them shares.
+const TCP_IP_GROUPS: [GroupSpec; 2] = [
+    GroupSpec {
+        caption: "ADDRESS FAMILIES",
+        settings: &[
+            Owner::Machine(MachineSetting::NetIpv4Enabled),
+            Owner::Machine(MachineSetting::NetIpv6Enabled),
+            Owner::Machine(MachineSetting::NetIpv6Privacy),
+        ],
+    },
+    GroupSpec {
+        caption: "CONNECTIONS",
+        settings: &[
+            Owner::Machine(MachineSetting::NetTcpSynCookies),
+            Owner::Machine(MachineSetting::NetTcpKeepalive),
+            Owner::Machine(MachineSetting::NetTcpEcn),
+        ],
+    },
+];
+
 /// The Appearance pane's groups.
 const APPEARANCE_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
@@ -577,6 +598,8 @@ pub enum Composition {
     LoginStartup,
     /// The Caching pane.
     Caching,
+    /// The Networking → TCP/IP pane.
+    TcpIp,
 }
 
 impl Composition {
@@ -588,6 +611,7 @@ impl Composition {
             Self::Wallpaper => &WALLPAPER_GROUPS,
             Self::LoginStartup => &LOGIN_GROUPS,
             Self::Caching => &CACHING_GROUPS,
+            Self::TcpIp => &TCP_IP_GROUPS,
         }
     }
 
@@ -599,7 +623,7 @@ impl Composition {
             // Writing the machine's store is a re-authenticated run of the
             // tool that owns it, which is not something to ask for per
             // pointer sample.
-            Self::LoginStartup | Self::Caching => Posture::Staged,
+            Self::LoginStartup | Self::Caching | Self::TcpIp => Posture::Staged,
         }
     }
 
@@ -613,7 +637,7 @@ impl Composition {
         match self {
             Self::Appearance | Self::Accessibility => &SettingsKey::APPEARANCE,
             Self::Wallpaper => &SettingsKey::PINBOARD,
-            Self::LoginStartup | Self::Caching => &[],
+            Self::LoginStartup | Self::Caching | Self::TcpIp => &[],
         }
     }
 

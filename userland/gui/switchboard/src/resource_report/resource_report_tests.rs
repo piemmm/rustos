@@ -15,7 +15,8 @@ use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat,
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 use tairix_abi::net_ipc::{
-    NetCounters, NetIfKind, NetInterfaceCountersRecord, NetInterfaceFactsRecord, IF_NAME_LEN,
+    NetAddrFamily, NetAddrState, NetCounters, NetIfAddr, NetIfKind, NetInterfaceCountersRecord,
+    NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_abi::sysinfo::{
@@ -1198,6 +1199,64 @@ fn rebuilding_a_report_never_advances_a_trace() {
             "a rebuild advanced a trace"
         );
     }
+}
+
+#[test]
+fn an_interface_address_is_spelled_the_one_way_every_surface_spells_it() {
+    // The rendering is `lib/procinfo`'s, shared with the `info:`/`state:`
+    // reads and the Settings DNS pane. This pane once wrote IPv6 as eight
+    // uncompressed groups while those wrote RFC 5952, so one machine spelled
+    // one address two ways; the test pins which spelling won.
+    let mut addrs = [NetInterfaceStateRecord::EMPTY_ADDR; NET_IF_MAX_ADDRS];
+    addrs[0] = NetIfAddr {
+        family: NetAddrFamily::V4,
+        prefix: 24,
+        state: NetAddrState::Preferred,
+        addr: {
+            let mut slot = [0u8; 16];
+            slot[..4].copy_from_slice(&[192, 168, 1, 10]);
+            slot
+        },
+    };
+    addrs[1] = NetIfAddr {
+        family: NetAddrFamily::V6,
+        prefix: 64,
+        state: NetAddrState::Tentative,
+        addr: {
+            let mut slot = [0u8; 16];
+            slot[..2].copy_from_slice(&0xfe80u16.to_be_bytes());
+            slot[15] = 1;
+            slot
+        },
+    };
+    let sample = Sample {
+        net_facts: Some(alloc::vec![iface("eth0")]),
+        net_state: Some(alloc::vec![NetInterfaceStateRecord {
+            name: if_name("eth0"),
+            link_up: true,
+            addr_count: 2,
+            addrs,
+        }]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let eth0 = device(&report, DeviceId::Interface(if_name("eth0")));
+    let stated: alloc::vec::Vec<&str> = eth0
+        .blocks
+        .iter()
+        .filter_map(|block| match &block.body {
+            BlockBody::Facts(facts) | BlockBody::Health { facts, .. } => Some(facts),
+            _ => None,
+        })
+        .flatten()
+        .filter(|fact| fact.label == "Address")
+        .filter_map(|fact| fact.value.text())
+        .collect();
+    assert_eq!(
+        stated,
+        ["192.168.1.10/24", "fe80::1/64 (tentative)"],
+        "RFC 5952 canonical, with a state suffix only where it is notable"
+    );
 }
 
 #[test]

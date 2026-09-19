@@ -12,7 +12,7 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use tairix_abi::net_ipc::{NetAddrFamily, NetServerAddr};
+use tairix_abi::net_ipc::{NetAddrFamily, NetServerAddr, MAX_RESOLVER_SERVERS};
 use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId, SysinfoRequestHeader};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
@@ -231,6 +231,23 @@ fn configured_servers_converts_and_orders_v4_then_v6() {
 fn configured_servers_surfaces_a_denial() {
     let fake = SysinfoFake::denying();
     assert_eq!(configured_servers(&fake), Err(Errno::PermissionDenied));
+}
+
+#[test]
+fn configured_servers_stops_at_the_bound_the_stack_promises() {
+    // The stack bounds its own set, so a service answering past the bound
+    // is broken or hostile. The walk stops there rather than growing a
+    // vector for whatever it keeps sending, and stopping is an ordinary
+    // success — which is what the documented cap on this function means.
+    let over = MAX_RESOLVER_SERVERS * 4;
+    let fake = SysinfoFake::new(
+        (0..over)
+            .map(|index| v4_record(10, 0, 0, u8::try_from(index).expect("a small fixture")))
+            .collect(),
+    );
+    let servers = configured_servers(&fake).expect("stopping at the bound is a success");
+    assert_eq!(servers.len(), MAX_RESOLVER_SERVERS);
+    assert_eq!(servers[0], IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)));
 }
 
 // -- resolve_name --------------------------------------------------------

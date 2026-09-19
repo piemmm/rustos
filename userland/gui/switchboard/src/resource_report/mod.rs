@@ -17,7 +17,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::net_ipc::{NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetServerAddr};
+use tairix_abi::net_ipc::NetIfKind;
 use tairix_abi::rlimit::{LimitKind, RLIMIT_INFINITY};
 use tairix_abi::sysinfo::{
     CpuCoreClass, LoadAverage, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
@@ -384,46 +384,6 @@ const fn kind_name(kind: NetIfKind) -> &'static str {
     }
 }
 
-/// One configured address with its prefix length, and its state where
-/// that state is anything other than the ordinary preferred one.
-fn format_addr(addr: &NetIfAddr) -> String {
-    let text = match addr.family {
-        NetAddrFamily::V4 => ipv4(&addr.addr),
-        NetAddrFamily::V6 => ipv6(&addr.addr),
-    };
-    let state = match addr.state {
-        NetAddrState::Preferred => "",
-        NetAddrState::Tentative => " (tentative)",
-        NetAddrState::Deprecated => " (deprecated)",
-    };
-    format!("{text}/{}{state}", addr.prefix)
-}
-
-/// The first four bytes of an address slot as dotted-quad text.
-fn ipv4(addr: &[u8; 16]) -> String {
-    let octet = |index: usize| addr.get(index).copied().unwrap_or(0);
-    format!("{}.{}.{}.{}", octet(0), octet(1), octet(2), octet(3))
-}
-
-/// An address slot as the eight colon-separated hexadecimal groups of an
-/// IPv6 address, written in full rather than with the `::` elision, so a
-/// reader can compare two addresses character by character.
-fn ipv6(addr: &[u8; 16]) -> String {
-    let mut out = String::new();
-    for group in 0..8usize {
-        if group > 0 {
-            out.push(':');
-        }
-        let high = addr.get(group.saturating_mul(2)).copied().unwrap_or(0);
-        let low = addr
-            .get(group.saturating_mul(2).saturating_add(1))
-            .copied()
-            .unwrap_or(0);
-        let _ = write!(out, "{:x}", u16::from(high) << 8 | u16::from(low));
-    }
-    out
-}
-
 /// A limit's name in the words the resource-limit facility uses.
 pub(super) const fn limit_name(kind: LimitKind) -> &'static str {
     match kind {
@@ -457,11 +417,3 @@ pub(super) fn bound(kind: LimitKind, value: u64) -> String {
 #[cfg(test)]
 #[path = "resource_report_tests.rs"]
 mod tests;
-
-/// One configured server's address, in the family it names.
-pub(super) fn server_address(server: &NetServerAddr) -> String {
-    match server.family {
-        NetAddrFamily::V4 => ipv4(&server.addr),
-        NetAddrFamily::V6 => ipv6(&server.addr),
-    }
-}

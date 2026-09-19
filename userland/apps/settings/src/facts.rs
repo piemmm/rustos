@@ -1,12 +1,14 @@
-//! The read-only fact columns: what this machine *is*, and what its clock
-//! says.
+//! The read-only fact columns: what this machine *is*, what its clock
+//! says, and which name servers it resolves through.
 //!
-//! Neither pane has a settable in it. About states the machine's identity,
-//! its version, how long it has been running, and its processors and
-//! memory; Date & Time states the wall clock and where the reading came
+//! None of these panes has a settable in it. About states the machine's
+//! identity, its version, how long it has been running, and its processors
+//! and memory; Date & Time states the wall clock and where the reading came
 //! from, and offers the one command that changes it — which is not a
 //! setting at all but a re-authenticated run of the application that owns
-//! the clock.
+//! the clock. DNS states the resolver set the network stack is actually
+//! using, which is the statically configured and the DHCP-learned servers
+//! aggregated into one answer.
 //!
 //! Byte counts read in the desktop's own prose ladder — the one the Storage
 //! pane's capacities use — rather than the `df` spelling, because a machine's
@@ -19,11 +21,12 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::sysinfo::{CpuInfoRecord, SystemIdentity, Uptime};
 use tairix_abi::time::{WallClockReading, WallTimeState};
 use tairix_controls::{FieldControl, FieldGroup, FieldLayout, FieldRow};
 use tairix_geometry::{Rect, Scale};
-use tairix_procinfo::format_uptime;
+use tairix_procinfo::{format_uptime, render_server};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_util::size::{format_binary, SIZE_TEXT_MAX};
@@ -43,6 +46,23 @@ pub(crate) const ABOUT_FACTS: &[&str] = &[
 
 /// The label of every Date & Time reading.
 pub(crate) const CLOCK_FACTS: &[&str] = &["Clock", "Set from"];
+
+/// What the DNS pane contributes to the search index.
+///
+/// One term rather than one per server: the rows are discovered at runtime
+/// and a reader searches for the subject, not for an address.
+pub(crate) const RESOLVER_FACTS: &[&str] = &["Name servers"];
+
+/// The label each name-server row carries.
+const SERVER_LABEL: &str = "Name server";
+
+/// What the pane states when the stack holds no resolver at all.
+///
+/// Distinct from a refused reading: the query answered, and what it
+/// answered was an empty set. A machine with no name server resolves
+/// nothing, which is worth saying plainly rather than showing an empty
+/// plate.
+const NO_SERVERS: &str = "none — this machine resolves no names";
 
 /// What a reading states when the caller could not take it.
 const UNMEASURED: &str = "not measured";
@@ -69,10 +89,38 @@ pub struct MachineFacts {
     pub clock: Option<WallClockReading>,
 }
 
+/// The network readings the DNS pane draws, as the caller answered them.
+///
+/// An [`Option`] for the same reason every machine reading is one: a query
+/// that was refused or has not landed is not an empty answer, and the pane
+/// says which of the two it is holding.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NetworkFacts {
+    /// The recursive resolvers the stack is actually using: the statically
+    /// configured and the DHCP-learned servers, aggregated and
+    /// deduplicated by the stack into the one answer every client reads.
+    pub resolvers: Option<Vec<NetServerAddr>>,
+}
+
+/// Where a fact column's readings were taken from.
+///
+/// Carried by the column itself so the shell can ask for the reading a
+/// pane is about without re-deriving it from the registry: the column
+/// knows what it states.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Subject {
+    /// Readings of the machine itself, which the machine desk takes.
+    Machine,
+    /// Readings of the network stack, which the network desk takes.
+    Network,
+}
+
 /// A read-only column of facts: one captioned plate, scrolled like every
 /// other plate column.
 pub(crate) struct Facts {
     group: FieldGroup,
+    /// What the column states, which decides whose reading it wants.
+    subject: Subject,
     /// The first plate drawn. One today, and the column still scrolls by
     /// plates so it behaves as every other does when a second lands.
     first: usize,
@@ -85,14 +133,24 @@ impl Facts {
         self.group.rows()
     }
 
+    /// What this column states.
+    pub(crate) const fn subject(&self) -> Subject {
+        self.subject
+    }
+
     /// The About column for `facts`.
     pub(crate) fn about(facts: &MachineFacts) -> Self {
-        Self::of("THIS MACHINE", about_rows(facts))
+        Self::of("THIS MACHINE", Subject::Machine, about_rows(facts))
     }
 
     /// The Date & Time column for `facts`.
     pub(crate) fn clock(facts: &MachineFacts) -> Self {
-        Self::of("THE CLOCK", clock_rows(facts))
+        Self::of("THE CLOCK", Subject::Machine, clock_rows(facts))
+    }
+
+    /// The DNS column for `facts`.
+    pub(crate) fn resolvers(facts: &NetworkFacts) -> Self {
+        Self::of("NAME SERVERS", Subject::Network, resolver_rows(facts))
     }
 
     /// One captioned plate carrying `rows`.
@@ -101,9 +159,10 @@ impl Facts {
     /// than a second read-only instrument inside the plate: a volume card
     /// already states its facts this way, and one label-and-reading row is
     /// all either needs.
-    fn of(caption: &'static str, rows: Vec<FieldRow>) -> Self {
+    fn of(caption: &'static str, subject: Subject, rows: Vec<FieldRow>) -> Self {
         Self {
             group: FieldGroup::new(caption, rows),
+            subject,
             first: 0,
         }
     }
@@ -210,6 +269,24 @@ fn clock_rows(facts: &MachineFacts) -> Vec<FieldRow> {
             clock.map_or_else(unmeasured, |clock| String::from(provenance(clock.state()))),
         ),
     ]
+}
+
+/// The name-server readings: one row per server the stack answered with.
+///
+/// Discovered rather than declared, exactly as the Storage pane's volumes
+/// are: the set is whatever the stack holds, so the column is as long as
+/// the answer and never a fixed table of slots waiting to be filled.
+fn resolver_rows(facts: &NetworkFacts) -> Vec<FieldRow> {
+    let Some(servers) = facts.resolvers.as_ref() else {
+        return alloc::vec![reading(SERVER_LABEL, unmeasured())];
+    };
+    if servers.is_empty() {
+        return alloc::vec![reading(SERVER_LABEL, String::from(NO_SERVERS))];
+    }
+    servers
+        .iter()
+        .map(|server| reading(SERVER_LABEL, render_server(server)))
+        .collect()
 }
 
 /// Where a wall-clock reading came from, in a reader's words.

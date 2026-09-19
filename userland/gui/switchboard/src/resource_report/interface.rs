@@ -12,9 +12,10 @@ use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetServerAddr, IF_NAME_LEN};
 use tairix_controls::PressureKind;
+use tairix_procinfo::{render_if_addr, render_server};
 use tairix_theme::SignalRole;
 
-use super::{format_addr, kind_name, mac, reading, server_address, trim_nul};
+use super::{kind_name, mac, reading, trim_nul};
 use crate::format::{format_bytes, format_duration, format_rate};
 use crate::model::{display_name, RollingMeters};
 use crate::sample::{DegradedField, Sample};
@@ -160,7 +161,7 @@ fn link_block(sample: &Sample, iface: &NetInterfaceFactsRecord) -> BlockBody {
                 .addrs
                 .iter()
                 .take(usize::from(state.addr_count).min(state.addrs.len()))
-                .map(format_addr)
+                .map(render_if_addr)
                 .collect();
             if addrs.is_empty() {
                 facts.push(ReadingFact::text("Addresses", "none configured"));
@@ -289,7 +290,7 @@ fn server_text(servers: &[NetServerAddr]) -> String {
     }
     servers
         .iter()
-        .map(server_address)
+        .map(render_server)
         .collect::<Vec<String>>()
         .join(" · ")
 }
