@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" data-hotspot-x="1" data-hotspot-y="1">
+  <title>Arrow</title>
+  <!-- Drawn twice: a wide white stroke first, then the dark body over its
+       inner half. The outer half survives as a halo, which is what keeps
+       this set legible over a photograph of any brightness. -->
+  <polygon points="2,2 2,28 9,21 14,29 18,27 13,19 22,19" fill="none" stroke="#ffffff" stroke-width="4" stroke-linejoin="round"/>
+  <polygon points="2,2 2,28 9,21 14,29 18,27 13,19 22,19" fill="#111114"/>
+</svg>

@@ -1,7 +1,8 @@
 //! Loading the desktop's on-disk SVG graphics assets from `/System/Graphics`.
 //!
 //! The desktop's cursors and notification icons are authored as SVG under
-//! `/System/Graphics` (the SVG-first asset rule).
+//! `/System/Graphics` — cursors in one directory per *set*, icons in one
+//! flat directory (the SVG-first asset rule).
 //! `lib/cursor` and `lib/icon` own the decode-and-fall-back logic but stay
 //! `no_std` and hold no path of their own: they take the asset bytes through
 //! the [`CursorAssetSource`] / [`IconAssetSource`] seams. Reading those bytes
@@ -16,18 +17,16 @@
 //! so a missing or corrupt `/System/Graphics` can never blank the pointer or a
 //! status icon — it simply yields the built-in set.
 
-use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_cursor::{CursorAssetSource, CursorTheme};
-use tairix_icon::{icon_vector_path, IconAssetSource, IconKind, IconSet, GRAPHICS_DIR, ICON_KINDS};
-use tairix_theme::{CursorKind, CursorSet, CURSOR_KINDS};
+use tairix_cursor::{cursor_asset_path, CursorAssetSource, CursorTheme};
+use tairix_icon::{icon_vector_path, IconAssetSource, IconKind, IconSet, ICON_KINDS};
+use tairix_theme::{CursorKind, CursorSet, CursorSetId, CURSOR_KINDS};
 
 /// The desktop session's file-reading seam.
 ///
-/// Reading a file — an SVG asset under [`GRAPHICS_DIR`], a program-library
+/// Reading a file — an SVG asset under `/System/Graphics`, a program-library
 /// store (the [`library`](crate::library) loader) — needs a filesystem
 /// capability, so it is the desktop session's job rather than a `no_std`
 /// library crate's. On a running system this is backed by the VFS under the
@@ -79,29 +78,26 @@ impl IconAssetSource for LoadedIconAssets {
     }
 }
 
-/// The on-disk path of the cursor asset named `asset_id`.
-///
-/// The asset id comes from the theme's [`CursorSet`]; cursors live in the
-/// `Cursors` subdirectory of [`GRAPHICS_DIR`].
-fn cursor_path(asset_id: &str) -> String {
-    format!("{GRAPHICS_DIR}/Cursors/{asset_id}.svg")
-}
-
-/// Build a cursor set from the on-disk SVG assets named by `cursors`.
+/// Build the cursor set `set` from the on-disk SVG assets in its own
+/// directory, under the asset names `cursors` gives each kind.
 ///
 /// Reads one asset per [`CursorKind`] through `reader` and lets `lib/cursor`
-/// decode it. A kind whose asset cannot be read, or whose bytes do not decode,
-/// keeps the built-in cursor, so this never fails: a missing
-/// `/System/Graphics` simply yields the built-in set. The result is a plain
-/// [`CursorTheme`] the window manager registers through its existing
-/// `CursorRegistry`.
-pub fn load_cursor_theme<R>(reader: &mut R, cursors: &CursorSet) -> CursorTheme
+/// decode it. A kind whose asset cannot be read, or whose bytes do not
+/// decode, keeps the built-in cursor, so this never fails: a set directory
+/// that is missing or unreadable simply yields the built-in artwork under
+/// that set's name. A theme naming an asset the store could not hold is
+/// refused at the path itself and keeps its built-in cursor too. The result is a plain [`CursorTheme`] the window manager
+/// registers through its existing `CursorRegistry`.
+pub fn load_cursor_theme<R>(reader: &mut R, set: CursorSetId, cursors: &CursorSet) -> CursorTheme
 where
     R: SessionFileReader + ?Sized,
 {
     let mut assets = Vec::new();
     for kind in CURSOR_KINDS {
-        if let Ok(bytes) = reader.read(&cursor_path(cursors.asset(kind))) {
+        let Some(path) = cursor_asset_path(set, cursors.asset(kind)) else {
+            continue;
+        };
+        if let Ok(bytes) = reader.read(&path) {
             assets.push((kind, bytes));
         }
     }

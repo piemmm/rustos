@@ -6,9 +6,18 @@ use alloc::vec;
 use tairix_raster::{Color, Paint};
 use tairix_theme::{CursorKind, CURSOR_KINDS};
 
-use crate::registry::{CursorRegistry, CursorRegistryError, CursorSetId};
+use tairix_theme::CursorSetId;
+
+use crate::registry::{CursorRegistry, CursorRegistryError};
+use crate::store::CURSOR_BASE_SIDE_PX;
 use crate::theme::CursorTheme;
 use crate::vector::{Shape, VectorCursor, Vertex};
+
+/// The side every built-in cursor here is rendered at: the reference side
+/// the desktop draws a pointer at before density and pointer size, which is
+/// also the built-in set's own design grid, so a coverage grid indexes one
+/// pixel per design unit.
+const NATIVE: u32 = CURSOR_BASE_SIDE_PX;
 
 /// The colour a shape paints with. Every built-in cursor and every test
 /// asset here is a flat fill, so anything else is a broken expectation.
@@ -23,6 +32,12 @@ fn solid(shape: &Shape) -> Color {
 /// Where the test asset's `(1, 2)` hotspot lands once its twenty-four-unit
 /// drawing is scaled onto the decoder's shared design grid.
 const HOTSPOT: (i32, i32) = (85, 171);
+
+/// A set id from a name a test knows is legal.
+#[track_caller]
+fn set_id(name: &str) -> CursorSetId {
+    CursorSetId::new(name).expect("a legal set name")
+}
 
 /// An opaque square cursor filling its whole `size`×`size` design grid.
 fn solid_square(size: u32, fill: Color) -> VectorCursor {
@@ -40,43 +55,49 @@ fn solid_square(size: u32, fill: Color) -> VectorCursor {
 }
 
 #[test]
-fn footprint_scales_with_percent() {
+fn zero_side_is_unrenderable() {
     let cursor = solid_square(32, Color::rgb(255, 255, 255));
-    assert_eq!(cursor.footprint(100), Some(32));
-    assert_eq!(cursor.footprint(200), Some(64));
-    assert_eq!(cursor.footprint(50), Some(16));
-}
-
-#[test]
-fn footprint_zero_scale_is_unrenderable() {
-    let cursor = solid_square(32, Color::rgb(255, 255, 255));
-    assert_eq!(cursor.footprint(0), None);
     assert!(cursor.rasterise(0).is_none());
 }
 
 #[test]
 fn empty_design_grid_is_unrenderable() {
     let cursor = solid_square(0, Color::rgb(255, 255, 255));
-    assert_eq!(cursor.footprint(100), None);
-    assert!(cursor.rasterise(100).is_none());
+    assert!(cursor.rasterise(NATIVE).is_none());
 }
 
 #[test]
-fn rasterised_image_is_square_at_scale() {
+fn rasterised_image_is_square_at_the_side_it_was_asked_for() {
     let cursor = solid_square(8, Color::rgb(255, 255, 255));
-    let image = cursor.rasterise(100).expect("renderable");
+    let image = cursor.rasterise(8).expect("renderable");
     assert_eq!(image.width(), 8);
     assert_eq!(image.height(), 8);
 
-    let big = cursor.rasterise(300).expect("renderable");
+    let big = cursor.rasterise(24).expect("renderable");
     assert_eq!(big.width(), 24);
     assert_eq!(big.height(), 24);
+}
+
+/// The design grid is an authoring detail: two sets whose grids differ draw
+/// the same size at the same asked-for side, so swapping sets can never
+/// resize the pointer.
+#[test]
+fn the_side_is_honoured_whatever_the_design_grid() {
+    let coarse = solid_square(8, Color::rgb(255, 255, 255));
+    let fine = solid_square(2048, Color::rgb(255, 255, 255));
+    for side in [1, 17, NATIVE, 64] {
+        let coarse = coarse.rasterise(side).expect("renderable");
+        let fine = fine.rasterise(side).expect("renderable");
+        assert_eq!(coarse.width(), side);
+        assert_eq!(fine.width(), side);
+        assert_eq!(fine.height(), side);
+    }
 }
 
 #[test]
 fn solid_square_fills_every_pixel_opaque() {
     let cursor = solid_square(4, Color::rgb(200, 100, 50));
-    let image = cursor.rasterise(100).expect("renderable");
+    let image = cursor.rasterise(4).expect("renderable");
     let surface = image.surface();
     for y in 0..surface.height() {
         for x in 0..surface.width() {
@@ -95,7 +116,7 @@ fn shape_with_fewer_than_three_vertices_is_skipped() {
         vec![Vertex::new(0, 0), Vertex::new(4, 4)],
     );
     let cursor = VectorCursor::new(4, 0, 0, vec![degenerate]);
-    let image = cursor.rasterise(100).expect("renderable");
+    let image = cursor.rasterise(4).expect("renderable");
     let surface = image.surface();
     for y in 0..surface.height() {
         for x in 0..surface.width() {
@@ -116,7 +137,7 @@ fn translucent_fill_blends_rather_than_overwrites() {
         ],
     );
     let cursor = VectorCursor::new(4, 0, 0, vec![shape]);
-    let image = cursor.rasterise(100).expect("renderable");
+    let image = cursor.rasterise(4).expect("renderable");
     let pixel = image.surface().get(2, 2).expect("in bounds");
     assert_eq!(pixel.a, 128, "half-transparent fill stays half transparent");
 }
@@ -126,7 +147,7 @@ fn builtin_set_defines_every_kind_renderable() {
     let theme = CursorTheme::builtin();
     for kind in CURSOR_KINDS {
         let cursor = theme.cursor(kind);
-        let image = cursor.rasterise(100).expect("every built-in renders");
+        let image = cursor.rasterise(NATIVE).expect("every built-in renders");
         let any_drawn = image.surface().pixels().iter().any(|pixel| pixel.a > 0);
         assert!(any_drawn, "{kind:?} should draw at least one pixel");
     }
@@ -146,7 +167,7 @@ const RESIZE_KINDS: [CursorKind; 4] = [
 fn builtin_coverage(kind: CursorKind) -> (usize, alloc::vec::Vec<u8>) {
     let image = CursorTheme::builtin()
         .cursor(kind)
-        .rasterise(100)
+        .rasterise(NATIVE)
         .expect("renderable");
     let side = usize::try_from(image.width()).unwrap_or(0);
     let alpha = image.surface().pixels().iter().map(|p| p.a).collect();
@@ -206,8 +227,8 @@ fn every_resize_cursor_pivots_on_its_centre() {
     // arrow's middle and scales with the artwork.
     for kind in RESIZE_KINDS {
         let cursor = CursorTheme::builtin().cursor(kind).clone();
-        let native = cursor.rasterise(100).expect("renderable");
-        let scaled = cursor.rasterise(200).expect("renderable");
+        let native = cursor.rasterise(NATIVE).expect("renderable");
+        let scaled = cursor.rasterise(NATIVE * 2).expect("renderable");
         let centre = i32::try_from(native.width() / 2).unwrap_or(0);
         assert_eq!(native.hotspot().x, centre, "{kind:?} x");
         assert_eq!(native.hotspot().y, centre, "{kind:?} y");
@@ -219,11 +240,11 @@ fn every_resize_cursor_pivots_on_its_centre() {
 fn builtin_arrow_hotspot_is_the_tip() {
     let theme = CursorTheme::builtin();
     let arrow = theme.cursor(CursorKind::Arrow);
-    let native = arrow.rasterise(100).expect("renderable");
+    let native = arrow.rasterise(NATIVE).expect("renderable");
     assert_eq!(native.hotspot().x, 0);
     assert_eq!(native.hotspot().y, 0);
     // The hotspot scales with the artwork but the arrow tip stays top-left.
-    let scaled = arrow.rasterise(200).expect("renderable");
+    let scaled = arrow.rasterise(NATIVE * 2).expect("renderable");
     assert_eq!(scaled.hotspot().x, 0);
     assert_eq!(scaled.hotspot().y, 0);
 }
@@ -232,8 +253,8 @@ fn builtin_arrow_hotspot_is_the_tip() {
 fn builtin_centre_hotspot_scales() {
     let theme = CursorTheme::builtin();
     let move_ = theme.cursor(CursorKind::Move);
-    let native = move_.rasterise(100).expect("renderable");
-    let scaled = move_.rasterise(200).expect("renderable");
+    let native = move_.rasterise(NATIVE).expect("renderable");
+    let scaled = move_.rasterise(NATIVE * 2).expect("renderable");
     assert!(scaled.hotspot().x > native.hotspot().x);
     assert!(scaled.hotspot().y > native.hotspot().y);
 }
@@ -243,7 +264,7 @@ fn builtin_arrow_layers_a_dark_outline_under_a_light_body() {
     let theme = CursorTheme::builtin();
     let image = theme
         .cursor(CursorKind::Arrow)
-        .rasterise(400)
+        .rasterise(NATIVE * 4)
         .expect("renderable");
     let surface = image.surface();
     let mut saw_dark = false;
@@ -270,7 +291,7 @@ fn builtin_busy_cursor_is_two_tone() {
     let theme = CursorTheme::builtin();
     let image = theme
         .cursor(CursorKind::Busy)
-        .rasterise(400)
+        .rasterise(NATIVE * 4)
         .expect("renderable");
     let mut saw_blue = false;
     let mut saw_amber = false;
@@ -295,7 +316,7 @@ fn registry_holds_builtin_and_is_never_empty() {
     let registry = CursorRegistry::with_builtin();
     assert_eq!(registry.len(), 1);
     assert!(!registry.is_empty());
-    assert_eq!(registry.active_id(), CursorSetId::BUILTIN);
+    assert_eq!(registry.active_id(), CursorSetId::builtin());
     for kind in CURSOR_KINDS {
         // Resolving the active cursor never panics.
         let _ = registry.active_cursor(kind);
@@ -305,12 +326,12 @@ fn registry_holds_builtin_and_is_never_empty() {
 #[test]
 fn registry_set_active_unknown_fails_closed() {
     let mut registry = CursorRegistry::with_builtin();
-    let missing = CursorSetId::new("nope");
+    let missing = set_id("Nope");
     assert_eq!(
         registry.set_active(missing),
         Err(CursorRegistryError::UnknownSet(missing))
     );
-    assert_eq!(registry.active_id(), CursorSetId::BUILTIN);
+    assert_eq!(registry.active_id(), CursorSetId::builtin());
 }
 
 #[test]
@@ -319,7 +340,7 @@ fn registry_register_then_switch_replaces_the_cursor_set() {
     // A high-visibility set whose arrow is a solid red square.
     let red = Color::rgb(255, 0, 0);
     let custom = CursorTheme::from_cursors(|_| solid_square(16, red));
-    let id = CursorSetId::new("high-contrast");
+    let id = set_id("High Contrast");
     registry.register(id, custom).expect("fresh id");
     assert_eq!(registry.len(), 2);
 
@@ -328,7 +349,7 @@ fn registry_register_then_switch_replaces_the_cursor_set() {
 
     let image = registry
         .active_cursor(CursorKind::Arrow)
-        .rasterise(100)
+        .rasterise(16)
         .expect("renderable");
     let centre = image.surface().get(8, 8).expect("in bounds");
     assert_eq!(centre.unpremultiply(), red);
@@ -337,7 +358,7 @@ fn registry_register_then_switch_replaces_the_cursor_set() {
 #[test]
 fn registry_register_duplicate_id_fails_closed() {
     let mut registry = CursorRegistry::with_builtin();
-    let dup = CursorSetId::BUILTIN;
+    let dup = CursorSetId::builtin();
     assert_eq!(
         registry.register(dup, CursorTheme::builtin()),
         Err(CursorRegistryError::DuplicateId(dup))
@@ -348,12 +369,12 @@ fn registry_register_duplicate_id_fails_closed() {
 #[test]
 fn registry_lists_ids_builtin_first() {
     let mut registry = CursorRegistry::with_builtin();
-    let id = CursorSetId::new("extra");
+    let id = set_id("Extra");
     registry
         .register(id, CursorTheme::builtin())
         .expect("fresh id");
     let ids: alloc::vec::Vec<CursorSetId> = registry.ids().collect();
-    assert_eq!(ids, vec![CursorSetId::BUILTIN, id]);
+    assert_eq!(ids, vec![CursorSetId::builtin(), id]);
 }
 
 #[test]
@@ -384,7 +405,7 @@ fn decoded_svg_cursor_without_hotspot_pins_to_origin() {
 fn decoded_svg_cursor_rasterises() {
     let svg = br##"<svg viewBox="0 0 16 16"><polygon points="0,0 0,12 4,9 7,15 9,8" fill="#fff"/></svg>"##;
     let cursor = crate::decode_svg(svg).expect("valid svg cursor");
-    let image = cursor.rasterise(100).expect("renderable");
+    let image = cursor.rasterise(NATIVE).expect("renderable");
     assert!(image.surface().pixels().iter().any(|p| p.a > 0));
 }
 
@@ -494,7 +515,7 @@ fn from_assets_malformed_asset_falls_back_per_kind() {
 fn from_assets_set_registers_and_activates() {
     let source = TestSource::for_kinds(&CURSOR_KINDS);
     let mut registry = CursorRegistry::with_builtin();
-    let id = CursorSetId::new("on-disk");
+    let id = set_id("On Disk");
     registry
         .register(id, CursorTheme::from_assets(&source))
         .expect("fresh id");

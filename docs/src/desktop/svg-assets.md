@@ -123,9 +123,13 @@ the userland side: a `SessionFileReader` (the session's one file-reading seam
 — VFS-backed on a running system, an in-memory table in tests) reads one
 asset per kind and the module assembles the set:
 
-- `DesktopSession::load_cursors` reads the asset named by the active theme's
-  `CursorSet` for each cursor kind from
-  `/System/Graphics/Cursors/<asset-id>.svg` and returns a `CursorTheme`.
+- `DesktopSession::load_cursors` reads, for one named cursor **set**, the
+  asset the active theme's `CursorSet` gives each kind, from
+  `/System/Graphics/Cursors/<set>/<asset-id>.svg`, and returns a
+  `CursorTheme`. The session walks the store once at bring-up
+  (`tairix_cursor::catalog_sets`) and loads every set it offers, so
+  *activating* one later reads nothing — see [Pointer
+  cursors](./cursors.md).
 - `DesktopSession::load_icons` reads the asset named by each `IconKind`'s
   `asset_id()` (the inverse of `IconKind::for_asset`) from
   `/System/Graphics/Icons/<asset-id>.svg` and returns an `IconSet`.
@@ -140,8 +144,10 @@ compositing path raw — they are decoded into the cached vector form below.
 A built-in set always exists, so the desktop is usable before any asset loads;
 a loaded set is swapped in at runtime without rebuilding the consumer:
 
-- the window manager registers a `CursorTheme::from_assets` result through the
-  existing `CursorRegistry`, so the `CursorController` picks it up unchanged;
+- the window manager registers every loaded `CursorTheme::from_assets` result
+  through the existing `CursorRegistry` under its own set name, so the
+  `CursorController` picks them up unchanged and activating one is
+  `set_active_set`;
 - the taskbar's `TaskbarRenderer::set_icons` installs an
   `IconSet::from_assets` result (the built-in `IconSet` is in use until then).
   Installing a set bumps an internal generation that is part of the glyph
@@ -199,13 +205,27 @@ content](./wm.md#releasable-window-content).
 
 ## Untrusted input
 
-On-disk assets are untrusted (`AGENTS.md` §19.5), so the decoder runs inside a
-minimum-capability parser sandbox and is **total**: `decode` never panics for
-any byte string, returns a precise `SvgError` for anything it cannot draw,
-and the caller fails closed to its built-in fallback artwork
-(a built-in cursor or `builtin_icon` glyph) rather than crashing the
-compositor (`AGENTS.md` §2.9). The decode path has a `cargo xtask fuzz`
-harness (§19.6).
+The decoder is **total** whoever calls it: `decode` never panics for any byte
+string, returns a precise `SvgError` for anything it cannot draw, and the
+caller fails closed to its built-in fallback artwork (a built-in cursor or
+`builtin_icon` glyph) rather than crashing the compositor (`AGENTS.md` §2.9).
+The decode path has a `cargo xtask fuzz` harness (§19.6).
+
+Where the *bytes* come from decides whether it additionally runs in a
+minimum-capability parser sandbox (`AGENTS.md` §19.5):
+
+- **In a sandbox** when a principal could have chosen the file: a wallpaper
+  or a viewed document, which `WallpaperChoice::Image` or a file picker can
+  name at any absolute path — and **every icon**, because the one artwork
+  resolver serves the shipped class masters and each bundle's *own* icon
+  alike, and a third-party bundle's is not ours. A crash there is contained
+  and the sandbox replaced.
+- **In the session** only where the file can be nothing but first-party
+  shipped artwork reached by a name the store itself supplied: the cursor
+  sets under `/System/Graphics/Cursors`, on the read-only, system-signed
+  volume that nothing but the installer and the updater may write
+  (`AGENTS.md` §16.2). The byte and complexity bounds still apply, so a
+  corrupt shipped asset costs its own artwork and nothing else.
 
 ## What an author may draw
 

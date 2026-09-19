@@ -94,10 +94,11 @@ sets the output scale on the compositor and re-presents the taskbar at the new
 density; the session then announces the change so every open window re-lays
 itself out too.
 
-The scale is *deliverable* but not yet *settable* by a user: nothing in the
-tree sets an output scale other than 100%, so the plumbing is honest and
-exercised at every layer while the settings surface that would change it is
-still to come (`plans/DISPLAY.md`).
+The scale is both deliverable and settable: the Settings application's
+Appearance and Accessibility panes offer an *Interface scale* row over the
+desktop's `scale` setting, which the session validates, applies through
+`DesktopShell::set_scale`, and publishes to every application
+(`plans/NEW-DESKTOP-SETTINGS.md` DS3).
 
 ## The taskbar consumes the scale transparently
 
@@ -116,12 +117,16 @@ re-present at the new density — no taskbar state to update and no restart. At
 ## Crisp cursors at any density
 
 Pointer cursors are vector artwork (`lib/cursor`), not fixed bitmaps:
-`VectorCursor::rasterise` renders the design grid at the active scale with
-anti-aliasing, so the pointer is sharp at any DPI. Bitmap assets are never the
-only path. The `CursorController` does not store a scale either — it reads
-`Compositor::scale` when it rasterises, and `CursorController::refresh`
-re-renders the pointer when the kind, the cursor set, **or** the output scale
-changes. So a DPI switch is `Compositor::set_scale` followed by one `refresh`.
+`VectorCursor::rasterise` renders the design grid into a square pixel image
+with anti-aliasing, so the pointer is sharp at any DPI. Bitmap assets are
+never the only path. The `CursorController` does not store a scale either —
+it reads `Compositor::scale` when it rasterises, applies it to the pointer's
+*logical* side through `Scale::scale_length`, and `CursorController::refresh`
+re-renders the pointer when the kind, the cursor set, **or** the pixel side
+those two resolve to changes. So a DPI switch is `Compositor::set_scale`
+followed by one `refresh`, and a pointer-size change (the Accessibility
+pane's own row, over the desktop's `cursor.size` setting) is
+`CursorController::set_logical_side`.
 
 ## Tests
 

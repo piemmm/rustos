@@ -1418,6 +1418,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::Close { window_id: 3 },
         WindowRequest::PickFile { window_id: 3 },
         WindowRequest::QueryWallpapers { from: 7 },
+        WindowRequest::QueryCursorSets,
         WindowRequest::RenderWallpaper {
             window_id: 3,
             shm_handle: 11,

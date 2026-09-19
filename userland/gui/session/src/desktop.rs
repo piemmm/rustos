@@ -204,13 +204,21 @@ pub struct AppearanceWork {
     /// republish, so every logical length on the desktop and in every
     /// application resolves at the new density.
     pub scale: bool,
+    /// The cursor set or the pointer size changed: the embedder must
+    /// re-render the pointer.
+    ///
+    /// Separate from `scale`, which also moves the pointer's pixel side,
+    /// because the two are answered in different places: a scale change
+    /// rescales the whole output and the pointer follows, while this is the
+    /// pointer alone and nothing else on screen moves.
+    pub cursor: bool,
 }
 
 impl AppearanceWork {
     /// Whether anything the desktop is drawn with moved.
     #[must_use]
     pub const fn any(self) -> bool {
-        self.theme || self.scale
+        self.theme || self.scale || self.cursor
     }
 }
 
@@ -409,6 +417,8 @@ impl<S: DirectorySource> Desktop<S> {
                     || settings.density != self.settings.density
                     || settings.motion != self.settings.motion,
                 scale: settings.scale != self.settings.scale,
+                cursor: settings.cursor_set != self.settings.cursor_set
+                    || settings.cursor_size != self.settings.cursor_size,
             },
         };
         self.settings = settings;

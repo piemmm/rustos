@@ -306,7 +306,7 @@ impl Theme {
             },
             common_metrics(),
             common_fonts(),
-            common_cursors(),
+            CursorSet::canonical(),
             common_motion(),
             Density::Normal,
             Contrast::Normal,
@@ -383,7 +383,7 @@ impl Theme {
             },
             common_metrics(),
             common_fonts(),
-            common_cursors(),
+            CursorSet::canonical(),
             common_motion(),
             Density::Normal,
             Contrast::Normal,
@@ -544,18 +544,3 @@ const UI_FAMILY: FamilyKey = match FamilyKey::new("inter") {
 
 /// The fixed-pitch family the shipped themes draw terminal and code text in.
 const MONOSPACE_FAMILY: FamilyKey = FamilyKey::MONO;
-
-/// The cursor set shared by both built-in themes.
-fn common_cursors() -> CursorSet {
-    CursorSet {
-        arrow: String::from("cursor.arrow"),
-        text: String::from("cursor.text"),
-        pointer: String::from("cursor.pointer"),
-        move_: String::from("cursor.move"),
-        busy: String::from("cursor.busy"),
-        resize_horizontal: String::from("cursor.resize-horizontal"),
-        resize_vertical: String::from("cursor.resize-vertical"),
-        resize_diagonal_rising: String::from("cursor.resize-diagonal-rising"),
-        resize_diagonal_falling: String::from("cursor.resize-diagonal-falling"),
-    }
-}

@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 29 open, 107 closed, 136 total.
+table normalises all three to **closed**. 30 open, 107 closed, 137 total.
 
-### Open (28)
+### Open (30)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -56,6 +56,32 @@ table normalises all three to **closed**. 29 open, 107 closed, 136 total.
 | D132 | no run states whether a *double-click* in a file-manager window reaches `activate` on a guest | coverage gap with an unexplained observation behind it, not a confirmed defect. The `handover_qemu_aarch64` vertical originally injected the pair as one four-edge burst and never passed. The burst **was** delivered: four window events reached the manager's own event mailbox (`0xE117…` tagged with the `files` task) in the 60 ms after that window's first frame, and the manager repainted twice after them — yet no `fd_grant` followed. The aim was verified independently against the run's screendump and round-trips to the intended entry through the production hit-test, and the shared pairing rule accepts two presses 32 ms apart on one subject (neither `Moved` nor `Released` resets the tracker). So either the burst yielded one press rather than two, or the two resolved to different subjects — and **no existing record can tell them apart**: `MessageDelivered` carries a port, a sender and a length, every window event is 40 bytes, and no audit event anywhere names a pointer action. Answering it needs a witness that names the delivered event kind, plus re-adding injection (`PointerAction::DoubleClick` was deleted with its last consumer). The vertical now activates through the item's context-menu *Open* row, which runs the same `activate`, so the delegation chain is covered and only the pairing path is host-tested only |
 | D133 | a task can grow another task's kernel-side pending-`fd_grant` table without bound | noticed while re-pointing the hand-over vertical; not absorbed. Fail-closed refusal, not a capacity |
 | D139 | `lib/rt` is not under the UB oracle, and cannot be enrolled as the registry's scopes stand | noticed while adding a granted-region mapping; the allocator's pager seam hands it fabricated addresses, which strict provenance refuses as *unsupported* — a reason `Scope::LibExcept` does not currently admit |
+| D140 | the desktop never installs the notification-icon set it can load, so a shipped chrome SVG would be ignored | latent today (no chrome kind ships an SVG); wiring it naively costs 76 speculative per-kind lookups at bring-up, so the fix is to discover the present assets from one directory listing first — see below |
+
+### D140 — the loaded notification-icon set is never installed
+
+`lib/icon`'s `IconSet` is the desktop's *tintable chrome glyph* tier: the
+taskbar's notification area resolves each `StatusKind` through
+`TaskbarRenderer::icons()`, and `set_icons` swaps a loaded set in, bumping the
+generation that is part of the glyph cache's epoch. `DesktopSession::load_icons`
+assembles that set from `/System/Graphics/Icons/<asset-id>.svg`. Both halves are
+complete and unit-tested — and **neither is called from the session's bring-up**,
+so the desktop always draws its built-in chrome glyphs. (This is the icon
+counterpart of the cursor-load gap DS3b closed; noticed while closing that one.)
+
+It is **latent**, not visible: the only kinds `draw_icon` resolves are
+`Network`, `Volume` and `Battery`, and none of the three ships an SVG today, so
+installing the set would change no pixel. It becomes a real defect the moment
+any chrome kind ships artwork.
+
+**Why it is not a two-line wiring fix.** `load_icon_set` reads one path per
+`IconKind` — 76 of them — of which 74 would miss. Calling it at bring-up
+would add 76 speculative VFS lookups to every boot to enable nothing. The
+honest shape is the one the cursor and wallpaper stores already use: list
+`/System/Graphics/Icons` **once**, keep the names `artwork_kind_for_file`
+resolves to a kind with a `.svg` extension, and read only those. That is a
+signature change to `load_icon_set` (it needs the present kinds, since the
+`SessionFileReader` seam only reads a path) plus the bring-up call.
 
 ### Closed (107)
 

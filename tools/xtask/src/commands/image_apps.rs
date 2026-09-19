@@ -1311,6 +1311,86 @@ mod tests {
         }
     }
 
+    /// Every shipped cursor asset is artwork the desktop will really draw:
+    /// it decodes through the same `lib/svg` path the session uses, and it
+    /// rasterises to visible pixels with its hotspot inside its own
+    /// artwork.
+    ///
+    /// Only the cursor-family rows of [`tairix_syshelp::GRAPHICS_FILES`]
+    /// are judged here: a cursor is a tintable vector silhouette under its
+    /// own contract, which is neither an icon master's nor a wallpaper's
+    /// (see the two checks above), and dispatching on
+    /// [`tairix_syshelp::GraphicsFamilyKind`] rather than a directory
+    /// string is what keeps the three from being conflated.
+    #[test]
+    fn every_shipped_cursor_asset_is_artwork_the_desktop_will_draw() {
+        let cursor_assets: Vec<_> = tairix_syshelp::GRAPHICS_FILES
+            .iter()
+            .filter(|asset| asset.family == tairix_syshelp::GraphicsFamilyKind::Cursor)
+            .collect();
+        assert!(!cursor_assets.is_empty(), "at least one cursor asset ships");
+        for asset in cursor_assets {
+            let set = asset
+                .category
+                .expect("a discovered cursor asset is filed under a set");
+            verify_cursor_asset(
+                &format!(
+                    "Graphics/{}/{set}/{}",
+                    asset.family.target_dir(),
+                    asset.file
+                ),
+                asset.bytes,
+            )
+            .expect("a shipped cursor asset");
+        }
+    }
+
+    /// Verify one cursor asset is artwork the desktop will draw: within
+    /// [`tairix_cursor::MAX_CURSOR_ASSET_BYTES`], decodable by the shared
+    /// SVG decoder, rasterisable at the reference pointer side, drawing at
+    /// least one visible pixel, and with a hotspot inside its own image.
+    ///
+    /// A cursor that decodes but draws nothing, or puts its hotspot outside
+    /// its artwork, would silently look broken on screen rather than fail
+    /// anything — so it is refused here, at build time, where the answer is
+    /// actionable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable build-error message naming `label` and what is
+    /// wrong with the artwork.
+    fn verify_cursor_asset(label: &str, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() > tairix_cursor::MAX_CURSOR_ASSET_BYTES {
+            return Err(format!(
+                "image: {label} is {} bytes, exceeding the {}-byte cursor asset bound; \
+                 the desktop would refuse it before decoding",
+                bytes.len(),
+                tairix_cursor::MAX_CURSOR_ASSET_BYTES
+            ));
+        }
+        let cursor = tairix_cursor::decode_svg(bytes)
+            .map_err(|err| format!("image: {label} does not decode as a cursor: {err:?}"))?;
+        let side = tairix_cursor::CURSOR_BASE_SIDE_PX;
+        let image = cursor.rasterise(side).ok_or_else(|| {
+            format!("image: {label} does not rasterise at the reference pointer side")
+        })?;
+        if !image.surface().pixels().iter().any(|pixel| pixel.a > 0) {
+            return Err(format!(
+                "image: {label} decodes but draws no pixel; the desktop would show a \
+                 blank pointer"
+            ));
+        }
+        let extent = i32::try_from(side).unwrap_or(i32::MAX);
+        let hotspot = image.hotspot();
+        if hotspot.x < 0 || hotspot.x >= extent || hotspot.y < 0 || hotspot.y >= extent {
+            return Err(format!(
+                "image: {label} puts its hotspot at {hotspot:?}, outside its own \
+                 {side}x{side} artwork"
+            ));
+        }
+        Ok(())
+    }
+
     /// Verify a wallpaper master is a photograph the desktop will actually
     /// draw: within [`tairix_wallpaper::MAX_WALLPAPER_BYTES`], a format
     /// [`tairix_image::sniff`] recognises, and one that format's decoder can

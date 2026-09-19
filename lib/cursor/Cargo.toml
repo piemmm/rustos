@@ -9,6 +9,15 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The bound a cursor-set listing is held to, imported rather than restated
+# because the set names travel the window channel to a chooser, so the count
+# this crate caps a listing at and the count that frame carries are one
+# definition.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one leaf-name spelling check: an asset id comes from the active theme
+# and is spliced into a store path, so it is judged by the same parser that
+# judges every other file name rather than by a second ad-hoc rule.
+tairix-path = { path = "../path", version = "=0.0.0" }
 # The pixel buffer and premultiplied-alpha colour algebra cursor shapes are
 # rasterised into and blended with. The cursor library owns no colour
 # arithmetic of its own; it composites through `lib/raster`'s single

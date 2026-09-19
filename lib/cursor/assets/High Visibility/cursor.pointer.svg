@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" data-hotspot-x="11" data-hotspot-y="3">
+  <title>Pointing hand</title>
+  <!-- Drawn twice: a wide white stroke first, then the dark body over its
+       inner half. The outer half survives as a halo, which is what keeps
+       this set legible over a photograph of any brightness. -->
+  <polygon points="9,3 14,3 14,13 18,13 18,15 22,15 22,17 26,17 26,29 9,29" fill="none" stroke="#ffffff" stroke-width="4" stroke-linejoin="round"/>
+  <polygon points="9,3 14,3 14,13 18,13 18,15 22,15 22,17 26,17 26,29 9,29" fill="#111114"/>
+</svg>

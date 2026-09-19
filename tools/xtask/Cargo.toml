@@ -305,6 +305,11 @@ tairix-svg = { path = "../../lib/svg", version = "=0.0.0" }
 # is not held to — and the desktop screendump assertions recompute the
 # wallpaper the guest composites from those same definitions.
 tairix-wallpaper = { path = "../../lib/wallpaper", version = "=0.0.0" }
+# The cursor asset contract the discovered-graphics check judges every
+# shipped cursor set against: the byte bound, the shared SVG decode, and the
+# rasterisation the compositor itself performs — the same definitions, so a
+# set that passes here cannot fail on screen.
+tairix-cursor = { path = "../../lib/cursor", version = "=0.0.0" }
 # The shared pointer input-event vocabulary: the icon-bar script raises the
 # real context menu by driving the production bar router with the very events
 # the guest will receive, so the menu geometry it clicks is the model's own.

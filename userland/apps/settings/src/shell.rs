@@ -23,7 +23,7 @@ use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::appearance::{Form, FormOutcome, FormPlace};
@@ -133,6 +133,9 @@ pub struct Shell {
     form: Option<Form>,
     /// The shipped pictures the desktop answered, empty until it has.
     catalog: Vec<CatalogItem>,
+    /// The cursor sets the desktop offers besides the built-in one, empty
+    /// until it has answered.
+    cursor_sets: Vec<CursorSetId>,
     /// The picture gallery the pane on show draws beneath its form, for the
     /// one pane that has one.
     gallery: Option<Gallery>,
@@ -164,11 +167,24 @@ impl Shell {
             settings,
             form: None,
             catalog: Vec::new(),
+            cursor_sets: Vec::new(),
             gallery: None,
         };
         shell.restate_trail();
         shell.restate_form();
         Some(shell)
+    }
+
+    /// Adopt the cursor sets the desktop answered.
+    ///
+    /// Which sets exist is what the desktop's read-only store holds, and
+    /// this application may not read it: the session lists it once and
+    /// answers, so the pointer row's choice space arrives here. Until it
+    /// does the row offers the built-in set alone, plus whatever the
+    /// document already names.
+    pub fn adopt_cursor_sets(&mut self, sets: Vec<CursorSetId>) {
+        self.cursor_sets = sets;
+        self.restate_form();
     }
 
     /// Adopt the shipped picture catalog the desktop answered.
@@ -279,7 +295,7 @@ impl Shell {
             .location
             .rows()
             .and_then(|(_, pane)| pane.composition())
-            .map(|composition| Form::new(composition, &self.settings));
+            .map(|composition| Form::new(composition, &self.settings, &self.cursor_sets));
         self.gallery = self
             .location
             .rows()

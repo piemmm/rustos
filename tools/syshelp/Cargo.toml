@@ -47,6 +47,13 @@ tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # filters against, so the build check and the runtime catalog cannot diverge.
 # It is `no_std`; here it links host-only into `build.rs`.
 tairix-wallpaper = { path = "../../lib/wallpaper", version = "=0.0.0" }
+# The cursor graphics family's own definition of a legal set directory name
+# (`is_cursor_set_name`), of the asset name each cursor kind asks for
+# (`cursor_asset_kind_for_file`), and the untrusted-input byte bound
+# (`MAX_CURSOR_ASSET_BYTES`) — the same definitions the running desktop
+# resolves a set through, so the build check and the runtime loader cannot
+# diverge. It is `no_std`; here it links host-only into `build.rs`.
+tairix-cursor = { path = "../../lib/cursor", version = "=0.0.0" }
 
 [dev-dependencies]
 # The same kind -> store mapping `build.rs` plants by, so the test that holds
@@ -70,3 +77,10 @@ tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
 # `GRAPHICS_FILES` rows against — the same definition `build.rs` validates
 # against, so the emitted table and the runtime catalog cannot drift.
 tairix-wallpaper = { path = "../../lib/wallpaper", version = "=0.0.0" }
+# The cursor contract the graphics-discovery tests judge the cursor
+# `GRAPHICS_FILES` rows against, for the same reason.
+tairix-cursor = { path = "../../lib/cursor", version = "=0.0.0" }
+# The closed cursor-kind vocabulary a shipped set must cover completely, so
+# a set missing a kind is caught here rather than showing a built-in cursor
+# beside the shipped ones at runtime.
+tairix-theme = { path = "../../lib/theme", version = "=0.0.0" }

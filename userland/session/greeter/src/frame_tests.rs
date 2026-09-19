@@ -50,7 +50,7 @@ fn cursor(size: u32, colour: Color) -> CursorImage {
         ],
     );
     VectorCursor::new(size, 0, 0, vec![shape])
-        .rasterise(100)
+        .rasterise(size)
         .expect("renderable")
 }
 

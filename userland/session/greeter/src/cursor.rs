@@ -1,21 +1,23 @@
 //! Where the pointer is, and the artwork drawn at it.
 
 use tairix_abi::driver::display::DisplayMode;
-use tairix_cursor::{CursorImage, CursorRegistry};
+use tairix_cursor::{CursorImage, CursorRegistry, CURSOR_BASE_SIDE_PX};
 use tairix_geometry::{Point, Scale};
 use tairix_theme::CursorKind;
 
-/// The pointer artwork for `scale`: the shared set's arrow, rasterised once.
+/// The pointer artwork for `scale`: the shared set's arrow, rasterised once
+/// at the reference side this density calls for.
 ///
-/// The login screen runs before any on-disk cursor set is read, so the
-/// built-in set is the whole choice. `None` when the arrow will not
-/// rasterise at this scale, which costs a visible pointer and nothing else
-/// — the position is still tracked and the screen still hit-tests.
+/// The login screen runs before any on-disk cursor set is read and before
+/// any user's own settings, so the built-in set at the reference size is
+/// the whole choice. `None` when the arrow will not rasterise at this
+/// scale, which costs a visible pointer and nothing else — the position is
+/// still tracked and the screen still hit-tests.
 #[must_use]
 pub fn pointer_image(scale: Scale) -> Option<CursorImage> {
     CursorRegistry::with_builtin()
         .active_cursor(CursorKind::Arrow)
-        .rasterise(scale.percent())
+        .rasterise(scale.scale_length(CURSOR_BASE_SIDE_PX))
 }
 
 /// The pointer position the seat's relative motion accumulates into.

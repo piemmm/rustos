@@ -6,7 +6,8 @@
 //! screen, the colour shown where it does not reach, the desktop icon flow,
 //! and the sort order the `Desktop` folder is listed in. The *appearance*
 //! keys are how every surface of the desktop is drawn: light or dark,
-//! contrast, density, motion, and the interface scale. Every field is a
+//! contrast, density, motion, the interface scale, and the cursor set and
+//! pointer size the compositor draws with. Every field is a
 //! closed value set, and the document itself is a plain `lib/appconf`
 //! `key = value` document — the one format engine the app-data store speaks,
 //! so this crate defines the *registry* over it and no grammar of its own.
@@ -54,6 +55,7 @@ use core::fmt;
 use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
 use tairix_appconf::{ConfError, Document, Lookup};
 use tairix_geometry::Scale;
+use tairix_theme::CursorSetId;
 
 use crate::catalog;
 
@@ -404,6 +406,73 @@ impl IconSort {
     }
 }
 
+/// How large the pointer is drawn, as a magnification of the size the
+/// desktop's own density already calls for.
+///
+/// A closed ladder rather than a free factor, for the reason the UI-scale
+/// row is one: every step is a size a reader would choose deliberately, and
+/// a continuous control would post a document per pointer sample.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum CursorSize {
+    /// The size the interface scale alone implies.
+    #[default]
+    Normal,
+    /// Half again as large.
+    Large,
+    /// Twice as large.
+    Larger,
+    /// Three times as large, for a pointer that must be findable across a
+    /// whole screen.
+    Largest,
+}
+
+impl CursorSize {
+    /// Every size, in the canonical listing order a chooser offers them in.
+    pub const ALL: [Self; 4] = [Self::Normal, Self::Large, Self::Larger, Self::Largest];
+
+    /// The canonical value spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Large => "large",
+            Self::Larger => "larger",
+            Self::Largest => "largest",
+        }
+    }
+
+    /// Decode a value spelling; `None` for anything outside the closed set.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|size| size.as_str() == value)
+    }
+
+    /// This size as a percentage of the pointer's reference side.
+    ///
+    /// Never zero, so multiplying a logical side by it can never collapse
+    /// the pointer to nothing.
+    #[must_use]
+    pub const fn percent(self) -> u32 {
+        match self {
+            Self::Normal => 100,
+            Self::Large => 150,
+            Self::Larger => 200,
+            Self::Largest => 300,
+        }
+    }
+
+    /// The logical pointer side this size implies, from the reference side
+    /// `base`.
+    ///
+    /// Logical, so the desktop's one logical-to-physical conversion turns
+    /// it into pixels afterwards and no density arithmetic is duplicated
+    /// here. Saturating, so no reference side can wrap it.
+    #[must_use]
+    pub const fn side(self, base: u32) -> u32 {
+        base.saturating_mul(self.percent()) / 100
+    }
+}
+
 /// One key of the closed desktop settings registry.
 ///
 /// Adding a key means adding a variant here, its row in [`SettingsKey::ALL`],
@@ -441,11 +510,15 @@ pub enum SettingsKey {
     Motion,
     /// `scale` — the UI scale, as a percentage of the reference density.
     Scale,
+    /// `cursor.set` — which cursor set the pointer is drawn from.
+    CursorSet,
+    /// `cursor.size` — how large the pointer is drawn.
+    CursorSize,
 }
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -456,6 +529,8 @@ impl SettingsKey {
         Self::Density,
         Self::Motion,
         Self::Scale,
+        Self::CursorSet,
+        Self::CursorSize,
     ];
 
     /// The keys describing the backdrop and the icons standing on it: what
@@ -471,12 +546,14 @@ impl SettingsKey {
 
     /// The keys describing how every surface of the desktop is drawn: what
     /// the Settings application's Appearance and Accessibility panes edit.
-    pub const APPEARANCE: [Self; 5] = [
+    pub const APPEARANCE: [Self; 7] = [
         Self::Appearance,
         Self::Contrast,
         Self::Density,
         Self::Motion,
         Self::Scale,
+        Self::CursorSet,
+        Self::CursorSize,
     ];
 
     /// The canonical key spelling.
@@ -493,6 +570,8 @@ impl SettingsKey {
             Self::Density => "density",
             Self::Motion => "motion",
             Self::Scale => "scale",
+            Self::CursorSet => "cursor.set",
+            Self::CursorSize => "cursor.size",
         }
     }
 
@@ -577,6 +656,10 @@ pub struct DesktopSettings {
     pub motion: Motion,
     /// The UI scale every logical length is resolved through.
     pub scale: Scale,
+    /// Which cursor set the pointer is drawn from.
+    pub cursor_set: CursorSetId,
+    /// How large the pointer is drawn.
+    pub cursor_size: CursorSize,
 }
 
 impl Default for DesktopSettings {
@@ -592,6 +675,8 @@ impl Default for DesktopSettings {
             density: Density::Normal,
             motion: Motion::Full,
             scale: Scale::ONE,
+            cursor_set: CursorSetId::builtin(),
+            cursor_size: CursorSize::default(),
         }
     }
 }
@@ -730,6 +815,24 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
             };
             settings.scale = scale;
         }
+        SettingsKey::CursorSet => {
+            // A name no set could carry is refused here rather than
+            // spliced into a store path later. Whether a *registered* set
+            // answers to it is the desktop's question, not the document's:
+            // a stored choice outlives the image that shipped it, and a set
+            // an update removed falls back to the built-in at activation
+            // rather than costing the reader the rest of their document.
+            let Some(set) = CursorSetId::new(value) else {
+                return false;
+            };
+            settings.cursor_set = set;
+        }
+        SettingsKey::CursorSize => {
+            let Some(size) = CursorSize::from_value(value) else {
+                return false;
+            };
+            settings.cursor_size = size;
+        }
     }
     true
 }
@@ -767,6 +870,8 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::Density => settings.density.as_str().to_string(),
         SettingsKey::Motion => settings.motion.as_str().to_string(),
         SettingsKey::Scale => format!("{}", settings.scale.percent()),
+        SettingsKey::CursorSet => settings.cursor_set.name().to_string(),
+        SettingsKey::CursorSize => settings.cursor_size.as_str().to_string(),
     }
 }
 

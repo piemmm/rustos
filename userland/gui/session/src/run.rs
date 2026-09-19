@@ -1776,6 +1776,16 @@ mod program {
         // a browsing application must never make the compositor walk a
         // store.
         let wallpaper_catalog = list_wallpaper_store();
+        // The shipped cursor store, walked once for the same reason, and
+        // every set it offers loaded here rather than when one is first
+        // chosen: a set becomes active on the loop that owes the user a
+        // frame, so activating one must not read a directory.
+        let cursor_sets = load_cursor_sets(&shell);
+        let cursor_set_names: Vec<tairix_window::CursorSetName> = cursor_sets
+            .iter()
+            .map(|(id, _)| tairix_window::CursorSetName(alloc::string::String::from(id.name())))
+            .collect();
+        shell.set_cursors(cursor_sets, &mut compositor);
         // The client region the one preview in flight will be written into.
         let mut preview_in_flight: Option<tairix_rt::shm::MappedGrant> = None;
 
@@ -2413,6 +2423,7 @@ mod program {
                                 desk: &wallpapers,
                                 in_flight: &mut preview_in_flight,
                             },
+                            cursor_sets: &cursor_set_names,
                         };
                         server.serve(
                             &mut bridge,
@@ -2610,6 +2621,7 @@ mod program {
                                 desk: &wallpapers,
                                 in_flight: &mut preview_in_flight,
                             },
+                            cursor_sets: &cursor_set_names,
                         };
                         server.client_exited(&mut bridge, client);
                         if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -2813,6 +2825,7 @@ mod program {
                                     desk: &wallpapers,
                                     in_flight: &mut preview_in_flight,
                                 },
+                                cursor_sets: &cursor_set_names,
                             };
                             server.client_exited(&mut bridge, client);
                             if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -5728,6 +5741,7 @@ mod program {
                 seat_held: true,
                 relay: &mut RtDocumentRelay,
                 wallpapers: &mut NoGallery,
+                cursor_sets: &[],
             };
             server.client_exited(&mut bridge, owner);
         }
@@ -6341,6 +6355,9 @@ mod program {
         if change.scale {
             shell.set_scale(settings.scale, compositor);
         }
+        if change.cursor {
+            shell.set_cursor_look(settings.cursor_set, settings.cursor_size, compositor);
+        }
         if change.any() {
             // Every served window holds its application's own pixels, which
             // the session cannot redraw: it says how the desktop now looks
@@ -6574,6 +6591,41 @@ mod program {
             file: item.file,
         })
         .collect()
+    }
+
+    /// Walk the read-only shipped cursor store and load every set it
+    /// offers, each under its own directory name.
+    ///
+    /// Done once, at bring-up, for the reason the wallpaper walk is:
+    /// `/System` is mounted read-only, so the choice space is fixed for the
+    /// life of the boot. Every set's nine assets are read here too, so
+    /// *activating* a set later is pure memory — the choice arrives on the
+    /// loop that owes the user a frame, and reading a directory there is
+    /// exactly what the desktop must never do.
+    ///
+    /// A store that cannot be listed is not fatal — the desktop then offers
+    /// only the built-in set — and one unreadable asset costs only its own
+    /// kind, which keeps its built-in cursor.
+    fn load_cursor_sets(
+        shell: &DesktopShell,
+    ) -> Vec<(tairix_theme::CursorSetId, tairix_cursor::CursorTheme)> {
+        let Some(entries) = list_store_dir(tairix_cursor::CURSOR_STORE) else {
+            return Vec::new();
+        };
+        // The store's own children are the sets; a stray file there is
+        // planted by nothing and offered by nothing.
+        let sets = tairix_cursor::catalog_sets(
+            entries
+                .iter()
+                .filter(|entry| entry.is_directory_backed())
+                .map(tairix_browse::Entry::name),
+        );
+        sets.into_iter()
+            .map(|set| {
+                let theme = shell.session().load_cursors(&mut VfsFileReader, set);
+                (set, theme)
+            })
+            .collect()
     }
 
     /// One wallpaper-store directory's entries, or `None` with the reason
@@ -7150,6 +7202,7 @@ mod program {
                 seat_held: true,
                 relay: &mut RtDocumentRelay,
                 wallpapers: &mut NoGallery,
+                cursor_sets: &[],
             };
             server.client_exited(&mut bridge, owner);
         }

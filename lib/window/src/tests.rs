@@ -33,8 +33,8 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    client_frame_budget_bytes, CallerIdentity, EventSink, HandOverDesk, LayerSpec, OpenEntry,
-    PopupSpec, WallpaperName, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, CallerIdentity, CursorSetName, EventSink, HandOverDesk, LayerSpec,
+    OpenEntry, PopupSpec, WallpaperName, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -201,6 +201,8 @@ struct RecordingHost {
     wallpapers: Vec<WallpaperName>,
     renders: Vec<(u64, u64, u16, u16)>,
     refuse_render: Option<Errno>,
+    /// The cursor sets this host offers.
+    cursor_sets: Vec<CursorSetName>,
 }
 
 impl Default for RecordingHost {
@@ -220,6 +222,7 @@ impl Default for RecordingHost {
             wallpapers: Vec::new(),
             renders: Vec::new(),
             refuse_render: None,
+            cursor_sets: Vec::new(),
             menu_opens: Vec::new(),
             tooltips: Vec::new(),
             refuse_tooltip: None,
@@ -447,6 +450,10 @@ impl WindowHost for RecordingHost {
 
     fn wallpaper_catalog(&mut self) -> &[WallpaperName] {
         &self.wallpapers
+    }
+
+    fn cursor_sets(&mut self) -> &[CursorSetName] {
+        &self.cursor_sets
     }
 
     fn wallpaper_render_requested(
@@ -2080,6 +2087,43 @@ fn the_wallpaper_catalog_is_answered_as_pages_of_the_hosts_own_listing() {
     let answered = client.wallpapers(9, &mut page).expect("a catalog page");
     assert_eq!(answered.total, 2);
     assert!(answered.is_empty());
+}
+
+/// The choice space is the host's, answered whole rather than paged: it
+/// fits one frame by construction, so a chooser learns every set in one
+/// call.
+#[test]
+fn the_cursor_sets_are_answered_whole_from_the_hosts_own_listing() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    loopback.borrow_mut().host.cursor_sets = alloc::vec![
+        CursorSetName(String::from("Standard")),
+        CursorSetName(String::from("High Visibility")),
+    ];
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_CURSOR_SETS_REPLY_MAX];
+
+    let answered = client.cursor_sets(&mut frame).expect("the choice space");
+    assert_eq!(answered.len(), 2);
+    let names: Vec<String> = answered
+        .names()
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        alloc::vec![String::from("Standard"), String::from("High Visibility")]
+    );
+}
+
+/// A desktop that listed no store offers no sets of its own, which is an
+/// answer rather than a failure: the built-in set is the client's to add.
+#[test]
+fn a_host_with_no_cursor_store_answers_an_empty_choice_space() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_CURSOR_SETS_REPLY_MAX];
+    let answered = client.cursor_sets(&mut frame).expect("the choice space");
+    assert!(answered.is_empty());
+    assert_eq!(answered.names().count(), 0);
 }
 
 /// A desktop that listed no store answers an empty catalog, not an error:

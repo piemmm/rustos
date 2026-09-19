@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" data-hotspot-x="16" data-hotspot-y="16">
+  <title>Move</title>
+  <!-- Drawn twice: a wide white stroke first, then the dark body over its
+       inner half. The outer half survives as a halo, which is what keeps
+       this set legible over a photograph of any brightness. -->
+  <polygon points="16,3 23,11 19,11 19,13 21,13 21,9 29,16 21,23 21,19 19,19 19,21 23,21 16,29 9,21 13,21 13,19 11,19 11,23 3,16 11,9 11,13 13,13 13,11 9,11" fill="none" stroke="#ffffff" stroke-width="4" stroke-linejoin="round"/>
+  <polygon points="16,3 23,11 19,11 19,13 21,13 21,9 29,16 21,23 21,19 19,19 19,21 23,21 16,29 9,21 13,21 13,19 11,19 11,23 3,16 11,9 11,13 13,13 13,11 9,11" fill="#111114"/>
+</svg>

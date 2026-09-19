@@ -3,7 +3,9 @@
 use tairix_cursor::CursorTheme;
 use tairix_icon::IconSet;
 use tairix_taskbar::{Taskbar, TaskbarConfig};
-use tairix_theme::{Accessibility, Appearance, Theme, ThemeError, ThemeId, ThemeRegistry};
+use tairix_theme::{
+    Accessibility, Appearance, CursorSetId, Theme, ThemeError, ThemeId, ThemeRegistry,
+};
 
 use crate::assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 
@@ -123,20 +125,21 @@ impl DesktopSession {
         true
     }
 
-    /// Load the active theme's cursor set from the on-disk SVG assets under
-    /// `/System/Graphics`, ready to register with the window manager's cursor
-    /// registry.
+    /// Load one cursor set's artwork from the on-disk SVG assets in its own
+    /// directory under the shipped store, ready to register with the window
+    /// manager's cursor registry.
     ///
-    /// Reads the asset named by the active theme's
-    /// [`CursorSet`](tairix_theme::CursorSet) for each cursor kind through
-    /// `reader`. It cannot fail: a kind whose asset is missing, unreadable, or
-    /// malformed keeps its built-in cursor, so a corrupt or
-    /// absent `/System/Graphics` simply yields the built-in cursor set.
-    pub fn load_cursors<R>(&self, reader: &mut R) -> CursorTheme
+    /// Reads the asset the active theme's
+    /// [`CursorSet`](tairix_theme::CursorSet) names for each kind, inside
+    /// `set`'s directory, through `reader`. It cannot fail: a kind whose
+    /// asset is missing, unreadable, or malformed keeps its built-in
+    /// cursor, so a corrupt or absent store simply yields the built-in
+    /// artwork under that set's name.
+    pub fn load_cursors<R>(&self, reader: &mut R, set: CursorSetId) -> CursorTheme
     where
         R: SessionFileReader + ?Sized,
     {
-        load_cursor_theme(reader, self.themes.active().cursors())
+        load_cursor_theme(reader, set, self.themes.active().cursors())
     }
 
     /// Load the notification-icon set from the on-disk SVG assets under

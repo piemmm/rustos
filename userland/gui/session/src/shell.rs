@@ -43,7 +43,7 @@ use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::Errno;
 use tairix_browse::{DirectorySource, GridView};
 use tairix_controls::damage::{self, Repaint};
-use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
+use tairix_cursor::{CursorRegistry, CursorTheme, CURSOR_BASE_SIDE_PX};
 use tairix_geometry::Region;
 use tairix_icon::{
     artwork_cache, ArtworkCache, ArtworkResolver, IconArtworkSource, IconKind, IconRequest,
@@ -56,8 +56,8 @@ use tairix_taskbar::{
     icon_cache, AppSlot, Edge, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
     TransientNotification,
 };
-use tairix_theme::MotionInteraction;
-use tairix_wallpaper::Backdrop;
+use tairix_theme::{CursorSetId, MotionInteraction};
+use tairix_wallpaper::{Backdrop, CursorSize};
 use tairix_wm::{
     cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse,
     Modifiers, Point, PointerCatch, Rect, Scale, Surface, WindowActivationState, WindowFrame,
@@ -429,24 +429,67 @@ impl DesktopShell {
         compositor.move_cursor(at);
     }
 
-    /// Install a loaded cursor set as the active pointer artwork, replacing
-    /// the built-in set, and re-render the current shape so the new artwork
-    /// shows without waiting for the next interaction.
+    /// Install the cursor sets read from the shipped store as the pointer
+    /// artwork this seat chooses from, and re-render the current shape so
+    /// they show without waiting for the next interaction.
     ///
-    /// The `theme` is the [`CursorTheme`] the session assembled from the
-    /// on-disk `/System/Graphics` SVG assets
+    /// Each set is a [`CursorTheme`] the session assembled from one store
+    /// directory's SVG assets
     /// ([`DesktopSession::load_cursors`](crate::DesktopSession::load_cursors)),
-    /// already failed closed per kind to the built-in cursor, so this cannot
-    /// blank the pointer. It is the cursor counterpart of
+    /// already failed closed per kind to the built-in cursor, so none of
+    /// them can blank the pointer. The built-in set is always registered
+    /// beside them, and a set whose id collides with one already registered
+    /// is dropped rather than replacing it. It is the cursor counterpart of
     /// [`set_icons`](Self::set_icons).
-    pub fn set_cursors(&mut self, theme: CursorTheme, compositor: &mut Compositor) {
+    ///
+    /// Every discovered set is loaded here, at bring-up, rather than when
+    /// one is first chosen: activating a set must not read a directory,
+    /// because the choice arrives on the loop that owes the user a frame.
+    pub fn set_cursors(
+        &mut self,
+        sets: Vec<(CursorSetId, CursorTheme)>,
+        compositor: &mut Compositor,
+    ) {
         let mut registry = CursorRegistry::with_builtin();
-        let id = CursorSetId::new("desktop");
-        if registry.register(id, theme).is_ok() {
-            let _ = registry.set_active(id);
+        for (id, theme) in sets {
+            let _ = registry.register(id, theme);
         }
         self.cursor
             .set_registry(registry, self.router.pointer(), compositor);
+    }
+
+    /// Draw the pointer from the set named `set` at `size`, answering
+    /// whether anything on screen changed.
+    ///
+    /// Pure memory: every set the store offers was loaded at bring-up, so
+    /// this reads no directory and is safe on the loop that owes a frame.
+    /// A set this seat does not hold falls back to the built-in one — a
+    /// stored choice outlives the image that shipped it, and an update that
+    /// removes a set must not leave the desktop with no pointer.
+    pub fn set_cursor_look(
+        &mut self,
+        set: CursorSetId,
+        size: CursorSize,
+        compositor: &mut Compositor,
+    ) -> bool {
+        let wanted = if self.cursor.registry().get(set).is_some() {
+            set
+        } else {
+            CursorSetId::builtin()
+        };
+        let at = self.router.pointer();
+        // The fallback above already holds the set registered, so the only
+        // refusal left would be a registry that lost its built-in — which
+        // cannot happen — and taking it as "nothing changed" keeps this
+        // total either way.
+        let swapped = self
+            .cursor
+            .set_active_set(wanted, at, compositor)
+            .unwrap_or(false);
+        let resized = self
+            .cursor
+            .set_logical_side(size.side(CURSOR_BASE_SIDE_PX), at, compositor);
+        swapped || resized
     }
 
     /// Open `surface` as a top-level window at `origin`, list it on the taskbar

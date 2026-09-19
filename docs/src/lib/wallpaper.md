@@ -85,6 +85,8 @@ that key's own closed vocabulary:
 | `density`   | `compact` \| `normal` \| `comfortable`            | `normal`                                      |
 | `motion`    | `full` \| `reduced`                               | `full`                                        |
 | `scale`     | a bare decimal percentage in `Scale`'s own range  | `100`                                         |
+| `cursor.set`| a cursor-set name (a plain leaf name within `CURSOR_SET_NAME_MAX`) | `Standard`                   |
+| `cursor.size`| `normal` \| `large` \| `larger` \| `largest`     | `normal`                                      |
 
 Keys and values are case-sensitive: each has one canonical spelling.
 
@@ -101,7 +103,16 @@ restated: the session publishes them to every application over the window
 channel, so the value this document stores and the byte on that wire are one
 definition. `scale` is validated by `tairix_geometry::Scale`, the one
 validator of a UI scale, so a percentage this registry accepts is always one
-the desktop can actually be drawn at.
+the desktop can actually be drawn at. `cursor.set` holds a
+`tairix_theme::CursorSetId` for the same reason — the value this document
+stores and the set the compositor activates are one type.
+
+**`cursor.set` names a set; it does not assert one exists.** A name no set
+could carry (a separator, an over-long name) is refused here, because it
+would be spliced into a store path. Whether a *registered* set answers to it
+is the desktop's question: a stored choice outlives the image that shipped
+it, so a set an update removed falls back to the built-in one at activation
+rather than costing the reader every other key in their document.
 
 A colour is written as **bare** hex digits — `112233`, never `#112233`. The
 document's own comment grammar cuts a line at the first `#`, so a
@@ -256,7 +267,8 @@ every source pixel at 1:1 and so needs the native size.
   `WallpaperPathError::{TooLong, Malformed}` — the validated wallpaper value.
 - `WallpaperFit::{Fill, Fit, Stretch, Centre, Tile}`,
   `Backdrop::{Theme, Colour}`, `Rgb::{new, from_hex, to_hex}`,
-  `IconFlow::{Leading, Trailing}`, `IconSort::{Name, Kind, Size, Date}` — the
+  `IconFlow::{Leading, Trailing}`, `IconSort::{Name, Kind, Size, Date}`,
+  `CursorSize::{Normal, Large, Larger, Largest, percent, side}` — the
   closed value vocabularies.
 - `SettingsKey::{ALL, PINBOARD, APPEARANCE, name, from_name, value_of}` — the
   closed key registry and its two groups;

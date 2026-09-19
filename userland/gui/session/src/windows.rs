@@ -31,7 +31,7 @@ use tairix_controls::{ChainModel, PlatePlacement};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::EventId;
-use tairix_window::{HandOverDesk, OpenEntry, WallpaperName};
+use tairix_window::{CursorSetName, HandOverDesk, OpenEntry, WallpaperName};
 
 use crate::launch::{
     bundle_of_run_path, resolve_launch, DocumentRelay, Launch, LaunchHost, LaunchTarget,
@@ -610,6 +610,14 @@ pub struct ShellWindowHost<'a> {
     /// application lists, and the previews it asks the session to render
     /// because it holds no authority to read or decode a picture itself.
     pub wallpapers: &'a mut dyn WallpaperService,
+    /// The cursor sets this desktop offers, in the order a chooser lists
+    /// them — what the settings application's pointer row is built from,
+    /// because it holds no authority to read the store either.
+    ///
+    /// A plain slice rather than a seam: the session listed the store once
+    /// at bring-up and holds the answer, so relaying it needs no policy
+    /// worth testing apart from the engine's own.
+    pub cursor_sets: &'a [CursorSetName],
 }
 
 /// The [`LaunchHost`] a hand-over resolves through: the engine's own routes,
@@ -1271,6 +1279,10 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.wallpapers.catalog()
     }
 
+    fn cursor_sets(&mut self) -> &[CursorSetName] {
+        self.cursor_sets
+    }
+
     fn wallpaper_render_requested(
         &mut self,
         window_id: u64,
@@ -1553,6 +1565,7 @@ mod tests {
                 seat_held: false,
                 relay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.hand_over_requested(desk, caller, &run_path, document)
         };
@@ -1661,6 +1674,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(
                 window_owner(1),
@@ -1720,6 +1734,7 @@ mod tests {
                     seat_held: false,
                     relay: &mut RefusingRelay,
                     wallpapers: &mut RecordingGallery::default(),
+                    cursor_sets: &[],
                 };
                 host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                     .expect("opens");
@@ -1787,6 +1802,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -1819,6 +1835,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
                 .expect("presents");
@@ -1849,6 +1866,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             open_one_full(&mut host, 7, 64, 48, WindowSizing::default())
         };
@@ -1868,6 +1886,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_presented(7, &m, &[0x40u8; 64 * 48 * 4], whole(&m))
                 .expect("presents");
@@ -1897,6 +1916,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1915,6 +1935,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents");
@@ -1934,6 +1955,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents again");
@@ -1957,6 +1979,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("re-attached and presents");
@@ -1989,6 +2012,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(owner, 1, &m, "one", WindowSizing::default())
                 .expect("opens");
@@ -2010,6 +2034,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_presented(2, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents");
@@ -2037,6 +2062,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -2081,6 +2107,7 @@ mod tests {
             seat_held: false,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -2153,6 +2180,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(window_owner(1), 1, &m, "w", RESIZABLE)
                 .expect("opens");
@@ -2187,6 +2215,7 @@ mod tests {
             seat_held: false,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
         };
         let mut next = frame;
         next[0..4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
@@ -2236,6 +2265,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -2256,6 +2286,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the repeat present is accepted");
@@ -2293,6 +2324,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -2316,6 +2348,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the second present lands");
@@ -2357,6 +2390,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -2397,6 +2431,7 @@ mod tests {
             seat_held: false,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -2426,6 +2461,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(
                 window_owner(1),
@@ -2472,6 +2508,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             open_one_sized(&mut host, 3, RESIZABLE)
         };
@@ -2527,6 +2564,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             open_one_full(&mut host, 7, 480, 320, WindowSizing::default())
         };
@@ -2754,6 +2792,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             // A client wide and tall enough that even the first cascade slot
             // overhangs the 640x480 work area.
@@ -2877,6 +2916,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             (
                 open_one_full(&mut host, 7, 200, 120, RESIZABLE),
@@ -2913,6 +2953,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             (
                 open_one_sized(
@@ -2973,6 +3014,7 @@ mod tests {
             seat_held: false,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
         };
         let wm = open_one_sized(&mut host, 3, RESIZABLE);
         assert_eq!(
@@ -3034,6 +3076,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             let wm = open_one(&mut host, 7);
             // A compositor window the session does not track (e.g. the taskbar
@@ -3085,6 +3128,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             open_one(&mut host, 7)
         };
@@ -3144,6 +3188,7 @@ mod tests {
             seat_held: false,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
         };
         let first = open_one(&mut host, 7);
         let second = open_one(&mut host, 8);
@@ -3202,6 +3247,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             open_one(&mut host, 7)
         };
@@ -3239,6 +3285,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             let back = open_one(&mut host, 7);
             let front = open_one(&mut host, 9);
@@ -3283,6 +3330,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             open_one(&mut host, 7)
         };
@@ -3355,6 +3403,7 @@ mod tests {
             seat_held: false,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
         };
         let wm = open_one(&mut host, 7);
         // A resize moves the client geometry the compositor draws and lays
@@ -3391,6 +3440,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             open_one_full(&mut host, 7, 200, 120, RESIZABLE)
         };
@@ -3428,6 +3478,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_resized(7, &mode(220, 135, DisplayFormat::Rgba8888))
                 .expect("accepted");
@@ -3457,6 +3508,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_resized(7, &mode(240, 150, DisplayFormat::Rgba8888))
                 .expect("resizes");
@@ -3483,6 +3535,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             let wm = open_one(&mut host, 7);
             host.window_retitled(7, "Files - Documents")
@@ -3527,6 +3580,7 @@ mod tests {
             seat_held: false,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -3562,6 +3616,7 @@ mod tests {
             seat_held: false,
             relay: &mut RefusingRelay,
             wallpapers: &mut gallery,
+            cursor_sets: &[],
         };
         assert_eq!(host.wallpaper_catalog().len(), 1);
         assert_eq!(host.wallpaper_catalog()[0].file, "a.jpg");
@@ -3588,6 +3643,7 @@ mod tests {
             seat_held: false,
             relay: &mut RefusingRelay,
             wallpapers: &mut NoStore,
+            cursor_sets: &[],
         };
         assert!(host.wallpaper_catalog().is_empty());
         assert_eq!(
@@ -3626,6 +3682,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             (
                 open_one_sized(&mut host, 1, WindowSizing::default()),
@@ -3745,6 +3802,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -3775,6 +3833,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
                 .expect("presents");
@@ -3813,6 +3872,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };
@@ -3870,6 +3930,7 @@ mod tests {
                 seat_held: false,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };

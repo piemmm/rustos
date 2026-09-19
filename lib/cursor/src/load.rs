@@ -23,8 +23,9 @@ use crate::vector::VectorCursor;
 
 /// A source of on-disk SVG cursor assets, one per [`CursorKind`].
 ///
-/// The desktop implements this over the filesystem (reading
-/// `/System/Graphics`), tests over an in-memory table. The seam keeps the
+/// The desktop implements this over the filesystem (reading one set's
+/// directory under [`CURSOR_STORE`](crate::store::CURSOR_STORE)), tests over
+/// an in-memory table. The seam keeps the
 /// asset bytes — and the capability needed to read them — out of this
 /// `no_std` library.
 pub trait CursorAssetSource {

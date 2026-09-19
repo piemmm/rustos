@@ -1,14 +1,21 @@
 //! Rasterising a [`VectorCursor`] onto a `lib/raster` [`Surface`] at any
-//! scale.
+//! pixel side.
 //!
 //! Scaling is what makes the vector representation worthwhile: a cursor
 //! authored once on its design grid is rendered at whatever pixel size a
-//! display's DPI calls for. Each shape is filled through `lib/raster`'s single
-//! [`Surface::fill_contours`] path — every pixel taking the exact area the
-//! shape covers of it — and the stack through its one [`Surface::layered`]
-//! composition, so the cursor library owns no scan converter or colour
-//! arithmetic of its own. Out-of-range scales and degenerate cursors fail
-//! closed with `None` rather than panicking.
+//! display's DPI and the user's chosen pointer size call for. Each shape is
+//! filled through `lib/raster`'s single [`Surface::fill_contours`] path —
+//! every pixel taking the exact area the shape covers of it — and the stack
+//! through its one [`Surface::layered`] composition, so the cursor library
+//! owns no scan converter or colour arithmetic of its own. A degenerate
+//! side or cursor fails closed with `None` rather than panicking.
+//!
+//! The side is asked for in **pixels**, not as a factor of the asset's own
+//! design grid, because the grid is an authoring detail that differs
+//! between a built-in cursor and a decoded SVG one: a caller naming a
+//! factor would get a different pointer size from each, so swapping cursor
+//! sets would resize the pointer. The caller names the size it wants and
+//! every set honours it.
 
 use alloc::vec::Vec;
 
@@ -72,36 +79,23 @@ impl CursorImage {
 }
 
 impl VectorCursor {
-    /// The square pixel side this cursor rasterises to at `scale_percent`,
-    /// or `None` if the cursor or the scale is degenerate.
+    /// Rasterise this cursor into a `side`x`side` pixel image.
     ///
-    /// `scale_percent` is relative to the design grid: `100` renders one
-    /// pixel per design unit, `200` doubles it, `50` halves it. A side of
-    /// zero (an empty design grid or a scale that rounds the artwork away to
-    /// nothing) is not renderable and reported as `None`.
-    #[must_use]
-    pub fn footprint(&self, scale_percent: u32) -> Option<u32> {
-        let side = u64::from(self.design_size()).checked_mul(u64::from(scale_percent))? / 100;
-        let side = u32::try_from(side).ok()?;
-        (side > 0).then_some(side)
-    }
-
-    /// Rasterise this cursor at `scale_percent` (see [`footprint`]).
-    ///
-    /// Returns `None` for a degenerate cursor or scale, or if the resulting
-    /// pixel buffer cannot be allocated — the caller falls back to a smaller
-    /// scale or a different cursor rather than crashing.
+    /// Returns `None` for a zero `side`, a cursor whose design grid is
+    /// degenerate, or a pixel buffer that cannot be allocated — the caller
+    /// falls back to a smaller side or a different cursor rather than
+    /// crashing.
     /// Each shape is filled through the shared [`Surface::fill_contours`] path
     /// in stack order, so a dark outline beneath a light body stays legible,
     /// and the stack goes through [`Surface::layered`] so the body meets that
     /// outline without the pale seam that compositing already-anti-aliased
     /// shapes leaves.
-    ///
-    /// [`footprint`]: Self::footprint
     #[must_use]
-    pub fn rasterise(&self, scale_percent: u32) -> Option<CursorImage> {
-        let side = self.footprint(scale_percent)?;
+    pub fn rasterise(&self, side: u32) -> Option<CursorImage> {
         let design = self.design_size();
+        if side == 0 || design == 0 {
+            return None;
+        }
 
         let surface = Surface::layered(side, side, self.shapes().len(), |surface| {
             for shape in self.shapes() {
@@ -114,18 +108,24 @@ impl VectorCursor {
             }
         })?;
 
-        let hotspot = self.scaled_hotspot(scale_percent, side);
-        Some(CursorImage { surface, hotspot })
+        Some(CursorImage {
+            surface,
+            hotspot: self.scaled_hotspot(side, design),
+        })
     }
 
-    /// The hotspot scaled into output pixels and clamped to the image.
-    fn scaled_hotspot(&self, scale_percent: u32, side: u32) -> Point {
-        let scale = |design: i32| -> i32 {
-            let value = i64::from(design) * i64::from(scale_percent) / 100;
-            let max = i64::from(side.saturating_sub(1));
-            let clamped = value.clamp(0, max);
+    /// The hotspot mapped from the design grid onto a `side`-pixel image and
+    /// clamped inside it.
+    ///
+    /// `design` is non-zero by the caller's own check, so the division is
+    /// sound and the pointer can never be handed a hotspot outside the
+    /// artwork it belongs to.
+    fn scaled_hotspot(&self, side: u32, design: u32) -> Point {
+        let onto = |coordinate: i32| -> i32 {
+            let value = i64::from(coordinate) * i64::from(side) / i64::from(design);
+            let clamped = value.clamp(0, i64::from(side.saturating_sub(1)));
             i32::try_from(clamped).unwrap_or(0)
         };
-        Point::new(scale(self.hotspot_x()), scale(self.hotspot_y()))
+        Point::new(onto(self.hotspot_x()), onto(self.hotspot_y()))
     }
 }

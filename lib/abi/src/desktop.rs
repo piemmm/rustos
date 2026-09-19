@@ -328,6 +328,23 @@ impl Motion {
     }
 }
 
+/// Longest cursor-set name the desktop offers or stores.
+///
+/// A fixed format bound, not a capacity: a set's name is the directory it
+/// occupies in the shipped store *and* the label a chooser draws, so it is
+/// held to a length a reply frame and a settings value can both carry
+/// outright. A directory whose name exceeds it is refused by the image
+/// build rather than shipped as artwork nothing could offer.
+pub const CURSOR_SET_NAME_MAX: usize = 32;
+
+/// Most cursor sets the desktop offers.
+///
+/// A containment bound on a store listing, like the wallpaper catalog's:
+/// the sets fit one reply frame, so a chooser learns the whole choice space
+/// in one call and no paging exists to get wrong. A store holding more sets
+/// than this offers the first this many in name order.
+pub const CURSOR_SETS_MAX: usize = 16;
+
 /// The desktop a window is displayed on.
 ///
 /// Opaque and validated on the way in: a desktop with a zero-sized screen

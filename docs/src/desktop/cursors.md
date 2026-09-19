@@ -14,9 +14,16 @@ square design grid, plus a hotspot. A shape is what it is painted with, which
 points it encloses (its fill rule), and the contours that bound them — lists
 of `Vertex`es. Because the artwork is geometry rather than a fixed bitmap:
 
-- **Scaling** is exact: `VectorCursor::rasterise(scale_percent)` renders one
-  pixel per design unit at `100`, doubles at `200`, halves at `50`. The
-  `footprint` method reports the square pixel side without rendering.
+- **Scaling** is exact: `VectorCursor::rasterise(side)` renders the artwork
+  into a `side`x`side` pixel image, whatever design grid it was authored on.
+  The side is asked for in **pixels**, not as a factor of that grid, because
+  the grid is an authoring detail that differs between a built-in cursor (32
+  units) and one decoded from SVG (`tairix_svg::DESIGN_GRID`): a caller
+  naming a factor would get a different pointer size from each, so swapping
+  cursor sets would resize the pointer. `tairix_cursor::CURSOR_BASE_SIDE_PX`
+  is the *logical* side the desktop draws a pointer at before density and
+  the user's pointer size, and the one logical-to-physical conversion
+  (`tairix_geometry::Scale::scale_length`) turns it into pixels.
 - **Anti-aliasing** is exact: each output pixel takes the true fraction of its
   own area the shape covers, so an edge lands where the geometry puts it
   instead of on the nearest of a handful of sample points.
@@ -64,23 +71,83 @@ authored coordinate tables.
 
 Because a `CursorTheme` is plain data, an entirely different look is just a
 different theme. The `CursorRegistry` holds the available sets and the active
-one, keyed by a `CursorSetId`. The built-in set is always present, so there is
+one, keyed by a `CursorSetId` — an owned, bounded, `Copy` name held inline
+(`lib/inline`'s `ArrayString`) rather than on the heap, because the window
+manager compares its cursor-cache epoch on every pointer refresh and an
+owned heap name would put an allocation on that path. The id is the set's
+**directory name in the store, which is also the label a chooser draws**,
+exactly as a wallpaper category's is, so no second spelling of it can drift.
+`CursorSetId::new` fails closed on anything that is not a plain leaf name
+within `tairix_abi::desktop::CURSOR_SET_NAME_MAX` bytes: a name with a
+separator could widen the store path it is spliced into. The built-in set
+(`CursorSetId::builtin()`, named `Standard`) is always present, so there is
 always an active set to return; `register` and `set_active` fail closed on a
 duplicate or unknown id rather than panicking (`AGENTS.md` §5.4 / §2.9).
 Swapping the active set replaces the whole pointer look at runtime — no
 window-manager change.
 
+## The store
+
 On-disk cursor sets follow the desktop's **SVG-first** asset rule
-(`AGENTS.md` §10): a replaceable set under `/System/Graphics` is authored as
-SVG and decoded — through the curated §16.4 image-decoding library (`lib/svg`)
-in a §19.5 parser sandbox — into the in-memory `VectorCursor`/`CursorTheme`
-form shown here. `tairix_cursor::decode_svg(bytes)` (built on
-`tairix_svg::decode` and `VectorCursor::from_svg`) performs that conversion,
-preserving the asset's `data-hotspot-x`/`data-hotspot-y` hotspot; a malformed
-or undecodable asset fails closed, so the caller keeps the built-in cursor
-rather than crashing (`AGENTS.md` §2.9). See
-[SVG asset decoding](./svg-assets.md). The built-in set remains the
-always-present fallback.
+(`AGENTS.md` §10). `tairix_cursor::store` is the store's one definition:
+
+- `/System/Graphics/Cursors/<set>/<asset-id>.svg` — one directory per set,
+  one asset per `CursorKind` inside it. The `<set>` level is the user's
+  choice (the `cursor.set` setting); the `<asset-id>` level is what the
+  *active theme* names that kind (`CursorSet::asset`), so a theme may point
+  at artwork of its own inside whichever set the user chose. The shipped
+  sets are authored against `CursorSet::canonical()`, which is every kind
+  under its own `CursorKind::asset_id`.
+- `catalog_sets` builds the choice space from a directory listing: it
+  performs no I/O, drops a name no set could carry, sorts by name, and
+  leaves the built-in set the slot a reply frame reserves for it. A
+  directory claiming the built-in name is dropped, so a store cannot shadow
+  it.
+- `MAX_CURSOR_ASSET_BYTES` is the fixed validation bound on one untrusted
+  asset. `tools/syshelp` refuses to plant an asset over it, or one whose
+  name no kind asks for, or a set directory no chooser could offer — so
+  unreachable or over-large artwork fails the *build*, never the desktop.
+
+The sets are discovered from `lib/cursor/assets/` at build time by the same
+`GRAPHICS_FAMILIES` walk that discovers the icon masters and the wallpapers
+(`GraphicsFamilyKind::Cursor`), never from a hand-maintained list. One set
+ships today: **High Visibility**, a dark pointer under a wide white halo,
+which is what makes the `cursor.set` row a real choice rather than a control
+of one value.
+
+`tairix_cursor::decode_svg(bytes)` (built on `tairix_svg::decode` and
+`VectorCursor::from_svg`) performs the conversion — through the curated
+§16.4 image-decoding library — preserving the asset's
+`data-hotspot-x`/`data-hotspot-y` hotspot; a malformed or undecodable asset
+fails closed **per kind**, so the desktop keeps the built-in cursor for that
+kind rather than crashing (`AGENTS.md` §2.9). See [SVG asset
+decoding](./svg-assets.md). The built-in set remains the always-present
+fallback.
+
+**A cursor asset is decoded in the session, not in a parser sandbox, and
+that is deliberate.** §19.5 sandboxes parsers of *untrusted* input, which is
+why a wallpaper is decoded in one (`WallpaperChoice::Image` names any
+absolute path) and why every icon is (the one artwork resolver serves each
+bundle's own icon as well as the shipped masters). A cursor set can
+only ever come from `/System/Graphics/Cursors/`, on the read-only,
+system-signed `/System` volume that nothing but the installer and the
+updater may write (`AGENTS.md` §16.2) — it is first-party shipped artwork
+reached by a name the store itself supplied. The decode is nonetheless
+bounded on every axis a hostile file would push: `MAX_CURSOR_ASSET_BYTES`
+before a byte is parsed, and `lib/svg`'s own layer, total-vertex and
+`<use>`-depth bounds during, with a decoder that is total and returns a
+typed error rather than panicking for *any* input. An asset id the theme
+supplies is validated as a plain leaf name at the path splice
+(`cursor_asset_path`), so a theme can never make the session read outside
+the set directory.
+
+**Every set is loaded at bring-up, not when one is first chosen.** The
+desktop session walks the store once — `/System` is read-only, so the choice
+space is fixed for the life of the boot — reads each set's assets, and
+registers them all. Activating a set afterwards is pure memory, which is the
+point: the choice arrives on the loop that owes the user a frame, and
+reading a directory there is exactly what an interactive surface must never
+do (`AGENTS.md` §28.1).
 
 ## Placing one on screen
 
@@ -110,8 +177,9 @@ the window stack uses), and hiding the cursor restores the pixels beneath it.
 
 ## On the login screen
 
-The greeter has no compositor and no cursor sets on disk yet, so it takes the
-built-in `Arrow`, rasterises it once at start-up for the active
+The greeter has no compositor, and it runs before any user's own settings,
+so it takes the built-in `Arrow` at the reference pointer side, rasterises it
+once at start-up for the active
 `tairix_geometry::Scale`, and samples the `PlacedCursor` over the painted
 surface as each frame is composed — the pointer is therefore always on top of
 everything the authentication surface drew, and the surface itself never
@@ -160,20 +228,31 @@ coded per window action. The window manager's `select` module
   to the output, so the controller reads it from `Compositor::scale` when it
   installs a cursor (`AGENTS.md` §10 / §2.2). `refresh(at, router, compositor)`
   runs the policy and
-  re-renders only when the chosen kind, the active cursor set, **or** the output
-  scale changed, installing the result in place — at `at`, the seat's pointer
+  re-renders only when the chosen kind, the active cursor set, **or** the
+  pixel side the output scale and the logical side resolve to changed,
+  installing the result in place — at `at`, the seat's pointer
   position, which is also where the hotspot is placed. A runtime cursor-set
-  swap is `set_registry(registry, at, compositor)`, which needs no router at
-  all; a DPI change is `Compositor::set_scale` followed by one
-  `refresh`. Rasterisation can fail for a degenerate cursor or scale; the
+  swap is `set_active_set(id, at, compositor)` (or
+  `set_registry(registry, at, compositor)` to replace the sets outright),
+  neither of which needs a router at all; a DPI change is
+  `Compositor::set_scale` followed by one `refresh`, and a pointer-size
+  change is `set_logical_side(side, at, compositor)`. Rasterisation can fail
+  for a degenerate cursor or side; the
   controller then fails closed, leaving the current pointer untouched rather
   than blanking it (`AGENTS.md` §2.9).
-- The controller rasterises each kind at most once per scale and cursor set: a
-  `tairix_reclaim::ReclaimCache` keyed by `CursorKind` within a
-  `(scale, cursor-set)` epoch (`CursorEpoch`) keeps the converted
+- The controller owns the pointer's **logical** side — the user's own
+  accessibility choice — but not the scale, which belongs to the output.
+- The controller rasterises each kind at most once per pixel side and cursor
+  set: a `tairix_reclaim::ReclaimCache` keyed by `CursorKind` within a
+  `(pixel side, cursor-set)` epoch (`CursorEpoch`) keeps the converted
   `CursorImage`, so toggling back to a previously-shown kind reuses its image
-  and only a scale change or a set swap re-rasterises (the SVG-first "convert
-  once, re-render only on a scale or theme change" rule, `AGENTS.md` §10). The
+  and only a change to the side or the set re-rasterises (the SVG-first
+  "convert once, re-render only on a scale or theme change" rule,
+  `AGENTS.md` §10). The epoch carries the *side* rather than the scale and
+  the pointer size separately, because an image depends on how many pixels
+  across it is and which set it came from and nothing else — so two
+  different (scale, size) pairs resolving to one side correctly share one
+  cached image. The
   cache is built by `cursor_cache` from the shared
   `tairix_reclaim::desktop::disposable_ui_cache` policy: owned by the seat,
   bounded by a budget derived from the real framebuffer byte size, dropped

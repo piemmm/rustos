@@ -7,7 +7,9 @@
 //! another set is [`register`](CursorRegistry::register) — data, not code.
 //! This is the "replaceable with other cursor sets" requirement (`PLAN.md`
 //! Stage 7): a different cursor set is a different `CursorTheme` under a new
-//! id, with no window-manager change.
+//! [`CursorSetId`], with no window-manager change. The desktop session fills
+//! one of these from the shipped store (`crate::store`) at bring-up, so
+//! activating a set afterwards costs no I/O at all.
 //!
 //! Both mutators fail closed: selecting an unknown set or
 //! registering a duplicate id returns a [`CursorRegistryError`] and leaves
@@ -15,34 +17,10 @@
 
 use alloc::vec::Vec;
 
-use tairix_theme::CursorKind;
+use tairix_theme::{CursorKind, CursorSetId};
 
 use crate::theme::CursorTheme;
 use crate::vector::VectorCursor;
-
-/// The stable identifier of a cursor set.
-///
-/// A short, human-readable name so a configuration or a chooser can refer to
-/// a set ("builtin", "high-contrast", …) rather than an opaque number.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct CursorSetId(&'static str);
-
-impl CursorSetId {
-    /// The id of the always-present built-in cursor set.
-    pub const BUILTIN: Self = Self("builtin");
-
-    /// Construct a cursor-set id from a static name.
-    #[must_use]
-    pub const fn new(name: &'static str) -> Self {
-        Self(name)
-    }
-
-    /// The set's name.
-    #[must_use]
-    pub const fn name(&self) -> &'static str {
-        self.0
-    }
-}
 
 /// Why a [`CursorRegistry`] mutation was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -81,7 +59,7 @@ impl CursorRegistry {
         Self {
             builtin: CursorTheme::builtin(),
             custom: Vec::new(),
-            active: CursorSetId::BUILTIN,
+            active: CursorSetId::builtin(),
         }
     }
 
@@ -143,7 +121,7 @@ impl CursorRegistry {
     /// The set with `id`, if registered.
     #[must_use]
     pub fn get(&self, id: CursorSetId) -> Option<&CursorTheme> {
-        if id == CursorSetId::BUILTIN {
+        if id.is_builtin() {
             return Some(&self.builtin);
         }
         self.custom
@@ -155,7 +133,7 @@ impl CursorRegistry {
     /// Every registered set id, built-in first, then custom in registration
     /// order.
     pub fn ids(&self) -> impl Iterator<Item = CursorSetId> + '_ {
-        core::iter::once(CursorSetId::BUILTIN).chain(self.custom.iter().map(|entry| entry.id))
+        core::iter::once(CursorSetId::builtin()).chain(self.custom.iter().map(|entry| entry.id))
     }
 
     /// The number of registered sets (always at least one).

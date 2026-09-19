@@ -939,7 +939,9 @@ dependencies = [
 name = "tairix-cursor"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-geometry",
+ "tairix-path",
  "tairix-raster",
  "tairix-reclaim",
  "tairix-svg",
@@ -2786,8 +2788,10 @@ name = "tairix-syshelp"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-cursor",
  "tairix-help",
  "tairix-icon",
+ "tairix-theme",
  "tairix-wallpaper",
 ]
 
@@ -5732,6 +5736,8 @@ name = "tairix-theme"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-inline",
+ "tairix-path",
 ]
 
 [[package]]
@@ -5936,6 +5942,7 @@ dependencies = [
  "tairix-geometry",
  "tairix-path",
  "tairix-rt",
+ "tairix-theme",
 ]
 
 [[package]]
@@ -6031,6 +6038,7 @@ dependencies = [
  "tairix-controls",
  "tairix-cpuops",
  "tairix-crypto",
+ "tairix-cursor",
  "tairix-desktop-session",
  "tairix-devids",
  "tairix-devmatch",

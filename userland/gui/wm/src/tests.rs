@@ -1933,7 +1933,7 @@ pub(crate) fn solid_cursor(size: u32, color: Color) -> tairix_cursor::CursorImag
         ],
     );
     VectorCursor::new(size, 0, 0, alloc::vec![shape])
-        .rasterise(100)
+        .rasterise(size)
         .expect("renderable")
 }
 
@@ -2100,9 +2100,9 @@ fn a_swept_cursor_composites_the_frame_a_single_move_would() {
 // ---- cursor selection from interaction state -------------------------
 
 use crate::select::{desired_cursor, CursorController};
-use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
+use tairix_cursor::{CursorRegistry, CursorTheme, CURSOR_BASE_SIDE_PX};
 use tairix_geometry::Scale;
-use tairix_theme::CursorKind;
+use tairix_theme::{CursorKind, CursorSetId};
 
 #[test]
 fn window_cursor_hint_round_trips_and_unknown_id_fails_closed() {
@@ -2493,7 +2493,7 @@ fn controller_re_renders_on_registry_swap() {
 
     // A registry that selects an alternative set re-renders the cursor.
     let mut registry = CursorRegistry::with_builtin();
-    let custom = CursorSetId::new("alt");
+    let custom = CursorSetId::new("Alternative").expect("a legal set name");
     registry
         .register(custom, CursorTheme::builtin())
         .expect("register");
@@ -5518,6 +5518,73 @@ fn a_scale_change_invalidates_every_cached_cursor() {
         "the new scale's image replaces the old one rather than joining it"
     );
     assert_eq!(ctrl.cache_stats().invalidations(), 1);
+}
+
+/// The pointer's size is the user's choice and the scale is the output's,
+/// but an image depends only on the pixel side the two resolve to.
+#[test]
+fn the_pointer_is_drawn_at_the_scale_and_the_chosen_size_together() {
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+    assert_eq!(ctrl.logical_side(), CURSOR_BASE_SIDE_PX);
+
+    router.handle(moved(100, 100), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    let native = c.cursor_bounds().expect("a cursor is shown");
+    assert_eq!(native.width, CURSOR_BASE_SIDE_PX);
+
+    // Twice the logical side at one scale, and the reference side at twice
+    // the scale, both draw the same pixels.
+    assert!(ctrl.set_logical_side(CURSOR_BASE_SIDE_PX * 2, router.pointer(), &mut c));
+    let doubled = c.cursor_bounds().expect("a cursor is shown");
+    assert_eq!(doubled.width, CURSOR_BASE_SIDE_PX * 2);
+
+    assert!(ctrl.set_logical_side(CURSOR_BASE_SIDE_PX, router.pointer(), &mut c));
+    assert!(c.set_scale(Scale::from_percent(200).expect("scale")));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    assert_eq!(
+        c.cursor_bounds().expect("a cursor is shown").width,
+        doubled.width
+    );
+}
+
+/// A size change re-rasterises exactly as a scale change does, rather than
+/// leaving the old image on screen at the old size.
+#[test]
+fn a_pointer_size_change_invalidates_every_cached_cursor() {
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+
+    router.handle(moved(100, 100), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    assert_eq!(ctrl.cache_len(), 1);
+
+    assert!(ctrl.set_logical_side(CURSOR_BASE_SIDE_PX * 3, router.pointer(), &mut c));
+    assert_eq!(
+        ctrl.cache_len(),
+        1,
+        "the new size's image replaces the old one rather than joining it"
+    );
+    assert_eq!(ctrl.cache_stats().invalidations(), 1);
+}
+
+/// A side of zero would collapse the pointer to nothing, and the size
+/// already in force is not a change at all.
+#[test]
+fn a_zero_or_unchanged_pointer_size_installs_nothing() {
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+    router.handle(moved(100, 100), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    let shown = c.cursor_bounds().expect("a cursor is shown");
+
+    assert!(!ctrl.set_logical_side(0, router.pointer(), &mut c));
+    assert_eq!(ctrl.logical_side(), CURSOR_BASE_SIDE_PX);
+    assert!(!ctrl.set_logical_side(CURSOR_BASE_SIDE_PX, router.pointer(), &mut c));
+    assert_eq!(c.cursor_bounds(), Some(shown));
 }
 
 #[test]

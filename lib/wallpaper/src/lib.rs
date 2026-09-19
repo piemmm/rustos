@@ -72,8 +72,9 @@ pub use catalog::{
 };
 pub use fit::{decode_request, nominal_source_size, place, Placement};
 pub use settings::{
-    merge, Backdrop, DesktopSettings, DocumentRefusal, IconFlow, IconSort, Rgb, SettingsKey,
-    WallpaperChoice, WallpaperFit, WallpaperPath, WallpaperPathError, MAX_WALLPAPER_PATH_LEN,
+    merge, Backdrop, CursorSize, DesktopSettings, DocumentRefusal, IconFlow, IconSort, Rgb,
+    SettingsKey, WallpaperChoice, WallpaperFit, WallpaperPath, WallpaperPathError,
+    MAX_WALLPAPER_PATH_LEN,
 };
 
 /// The signed bundle identifier of the desktop session — the application

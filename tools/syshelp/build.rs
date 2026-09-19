@@ -20,19 +20,20 @@
 //! loudly rather than emitting a silently-incomplete image.
 //!
 //! Alongside the per-bundle help and resource families, this script also
-//! discovers the desktop's graphics assets — today the icon class masters
-//! under `lib/icon/assets/` and the wallpaper masters under
-//! `lib/wallpaper/assets/` — and emits one `[GraphicsFile]` table for the
-//! image builder to plant under `/System/Graphics`. Both are single,
-//! non-per-bundle trees walked by the same `GRAPHICS_FAMILIES` table and
-//! loop; a family is either flat (icons) or files its assets one directory
-//! level deep in categories (wallpapers), which is one field on the family
-//! rather than a second walk. Each asset is validated against its own
-//! family's contract (`tairix_icon`/`tairix_wallpaper`) as it is discovered:
+//! discovers the desktop's graphics assets — the icon class masters under
+//! `lib/icon/assets/`, the wallpaper masters under `lib/wallpaper/assets/`,
+//! and the cursor sets under `lib/cursor/assets/` — and emits one
+//! `[GraphicsFile]` table for the image builder to plant under
+//! `/System/Graphics`. All three are single, non-per-bundle trees walked by
+//! the same `GRAPHICS_FAMILIES` table and loop; a family is either flat
+//! (icons) or files its assets one directory level deep in categories
+//! (wallpapers, cursor sets), which is one field on the family rather than
+//! a second walk. Each asset is validated against its own family's contract
+//! (`tairix_icon`/`tairix_wallpaper`/`tairix_cursor`) as it is discovered:
 //! a name a consumer could never resolve, an illegal category directory, an
-//! over-large file, or (for icons) two files claiming one asset id fails the
-//! build closed rather than shipping artwork that would silently render as a
-//! fallback glyph or never be offered.
+//! over-large file, or two files in one directory claiming one asset id
+//! fails the build closed rather than shipping artwork that would silently
+//! render as a fallback glyph or never be offered.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -95,8 +96,8 @@ struct GraphicsFamily {
     identify: fn(&str) -> Option<String>,
 }
 
-/// The desktop's single-tree graphics asset families: today the icon class
-/// masters and the shipped wallpaper masters.
+/// The desktop's single-tree graphics asset families: the icon class
+/// masters, the shipped wallpaper masters, and the shipped cursor sets.
 const GRAPHICS_FAMILIES: &[GraphicsFamily] = &[
     GraphicsFamily {
         source_root: "lib/icon/assets",
@@ -118,6 +119,18 @@ const GRAPHICS_FAMILIES: &[GraphicsFamily] = &[
         family_variant: "Wallpaper",
         max_bytes: tairix_wallpaper::MAX_WALLPAPER_BYTES,
         identify: |name| tairix_wallpaper::is_wallpaper_file_name(name).then(|| name.to_string()),
+    },
+    GraphicsFamily {
+        source_root: "lib/cursor/assets",
+        categorise: Some(tairix_cursor::is_cursor_set_name),
+        family_variant: "Cursor",
+        max_bytes: tairix_cursor::MAX_CURSOR_ASSET_BYTES,
+        // An asset identifies as the cursor *kind* it draws, so a set
+        // shipping two files for one kind trips the duplicate-id check
+        // rather than shipping artwork the loader could never ask for.
+        identify: |name| {
+            tairix_cursor::cursor_asset_kind_for_file(name).map(|kind| kind.asset_id().to_string())
+        },
     },
 ];
 

@@ -2,12 +2,14 @@
 
 use alloc::string::String;
 
+use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
+
 use crate::motion::MotionInteraction;
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
-    Accessibility, Appearance, Contrast, CursorKind, CursorSet, Density, Fade, FamilyKey,
-    FontWeight, Fonts, Metrics, Motion, MotionTheme, Palette, Rgba, SignalRole, SurfaceGround,
-    TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS,
+    Accessibility, Appearance, Contrast, CursorKind, CursorSet, CursorSetId, Density, Fade,
+    FamilyKey, FontWeight, Fonts, Metrics, Motion, MotionTheme, Palette, Rgba, SignalRole,
+    SurfaceGround, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS,
 };
 
 #[test]
@@ -981,6 +983,61 @@ fn every_window_command_highlights_in_its_own_translucent_hue() {
             "{name}: put-to-back is blue"
         );
     }
+}
+
+/// The shipped themes name the canonical assets, so a shipped cursor set
+/// authored against `CursorSet::canonical` is what either theme asks for.
+#[test]
+fn both_shipped_themes_name_the_canonical_cursor_assets() {
+    let canonical = CursorSet::canonical();
+    assert_eq!(Theme::dark().cursors(), &canonical);
+    assert_eq!(Theme::light().cursors(), &canonical);
+    for kind in CURSOR_KINDS {
+        assert_eq!(canonical.asset(kind), kind.asset_id());
+    }
+}
+
+/// Every kind's asset id is its own, or two kinds would resolve to one
+/// file and a set could not ship artwork for both.
+#[test]
+fn every_cursor_kind_has_its_own_asset_id() {
+    for (at, kind) in CURSOR_KINDS.into_iter().enumerate() {
+        assert!(!kind.asset_id().is_empty());
+        for other in CURSOR_KINDS.into_iter().skip(at + 1) {
+            assert_ne!(kind.asset_id(), other.asset_id(), "{kind:?} vs {other:?}");
+        }
+    }
+}
+
+/// The built-in id is spelled directly rather than through the validated
+/// constructor, so the two must agree.
+#[test]
+fn the_builtin_cursor_set_id_is_one_the_constructor_would_accept() {
+    assert_eq!(
+        CursorSetId::new(CursorSetId::BUILTIN_NAME),
+        Some(CursorSetId::builtin())
+    );
+    assert_eq!(CursorSetId::builtin().name(), CursorSetId::BUILTIN_NAME);
+    assert!(CursorSetId::builtin().is_builtin());
+}
+
+/// A name spliced into a store path, so anything that could widen that
+/// path — or that a reply frame could not carry — is refused.
+#[test]
+fn a_cursor_set_id_refuses_a_name_no_set_could_carry() {
+    for name in ["", ".", "..", "a/b", "C:", "a\u{7f}b"] {
+        assert_eq!(CursorSetId::new(name), None, "`{name}` must not name a set");
+    }
+    let widest = "s".repeat(CURSOR_SET_NAME_MAX);
+    assert_eq!(
+        CursorSetId::new(&widest).map(|id| String::from(id.name())),
+        Some(widest)
+    );
+    assert_eq!(CursorSetId::new(&"s".repeat(CURSOR_SET_NAME_MAX + 1)), None);
+    // The name is the label a chooser draws, verbatim.
+    let named = CursorSetId::new("High Visibility").expect("a legal set name");
+    assert_eq!(named.name(), "High Visibility");
+    assert!(!named.is_builtin());
 }
 
 #[test]

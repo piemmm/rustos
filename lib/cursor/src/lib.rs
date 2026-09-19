@@ -21,9 +21,11 @@
 //! [`CursorTheme`] binds one [`VectorCursor`] to each [`CursorKind`];
 //! [`CursorRegistry`] holds the available sets and the active one and lets
 //! the running system swap the whole pointer look at runtime. A screen
-//! resolves a kind to a cursor, rasterises it at the display scale, and
-//! places the resulting [`CursorImage`] as a [`PlacedCursor`], which puts
-//! the hotspot on the pointer and samples the artwork for a draw loop.
+//! resolves a kind to a cursor, rasterises it at the pixel side the display
+//! density and the user's chosen pointer size call for, and places the
+//! resulting [`CursorImage`] as a [`PlacedCursor`], which puts the hotspot
+//! on the pointer and samples the artwork for a draw loop. [`store`] is
+//! where the sets a running desktop offers are discovered from.
 //!
 //! ```
 //! use tairix_cursor::{CursorRegistry, CursorImage};
@@ -32,9 +34,9 @@
 //! let cursors = CursorRegistry::with_builtin();
 //! let arrow = cursors.active_cursor(CursorKind::Arrow);
 //!
-//! // Render at native size and at 2× for a high-DPI display.
-//! let native: CursorImage = arrow.rasterise(100).expect("renderable");
-//! let hidpi: CursorImage = arrow.rasterise(200).expect("renderable");
+//! // Render at the reference side and at 2x for a high-DPI display.
+//! let native: CursorImage = arrow.rasterise(32).expect("renderable");
+//! let hidpi: CursorImage = arrow.rasterise(64).expect("renderable");
 //! assert_eq!(hidpi.width(), native.width() * 2);
 //! ```
 //!
@@ -50,6 +52,7 @@ pub mod load;
 pub mod placed;
 pub mod raster;
 pub mod registry;
+pub mod store;
 pub mod svg;
 pub mod theme;
 pub mod vector;
@@ -60,7 +63,11 @@ mod tests;
 pub use load::CursorAssetSource;
 pub use placed::PlacedCursor;
 pub use raster::CursorImage;
-pub use registry::{CursorRegistry, CursorRegistryError, CursorSetId};
+pub use registry::{CursorRegistry, CursorRegistryError};
+pub use store::{
+    catalog_sets, cursor_asset_kind_for_file, cursor_asset_path, is_cursor_set_name, set_path,
+    CURSOR_BASE_SIDE_PX, CURSOR_STORE, MAX_CURSOR_ASSET_BYTES, SHIPPED_CURSOR_SET,
+};
 pub use svg::decode as decode_svg;
 pub use theme::CursorTheme;
 pub use vector::{Shape, VectorCursor, Vertex};

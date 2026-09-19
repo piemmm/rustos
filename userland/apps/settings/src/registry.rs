@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use tairix_icon::IconKind;
 
-use crate::appearance::{Composition, Setting, POINTER_SIZE_LABEL};
+use crate::appearance::{Composition, Setting};
 
 /// One top-level entry of the sidebar: a group of related settings.
 ///
@@ -436,13 +436,14 @@ const APPEARANCE_SETTINGS: &[&str] = &[
 ];
 
 /// The Accessibility pane's setting labels: the shared rows plus the
-/// pointer size it states it does not keep.
+/// pointer's own two.
 const ACCESSIBILITY_SETTINGS: &[&str] = &[
     Setting::Contrast.label(),
     Setting::Density.label(),
     Setting::Scale.label(),
     Setting::Motion.label(),
-    POINTER_SIZE_LABEL,
+    Setting::CursorSet.label(),
+    Setting::CursorSize.label(),
 ];
 
 /// The Wallpaper pane's setting labels: its four rows, plus the picture

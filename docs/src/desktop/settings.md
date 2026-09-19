@@ -115,6 +115,8 @@ a reader looks for them in either place.
 | Density | Compact, normal, or comfortable. It moves the three metrics that decide how much room a control is given and nothing else, so a compact desktop packs the same controls closer rather than drawing different ones. |
 | Motion | Full, or reduced — a reduced state change is still visible, it just happens at once. |
 | Interface scale | How large every desktop length is drawn. |
+| Pointer set | Which cursor artwork the pointer is drawn from (Accessibility's alone). |
+| Pointer size | How large the pointer is drawn, on top of the interface scale (Accessibility's alone). |
 
 Each row commits on the choice: the change is cheap, reversible, and its
 effect is the feedback, so there is no Apply button to go stale. The pane
@@ -129,10 +131,20 @@ reader's choice at once and adopt the *durable* value when the answer lands,
 so a refusal states its reason and puts the row back rather than leaving a
 value on screen the next login would not restore.
 
-Accessibility additionally states, in a row of its own, that this desktop
-keeps **no pointer size**: the pointer is drawn at the interface scale, and a
-size of its own would need a factor in the session's cursor controller. It is
-stated rather than drawn as a control that would change nothing.
+Accessibility additionally carries the **pointer pair**, in a POINTER group
+of its own. *Pointer size* is a closed ladder over the desktop's
+`cursor.size` setting, magnifying the pointer's logical side on top of the
+interface scale. *Pointer set* is the cursor artwork, and its choice space
+is the one thing on these panes the settings document cannot supply: which
+sets exist is what the read-only store holds, and Settings may not read it.
+So the session lists the store once at its own bring-up and answers a
+capability-free window-channel query (`QueryCursorSets`) — the whole choice
+space in one reply, since it is bounded small — exactly as it serves the
+wallpaper catalog. The built-in `Standard` set is always offered beside
+whatever the store carries, and a set the document names that the store no
+longer holds is still offered under its own name, so opening the pane never
+quietly changes the pointer someone chose. [The cursors
+page](./cursors.md) has the store's layout and the artwork pipeline.
 
 ## Wallpaper
 

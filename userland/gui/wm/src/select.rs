@@ -34,11 +34,17 @@
 //! [`CursorRegistry`] and remembers which [`CursorKind`] is on screen and at
 //! what density it was rasterised. It does **not** own the scale: the desktop
 //! density belongs to the output, so the controller reads it from the
-//! [`Compositor`] ([`Compositor::scale`]) every time it installs a cursor. [`CursorController::refresh`] runs the policy and
+//! [`Compositor`] ([`Compositor::scale`]) every time it installs a cursor.
+//! It *does* own the pointer's **logical** side, which is the user's
+//! accessibility choice rather than the output's property, and resolves the
+//! two into physical pixels through the one shared conversion.
+//! [`CursorController::refresh`] runs the policy and
 //! re-rasterises only when something the cursor depends on actually changed —
-//! the chosen kind, the active cursor set, or the output scale — installing
+//! the chosen kind, the active cursor set, or the pixel side the scale and
+//! the logical side resolve to — installing
 //! the result through [`Compositor::set_cursor`]. A runtime DPI change is
-//! therefore [`Compositor::set_scale`] followed by one `refresh`. Pointer
+//! therefore [`Compositor::set_scale`] followed by one `refresh`, and a
+//! pointer-size change is [`CursorController::set_logical_side`]. Pointer
 //! *motion* is not its job — the caller moves the existing overlay with
 //! [`Compositor::move_cursor`]; the controller switches the *shape*.
 //!
@@ -48,8 +54,8 @@
 //!
 //! # The cache
 //!
-//! Each shown [`CursorKind`] is rasterised at most once per scale and cursor
-//! set through a [`ReclaimCache`] (`plans/SMARTRAM.md` section 6.4): a
+//! Each shown [`CursorKind`] is rasterised at most once per pixel side and
+//! cursor set through a [`ReclaimCache`] (`plans/SMARTRAM.md` section 6.4): a
 //! bounded, pressure-governed cache shared with every other reclaimable
 //! cache in TAIRiX, rather than an unbounded cache of the controller's own.
 //! [`CursorController`] never builds its own cache policy — that would be
@@ -66,11 +72,11 @@
 //! real inputs up front is what rules that out.
 
 use tairix_controls::{FurniturePart, ResizeEdge};
-use tairix_cursor::{CursorImage, CursorRegistry, CursorSetId};
+use tairix_cursor::{CursorImage, CursorRegistry, CursorRegistryError, CURSOR_BASE_SIDE_PX};
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
-use tairix_theme::CursorKind;
+use tairix_theme::{CursorKind, CursorSetId};
 
 use crate::geometry::Point;
 use crate::input::InputRouter;
@@ -140,9 +146,15 @@ const fn resize_cursor(edge: ResizeEdge) -> CursorKind {
     }
 }
 
-/// The epoch a cached cursor image is valid for: the desktop scale (in
-/// percent) paired with the active cursor-set id. A scale change or a
-/// cursor-set swap moves the epoch on and invalidates every cached image.
+/// The epoch a cached cursor image is valid for: the physical pixel side
+/// the pointer is drawn at, paired with the active cursor-set id.
+///
+/// The *side* rather than the scale and the pointer size separately,
+/// because those two are only ever read together and only ever to produce
+/// it: an image depends on how many pixels across it is and which set it
+/// came from, and nothing else. Two different (scale, size) pairs that
+/// resolve to one side therefore share one cached image, which is correct
+/// rather than a missed invalidation.
 pub type CursorEpoch = (u32, CursorSetId);
 
 /// Build the one [`ReclaimCache`] a [`CursorController`] retains rasterised
@@ -178,17 +190,18 @@ pub fn cursor_cache(
 /// Drives the on-screen pointer shape from interaction state.
 ///
 /// Holds the active [`CursorRegistry`] (the replaceable cursor sets) and the
-/// [`CursorKind`] currently shown, paired with the cache epoch (scale and
-/// cursor-set id) it was rasterised for. The density is **not** stored here —
-/// it belongs to the output, so [`refresh`](Self::refresh) reads it from the
-/// [`Compositor`] and applies the [`desired_cursor`]
-/// policy.
+/// [`CursorKind`] currently shown, paired with the cache epoch (pixel side
+/// and cursor-set id) it was rasterised for. The density is **not** stored
+/// here — it belongs to the output, so [`refresh`](Self::refresh) reads it
+/// from the [`Compositor`] and applies the [`desired_cursor`] policy. The
+/// pointer's *logical* side is stored here, because it is the user's own
+/// accessibility choice rather than anything the output knows.
 ///
-/// Each shown [`CursorKind`] is rasterised at most once per scale and cursor
-/// set: a [`ReclaimCache`] keyed by kind keeps the converted [`CursorImage`]
-/// so re-showing a kind reuses the image and only a scale or set change
-/// re-rasterises. Cursor *motion* never touches the cache;
-/// it moves the existing overlay.
+/// Each shown [`CursorKind`] is rasterised at most once per pixel side and
+/// cursor set: a [`ReclaimCache`] keyed by kind keeps the converted
+/// [`CursorImage`] so re-showing a kind reuses the image and only a change
+/// to the side or the set re-rasterises. Cursor *motion* never touches the
+/// cache; it moves the existing overlay.
 ///
 /// Neither `Clone` nor `PartialEq`/`Eq` are derived: the cache holds a
 /// pressure gauge and a diagnostics sink behind trait objects, which are
@@ -199,6 +212,10 @@ pub struct CursorController {
     registry: CursorRegistry,
     kind: CursorKind,
     shown: Option<CursorEpoch>,
+    /// The pointer's side in *logical* pixels: the reference side magnified
+    /// by the user's chosen pointer size. Physical pixels come from pairing
+    /// it with the output's scale.
+    logical_side: u32,
     cache: ReclaimCache<CursorKind, CursorImage, CursorEpoch, BuildFastHash>,
 }
 
@@ -228,8 +245,62 @@ impl CursorController {
             registry,
             kind: CursorKind::Arrow,
             shown: None,
+            logical_side: CURSOR_BASE_SIDE_PX,
             cache,
         }
+    }
+
+    /// The pointer's side in logical pixels.
+    #[must_use]
+    pub const fn logical_side(&self) -> u32 {
+        self.logical_side
+    }
+
+    /// Draw the pointer from the registered set `id` and immediately
+    /// re-render the current kind at the pointer position `at`, so a set
+    /// change is visible without waiting for the next interaction. Returns
+    /// whether a new image was installed.
+    ///
+    /// Fails closed on a set this registry does not hold: the active set
+    /// stands and `false` is returned, so a stale stored choice leaves the
+    /// pointer as it is rather than blanking it.
+    ///
+    /// # Errors
+    ///
+    /// [`CursorRegistryError::UnknownSet`] for a set that is not
+    /// registered.
+    pub fn set_active_set(
+        &mut self,
+        id: CursorSetId,
+        at: Point,
+        compositor: &mut Compositor,
+    ) -> Result<bool, CursorRegistryError> {
+        if self.registry.active_id() == id {
+            return Ok(false);
+        }
+        self.registry.set_active(id)?;
+        if compositor.cursor_bounds().is_none() {
+            return Ok(false);
+        }
+        Ok(self.install(self.kind, at, compositor))
+    }
+
+    /// Draw the pointer at `side` logical pixels and immediately re-render
+    /// the current kind at the pointer position `at`, so a size change is
+    /// visible without waiting for the next interaction. Returns whether a
+    /// new image was installed.
+    ///
+    /// Fails closed on a zero side, which would collapse the pointer to
+    /// nothing: the current size stands and `false` is returned.
+    pub fn set_logical_side(&mut self, side: u32, at: Point, compositor: &mut Compositor) -> bool {
+        if side == 0 || side == self.logical_side {
+            return false;
+        }
+        self.logical_side = side;
+        if compositor.cursor_bounds().is_none() {
+            return false;
+        }
+        self.install(self.kind, at, compositor)
     }
 
     /// The cursor sets this controller chooses artwork from.
@@ -307,8 +378,9 @@ impl CursorController {
     /// to date with the compositor's current scale and the active cursor set.
     /// Returns whether the displayed cursor changed.
     ///
-    /// It re-rasterises and installs when the chosen kind, the output
-    /// [`scale`](Compositor::scale), or the active cursor set differs from
+    /// It re-rasterises and installs when the chosen kind, the pixel side
+    /// the output [`scale`](Compositor::scale) and the logical side resolve
+    /// to, or the active cursor set differs from
     /// what is on screen; when nothing it depends on changed and a cursor is
     /// already shown it does no work and returns `false`. The pointer's
     /// *position* is updated separately with [`Compositor::move_cursor`].
@@ -328,15 +400,22 @@ impl CursorController {
         self.install(kind, at, compositor)
     }
 
-    /// The cache epoch for the compositor's current output scale and the
+    /// The cache epoch: the physical side the pointer is drawn at, and the
     /// active cursor set.
+    ///
+    /// The desktop's one logical-to-physical conversion turns the logical
+    /// side into pixels, so the pointer scales with every other desktop
+    /// length through the same arithmetic.
     fn epoch(&self, compositor: &Compositor) -> CursorEpoch {
-        (compositor.scale().percent(), self.registry.active_id())
+        (
+            compositor.scale().scale_length(self.logical_side),
+            self.registry.active_id(),
+        )
     }
 
-    /// Rasterise `kind` at the compositor's current scale and install it so
-    /// its hotspot lands on `pointer`. Fails closed (leaving any current
-    /// cursor untouched) if the cursor cannot be rasterised.
+    /// Rasterise `kind` at the epoch's pixel side and install it so its
+    /// hotspot lands on `pointer`. Fails closed (leaving any current cursor
+    /// untouched) if the cursor cannot be rasterised.
     fn install(&mut self, kind: CursorKind, pointer: Point, compositor: &mut Compositor) -> bool {
         let epoch = self.epoch(compositor);
         let registry = &self.registry;

@@ -28,6 +28,10 @@ tairix-geometry = { path = "../geometry", version = "=0.0.0" }
 # catalog's file names are validated as plain leaf names, exactly as the
 # icon catalog already does — never a second ad-hoc spelling check.
 tairix-path = { path = "../path", version = "=0.0.0" }
+# The cursor-set identity the `cursor.set` key holds: a validated, bounded
+# name, imported rather than restated so the value this document stores and
+# the set the compositor activates are one type.
+tairix-theme = { path = "../theme", version = "=0.0.0" }
 # The one `key = value` document engine: the pinboard settings are a plain
 # `lib/appconf` document in the desktop session's published app-data scope,
 # so this crate defines the closed *registry* over that format and no

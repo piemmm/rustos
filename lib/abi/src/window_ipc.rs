@@ -1914,6 +1914,20 @@ pub enum WindowRequest {
         /// The first catalog entry the page answers, counted from zero.
         from: u16,
     },
+    /// Ask the session which cursor sets this desktop offers.
+    ///
+    /// The same posture as [`Self::QueryDesktop`]: it describes the seat's
+    /// own read-only shipped store, carries no capability, and grants
+    /// nothing. The session lists that store once, at bring-up, and
+    /// answers from what it holds, so the reply costs no I/O.
+    ///
+    /// Unlike [`Self::QueryWallpapers`] the answer is not paged and this
+    /// carries no operand: the whole choice space is at most
+    /// [`CURSOR_SETS_MAX`] short names, which one reply frame holds
+    /// outright, so there is no paging to get wrong.
+    ///
+    /// [`CURSOR_SETS_MAX`]: crate::desktop::CURSOR_SETS_MAX
+    QueryCursorSets,
     /// Ask the session to render catalog entry `index` of the shipped
     /// wallpaper store as a `side`×`side` straight-alpha RGBA8 picture in
     /// the region granted as `shm_handle`.
@@ -2229,6 +2243,8 @@ const OP_SET_SIZING: u16 = 22;
 const OP_QUERY_WALLPAPERS: u16 = 23;
 /// Wire operation discriminant of [`WindowRequest::RenderWallpaper`].
 const OP_RENDER_WALLPAPER: u16 = 24;
+/// Wire operation discriminant of [`WindowRequest::QueryCursorSets`].
+const OP_QUERY_CURSOR_SETS: u16 = 25;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -2276,6 +2292,10 @@ const TAKE_MENU_TEXT_WIRE_LEN: usize = REQUEST_HEADER_LEN + 16;
 /// page's first entry. It names no window — the catalog is the seat's, not
 /// any one window's.
 const QUERY_WALLPAPERS_WIRE_LEN: usize = REQUEST_HEADER_LEN + 2;
+
+/// Encoded size of a [`WindowRequest::QueryCursorSets`]: the header alone.
+/// It names no window and no page — the whole choice space fits one reply.
+const QUERY_CURSOR_SETS_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 
 /// Byte offset of a [`WindowRequest::RenderWallpaper`]'s granted region.
 const RENDER_WALLPAPER_SHM_OFFSET: usize = REQUEST_HEADER_LEN + 8;
@@ -2586,6 +2606,7 @@ impl WindowRequest {
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
             Self::QueryDesktop => QUERY_DESKTOP_WIRE_LEN,
             Self::QueryWallpapers { .. } => QUERY_WALLPAPERS_WIRE_LEN,
+            Self::QueryCursorSets => QUERY_CURSOR_SETS_WIRE_LEN,
             Self::RenderWallpaper { .. } => RENDER_WALLPAPER_WIRE_LEN,
             Self::SetAppBar(ref bar) => {
                 app_bar_wire_len(bar.menu.len(), bar.menu.text_len as usize)
@@ -2669,6 +2690,7 @@ impl WindowRequest {
             Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
             Self::QueryDesktop => OP_QUERY_DESKTOP,
             Self::QueryWallpapers { .. } => OP_QUERY_WALLPAPERS,
+            Self::QueryCursorSets => OP_QUERY_CURSOR_SETS,
             Self::RenderWallpaper { .. } => OP_RENDER_WALLPAPER,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
             Self::OpenMenu { .. } => OP_OPEN_MENU,
@@ -2768,9 +2790,10 @@ impl WindowRequest {
                 put_u64(out, 8, window_id);
                 put_u16(out, 16, radius_px);
             }
-            // The two header-only operations: both name the caller, whose
-            // identity the kernel attests, so neither carries an operand.
-            Self::TakeOpenTarget | Self::QueryDesktop => {}
+            // The header-only operations: each names the caller, whose
+            // identity the kernel attests, or the seat's own read-only
+            // store, so none carries an operand.
+            Self::TakeOpenTarget | Self::QueryDesktop | Self::QueryCursorSets => {}
             Self::QueryWallpapers { .. } | Self::RenderWallpaper { .. } => {
                 self.write_wallpaper_operands(out);
             }
@@ -3033,9 +3056,16 @@ impl WindowRequest {
             }
             OP_QUERY_WALLPAPERS => read_query_wallpapers(bytes),
             OP_RENDER_WALLPAPER => read_render_wallpaper(bytes),
+            OP_QUERY_CURSOR_SETS => read_query_cursor_sets(bytes),
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode a [`WindowRequest::QueryCursorSets`] frame.
+fn read_query_cursor_sets(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, QUERY_CURSOR_SETS_WIRE_LEN)?;
+    Ok(WindowRequest::QueryCursorSets)
 }
 
 /// Decode a [`WindowRequest::QueryWallpapers`] frame.
@@ -4251,6 +4281,153 @@ pub fn decode_wallpapers_reply(bytes: &[u8]) -> Result<WallpaperPage<'_>, Errno>
     Ok(WallpaperPage { total, body, count })
 }
 
+/// Encoded length of a [`WindowRequest::QueryCursorSets`] reply: a status
+/// word, the number of sets, then one length byte and its name per set.
+///
+/// Not a page bound like the wallpaper catalog's: the whole choice space
+/// fits here by construction, because a store offers at most
+/// [`CURSOR_SETS_MAX`](crate::desktop::CURSOR_SETS_MAX) sets and a set's
+/// name is at most
+/// [`CURSOR_SET_NAME_MAX`](crate::desktop::CURSOR_SET_NAME_MAX) bytes. A
+/// chooser therefore learns every set it may offer in one call.
+pub const WINDOW_CURSOR_SETS_REPLY_MAX: usize = CURSOR_SETS_REPLY_NAMES_OFFSET
+    + crate::desktop::CURSOR_SETS_MAX * (1 + crate::desktop::CURSOR_SET_NAME_MAX);
+
+/// Byte offset of the set count in a [`WindowRequest::QueryCursorSets`]
+/// reply.
+const CURSOR_SETS_REPLY_COUNT_OFFSET: usize = 4;
+/// Byte offset of the first packed name.
+const CURSOR_SETS_REPLY_NAMES_OFFSET: usize = CURSOR_SETS_REPLY_COUNT_OFFSET + 2;
+
+/// Encode a [`WindowRequest::QueryCursorSets`] outcome into `out`,
+/// answering the number of bytes written.
+///
+/// `sets` is every set the desktop offers, in the order a chooser lists
+/// them. A name that is empty or longer than the wire admits is the session
+/// contradicting its own store model, so the whole reply is refused rather
+/// than a partial choice space offered — a chooser that silently lost a set
+/// would show a control missing one of its answers. More sets than the
+/// frame holds is the same contradiction, and refused the same way.
+///
+/// A refusal is the shared status frame, so a client issues one receive
+/// whatever the answer.
+#[must_use]
+pub fn encode_cursor_sets_reply<'a, I>(
+    out: &mut [u8; WINDOW_CURSOR_SETS_REPLY_MAX],
+    result: Result<I, Errno>,
+) -> usize
+where
+    I: IntoIterator<Item = &'a [u8]>,
+{
+    *out = [0u8; WINDOW_CURSOR_SETS_REPLY_MAX];
+    let refuse = |out: &mut [u8; WINDOW_CURSOR_SETS_REPLY_MAX], err: Errno| {
+        out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+        4
+    };
+    let sets = match result {
+        Ok(sets) => sets,
+        Err(err) => return refuse(out, err),
+    };
+    let mut at = CURSOR_SETS_REPLY_NAMES_OFFSET;
+    let mut written: u16 = 0;
+    for name in sets {
+        if name.is_empty() || name.len() > crate::desktop::CURSOR_SET_NAME_MAX {
+            return refuse(out, Errno::LengthOutOfRange);
+        }
+        if at + 1 + name.len() > WINDOW_CURSOR_SETS_REPLY_MAX {
+            return refuse(out, Errno::LengthOutOfRange);
+        }
+        // Checked against `CURSOR_SET_NAME_MAX` above, so the length fits a
+        // byte.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            out[at] = name.len() as u8;
+        }
+        out[at + 1..at + 1 + name.len()].copy_from_slice(name);
+        at += 1 + name.len();
+        written = written.saturating_add(1);
+    }
+    put_u16(out, CURSOR_SETS_REPLY_COUNT_OFFSET, written);
+    at
+}
+
+/// The decoded choice space of a [`WindowRequest::QueryCursorSets`] reply.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CursorSetList<'a> {
+    /// The packed names, still in their frame.
+    body: &'a [u8],
+    /// How many names `body` holds.
+    count: u16,
+}
+
+impl<'a> CursorSetList<'a> {
+    /// How many sets the desktop offers.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// Whether the desktop named no set at all.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The set names, in the order a chooser lists them.
+    pub fn names(&self) -> impl Iterator<Item = &'a [u8]> + '_ {
+        let mut at = 0usize;
+        (0..self.count).filter_map(move |_| {
+            let len = usize::from(*self.body.get(at)?);
+            let name = self.body.get(at + 1..at + 1 + len)?;
+            at += 1 + len;
+            Some(name)
+        })
+    }
+}
+
+/// Decode a [`WindowRequest::QueryCursorSets`] reply.
+///
+/// Every declared length is checked against the frame it arrived in before
+/// any of it is read, so a reply claiming more sets or longer names than it
+/// carries is refused rather than read past.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame too short to hold its own header.
+/// * [`Errno::LengthOutOfRange`] for a count the body cannot hold, or more
+///   sets than the wire admits.
+/// * [`Errno::OutOfRange`] for an empty name.
+pub fn decode_cursor_sets_reply(bytes: &[u8]) -> Result<CursorSetList<'_>, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < CURSOR_SETS_REPLY_NAMES_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let count = read_u16(bytes, CURSOR_SETS_REPLY_COUNT_OFFSET);
+    if usize::from(count) > crate::desktop::CURSOR_SETS_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let body = &bytes[CURSOR_SETS_REPLY_NAMES_OFFSET..];
+    // Walk the declared names once, here, so `names()` can never read past
+    // the frame and needs no error path of its own.
+    let mut at = 0usize;
+    for _ in 0..count {
+        let Some(&len) = body.get(at) else {
+            return Err(Errno::LengthOutOfRange);
+        };
+        if len == 0 {
+            return Err(Errno::OutOfRange);
+        }
+        if at + 1 + usize::from(len) > body.len() {
+            return Err(Errno::LengthOutOfRange);
+        }
+        at += 1 + usize::from(len);
+    }
+    Ok(CursorSetList { body, count })
+}
+
 /// Encoded length of the longest [`WindowRequest::TakeMenuText`] reply: a
 /// status word, the "is there a text at all" kind, its length, then the
 /// widest text a quick-entry field admits.
@@ -5271,9 +5448,10 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bar_wire_len, decode_create_reply, decode_desktop_reply, decode_hand_over_reply,
-        decode_menu_text_reply, decode_minted_id_reply, decode_open_target_reply,
-        decode_terrain_reply, decode_wallpapers_reply, encode_create_reply, encode_desktop_reply,
+        app_bar_wire_len, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
+        decode_hand_over_reply, decode_menu_text_reply, decode_minted_id_reply,
+        decode_open_target_reply, decode_terrain_reply, decode_wallpapers_reply,
+        encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
         encode_hand_over_reply, encode_menu_text_reply, encode_minted_id_reply,
         encode_open_target_reply, encode_terrain_reply, encode_wallpapers_reply,
         hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_u16, AppBar,
@@ -5290,26 +5468,28 @@ mod tests {
         APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
         APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
         APP_MENU_TEXT_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
-        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_REPLY_SERVER_OFFSET,
-        HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET,
-        HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH,
-        MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
-        MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
-        MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, OPEN_LAYER_WIRE_LEN,
-        OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET,
-        OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET,
-        PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
+        CURSOR_SETS_REPLY_COUNT_OFFSET, CURSOR_SETS_REPLY_NAMES_OFFSET, DESKTOP_LAYER_MAX_PLATES,
+        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_REPLY_SERVER_OFFSET, HAND_OVER_GRANT_OFFSET,
+        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET,
+        HAND_OVER_RUN_PATH_MAX, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
+        MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END,
+        MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET,
+        MENU_TEXT_REPLY_TEXT_OFFSET, OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET,
+        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
+        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PLACE_LAYER_WIRE_LEN,
+        PRESENT_WIRE_LEN, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
         RENDER_WALLPAPER_SIDE_OFFSET, RENDER_WALLPAPER_WIRE_LEN, REQUEST_HEADER_LEN,
         SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET,
         SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET,
         SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH,
         SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN,
         TOOLTIP_TEXT_MAX, WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
-        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
-        WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
-        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
-        WINDOW_PANE_NAME_MAX, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
-        WINDOW_WALLPAPERS_REPLY_MAX, WINDOW_WALLPAPER_PREVIEW_MAX_SIDE,
+        WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
+        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN,
+        WINDOW_MAX_FRAMES, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX, WINDOW_REQUEST_MAGIC,
+        WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
+        WINDOW_WALLPAPER_PREVIEW_MAX_SIDE,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -7924,6 +8104,113 @@ mod tests {
             decode_open_target_reply(&out[..n]),
             Err(Errno::LengthOutOfRange),
             "a pane name is an identifier, not a path"
+        );
+    }
+
+    #[test]
+    fn the_cursor_set_query_round_trips_as_a_bare_header() {
+        let query = WindowRequest::QueryCursorSets;
+        assert_eq!(query.wire_len(), QUERY_CURSOR_SETS_WIRE_LEN);
+        assert_eq!(query.wire_len(), REQUEST_HEADER_LEN);
+        assert_eq!(WindowRequest::from_bytes(&query.frame()), Ok(query));
+        // No operand, so anything past the header is a field smuggled past
+        // this operation's own end.
+        let mut wide = [0u8; QUERY_CURSOR_SETS_WIRE_LEN + 2];
+        let len = query.encode(&mut wide).expect("the header fits");
+        assert_eq!(
+            WindowRequest::from_bytes(&wide[..len + 2]),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&wide[..len - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn a_cursor_set_reply_round_trips_the_whole_choice_space() {
+        let mut frame = [0u8; WINDOW_CURSOR_SETS_REPLY_MAX];
+        let names: [&[u8]; 2] = [b"Standard", b"High Visibility"];
+        let len = encode_cursor_sets_reply(&mut frame, Ok(names));
+        let answered = decode_cursor_sets_reply(&frame[..len]).expect("a well-formed reply");
+        assert_eq!(answered.len(), 2);
+        assert!(!answered.is_empty());
+        assert!(answered.names().eq(names));
+
+        // The frame is as long as the answer, not as long as the widest one.
+        assert!(len < WINDOW_CURSOR_SETS_REPLY_MAX);
+        let empty = encode_cursor_sets_reply(&mut frame, Ok(core::iter::empty::<&[u8]>()));
+        let none = decode_cursor_sets_reply(&frame[..empty]).expect("an empty reply");
+        assert!(none.is_empty());
+        assert_eq!(none.names().count(), 0);
+    }
+
+    /// The whole choice space fits one frame by construction, so a session
+    /// naming more sets or a longer name than the wire admits is
+    /// contradicting its own store model — refused whole, because a chooser
+    /// silently missing one of its answers is worse than an error.
+    #[test]
+    fn a_cursor_set_reply_refuses_what_the_wire_could_not_carry() {
+        let mut frame = [0u8; WINDOW_CURSOR_SETS_REPLY_MAX];
+        let over_long = [b'x'; crate::desktop::CURSOR_SET_NAME_MAX + 1];
+        for bad in [b"".as_slice(), over_long.as_slice()] {
+            let len = encode_cursor_sets_reply(&mut frame, Ok([bad]));
+            assert_eq!(
+                decode_cursor_sets_reply(&frame[..len]),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        // More sets than the frame holds: the encoder refuses rather than
+        // writing a page, since the whole space is meant to fit.
+        let widest = [b'x'; crate::desktop::CURSOR_SET_NAME_MAX];
+        let too_many = [widest.as_slice(); crate::desktop::CURSOR_SETS_MAX + 1];
+        let len = encode_cursor_sets_reply(&mut frame, Ok(too_many));
+        assert_eq!(
+            decode_cursor_sets_reply(&frame[..len]),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // And a count past the bound is refused on the way in, before any
+        // name is read, whatever wrote it.
+        let len = encode_cursor_sets_reply(&mut frame, Ok([b"Standard".as_slice()]));
+        put_u16(
+            &mut frame,
+            CURSOR_SETS_REPLY_COUNT_OFFSET,
+            u16::try_from(crate::desktop::CURSOR_SETS_MAX + 1).expect("a small count"),
+        );
+        assert_eq!(
+            decode_cursor_sets_reply(&frame[..len]),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_refused_cursor_set_query_answers_the_shared_status_frame() {
+        let mut frame = [0u8; WINDOW_CURSOR_SETS_REPLY_MAX];
+        let len = encode_cursor_sets_reply(
+            &mut frame,
+            Err::<core::iter::Empty<&[u8]>, Errno>(Errno::NotSupported),
+        );
+        assert_eq!(len, 4);
+        assert_eq!(
+            decode_cursor_sets_reply(&frame[..len]),
+            Err(Errno::NotSupported)
+        );
+    }
+
+    /// A count the body cannot back would otherwise be read past, and a
+    /// frame too short for its own header has no count to read at all.
+    #[test]
+    fn a_truncated_cursor_set_reply_is_refused_rather_than_read_past() {
+        let mut frame = [0u8; WINDOW_CURSOR_SETS_REPLY_MAX];
+        let len = encode_cursor_sets_reply(&mut frame, Ok([b"Standard".as_slice()]));
+        assert_eq!(
+            decode_cursor_sets_reply(&frame[..len - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            decode_cursor_sets_reply(&frame[..CURSOR_SETS_REPLY_NAMES_OFFSET - 1]),
+            Err(Errno::BufferTooSmall)
         );
     }
 

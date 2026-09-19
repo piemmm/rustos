@@ -60,7 +60,7 @@ pub mod typography;
 mod tests;
 
 pub use color::Rgba;
-pub use cursor::{CursorKind, CursorSet, CURSOR_KINDS};
+pub use cursor::{CursorKind, CursorSet, CursorSetId, CURSOR_KINDS};
 pub use metrics::Metrics;
 pub use motion::{Contrast, Density, Fade, Motion, MotionInteraction, MotionTheme, Timeline};
 pub use palette::{Palette, SignalRole};

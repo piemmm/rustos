@@ -27,9 +27,9 @@ use tairix_controls::{
 use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
-use tairix_theme::Theme;
+use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{
-    Backdrop, DesktopSettings, IconFlow, IconSort, Rgb, SettingsKey, WallpaperFit,
+    Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, Rgb, SettingsKey, WallpaperFit,
 };
 
 /// The UI scales the surface offers, as percentages of the reference
@@ -61,6 +61,20 @@ const BACKDROP_PALETTE: [(&str, Backdrop); 6] = [
     ("Linen", Backdrop::Colour(Rgb::new(0xe8, 0xe0, 0xd8))),
 ];
 
+/// A choice space the settings document cannot supply on its own.
+///
+/// Every other row derives its choices from the closed value set the
+/// registry carries, so it needs nothing beyond the document. The pointer
+/// set is the exception: which sets exist is what the desktop's store
+/// holds, and this application may not read it — the session lists it and
+/// answers, so the answer is threaded in here rather than guessed.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Offered<'a> {
+    /// The cursor sets the desktop offers besides the always-present
+    /// built-in one, in the order it listed them.
+    pub cursor_sets: &'a [CursorSetId],
+}
+
 /// One settable of the desktop's settings registry.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Setting {
@@ -82,6 +96,10 @@ pub enum Setting {
     Icons,
     /// The order the `Desktop` folder's icons are sorted in.
     Sort,
+    /// Which cursor set the pointer is drawn from.
+    CursorSet,
+    /// How large the pointer is drawn.
+    CursorSize,
 }
 
 impl Setting {
@@ -98,6 +116,8 @@ impl Setting {
             Self::Backdrop => SettingsKey::Backdrop,
             Self::Icons => SettingsKey::Icons,
             Self::Sort => SettingsKey::Sort,
+            Self::CursorSet => SettingsKey::CursorSet,
+            Self::CursorSize => SettingsKey::CursorSize,
         }
     }
 
@@ -114,6 +134,8 @@ impl Setting {
             Self::Backdrop => "Backdrop",
             Self::Icons => "Icons",
             Self::Sort => "Sort",
+            Self::CursorSet => "Pointer set",
+            Self::CursorSize => "Pointer size",
         }
     }
 
@@ -140,6 +162,12 @@ impl Setting {
             }
             Self::Icons => "The corner the desktop's icons are arranged from.",
             Self::Sort => "The order the Desktop folder's icons are listed in.",
+            Self::CursorSet => {
+                "Which artwork the pointer is drawn from. Standard is the built-in set."
+            }
+            Self::CursorSize => {
+                "How large the pointer is drawn, on top of the interface scale above."
+            }
         }
     }
 
@@ -148,7 +176,7 @@ impl Setting {
     ///
     /// A choice list is derived from the closed set the registry carries, so
     /// a value this surface offers is always one the document accepts.
-    fn choices(self, settings: &DesktopSettings) -> (Vec<String>, usize) {
+    fn choices(self, settings: &DesktopSettings, offered: Offered<'_>) -> (Vec<String>, usize) {
         match self {
             Self::Appearance => pick(&Appearance::ALL, settings.appearance, appearance_label),
             Self::Contrast => pick(&Contrast::ALL, settings.contrast, contrast_label),
@@ -159,6 +187,18 @@ impl Setting {
             Self::Backdrop => backdrop_choices(settings.backdrop),
             Self::Icons => pick(&IconFlow::ALL, settings.icons, icon_flow_label),
             Self::Sort => pick(&IconSort::ALL, settings.sort, icon_sort_label),
+            Self::CursorSet => {
+                let ladder = cursor_set_ladder(settings.cursor_set, offered.cursor_sets);
+                let at = ladder
+                    .iter()
+                    .position(|set| *set == settings.cursor_set)
+                    .unwrap_or(0);
+                (
+                    ladder.iter().map(|set| set.name().to_string()).collect(),
+                    at,
+                )
+            }
+            Self::CursorSize => pick(&CursorSize::ALL, settings.cursor_size, cursor_size_label),
         }
     }
 
@@ -168,7 +208,7 @@ impl Setting {
     /// Fails closed: an index outside the list this very surface built
     /// changes nothing, so a routing defect cannot post a setting the reader
     /// did not choose.
-    fn adopt(self, index: usize, settings: &mut DesktopSettings) -> bool {
+    fn adopt(self, index: usize, settings: &mut DesktopSettings, offered: Offered<'_>) -> bool {
         match self {
             Self::Appearance => set(&Appearance::ALL, index, &mut settings.appearance),
             Self::Contrast => set(&Contrast::ALL, index, &mut settings.contrast),
@@ -191,12 +231,18 @@ impl Setting {
             },
             Self::Icons => set(&IconFlow::ALL, index, &mut settings.icons),
             Self::Sort => set(&IconSort::ALL, index, &mut settings.sort),
+            Self::CursorSet => set(
+                &cursor_set_ladder(settings.cursor_set, offered.cursor_sets),
+                index,
+                &mut settings.cursor_set,
+            ),
+            Self::CursorSize => set(&CursorSize::ALL, index, &mut settings.cursor_size),
         }
     }
 
     /// The row this setting draws, showing what the desktop currently holds.
-    fn row(self, settings: &DesktopSettings) -> FieldRow {
-        let (choices, current) = self.choices(settings);
+    fn row(self, settings: &DesktopSettings, offered: Offered<'_>) -> FieldRow {
+        let (choices, current) = self.choices(settings, offered);
         let mut combo = ComboBox::new(choices);
         combo.set_selected(current);
         FieldRow::new(self.label(), FieldControl::Combo(combo)).with_description(self.description())
@@ -342,6 +388,34 @@ fn backdrop_ladder(current: Backdrop) -> Vec<(String, Backdrop)> {
     ladder
 }
 
+/// The cursor sets offered to a desktop currently drawing `current`: the
+/// built-in set first, then whatever the desktop listed, plus `current`
+/// itself when it is none of them.
+///
+/// The stale entry is what keeps opening the pane from quietly changing the
+/// pointer: a stored set an update has since removed is still what the
+/// document says, so it is offered under its own name rather than silently
+/// re-read as the built-in one the desktop is drawing in its place.
+fn cursor_set_ladder(current: CursorSetId, offered: &[CursorSetId]) -> Vec<CursorSetId> {
+    let mut ladder: Vec<CursorSetId> = core::iter::once(CursorSetId::builtin())
+        .chain(offered.iter().copied())
+        .collect();
+    if !ladder.contains(&current) {
+        ladder.push(current);
+    }
+    ladder
+}
+
+/// The display label of a pointer size.
+const fn cursor_size_label(size: CursorSize) -> &'static str {
+    match size {
+        CursorSize::Normal => "Normal",
+        CursorSize::Large => "Large",
+        CursorSize::Larger => "Larger",
+        CursorSize::Largest => "Largest",
+    }
+}
+
 /// The backdrop choices and which one is in effect.
 fn backdrop_choices(current: Backdrop) -> (Vec<String>, usize) {
     let ladder = backdrop_ladder(current);
@@ -351,18 +425,6 @@ fn backdrop_choices(current: Backdrop) -> (Vec<String>, usize) {
         .unwrap_or(0);
     (ladder.into_iter().map(|(label, _)| label).collect(), at)
 }
-
-/// The label of the row stating that the desktop keeps no pointer size.
-pub const POINTER_SIZE_LABEL: &str = "Pointer size";
-
-/// Why the pointer-size row has nothing to report.
-///
-/// Stated rather than drawn as a control that would change nothing: the
-/// desktop rasterises its pointer at the output's own density and keeps no
-/// size of its own, so there is no value here to show or to set.
-const POINTER_SIZE_ABSENT: &str =
-    "This desktop keeps no pointer size: the pointer is drawn at the interface scale above. \
-     Setting it separately needs a size factor in the session's cursor controller.";
 
 /// One captioned group of a composed pane: its caption and the settings it
 /// holds, in order.
@@ -390,7 +452,7 @@ const APPEARANCE_GROUPS: [GroupSpec; 2] = [
 
 /// The Accessibility pane's groups: the same settings, grouped the way a
 /// reader looking for them would.
-const ACCESSIBILITY_GROUPS: [GroupSpec; 2] = [
+const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
     GroupSpec {
         caption: "DISPLAY",
         settings: &[Setting::Contrast, Setting::Density, Setting::Scale],
@@ -398,6 +460,10 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "MOTION",
         settings: &[Setting::Motion],
+    },
+    GroupSpec {
+        caption: "POINTER",
+        settings: &[Setting::CursorSet, Setting::CursorSize],
     },
 ];
 
@@ -418,8 +484,7 @@ const WALLPAPER_GROUPS: [GroupSpec; 1] = [GroupSpec {
 pub enum Composition {
     /// The Appearance pane.
     Appearance,
-    /// The Accessibility pane, which additionally states that the desktop
-    /// keeps no pointer size.
+    /// The Accessibility pane.
     Accessibility,
     /// The Wallpaper pane's settings rows, beneath its picture gallery.
     Wallpaper,
@@ -451,44 +516,30 @@ impl Composition {
     /// contribution to the search index.
     #[must_use]
     pub fn labels(self) -> Vec<&'static str> {
-        let mut labels: Vec<&'static str> = self
-            .groups()
+        self.groups()
             .iter()
             .flat_map(|group| group.settings.iter().map(|setting| setting.label()))
-            .collect();
-        if matches!(self, Self::Accessibility) {
-            labels.push(POINTER_SIZE_LABEL);
-        }
-        labels
+            .collect()
     }
 
     /// The groups and the setting each of their rows carries, built from
-    /// what the desktop currently holds.
-    ///
-    /// A row that states an absence carries no setting, so routing an action
-    /// from it can name nothing to write.
-    fn build(self, settings: &DesktopSettings) -> (Vec<FieldGroup>, Vec<Vec<Option<Setting>>>) {
-        let mut groups = Vec::with_capacity(self.groups().len().saturating_add(1));
-        let mut owners = Vec::with_capacity(groups.capacity());
+    /// what the desktop currently holds and the choice spaces it answered.
+    fn build(
+        self,
+        settings: &DesktopSettings,
+        offered: Offered<'_>,
+    ) -> (Vec<FieldGroup>, Vec<Vec<Setting>>) {
+        let mut groups = Vec::with_capacity(self.groups().len());
+        let mut owners = Vec::with_capacity(self.groups().len());
         for spec in self.groups() {
             groups.push(FieldGroup::new(
                 spec.caption,
                 spec.settings
                     .iter()
-                    .map(|setting| setting.row(settings))
+                    .map(|setting| setting.row(settings, offered))
                     .collect(),
             ));
-            owners.push(spec.settings.iter().map(|s| Some(*s)).collect());
-        }
-        if matches!(self, Self::Accessibility) {
-            groups.push(FieldGroup::new(
-                "POINTER",
-                alloc::vec![FieldRow::new(
-                    POINTER_SIZE_LABEL,
-                    FieldControl::Unmeasured(String::from(POINTER_SIZE_ABSENT)),
-                )],
-            ));
-            owners.push(alloc::vec![None]);
+            owners.push(spec.settings.to_vec());
         }
         (groups, owners)
     }
@@ -549,10 +600,12 @@ pub enum FormOutcome {
 pub struct Form {
     composition: Composition,
     groups: Vec<FieldGroup>,
-    /// The setting each row writes, indexed as `groups`. A row that states
-    /// an absence carries `None`, so it can never post anything.
-    owners: Vec<Vec<Option<Setting>>>,
+    /// The setting each row writes, indexed as `groups`.
+    owners: Vec<Vec<Setting>>,
     settings: DesktopSettings,
+    /// The cursor sets the desktop answered with, kept so a rebuild offers
+    /// the same choice space rather than collapsing to the built-in one.
+    cursor_sets: Vec<CursorSetId>,
     /// Which group holds the keyboard cursor.
     focus: usize,
     /// The first group drawn.
@@ -566,15 +619,21 @@ pub struct Form {
 }
 
 impl Form {
-    /// The form `composition` draws for the desktop `settings`.
+    /// The form `composition` draws for the desktop `settings`, offering
+    /// the cursor sets in `cursor_sets`.
     #[must_use]
-    pub fn new(composition: Composition, settings: &DesktopSettings) -> Self {
-        let (groups, owners) = composition.build(settings);
+    pub fn new(
+        composition: Composition,
+        settings: &DesktopSettings,
+        cursor_sets: &[CursorSetId],
+    ) -> Self {
+        let (groups, owners) = composition.build(settings, Offered { cursor_sets });
         Self {
             composition,
             groups,
             owners,
             settings: settings.clone(),
+            cursor_sets: cursor_sets.to_vec(),
             focus: 0,
             first: 0,
         }
@@ -586,13 +645,20 @@ impl Form {
     /// become the ones the store actually holds, so an apply the session
     /// refused reverts rather than standing.
     pub fn adopt(&mut self, settings: &DesktopSettings) {
-        let (groups, owners) = self.composition.build(settings);
+        let (groups, owners) = self.composition.build(settings, self.offered());
         self.groups = groups;
         self.owners = owners;
         self.settings = settings.clone();
         let last = self.groups.len().saturating_sub(1);
         self.focus = self.focus.min(last);
         self.first = self.first.min(last);
+    }
+
+    /// The choice spaces the document cannot supply on its own.
+    fn offered(&self) -> Offered<'_> {
+        Offered {
+            cursor_sets: &self.cursor_sets,
+        }
     }
 
     /// The physical height this form needs.
@@ -765,7 +831,7 @@ impl Form {
             // closing, which changes the pixels and nothing else.
             return FormOutcome::Changed;
         };
-        let Some(Some(setting)) = self
+        let Some(setting) = self
             .owners
             .get(group)
             .and_then(|rows| rows.get(action.row))
@@ -773,7 +839,10 @@ impl Form {
         else {
             return FormOutcome::Changed;
         };
-        if !setting.adopt(index, &mut self.settings) {
+        let offered = Offered {
+            cursor_sets: &self.cursor_sets,
+        };
+        if !setting.adopt(index, &mut self.settings, offered) {
             return FormOutcome::Changed;
         }
         FormOutcome::Apply(self.applied())

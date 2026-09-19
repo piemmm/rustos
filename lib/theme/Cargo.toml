@@ -18,8 +18,20 @@ workspace = true
 # (`tairix_abi::font_ipc::FontWeight`), which a theme names for each text
 # role, and the light/dark `Appearance` (`tairix_abi::desktop::Appearance`),
 # which the window channel reports to every application.
-# This is the crate's only dependency: everything else here is pure theme
-# *data*, the compositing colour algebra lives in `lib/raster`, and the crate
-# stays at the bottom of the layering — depended on, never depending on a
-# kernel, driver, or userland crate.
+# It also carries the two bounds a cursor set's name is held to, since that
+# name travels the window channel to a chooser.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The allocation-free bounded string a `CursorSetId` holds its name in: the
+# compositor compares its cursor-cache epoch on every pointer refresh, so a
+# heap-owned name would put an allocation on that path.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The one leaf-name spelling check, so the name a cursor set may carry is
+# judged by the same parser that judges every other directory name rather
+# than by a second ad-hoc rule.
+tairix-path = { path = "../path", version = "=0.0.0" }
+
+# These three are the crate's only dependencies, and all three are
+# themselves dependency-free: everything else here is pure theme *data*, the
+# compositing colour algebra lives in `lib/raster`, and the crate stays at
+# the bottom of the layering — depended on, never depending on a kernel,
+# driver, or userland crate.

@@ -44,15 +44,15 @@ use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
-    encode_create_reply, encode_desktop_reply, encode_hand_over_reply, encode_menu_text_reply,
-    encode_minted_id_reply, encode_open_target_reply, encode_terrain_reply,
+    encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply, encode_hand_over_reply,
+    encode_menu_text_reply, encode_minted_id_reply, encode_open_target_reply, encode_terrain_reply,
     encode_wallpapers_reply, AppBar, AppMenu, HandOverDocument, HandOverOutcome, LayerDepth,
     OpenTarget, TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
     WindowTitle, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT,
-    DESKTOP_LAYER_MAX_PLATES, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
-    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
-    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
-    WINDOW_WALLPAPERS_REPLY_MAX,
+    DESKTOP_LAYER_MAX_PLATES, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
+    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+    WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 use tairix_abi::{CapabilityId, Errno};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -84,7 +84,10 @@ pub const WINDOW_REPLY_MAX: usize = {
             wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN),
             wider(
                 wider(WINDOW_MINTED_ID_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX),
-                wider(WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX),
+                wider(
+                    WINDOW_TERRAIN_REPLY_MAX,
+                    wider(WINDOW_WALLPAPERS_REPLY_MAX, WINDOW_CURSOR_SETS_REPLY_MAX),
+                ),
             ),
         ),
     )
@@ -584,6 +587,21 @@ pub trait WindowHost {
         &[]
     }
 
+    /// The cursor sets this host offers, in the order a chooser lists
+    /// them.
+    ///
+    /// The host is the authority because it is the only party that may read
+    /// the store; it lists that store once at bring-up — `/System` is
+    /// read-only, so the choice space is fixed for the life of the boot —
+    /// and holds the result, so answering a query costs no I/O on the serve
+    /// loop.
+    ///
+    /// The default is empty: a host that has listed no store offers no sets
+    /// of its own, which is the honest answer rather than a refusal.
+    fn cursor_sets(&mut self) -> &[CursorSetName] {
+        &[]
+    }
+
     /// A validated `RenderWallpaper`: render catalog entry `index` as a
     /// `side`x`side` straight-alpha RGBA8 picture into the region granted
     /// as `shm_handle`, concluding to `window_id`.
@@ -816,6 +834,15 @@ pub struct WallpaperName {
     /// The wallpaper's own file name inside that category.
     pub file: String,
 }
+
+/// One cursor set a host offers, named by the directory it occupies in the
+/// shipped store — which is also the label a chooser draws.
+///
+/// A `String` rather than the typed `CursorSetId`: the engine relays the
+/// name and judges only its length, so it needs no cursor vocabulary and
+/// this crate takes on no dependency to carry one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CursorSetName(pub String);
 
 impl OpenEntry {
     /// This entry as the wire type, borrowing its text.
@@ -1118,6 +1145,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 open_target_reply(reply, Ok(taken.as_ref().map(OpenEntry::as_wire)))
             }
             WindowRequest::QueryWallpapers { from } => wallpapers_reply(reply, host, from),
+            WindowRequest::QueryCursorSets => cursor_sets_reply(reply, host),
             WindowRequest::TakeMenuText { window_id, open_id } => {
                 let taken = self.take_menu_text(caller, window_id, open_id);
                 menu_text_reply(
@@ -1250,6 +1278,7 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::TakeOpenTarget => open_target_reply(reply, Err(Errno::NotSupported)),
             // ...and a catalog page, likewise.
             WindowRequest::QueryWallpapers { .. } => wallpapers_refusal(reply, Errno::NotSupported),
+            WindowRequest::QueryCursorSets => cursor_sets_refusal(reply, Errno::NotSupported),
             // ...and a committed-text pull, likewise.
             WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
             // ...and a hand-over, likewise.
@@ -2323,6 +2352,28 @@ fn wallpapers_reply(
             }),
         )),
     );
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
+}
+
+/// Write `host`'s cursor-set choice space into `reply`, answering its
+/// length.
+///
+/// The whole choice space, never a page: a store offers at most what one
+/// reply frame holds, so a chooser learns every set it may offer in one
+/// call.
+fn cursor_sets_reply(reply: &mut [u8; WINDOW_REPLY_MAX], host: &mut dyn WindowHost) -> usize {
+    let sets = host.cursor_sets();
+    let mut frame = [0u8; WINDOW_CURSOR_SETS_REPLY_MAX];
+    let len = encode_cursor_sets_reply(&mut frame, Ok(sets.iter().map(|set| set.0.as_bytes())));
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
+}
+
+/// Write a cursor-set refusal into `reply`, answering its length.
+fn cursor_sets_refusal(reply: &mut [u8; WINDOW_REPLY_MAX], err: Errno) -> usize {
+    let mut frame = [0u8; WINDOW_CURSOR_SETS_REPLY_MAX];
+    let len = encode_cursor_sets_reply(&mut frame, Err::<core::iter::Empty<&[u8]>, Errno>(err));
     reply[..len].copy_from_slice(&frame[..len]);
     len
 }

@@ -125,12 +125,12 @@ pub const RESOURCE_FILES: &[ResourceFile] =
 /// Which family of desktop graphics assets a [`GraphicsFile`] belongs to.
 ///
 /// Closed by design, and deliberately not carried as a free-form string: a
-/// consumer tells the two shipped families apart by matching on this enum,
-/// never by comparing a directory name. Adding a third family (a future
-/// cursor or chrome set, say) means adding a variant here, which then forces
-/// every `match` over this type — in this crate and in every crate that
-/// reads [`GRAPHICS_FILES`] — to say explicitly what the new family means to
-/// it, rather than silently falling through a default arm.
+/// consumer tells the shipped families apart by matching on this enum,
+/// never by comparing a directory name. Adding a family means adding a
+/// variant here, which then forces every `match` over this type — in this
+/// crate and in every crate that reads [`GRAPHICS_FILES`] — to say
+/// explicitly what the new family means to it, rather than silently falling
+/// through a default arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphicsFamilyKind {
     /// The icon class masters: one `<asset-id>.png` raster *or*
@@ -143,6 +143,12 @@ pub enum GraphicsFamilyKind {
     /// A category is listed through `tairix_wallpaper::catalog_categories`
     /// and its masters through `tairix_wallpaper::catalog_entries`.
     Wallpaper,
+    /// The shipped cursor sets: one `<asset-id>.svg` per cursor kind, filed
+    /// one directory level deep in a set (`High Visibility`, …) whose own
+    /// name is the label a chooser draws. A set is listed through
+    /// `tairix_cursor::catalog_sets` and its assets resolved by
+    /// `tairix_cursor::cursor_asset_kind_for_file`.
+    Cursor,
 }
 
 impl GraphicsFamilyKind {
@@ -154,6 +160,7 @@ impl GraphicsFamilyKind {
         match self {
             Self::Icon => "Icons",
             Self::Wallpaper => "Wallpapers",
+            Self::Cursor => "Cursors",
         }
     }
 }
@@ -185,7 +192,8 @@ pub struct GraphicsFile {
 
 /// Every desktop graphics asset, discovered from each graphics family's own
 /// source tree at build time (`lib/icon/assets/` for icons,
-/// `lib/wallpaper/assets/` for wallpapers) and validated against that
+/// `lib/wallpaper/assets/` for wallpapers, `lib/cursor/assets/` for cursor
+/// sets) and validated against that
 /// family's own contract as it is discovered (a name its consumer could not
 /// resolve, an over-large file, or a duplicate identifier fails the build).
 ///
@@ -387,88 +395,158 @@ mod tests {
         assert!(violations.is_empty(), "{}", violations.join("\n"));
     }
 
-    /// The discovered desktop graphics assets are non-empty and every one
-    /// satisfies its own family's contract: an icon is a legal
-    /// `<asset-id>.png` or `<asset-id>.svg` name within the artwork byte
-    /// bound with a unique asset id — so one kind never ships a master in
-    /// both formats, of which the resolution order could only ever select
-    /// the raster one — and a wallpaper is a legal shipped file name within
-    /// the wallpaper byte bound, filed under a legal category directory and
-    /// unique within it. Dispatching on
-    /// [`super::GraphicsFamilyKind`] rather than a directory string means a
-    /// third family added here without a matching arm fails to compile,
-    /// never silently skips its own contract. This mirrors the fail-closed
-    /// checks `build.rs` applies — the emitted table and each family's own
-    /// runtime consumer share one definition, so neither can drift.
+    /// The discovered desktop graphics assets are non-empty, and every one
+    /// satisfies its own family's contract.
+    ///
+    /// Partitioning on [`super::GraphicsFamilyKind`] rather than a
+    /// directory string is what makes that true of *every* family: a family
+    /// added without an arm here fails to compile rather than silently
+    /// skipping its own contract. Each partition is then held to the
+    /// fail-closed checks `build.rs` applies — the emitted table and each
+    /// family's own runtime consumer share one definition, so neither can
+    /// drift.
     #[test]
     fn every_discovered_graphics_asset_satisfies_its_family_contract() {
-        use super::{GraphicsFamilyKind, GRAPHICS_FILES};
+        use super::{GraphicsFamilyKind, GraphicsFile, GRAPHICS_FILES};
 
         assert!(
             !GRAPHICS_FILES.is_empty(),
             "at least one desktop graphics asset must be discovered"
         );
-        let mut icon_ids: BTreeSet<&str> = BTreeSet::new();
-        let mut wallpapers: BTreeSet<(&str, &str)> = BTreeSet::new();
-        let mut categories: BTreeSet<&str> = BTreeSet::new();
+        let mut icons: Vec<&GraphicsFile> = Vec::new();
+        let mut wallpapers: Vec<&GraphicsFile> = Vec::new();
+        let mut cursors: Vec<&GraphicsFile> = Vec::new();
         for asset in GRAPHICS_FILES {
             match asset.family {
-                GraphicsFamilyKind::Icon => {
-                    assert!(
-                        asset.category.is_none(),
-                        "the icon family is flat, so `{}` carries no category",
-                        asset.file
-                    );
-                    let kind = tairix_icon::artwork_kind_for_file(asset.file)
-                        .unwrap_or_else(|| panic!("`{}` is a legal icon artwork name", asset.file));
-                    assert!(
-                        asset.bytes.len() <= tairix_icon::MAX_ARTWORK_BYTES,
-                        "`{}` is within the artwork byte bound",
-                        asset.file
-                    );
-                    assert!(
-                        icon_ids.insert(kind.asset_id()),
-                        "asset id `{}` is claimed by more than one file",
-                        kind.asset_id()
-                    );
-                }
-                GraphicsFamilyKind::Wallpaper => {
-                    let category = asset.category.unwrap_or_else(|| {
-                        panic!("wallpaper `{}` is filed under a category", asset.file)
-                    });
-                    assert!(
-                        tairix_wallpaper::is_wallpaper_category_name(category),
-                        "`{category}` is a legal wallpaper category name"
-                    );
-                    assert!(
-                        tairix_wallpaper::is_wallpaper_file_name(asset.file),
-                        "`{}` is a legal wallpaper file name",
-                        asset.file
-                    );
-                    assert!(
-                        asset.bytes.len() <= tairix_wallpaper::MAX_WALLPAPER_BYTES,
-                        "`{}` is within the wallpaper byte bound",
-                        asset.file
-                    );
-                    assert!(
-                        wallpapers.insert((category, asset.file)),
-                        "wallpaper `{category}/{}` is claimed by more than one file",
-                        asset.file
-                    );
-                    categories.insert(category);
-                }
+                GraphicsFamilyKind::Icon => icons.push(asset),
+                GraphicsFamilyKind::Wallpaper => wallpapers.push(asset),
+                GraphicsFamilyKind::Cursor => cursors.push(asset),
             }
         }
-        assert!(!icon_ids.is_empty(), "at least one icon must be discovered");
+        check_icon_family(&icons);
+        check_wallpaper_family(&wallpapers);
+        check_cursor_family(&cursors);
+    }
+
+    /// The icon family's contract: a flat `<asset-id>.png` or
+    /// `<asset-id>.svg` name within the artwork byte bound, with a unique
+    /// asset id — so one kind never ships a master in both formats, of
+    /// which the resolution order could only ever select the raster one.
+    fn check_icon_family(assets: &[&super::GraphicsFile]) {
+        assert!(!assets.is_empty(), "at least one icon must be discovered");
+        let mut ids: BTreeSet<&str> = BTreeSet::new();
+        for asset in assets {
+            assert!(
+                asset.category.is_none(),
+                "the icon family is flat, so `{}` carries no category",
+                asset.file
+            );
+            let kind = tairix_icon::artwork_kind_for_file(asset.file)
+                .unwrap_or_else(|| panic!("`{}` is a legal icon artwork name", asset.file));
+            assert!(
+                asset.bytes.len() <= tairix_icon::MAX_ARTWORK_BYTES,
+                "`{}` is within the artwork byte bound",
+                asset.file
+            );
+            assert!(
+                ids.insert(kind.asset_id()),
+                "asset id `{}` is claimed by more than one file",
+                kind.asset_id()
+            );
+        }
+    }
+
+    /// The wallpaper family's contract: a legal shipped file name within
+    /// the wallpaper byte bound, filed under a legal category directory and
+    /// unique within it, and the default wallpaper's own category present —
+    /// without it the desktop's default choice ships nowhere.
+    fn check_wallpaper_family(assets: &[&super::GraphicsFile]) {
         assert!(
-            !wallpapers.is_empty(),
+            !assets.is_empty(),
             "at least one wallpaper must be discovered"
         );
+        let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let mut categories: BTreeSet<&str> = BTreeSet::new();
+        for asset in assets {
+            let category = asset
+                .category
+                .unwrap_or_else(|| panic!("wallpaper `{}` is filed under a category", asset.file));
+            assert!(
+                tairix_wallpaper::is_wallpaper_category_name(category),
+                "`{category}` is a legal wallpaper category name"
+            );
+            assert!(
+                tairix_wallpaper::is_wallpaper_file_name(asset.file),
+                "`{}` is a legal wallpaper file name",
+                asset.file
+            );
+            assert!(
+                asset.bytes.len() <= tairix_wallpaper::MAX_WALLPAPER_BYTES,
+                "`{}` is within the wallpaper byte bound",
+                asset.file
+            );
+            assert!(
+                seen.insert((category, asset.file)),
+                "wallpaper `{category}/{}` is claimed by more than one file",
+                asset.file
+            );
+            categories.insert(category);
+        }
         assert!(
             categories.contains(tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY),
             "the default wallpaper's own category must be discovered, or the \
              desktop's default choice ships nowhere"
         );
+    }
+
+    /// The cursor family's contract: an asset name some cursor kind asks
+    /// for, within the cursor byte bound, filed under a legal set directory
+    /// and unique within it — and every shipped set covering every kind,
+    /// since a missing one shows that kind's built-in cursor beside the
+    /// shipped artwork and the pointer changes look as it changes shape.
+    fn check_cursor_family(assets: &[&super::GraphicsFile]) {
+        assert!(
+            !assets.is_empty(),
+            "at least one cursor asset must be discovered"
+        );
+        let mut kinds: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let mut sets: BTreeSet<&str> = BTreeSet::new();
+        for asset in assets {
+            let set = asset
+                .category
+                .unwrap_or_else(|| panic!("cursor asset `{}` is filed under a set", asset.file));
+            assert!(
+                tairix_cursor::is_cursor_set_name(set),
+                "`{set}` is a legal cursor-set name"
+            );
+            let kind = tairix_cursor::cursor_asset_kind_for_file(asset.file).unwrap_or_else(|| {
+                panic!("`{set}/{}` is an asset name a kind asks for", asset.file)
+            });
+            assert!(
+                asset.bytes.len() <= tairix_cursor::MAX_CURSOR_ASSET_BYTES,
+                "`{set}/{}` is within the cursor asset byte bound",
+                asset.file
+            );
+            assert!(
+                kinds.insert((set, kind.asset_id())),
+                "cursor kind `{set}/{}` is claimed by more than one file",
+                kind.asset_id()
+            );
+            sets.insert(set);
+        }
+        assert!(
+            sets.contains(tairix_cursor::SHIPPED_CURSOR_SET),
+            "the shipped cursor set must be discovered, or `cursor.set` is a \
+             choice of one and the row changes nothing"
+        );
+        for set in &sets {
+            for kind in tairix_theme::CURSOR_KINDS {
+                assert!(
+                    kinds.contains(&(set, kind.asset_id())),
+                    "cursor set `{set}` ships no artwork for {kind:?}"
+                );
+            }
+        }
     }
 
     /// The shared payload walk yields every discovered file exactly once,

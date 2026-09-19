@@ -20,8 +20,10 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::Surface;
-use tairix_theme::Theme;
-use tairix_wallpaper::{Backdrop, DesktopSettings, IconFlow, IconSort, Rgb, WallpaperChoice};
+use tairix_theme::{CursorSetId, Theme};
+use tairix_wallpaper::{
+    Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, Rgb, WallpaperChoice,
+};
 use tairix_wm::{Key, NamedKey};
 
 use crate::desktop::{
@@ -1395,6 +1397,7 @@ fn an_appearance_edit_asks_for_a_re_theme_and_nothing_of_the_backdrop() {
         .expect("the contrast changed");
     assert!(themed.appearance.theme);
     assert!(!themed.appearance.scale);
+    assert!(!themed.appearance.cursor);
     assert!(themed.appearance.any());
     // A contrast change must not re-list the folder or decode a wallpaper.
     assert_eq!(themed.backdrop, BackdropWork::default());
@@ -1409,6 +1412,29 @@ fn an_appearance_edit_asks_for_a_re_theme_and_nothing_of_the_backdrop() {
     assert!(rescaled.appearance.scale);
     assert!(!rescaled.appearance.theme);
     assert_eq!(rescaled.backdrop, BackdropWork::default());
+}
+
+/// The cursor pair moves the pointer and nothing else: a re-theme would
+/// repaint every surface and a rescale would move every length, for a
+/// change only the pointer can see.
+#[test]
+fn a_cursor_edit_asks_only_for_the_pointer() {
+    let edits: [fn(&mut DesktopSettings); 2] = [
+        |s| s.cursor_size = CursorSize::Larger,
+        |s| {
+            s.cursor_set = CursorSetId::new("High Visibility").expect("a legal set name");
+        },
+    ];
+    for edit in edits {
+        let mut desktop = desktop_of(vec![file("a.txt")]);
+        let mut wanted = desktop.settings().clone();
+        edit(&mut wanted);
+        let change = desktop.apply_settings(wanted).expect("the pointer moved");
+        assert!(change.appearance.cursor);
+        assert!(!change.appearance.theme);
+        assert!(!change.appearance.scale);
+        assert_eq!(change.backdrop, BackdropWork::default());
+    }
 }
 
 #[test]

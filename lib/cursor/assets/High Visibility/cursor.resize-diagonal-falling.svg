@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" data-hotspot-x="16" data-hotspot-y="16">
+  <title>Resize along the falling diagonal</title>
+  <!-- Drawn twice: a wide white stroke first, then the dark body over its
+       inner half. The outer half survives as a halo, which is what keeps
+       this set legible over a photograph of any brightness. -->
+  <polygon points="28,28 28,16 25,19 13,7 16,4 4,4 4,16 7,13 19,25 16,28" fill="none" stroke="#ffffff" stroke-width="4" stroke-linejoin="round"/>
+  <polygon points="28,28 28,16 25,19 13,7 16,4 4,4 4,16 7,13 19,25 16,28" fill="#111114"/>
+</svg>

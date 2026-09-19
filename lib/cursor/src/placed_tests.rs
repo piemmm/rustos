@@ -23,7 +23,7 @@ fn image(size: u32, hx: i32, hy: i32) -> CursorImage {
         ],
     );
     VectorCursor::new(size, hx, hy, vec![shape])
-        .rasterise(100)
+        .rasterise(size)
         .expect("renderable")
 }
 
@@ -41,7 +41,7 @@ fn half_image(size: u32) -> CursorImage {
         ],
     );
     VectorCursor::new(size, 0, 0, vec![shape])
-        .rasterise(100)
+        .rasterise(size)
         .expect("renderable")
 }
 

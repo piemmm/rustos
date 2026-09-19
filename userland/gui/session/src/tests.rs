@@ -41,8 +41,8 @@ use tairix_taskbar::{
     TaskbarRepaint, TaskbarResponse, PICKER_CLOSE_GRACE_NS, PICKER_OPEN_DELAY_NS,
 };
 use tairix_theme::{
-    Appearance, CursorKind, Metrics, MotionInteraction, SurfaceGround, Theme, ThemeError, ThemeId,
-    Timeline,
+    Appearance, CursorKind, CursorSetId, Metrics, MotionInteraction, SurfaceGround, Theme,
+    ThemeError, ThemeId, Timeline,
 };
 use tairix_wm::{
     chrome_cache, cursor_cache, frost_cache, ChromeEpoch, Color, Compositor, Corners, FrostEpoch,
@@ -415,12 +415,19 @@ fn malformed_icon_asset_falls_back_to_builtin() {
     assert!(!icons.is_loaded(IconKind::Bell));
 }
 
+/// A cursor set the store might carry.
+fn test_set() -> CursorSetId {
+    CursorSetId::new("High Visibility").expect("a legal set name")
+}
+
 #[test]
 fn loads_cursor_assets_for_the_active_theme_and_falls_back_per_kind() {
     let session = session();
-    let mut reader =
-        MemoryAssets::default().with("/System/Graphics/Cursors/cursor.arrow.svg", VALID_SVG);
-    let cursors = session.load_cursors(&mut reader);
+    let mut reader = MemoryAssets::default().with(
+        "/System/Graphics/Cursors/High Visibility/cursor.arrow.svg",
+        VALID_SVG,
+    );
+    let cursors = session.load_cursors(&mut reader, test_set());
 
     let builtin = CursorTheme::builtin();
     // The arrow asset loaded, so its cursor differs from the built-in arrow.
@@ -442,7 +449,7 @@ fn loads_cursor_assets_for_the_active_theme_and_falls_back_per_kind() {
 #[test]
 fn empty_cursor_source_is_the_builtin_set() {
     let session = session();
-    let cursors = session.load_cursors(&mut MemoryAssets::default());
+    let cursors = session.load_cursors(&mut MemoryAssets::default(), test_set());
 
     let builtin = CursorTheme::builtin();
     for kind in [
@@ -459,9 +466,11 @@ fn empty_cursor_source_is_the_builtin_set() {
 #[test]
 fn malformed_cursor_asset_falls_back_to_builtin() {
     let session = session();
-    let mut reader =
-        MemoryAssets::default().with("/System/Graphics/Cursors/cursor.arrow.svg", MALFORMED_SVG);
-    let cursors = session.load_cursors(&mut reader);
+    let mut reader = MemoryAssets::default().with(
+        "/System/Graphics/Cursors/High Visibility/cursor.arrow.svg",
+        MALFORMED_SVG,
+    );
+    let cursors = session.load_cursors(&mut reader, test_set());
     assert_eq!(
         cursors.cursor(CursorKind::Arrow),
         CursorTheme::builtin().cursor(CursorKind::Arrow)
@@ -2888,24 +2897,65 @@ fn the_pointer_shape_follows_the_window_under_it() {
 }
 
 #[test]
-fn set_cursors_installs_loaded_artwork_and_keeps_the_pointer_shown() {
+fn set_cursors_offers_the_loaded_sets_beside_the_builtin_one() {
     let mut shell = shell();
     let mut comp = compositor();
     shell.refresh_cursor(&mut comp);
-    let mut reader =
-        MemoryAssets::default().with("/System/Graphics/Cursors/cursor.arrow.svg", VALID_SVG);
-    let theme = shell.session().load_cursors(&mut reader);
-
-    shell.set_cursors(theme, &mut comp);
-
-    assert_eq!(
-        shell.cursor().registry().active_id().name(),
-        "desktop",
-        "the loaded cursor set is active, replacing the built-in one"
+    let mut reader = MemoryAssets::default().with(
+        "/System/Graphics/Cursors/High Visibility/cursor.arrow.svg",
+        VALID_SVG,
     );
+    let theme = shell.session().load_cursors(&mut reader, test_set());
+
+    shell.set_cursors(alloc::vec![(test_set(), theme)], &mut comp);
+
+    // A store set is a *choice*, not a replacement: the built-in stays
+    // registered and active until the document asks for another.
+    assert_eq!(shell.cursor().registry().len(), 2);
+    assert_eq!(
+        shell.cursor().registry().active_id(),
+        CursorSetId::builtin()
+    );
+    assert!(shell.cursor().registry().get(test_set()).is_some());
     assert!(
         comp.cursor_bounds().is_some(),
-        "swapping the artwork re-renders the pointer rather than blanking it"
+        "installing the sets re-renders the pointer rather than blanking it"
+    );
+}
+
+#[test]
+fn the_cursor_look_follows_the_document_and_falls_back_to_the_builtin() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.refresh_cursor(&mut comp);
+    let mut reader = MemoryAssets::default().with(
+        "/System/Graphics/Cursors/High Visibility/cursor.arrow.svg",
+        VALID_SVG,
+    );
+    let theme = shell.session().load_cursors(&mut reader, test_set());
+    shell.set_cursors(alloc::vec![(test_set(), theme)], &mut comp);
+    let native = comp.cursor_bounds().expect("a pointer is shown").width;
+
+    assert!(shell.set_cursor_look(test_set(), CursorSize::Larger, &mut comp));
+    assert_eq!(shell.cursor().registry().active_id(), test_set());
+    assert_eq!(
+        comp.cursor_bounds().expect("a pointer is shown").width,
+        native * 2,
+        "the chosen size reaches the pixels"
+    );
+
+    // A stored choice outlives the image that shipped it: a set this seat
+    // does not hold leaves a pointer drawn from the built-in artwork rather
+    // than none at all.
+    let gone = CursorSetId::new("Gone Away").expect("a legal set name");
+    assert!(shell.set_cursor_look(gone, CursorSize::Normal, &mut comp));
+    assert_eq!(
+        shell.cursor().registry().active_id(),
+        CursorSetId::builtin()
+    );
+    assert_eq!(
+        comp.cursor_bounds().expect("a pointer is shown").width,
+        native
     );
 }
 
@@ -5203,6 +5253,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             seat_held: false,
             relay: &mut RecordingRelay::default(),
             wallpapers: &mut NoGallery,
+            cursor_sets: &[],
         };
         tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(AppBarClick::Open))
             .expect("the session lists it");
@@ -5224,6 +5275,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             seat_held: false,
             relay: &mut RecordingRelay::default(),
             wallpapers: &mut NoGallery,
+            cursor_sets: &[],
         };
         tairix_window::WindowHost::app_bar_withdrawn(&mut host, owner);
     }
@@ -9370,7 +9422,7 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
 
 use crate::desktop::Desktop;
 use tairix_browse::GridView;
-use tairix_wallpaper::{Backdrop, DesktopSettings, Rgb};
+use tairix_wallpaper::{Backdrop, CursorSize, DesktopSettings, Rgb};
 use tairix_window::WindowHost;
 use tairix_wm::{Region, Window};
 
@@ -10873,6 +10925,7 @@ fn desktop_info_reports_compositor_state() {
         seat_held: false,
         relay: &mut RecordingRelay::default(),
         wallpapers: &mut NoGallery,
+        cursor_sets: &[],
     };
 
     // What an application is actually handed, whole: the record is one
@@ -10925,6 +10978,7 @@ fn with_window_host<R>(
         seat_held: false,
         relay: &mut RecordingRelay::default(),
         wallpapers: &mut NoGallery,
+        cursor_sets: &[],
     };
     body(&mut host)
 }

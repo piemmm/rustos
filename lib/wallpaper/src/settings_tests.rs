@@ -1,5 +1,6 @@
 //! Unit tests for the desktop settings registry.
 
+use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
 use tairix_appconf::Document;
 
 use super::*;
@@ -101,6 +102,8 @@ fn the_render_is_canonical_and_round_trips() {
         density: Density::Comfortable,
         motion: Motion::Reduced,
         scale: Scale::from_percent(150).expect("150% is a scale"),
+        cursor_set: CursorSetId::new("High Visibility").expect("a legal set name"),
+        cursor_size: CursorSize::Larger,
     };
     let text = rendered(&settings);
     assert_eq!(
@@ -114,9 +117,62 @@ fn the_render_is_canonical_and_round_trips() {
          contrast = high\n\
          density = comfortable\n\
          motion = reduced\n\
-         scale = 150\n"
+         scale = 150\n\
+         cursor.set = High Visibility\n\
+         cursor.size = larger\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);
+}
+
+#[test]
+fn the_cursor_keys_default_to_the_builtin_set_at_its_own_size() {
+    let settings = DesktopSettings::default();
+    assert_eq!(settings.cursor_set, CursorSetId::builtin());
+    assert_eq!(settings.cursor_size, CursorSize::Normal);
+    assert_eq!(settings.cursor_size.percent(), 100);
+}
+
+#[test]
+fn a_cursor_set_name_no_set_could_carry_is_refused() {
+    for value in ["", "..", "a/b", &"s".repeat(CURSOR_SET_NAME_MAX + 1)] {
+        let document = alloc::format!("cursor.set = {value:?}\n");
+        assert!(
+            merge(&DesktopSettings::default(), &document).is_err(),
+            "`{value}` must not be accepted as a cursor set"
+        );
+    }
+}
+
+/// A stored choice outlives the image that shipped it, so a set an update
+/// removed is still a legal *value*: it is the desktop that falls back to
+/// the built-in at activation, rather than the document losing every other
+/// key it carries.
+#[test]
+fn a_set_the_store_no_longer_carries_is_still_a_legal_value() {
+    let settings = read("cursor.set = \"Gone Away\"\nscale = 150\n").expect("a legal document");
+    assert_eq!(settings.cursor_set.name(), "Gone Away");
+    assert_eq!(settings.scale.percent(), 150);
+}
+
+#[test]
+fn a_pointer_size_outside_the_ladder_is_refused() {
+    assert!(merge(&DesktopSettings::default(), "cursor.size = huge\n").is_err());
+    assert!(merge(&DesktopSettings::default(), "cursor.size = 150\n").is_err());
+}
+
+/// The size magnifies a logical side, so the one logical-to-physical
+/// conversion still turns the answer into pixels.
+#[test]
+fn a_pointer_size_magnifies_the_reference_side() {
+    assert_eq!(CursorSize::Normal.side(32), 32);
+    assert_eq!(CursorSize::Large.side(32), 48);
+    assert_eq!(CursorSize::Larger.side(32), 64);
+    assert_eq!(CursorSize::Largest.side(32), 96);
+    // No size collapses the pointer, and none of them wraps.
+    for size in CursorSize::ALL {
+        assert!(size.side(1) >= 1);
+        assert!(size.side(u32::MAX) > 0);
+    }
 }
 
 #[test]

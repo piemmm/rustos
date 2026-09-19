@@ -34,7 +34,7 @@ dropped is a category the surface then has to lie about.
 | **DS1** | `lib/controls::form` — `FieldRow`/`FieldGroup`/`FieldControl`/`FieldLayout` over the row chrome hoisted into the shared `paint` core, the measured-width accessors the slot model needs, and a `widgets.app` gallery tab | — | DS1, §4 | done |
 | **DS2** | The `userland/apps/settings` crate and its shell: the closed `Category`/`Pane` registry, the vertical `Tabs` sidebar, the search index, the breadcrumb band, frame shedding, the absence-pane renderer, and the taskbar's *Settings…* row | DS1 | DS2 | done |
 | **DS3** | Appearance and Accessibility over the session's user-scope appearance registry, and the apply rendezvous every other user-scope write reuses | DS2 | DS3 | done |
-| **DS3b** | The cursor pair: a cursor-set store under `/System/Graphics/Cursors/<set>/` so `cursor.set` has a choice space at all, and a `cursor.size` factor in the session's cursor controller | DS3 | DS3b | planned |
+| **DS3b** | The cursor pair: a cursor-set store under `/System/Graphics/Cursors/<set>/` so `cursor.set` has a choice space at all, and a `cursor.size` factor in the session's cursor controller | DS3 | DS3b | done |
 | **DS4** | Wallpaper — the gallery absorbed into the pane over two served requests, `wallpaper.app` deleted, and *Change Background…* opening Settings at that pane | DS3 | DS4 | done |
 | **DS5** | Storage — one group per mount with its capacity track and health pill, over the mount→capacity derivation moved into `lib/procinfo` and shared with the Switchboard | DS2 | DS5 | planned |
 | **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | planned |
@@ -349,8 +349,6 @@ would change nothing.
 | Keyboard → shortcuts | no shortcut registry anywhere; each surface owns its own keys | a desktop-wide binding registry |
 | Language & Region → time zone | no zone data, no local rendering | `plans/TIMEZONES.md` |
 | General → Software Update | no updater, no package store | out of scope for this plan |
-| Accessibility → pointer size | the pointer is rasterised at the output's density and the session keeps no size of its own | a size factor in the session's `CursorController` (DS3b) |
-| Accessibility → cursor set | `/System/Graphics/Cursors/` holds one set, named by the active theme; there is nothing to choose between | a cursor-set store scanned like the wallpaper catalog (DS3b) |
 | Accessibility → screen reader, zoom, sticky keys | no assistive-technology surface | out of scope for this plan |
 
 Two of these are cheap enough to build *here* rather than defer, and this plan
@@ -562,23 +560,71 @@ What it guarantees, which no later stage re-derives:
   would freeze the window for a disk commit. The rows show the choice at once
   and adopt the durable value when the answer lands, so a refusal reverts.
 
-**The cursor pair is not here, and DS3b says why.** `cursor.size` has no
-mechanism anywhere — the pointer is rasterised at the output's density and the
-session keeps no size of its own — and `cursor.set` has no *choice space*:
-`/System/Graphics/Cursors/` holds one set, named by the active theme, so the
-key would be a closed set of one and the row a control that would change
-nothing. Accessibility therefore states the absence in a row of its own rather
-than offering it.
+**The cursor pair is DS3b's, and it landed there.** DS3 left Accessibility
+stating that the desktop kept no pointer size; DS3b replaced that statement
+with the POINTER group's two real rows.
 
 ### DS3b — the cursor pair
 
-`cursor.size` as a factor the session's `CursorController` rasterises at
-(a third component of its cache epoch, so a size change re-rasterises exactly
-as a scale change does), and `cursor.set` over a real cursor-set store:
-`/System/Graphics/Cursors/<set>/` scanned like the wallpaper catalog, each set
-registered with the window manager's existing `CursorRegistry`, so the key has
-more than one legal value. Both then join the `SettingsKey::APPEARANCE` group
-and the Accessibility pane's rows, replacing the stated absence DS3 left.
+`cursor.set` and `cursor.size` joined `SettingsKey::APPEARANCE` and the
+Accessibility pane's POINTER group. What it guarantees, which no later stage
+re-derives:
+
+- **The pointer is rasterised to a pixel *side*, not to a factor of its own
+  design grid.** `VectorCursor::rasterise(side)` replaced
+  `rasterise(scale_percent)`/`footprint`, because the grid is an authoring
+  detail — 32 units for a built-in cursor, `tairix_svg::DESIGN_GRID` for a
+  decoded one — so a factor gave a different pointer size per set and
+  swapping sets would have resized the pointer. **That was a live defect, not
+  a refactor:** the first shipped SVG set would have drawn a 2048-pixel
+  arrow. `CURSOR_BASE_SIDE_PX` is the logical reference side, and
+  `Scale::scale_length` is still the one logical-to-physical conversion.
+- **The cache epoch is the pixel side and the set, not the scale, the size
+  and the set.** An image depends on how many pixels across it is and which
+  set it came from and nothing else, so two (scale, size) pairs resolving to
+  one side correctly share one cached image. The controller owns the pointer's
+  *logical* side (the user's own choice) and never the scale (the output's).
+- **`CursorSetId` is an owned bounded name**, `tairix_theme`'s — held inline
+  (`lib/inline`'s `ArrayString`) so the epoch stays `Copy` and no allocation
+  reaches the compositing path, and validated as a plain leaf name within
+  `tairix_abi::desktop::CURSOR_SET_NAME_MAX` because it is spliced into a
+  store path. The name *is* the chooser's label, verbatim, as a wallpaper
+  category's is. It lives in `lib/theme` — the cursor *vocabulary* crate,
+  whose only dependencies are themselves dependency-free — rather than in
+  `lib/cursor`, so the settings registry can hold one without linking a
+  rasteriser.
+- **The store is `<set>/<asset-id>.svg`, a categorised graphics family.**
+  `GraphicsFamilyKind::Cursor` is the third family, discovered from
+  `lib/cursor/assets/` by the same `GRAPHICS_FAMILIES` walk, and validated as
+  it is discovered: an asset name no kind asks for, a set directory no chooser
+  could offer, an over-large file, or two files claiming one kind fails the
+  *build*. `tools/xtask` additionally decodes and rasterises every shipped
+  asset, so artwork that draws nothing or puts its hotspot outside itself is a
+  build error rather than a broken pointer.
+- **One set ships: `High Visibility`** — a dark pointer under a wide white
+  halo, its own bolder geometry rather than a recolour of the built-in
+  tables. With the always-present built-in `Standard` that is a choice of
+  two, which is what makes the row a control rather than a list of one.
+- **Every set is loaded at bring-up; activating one reads nothing.** The
+  session walks the store once (`/System` is read-only, so the choice space
+  is fixed for the boot) and registers all of them. A settings apply arrives
+  on the loop that owes the user a frame, so activation had to be pure memory
+  — the alternative was a directory read on that loop, or a whole second
+  worker desk for nine small files.
+- **A stale set is a legal value.** `cursor.set` names a set; it does not
+  assert one exists. A stored choice outlives the image that shipped it, so a
+  set an update removed still parses (the rest of the document survives),
+  is still *offered* under its own name (opening the pane changes nothing),
+  and falls back to the built-in artwork at activation.
+- **A third served request, of `QueryDesktop`'s posture.** `QueryCursorSets`
+  is seat-scoped, capability-free, and a read: Settings holds no
+  `CAP_FS_ACCESS`, so the session lists and Settings asks, exactly as for the
+  wallpaper catalog. Unlike `QueryWallpapers` it carries **no operand and no
+  paging**: at most `CURSOR_SETS_MAX` short names, which one reply frame
+  holds outright, so there is no paging to get wrong.
+- **`AppearanceWork` gained a `cursor` flag.** The pair moves the pointer and
+  nothing else: a re-theme would repaint every surface and a rescale would
+  move every length, for a change only the pointer can see.
 
 ### DS4 — Wallpaper: the gallery absorbed, and `wallpaper.app` deleted
 

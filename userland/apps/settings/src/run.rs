@@ -55,7 +55,7 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{Shell, ShellOutcome};
-    use tairix_theme::{Theme, ThemeRegistry};
+    use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
@@ -223,6 +223,39 @@ mod program {
                 return catalog;
             }
         }
+    }
+
+    /// The cursor sets the desktop offers, read once.
+    ///
+    /// The store is on the read-only `/System` volume, so the session
+    /// listed it at bring-up and answers from memory: this costs one round
+    /// trip and no I/O either side. An answer that cannot be read leaves
+    /// the pointer-set row offering the built-in set alone — which is
+    /// honest, since that is the one set every desktop has — and states
+    /// the reason once.
+    fn fetch_cursor_sets(
+        client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+    ) -> Vec<CursorSetId> {
+        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_CURSOR_SETS_REPLY_MAX];
+        let answered = match client.cursor_sets(&mut frame) {
+            Ok(answered) => answered,
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: the desktop's cursor sets could not be read ({err}); the \
+                     pointer row offers the built-in set alone"
+                );
+                return Vec::new();
+            }
+        };
+        // A name this build would not accept as a set is dropped rather
+        // than offered: choosing it would post a document the desktop
+        // refuses whole.
+        answered
+            .names()
+            .filter_map(|name| core::str::from_utf8(name).ok())
+            .filter_map(CursorSetId::new)
+            .collect()
     }
 
     /// The picture gallery's client half: the region the desktop renders
@@ -952,6 +985,8 @@ mod program {
         // session lists the read-only store once at its own bring-up and
         // answers this from memory.
         shell.adopt_catalog(fetch_catalog(surface.window.client()));
+        // And its pointer rows their choice space, for the same reason.
+        shell.adopt_cursor_sets(fetch_cursor_sets(surface.window.client()));
         // A pane the launch named, if it named one: a fresh process is
         // given it as its one argument, exactly as a running instance is
         // handed it over the channel.

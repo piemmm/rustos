@@ -12,10 +12,10 @@ use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
-use tairix_theme::Theme;
+use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{DesktopSettings, SettingsKey};
 
-use crate::appearance::{Composition, Setting, POINTER_SIZE_LABEL};
+use crate::appearance::{Composition, Setting};
 use crate::frame::{resolve_frame, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
 use crate::registry::{Category, Location, Pane, StripRow, CATEGORIES};
 use crate::shell::{Shell, ShellOutcome};
@@ -733,24 +733,74 @@ fn a_refused_apply_reverts_the_row_to_what_the_store_holds() {
     );
 }
 
+/// The pointer pair is a real control now, so both rows must draw a choice
+/// list rather than the statement that stood where they are.
 #[test]
-fn accessibility_states_the_pointer_size_it_does_not_keep() {
+fn accessibility_offers_the_pointer_set_and_size_as_real_controls() {
     let shell = shell_at(Location {
         category: Category::Accessibility,
         pane: Pane::Accessibility,
     });
     let form = shell.form_for_test().expect("a form");
-    let stated = form
+    for label in [Setting::CursorSet.label(), Setting::CursorSize.label()] {
+        let row = form
+            .groups()
+            .iter()
+            .flat_map(tairix_controls::FieldGroup::rows)
+            .find(|row| row.label() == label)
+            .unwrap_or_else(|| panic!("the {label} row"));
+        assert!(matches!(
+            row.control(),
+            tairix_controls::FieldControl::Combo(_)
+        ));
+    }
+}
+
+/// Before the desktop answers, the pointer-set row still offers the
+/// always-present built-in set: a list of nothing is a control that cannot
+/// be used.
+#[test]
+fn the_pointer_set_row_offers_the_builtin_set_before_the_desktop_answers() {
+    let shell = shell_at(Location {
+        category: Category::Accessibility,
+        pane: Pane::Accessibility,
+    });
+    let form = shell.form_for_test().expect("a form");
+    let row = form
         .groups()
         .iter()
         .flat_map(tairix_controls::FieldGroup::rows)
-        .find(|row| row.label() == POINTER_SIZE_LABEL)
-        .expect("the pointer-size row");
-    // Stated, never drawn as a control that would change nothing.
-    assert!(matches!(
-        stated.control(),
-        tairix_controls::FieldControl::Unmeasured(_)
-    ));
+        .find(|row| row.label() == Setting::CursorSet.label())
+        .expect("the pointer-set row");
+    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
+        panic!("the pointer-set row draws a choice list");
+    };
+    assert_eq!(combo.choices(), [CursorSetId::builtin().name()]);
+}
+
+/// The choice space is the desktop's to answer, and it reaches the row.
+#[test]
+fn an_answered_cursor_set_joins_the_pointer_set_row() {
+    let mut shell = shell_at(Location {
+        category: Category::Accessibility,
+        pane: Pane::Accessibility,
+    });
+    let offered = CursorSetId::new("High Visibility").expect("a legal set name");
+    shell.adopt_cursor_sets(alloc::vec![offered]);
+    let form = shell.form_for_test().expect("a form");
+    let row = form
+        .groups()
+        .iter()
+        .flat_map(tairix_controls::FieldGroup::rows)
+        .find(|row| row.label() == Setting::CursorSet.label())
+        .expect("the pointer-set row");
+    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
+        panic!("the pointer-set row draws a choice list");
+    };
+    assert_eq!(
+        combo.choices(),
+        [CursorSetId::builtin().name(), offered.name()]
+    );
 }
 
 #[test]
@@ -772,11 +822,12 @@ fn both_composed_panes_offer_the_shared_settings_from_one_definition() {
             "{shared} missing from Accessibility"
         );
     }
-    // Light/dark is Appearance's alone; the pointer statement is
+    // Light/dark is Appearance's alone; the pointer pair is
     // Accessibility's alone.
     assert!(appearance.contains(&Setting::Appearance.label()));
     assert!(!accessibility.contains(&Setting::Appearance.label()));
-    assert!(accessibility.contains(&POINTER_SIZE_LABEL));
+    assert!(accessibility.contains(&Setting::CursorSet.label()));
+    assert!(accessibility.contains(&Setting::CursorSize.label()));
 }
 
 #[test]
