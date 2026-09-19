@@ -1,0 +1,37 @@
+[package]
+name = "tairix-test-rules-determinism-qemu-aarch64"
+description = "QEMU integration test: WinterSun's authoritative simulation produces the digest tairix_wintersun_rules::digest::REFERENCE_DIGEST on aarch64. A scripted session — twelve bodies of differing stats walking obstructed ground, colliding, taking blows, being healed, carrying statuses that stack and diminish, and one of them dying — runs in the guest for a fixed number of ticks, and the whole trajectory is folded into one number that must equal the constant every other Tier-1 target asserts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU loads with `-kernel` on the aarch64 `virt`
+# board. It links the aarch64 port for boot and console, a heap for the
+# simulation's entity and event vectors, and the rules crate itself. The point of
+# running it here rather than on the host is that the arithmetic is
+# compiled by a different backend for a different ISA: a divergence in
+# f64 lowering, in an integer narrowing, or in a sort's tie-break shows up
+# as a different digest and nowhere else.
+#
+# On the host target the crate has no test source and contributes nothing
+# to `cargo test`; the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-rules-determinism-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-wintersun-rules = { path = "../../../userland/games/wintersun/rules", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

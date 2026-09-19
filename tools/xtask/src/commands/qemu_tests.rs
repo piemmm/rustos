@@ -1255,6 +1255,93 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
+    // WinterSun's authoritative simulation on aarch64
+    // (`plans/WINTERSUN.md` WS3). A scripted session runs in the guest and
+    // the whole trajectory is folded into one number, which must equal the
+    // reference constant the host suite and every sibling target assert. It
+    // is enrolled once per Tier-1 target on purpose: the defect it exists to
+    // catch is one compiler backend lowering the same arithmetic differently
+    // from another, which no single-target run can see. Pure computation
+    // over the boot heap — no device, no disk, one CPU — so the 90-second
+    // inactivity budget is generous for a debug-profile guest.
+    QemuTest {
+        package: "tairix-test-rules-determinism-qemu-aarch64",
+        binary: "tairix-test-rules-determinism-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(90),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
+    // WinterSun's authoritative simulation on riscv64
+    // (`plans/WINTERSUN.md` WS3). A scripted session runs in the guest and
+    // the whole trajectory is folded into one number, which must equal the
+    // reference constant the host suite and every sibling target assert. It
+    // is enrolled once per Tier-1 target on purpose: the defect it exists to
+    // catch is one compiler backend lowering the same arithmetic differently
+    // from another, which no single-target run can see. Pure computation
+    // over the boot heap — no device, no disk, one CPU — so the 90-second
+    // inactivity budget is generous for a debug-profile guest.
+    QemuTest {
+        package: "tairix-test-rules-determinism-qemu-riscv64",
+        binary: "tairix-test-rules-determinism-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(90),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
+    // WinterSun's authoritative simulation on x86_64
+    // (`plans/WINTERSUN.md` WS3). A scripted session runs in the guest and
+    // the whole trajectory is folded into one number, which must equal the
+    // reference constant the host suite and every sibling target assert. It
+    // is enrolled once per Tier-1 target on purpose: the defect it exists to
+    // catch is one compiler backend lowering the same arithmetic differently
+    // from another, which no single-target run can see. Pure computation
+    // over the boot heap — no device, no disk, one CPU — so the 90-second
+    // inactivity budget is generous for a debug-profile guest.
+    QemuTest {
+        package: "tairix-test-rules-determinism-qemu-x86-64",
+        binary: "tairix-test-rules-determinism-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(90),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     QemuTest {
         package: "tairix-test-accessed-bit-qemu-aarch64",
         binary: "tairix-test-accessed-bit-qemu-aarch64",

@@ -4630,6 +4630,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-rules-determinism-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+ "tairix-wintersun-rules",
+]
+
+[[package]]
+name = "tairix-test-rules-determinism-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+ "tairix-wintersun-rules",
+]
+
+[[package]]
+name = "tairix-test-rules-determinism-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-wintersun-rules",
+]
+
+[[package]]
+name = "tairix-test-rules-determinism-wasm32"
+version = "0.0.0"
+dependencies = [
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-wintersun-rules",
+]
+
+[[package]]
 name = "tairix-test-sandbox"
 version = "0.0.0"
 dependencies = [
@@ -6048,6 +6091,19 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-util",
  "zeroize",
+]
+
+[[package]]
+name = "tairix-wintersun-rules"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-inline",
+ "tairix-util",
+ "tairix-wintersun-net",
+ "tairix-wintersun-world",
 ]
 
 [[package]]

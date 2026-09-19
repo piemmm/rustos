@@ -1,0 +1,33 @@
+[package]
+name = "tairix-test-rules-determinism-wasm32"
+description = "wasm32 integration test: WinterSun's authoritative simulation produces the digest tairix_wintersun_rules::digest::REFERENCE_DIGEST under a real WebAssembly engine. The wasm32 leg of the cross-architecture determinism vertical whose bare-metal siblings are rules_determinism_qemu_{aarch64,riscv64,x86_64}."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# A `cdylib` the harness instantiates directly. Like its world-generator
+# sibling this one needs no browser and no DOM: the claim is about
+# arithmetic, so the module exports the digest and the constant it must
+# equal, and the harness compares them. wasm32 is the leg most likely to
+# catch a real divergence, being the only Tier-1 target with a 32-bit
+# `usize` — an index or a length that had quietly become part of an answer
+# shows up here and nowhere else.
+#
+# On a host build it compiles to an inert empty `cdylib`, so
+# `cargo build --workspace` stays green without the wasm toolchain.
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-wintersun-rules = { path = "../../../userland/games/wintersun/rules", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

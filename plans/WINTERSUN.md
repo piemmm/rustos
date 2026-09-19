@@ -37,7 +37,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS0 | This plan, `plans/FIGURE.md`, `plans/RECDB.md`, `plans/GPU.md`, the jump-sheet rows, the §3 map entries, the `PLAN.md` stage | done |
 | WS1 | `Layer::UserGame` in `deps-check`, the `userland/games/` subtree, and `wintersun/net`: the wire vocabulary, framing, the authenticated session handshake, bounded decode, the fuzz target | done |
 | WS2 | `wintersun/world`: the seed-pure chunked generator — uplift, hydrology, climate, biomes, roads, sites — and its cross-architecture determinism vertical | done |
-| WS3 | `wintersun/rules`: the fixed-tick authoritative step, space and collision, stats, damage, status effects | planned |
+| WS3 | `wintersun/rules`: the fixed-tick authoritative step, space and collision, stats, damage, status effects | done |
 | WS4 | `wintersun/art`: material synthesis, the splat field, the decal and particle vocabulary, the WinterSun palette | planned |
 | WS5 | The client shell: window, the three size states, input, frame pacing, camera, terrain draw | planned |
 | WS6 | Figures on screen: presets, clips, the animation state machine, the locomotion join | planned |
@@ -374,9 +374,8 @@ the wrapper here before that caller exists would be speculative surface, and
 each build is already independent of every other, so the composition needs
 nothing from this crate that it does not already have.
 
-Still WS3's, not deferred here: the *simulation's* determinism vertical, which
-is a different claim over a different subject (a fixed intent log over N
-ticks) and belongs with the code that ticks.
+The *simulation's* determinism vertical is a different claim over a different
+subject and lives with the code that ticks (§5).
 
 ## 3. WS4/WS5 — what it looks like
 
@@ -554,6 +553,52 @@ intent additionally carries the client's sub-tick sample time**, so the server
 places an action *within* the tick it arrived in rather than snapping it to the
 boundary — recovering most of the remaining granularity for the cost of one
 field.
+
+### What WS3 settled
+
+The tick, the collision field, the broad phase, the stat curves, the damage
+pipeline and the status vocabulary are built, in `wintersun/rules`. What a
+later item needs to know:
+
+- **The step order above is fixed and documented on `Zone::step`.** Bodies
+  are iterated in identity order out of an array kept sorted by an identity
+  the zone mints monotonically; nothing reads a hash order anywhere.
+- **The simulation is integer arithmetic throughout but for one heading
+  conversion** (`Facing::towards`, which went into `wintersun/net` beside
+  `unit_vector` for the same reason that one did). Movement is fixed-point
+  with a carried remainder per body, separation is an exact integer square
+  root. Anything folded into the digest has a fixed width, never `usize`,
+  whose four bytes on `wasm32` would otherwise put the host's pointer size in
+  the answer. Reaching for `f64` in an authoritative path is a defect.
+- **The claim is staked on `digest::REFERENCE_DIGEST`**, a scripted session
+  folded tick by tick — not a final state, so a divergence that later
+  converges is still caught. Asserted by the host suite and by
+  `tests/integration/rules_determinism_qemu_{aarch64,riscv64,x86_64}` and
+  `rules_determinism_wasm32`. It is a *separate* constant from WS2's, and the
+  session walks a pattern rather than a generated realm, so a change to
+  either cannot make the other's evidence ambiguous.
+- **The collision seam is a data source, not a policy.** `Terrain` answers
+  ground height and water height per cell; the passability rules live in the
+  crate. Fetching chunks is a cache with a budget and belongs to the process
+  holding it, so `ChunkTerrain` borrows a sorted window and owns no cache.
+  Absent ground reads as impassable.
+- **A root or a stun works through the speed, never by refusing the input.**
+  Refusing would leave a stale held direction to resume when it expired, so a
+  body that changed its mind while held would walk the old way. Discrete
+  actions a stun or a silence forbids *are* refused, with the reason.
+- **An intent naming an action, spell, item or interaction is refused as
+  unresolvable**, because no table exists to resolve one. That is the final
+  code path, not a placeholder: WS9–WS11 add the tables the same lookup will
+  then find. The damage, healing, status and resource verbs those items will
+  call are built and tested on `Zone`.
+- **Bounds are fixed ranges rules are defined over, not capacities.** They
+  also bound every product the pipelines form, which is what lets the whole
+  simulation run in checked integer arithmetic with no saturating step hiding
+  a real overflow. Entity, event and refusal storage grows on demand and
+  fails closed as a typed error.
+- **`lib/parallel` is still not wired here.** A tick's phases are sequential
+  by dependency and its bodies share one table; the parallelism worth having
+  is over zones and over chunks, which is WS5's and WS8's composition.
 
 ### Combat (WS9)
 

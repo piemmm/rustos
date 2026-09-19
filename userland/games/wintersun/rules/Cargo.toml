@@ -1,0 +1,42 @@
+[package]
+name = "tairix-wintersun-rules"
+description = "WinterSun's authoritative simulation (plans/WINTERSUN.md §5): the fixed-rate total tick, intent admission and the clock defences around it, integer fixed-point movement over a collision field, the sorted-cell broad phase, the closed stat set and its curves, the ordered damage pipeline, and the status vocabulary with its diminishing returns. no_std, forbids unsafe, and bit-identical on every Tier-1 target — the arithmetic is integer throughout but for one heading conversion, so the cross-target claim rests on semantics Rust fully specifies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The identifiers, geometry, tick instants and intents are the wire's. A
+# second vocabulary for the same values is how a client and a realm come to
+# disagree about which way round the world is.
+tairix-wintersun-net = { path = "../net", version = "=0.0.0" }
+# The collision field is the generated ground: its stored elevation, water
+# and surface fields are what passability is decided from.
+tairix-wintersun-world = { path = "../world", version = "=0.0.0" }
+# TAIRiX's own libm, for the one place this crate leaves integer arithmetic:
+# a held direction to a heading. A platform libm would resolve it differently
+# per target.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
+# The per-entity status set is a fixed containment bound, not a capacity, so
+# it is held inline and allocates nothing.
+tairix-inline = { path = "../../../../lib/inline", version = "=0.0.0" }
+# The state digest a desync is bisected with.
+tairix-hash = { path = "../../../../lib/hash", version = "=0.0.0" }
+
+[dev-dependencies]
+# The stateful property model drives generated programs against a live zone
+# and shrinks any counterexample to a minimal failing one. Test scaffolding
+# only; never in a TAIRiX build.
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
+# The shared seed/budget seam every model and fuzz harness uses: one place
+# picks the per-run seed, logs it at the start, and bounds the smoke and soak
+# loops.
+tairix-fuzzseed = { path = "../../../../tests/fuzzseed", version = "=0.0.0", features = [
+    "proptest",
+] }

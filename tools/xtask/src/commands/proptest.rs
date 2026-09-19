@@ -43,8 +43,10 @@ pub struct Model {
     pub description: &'static str,
 }
 
-/// The closed set of Bronze models, in run order. Covers every
-/// capability-critical path the charter names.
+/// The closed set of stateful models, in run order.
+///
+/// Every capability-critical path the charter names, plus each model a
+/// binding plan asks for by name.
 pub const MODELS: &[Model] = &[
     Model {
         name: "caps",
@@ -69,6 +71,12 @@ pub const MODELS: &[Model] = &[
         package: "tairix-kernel-syscall",
         test: "proptest_model",
         description: "kernel/syscall dispatch capability gate",
+    },
+    Model {
+        name: "wintersun-rules",
+        package: "tairix-wintersun-rules",
+        test: "proptest_model",
+        description: "WinterSun zone invariants over generated action programs",
     },
 ];
 

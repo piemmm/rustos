@@ -1,0 +1,35 @@
+[package]
+name = "tairix-test-rules-determinism-qemu-x86-64"
+description = "QEMU integration test: WinterSun's authoritative simulation produces the digest tairix_wintersun_rules::digest::REFERENCE_DIGEST on x86_64. A scripted session — twelve bodies of differing stats walking obstructed ground, colliding, taking blows, being healed, carrying statuses that stack and diminish, and one of them dying — runs in the guest for a fixed number of ticks, and the whole trajectory is folded into one number that must equal the constant every other Tier-1 target asserts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU loads with `-kernel`. It links the x86_64
+# port for boot and the COM1 console, a heap for the generator's working
+# vectors, and the world crate itself. The point of running it here rather
+# than on the host is that the arithmetic is compiled by a different
+# backend for a freestanding target with no platform libm: a divergence in
+# f64 lowering, in an integer narrowing, or in a sort's tie-break shows up
+# as a different digest and nowhere else.
+#
+# On the host target the crate has no test source and contributes nothing
+# to `cargo test`; the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-rules-determinism-qemu-x86-64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-wintersun-rules = { path = "../../../userland/games/wintersun/rules", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

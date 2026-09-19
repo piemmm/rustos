@@ -8987,7 +8987,7 @@ app's private path.
 
 ---
 
-## WINTERSUN — the desktop RPG and its enabling libraries  **[IN PROGRESS — WS1, WS2 done (M0 met); WS3 onward planned]**
+## WINTERSUN — the desktop RPG and its enabling libraries  **[IN PROGRESS — WS1–WS3 done (M0 met); WS4 onward planned]**
 
 Plans: `plans/WINTERSUN.md` (the game), `plans/FIGURE.md` (characters and
 animation), `plans/RECDB.md` (durable storage). Each carries its own ledger;

@@ -271,6 +271,7 @@ members = [
     # `lib/*`, and nothing outside it may depend on them, so game code never
     # enters the OS libraries (`cargo xtask deps-check` enforces it).
     "userland/games/wintersun/net",
+    "userland/games/wintersun/rules",
     "userland/games/wintersun/world",
 
     # Tooling
@@ -506,6 +507,10 @@ members = [
 
     # WinterSun's world generator, on every Tier-1 target: the cross-
     # architecture determinism vertical (plans/WINTERSUN.md WS2).
+    "tests/integration/rules_determinism_qemu_aarch64",
+    "tests/integration/rules_determinism_qemu_riscv64",
+    "tests/integration/rules_determinism_qemu_x86_64",
+    "tests/integration/rules_determinism_wasm32",
     "tests/integration/world_determinism_qemu_aarch64",
     "tests/integration/world_determinism_qemu_riscv64",
     "tests/integration/world_determinism_qemu_x86_64",

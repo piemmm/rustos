@@ -48,6 +48,50 @@ fn a_direction_admits_a_unit_vector_and_refuses_a_longer_one() {
 }
 
 #[test]
+fn a_heading_points_where_the_axes_say() {
+    // Zero is east and the turn advances toward south, which is the sense
+    // `WorldPoint`'s axes have.
+    assert_eq!(Facing::towards(1, 0), Some(Facing(0)));
+    assert_eq!(Facing::towards(0, 1), Some(Facing(0x4000)));
+    assert_eq!(Facing::towards(-1, 0), Some(Facing(0x8000)));
+    assert_eq!(Facing::towards(0, -1), Some(Facing(0xC000)));
+    assert_eq!(Facing::towards(1, 1), Some(Facing(0x2000)));
+}
+
+#[test]
+fn a_vector_pointing_nowhere_has_no_heading() {
+    assert_eq!(Facing::towards(0, 0), None);
+}
+
+#[test]
+fn a_heading_is_the_inverse_of_its_own_unit_vector() {
+    for raw in (0..=u16::MAX).step_by(97) {
+        let facing = Facing(raw);
+        let (x, y) = facing.unit_vector();
+        // Back through a scaled integer pair, which is what a caller
+        // actually holds: a held direction or a movement delta.
+        let scale = 1_000_000.0;
+        let back = Facing::towards(
+            tairix_util::mathf::round_i32(x * scale),
+            tairix_util::mathf::round_i32(y * scale),
+        )
+        .expect("a unit vector points somewhere");
+        let error = i32::from(back.0) - i32::from(raw);
+        let wrapped = error
+            .rem_euclid(1 << 16)
+            .min((1 << 16) - error.rem_euclid(1 << 16));
+        assert!(wrapped <= 1, "heading {raw} came back as {} ", back.0);
+    }
+}
+
+#[test]
+fn a_heading_is_scale_invariant() {
+    let near = Facing::towards(3, 4).expect("a heading");
+    let far = Facing::towards(3_000_000, 4_000_000).expect("a heading");
+    assert_eq!(near, far, "only the direction matters, never the length");
+}
+
+#[test]
 fn an_entity_state_round_trips() {
     round_trip(EntityState {
         id: EntityId(0x0102_0304_0506_0708),

@@ -59,6 +59,17 @@ const VERTICALS: &[Vertical] = &[
         artifact: "tairix_test_world_determinism_wasm32.wasm",
         harness: "tests/integration/world_determinism_wasm32/web/harness.mjs",
     },
+    // WinterSun's authoritative simulation under a real WebAssembly engine
+    // (`plans/WINTERSUN.md` WS3): the wasm32 leg of the cross-architecture
+    // determinism vertical whose bare-metal siblings run under QEMU. Its
+    // harness needs no browser — the subject is a simulation, and wasm32 is
+    // the only Tier-1 target with a 32-bit `usize`, so a length that had
+    // quietly become part of an answer shows up here and nowhere else.
+    Vertical {
+        package: "tairix-test-rules-determinism-wasm32",
+        artifact: "tairix_test_rules_determinism_wasm32.wasm",
+        harness: "tests/integration/rules_determinism_wasm32/web/harness.mjs",
+    },
     // The `display`-row parity vertical: signed framebuffer `.rxe`
     // lifecycle presenting to a real canvas (`plans/WIRING.md`).
     Vertical {

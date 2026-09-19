@@ -105,11 +105,35 @@ impl Facing {
     /// the world is would be a defect no single crate could see.
     #[must_use]
     pub fn unit_vector(self) -> (f64, f64) {
-        let turn = f64::from(self.0) / f64::from(1_u32 << 16);
+        let turn = f64::from(self.0) / f64::from(TURN_UNITS);
         let radians = turn * core::f64::consts::TAU;
         (mathf::cos(radians), mathf::sin(radians))
     }
+
+    /// The heading pointing along `(x, y)`, or `None` for the zero vector,
+    /// which points nowhere.
+    ///
+    /// The exact inverse of [`Self::unit_vector`]'s convention, and here
+    /// beside it for the same reason: a simulation deriving a heading from a
+    /// movement and a renderer deriving a movement from a heading must agree
+    /// which way round the world is, and two crates each picking a sense
+    /// would be a defect neither could see.
+    #[must_use]
+    pub fn towards(x: i32, y: i32) -> Option<Self> {
+        if x == 0 && y == 0 {
+            return None;
+        }
+        let radians = mathf::atan2(f64::from(y), f64::from(x));
+        let turn = radians / core::f64::consts::TAU;
+        let units = mathf::round_i32(turn * f64::from(TURN_UNITS)).rem_euclid(TURN_UNITS);
+        // `rem_euclid` by the turn leaves a value inside `u16`, so the
+        // narrowing is exact.
+        u16::try_from(units).ok().map(Self)
+    }
 }
+
+/// Divisions of a full turn a [`Facing`] counts in — every `u16`.
+const TURN_UNITS: i32 = 1 << 16;
 
 /// A position *within* an authoritative tick, as a fraction of it.
 ///
