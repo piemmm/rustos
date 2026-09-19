@@ -272,8 +272,9 @@ account, through the one spawn-as-user holder, after re-authentication**:
   account* — on another console, or by exiting the session. The debug image
   has exactly one account and it is the administrator, so bring-up needs
   nothing further.
-- CU5 adds the deliberate per-invocation form: an `elevate <user> <program>`
-  request the shell forwards to its console's session supervisor (login),
+- CU5 adds the deliberate per-invocation form: an
+  `elevate <user> <program> [argument ...]` request the shell forwards to its
+  console's session supervisor (login),
   which **re-authenticates the target account's credentials** and spawns
   the program as that account — the same `CAP_SPAWN_AS_USER` +
   `CAP_USERS_READ` path as a fresh login, one more caller of the existing
@@ -545,12 +546,25 @@ exist from CU3).
 
 **Status: done.**
 
-- The §4.4 broker path is live. The shell's `elevate <user> <program>`
-  builtin (`userland/shell/elsh`: `Elevator` seam, `elevate.rs`, production
-  seam in the `Run` binary) prompts for the password echo-off, posts one
-  synchronous `ipc_call` to its console's login supervisor, and blocks — a
-  foreground elevated command — until the re-authenticated program has run
-  as the target account; its exit code becomes `$?`. The requesting
+- The §4.4 broker path is live. The shell's
+  `elevate <user> <program> [argument ...]` builtin (`userland/shell/elsh`:
+  `Elevator` seam, `elevate.rs`, production seam in the `Run` binary) prompts
+  for the password echo-off, posts one synchronous `ipc_call` to its console's
+  login supervisor, and blocks — a foreground elevated command — until the
+  re-authenticated program has run as the target account; its exit code
+  becomes `$?`.
+- The request carries a **bounded argument vector** (at most 16 arguments,
+  512 bytes each, 1024 in all, one admissibility rule shared by the encoder
+  and the decoder), so a caller can run the tool that already owns a store
+  with the one change a user asked for rather than that store growing a
+  second writer. It widens no authority — the request already named an
+  arbitrary absolute program — and a malformed or over-long vector is refused
+  at the decode, before an attempt is spent against the named account. The
+  audit records the argument *count* and never the arguments: the broker
+  hands them over without interpreting them, so it cannot know which of them
+  is a secret, and what an elevated run changed is the elevated tool's own to
+  audit. A `Launch` carries no vector — the program it starts is interactive
+  and collects its own input. The requesting
   shell's set is untouched; the elevated child's set is derived kernel-side
   as `its manifest ∩ the target account's ceiling`, exactly as at login.
 - The same rendezvous also serves a narrower, verify-only request that

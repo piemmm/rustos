@@ -145,6 +145,40 @@ definition of "how much RAM this machine has". Only the total is exposed
 here — the gated, audited `MEMORY_PRESSURE` view (free bytes, watermarks,
 the reserve, transition history) is untouched and stays gated.
 
+### The machine's boot-time configuration
+
+`SYSTEM_CONFIG` answers the operator's `system.conf` document as its own
+text, read fresh off the volume, bounded by `SYSTEM_CONFIG_MAX_LEN`, and
+empty where no store exists (a fresh installation, which means the
+documented defaults and is not an error).
+
+It is ungated and unaudited, on the same ground as `MOUNT_LIST` and
+`USER_DIRECTORY`: the document is the machine's *public* configuration,
+world-readable by its own inode policy under `/System/Settings`, and it
+carries no credential — every secret the machine holds lives under
+`/System/Security`, behind the capabilities that guard it. What the query
+does **not** offer is a way to change it: writing the store is a
+re-authenticated run of the `configure` tool that owns it, and this read
+adds no path to one.
+
+The **text**, never a parse of it. The store's grammar, closed key registry
+and value sets have one definition in `lib/sysconfig`, and a second
+spelling in the wire format would be a second thing to keep in step; a
+client reads the document through that one engine
+(`tairix_procinfo::system_config`), so a surface showing a setting and the
+tool writing it can never disagree about what the store says. A document a
+hand edit has taken outside the grammar is refused whole rather than
+half-read.
+
+It is **read**, not remembered. A snapshot taken at the root unlock would
+still report the old value after `configure` had written a new one, which
+is exactly the fabricated reading this whole API exists to avoid: the
+kernel re-reads the document — a page at most, on the root volume behind
+the block cache, bounded before a byte is read — and a document past the
+bound is refused rather than truncated, because the store's own parser
+refuses it too and serving a prefix would only turn a refusal into data
+that reads as the truth.
+
 ### Where the RAM went: the memory-class partition
 
 `KernelMemoryStats` carries `class_bytes`, one figure per `MemoryClass`

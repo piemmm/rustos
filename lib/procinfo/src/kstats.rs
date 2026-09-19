@@ -34,6 +34,7 @@ use tairix_abi::sysinfo::{
     SysinfoQueryId, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::Errno;
+use tairix_sysconfig::SystemConfig;
 
 use crate::list::{walk_pages, ListError, WalkStep};
 use crate::request::{call, CallError};
@@ -133,6 +134,43 @@ pub fn memory_total_bytes(transport: &dyn Transport) -> Result<u64, CallError> {
     MemoryTotal::from_bytes(&reply)
         .map(|total| total.total_bytes)
         .map_err(|_| CallError::Service(Errno::BadMagic))
+}
+
+/// Read the machine's boot-time configuration store
+/// ([`SysinfoQueryId::SYSTEM_CONFIG`]), parsed through the store's own
+/// engine.
+///
+/// `Ok(None)` is an installation with no store at all — a fresh one — which
+/// means the documented defaults and is not an error.
+///
+/// Ungated: the document is the machine's public configuration,
+/// world-readable by its own inode policy, and carries no credential. This
+/// is how a surface with no filesystem authority shows what the machine is
+/// configured to be; changing it is a re-authenticated run of the tool that
+/// owns the store, and this read adds no path to one.
+///
+/// The parse is [`tairix_sysconfig`]'s, never a second one: a surface
+/// showing a setting and the `configure` tool writing it read the same
+/// grammar, the same key registry, and the same value sets, so they cannot
+/// disagree about what the store says.
+///
+/// # Errors
+///
+/// * [`CallError::Service`] — the transport failed, or the document did not
+///   parse (reported as [`Errno::BadMagic`]). A store a hand edit has taken
+///   outside the grammar is refused whole rather than half-read, exactly as
+///   `configure` refuses it: a surface must not show some of a document it
+///   does not understand.
+pub fn system_config(transport: &dyn Transport) -> Result<Option<SystemConfig>, CallError> {
+    let reply = call(transport, SysinfoQueryId::SYSTEM_CONFIG, &[])?;
+    if reply.is_empty() {
+        return Ok(None);
+    }
+    core::str::from_utf8(&reply)
+        .ok()
+        .and_then(|text| SystemConfig::parse(text).ok())
+        .map(Some)
+        .ok_or(CallError::Service(Errno::BadMagic))
 }
 
 /// Query the `ramzip` compressed-tier counters
@@ -492,8 +530,8 @@ fn net_list_request(offset: u32, limit: u16) -> alloc::vec::Vec<u8> {
 mod tests {
     use super::{
         for_each_cache_ledger, for_each_cpu_load, for_each_desktop_frame_report, for_each_irq,
-        for_each_reclaim_class, memory_pressure, memory_total_bytes, ramzip_stats, WalkStep,
-        CACHE_LEDGER_PAGE, CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
+        for_each_reclaim_class, memory_pressure, memory_total_bytes, ramzip_stats, system_config,
+        WalkStep, CACHE_LEDGER_PAGE, CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -520,6 +558,9 @@ mod tests {
         loads: Vec<CpuLoadRecord>,
         irqs: Vec<IrqRecord>,
         frames: Vec<DesktopFrameRecord>,
+        /// The boot-time configuration document the fixture serves, empty
+        /// for an installation that has never had one.
+        system_config: Vec<u8>,
         deny: Option<SysinfoQueryId>,
         malformed: Option<SysinfoQueryId>,
         seen: RefCell<Vec<SysinfoQueryId>>,
@@ -549,6 +590,7 @@ mod tests {
                     ..RamzipStats::default()
                 },
                 reclaim,
+                system_config: Vec::from(&b"os.loginType text\ncache.block off\n"[..]),
                 caches: alloc::vec![
                     {
                         let mut row = CacheLedgerRecord::new(
@@ -643,6 +685,7 @@ mod tests {
                 .to_le_bytes()
                 .to_vec()),
                 SysinfoQueryId::RAMZIP_STATS => Ok(self.ramzip.to_le_bytes().to_vec()),
+                SysinfoQueryId::SYSTEM_CONFIG => Ok(self.system_config.clone()),
                 SysinfoQueryId::RECLAIM_STATS => {
                     let req = ReclaimListRequest::from_bytes(payload)?;
                     Ok(page(&self.reclaim, req.offset, req.limit, |r| {
@@ -786,6 +829,47 @@ mod tests {
                 SysinfoQueryId::MEMORY_PRESSURE,
                 SysinfoQueryId::RAMZIP_STATS
             ]
+        );
+    }
+
+    /// The store document is parsed through its own engine, so a surface
+    /// reads exactly what the `configure` tool would write.
+    #[test]
+    fn the_system_configuration_parses_through_the_stores_own_engine() {
+        let fixture = Fixture::new();
+        let config = system_config(&fixture).expect("read").expect("a store");
+        assert_eq!(config.login_type, tairix_sysconfig::LoginType::Text);
+        assert_eq!(config.cache_block, tairix_sysconfig::CacheMode::Off);
+        // Every key the document did not name is at its documented default.
+        assert_eq!(config.cache_filesystem, tairix_sysconfig::CacheMode::Auto);
+    }
+
+    /// An installation that has never had a store is not an error: it means
+    /// the documented defaults, and saying so is what lets a surface show
+    /// them rather than an absence.
+    #[test]
+    fn an_absent_store_reads_as_no_document_rather_than_a_failure() {
+        let mut fixture = Fixture::new();
+        fixture.system_config.clear();
+        assert_eq!(system_config(&fixture), Ok(None));
+    }
+
+    /// A document a hand edit has taken outside the grammar is refused
+    /// whole, exactly as `configure` refuses it: a surface must never show
+    /// part of a store it does not understand.
+    #[test]
+    fn a_malformed_store_is_refused_rather_than_half_read() {
+        let mut fixture = Fixture::new();
+        fixture.system_config = Vec::from(&b"os.loginType text\nos.notAKey wat\n"[..]);
+        assert_eq!(
+            system_config(&fixture),
+            Err(CallError::Service(Errno::BadMagic))
+        );
+        // And so is one that is not text at all.
+        fixture.system_config = alloc::vec![0xFF, 0xFE];
+        assert_eq!(
+            system_config(&fixture),
+            Err(CallError::Service(Errno::BadMagic))
         );
     }
 

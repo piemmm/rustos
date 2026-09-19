@@ -4,7 +4,7 @@ configure — 부팅 시 시스템 구성을 읽고 설정하기
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 

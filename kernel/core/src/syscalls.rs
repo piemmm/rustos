@@ -7683,6 +7683,7 @@ where
             IntrospectDomain::MemoryPressure => self.introspect.memory_pressure()?,
             IntrospectDomain::MemoryPressureBand => self.introspect.memory_pressure_band()?,
             IntrospectDomain::MemoryTotalBytes => self.introspect.memory_total_bytes()?,
+            IntrospectDomain::SystemConfig => self.introspect.system_config()?,
             IntrospectDomain::CacheLedgers => self
                 .introspect
                 .cache_ledgers(arg, records_that_fit(out_cap, CacheLedgerRecord::WIRE_LEN)?)?,
@@ -30448,6 +30449,9 @@ mod tests {
             Err(Errno::NotImplemented)
         }
         fn memory_total_bytes(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn system_config(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Err(Errno::NotImplemented)
         }
         fn cache_ledgers(

@@ -22,6 +22,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::sysinfo::SYSTEM_CONFIG_MAX_LEN;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
     KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
@@ -30,7 +31,9 @@ use tairix_abi::sysinfo::{
     CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE,
     RESOURCE_LIMITS_REPORT_LEN,
 };
-use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64, MEMORY_CLASS_COUNT};
+use tairix_abi::{
+    CapabilityId, CapabilityQuery, Duration64, Errno, LimitKind, ProcId, Time64, MEMORY_CLASS_COUNT,
+};
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
@@ -46,6 +49,23 @@ use crate::loadavg::LoadTracker;
 use crate::sched::{level_of_priority, SchedulerArch};
 use crate::users::UsersDbSource;
 use crate::wallclock::WallClockSource;
+
+/// How much of the configuration document one read asks for.
+///
+/// A whole page: the store is far smaller than one, so in practice this is
+/// a single read, and the loop above it exists because the filesystem seam
+/// promises only "up to" this many bytes.
+const CONFIG_READ_CHUNK: usize = 4096;
+
+/// The kernel's own bootstrap principal holds no capability at all, so a
+/// read it makes is admitted by the per-inode policy or not at all.
+struct NoCapabilities;
+
+impl CapabilityQuery for NoCapabilities {
+    fn holds(&self, _cap: CapabilityId) -> bool {
+        false
+    }
+}
 
 /// The OS version reported in the [`SystemIdentity`] domain, taken from the
 /// crate's own package version at build time so the reported version never
@@ -353,6 +373,41 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             max_records,
             VolumeIoQueueRecord::to_le_bytes,
         ))
+    }
+
+    fn system_config(&self) -> Result<Vec<u8>, Errno> {
+        // The kernel's own uid-0 bootstrap identity holds no capability, so
+        // the read passes the per-inode owner/mode/ACL check on its merits:
+        // the document is the machine's public configuration and world-
+        // readable, and nothing here could reach a node that is not.
+        let cred = NoCapabilities;
+        let mut document = Vec::new();
+        let mut buf = [0u8; CONFIG_READ_CHUNK];
+        loop {
+            let read = match self.filesystem.read(
+                0,
+                &cred,
+                tairix_sysconfig::CONFIG_PATH,
+                document.len() as u64,
+                &mut buf,
+            ) {
+                Ok(read) => read,
+                // No store is the fresh-installation case: the documented
+                // defaults apply, and answering nothing says exactly that.
+                Err(Errno::NotFound) => return Ok(Vec::new()),
+                Err(err) => return Err(err),
+            };
+            if read == 0 {
+                return Ok(document);
+            }
+            if document.len().saturating_add(read) > SYSTEM_CONFIG_MAX_LEN {
+                // The store's own parser refuses an over-long document
+                // whole, so serving a prefix would only turn a refusal into
+                // data that reads as the truth.
+                return Err(Errno::LengthOutOfRange);
+            }
+            document.extend_from_slice(buf.get(..read).ok_or(Errno::OutOfRange)?);
+        }
     }
 
     fn identity(&self) -> Result<Vec<u8>, Errno> {

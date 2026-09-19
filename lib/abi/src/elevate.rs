@@ -11,6 +11,12 @@
 //! code once it finishes. The requesting shell's own identity and capability
 //! set are never touched.
 //!
+//! A [`ElevateRequest::Run`] carries a bounded argument vector, so a caller
+//! can run the tool that already owns a store with the one change a user
+//! asked for instead of growing a second writer for that store. The vector
+//! widens no authority — the request already named an arbitrary absolute
+//! program — and the supervisor performs every check it always did.
+//!
 //! A graphical caller cannot use that exchange: its reply arrives only
 //! once the elevated program has exited, so a desktop session posting it
 //! would stop serving windows to the very program it is waiting for. Such
@@ -63,7 +69,33 @@ pub const ELEVATE_VERSION: u16 = 1;
 /// maximum request size. A fail-closed memory bound (the strings inside are
 /// semantically validated by the supervisor), mirroring
 /// [`crate::users_admin::USERS_ADMIN_MAX_REQUEST`].
-pub const ELEVATE_MAX_REQUEST: usize = 1024;
+///
+/// Wide enough for the account, the offered secret, an absolute program path,
+/// and a full [`ELEVATE_MAX_ARGV_BYTES`] argument vector with its framing.
+pub const ELEVATE_MAX_REQUEST: usize = 2048;
+
+/// Most arguments one [`ElevateRequest::Run`] may carry.
+///
+/// A containment bound, not a capacity: the vector exists so a caller can
+/// hand a store-writing tool the one change a user asked for, and every such
+/// invocation this system has is a handful of words. A vector a reviewer
+/// cannot read at a glance is not one worth running as another account.
+pub const ELEVATE_MAX_ARGS: usize = 16;
+
+/// Longest single argument, in bytes.
+///
+/// Holds every value the configuration registry admits — a key name, a
+/// closed-set spelling, an absolute path, or a full list of network time
+/// servers — and refuses anything that could only be a paste of something
+/// else.
+pub const ELEVATE_MAX_ARG_LEN: usize = 512;
+
+/// Most argument *content* bytes one request may carry, across the whole
+/// vector and excluding the per-argument framing.
+///
+/// Bounds the vector as a whole, so [`ELEVATE_MAX_ARGS`] arguments each at
+/// [`ELEVATE_MAX_ARG_LEN`] cannot together outgrow the request.
+pub const ELEVATE_MAX_ARGV_BYTES: usize = 1024;
 
 /// Exact byte length of an encoded [`ElevateReply`] — also the endpoint's
 /// maximum reply size: a status word and an exit code.
@@ -94,6 +126,192 @@ pub const fn elevate_endpoint(console: u64) -> Result<u64, Errno> {
     Ok(ELEVATE_ENDPOINT_BASE + console)
 }
 
+/// The argument vector an [`ElevateRequest::Run`] hands the program it
+/// starts.
+///
+/// Bounded three ways ([`ELEVATE_MAX_ARGS`], [`ELEVATE_MAX_ARG_LEN`],
+/// [`ELEVATE_MAX_ARGV_BYTES`]) and checked by one shared rule at both
+/// construction and decode, so an encoder and a decoder can never disagree
+/// on what is admissible.
+///
+/// The arguments are **data**: the broker hands them to the program
+/// verbatim and interprets none of them, so an empty argument is a
+/// well-formed one and is carried as typed. Every argument's *meaning* is
+/// the started program's to judge, and it fails closed on anything it does
+/// not understand exactly as it does on a command line.
+///
+/// It carries either a caller's slice or the packed wire bytes a decode
+/// borrowed, because this crate has no allocator to rebuild a slice with;
+/// the two compare and iterate identically, so which one a value holds is
+/// never observable.
+#[derive(Copy, Clone)]
+pub struct ElevateArgv<'a> {
+    repr: ArgvRepr<'a>,
+}
+
+/// How an [`ElevateArgv`] is holding its arguments.
+#[derive(Copy, Clone)]
+enum ArgvRepr<'a> {
+    /// A caller's own slice.
+    Slice(&'a [&'a str]),
+    /// The `count`-argument packed region a decode borrowed, already
+    /// validated: `count` repetitions of a `u16` length and that many UTF-8
+    /// bytes, and nothing after them.
+    Packed { count: u16, bytes: &'a [u8] },
+}
+
+impl<'a> ElevateArgv<'a> {
+    /// The empty vector: the program is started with no arguments of its
+    /// own, which is what every request carried before the vector existed.
+    pub const NONE: Self = Self {
+        repr: ArgvRepr::Slice(&[]),
+    };
+
+    /// The vector over `args`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] when `args` holds more than
+    /// [`ELEVATE_MAX_ARGS`] arguments, one longer than
+    /// [`ELEVATE_MAX_ARG_LEN`], or more than [`ELEVATE_MAX_ARGV_BYTES`]
+    /// content bytes in total.
+    pub fn new(args: &'a [&'a str]) -> Result<Self, Errno> {
+        check_argv(args.len(), args.iter().map(|arg| arg.len()))?;
+        Ok(Self {
+            repr: ArgvRepr::Slice(args),
+        })
+    }
+
+    /// How many arguments the vector carries.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        match self.repr {
+            ArgvRepr::Slice(args) => args.len(),
+            ArgvRepr::Packed { count, .. } => count as usize,
+        }
+    }
+
+    /// Whether the program is started with no arguments of its own.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The arguments, in order.
+    #[must_use]
+    pub const fn iter(&self) -> ElevateArgvIter<'a> {
+        match self.repr {
+            ArgvRepr::Slice(args) => ElevateArgvIter::Slice(args),
+            ArgvRepr::Packed { count, bytes } => ElevateArgvIter::Packed { left: count, bytes },
+        }
+    }
+
+    /// The encoded length of the vector: the count, then each argument's
+    /// length prefix and bytes.
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(2, |total, arg| total + 2 + arg.len())
+    }
+}
+
+impl<'a> IntoIterator for ElevateArgv<'a> {
+    type Item = &'a str;
+    type IntoIter = ElevateArgvIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &ElevateArgv<'a> {
+    type Item = &'a str;
+    type IntoIter = ElevateArgvIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl PartialEq for ElevateArgv<'_> {
+    /// By content, so a decoded vector equals the slice it was encoded from.
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for ElevateArgv<'_> {}
+
+impl core::fmt::Debug for ElevateArgv<'_> {
+    /// By content, for the same reason equality is.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+/// The arguments of an [`ElevateArgv`], in order.
+#[derive(Clone, Debug)]
+pub enum ElevateArgvIter<'a> {
+    /// Walking a caller's slice.
+    Slice(&'a [&'a str]),
+    /// Walking a validated packed region.
+    Packed {
+        /// Arguments still to yield.
+        left: u16,
+        /// The remaining length-prefixed arguments.
+        bytes: &'a [u8],
+    },
+}
+
+impl<'a> Iterator for ElevateArgvIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        match self {
+            Self::Slice(args) => {
+                let (first, rest) = args.split_first()?;
+                *args = rest;
+                Some(first)
+            }
+            Self::Packed { left, bytes } => {
+                if *left == 0 {
+                    return None;
+                }
+                // The region was validated at decode, so every step here
+                // succeeds; ending the walk on a short read keeps that an
+                // invariant rather than a panic.
+                let mut cur = Cursor::new(bytes);
+                let arg = cur.str().ok()?;
+                *bytes = bytes.get(cur.at..)?;
+                *left -= 1;
+                Some(arg)
+            }
+        }
+    }
+}
+
+/// The one admissibility rule for an argument vector, applied to a caller's
+/// slice and to a decoded region alike.
+///
+/// # Errors
+///
+/// [`Errno::LengthOutOfRange`] when the count, any one argument, or the
+/// total content exceeds its bound.
+fn check_argv(count: usize, lengths: impl Iterator<Item = usize>) -> Result<(), Errno> {
+    if count > ELEVATE_MAX_ARGS {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let mut total = 0usize;
+    for len in lengths {
+        if len > ELEVATE_MAX_ARG_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        total = total.saturating_add(len);
+        if total > ELEVATE_MAX_ARGV_BYTES {
+            return Err(Errno::LengthOutOfRange);
+        }
+    }
+    Ok(())
+}
+
 /// Wire opcode naming an [`ElevateRequest::Run`] request.
 const OPCODE_RUN: u8 = 0;
 /// Wire opcode naming an [`ElevateRequest::Verify`] request.
@@ -112,7 +330,14 @@ const OPCODE_LAUNCH: u8 = 2;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ElevateRequest<'a> {
     /// Re-authenticate `username` and, on success, run `program` as that
-    /// account.
+    /// account with the argument vector `argv`.
+    ///
+    /// The vector is what lets a caller run the tool that already owns a
+    /// store with the one change a user asked for, rather than growing a
+    /// second writer for that store. It widens no authority: the request
+    /// already named an arbitrary absolute program, and the broker still
+    /// re-authenticates the account, loads through the ordinary signed load
+    /// gate, runs as that account, and audits the decision.
     Run {
         /// The target account to re-authenticate and run as.
         username: &'a str,
@@ -120,6 +345,8 @@ pub enum ElevateRequest<'a> {
         password: &'a str,
         /// Absolute path of the program to spawn on success.
         program: &'a str,
+        /// The arguments to hand it, [`ElevateArgv::NONE`] for none.
+        argv: ElevateArgv<'a>,
     },
     /// Re-authenticate the **calling principal's own** account against
     /// `password`; run nothing.
@@ -170,8 +397,18 @@ impl<'a> ElevateRequest<'a> {
                     username,
                     password,
                     program,
+                    argv,
+                } => {
+                    if username.is_empty() || password.is_empty() || program.is_empty() {
+                        return Err(Errno::LengthOutOfRange);
+                    }
+                    check_argv(argv.len(), argv.iter().map(str::len))?;
+                    (2 + username.len())
+                        + (2 + password.len())
+                        + (2 + program.len())
+                        + argv.encoded_len()
                 }
-                | Self::Launch {
+                Self::Launch {
                     username,
                     password,
                     program,
@@ -199,8 +436,17 @@ impl<'a> ElevateRequest<'a> {
                 username,
                 password,
                 program,
+                argv,
+            } => {
+                w.str(username)?;
+                w.str(password)?;
+                w.str(program)?;
+                w.u16(u16::try_from(argv.len()).map_err(|_| Errno::LengthOutOfRange)?)?;
+                for arg in argv {
+                    w.str(arg)?;
+                }
             }
-            | Self::Launch {
+            Self::Launch {
                 username,
                 password,
                 program,
@@ -252,6 +498,7 @@ impl<'a> ElevateRequest<'a> {
                         username,
                         password,
                         program,
+                        argv: cur.argv()?,
                     }
                 } else {
                     Self::Launch {
@@ -420,6 +667,38 @@ impl<'a> Cursor<'a> {
         core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)
     }
 
+    /// A `u16` argument count and that many length-prefixed UTF-8
+    /// arguments, validated whole against the same rule an encoder applies.
+    ///
+    /// Every argument is decoded here — its length read, its bytes taken,
+    /// its UTF-8 checked — so the region the borrowed [`ElevateArgv`] keeps
+    /// is one that walks cleanly, and the iterator over it needs no error
+    /// path of its own.
+    fn argv(&mut self) -> Result<ElevateArgv<'a>, Errno> {
+        let count = self.u16()?;
+        if count as usize > ELEVATE_MAX_ARGS {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let from = self.at;
+        let mut total = 0usize;
+        for _ in 0..count {
+            let arg = self.str()?;
+            if arg.len() > ELEVATE_MAX_ARG_LEN {
+                return Err(Errno::LengthOutOfRange);
+            }
+            total = total.saturating_add(arg.len());
+            if total > ELEVATE_MAX_ARGV_BYTES {
+                return Err(Errno::LengthOutOfRange);
+            }
+        }
+        Ok(ElevateArgv {
+            repr: ArgvRepr::Packed {
+                count,
+                bytes: self.bytes.get(from..self.at).ok_or(Errno::OutOfRange)?,
+            },
+        })
+    }
+
     const fn exhausted(&self) -> bool {
         self.at == self.bytes.len()
     }
@@ -469,7 +748,8 @@ impl<'a> Writer<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_ENDPOINT_BASE, ELEVATE_MAX_REQUEST,
+        elevate_endpoint, ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_ENDPOINT_BASE,
+        ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES, ELEVATE_MAX_ARG_LEN, ELEVATE_MAX_REQUEST,
         ELEVATE_REPLY_LEN, ELEVATE_VERSION,
     };
     use crate::{Errno, ORIGIN_CONSOLE_NONE};
@@ -494,6 +774,7 @@ mod tests {
             username: "root",
             password: "hunter2",
             program: "/System/Commands/users.app/Run",
+            argv: ElevateArgv::NONE,
         };
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         let len = req.encode(&mut buf).expect("encodes");
@@ -516,13 +797,6 @@ mod tests {
     fn launch_and_run_are_distinct_on_the_wire() {
         let mut run_buf = [0u8; ELEVATE_MAX_REQUEST];
         let mut launch_buf = [0u8; ELEVATE_MAX_REQUEST];
-        let run_len = ElevateRequest::Run {
-            username: "root",
-            password: "hunter2",
-            program: "/x",
-        }
-        .encode(&mut run_buf)
-        .expect("encodes");
         let launch_len = ElevateRequest::Launch {
             username: "root",
             password: "hunter2",
@@ -530,8 +804,30 @@ mod tests {
         }
         .encode(&mut launch_buf)
         .expect("encodes");
-        assert_eq!(run_len, launch_len);
-        assert_ne!(run_buf[..run_len], launch_buf[..launch_len]);
+        // Even with no arguments to carry, a run spells its (empty) vector,
+        // so the two opcodes never encode to the same bytes.
+        let bare = ElevateRequest::Run {
+            username: "root",
+            password: "hunter2",
+            program: "/x",
+            argv: ElevateArgv::NONE,
+        }
+        .encode(&mut run_buf)
+        .expect("encodes");
+        assert_eq!(bare, launch_len + 2);
+        assert_ne!(run_buf[..launch_len], launch_buf[..launch_len]);
+        // And a launch has nowhere to put arguments: the program it starts
+        // is interactive and collects its own input.
+        let args = ["os.loginType", "text"];
+        let carried = ElevateRequest::Run {
+            username: "root",
+            password: "hunter2",
+            program: "/x",
+            argv: ElevateArgv::new(&args).expect("within bounds"),
+        }
+        .encode(&mut run_buf)
+        .expect("encodes");
+        assert!(carried > bare);
     }
 
     #[test]
@@ -587,16 +883,19 @@ mod tests {
                 username: "",
                 password: "p",
                 program: "/x",
+                argv: ElevateArgv::NONE,
             },
             ElevateRequest::Run {
                 username: "u",
                 password: "",
                 program: "/x",
+                argv: ElevateArgv::NONE,
             },
             ElevateRequest::Run {
                 username: "u",
                 password: "p",
                 program: "",
+                argv: ElevateArgv::NONE,
             },
         ] {
             assert_eq!(req.encode(&mut buf), Err(Errno::LengthOutOfRange));
@@ -639,6 +938,7 @@ mod tests {
             username: "root",
             password: "pw",
             program: "/System/Commands/ps.app/Run",
+            argv: ElevateArgv::NONE,
         };
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         let len = req.encode(&mut buf).expect("encodes");
@@ -687,9 +987,127 @@ mod tests {
             username: long,
             password: "p",
             program: "/x",
+            argv: ElevateArgv::NONE,
         };
         let mut buf = [0u8; ELEVATE_MAX_REQUEST * 2];
         assert_eq!(req.encode(&mut buf), Err(Errno::LengthOutOfRange));
+    }
+
+    #[test]
+    fn run_request_round_trips_its_argument_vector() {
+        let args = ["os.loginType", "text"];
+        let req = ElevateRequest::Run {
+            username: "root",
+            password: "hunter2",
+            program: "/System/Commands/configure.app/Run",
+            argv: ElevateArgv::new(&args).expect("within bounds"),
+        };
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = req.encode(&mut buf).expect("encodes");
+        let decoded = ElevateRequest::decode(&buf[..len]).expect("decodes");
+        assert_eq!(decoded, req);
+        let ElevateRequest::Run { argv, .. } = decoded else {
+            panic!("a run request decodes as one");
+        };
+        assert_eq!(argv.len(), 2);
+        assert!(argv.iter().eq(args));
+    }
+
+    #[test]
+    fn an_empty_argument_is_carried_as_typed() {
+        // The arguments are data the broker hands over verbatim; judging an
+        // argument's spelling is the started program's job, not the wire's.
+        let args = ["time.servers", ""];
+        let req = ElevateRequest::Run {
+            username: "root",
+            password: "p",
+            program: "/x",
+            argv: ElevateArgv::new(&args).expect("within bounds"),
+        };
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = req.encode(&mut buf).expect("encodes");
+        assert_eq!(ElevateRequest::decode(&buf[..len]), Ok(req));
+    }
+
+    #[test]
+    fn an_argument_vector_is_bounded_three_ways() {
+        let one = "a";
+        let too_many = [one; ELEVATE_MAX_ARGS + 1];
+        assert_eq!(ElevateArgv::new(&too_many), Err(Errno::LengthOutOfRange));
+        assert!(ElevateArgv::new(&too_many[..ELEVATE_MAX_ARGS]).is_ok());
+
+        let long = [b'a'; ELEVATE_MAX_ARG_LEN + 1];
+        let long = core::str::from_utf8(&long).expect("ascii");
+        assert_eq!(ElevateArgv::new(&[long]), Err(Errno::LengthOutOfRange));
+        assert!(ElevateArgv::new(&[&long[..ELEVATE_MAX_ARG_LEN]]).is_ok());
+
+        // Each argument within its own bound, the vector over the total.
+        let chunk = &long[..ELEVATE_MAX_ARG_LEN];
+        let spread = [chunk; ELEVATE_MAX_ARGV_BYTES / ELEVATE_MAX_ARG_LEN + 1];
+        assert_eq!(ElevateArgv::new(&spread), Err(Errno::LengthOutOfRange));
+    }
+
+    #[test]
+    fn an_over_long_vector_is_refused_at_decode_too() {
+        // The wire is not trusted to mirror the encoder: a hand-built record
+        // claiming more arguments than the bound admits is refused before a
+        // single one of them is read.
+        let mut bytes = [0u8; 16];
+        bytes[..2].copy_from_slice(&ELEVATE_VERSION.to_le_bytes());
+        bytes[2] = 0; // OPCODE_RUN
+        let mut at = 3;
+        for field in ["u", "p", "/x"] {
+            let len = u16::try_from(field.len()).expect("short");
+            bytes[at..at + 2].copy_from_slice(&len.to_le_bytes());
+            at += 2;
+            bytes[at..at + field.len()].copy_from_slice(field.as_bytes());
+            at += field.len();
+        }
+        let count = u16::try_from(ELEVATE_MAX_ARGS + 1).expect("small");
+        bytes[at..at + 2].copy_from_slice(&count.to_le_bytes());
+        at += 2;
+        assert_eq!(
+            ElevateRequest::decode(&bytes[..at]),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_vector_of_non_utf8_bytes_is_refused_at_decode() {
+        let args = ["key", "value"];
+        let req = ElevateRequest::Run {
+            username: "root",
+            password: "p",
+            program: "/x",
+            argv: ElevateArgv::new(&args).expect("within bounds"),
+        };
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = req.encode(&mut buf).expect("encodes");
+        // The last argument's final byte, which is inside its own content.
+        buf[len - 1] = 0xFF;
+        assert_eq!(ElevateRequest::decode(&buf[..len]), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn the_widest_admissible_vector_still_fits_one_request() {
+        // The request bound is not a second, tighter limit on the vector: a
+        // vector at every one of its own bounds still encodes, beside a
+        // full account, secret and program path.
+        let arg = [b'a'; ELEVATE_MAX_ARGV_BYTES / ELEVATE_MAX_ARGS];
+        let arg = core::str::from_utf8(&arg).expect("ascii");
+        let args = [arg; ELEVATE_MAX_ARGS];
+        let account = [b'u'; 64];
+        let secret = [b's'; 256];
+        let program = [b'/'; 512];
+        let req = ElevateRequest::Run {
+            username: core::str::from_utf8(&account).expect("ascii"),
+            password: core::str::from_utf8(&secret).expect("ascii"),
+            program: core::str::from_utf8(&program).expect("ascii"),
+            argv: ElevateArgv::new(&args).expect("within bounds"),
+        };
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = req.encode(&mut buf).expect("encodes");
+        assert_eq!(ElevateRequest::decode(&buf[..len]), Ok(req));
     }
 
     #[test]

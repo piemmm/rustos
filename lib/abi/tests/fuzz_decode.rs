@@ -38,7 +38,10 @@ use tairix_abi::driver::display::{DamageRect, DisplayFormat};
 use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, NetChannelNotify, NetChannelRequest,
 };
-use tairix_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
+use tairix_abi::elevate::{
+    ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES,
+    ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
+};
 use tairix_abi::font_ipc::{
     decode_families_reply, decode_glyphs_reply, decode_metrics_reply, encode_families_reply,
     FamilyKey, FontRequest, GlyphBatchWriter, GlyphRun, FONT_MAX_FAMILIES_REPLY,
@@ -1330,6 +1333,64 @@ fn structured_reply_inputs_with_corrupted_fields_never_panic() {
             frame[byte] ^= 1 << bit;
             exercise(&frame);
             frame[byte] ^= 1 << bit;
+        }
+    }
+}
+
+/// Every elevation request, seeded and bit-flipped a byte at a time.
+///
+/// A random input never assembles a well-formed request — it would have to
+/// land the version, the opcode, and three length-prefixed UTF-8 fields in
+/// order — so the argument vector's decoder is reached only from a
+/// structured seed. One seed per variant, plus a run at every one of the
+/// vector's own bounds, is what stops the widest frame from having no
+/// coverage at all.
+#[test]
+fn structured_elevate_requests_with_corrupted_fields_never_panic() {
+    let arg = [b'a'; ELEVATE_MAX_ARGV_BYTES / ELEVATE_MAX_ARGS];
+    let arg = std::str::from_utf8(&arg).expect("ascii");
+    let widest = [arg; ELEVATE_MAX_ARGS];
+    let one_change = ["os.loginType", "text"];
+    let mut base = std::vec![0u8; ELEVATE_MAX_REQUEST + 1];
+    for seed in [
+        ElevateRequest::Run {
+            username: "root",
+            password: "hunter2",
+            program: "/System/Commands/configure.app/Run",
+            argv: ElevateArgv::NONE,
+        },
+        ElevateRequest::Run {
+            username: "root",
+            password: "hunter2",
+            program: "/System/Commands/configure.app/Run",
+            argv: ElevateArgv::new(&one_change).expect("within bounds"),
+        },
+        ElevateRequest::Run {
+            username: "root",
+            password: "hunter2",
+            program: "/System/Commands/configure.app/Run",
+            argv: ElevateArgv::new(&widest).expect("within bounds"),
+        },
+        ElevateRequest::Launch {
+            username: "root",
+            password: "hunter2",
+            program: "/System/Applications/datetime.app/Run",
+        },
+        ElevateRequest::Verify {
+            password: "hunter2",
+        },
+    ] {
+        let len = seed
+            .encode(&mut base)
+            .expect("the max frame holds any request");
+        for byte in 0..len {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base[..len]);
+                exercise(&base[..len - 1]);
+                exercise(&base[..=len]);
+                base[byte] ^= 1 << bit;
+            }
         }
     }
 }

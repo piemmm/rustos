@@ -15,6 +15,12 @@ never diverge — the login service for `os.loginType`, and the kernel's
 cache-admission control (`kernel/core::syscfg` → `CacheControl`) for the
 `cache.*` switches (a master `cache.all` ceiling over the per-class
 `cache.filesystem` / `cache.block` / `cache.transform` / `cache.semantic`).
+A reader with no filesystem authority — the desktop Settings application —
+reaches the same document through the ungated `SYSTEM_CONFIG` System
+Information API query and parses it with this engine
+(`tairix_procinfo::system_config`), so what a settings row shows and what
+`configure` would set cannot disagree.
+
 The crate performs no
 I/O and holds no authority: file access goes through the secured VFS under
 the caller's own kernel-attested identity, and the per-inode policy on

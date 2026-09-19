@@ -44,9 +44,11 @@ mod program {
     use core::cell::Cell;
 
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
+    use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::pinboard_ipc::PinboardDocument;
+    use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowSizing};
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
     use tairix_appdata::RtHost;
@@ -55,7 +57,10 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{Stderr, Write};
-    use tairix_settings::{Shell, ShellOutcome, VolumeReading};
+    use tairix_settings::{
+        ElevateRefusal, Elevation, MachineFacts, Pane, Shell, ShellOutcome, VolumeReading,
+    };
+    use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
@@ -77,6 +82,20 @@ mod program {
     /// Its own desk rather than the applier's: the two carry different work
     /// and a shared latest-wins desk would let one evict the other.
     const MOUNTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 1;
+
+    /// The wait-set token of the machine-reading desk's wake: readable
+    /// exactly when a fresh reading of the machine's configuration and
+    /// facts has landed.
+    const MACHINE_TOKEN: u64 = app::FIRST_APP_TOKEN + 2;
+
+    /// The wait-set token of the elevated-run desk's wake: readable exactly
+    /// when the console's broker has answered an offered account.
+    ///
+    /// Its own desk because it is the one round trip that blocks for as
+    /// long as another program takes to run — a window that waited on it
+    /// would stop answering for the whole of an authentication and a store
+    /// write.
+    const ELEVATE_TOKEN: u64 = app::FIRST_APP_TOKEN + 3;
 
     /// The window's logical width at the reference density: the strip plus a
     /// content column wide enough for a pane's widest row.
@@ -151,6 +170,126 @@ mod program {
     /// and states the reason rather than showing a shorter table silently.
     type Mounts = tairix_rt::work::Worker<(), (), Vec<VolumeReading>>;
 
+    /// The machine readings: the boot-time configuration store, and the
+    /// facts the About and Date & Time panes state.
+    ///
+    /// One desk for all of them because they are one refresh: a pane that
+    /// comes on show wants the reading that backs it, and the queries are
+    /// each a single ungated round trip. A reading that is refused is left
+    /// absent, so its row states that rather than showing a value the
+    /// reader could not account for.
+    type Machine = tairix_rt::work::Worker<(), (), (Option<SystemConfig>, MachineFacts)>;
+
+    /// The machine readings' body.
+    fn read_machine(_: &mut (), (): &mut ()) -> (Option<SystemConfig>, MachineFacts) {
+        let config = match tairix_procinfo::system_config(&IpcTransport) {
+            Ok(config) => config.or_else(|| Some(SystemConfig::default())),
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: the machine's configuration could not be read ({err:?}); its rows \
+                     show no value"
+                );
+                None
+            }
+        };
+        (config, machine_facts())
+    }
+
+    /// The machine facts the About and Date & Time panes state, each taken
+    /// on its own so one refusal costs one reading rather than all of them.
+    fn machine_facts() -> MachineFacts {
+        MachineFacts {
+            identity: read_scalar(SysinfoQueryId::SYSTEM_IDENTITY)
+                .and_then(|reply| SystemIdentity::from_bytes(&reply).ok()),
+            uptime: read_scalar(SysinfoQueryId::UPTIME)
+                .and_then(|reply| Uptime::from_bytes(&reply).ok()),
+            cpus: tairix_procinfo::cpu_info(&IpcTransport).unwrap_or_default(),
+            memory_bytes: tairix_procinfo::memory_total_bytes(&IpcTransport).ok(),
+            clock: wall_clock(),
+        }
+    }
+
+    /// One scalar System Information API reading.
+    fn read_scalar(query: SysinfoQueryId) -> Option<Vec<u8>> {
+        tairix_procinfo::call(&IpcTransport, query, &[]).ok()
+    }
+
+    /// The machine's wall clock, or `None` where it could not be read.
+    fn wall_clock() -> Option<tairix_abi::time::WallClockReading> {
+        tairix_rt::wall_time().ok()
+    }
+
+    /// The elevated run: the console broker's round trip, carried out on a
+    /// worker thread.
+    ///
+    /// The broker re-authenticates the offered account, runs the program as
+    /// it, and answers only once that program has exited — which is exactly
+    /// as long as an authentication and a store write take. The loop
+    /// submits and collects the answer on the wake it nudges, so the window
+    /// keeps drawing throughout.
+    type Elevator = tairix_rt::work::Worker<(), Elevation, Result<i32, ElevateRefusal>>;
+
+    /// The elevated run's body: one posted request, one verdict.
+    ///
+    /// The offered password is wiped as soon as the exchange resolves,
+    /// whichever way it went: the request it was encoded into is erased by
+    /// the runtime's own wiped buffer, and the copy this desk was handed is
+    /// erased here.
+    fn send_elevate(_: &mut (), asked: &mut Elevation) -> Result<i32, ElevateRefusal> {
+        let argv: Vec<&str> = asked.argv.iter().map(String::as_str).collect();
+        let verdict = elevate_once(asked, &argv);
+        // Before the desk's own drop, because it keeps the job it was
+        // handed until the next one replaces it.
+        asked.erase();
+        verdict
+    }
+
+    /// Post one elevation request and turn the reply into a verdict.
+    fn elevate_once(asked: &Elevation, argv: &[&str]) -> Result<i32, ElevateRefusal> {
+        // A secret that is not text was never one the broker could check,
+        // so it is refused here rather than put on the wire.
+        let Ok(password) = core::str::from_utf8(&asked.password) else {
+            return Err(ElevateRefusal::Credentials);
+        };
+        let request = if asked.wait {
+            ElevateRequest::Run {
+                username: &asked.account,
+                password,
+                program: asked.program,
+                argv: match ElevateArgv::new(argv) {
+                    Ok(argv) => argv,
+                    Err(_) => {
+                        return Err(ElevateRefusal::NotRun(String::from(
+                            "That is more than one command can carry.",
+                        )))
+                    }
+                },
+            }
+        } else {
+            ElevateRequest::Launch {
+                username: &asked.account,
+                password,
+                program: asked.program,
+            }
+        };
+        match tairix_rt::elevate(&request) {
+            Ok(ElevateReply::Completed { exit_code }) => Ok(exit_code),
+            // A launch is started and left running; there is no exit code
+            // to wait for and none is invented.
+            Ok(ElevateReply::Launched { .. }) => Ok(0),
+            Ok(ElevateReply::Refused(Errno::PermissionDenied)) => Err(ElevateRefusal::Credentials),
+            Ok(ElevateReply::Refused(err)) => Err(ElevateRefusal::NotRun(alloc::format!(
+                "The account was accepted, but nothing ran ({err})."
+            ))),
+            // A reply to a request this program did not send: nothing ran
+            // on an answer it does not understand.
+            Ok(ElevateReply::Verified) | Err(_) => Err(ElevateRefusal::NotRun(String::from(
+                "This console has no way to ask for an account.",
+            ))),
+        }
+    }
+
     /// The mount walk's body.
     fn read_mounts(_: &mut (), (): &mut ()) -> Vec<VolumeReading> {
         let mut volumes = Vec::new();
@@ -207,6 +346,42 @@ mod program {
         }
     }
 
+    /// The machine-reading desk's client half.
+    ///
+    /// One reading at a time, because a pane only ever wants the latest
+    /// and re-asking while one is in flight would spend a round trip on
+    /// readings it is about to be told anyway.
+    struct MachineRead<'a> {
+        worker: &'a Machine,
+        pending: bool,
+    }
+
+    impl MachineRead<'_> {
+        /// Ask for a fresh reading if a pane wants one and none is
+        /// outstanding, answering whether anything on screen changed.
+        fn request(&mut self, shell: &mut Shell) -> bool {
+            if self.pending || !shell.config_wanted() {
+                return false;
+            }
+            if self.worker.submit(()) {
+                return self.settle(shell);
+            }
+            self.pending = true;
+            false
+        }
+
+        /// Adopt a landed reading, answering whether anything changed.
+        fn settle(&mut self, shell: &mut Shell) -> bool {
+            let Some((config, facts)) = self.worker.collect() else {
+                return false;
+            };
+            self.pending = false;
+            shell.adopt_config(config);
+            shell.adopt_machine(facts);
+            true
+        }
+    }
+
     /// Ask the desktop session to adopt `document`, off the event loop.
     ///
     /// A document this program cannot even encode is refused here, where it
@@ -222,6 +397,20 @@ mod program {
                 "settings document out of range",
             ))),
         }
+    }
+
+    /// Ask the console's broker to run what an offered account authorises,
+    /// off the event loop.
+    fn submit_elevate(
+        elevator: &Elevator,
+        asked: Elevation,
+    ) -> Option<Result<i32, ElevateRefusal>> {
+        // With no worker the call was made on this thread and its answer is
+        // already on the desk.
+        if elevator.submit(asked) {
+            return elevator.collect();
+        }
+        None
     }
 
     /// Adopt what the desktop answered: state a refusal, then re-read what
@@ -478,6 +667,10 @@ mod program {
         /// The mount walk's wake, drained on a [`MOUNTS_TOKEN`] wake for
         /// the same reason.
         mounts: &'a Mounts,
+        /// The machine readings' wake, drained on a [`MACHINE_TOKEN`] wake.
+        machine: &'a Machine,
+        /// The elevated run's wake, drained on an [`ELEVATE_TOKEN`] wake.
+        elevator: &'a Elevator,
         /// Set when the park woke for a desktop change, cleared when the loop
         /// adopts it.
         desktop_moved: &'a Cell<bool>,
@@ -503,6 +696,16 @@ mod program {
                 // it, and the answer is the loop's to adopt.
                 Wake::App(MOUNTS_TOKEN) => {
                     self.mounts.wake().drain();
+                    Ok(Parked::Interrupted)
+                }
+                // The machine readings landed.
+                Wake::App(MACHINE_TOKEN) => {
+                    self.machine.wake().drain();
+                    Ok(Parked::Interrupted)
+                }
+                // The broker answered an offered account.
+                Wake::App(ELEVATE_TOKEN) => {
+                    self.elevator.wake().drain();
                     Ok(Parked::Interrupted)
                 }
                 Wake::PressureChanged => {
@@ -595,6 +798,9 @@ mod program {
         /// The reader chose a setting: ask the desktop to adopt it, then
         /// re-read what it holds.
         Apply(String),
+        /// The reader offered an account: ask the console's broker to run
+        /// what it authorises, then adopt the verdict.
+        Elevate(Elevation),
         /// The desktop queued a target: drain the queue and show what it
         /// named.
         Opened,
@@ -626,6 +832,7 @@ mod program {
             ShellOutcome::Idle => Acted::Idle,
             ShellOutcome::Changed => Acted::Changed,
             ShellOutcome::Apply(document) => Acted::Apply(document),
+            ShellOutcome::Elevate(asked) => Acted::Elevate(asked),
         };
         match event {
             WindowEvent::CloseRequested { .. } => Acted::Quit,
@@ -787,9 +994,12 @@ mod program {
         let mut concluded = ShellOutcome::Idle;
         for input in pointer_input_events(action, at) {
             let acted = shell.on_pointer(&input, viewport, scale, theme, damage);
-            if matches!(acted, ShellOutcome::Apply(_))
-                || (acted.changed() && !matches!(concluded, ShellOutcome::Apply(_)))
-            {
+            // A conclusion the caller must act on outranks a repaint: a
+            // press and its release are two events, and the one that asked
+            // for something must not be lost to the one that did not.
+            let asked = matches!(acted, ShellOutcome::Apply(_) | ShellOutcome::Elevate(_));
+            let held = matches!(concluded, ShellOutcome::Apply(_) | ShellOutcome::Elevate(_));
+            if asked || (acted.changed() && !held) {
                 concluded = acted;
             }
         }
@@ -881,9 +1091,24 @@ mod program {
         themes: &'a mut ThemeRegistry,
         shell: &'a mut Shell,
         desktop_moved: &'a Cell<bool>,
-        applier: &'a Applier,
         pictures: &'a mut Pictures,
-        mounts: &'a mut MountWalk<'a>,
+        desks: Desks<'a>,
+    }
+
+    /// The four worker desks the loop submits to and collects from.
+    ///
+    /// One group, because every path through the loop reaches all of them
+    /// and each is the same shape: submit, carry on drawing, adopt the
+    /// answer on the wake it nudges.
+    struct Desks<'a> {
+        /// The desktop apply an immediate row posts.
+        applier: &'a Applier,
+        /// The mount-table walk the Storage pane lists.
+        mounts: MountWalk<'a>,
+        /// The machine's configuration and facts the General panes state.
+        machine: MachineRead<'a>,
+        /// The broker round trip an offered account costs.
+        elevator: &'a Elevator,
     }
 
     /// Adopt whatever a worker answered while the loop was parked, and
@@ -897,15 +1122,19 @@ mod program {
         shell: &mut Shell,
         themes: &ThemeRegistry,
         desktop: &Desktop,
-        applier: &Applier,
-        mounts: &mut MountWalk<'_>,
+        desks: &mut Desks<'_>,
     ) -> bool {
         let mut landed = false;
-        if let Some(outcome) = applier.collect() {
+        if let Some(outcome) = desks.applier.collect() {
             adopt_apply(shell, outcome);
             landed = true;
         }
-        landed |= mounts.settle(shell);
+        landed |= desks.mounts.settle(shell);
+        landed |= desks.machine.settle(shell);
+        if let Some(verdict) = desks.elevator.collect() {
+            shell.adopt_elevation(verdict);
+            landed = true;
+        }
         if !landed {
             return true;
         }
@@ -921,7 +1150,7 @@ mod program {
         shell: &mut Shell,
         themes: &ThemeRegistry,
         desktop: &Desktop,
-        applier: &Applier,
+        desks: &Desks<'_>,
         pictures: &mut Pictures,
     ) -> bool {
         match acted {
@@ -929,11 +1158,20 @@ mod program {
                 surface.close();
                 return true;
             }
+            Acted::Elevate(asked) => {
+                // Submitted, not awaited: the broker answers only once the
+                // program it started has exited, and a window that waited
+                // would stop drawing for the whole of it.
+                if let Some(verdict) = submit_elevate(desks.elevator, asked.clone()) {
+                    shell.adopt_elevation(verdict);
+                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+                }
+            }
             Acted::Apply(document) => {
                 // Submitted, not awaited: the answer arrives on the wake
                 // the worker nudges. With no worker to serve it the call
                 // was made here and its answer is already in hand.
-                if let Some(outcome) = submit_apply(applier, document) {
+                if let Some(outcome) = submit_apply(desks.applier, document) {
                     adopt_apply(shell, outcome);
                     shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
                 }
@@ -962,14 +1200,13 @@ mod program {
             themes,
             shell,
             desktop_moved,
-            applier,
             pictures,
-            mounts,
+            mut desks,
         } = session;
         loop {
             // An answer the park drained is the loop's to adopt, whether or
             // not an event came with it.
-            if !adopt_answers(surface, shell, themes, desktop, applier, mounts) {
+            if !adopt_answers(surface, shell, themes, desktop, &mut desks) {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
             let event = match events.wait(surface.window.client()) {
@@ -1010,7 +1247,7 @@ mod program {
                 &event,
                 &mut damage,
             );
-            if act(&acted, surface, shell, themes, desktop, applier, pictures) {
+            if act(&acted, surface, shell, themes, desktop, &desks, pictures) {
                 return 0;
             }
             // Ask for the next picture the gallery wants, whatever this
@@ -1020,8 +1257,11 @@ mod program {
             // And for the mount table, if this round put the storage pane on
             // show. With no worker to serve it the walk was made here and
             // the pane already holds its answer.
-            let volumes_landed = mounts.request(shell);
-            if volumes_landed {
+            let volumes_landed = desks.mounts.request(shell);
+            // And for the machine's own readings, if this round put a pane
+            // that states them on show.
+            let machine_landed = desks.machine.request(shell);
+            if volumes_landed || machine_landed {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
             }
             if matches!(event, WindowEvent::ContentReleased { .. }) {
@@ -1032,6 +1272,7 @@ mod program {
             // the whole client is redrawn rather than the one row the
             // choice reported.
             let whole = redraw
+                || machine_landed
                 || volumes_landed
                 || matches!(
                     acted,
@@ -1052,6 +1293,62 @@ mod program {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
         }
+    }
+
+    /// Read everything the window's first frame needs, before it opens.
+    ///
+    /// Each of these is answered from memory or from one ungated round
+    /// trip, so taking them here costs a moment at start-up and spares the
+    /// reader a first frame that states nothing it could have stated.
+    fn seat_first_frame(
+        shell: &mut Shell,
+        surface: &mut SettingsWindow,
+        desktop: &Desktop,
+        themes: &ThemeRegistry,
+    ) {
+        // The session lists the read-only picture store once at its own
+        // bring-up and answers this from memory.
+        shell.adopt_catalog(fetch_catalog(surface.window.client()));
+        // And the pointer rows their choice space, for the same reason.
+        shell.adopt_cursor_sets(fetch_cursor_sets(surface.window.client()));
+        // A pane the launch named, if it named one: a fresh process is
+        // given it as its one operand, exactly as a running instance is
+        // handed it over the channel. `args` has already dropped the
+        // program's own name, so the operand is the first of them.
+        if let Some(argv) = tairix_rt::args().filter(|argv| !argv.is_empty()) {
+            let mut sink = tairix_controls::damage::sink();
+            let viewport = surface.viewport();
+            let named = Pane::launched(&argv).is_some_and(|pane| {
+                shell.go_to(pane, viewport, desktop.scale(), themes.active(), &mut sink)
+            });
+            if !named {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: that is not a pane here; the window opens where it always does"
+                );
+            }
+        }
+        // After the launch target, so a window opened *at* the storage pane
+        // has its volumes on its first frame rather than on a later wake.
+        // The pane asks for them again each time it comes on show, because
+        // unlike the picture store the mount table moves.
+        shell.adopt_volumes(read_mounts(&mut (), &mut ()));
+        // And the machine's own readings, for the same reason: the window
+        // opens on General, whose panes state them.
+        let (config, facts) = read_machine(&mut (), &mut ());
+        shell.adopt_config(config);
+        shell.adopt_machine(facts);
+        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+    }
+
+    /// Put `worker` on a desk of its own and start it.
+    fn started<S: Send + 'static, Req: Send + 'static, Ans: Send + 'static>(
+        worker: tairix_rt::work::Worker<S, Req, Ans>,
+        what: &str,
+    ) -> alloc::sync::Arc<tairix_rt::work::Worker<S, Req, Ans>> {
+        let worker = alloc::sync::Arc::new(worker);
+        start_worker(&worker, what);
+        worker
     }
 
     /// Start a worker, stating in this program's own words why a machine
@@ -1131,56 +1428,43 @@ mod program {
         // Two desks, each its own: an apply and a mount walk carry
         // different work, and one latest-wins desk would let either evict
         // the other. Each would otherwise stall the window for a round trip.
-        let applier = alloc::sync::Arc::new(Applier::new(
-            send_apply,
-            (),
-            tairix_rt::sync::WorkerWake::create(),
-        ));
-        start_worker(&applier, "apply");
+        let applier = started(
+            Applier::new(send_apply, (), tairix_rt::sync::WorkerWake::create()),
+            "apply",
+        );
         let _applier_guard = tairix_rt::work::WorkerGuard::new(&applier);
-        let mounts = alloc::sync::Arc::new(Mounts::new(
-            read_mounts,
-            (),
-            tairix_rt::sync::WorkerWake::create(),
-        ));
-        start_worker(&mounts, "mount-table");
+        let mounts = started(
+            Mounts::new(read_mounts, (), tairix_rt::sync::WorkerWake::create()),
+            "mount-table",
+        );
         let _mounts_guard = tairix_rt::work::WorkerGuard::new(&mounts);
+        let machine = started(
+            Machine::new(read_machine, (), tairix_rt::sync::WorkerWake::create()),
+            "machine-readings",
+        );
+        let _machine_guard = tairix_rt::work::WorkerGuard::new(&machine);
+        let elevator = started(
+            Elevator::new(send_elevate, (), tairix_rt::sync::WorkerWake::create()),
+            "elevated-run",
+        );
+        let _elevator_guard = tairix_rt::work::WorkerGuard::new(&elevator);
         if let Err(code) = watch_wakes(
             binding.set(),
             &[
                 (applier.wake(), APPLY_TOKEN, "apply wake refused"),
                 (mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
+                (
+                    machine.wake(),
+                    MACHINE_TOKEN,
+                    "machine-readings wake refused",
+                ),
+                (elevator.wake(), ELEVATE_TOKEN, "elevated-run wake refused"),
             ],
         ) {
             return code;
         }
 
-        // Before the window opens, so the Wallpaper pane has its pictures
-        // to offer on its first frame rather than on a later wake. The
-        // session lists the read-only store once at its own bring-up and
-        // answers this from memory.
-        shell.adopt_catalog(fetch_catalog(surface.window.client()));
-        // And its pointer rows their choice space, for the same reason.
-        shell.adopt_cursor_sets(fetch_cursor_sets(surface.window.client()));
-        // A pane the launch named, if it named one: a fresh process is
-        // given it as its one argument, exactly as a running instance is
-        // handed it over the channel.
-        if let Some(pane) = tairix_rt::args().as_deref().and_then(|argv| argv.get(1)) {
-            let mut sink = tairix_controls::damage::sink();
-            let viewport = surface.viewport();
-            if !shell.go_to_pane(pane, viewport, desktop.scale(), themes.active(), &mut sink) {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: there is no `{pane}` here; the window opens where it always does"
-                );
-            }
-        }
-        // After the launch target, so a window opened *at* the storage pane
-        // has its volumes on its first frame rather than on a later wake.
-        // The pane asks for them again each time it comes on show, because
-        // unlike the picture store the mount table moves.
-        shell.adopt_volumes(read_mounts(&mut (), &mut ()));
-        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+        seat_first_frame(&mut shell, &mut surface, &desktop, &themes);
 
         let server = match surface.open(event_endpoint, &shell, themes.active(), desktop.scale()) {
             Ok(server) => server,
@@ -1193,6 +1477,8 @@ mod program {
             set: binding.set(),
             applier: &applier,
             mounts: &mounts,
+            machine: &machine,
+            elevator: &elevator,
             desktop_moved: &desktop_moved,
         });
         run_event_loop(
@@ -1202,11 +1488,18 @@ mod program {
                 themes: &mut themes,
                 shell: &mut shell,
                 desktop_moved: &desktop_moved,
-                applier: &applier,
                 pictures: &mut Pictures::new(),
-                mounts: &mut MountWalk {
-                    worker: &mounts,
-                    pending: false,
+                desks: Desks {
+                    applier: &applier,
+                    mounts: MountWalk {
+                        worker: &mounts,
+                        pending: false,
+                    },
+                    machine: MachineRead {
+                        worker: &machine,
+                        pending: false,
+                    },
+                    elevator: &elevator,
                 },
             },
             events,

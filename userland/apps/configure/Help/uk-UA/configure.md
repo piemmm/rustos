@@ -4,7 +4,7 @@ configure — читати й задавати конфігурацію сист
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 

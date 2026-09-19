@@ -18,8 +18,8 @@ use tairix_raster::Surface;
 use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{DesktopSettings, SettingsKey};
 
-use crate::appearance::{Composition, Setting};
-use crate::frame::{resolve_frame, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
+use crate::form::{Composition, Setting};
+use crate::frame::{resolve_frame, Actions, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
 use crate::registry::{Category, Location, Pane, StripRow, CATEGORIES};
 use crate::shell::{Shell, ShellOutcome};
 use crate::volumes::VolumeReading;
@@ -36,6 +36,18 @@ fn theme() -> Theme {
 
 fn shell() -> Shell {
     Shell::new(DesktopSettings::default()).expect("the registry holds a category")
+}
+
+/// A shell showing a pane that states an absence, which is the body that
+/// scrolls by pixels — the one a wrapped-prose column is measured against.
+fn stating() -> Shell {
+    let mut shell = shell();
+    let mut sink = damage();
+    assert!(
+        shell.go_to_pane("sound", WIDE, Scale::ONE, &theme(), &mut sink),
+        "the registry carries the pane that states the absent audio stack"
+    );
+    shell
 }
 
 fn damage() -> tairix_geometry::Region {
@@ -74,7 +86,7 @@ fn row_point(shell: &Shell, index: usize, viewport: Rect, theme: &Theme) -> Opti
 #[test]
 fn a_wide_window_seats_every_region() {
     let theme = theme();
-    let frame = resolve_frame(WIDE, Scale::ONE, &theme, Overflow::default());
+    let frame = resolve_frame(WIDE, Scale::ONE, &theme, Overflow::default(), Actions::None);
     let search = frame.search.expect("a search field");
     let sidebar = frame.sidebar.expect("a strip");
     assert_eq!(search.width, sidebar.width);
@@ -90,7 +102,13 @@ fn a_wide_window_seats_every_region() {
 #[test]
 fn a_narrow_window_sheds_the_strip_and_keeps_the_pane() {
     let theme = theme();
-    let frame = resolve_frame(NARROW, Scale::ONE, &theme, Overflow::default());
+    let frame = resolve_frame(
+        NARROW,
+        Scale::ONE,
+        &theme,
+        Overflow::default(),
+        Actions::None,
+    );
     assert!(frame.sidebar.is_none());
     assert!(frame.search.is_none(), "nothing left to filter");
     assert_eq!(frame.content.left(), NARROW.left());
@@ -110,7 +128,8 @@ fn the_strip_is_shed_exactly_at_the_stated_floor() {
         Rect::new(0, 0, exact, 480),
         Scale::ONE,
         &theme,
-        Overflow::default()
+        Overflow::default(),
+        Actions::None
     )
     .sidebar
     .is_some());
@@ -118,7 +137,8 @@ fn the_strip_is_shed_exactly_at_the_stated_floor() {
         Rect::new(0, 0, exact - 1, 480),
         Scale::ONE,
         &theme,
-        Overflow::default()
+        Overflow::default(),
+        Actions::None
     )
     .sidebar
     .is_none());
@@ -128,7 +148,13 @@ fn the_strip_is_shed_exactly_at_the_stated_floor() {
 fn a_pane_taller_than_its_column_gets_a_scrollbar_beside_it() {
     let theme = theme();
     let short = Rect::new(0, 0, 900, 120);
-    let fits = resolve_frame(short, Scale::ONE, &theme, Overflow::default());
+    let fits = resolve_frame(
+        short,
+        Scale::ONE,
+        &theme,
+        Overflow::default(),
+        Actions::None,
+    );
     assert!(fits.scrollbar.is_none());
     let scrolls = resolve_frame(
         short,
@@ -138,6 +164,7 @@ fn a_pane_taller_than_its_column_gets_a_scrollbar_beside_it() {
             strip: false,
             pane: true,
         },
+        Actions::None,
     );
     let bar = scrolls.scrollbar.expect("a bar");
     assert_eq!(bar.left(), scrolls.content.right());
@@ -156,7 +183,7 @@ fn a_pane_taller_than_its_column_gets_a_scrollbar_beside_it() {
 fn laying_out_a_short_window_raises_the_scrollbar_the_pane_needs() {
     let theme = theme();
     let short = Rect::new(0, 0, 420, 110);
-    let mut shell = shell();
+    let mut shell = stating();
     // Before any layout there is no measured range, so no bar is claimed.
     assert!(shell.frame(short, Scale::ONE, &theme).scrollbar.is_none());
 
@@ -178,7 +205,7 @@ fn laying_out_a_short_window_raises_the_scrollbar_the_pane_needs() {
 fn a_wheel_tick_over_the_pane_scrolls_it_and_stops_at_the_ends() {
     let theme = theme();
     let short = Rect::new(0, 0, 420, 110);
-    let mut shell = shell();
+    let mut shell = stating();
     shell.lay_out(short, Scale::ONE, &theme);
     let frame = shell.frame(short, Scale::ONE, &theme);
     assert!(frame.scrollbar.is_some(), "the pane scrolls");
@@ -228,6 +255,7 @@ fn a_viewport_with_no_room_for_the_band_yields_nothing() {
         Scale::ONE,
         &theme,
         Overflow::default(),
+        Actions::None,
     );
     assert!(frame.sidebar.is_none());
     assert_eq!(frame.content, Rect::EMPTY);
@@ -243,6 +271,7 @@ fn the_frame_holds_at_a_larger_density() {
         scale,
         &theme,
         Overflow::default(),
+        Actions::None,
     );
     let sidebar = frame.sidebar.expect("a strip");
     assert_eq!(sidebar.width, scale.scale_length(SIDEBAR_WIDTH).max(1));

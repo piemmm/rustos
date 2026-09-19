@@ -4,7 +4,7 @@ configure — darllen a gosod cyfluniad y system adeg cychwyn
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 

@@ -65,6 +65,11 @@ tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # shared mount-record view model that turns a record into a capacity, a
 # medium and a health band. This pane derives nothing of its own.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The boot-time configuration store's one engine: the General panes read the
+# machine's `system.conf` through it and stage a change against its own key
+# registry and value sets, so the rows a reader sees and the `configure` run
+# that writes them cannot disagree about what the store admits.
+tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 # The shared size ladder a capacity is spelled through, which the
 # Switchboard's storage page reads too.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }

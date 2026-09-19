@@ -19,7 +19,9 @@ use alloc::vec::Vec;
 
 use tairix_icon::IconKind;
 
-use crate::appearance::{Composition, Setting};
+use crate::facts::{ABOUT_FACTS, CLOCK_FACTS};
+use crate::form::{Composition, Posture, Setting};
+use crate::machine::MachineSetting;
 use crate::volumes::VOLUME_FACTS;
 
 /// One top-level entry of the sidebar: a group of related settings.
@@ -177,6 +179,12 @@ pub enum PaneContent {
     /// The mounted volumes, discovered at runtime and read-only: one card
     /// per volume rather than a fixed table of settables.
     Volumes,
+    /// What this machine is: identity, version, uptime, processors and
+    /// memory, all read-only.
+    About,
+    /// The wall clock and where its reading came from, read-only, with the
+    /// one command that changes it beneath.
+    Clock,
 }
 
 /// One pane's registry row.
@@ -211,6 +219,28 @@ impl PaneRow {
         match self.backing {
             PaneBacking::Composed(content) => Some(content),
             PaneBacking::None { .. } | PaneBacking::Elsewhere { .. } => None,
+        }
+    }
+
+    /// The label of the command this pane's action band offers, or `None`
+    /// for a pane that has no band.
+    ///
+    /// A band exists for exactly two reasons: a staged composition, whose
+    /// change is made durable by one re-authenticated run, and a reading
+    /// whose *subject* is changed by starting the application that owns it.
+    /// An immediate pane has none — its effect is its feedback, and a stale
+    /// Apply is a trap.
+    #[must_use]
+    pub const fn action(&self) -> Option<&'static str> {
+        match self.content() {
+            Some(PaneContent::Form(composition) | PaneContent::Pictures(composition)) => {
+                match composition.posture() {
+                    Posture::Staged => Some("Apply"),
+                    Posture::Immediate => None,
+                }
+            }
+            Some(PaneContent::Clock) => Some("Set Date & Time…"),
+            Some(PaneContent::About | PaneContent::Volumes) | None => None,
         }
     }
 }
@@ -268,6 +298,24 @@ impl Pane {
             .flat_map(|row| row.panes)
             .find(|row| row.name == name)
             .map(|row| row.pane)
+    }
+
+    /// The pane a launch's operands name, if they name one.
+    ///
+    /// A launch carries the pane as its single operand, and the runtime's
+    /// argument reader has already dropped the program's own name — so the
+    /// operand is the *first* of them. Reading the second instead silently
+    /// loses every launch target, because there is never one there.
+    ///
+    /// Operands beyond the first name nothing: the launch vocabulary is one
+    /// pane, and a command line carrying more is one this surface does not
+    /// understand rather than one to take a guess at.
+    #[must_use]
+    pub fn launched(args: &[&str]) -> Option<Self> {
+        match args {
+            [name] => Self::named(name),
+            _ => None,
+        }
     }
 
     /// The category that holds this pane, and its row.
@@ -436,6 +484,18 @@ fn contains_fold(haystack: &str, needle: &str) -> bool {
         })
 }
 
+/// The Login & startup pane's setting labels.
+const LOGIN_SETTINGS: &[&str] = &[MachineSetting::LoginType.label()];
+
+/// The Caching pane's setting labels.
+const CACHING_SETTINGS: &[&str] = &[
+    MachineSetting::CacheAll.label(),
+    MachineSetting::CacheFilesystem.label(),
+    MachineSetting::CacheBlock.label(),
+    MachineSetting::CacheTransform.label(),
+    MachineSetting::CacheSemantic.label(),
+];
+
 /// The Appearance pane's setting labels.
 const APPEARANCE_SETTINGS: &[&str] = &[
     Setting::Appearance.label(),
@@ -482,47 +542,29 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::About,
                 name: "about",
                 title: "About",
-                backing: PaneBacking::Elsewhere {
-                    shows: "What this system is: its name, its version, how long it has been \
-                            running, and its processors and memory.",
-                    elsewhere: "Reported by the `sysinfo` command, and by the Switchboard's \
-                                Resources section.",
-                },
-                settings: &[],
+                backing: PaneBacking::Composed(PaneContent::About),
+                settings: ABOUT_FACTS,
             },
             PaneRow {
                 pane: Pane::LoginStartup,
                 name: "login-startup",
                 title: "Login & startup",
-                backing: PaneBacking::Elsewhere {
-                    shows: "Whether this system starts at a text login or a graphical one.",
-                    elsewhere: "Set with the `configure` command, by an account that may write \
-                                the system configuration.",
-                },
-                settings: &[],
+                backing: PaneBacking::Composed(PaneContent::Form(Composition::LoginStartup)),
+                settings: LOGIN_SETTINGS,
             },
             PaneRow {
                 pane: Pane::Caching,
                 name: "caching",
                 title: "Caching",
-                backing: PaneBacking::Elsewhere {
-                    shows: "How much memory this system may keep as caches, and which caches it \
-                            keeps.",
-                    elsewhere: "Set with the `configure` command, by an account that may write \
-                                the system configuration.",
-                },
-                settings: &[],
+                backing: PaneBacking::Composed(PaneContent::Form(Composition::Caching)),
+                settings: CACHING_SETTINGS,
             },
             PaneRow {
                 pane: Pane::DateTime,
                 name: "date-time",
                 title: "Date & Time",
-                backing: PaneBacking::Elsewhere {
-                    shows: "The wall clock, and whether it is set from the network.",
-                    elsewhere: "Set from the desktop clock's Set Date & Time row, which asks for \
-                                the password of an account that may set the clock.",
-                },
-                settings: &[],
+                backing: PaneBacking::Composed(PaneContent::Clock),
+                settings: CLOCK_FACTS,
             },
         ],
     },

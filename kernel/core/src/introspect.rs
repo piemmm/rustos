@@ -280,6 +280,28 @@ pub trait IntrospectSource: Sync {
     ///
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn cpu_info(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
+    /// The boot-time system-configuration document, read fresh off the
+    /// volume: its own bytes, or an empty `Vec` where no store exists (a
+    /// fresh installation runs on the documented defaults, which is not an
+    /// error).
+    ///
+    /// Read rather than remembered: a surface showing a setting has to show
+    /// what the store says now, and a snapshot taken at the unlock would
+    /// still report the old value after the tool that owns the store had
+    /// written a new one. The document is bounded
+    /// ([`tairix_abi::sysinfo::SYSTEM_CONFIG_MAX_LEN`]) before a byte is
+    /// read, and a larger one is refused rather than truncated — the
+    /// store's own parser refuses it too, so serving a prefix would only
+    /// move the refusal somewhere it reads as data.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`];
+    /// [`Errno::LengthOutOfRange`] for a document past the bound, and
+    /// whatever the filesystem raises for a read that is neither a success
+    /// nor an absence.
+    fn system_config(&self) -> Result<Vec<u8>, Errno>;
 }
 
 /// The fail-closed default installed before the binding kernel wires the real
@@ -362,6 +384,10 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn cpu_info(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn system_config(&self) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 }

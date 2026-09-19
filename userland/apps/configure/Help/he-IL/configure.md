@@ -4,7 +4,7 @@ configure — קריאה וקביעה של תצורת המערכת בזמן הא
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 

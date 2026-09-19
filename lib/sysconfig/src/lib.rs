@@ -1049,6 +1049,19 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
+    /// The document the System Information API carries and the document
+    /// this parser accepts are the same document, so their bounds are the
+    /// same number. `lib/abi` sits beneath this crate and cannot read the
+    /// constant, so the equality is pinned here.
+    #[test]
+    fn the_abi_carries_exactly_what_this_parser_accepts() {
+        assert_eq!(
+            tairix_abi::sysinfo::SYSTEM_CONFIG_MAX_LEN,
+            MAX_CONFIG_LEN,
+            "the sysinfo query and the store parser bound the same document"
+        );
+    }
+
     #[test]
     fn an_empty_store_is_the_default_configuration() {
         assert_eq!(SystemConfig::parse(""), Ok(SystemConfig::default()));

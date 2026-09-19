@@ -6,7 +6,9 @@ at `/System/Settings/Configuration/system.conf`.
 
 - `configure` — list every setting and its current value.
 - `configure <key>` — show one setting's current value.
-- `configure <key> <value>` — set one setting (e.g.
+- `configure <key> <value> [<key> <value>]...` — set one or more settings
+  together, applied to one rendered document so a group is never half
+  written (e.g.
   `configure os.loginType graphical`).
 
 The store's grammar, closed key registry, fail-closed parse, and canonical

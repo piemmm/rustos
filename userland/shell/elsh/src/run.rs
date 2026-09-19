@@ -56,7 +56,7 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::elevate::{ElevateReply, ElevateRequest};
+    use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest};
     use tairix_abi::fs::{DirEntry, FS_IO_MAX};
     use tairix_abi::origin::{CapabilitySummary, Origin};
     use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
@@ -963,11 +963,20 @@ mod program {
             result
         }
 
-        fn elevate(&self, username: &str, password: &str, program: &str) -> Result<i32, Errno> {
+        fn elevate(
+            &self,
+            username: &str,
+            password: &str,
+            program: &str,
+            args: &[&str],
+        ) -> Result<i32, Errno> {
             let request = ElevateRequest::Run {
                 username,
                 password,
                 program,
+                // Past the protocol's bounds is refused here, before the
+                // secret is ever put on the wire.
+                argv: ElevateArgv::new(args)?,
             };
             match tairix_rt::elevate(&request)? {
                 ElevateReply::Completed { exit_code } => Ok(exit_code),

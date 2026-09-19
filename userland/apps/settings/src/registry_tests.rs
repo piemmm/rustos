@@ -425,3 +425,40 @@ fn the_bundle_presents_no_icon_bar_slot_and_runs_one_instance() {
         "a second Settings could overwrite the first's applies"
     );
 }
+
+/// A launch names its pane as the vector's **first** operand, because the
+/// runtime's argument reader has already dropped the program's own name.
+/// Reading the second instead silently loses every launch target, which is
+/// what sent *Change Background…* to the wrong pane.
+#[test]
+fn a_launch_names_its_pane_as_the_first_operand() {
+    assert_eq!(Pane::launched(&["wallpaper"]), Some(Pane::Wallpaper));
+    assert_eq!(Pane::launched(&["about"]), Some(Pane::About));
+    // Not the second: there is never a pane there, and looking for one
+    // finds nothing however the desktop spelled the launch.
+    assert_eq!(Pane::launched(&["settings", "wallpaper"]), None);
+    // And no operands names no pane, which opens the window where it
+    // always does.
+    assert_eq!(Pane::launched(&[]), None);
+    // An operand outside the closed vocabulary confers nothing and reaches
+    // nothing.
+    assert_eq!(Pane::launched(&["../../etc/passwd"]), None);
+}
+
+/// A pane offers an action band exactly where it has something durable to
+/// do: a staged composition, or a reading whose subject another application
+/// owns. An immediate pane has none, because its effect is its feedback and
+/// a stale Apply is a trap.
+#[test]
+fn only_a_staged_pane_or_a_reading_with_an_owner_offers_a_command() {
+    let action = |pane: Pane| pane.locate().and_then(|(_, row)| row.action());
+    assert_eq!(action(Pane::LoginStartup), Some("Apply"));
+    assert_eq!(action(Pane::Caching), Some("Apply"));
+    assert_eq!(action(Pane::DateTime), Some("Set Date & Time…"));
+    assert_eq!(action(Pane::Appearance), None);
+    assert_eq!(action(Pane::Wallpaper), None);
+    assert_eq!(action(Pane::About), None);
+    assert_eq!(action(Pane::Storage), None);
+    // A pane that states an absence offers nothing to press either.
+    assert_eq!(action(Pane::Sound), None);
+}

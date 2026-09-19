@@ -1,4 +1,5 @@
-//! The desktop's settings registry as form rows.
+//! The settings registry as form rows, and the one column of plates every
+//! composed pane draws.
 //!
 //! One definition of each settable, and the panes that each select a subset
 //! of it: Appearance offers light/dark and the interface axes, Accessibility
@@ -7,6 +8,14 @@
 //! of the first two, so neither pane may carry its own copy of what contrast
 //! *is* — the label, the sentence beneath it, the choices it offers, and the
 //! key it writes all live here once.
+//!
+//! The settables span **two** stores, and a composition names which of them
+//! its rows write: the desktop's own document, which the session owns and
+//! adopts a change to at once, and the machine's `system.conf`, which
+//! `configure` owns and a staged change is applied to by re-running it as an
+//! account that may. One plate column serves both — a second would be two
+//! places to get focus, scrolling and hit-testing right (`crate::machine`
+//! holds the machine settables themselves).
 //!
 //! A composition also names the **group of keys** its rows write, because
 //! the session merges an apply over what the desktop holds: a pane that
@@ -27,11 +36,13 @@ use tairix_controls::{
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
+use tairix_sysconfig::{Key as ConfigKey, SystemConfig};
 use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{
     Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, Rgb, SettingsKey, WallpaperFit,
 };
 
+use crate::machine::MachineSetting;
 use crate::stack;
 
 /// The UI scales the surface offers, as percentages of the reference
@@ -428,26 +439,74 @@ fn backdrop_choices(current: Backdrop) -> (Vec<String>, usize) {
     (ladder.into_iter().map(|(label, _)| label).collect(), at)
 }
 
+/// Which store a row writes, and which settable of it.
+///
+/// A row is one or the other and never both: the two documents have
+/// different owners, different write paths, and different apply postures,
+/// so a settable that could be either would be a settable with no owner.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Owner {
+    /// The desktop's own settings document, which the session owns.
+    Desktop(Setting),
+    /// The machine's boot-time configuration store, which `configure`
+    /// owns.
+    Machine(MachineSetting),
+}
+
+impl Owner {
+    /// The row's leading label, which is also its search term.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Desktop(setting) => setting.label(),
+            Self::Machine(setting) => setting.label(),
+        }
+    }
+}
+
 /// One captioned group of a composed pane: its caption and the settings it
 /// holds, in order.
 struct GroupSpec {
     caption: &'static str,
-    settings: &'static [Setting],
+    settings: &'static [Owner],
 }
+
+/// The Login & startup pane's one group.
+const LOGIN_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "STARTUP",
+    settings: &[Owner::Machine(MachineSetting::LoginType)],
+}];
+
+/// The Caching pane's groups: the master switch, then the classes it is a
+/// ceiling over.
+const CACHING_GROUPS: [GroupSpec; 2] = [
+    GroupSpec {
+        caption: "CACHING",
+        settings: &[Owner::Machine(MachineSetting::CacheAll)],
+    },
+    GroupSpec {
+        caption: "WHAT IS CACHED",
+        settings: &[
+            Owner::Machine(MachineSetting::CacheFilesystem),
+            Owner::Machine(MachineSetting::CacheBlock),
+            Owner::Machine(MachineSetting::CacheTransform),
+            Owner::Machine(MachineSetting::CacheSemantic),
+        ],
+    },
+];
 
 /// The Appearance pane's groups.
 const APPEARANCE_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "APPEARANCE",
-        settings: &[Setting::Appearance],
+        settings: &[Owner::Desktop(Setting::Appearance)],
     },
     GroupSpec {
         caption: "INTERFACE",
         settings: &[
-            Setting::Contrast,
-            Setting::Density,
-            Setting::Motion,
-            Setting::Scale,
+            Owner::Desktop(Setting::Contrast),
+            Owner::Desktop(Setting::Density),
+            Owner::Desktop(Setting::Motion),
+            Owner::Desktop(Setting::Scale),
         ],
     },
 ];
@@ -457,15 +516,22 @@ const APPEARANCE_GROUPS: [GroupSpec; 2] = [
 const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
     GroupSpec {
         caption: "DISPLAY",
-        settings: &[Setting::Contrast, Setting::Density, Setting::Scale],
+        settings: &[
+            Owner::Desktop(Setting::Contrast),
+            Owner::Desktop(Setting::Density),
+            Owner::Desktop(Setting::Scale),
+        ],
     },
     GroupSpec {
         caption: "MOTION",
-        settings: &[Setting::Motion],
+        settings: &[Owner::Desktop(Setting::Motion)],
     },
     GroupSpec {
         caption: "POINTER",
-        settings: &[Setting::CursorSet, Setting::CursorSize],
+        settings: &[
+            Owner::Desktop(Setting::CursorSet),
+            Owner::Desktop(Setting::CursorSize),
+        ],
     },
 ];
 
@@ -474,12 +540,29 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
 const WALLPAPER_GROUPS: [GroupSpec; 1] = [GroupSpec {
     caption: "DESKTOP",
     settings: &[
-        Setting::Fit,
-        Setting::Backdrop,
-        Setting::Icons,
-        Setting::Sort,
+        Owner::Desktop(Setting::Fit),
+        Owner::Desktop(Setting::Backdrop),
+        Owner::Desktop(Setting::Icons),
+        Owner::Desktop(Setting::Sort),
     ],
 }];
+
+/// How a composition's changes become durable.
+///
+/// Declared per composition and never improvised, so a reader learns the
+/// rule once rather than per pane.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Posture {
+    /// The change is cheap, reversible, and its effect is the feedback: the
+    /// row commits on interaction and the desktop adopts it. There is no
+    /// Apply button, because there is nothing to batch and a stale Apply is
+    /// a trap.
+    Immediate,
+    /// The change needs re-authentication, so it is edited as a working
+    /// copy and applied as one command: the pane shows which rows differ
+    /// from what is in effect and offers Apply and Revert.
+    Staged,
+}
 
 /// Which settings a pane composes, in the order its groups list them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -490,6 +573,10 @@ pub enum Composition {
     Accessibility,
     /// The Wallpaper pane's settings rows, beneath its picture gallery.
     Wallpaper,
+    /// The Login & startup pane.
+    LoginStartup,
+    /// The Caching pane.
+    Caching,
 }
 
 impl Composition {
@@ -499,6 +586,20 @@ impl Composition {
             Self::Appearance => &APPEARANCE_GROUPS,
             Self::Accessibility => &ACCESSIBILITY_GROUPS,
             Self::Wallpaper => &WALLPAPER_GROUPS,
+            Self::LoginStartup => &LOGIN_GROUPS,
+            Self::Caching => &CACHING_GROUPS,
+        }
+    }
+
+    /// How this composition's changes become durable.
+    #[must_use]
+    pub const fn posture(self) -> Posture {
+        match self {
+            Self::Appearance | Self::Accessibility | Self::Wallpaper => Posture::Immediate,
+            // Writing the machine's store is a re-authenticated run of the
+            // tool that owns it, which is not something to ask for per
+            // pointer sample.
+            Self::LoginStartup | Self::Caching => Posture::Staged,
         }
     }
 
@@ -507,10 +608,12 @@ impl Composition {
     /// Only its own, because the session merges an apply over what the
     /// desktop holds: a pane that rendered the whole document would
     /// reimpose whatever the other panes happened to hold when it opened.
+    /// A staged composition renders no desktop document at all.
     const fn keys(self) -> &'static [SettingsKey] {
         match self {
             Self::Appearance | Self::Accessibility => &SettingsKey::APPEARANCE,
             Self::Wallpaper => &SettingsKey::PINBOARD,
+            Self::LoginStartup | Self::Caching => &[],
         }
     }
 
@@ -520,17 +623,14 @@ impl Composition {
     pub fn labels(self) -> Vec<&'static str> {
         self.groups()
             .iter()
-            .flat_map(|group| group.settings.iter().map(|setting| setting.label()))
+            .flat_map(|group| group.settings.iter().map(|owner| owner.label()))
             .collect()
     }
 
-    /// The groups and the setting each of their rows carries, built from
-    /// what the desktop currently holds and the choice spaces it answered.
-    fn build(
-        self,
-        settings: &DesktopSettings,
-        offered: Offered<'_>,
-    ) -> (Vec<FieldGroup>, Vec<Vec<Setting>>) {
+    /// The groups and the settable each of their rows carries, built from
+    /// what each store currently holds and the choice spaces the desktop
+    /// answered.
+    fn build(self, documents: Documents<'_>) -> (Vec<FieldGroup>, Vec<Vec<Owner>>) {
         let mut groups = Vec::with_capacity(self.groups().len());
         let mut owners = Vec::with_capacity(self.groups().len());
         for spec in self.groups() {
@@ -538,13 +638,39 @@ impl Composition {
                 spec.caption,
                 spec.settings
                     .iter()
-                    .map(|setting| setting.row(settings, offered))
+                    .map(|owner| match owner {
+                        Owner::Desktop(setting) => setting.row(
+                            documents.settings,
+                            Offered {
+                                cursor_sets: documents.cursor_sets,
+                            },
+                        ),
+                        Owner::Machine(setting) => setting.row(documents.config),
+                    })
                     .collect(),
             ));
             owners.push(spec.settings.to_vec());
         }
         (groups, owners)
     }
+}
+
+/// The stores a form's rows are built from.
+///
+/// The machine's is an [`Option`] because it is *read*, and a reading that
+/// has not landed is not the same fact as a store of defaults: a row with
+/// no reading says so rather than showing a value the reader could not have
+/// set.
+#[derive(Copy, Clone, Debug)]
+pub struct Documents<'a> {
+    /// The desktop's own settings document, which the caller always holds
+    /// (an unpublished one means the documented defaults).
+    pub settings: &'a DesktopSettings,
+    /// The cursor sets the desktop answered with.
+    pub cursor_sets: &'a [CursorSetId],
+    /// The machine's boot-time configuration, or `None` while it has not
+    /// been read.
+    pub config: Option<&'a SystemConfig>,
 }
 
 /// Which end of the group the cursor lands on when it steps into it.
@@ -590,6 +716,10 @@ pub enum FormOutcome {
     /// whole document would reimpose whatever the other panes happened to
     /// hold when it opened.
     Apply(String),
+    /// The reader changed a staged row. Nothing durable happened and
+    /// nothing was asked for; the pane's own action band has to re-render,
+    /// because what it offers depends on whether anything now differs.
+    Staged,
 }
 
 /// A composed pane: the groups it draws, and the setting behind each row.
@@ -602,9 +732,16 @@ pub enum FormOutcome {
 pub struct Form {
     composition: Composition,
     groups: Vec<FieldGroup>,
-    /// The setting each row writes, indexed as `groups`.
-    owners: Vec<Vec<Setting>>,
+    /// The settable each row writes, indexed as `groups`.
+    owners: Vec<Vec<Owner>>,
     settings: DesktopSettings,
+    /// The working copy of the machine's store the staged rows edit, and
+    /// `None` while it has not been read.
+    config: Option<SystemConfig>,
+    /// What the machine's store actually holds, so a dirty row is the
+    /// difference between the two rather than a flag a revert could leave
+    /// set.
+    config_in_effect: Option<SystemConfig>,
     /// The cursor sets the desktop answered with, kept so a rebuild offers
     /// the same choice space rather than collapsing to the built-in one.
     cursor_sets: Vec<CursorSetId>,
@@ -621,21 +758,18 @@ pub struct Form {
 }
 
 impl Form {
-    /// The form `composition` draws for the desktop `settings`, offering
-    /// the cursor sets in `cursor_sets`.
+    /// The form `composition` draws for the stores in `documents`.
     #[must_use]
-    pub fn new(
-        composition: Composition,
-        settings: &DesktopSettings,
-        cursor_sets: &[CursorSetId],
-    ) -> Self {
-        let (groups, owners) = composition.build(settings, Offered { cursor_sets });
+    pub fn new(composition: Composition, documents: Documents<'_>) -> Self {
+        let (groups, owners) = composition.build(documents);
         Self {
             composition,
             groups,
             owners,
-            settings: settings.clone(),
-            cursor_sets: cursor_sets.to_vec(),
+            settings: documents.settings.clone(),
+            config: documents.config.cloned(),
+            config_in_effect: documents.config.cloned(),
+            cursor_sets: documents.cursor_sets.to_vec(),
             focus: 0,
             first: 0,
         }
@@ -647,20 +781,77 @@ impl Form {
     /// become the ones the store actually holds, so an apply the session
     /// refused reverts rather than standing.
     pub fn adopt(&mut self, settings: &DesktopSettings) {
-        let (groups, owners) = self.composition.build(settings, self.offered());
+        self.settings = settings.clone();
+        self.rebuild();
+    }
+
+    /// Adopt what the machine's store now holds.
+    ///
+    /// The working copy goes with it: a reading that lands is the truth,
+    /// and an edit staged against an older one would apply a change the
+    /// reader made to a value that has since moved.
+    pub fn adopt_config(&mut self, config: Option<&SystemConfig>) {
+        self.config = config.cloned();
+        self.config_in_effect = config.cloned();
+        self.rebuild();
+    }
+
+    /// Put the working copy back to what the store holds.
+    pub fn revert(&mut self) {
+        self.config.clone_from(&self.config_in_effect);
+        self.rebuild();
+    }
+
+    /// The store settings this form's working copy differs from what is in
+    /// effect on, each with the value it would be set to.
+    ///
+    /// The whole of what an apply asks for, in registry order, so the one
+    /// elevated run writes every change together and the document is
+    /// rendered once.
+    #[must_use]
+    pub fn pending(&self) -> Vec<(ConfigKey, &'static str)> {
+        let (Some(working), Some(effect)) = (self.config.as_ref(), self.config_in_effect.as_ref())
+        else {
+            return Vec::new();
+        };
+        self.owners
+            .iter()
+            .flatten()
+            .filter_map(|owner| match owner {
+                Owner::Machine(setting) => {
+                    let value = setting.value(working);
+                    (value != setting.value(effect)).then_some((setting.key(), value))
+                }
+                Owner::Desktop(_) => None,
+            })
+            .collect()
+    }
+
+    /// Whether row `row` of group `group` differs from what is in effect.
+    #[must_use]
+    pub fn is_dirty(&self, group: usize, row: usize) -> bool {
+        let (Some(working), Some(effect)) = (self.config.as_ref(), self.config_in_effect.as_ref())
+        else {
+            return false;
+        };
+        match self.owners.get(group).and_then(|rows| rows.get(row)) {
+            Some(Owner::Machine(setting)) => setting.value(working) != setting.value(effect),
+            Some(Owner::Desktop(_)) | None => false,
+        }
+    }
+
+    /// Rebuild every row from the stores the form currently holds.
+    fn rebuild(&mut self) {
+        let (groups, owners) = self.composition.build(Documents {
+            settings: &self.settings,
+            cursor_sets: &self.cursor_sets,
+            config: self.config.as_ref(),
+        });
         self.groups = groups;
         self.owners = owners;
-        self.settings = settings.clone();
         let last = self.groups.len().saturating_sub(1);
         self.focus = self.focus.min(last);
         self.first = self.first.min(last);
-    }
-
-    /// The choice spaces the document cannot supply on its own.
-    fn offered(&self) -> Offered<'_> {
-        Offered {
-            cursor_sets: &self.cursor_sets,
-        }
     }
 
     /// The physical height this form needs.
@@ -833,7 +1024,7 @@ impl Form {
             // closing, which changes the pixels and nothing else.
             return FormOutcome::Changed;
         };
-        let Some(setting) = self
+        let Some(owner) = self
             .owners
             .get(group)
             .and_then(|rows| rows.get(action.row))
@@ -841,13 +1032,36 @@ impl Form {
         else {
             return FormOutcome::Changed;
         };
-        let offered = Offered {
-            cursor_sets: &self.cursor_sets,
-        };
-        if !setting.adopt(index, &mut self.settings, offered) {
-            return FormOutcome::Changed;
+        match owner {
+            Owner::Desktop(setting) => {
+                let offered = Offered {
+                    cursor_sets: &self.cursor_sets,
+                };
+                if !setting.adopt(index, &mut self.settings, offered) {
+                    return FormOutcome::Changed;
+                }
+                FormOutcome::Apply(self.applied())
+            }
+            Owner::Machine(setting) => {
+                // A working copy, never a write: the store is reached by
+                // re-running the tool that owns it, and doing that per
+                // pointer sample is exactly what a staged pane exists to
+                // avoid.
+                let Some(config) = self.config.as_mut() else {
+                    return FormOutcome::Changed;
+                };
+                if !setting.adopt(index, config) {
+                    return FormOutcome::Changed;
+                }
+                // The master switch is a ceiling over the rows beneath it,
+                // so turning it off restates them rather than leaving four
+                // rows claiming to be running.
+                if setting == MachineSetting::CacheAll {
+                    self.rebuild();
+                }
+                FormOutcome::Staged
+            }
         }
-        FormOutcome::Apply(self.applied())
     }
 
     /// The document this form's current values mean, over its own keys
@@ -976,6 +1190,12 @@ impl Form {
         }
     }
 
+    /// How this form's changes become durable.
+    #[must_use]
+    pub const fn posture(&self) -> Posture {
+        self.composition.posture()
+    }
+
     /// The settings the form currently shows.
     #[must_use]
     pub const fn settings(&self) -> &DesktopSettings {
@@ -986,6 +1206,29 @@ impl Form {
     #[cfg(test)]
     pub(crate) fn groups(&self) -> &[FieldGroup] {
         &self.groups
+    }
+
+    /// Choose the value at `index` for group `group`'s row `row`, through
+    /// the same adoption path a committed choice list takes.
+    ///
+    /// A test seam over the *routing* only: what it exercises is the
+    /// working copy, the dirty set and the ceiling restatement, none of
+    /// which a choice list's own keyboard mechanics (which `lib/controls`
+    /// tests) has any part in.
+    #[cfg(test)]
+    pub(crate) fn choose_for_test(
+        &mut self,
+        group: usize,
+        row: usize,
+        index: usize,
+    ) -> FormOutcome {
+        self.acted(Some((
+            group,
+            tairix_controls::FieldGroupAction {
+                row,
+                action: tairix_controls::FieldAction::Selected { index },
+            },
+        )))
     }
 }
 

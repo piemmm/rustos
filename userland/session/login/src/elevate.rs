@@ -39,7 +39,7 @@
 //! binary owns the IPC serve loop (`call_recv` → this → `call_reply`) and
 //! the syscall-backed launcher.
 
-use tairix_abi::elevate::{ElevateReply, ElevateRequest};
+use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest};
 use tairix_abi::Errno;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
@@ -57,15 +57,19 @@ use crate::session::{Authenticator, Credentials};
 /// an elevation runs one explicit program and must never consult the
 /// account's shell.
 pub trait ElevateLauncher {
-    /// Spawn `program` as `uid`, block until it exits, and return its exit
-    /// code.
+    /// Spawn `program` as `uid` with the argument vector `argv`, block until
+    /// it exits, and return its exit code.
+    ///
+    /// The arguments are data the implementation hands the child verbatim;
+    /// they confer nothing, and the child's capability set is still its
+    /// manifest intersected with the target account's ceiling.
     ///
     /// # Errors
     ///
     /// Returns the implementation's [`Errno`] verbatim when the program
     /// cannot be spawned or reaped (unknown path, spawn refused, …); the
     /// broker reports it to the requester and audits it.
-    fn run_as(&self, program: &str, uid: u32) -> Result<i32, Errno>;
+    fn run_as(&self, program: &str, argv: ElevateArgv<'_>, uid: u32) -> Result<i32, Errno>;
 
     /// Spawn `program` as `uid` and return its pid **without waiting for
     /// it**.
@@ -93,6 +97,9 @@ pub trait ElevateLauncher {
 ///    is refused before its bytes are even parsed.
 /// 2. **Shape** — the request must decode ([`ElevateRequest::decode`],
 ///    fail-closed).
+///    A malformed or over-long argument vector is refused here, at the
+///    shape check, so a request that could never be run costs no
+///    authentication attempt against the named account.
 /// 3. **Re-authentication** — for [`ElevateRequest::Run`], the offered
 ///    `(username, password)` must verify through `authenticator`; for
 ///    [`ElevateRequest::Verify`], `password` must verify against the
@@ -102,8 +109,8 @@ pub trait ElevateLauncher {
 ///    ([`Errno::PermissionDenied`] — the cause is audited, never
 ///    disclosed).
 /// 4. **Run** — for [`ElevateRequest::Run`] the program is spawned as the
-///    target account and waited for; for [`ElevateRequest::Launch`] it is
-///    spawned and its pid answered at once. Either way a spawn refusal is
+///    target account with the request's argument vector and waited for; for
+///    [`ElevateRequest::Launch`] it is spawned and its pid answered at once. Either way a spawn refusal is
 ///    reported verbatim. A [`ElevateRequest::Verify`] request never reaches
 ///    the launcher: a successful re-authentication answers
 ///    [`ElevateReply::Verified`] directly.
@@ -139,7 +146,15 @@ pub fn handle_elevate_request(
             username,
             password,
             program,
-        } => handle_run(username, password, program, authenticator, launcher, sink),
+            argv,
+        } => handle_run(
+            username,
+            password,
+            Started { program, argv },
+            authenticator,
+            launcher,
+            sink,
+        ),
         ElevateRequest::Verify { password } => {
             handle_verify(peer_uid, password, authenticator, sink)
         }
@@ -151,12 +166,21 @@ pub fn handle_elevate_request(
     }
 }
 
+/// What a [`ElevateRequest::Run`] asks to be started: the program and the
+/// arguments to hand it, carried together because neither is meaningful
+/// without the other.
+#[derive(Copy, Clone)]
+struct Started<'a> {
+    program: &'a str,
+    argv: ElevateArgv<'a>,
+}
+
 /// Decide a [`ElevateRequest::Run`] request: re-authenticate `username`
-/// and, on success, spawn `program` as that account.
+/// and, on success, spawn the named program as that account.
 fn handle_run(
     username: &str,
     password: &str,
-    program: &str,
+    started: Started<'_>,
     authenticator: &dyn Authenticator,
     launcher: &dyn ElevateLauncher,
     sink: &dyn Sink,
@@ -174,9 +198,9 @@ fn handle_run(
         );
         return ElevateReply::Refused(Errno::PermissionDenied);
     };
-    match launcher.run_as(program, user.uid.0) {
+    match launcher.run_as(started.program, started.argv, user.uid.0) {
         Ok(exit_code) => {
-            audit_granted(sink, username, program, user.uid.0, exit_code);
+            audit_granted(sink, username, started, user.uid.0, exit_code);
             ElevateReply::Completed { exit_code }
         }
         Err(err) => {
@@ -266,9 +290,19 @@ fn emit(sink: &dyn Sink, level: Level, id: EventId, message: &str, fields: &[Fie
     );
 }
 
-fn audit_granted(sink: &dyn Sink, username: &str, program: &str, uid: u32, exit_code: i32) {
+/// Audit a granted run.
+///
+/// The argument vector is recorded as a **count**, never as content: the
+/// broker hands the arguments over without interpreting them, so it cannot
+/// know which of them is a secret — a tool that sets an account's password
+/// would take one on its command line — and a log that might carry one is
+/// worse than a log that carries none. What the elevated run changed is the
+/// elevated tool's own to audit, where the authority and the meaning both
+/// are.
+fn audit_granted(sink: &dyn Sink, username: &str, started: Started<'_>, uid: u32, exit_code: i32) {
     let mut uid_buf = DecBuf::new();
     let mut code_buf = DecBuf::new();
+    let mut args_buf = DecBuf::new();
     emit(
         sink,
         Level::Info,
@@ -285,7 +319,13 @@ fn audit_granted(sink: &dyn Sink, username: &str, program: &str, uid: u32, exit_
             },
             Field {
                 key: "program",
-                value: tairix_log::FieldValue::Str(program),
+                value: tairix_log::FieldValue::Str(started.program),
+            },
+            Field {
+                key: "args",
+                value: tairix_log::FieldValue::Str(
+                    args_buf.format(i128::try_from(started.argv.len()).unwrap_or(i128::MAX)),
+                ),
             },
             Field {
                 key: "exit_code",
@@ -459,7 +499,9 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST};
+    use tairix_abi::elevate::{
+        ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_ARGS, ELEVATE_MAX_REQUEST,
+    };
     use tairix_abi::{Errno, LOAD_UNVERIFIED};
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Sink};
@@ -506,11 +548,15 @@ mod tests {
         }
     }
 
+    /// One recorded run: the program, the arguments it was handed, and the
+    /// account it ran as.
+    type RecordedRun = (alloc::string::String, Vec<alloc::string::String>, u32);
+
     /// Launcher recording each run and each launch, and returning a
     /// scripted outcome for both.
     struct MockLauncher {
         outcome: Result<i32, Errno>,
-        runs: RefCell<Vec<(alloc::string::String, u32)>>,
+        runs: RefCell<Vec<RecordedRun>>,
         launches: RefCell<Vec<(alloc::string::String, u32)>>,
     }
 
@@ -525,14 +571,38 @@ mod tests {
     }
 
     impl ElevateLauncher for MockLauncher {
-        fn run_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
-            self.runs.borrow_mut().push((program.to_string(), uid));
+        fn run_as(&self, program: &str, argv: ElevateArgv<'_>, uid: u32) -> Result<i32, Errno> {
+            self.runs.borrow_mut().push((
+                program.to_string(),
+                argv.iter().map(ToString::to_string).collect(),
+                uid,
+            ));
             self.outcome
         }
 
         fn launch_as(&self, program: &str, uid: u32) -> Result<i64, Errno> {
             self.launches.borrow_mut().push((program.to_string(), uid));
             self.outcome.map(i64::from)
+        }
+    }
+
+    /// An authenticator that refuses everything and records that it was
+    /// asked at all, so a test can prove a refusal happened *before* any
+    /// attempt was spent against the named account.
+    #[derive(Default)]
+    struct CountingAuth {
+        attempts: core::cell::Cell<usize>,
+    }
+
+    impl Authenticator for CountingAuth {
+        fn authenticate(&self, _credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
+            self.attempts.set(self.attempts.get() + 1);
+            Err(Errno::PermissionDenied)
+        }
+
+        fn authenticate_uid(&self, _uid: u32, _password: &str) -> Result<AuthenticatedUser, Errno> {
+            self.attempts.set(self.attempts.get() + 1);
+            Err(Errno::PermissionDenied)
         }
     }
 
@@ -577,11 +647,21 @@ mod tests {
         password: &str,
         program: &str,
     ) -> ([u8; ELEVATE_MAX_REQUEST], usize) {
+        encoded_run_with(username, password, program, &[])
+    }
+
+    fn encoded_run_with(
+        username: &str,
+        password: &str,
+        program: &str,
+        args: &[&str],
+    ) -> ([u8; ELEVATE_MAX_REQUEST], usize) {
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         let len = ElevateRequest::Run {
             username,
             password,
             program,
+            argv: ElevateArgv::new(args).expect("within bounds"),
         }
         .encode(&mut buf)
         .expect("encodes");
@@ -622,10 +702,89 @@ mod tests {
         assert_eq!(reply, ElevateReply::Completed { exit_code: 7 });
         assert_eq!(
             launcher.runs.borrow().as_slice(),
-            &[("/System/Commands/users.app/Run".to_string(), 0)]
+            &[("/System/Commands/users.app/Run".to_string(), Vec::new(), 0)]
         );
         assert_eq!(sink.count(events::ELEVATE_GRANTED), 1);
         assert_eq!(sink.count(events::ELEVATE_REFUSED), 0);
+    }
+
+    #[test]
+    fn a_run_hands_its_argument_vector_to_the_launcher_verbatim() {
+        let (buf, len) = encoded_run_with(
+            "root",
+            "correct",
+            "/System/Commands/configure.app/Run",
+            &["os.loginType", "text"],
+        );
+        let launcher = MockLauncher::new(Ok(0));
+        let sink = CountSink::default();
+        let reply =
+            handle_elevate_request(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Completed { exit_code: 0 });
+        assert_eq!(
+            launcher.runs.borrow().as_slice(),
+            &[(
+                "/System/Commands/configure.app/Run".to_string(),
+                alloc::vec!["os.loginType".to_string(), "text".to_string()],
+                0,
+            )]
+        );
+    }
+
+    #[test]
+    fn the_audit_records_the_argument_count_and_never_the_arguments() {
+        // A tool that sets an account's password would take one on its
+        // command line, and the broker cannot tell which argument that is —
+        // so no argument reaches the log, only how many there were.
+        let (buf, len) = encoded_run_with(
+            "root",
+            "correct",
+            "/System/Commands/configure.app/Run",
+            &["os.loginType", "hunter2"],
+        );
+        let launcher = MockLauncher::new(Ok(0));
+        let sink = CountSink::default();
+        let _ = handle_elevate_request(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(sink.count(events::ELEVATE_GRANTED), 1);
+        assert_eq!(sink.field("args").as_deref(), Some("2"));
+        assert!(!sink
+            .fields
+            .borrow()
+            .iter()
+            .any(|(_, value)| value.contains("hunter2") || value == "os.loginType"));
+    }
+
+    #[test]
+    fn an_over_long_argument_vector_is_refused_before_any_authentication() {
+        // Hand-built past the bound the encoder enforces, so the refusal
+        // proved here is the *decoder's* — the shape check the broker runs
+        // before it spends an attempt against the named account.
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let mut at = 0;
+        buf[at..at + 2].copy_from_slice(&1u16.to_le_bytes()); // ELEVATE_VERSION
+        at += 2;
+        buf[at] = 0; // the run opcode
+        at += 1;
+        for field in ["root", "correct", "/System/Commands/configure.app/Run"] {
+            let len = u16::try_from(field.len()).expect("short");
+            buf[at..at + 2].copy_from_slice(&len.to_le_bytes());
+            at += 2;
+            buf[at..at + field.len()].copy_from_slice(field.as_bytes());
+            at += field.len();
+        }
+        let count = u16::try_from(ELEVATE_MAX_ARGS + 1).expect("small");
+        buf[at..at + 2].copy_from_slice(&count.to_le_bytes());
+        at += 2;
+
+        let launcher = MockLauncher::new(Ok(0));
+        let sink = CountSink::default();
+        let auth = CountingAuth::default();
+        let reply = handle_elevate_request(&buf[..at], 1, Some(0), 1, &auth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Refused(Errno::LengthOutOfRange));
+        assert_eq!(auth.attempts.get(), 0);
+        assert!(launcher.runs.borrow().is_empty());
+        assert_eq!(sink.count(events::ELEVATE_REFUSED), 1);
+        assert_eq!(sink.field("cause").as_deref(), Some("malformed request"));
     }
 
     #[test]

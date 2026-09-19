@@ -4,7 +4,7 @@ configure — 读取并设置启动时的系统配置
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 

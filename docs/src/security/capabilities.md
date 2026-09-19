@@ -214,13 +214,18 @@ Elevation is starting a new process under a more-privileged account
 through the one `CAP_SPAWN_AS_USER` holder (login) after
 re-authentication; there is no setuid and no "enter admin mode" for a
 live process. The per-invocation form is the shell's
-`elevate <user> <program>` builtin (`plans/CAPABILITY_USE.md` CU5): it
-posts one synchronous IPC call to its console's login supervisor over the
-reserved per-console rendezvous (`lib/abi/src/elevate.rs`, derived from
-the caller's kernel-attested `Origin::console`), the supervisor
-re-authenticates the offered credentials with the same timing-equalised
-authenticator as the login prompt and spawns the program as the target
-account, and the shell blocks until it exits. The elevated child's set is
+`elevate <user> <program> [argument ...]` builtin
+(`plans/CAPABILITY_USE.md` CU5): it posts one synchronous IPC call to its
+console's login supervisor over the reserved per-console rendezvous
+(`lib/abi/src/elevate.rs`, derived from the caller's kernel-attested
+`Origin::console`), the supervisor re-authenticates the offered
+credentials with the same timing-equalised authenticator as the login
+prompt and spawns the program as the target account with the request's
+bounded argument vector, and the shell blocks until it exits. The vector
+is what lets a caller run the tool that already owns a store with the one
+change a user asked for rather than a second writer for that store
+existing; it widens no authority, because the request already named an
+arbitrary absolute program. The elevated child's set is
 `its manifest ∩ the target account's ceiling`; the requesting shell's set
 is untouched, refusal causes are audited but indistinguishable to the
 requester, and binding the reserved rendezvous requires

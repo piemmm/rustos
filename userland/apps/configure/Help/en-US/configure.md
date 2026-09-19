@@ -4,15 +4,21 @@ configure — read and set the boot-time system configuration
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 
 Lists, shows, and sets the settings of the system-configuration store
 at `/System/Settings/Configuration/system.conf`. With no operand every
 setting is listed with its current value; with a key alone that
-setting's value is shown; with a key and a value the setting is
-changed.
+setting's value is shown; with one or more `<key> <value>` pairs those
+settings are changed together.
+
+Several pairs are one change, not several: every pair is resolved and
+applied to a working copy before a byte is written, and the store is
+then rewritten once. A command line naming an unknown key, a value
+outside its key's set, or the same key twice changes nothing at all,
+so a group of settings can never be left half applied.
 
 The store lives on the encrypted root volume and is parsed by its
 consumers after the root filesystem is unlocked, so a change takes

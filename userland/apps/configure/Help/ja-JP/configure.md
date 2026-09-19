@@ -4,7 +4,7 @@ configure — 起動時のシステム設定を読み取り・変更する
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 

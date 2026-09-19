@@ -80,7 +80,9 @@ mod program {
     use core::cell::RefCell;
     use core::sync::atomic::{AtomicBool, Ordering};
     use tairix_abi::display_ipc::{DisplayRequest, DISPLAY_ENDPOINT, DISPLAY_MODE_REPLY_LEN};
-    use tairix_abi::elevate::{elevate_endpoint, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
+    use tairix_abi::elevate::{
+        elevate_endpoint, ElevateArgv, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
+    };
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::session_ipc::{
         SessionWake, SESSION_ENDPOINT, SESSION_MAX_REPLY, SESSION_MAX_REQUEST, SESSION_WAKE_LEN,
@@ -823,8 +825,8 @@ mod program {
     }
 
     impl ElevateLauncher for RtElevateLauncher<'_> {
-        fn run_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
-            let pid = spawn_elevated(program, uid)?;
+        fn run_as(&self, program: &str, argv: ElevateArgv<'_>, uid: u32) -> Result<i32, Errno> {
+            let pid = spawn_elevated(program, argv, uid)?;
             let mut status = 0i32;
             let wret = tairix_rt::wait_exit(pid, &mut status);
             if wret < 0 {
@@ -834,19 +836,33 @@ mod program {
         }
 
         fn launch_as(&self, program: &str, uid: u32) -> Result<i64, Errno> {
-            let pid = spawn_elevated(program, uid)?;
+            let pid = spawn_elevated(program, ElevateArgv::NONE, uid)?;
             self.server.track_launched(pid);
             Ok(pid)
         }
     }
 
-    /// Spawn one elevated `program` as `uid` on login's own console,
-    /// returning its PID.
+    /// Spawn one elevated `program` as `uid` on login's own console with the
+    /// argument vector `argv`, returning its PID.
     ///
     /// The single spawn both elevation forms take, so a blocking run and a
     /// non-blocking launch can never start a program under different terms.
-    fn spawn_elevated(program: &str, uid: u32) -> Result<i64, Errno> {
-        let ret = tairix_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid);
+    ///
+    /// A request that carries no arguments takes the plain spawn, so the
+    /// program receives its own registered defaults exactly as it always
+    /// has; one that carries some is given `program` as its argument zero
+    /// and the request's arguments after it, because a program reads its
+    /// arguments from index one and an argument passed first would be read
+    /// as the program's name and never seen.
+    fn spawn_elevated(program: &str, argv: ElevateArgv<'_>, uid: u32) -> Result<i64, Errno> {
+        let ret = if argv.is_empty() {
+            tairix_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid)
+        } else {
+            let mut vector: Vec<&[u8]> = Vec::with_capacity(argv.len() + 1);
+            vector.push(program.as_bytes());
+            vector.extend(argv.iter().map(str::as_bytes));
+            tairix_rt::spawn_with(program.as_bytes(), CONSOLE_INHERIT, uid, &vector, &[])
+        };
         if ret < 0 {
             return Err(Errno::from_syscall(ret));
         }

@@ -4,7 +4,7 @@ configure — قراءة إعدادات النظام وقت الإقلاع وض�
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 

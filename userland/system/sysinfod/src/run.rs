@@ -69,6 +69,7 @@ mod program {
         RamzipStats, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
         VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN,
         SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
+        SYSTEM_CONFIG_MAX_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, Origin, ProcId, ORIGIN_WIRE_LEN, PROC_ID_LEN};
@@ -237,6 +238,18 @@ mod program {
 
         fn memory_total(&self, _caller: &Caller) -> Result<MemoryTotal, Errno> {
             MemoryTotal::from_bytes(&read_scalar(IntrospectDomain::MemoryTotalBytes)?)
+        }
+
+        fn system_config(&self, _caller: &Caller) -> Result<Vec<u8>, Errno> {
+            // The whole document in one call: the kernel bounds it at
+            // `SYSTEM_CONFIG_MAX_LEN` before reading a byte and answers the
+            // whole thing or refuses, so there is nothing to page.
+            let mut buf = alloc::vec![0u8; SYSTEM_CONFIG_MAX_LEN];
+            let n =
+                tairix_rt::sysinfo_introspect(IntrospectDomain::SystemConfig.as_u32(), 0, &mut buf)
+                    .map_err(Errno::from_syscall)?;
+            buf.truncate(n);
+            Ok(buf)
         }
 
         fn cache_ledger_records(&self, _caller: &Caller) -> Result<Vec<CacheLedgerRecord>, Errno> {

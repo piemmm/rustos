@@ -26,8 +26,9 @@ The builtins:
 - `export NAME=value`, `unset NAME` — edit the exported environment.
 - `jobs`, `fg`, `bg` — job control.
 - `ulimit` — read and impose resource limits.
-- `elevate` — run one command re-authenticated through the console's
-  login supervisor.
+- `elevate <user> <program> [argument ...]` — run one command, with the
+  arguments given, re-authenticated through the console's login
+  supervisor.
 - `help` — list the builtins.
 - `exit [code]` — end the session.
 

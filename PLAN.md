@@ -7353,9 +7353,10 @@ enforcing never-widen grant editing, the last-administrator guard, full
 re-validation, crash-safe persistence to the encrypted root, and
 next-spawn/next-login binding, with the interactive `users` tool as its
 first holder (CU4), and per-invocation elevation is live: the shell's
-`elevate <user> <program>` builtin posts to its console's login supervisor
-over the reserved per-console rendezvous (`lib/abi/src/elevate.rs`), which
-re-authenticates the target account and spawn-as-user runs the program
+`elevate <user> <program> [argument ...]` builtin posts to its console's
+login supervisor over the reserved per-console rendezvous
+(`lib/abi/src/elevate.rs`), which re-authenticates the target account and
+spawn-as-user runs the program with the request's bounded argument vector
 while the shell blocks — backed by the `WaitSourceKind::Child` wait-set
 member, the kernel-attested `Origin::console`, and the
 `is_reserved_endpoint` bind gate that keeps squatters off well-known

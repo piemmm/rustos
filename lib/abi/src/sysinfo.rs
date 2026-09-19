@@ -566,6 +566,27 @@ impl SysinfoQueryId {
     /// second averaging convention appears.
     pub const GPU_DEVICE_STATS: Self = Self(40);
 
+    /// Read the machine's boot-time configuration store — the operator's
+    /// `system.conf` document — as its own text, bounded by
+    /// [`SYSTEM_CONFIG_MAX_LEN`] (which is the store engine's own parse
+    /// bound, pinned equal by that crate's test). An installation that has
+    /// never had one answers nothing, which is the documented defaults.
+    ///
+    /// The **document**, not a parse of it: the store's grammar, key
+    /// registry and value sets have one definition in `lib/sysconfig`, and
+    /// a second spelling here would be a second thing to keep in step. A
+    /// reader parses the text through that one engine, so a surface showing
+    /// a setting and the tool writing it can never disagree about what the
+    /// store says.
+    ///
+    /// Ungated, exactly as [`Self::MOUNT_LIST`] and [`Self::USER_DIRECTORY`]
+    /// are: the document is the machine's public configuration, world-
+    /// readable by its own inode policy, and it carries no credential. What
+    /// it is *not* is writable from here — changing it is a re-authenticated
+    /// run of the tool that owns the store, and this query adds no path to
+    /// one.
+    pub const SYSTEM_CONFIG: Self = Self(41);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -695,6 +716,18 @@ pub enum IntrospectDomain {
     /// [`IoBudget`] in force), with the syscall's
     /// `arg` naming the record offset to page from.
     VolumeIoQueue = 21,
+    /// The boot-time system-configuration store, read fresh off the volume
+    /// as its own text: at most [`SYSTEM_CONFIG_MAX_LEN`] bytes, and none at
+    /// all where no store exists.
+    ///
+    /// Read rather than remembered, because a surface that shows a setting
+    /// has to show what the store says *now* — a snapshot taken at boot
+    /// would still report the old value after the tool that owns the store
+    /// had written a new one, which is the fabricated reading the whole
+    /// System Information API exists to avoid. The document is tiny, lives
+    /// on the root volume behind the block cache, and is bounded before a
+    /// byte is read.
+    SystemConfig = 22,
 }
 
 impl IntrospectDomain {
@@ -731,10 +764,22 @@ impl IntrospectDomain {
             19 => Ok(Self::MemoryTotalBytes),
             20 => Ok(Self::VolumeIoStats),
             21 => Ok(Self::VolumeIoQueue),
+            22 => Ok(Self::SystemConfig),
             _ => Err(Errno::OutOfRange),
         }
     }
 }
+
+/// Hard byte bound on the boot-time configuration document
+/// [`IntrospectDomain::SystemConfig`] and
+/// [`SysinfoQueryId::SYSTEM_CONFIG`] carry.
+///
+/// Equal to the bound the store engine's own parser enforces
+/// (`tairix_sysconfig::MAX_CONFIG_LEN`), which the engine pins with a test
+/// rather than this crate depending on it: `lib/abi` sits beneath every
+/// other crate and may not read one. A store larger than this is refused
+/// whole by the parser too, so serving more would only move the refusal.
+pub const SYSTEM_CONFIG_MAX_LEN: usize = 4096;
 
 /// Maximum length, in bytes, of the ASCII `name` of any [`SysinfoQuerySpec`].
 ///
@@ -1030,6 +1075,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "gpu_device_stats",
         required_capability: Some(CapabilityId::SYSINFO_HW),
         audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::SYSTEM_CONFIG,
+        name: "system_config",
+        required_capability: None,
+        audit: false,
     },
 ];
 
@@ -6745,12 +6796,13 @@ mod tests {
             (19, IntrospectDomain::MemoryTotalBytes),
             (20, IntrospectDomain::VolumeIoStats),
             (21, IntrospectDomain::VolumeIoQueue),
+            (22, IntrospectDomain::SystemConfig),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(22), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(23), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 

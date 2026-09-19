@@ -215,6 +215,17 @@ pub trait SysinfoSource {
     /// one reading so the two can never disagree.
     fn memory_total(&self, caller: &Caller) -> Result<MemoryTotal, Errno>;
 
+    /// Return the boot-time system-configuration document as its own bytes,
+    /// read fresh, or an empty vector where no store exists.
+    ///
+    /// Ungated, like the mount table and the account directory: the
+    /// document is the machine's public configuration, world-readable by
+    /// its own inode policy, and it carries no credential. The broker
+    /// serves the **text**, never a parse of it — the store's grammar has
+    /// one definition in `lib/sysconfig`, and a client reads it through
+    /// that engine.
+    fn system_config(&self, caller: &Caller) -> Result<Vec<u8>, Errno>;
+
     /// Return the kernel's own per-cache ledger rows: one
     /// [`CacheLedgerRecord`] per cache the kernel measures directly, in the
     /// kernel's stable registration order.

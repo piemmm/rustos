@@ -4,7 +4,7 @@ configure — die Systemkonfiguration zum Startzeitpunkt lesen und setzen
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 

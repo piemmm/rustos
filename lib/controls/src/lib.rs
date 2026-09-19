@@ -281,6 +281,7 @@ pub mod button;
 pub mod chart;
 pub mod collection;
 pub mod combo;
+pub mod credential;
 pub mod damage;
 pub mod decision;
 pub mod form;
@@ -310,6 +311,10 @@ pub use collection::{
     PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow,
 };
 pub use combo::{ComboAction, ComboBox};
+pub use credential::{
+    CredentialAction, CredentialSheet, CREDENTIAL_HEIGHT, CREDENTIAL_NOT_STARTED_REASON,
+    CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
+};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use form::{FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow};
 pub use menu::{

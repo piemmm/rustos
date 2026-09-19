@@ -242,8 +242,8 @@ pub use desktop::{
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use elevate::{
-    field_rect as elevate_field_rect, ElevatePrompt, Elevator, PromptOutcome, ELEVATE_ORIGIN,
-    ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, NOT_STARTED_REASON, REFUSED_REASON,
+    ElevatePrompt, Elevator, PromptOutcome, ELEVATE_ORIGIN, ELEVATE_PROMPT_SHOWN,
+    ELEVATE_PROMPT_SHOWN_MESSAGE, NOT_STARTED_REASON, REFUSED_REASON,
     WIN_HEIGHT as ELEVATE_WIN_HEIGHT, WIN_WIDTH as ELEVATE_WIN_WIDTH,
 };
 pub use fade::{

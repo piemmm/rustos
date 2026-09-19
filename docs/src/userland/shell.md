@@ -389,14 +389,20 @@ watches, the process's own resource limits, or (for `elevate`) the
 controlling terminal a password prompt must own; everything else is
 launched as an external program.
 
-`elevate <user> <program>` is the per-invocation elevation frontend
-(`plans/CAPABILITY_USE.md` CU5): it prompts for the target account's
-password with echo suppressed, posts one synchronous IPC call to this
-console's login supervisor over the reserved per-console rendezvous
-(derived from the shell's **own** kernel-attested console, never a
-claim), and blocks — a foreground elevated command — until the
+`elevate <user> <program> [argument ...]` is the per-invocation elevation
+frontend (`plans/CAPABILITY_USE.md` CU5): it prompts for the target
+account's password with echo suppressed, posts one synchronous IPC call
+to this console's login supervisor over the reserved per-console
+rendezvous (derived from the shell's **own** kernel-attested console,
+never a claim), and blocks — a foreground elevated command — until the
 re-authenticated program has run as that account; its exit code becomes
-`$?`. The shell holds no elevation authority: authentication, placement
+`$?`. Operands after the program are its argument vector, handed over
+verbatim and bounded by the protocol (at most 16 arguments, 512 bytes
+each, 1024 bytes in all), so the one change an operator wants to make to
+a store goes to the tool that already writes it —
+`elevate root /System/Commands/configure.app/Run os.loginType text` —
+instead of a second writer existing. A vector past those bounds is
+refused before the offered password is put on the wire. The shell holds no elevation authority: authentication, placement
 checking, and the identity switch all happen in the supervisor and the
 kernel, the password buffer is zeroed on every path, and a shell with no
 console-backed streams (a pipe, a network session) has no rendezvous and

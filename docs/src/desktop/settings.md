@@ -242,8 +242,12 @@ One row per pane: what backs its readings, where a change goes, and what a
 refusal looks like. `plans/NEW-DESKTOP-SETTINGS.md` §2 is the full table and
 the staged source of truth; the shape of it is:
 
-- **read-only panes** (About, Storage) render a reading, or render *unmeasured*
-  when the reading could not be taken — never a fabricated zero. Storage draws
+- **read-only panes** (About, Date & Time, Storage) render a reading, or render
+  *unmeasured* when the reading could not be taken — never a fabricated zero.
+  About states the machine's name, machine id, OS version, uptime, processor
+  and memory, each from its own ungated `sysinfo-v1` query, so one refusal
+  costs one row rather than the pane; Date & Time states the wall clock and
+  which source it came from. Storage draws
   one card per mounted volume from the ungated `MOUNT_LIST` query, derived by
   the shared volume view model every other surface reads, so it needs no
   capability beyond the two the bundle already requests; the per-device I/O
@@ -258,6 +262,25 @@ the staged source of truth; the shape of it is:
 - **machine-scope panes** (Login & startup, Caching, TCP/IP, Ethernet, DNS,
   Language & Region) ask the console's elevation broker to re-authenticate an
   account that may, and run the same `configure` program the command line
-  uses, so the CLI and the GUI are literally the same writer;
-- **kernel-scope panes** (Date & Time, Users & Groups) elevate the tool that
-  owns the syscall, never acquiring the capability here.
+  uses, so the CLI and the GUI are literally the same writer. They read the
+  store through the ungated `SYSTEM_CONFIG` query and parse it with
+  `lib/sysconfig`, the engine `configure` writes through, so what a row shows
+  and what the tool would set cannot disagree. They are **staged**: a choice
+  edits a working copy, the pane's action band says how many rows differ, and
+  **Apply** asks for an account once and runs `configure` once, carrying every
+  changed key — so the document is rendered a single time and a group of
+  settings can never be left half written. A refusal leaves the working copy
+  intact and states why; nothing is reported applied that was not;
+- **kernel-scope panes** (Date & Time, Users & Groups) elevate the application
+  that owns the syscall, never acquiring the capability here. Date & Time's
+  action band starts `datetime.app` as an authenticated account and leaves it
+  running — a window that waited for a program the reader then works in would
+  stop drawing for the whole session.
+
+The credential question every elevated run is offered through is the shared
+`lib/controls` credential sheet, the same surface the desktop session puts up
+when a command it may not perform is chosen: one credential surface on the
+desktop, with one focus order, one refusal wording, and one place the secret
+lives. It is modal while it is up, so a press behind it cannot change a pane
+the reader is about to authenticate for, and the password is held only in the
+masked field's bounded buffer, which zeroises what it discards.

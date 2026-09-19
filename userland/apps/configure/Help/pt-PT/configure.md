@@ -4,7 +4,7 @@ configure — ler e definir a configuração do sistema no arranque
 
 ## SYNOPSIS
 
-`configure [<key> [<value>]]`
+`configure [<key> [<value> [<key> <value>]...]]`
 
 ## DESCRIPTION
 

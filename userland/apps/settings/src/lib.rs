@@ -21,26 +21,32 @@
 
 extern crate alloc;
 
-mod appearance;
 mod body;
+mod facts;
+mod footer;
+mod form;
 mod frame;
 mod gallery;
+mod machine;
 mod registry;
 mod shell;
 mod stack;
 mod statement;
 mod volumes;
 
-pub use appearance::{Composition, Form, FormOutcome, FormPlace, Offered, Setting};
-pub use frame::{resolve_frame, Overflow, ShellFrame, CONTENT_FLOOR, SIDEBAR_WIDTH};
+pub use facts::MachineFacts;
+pub use form::{Composition, Form, FormOutcome, FormPlace, Offered, Setting};
+pub use frame::{resolve_frame, Actions, Overflow, ShellFrame, CONTENT_FLOOR, SIDEBAR_WIDTH};
 pub use gallery::{Gallery, GalleryOutcome, PictureWanted, NONE_LABEL};
 pub use registry::{
     strip_rows, Category, CategoryRow, Location, Pane, PaneBacking, PaneContent, PaneRow, StripRow,
     CATEGORIES,
 };
-pub use shell::{Shell, ShellOutcome};
+pub use shell::{ElevateRefusal, Elevation, Shell, ShellOutcome};
 pub use volumes::{Readings, VolumeReading};
 
+#[cfg(test)]
+mod general_tests;
 #[cfg(test)]
 mod registry_tests;
 #[cfg(test)]

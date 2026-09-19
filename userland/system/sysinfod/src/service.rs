@@ -199,6 +199,8 @@ fn dispatch(
         )
     } else if query == SysinfoQueryId::MEMORY_TOTAL {
         write_bytes(&source.memory_total(caller)?.to_le_bytes(), response)
+    } else if query == SysinfoQueryId::SYSTEM_CONFIG {
+        write_bytes(&source.system_config(caller)?, response)
     } else if query == SysinfoQueryId::RECLAIM_STATS {
         reclaim_list(source, caller, reports, payload, response)
     } else if query == SysinfoQueryId::CACHE_LEDGERS {
@@ -1261,6 +1263,8 @@ mod tests {
         hwtree: alloc::vec::Vec<u8>,
         mounts: [MountRecord; 2],
         cache_ledgers: alloc::vec::Vec<CacheLedgerRecord>,
+        /// The boot-time configuration document the fixture serves.
+        system_config: alloc::vec::Vec<u8>,
         /// Which process instances `live_process_instances` reports as
         /// live, set by tests through [`FixtureSource::set_live`]; empty by
         /// default, since most tests never report a cache and so never
@@ -1343,6 +1347,7 @@ mod tests {
                     .unwrap(),
                 ],
                 cache_ledgers: fixture_cache_ledgers(),
+                system_config: alloc::vec::Vec::from(&b"os.loginType text\n"[..]),
                 live: RefCell::new(alloc::vec::Vec::new()),
                 live_calls: RefCell::new(0),
             }
@@ -1436,6 +1441,10 @@ mod tests {
             Ok(MemoryTotal {
                 total_bytes: self.kernel_memory_stats(caller)?.total_bytes,
             })
+        }
+
+        fn system_config(&self, _caller: &Caller) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(self.system_config.clone())
         }
         fn cache_ledger_records(
             &self,
@@ -3389,6 +3398,29 @@ mod tests {
 
         // Unaudited: an ungated query a process may issue on every band
         // change must not be able to drive the security log.
+        assert!(sink.events.borrow().as_slice().is_empty());
+    }
+
+    #[test]
+    fn the_system_configuration_is_served_ungated_unaudited_and_verbatim() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let req = request_bytes(SysinfoQueryId::SYSTEM_CONFIG, &[]);
+        let mut resp = [0u8; 256];
+
+        // No capability at all: the store document is the machine's public
+        // configuration, world-readable by its own inode policy, and it
+        // carries no credential.
+        let sink = RecordingSink::new();
+        let none = Caps(&[]);
+        let n = serve_once(&source, &caller(&none), &sink, &req, &mut resp).expect("ungated");
+
+        // The text, not a parse of it: the store's grammar has one
+        // definition and the broker is not a second one.
+        assert_eq!(&resp[..n], b"os.loginType text\n");
+
+        // Unaudited: a reading a surface takes on every refresh must not be
+        // able to drive the security log.
         assert!(sink.events.borrow().as_slice().is_empty());
     }
 

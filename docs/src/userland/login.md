@@ -497,13 +497,17 @@ program PID 1 `init`'s `session` directive launches and supervises
   `CAP_IPC_BIND_PRIVILEGED`, so a squatter can never claim it). While a
   session runs, the supervision wait is a kernel wait-set multiplexing the
   shell child (`WaitSourceKind::Child`) with the endpoint: an
-  `elevate <user> <program>` request from the session's shell is
-  placement-checked against the caller's attested console, decoded
+  `elevate <user> <program> [argument ...]` request from the session's
+  shell is placement-checked against the caller's attested console, decoded
   fail-closed, **re-authenticated with the same authenticator as the
   prompt** (refusals indistinguishable), and its program spawned as the
-  target account and reaped while the shell blocks in its `ipc_call`; the
-  request buffer is zeroed on every path (it carries the offered
-  password). A graphical caller posts the non-blocking `Launch` form
+  target account with the request's argument vector and reaped while the
+  shell blocks in its `ipc_call`; the request buffer is zeroed on every
+  path (it carries the offered password). A malformed or over-long vector
+  is refused at the decode, before an attempt is spent against the named
+  account, and the audit records how many arguments there were and never
+  what they said — the broker hands them over without interpreting them,
+  so it cannot know which one is a secret. A graphical caller posts the non-blocking `Launch` form
   instead, so the started program is login's child to reap on its own
   loop; its `stderr` is login's console, invisible behind the desktop, so
   an abnormal exit is audited (`LAUNCH_ENDED_ABNORMALLY`) rather than lost.

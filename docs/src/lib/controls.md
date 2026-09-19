@@ -53,6 +53,7 @@ under the floor and are unchanged.
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `form` | `FieldRow`, `FieldGroup` |
+| `credential` | `CredentialSheet` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
@@ -255,6 +256,19 @@ it, or frame the content that does:
   neutral as the unfilled tail, last, and still named in the key. The key wraps
   rather than dropping an entry, so `measured_height` takes the width it will
   be given.
+`CredentialSheet` is the one surface that asks for an account and its
+password so a more-privileged program can be started as that account. Two
+places on the desktop ask that question — the session, when a command it may
+not perform is chosen, and Settings, when a machine setting is applied by
+re-running the tool that owns the store — and they may not depend on one
+another, so the wording, the focus order, the "an empty field is never
+offered" rule and the secret's hygiene live here once. It knows nothing of a
+compositor, a window, an account database or IPC: an owner gives it events
+and a rectangle, takes back a painted surface and a `CredentialAction`, and
+performs the exchange itself. The password is held only in the masked field's
+bounded, pre-reserved buffer, which zeroises every byte it discards including
+on drop.
+
 - `FactList` is a column of key/value readouts with the values right-aligned
   on one another: the value keeps its room and the label truncates first, so a
   narrow detail pane loses a word of description rather than a digit.

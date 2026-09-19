@@ -2438,6 +2438,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-resref",
  "tairix-rt",
+ "tairix-sysconfig",
 ]
 
 [[package]]
@@ -2683,6 +2684,7 @@ dependencies = [
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
+ "tairix-sysconfig",
  "tairix-theme",
  "tairix-util",
  "tairix-wallpaper",

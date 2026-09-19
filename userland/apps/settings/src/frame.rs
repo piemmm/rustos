@@ -39,6 +39,20 @@ pub struct Overflow {
     pub pane: bool,
 }
 
+/// Whether the pane on show offers an action band beneath its column.
+///
+/// The frame cannot work this out either: it is the registry's answer for
+/// the pane the shell has open.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum Actions {
+    /// The pane's effect is its own feedback; there is nothing to batch.
+    #[default]
+    None,
+    /// The pane stages its change, or offers the command that changes what
+    /// it reports, so it has a band beneath its column.
+    Band,
+}
+
 /// The regions of the settings window, resolved once per layout.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ShellFrame {
@@ -58,6 +72,8 @@ pub struct ShellFrame {
     pub content: Rect,
     /// The content column's scrollbar gutter, or `None` when the pane fits.
     pub scrollbar: Option<Rect>,
+    /// The pane's action band, or `None` for a pane that offers none.
+    pub footer: Option<Rect>,
 }
 
 /// Divide `viewport` into the shell's regions, `overflow` saying which
@@ -75,6 +91,7 @@ pub fn resolve_frame(
     scale: Scale,
     theme: &Theme,
     overflow: Overflow,
+    actions: Actions,
 ) -> ShellFrame {
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     // A search field is a text field plus its magnifier and clear mark, so
@@ -90,6 +107,7 @@ pub fn resolve_frame(
             strip_scrollbar: None,
             content: Rect::EMPTY,
             scrollbar: None,
+            footer: None,
         };
     }
     let bar_w = scale.scale_length(theme.metrics().scrollbar_breadth).max(1);
@@ -138,6 +156,26 @@ pub fn resolve_frame(
     };
 
     let breadcrumb = Rect::new(content_x, viewport.top(), content_w, band_h);
+    // The band is carved out of the pane's own column before the gutter is,
+    // so the scrollbar runs beside the column the pane actually gets rather
+    // than past the commands beneath it.
+    let action_h = match actions {
+        Actions::Band => crate::footer::Footer::measured_height(scale, theme),
+        Actions::None => 0,
+    };
+    let (body_h, footer) = if action_h > 0 && body_h > action_h {
+        (
+            body_h.saturating_sub(action_h),
+            Some(Rect::new(
+                content_x,
+                body_top.saturating_add(to_i32(body_h.saturating_sub(action_h))),
+                content_w,
+                action_h,
+            )),
+        )
+    } else {
+        (body_h, None)
+    };
     let (content, scrollbar) = if overflow.pane && content_w > bar_w.saturating_add(1) {
         (
             Rect::new(content_x, body_top, content_w.saturating_sub(bar_w), body_h),
@@ -158,5 +196,6 @@ pub fn resolve_frame(
         strip_scrollbar,
         content,
         scrollbar,
+        footer,
     }
 }

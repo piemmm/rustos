@@ -1,11 +1,15 @@
 //! The `elevate` builtin: run one program as another account
 //! (`plans/CAPABILITY_USE.md` CU5).
 //!
-//! `elevate <user> <program>` prompts for `<user>`'s password (terminal echo
-//! off), posts the request to this console's login supervisor through the
-//! injected [`Elevator`](crate::host::Elevator) seam, and blocks until the
-//! re-authenticated command has run to completion as that account; its exit
-//! code becomes the builtin's status (`$?`). The shell holds **no**
+//! `elevate <user> <program> [argument ...]` prompts for `<user>`'s password
+//! (terminal echo off), posts the request to this console's login supervisor
+//! through the injected [`Elevator`](crate::host::Elevator) seam, and blocks
+//! until the re-authenticated command has run to completion as that account;
+//! its exit code becomes the builtin's status (`$?`). Arguments after the
+//! program are handed to it verbatim, which is what lets an operator run the
+//! tool that owns a store with one change — `elevate root
+//! /System/Commands/configure.app/Run os.loginType text` — rather than only
+//! being able to start it. The shell holds **no**
 //! elevation authority of its own: the supervisor re-authenticates the
 //! offered credentials and the kernel derives the elevated child's
 //! capability set exactly as at login, so the builtin only asks — it can
@@ -20,6 +24,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_util::secret::wipe;
 
@@ -27,6 +32,9 @@ use crate::builtin::BuiltinContext;
 
 /// Status returned when the builtin is used incorrectly or refused.
 const USAGE_ERROR: i32 = 1;
+
+/// The usage line a misuse is reported with.
+const USAGE: &str = "usage: elevate <user> <program> [argument ...]\n";
 
 /// Hard bound on an offered password's byte length: matches the login
 /// prompt's own line budget, and far below the request bound the wire
@@ -38,16 +46,15 @@ const MAX_PASSWORD: usize = 256;
 /// The password buffer is stack-held and zeroed on **every** path out — it
 /// carries a credential, and secret hygiene is the holder's job.
 pub(crate) fn elevate(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
-    let [username, program] = args else {
-        ctx.console
-            .write_stderr("usage: elevate <user> <program>\n");
+    let [username, program, rest @ ..] = args else {
+        ctx.console.write_stderr(USAGE);
         return USAGE_ERROR;
     };
     if username.is_empty() || program.is_empty() {
-        ctx.console
-            .write_stderr("usage: elevate <user> <program>\n");
+        ctx.console.write_stderr(USAGE);
         return USAGE_ERROR;
     }
+    let operands: Vec<&str> = rest.iter().map(String::as_str).collect();
 
     ctx.console
         .write_stdout(&format!("Password for {username}: "));
@@ -56,7 +63,7 @@ pub(crate) fn elevate(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
         Ok(len) => match core::str::from_utf8(&secret[..len]) {
             // An empty password is offered as-is: whether it verifies is the
             // supervisor's decision, not a spelling the shell pre-judges.
-            Ok(password) => ctx.elevator.elevate(username, password, program),
+            Ok(password) => ctx.elevator.elevate(username, password, program, &operands),
             // Refuse malformed input locally without ever sending it — the
             // same errno the wire decoder gives a bad encoding.
             Err(_) => Err(tairix_abi::Errno::LengthOutOfRange),
@@ -83,13 +90,17 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::Errno;
 
+    /// One posted request: the account, the offered secret, the program,
+    /// and the arguments it was to be handed.
+    type Posted = (String, String, String, Vec<String>);
+
     /// An in-memory [`Elevator`]: scripted secret input, recorded calls,
     /// scripted outcome.
     struct ScriptedElevator {
         secret: &'static str,
         secret_result: Result<(), Errno>,
         outcome: Result<i32, Errno>,
-        calls: RefCell<Vec<(String, String, String)>>,
+        calls: RefCell<Vec<Posted>>,
     }
 
     impl ScriptedElevator {
@@ -120,11 +131,18 @@ mod tests {
             Ok(bytes.len())
         }
 
-        fn elevate(&self, username: &str, password: &str, program: &str) -> Result<i32, Errno> {
+        fn elevate(
+            &self,
+            username: &str,
+            password: &str,
+            program: &str,
+            args: &[&str],
+        ) -> Result<i32, Errno> {
             self.calls.borrow_mut().push((
                 username.to_string(),
                 password.to_string(),
                 program.to_string(),
+                args.iter().map(ToString::to_string).collect(),
             ));
             self.outcome
         }
@@ -142,9 +160,45 @@ mod tests {
             &[(
                 "root".to_string(),
                 "hunter2".to_string(),
-                "/Apps/Tool.app/Run".to_string()
+                "/Apps/Tool.app/Run".to_string(),
+                Vec::new(),
             )]
         );
+    }
+
+    #[test]
+    fn operands_after_the_program_are_posted_as_its_arguments() {
+        // What makes the shell and the desktop the same writer: an operator
+        // can run the tool that owns a store with the one change they want.
+        let elevator = ScriptedElevator::new("hunter2", Ok(0));
+        let mut fixture = Fixture::with_elevator(&elevator);
+        let status = fixture.run(&[
+            "elevate",
+            "root",
+            "/System/Commands/configure.app/Run",
+            "os.loginType",
+            "text",
+        ]);
+        assert_eq!(status, Some(0));
+        assert_eq!(
+            elevator.calls.borrow().as_slice(),
+            &[(
+                "root".to_string(),
+                "hunter2".to_string(),
+                "/System/Commands/configure.app/Run".to_string(),
+                alloc::vec!["os.loginType".to_string(), "text".to_string()],
+            )]
+        );
+    }
+
+    #[test]
+    fn a_vector_past_the_protocols_bounds_is_reported_not_truncated() {
+        // The seam refuses it; the builtin states the refusal and changes
+        // nothing, rather than posting a shortened command.
+        let elevator = ScriptedElevator::new("hunter2", Err(Errno::LengthOutOfRange));
+        let mut fixture = Fixture::with_elevator(&elevator);
+        assert_eq!(fixture.run(&["elevate", "root", "/p", "a", "b"]), Some(1));
+        assert!(fixture.console.stderr().contains("elevate:"));
     }
 
     #[test]
@@ -173,7 +227,6 @@ mod tests {
         assert_eq!(fixture.run(&["elevate", "root"]), Some(1));
         assert_eq!(fixture.run(&["elevate", "", "/p"]), Some(1));
         assert_eq!(fixture.run(&["elevate", "root", ""]), Some(1));
-        assert_eq!(fixture.run(&["elevate", "root", "/p", "extra"]), Some(1));
         assert!(elevator.calls.borrow().is_empty());
     }
 

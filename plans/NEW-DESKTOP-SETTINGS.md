@@ -38,7 +38,7 @@ dropped is a category the surface then has to lie about.
 | **DS4** | Wallpaper — the gallery absorbed into the pane over two served requests, `wallpaper.app` deleted, and *Change Background…* opening Settings at that pane | DS3 | DS4 | done |
 | **DS5a** | The shared volume view model: the mount record → capacity/health derivation in `lib/procinfo`, the `VolumeHealth` banding in `lib/abi`, the one band→role binding in `lib/theme`, and every private copy collapsed onto them | — | DS5a | done |
 | **DS5** | Storage — one card per mount with its capacity track and health pill, over the DS5a model | DS2, DS5a | DS5 | done |
-| **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | planned |
+| **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | done |
 | **DS7** | Networking read — per-interface facts, link state, addresses and rates through the Switchboard's own client, plus the stack-wide `net.*` options | DS2, DS6 | DS7 | planned |
 | **DS8** | Networking write — `configure` grows the `lib/netconfig` registry, Ethernet and DNS stage and apply through it, and the stack adopts the change without a reboot | DS6, DS7 | DS8 | planned |
 | **DS9** | Users & Groups — the ungated `GROUP_DIRECTORY` sibling, the caller's own record, the admin-authenticated read of every other account, and the user-admin operations the syscall carries but no tool spells | DS6 | DS9 | planned |
@@ -293,10 +293,10 @@ owner the change goes to; the last column is what a refusal looks like.
 
 | Category → pane | Read | Write goes to | On refusal |
 |---|---|---|---|
-| General → About | `SYSTEM_IDENTITY`, `UPTIME`, `CPU_INFO`, `KERNEL_MEMORY_STATS` | — (read-only) | reading renders unmeasured |
-| General → Login & startup | `lib/sysconfig` `os.loginType` | elevated `configure` | Authority Mark, value unchanged |
-| General → Caching | `lib/sysconfig` `cache.*` | elevated `configure` | Authority Mark, value unchanged |
-| General → Date & Time | `WallClockReading` | elevated `datetime.app` (launched) | prompt not shown, clock untouched |
+| General → About | `SYSTEM_IDENTITY`, `UPTIME`, `CPU_INFO`, `MEMORY_TOTAL` | — (read-only) | reading renders unmeasured |
+| General → Login & startup | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure` | working copy stands, refusal stated |
+| General → Caching | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure` | working copy stands, refusal stated |
+| General → Date & Time | `WallClockReading` | elevated `datetime.app` (launched) | refusal stated, clock untouched |
 | Appearance | the session's published settings document | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
 | Wallpaper | session's published settings document; the store catalog and each preview served by the session | session apply (merged) | apply refused, stated; a preview that did not arrive draws its placeholder |
 | Displays | `SEAT_LIST`, `DesktopInfo`, `Compositor::window_scale` | session apply (scale only) | mode change: no interface (§3) |
@@ -849,27 +849,54 @@ rung short spells the top of its own domain as four figures of the rung below.
 
 ### DS6 — the elevated-apply seam, and General
 
-`ElevateRequest::Run` gains a **bounded argv** (a count bound, a per-argument
-length bound, and a total bound, fixed-width and fuzzed like every other
-`lib/abi` frame). Today the broker can only start a whole interactive program,
-which is why every privileged desktop action has had to become its own app;
-with argv it can run the tool that already owns a store with the one change
-the user asked for. This widens no authority — the request already named an
-arbitrary absolute program — and the broker keeps every existing check: it
-authenticates the named account, loads through the ordinary signed load gate,
-runs as that account, and audits the decision.
+**Done.** `ElevateRequest::Run` carries a bounded argv — at most
+`ELEVATE_MAX_ARGS` (16) arguments, `ELEVATE_MAX_ARG_LEN` (512) bytes each,
+`ELEVATE_MAX_ARGV_BYTES` (1024) in all, one admissibility rule shared by the
+encoder and the decoder — so a caller can run the tool that already owns a
+store with the one change a user asked for instead of that store growing a
+second writer. It widens no authority: the request already named an arbitrary
+absolute program, and the broker keeps every check it had. A malformed or
+over-long vector is refused at the decode, *before* an attempt is spent
+against the named account, and the audit records the argument **count** and
+never the arguments — the broker hands them over without interpreting them,
+so it cannot know which is a secret. The shell's `elevate` builtin grew the
+same operands, so the CLI and the GUI reach the writer identically.
 
-Its first consumer is General: **About** (identity, OS version, uptime, CPU and
-memory facts as a `FactList`), **Login & startup** (`os.loginType`), and
-**Caching** (the five `cache.*` keys with their `auto`/`off` sets and the
-master switch's ceiling shown as the ceiling it is), each staged and applied by
-elevating `configure`. **Date & Time** shows the current reading and launches
-`datetime.app` through the broker's existing `Launch`, unchanged.
+**Reading the machine's store.** Settings holds no `CAP_FS_ACCESS` and never
+will, so `system.conf` is served by a new ungated `sysinfo-v1` query,
+`SYSTEM_CONFIG`, over a kernel introspect domain of the same name: the kernel
+already owns the VFS and already parses this document at the root unlock, so
+serving it adds no authority to anything and no manifest widens. It answers
+the **text**, read fresh (a boot snapshot would report the old value after
+`configure` wrote a new one), and `lib/procinfo::system_config` parses it with
+`lib/sysconfig` — the engine `configure` writes through. Ungated on the same
+ground as `MOUNT_LIST`: a world-readable public document carrying no
+credential, with no write path anywhere near it. DS7/DS8's `network.conf` read
+is the same shape and lands with its own consumer.
 
-Host tests: the argv codec (bounds, fail-closed decode, no panic, fuzz seed);
-the broker refusing an over-long or malformed argv before authenticating
-anything; Settings' staged-pane model (working copy, dirty rows, revert,
-outcome reporting) against an injected elevation seam.
+**General.** *About* and *Date & Time* are read-only fact columns — one
+label-and-reading row per figure, each from its own ungated query, so one
+refusal costs one row and every reading that did not arrive says so. *Login &
+startup* and *Caching* are **staged**: a choice edits a working copy, the
+pane's action band says how many rows differ, and Apply asks for an account
+once and runs `configure` once with every changed key. That made `configure`
+accept several `<key> <value>` pairs, applied to one rendered document, so a
+group of settings can never be left half written — the defect a run per key
+would have had. The master switch's ceiling is shown as the ceiling it is: a
+per-class row keeps its own value, because that is what the store says, and
+states that caching is off for the machine so it cannot be read as running.
+Date & Time launches `datetime.app` through the broker's existing `Launch`,
+started and left running.
+
+**The credential question is shared.** The desktop has one credential
+surface, `lib/controls::CredentialSheet`: the session's prompt window and this
+application's in-window sheet compose the same focus order, wording, "an empty
+field is never offered" rule and secret hygiene. It is modal while it is up.
+
+**One more desk each way.** The store read and the elevated run are worker
+desks like DS5's, because the broker answers only once the program it started
+has exited — a window that waited would stop drawing for the whole of an
+authentication and a store write.
 
 ### DS7 — Networking: read, and the stack-wide options
 

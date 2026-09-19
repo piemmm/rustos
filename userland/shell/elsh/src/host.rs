@@ -286,16 +286,25 @@ pub trait Elevator {
     /// closed — a password must never render) or the read fails.
     fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 
-    /// Run `program` as `username` after the supervisor re-authenticates
-    /// `password`, blocking until it exits; returns its exit code.
+    /// Run `program` with the arguments `args` as `username` after the
+    /// supervisor re-authenticates `password`, blocking until it exits;
+    /// returns its exit code.
     ///
     /// # Errors
     ///
     /// Returns the supervisor's refusal verbatim: an indistinguishable
     /// [`Errno::PermissionDenied`] for a failed re-authentication or a
-    /// foreign console, the spawn's [`Errno`] for a launch failure, or
-    /// [`Errno::NotFound`] when this console has no elevation rendezvous.
-    fn elevate(&self, username: &str, password: &str, program: &str) -> Result<i32, Errno>;
+    /// foreign console, the spawn's [`Errno`] for a launch failure,
+    /// [`Errno::LengthOutOfRange`] for an argument vector past the
+    /// protocol's bounds, or [`Errno::NotFound`] when this console has no
+    /// elevation rendezvous.
+    fn elevate(
+        &self,
+        username: &str,
+        password: &str,
+        program: &str,
+        args: &[&str],
+    ) -> Result<i32, Errno>;
 }
 
 /// A fail-closed [`Elevator`]: every operation reports
@@ -311,7 +320,13 @@ impl Elevator for NullElevator {
         Err(Errno::NotImplemented)
     }
 
-    fn elevate(&self, _username: &str, _password: &str, _program: &str) -> Result<i32, Errno> {
+    fn elevate(
+        &self,
+        _username: &str,
+        _password: &str,
+        _program: &str,
+        _args: &[&str],
+    ) -> Result<i32, Errno> {
         Err(Errno::NotImplemented)
     }
 }

@@ -55,8 +55,9 @@ design:
   the resume that brings it back to the screen, and the end sent when the
   authority itself exits.
 - `ElevateLauncher` (`elevate.rs`) — runs one re-authenticated
-  `elevate <user> <program>` command as the target account and returns its
-  exit code, **or** starts it and returns its pid without waiting
+  `elevate <user> <program> [argument ...]` command as the target account
+  with the arguments the request carried and returns its exit code, **or**
+  starts it and returns its pid without waiting
   (`launch_as`), which is what a graphical caller needs: a desktop cannot
   wait for a program it must keep serving windows to
   (`plans/CAPABILITY_USE.md` CU5). Both forms take one spawn, so they can

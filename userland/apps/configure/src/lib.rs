@@ -51,6 +51,7 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::net_ipc::NetworkSettings;
@@ -61,17 +62,28 @@ use tairix_sysconfig::{Key, SystemConfig, ValueShape};
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `configure`'s own Help tree is
 /// unavailable.
-pub const USAGE: &str = "usage: configure [<key> [<value>]] [-h | -?]";
+pub const USAGE: &str = "usage: configure [<key> [<value> [<key> <value>]...]] [-h | -?]";
+
+/// Most `<key> <value>` pairs one invocation may set.
+///
+/// The registry is closed and small, so setting every key at once is the
+/// widest an invocation can meaningfully be; a longer command line names a
+/// key twice and is refused rather than applied in some order.
+pub const MAX_PAIRS: usize = tairix_sysconfig::Key::ALL.len();
 
 /// One thing the `configure` tool can do.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command<'a> {
     /// List every registry setting and its current value.
     List,
     /// Show one setting's current value.
     Show(&'a str),
-    /// Set one setting to a value.
-    Set(&'a str, &'a str),
+    /// Set each named setting to the value beside it, together.
+    ///
+    /// Several pairs rather than one, because the store is rendered and
+    /// replaced whole: applying a group of changes one invocation at a time
+    /// could leave it holding half of them if a later one were refused.
+    Set(Vec<(&'a str, &'a str)>),
     /// Render `configure`'s own short help (`-h`/`-?`/`--help`) through
     /// the same engine as any other command's short help (plans/APPS.md).
     Help,
@@ -201,26 +213,30 @@ pub trait Output {
 ///
 /// [`ConfigureError::Usage`] for any input outside the grammar above.
 pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, ConfigureError> {
-    let mut operands: [Option<&'a str>; 2] = [None, None];
-    let mut count = 0usize;
+    let mut operands: Vec<&'a str> = Vec::new();
     for arg in args {
         match *arg {
             "-h" | "-?" | "--help" => return Ok(Command::Help),
             other if other.starts_with('-') => return Err(ConfigureError::Usage),
-            other => {
-                if count >= operands.len() {
-                    return Err(ConfigureError::Usage);
-                }
-                operands[count] = Some(other);
-                count += 1;
-            }
+            other => operands.push(other),
         }
     }
-    Ok(match (operands[0], operands[1]) {
-        (None, _) => Command::List,
-        (Some(key), None) => Command::Show(key),
-        (Some(key), Some(value)) => Command::Set(key, value),
-    })
+    match operands.len() {
+        0 => Ok(Command::List),
+        1 => Ok(Command::Show(operands[0])),
+        // An odd count past the first leaves a key with no value, which is
+        // a command line that says nothing rather than one to guess at.
+        len if len % 2 == 1 => Err(ConfigureError::Usage),
+        len if len / 2 > MAX_PAIRS => Err(ConfigureError::Usage),
+        _ => Ok(Command::Set(
+            operands
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| (pair[0], pair[1]))
+                .collect(),
+        )),
+    }
 }
 
 /// Execute `command` against the injected seams.
@@ -268,16 +284,31 @@ pub fn run(
                 .write_all(text.as_bytes())
                 .map_err(ConfigureError::Output)
         }
-        Command::Set(name, value) => {
-            let key = Key::from_name(name).ok_or(ConfigureError::UnknownKey)?;
+        Command::Set(pairs) => {
+            // Every pair is resolved and applied to one working copy before
+            // a byte is written, so a command line that names an unknown
+            // key or an invalid value changes nothing at all rather than
+            // applying the pairs that came before it.
             let mut config = load(store)?;
-            config
-                .set(key, value)
-                .map_err(|_| ConfigureError::InvalidValue(key))?;
+            let mut network = false;
+            let mut seen: Vec<Key> = Vec::with_capacity(pairs.len());
+            for (name, value) in &pairs {
+                let key = Key::from_name(name).ok_or(ConfigureError::UnknownKey)?;
+                // A key named twice is a command line with two intents for
+                // one setting; there is no order in which both are honoured.
+                if seen.contains(&key) {
+                    return Err(ConfigureError::Usage);
+                }
+                seen.push(key);
+                config
+                    .set(key, value)
+                    .map_err(|_| ConfigureError::InvalidValue(key))?;
+                network |= key.is_network();
+            }
             store
                 .write(&config.render())
                 .map_err(ConfigureError::Write)?;
-            if !key.is_network() {
+            if !network {
                 return Ok(());
             }
             // A `net.*` key describes the running stack, so persisting it is
@@ -288,22 +319,29 @@ pub fn run(
             match policy.apply(config.network_settings()) {
                 Ok(()) => Ok(()),
                 // A diagnostic, so it never lands in the stdout a script
-                // parses.
+                // parses. One notice for the whole policy, because one
+                // delivery carries all of it.
                 Err(err) => diagnostics
-                    .write_all(deferred_notice(key, err).as_bytes())
+                    .write_all(deferred_notice(&seen, err).as_bytes())
                     .map_err(ConfigureError::Output),
             }
         }
     }
 }
 
-/// The notice a saved-but-not-applied `net.*` change reports: the setting is
-/// persisted, the running stack did not take it, and why.
-fn deferred_notice(key: Key, err: Errno) -> String {
+/// The notice a saved-but-not-applied `net.*` change reports: the settings
+/// are persisted, the running stack did not take them, and why.
+fn deferred_notice(keys: &[Key], err: Errno) -> String {
+    let mut named = String::new();
+    for key in keys.iter().filter(|key| key.is_network()) {
+        if !named.is_empty() {
+            named.push_str(", ");
+        }
+        named.push_str(key.name());
+    }
     format!(
-        "{}: saved; the running network stack did not accept it ({}); it applies at next boot\n",
-        key.name(),
-        err
+        "{named}: saved; the running network stack did not accept it ({err}); it applies at next \
+         boot\n"
     )
 }
 
@@ -441,7 +479,7 @@ mod tests {
         assert_eq!(parse(&["os.loginType"]), Ok(Command::Show("os.loginType")));
         assert_eq!(
             parse(&["os.loginType", "graphical"]),
-            Ok(Command::Set("os.loginType", "graphical")),
+            Ok(Command::Set(alloc::vec![("os.loginType", "graphical")])),
         );
         assert_eq!(parse(&["-h"]), Ok(Command::Help));
         assert_eq!(parse(&["-?"]), Ok(Command::Help));
@@ -516,7 +554,7 @@ mod tests {
         let output = MemOutput::default();
         let errors = MemOutput::default();
         run(
-            Command::Set("os.loginType", "graphical"),
+            Command::Set(alloc::vec![("os.loginType", "graphical")]),
             None,
             &store,
             &MemPolicy::accepting(),
@@ -540,7 +578,7 @@ mod tests {
         let errors = MemOutput::default();
         let policy = MemPolicy::accepting();
         run(
-            Command::Set("net.tcp.ecn", "true"),
+            Command::Set(alloc::vec![("net.tcp.ecn", "true")]),
             None,
             &store,
             &policy,
@@ -568,7 +606,7 @@ mod tests {
         let errors = MemOutput::default();
         let policy = MemPolicy::accepting();
         run(
-            Command::Set("os.loginType", "text"),
+            Command::Set(alloc::vec![("os.loginType", "text")]),
             None,
             &store,
             &policy,
@@ -592,7 +630,7 @@ mod tests {
         // answer about one action, not a failure of the command.
         let policy = MemPolicy::refusing(Errno::NotFound);
         run(
-            Command::Set("net.ipv6.privacy", "true"),
+            Command::Set(alloc::vec![("net.ipv6.privacy", "true")]),
             None,
             &store,
             &policy,
@@ -625,7 +663,7 @@ mod tests {
         let errors = MemOutput::default();
         assert_eq!(
             run(
-                Command::Set("os.frob", "on"),
+                Command::Set(alloc::vec![("os.frob", "on")]),
                 None,
                 &store,
                 &MemPolicy::accepting(),
@@ -648,7 +686,7 @@ mod tests {
         let output = MemOutput::default();
         let errors = MemOutput::default();
         let err = run(
-            Command::Set("os.loginType", "desktop"),
+            Command::Set(alloc::vec![("os.loginType", "desktop")]),
             None,
             &store,
             &MemPolicy::accepting(),
@@ -671,7 +709,7 @@ mod tests {
         let output = MemOutput::default();
         let errors = MemOutput::default();
         let err = run(
-            Command::Set("os.loginType", "text"),
+            Command::Set(alloc::vec![("os.loginType", "text")]),
             None,
             &store,
             &MemPolicy::accepting(),
@@ -711,7 +749,7 @@ mod tests {
         store.write_err = Some(Errno::PermissionDenied);
         assert_eq!(
             run(
-                Command::Set("os.loginType", "graphical"),
+                Command::Set(alloc::vec![("os.loginType", "graphical")]),
                 None,
                 &store,
                 &MemPolicy::accepting(),
@@ -769,5 +807,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn several_pairs_are_applied_to_one_rendered_document() {
+        // What makes a settings surface's Apply atomic: the whole change is
+        // one invocation, so the store is never left holding half of it.
+        let store = MemStore::new(None);
+        let out = MemOutput::default();
+        run(
+            Command::Set(alloc::vec![
+                ("os.loginType", "text"),
+                ("cache.all", "off"),
+                ("cache.block", "off"),
+            ]),
+            None,
+            &store,
+            &MemPolicy::accepting(),
+            &NoHelp,
+            &out,
+            &MemOutput::default(),
+        )
+        .expect("sets");
+        let text = store.text.borrow().clone().expect("a store");
+        let config = SystemConfig::parse(&text).expect("parses");
+        assert_eq!(config.login_type, tairix_sysconfig::LoginType::Text);
+        assert_eq!(config.cache_all, tairix_sysconfig::CacheSwitch::Off);
+        assert_eq!(config.cache_block, tairix_sysconfig::CacheMode::Off);
+    }
+
+    #[test]
+    fn a_refused_pair_changes_nothing_at_all() {
+        // Resolved and applied to a working copy before a byte is written,
+        // so a later bad pair cannot leave the earlier ones standing.
+        let store = MemStore::new(Some("os.loginType graphical\n"));
+        for command in [
+            Command::Set(alloc::vec![("cache.all", "off"), ("no.such.key", "x")]),
+            Command::Set(alloc::vec![("cache.all", "off"), ("cache.block", "wat")]),
+        ] {
+            let refused = run(
+                command,
+                None,
+                &store,
+                &MemPolicy::accepting(),
+                &NoHelp,
+                &MemOutput::default(),
+                &MemOutput::default(),
+            );
+            assert!(refused.is_err());
+            assert_eq!(
+                store.text.borrow().as_deref(),
+                Some("os.loginType graphical\n")
+            );
+        }
+    }
+
+    #[test]
+    fn the_command_line_grammar_admits_pairs_and_refuses_a_lone_key() {
+        assert_eq!(
+            parse(&["os.loginType", "text", "cache.all", "off"]),
+            Ok(Command::Set(alloc::vec![
+                ("os.loginType", "text"),
+                ("cache.all", "off")
+            ]))
+        );
+        // An odd operand past the first leaves a key with no value.
+        assert_eq!(
+            parse(&["os.loginType", "text", "cache.all"]),
+            Err(ConfigureError::Usage)
+        );
+        // And a key named twice has two intents for one setting.
+        assert_eq!(
+            parse(&["cache.all", "on", "cache.all", "off"]).map(|command| run(
+                command,
+                None,
+                &MemStore::new(None),
+                &MemPolicy::accepting(),
+                &NoHelp,
+                &MemOutput::default(),
+                &MemOutput::default(),
+            )),
+            Ok(Err(ConfigureError::Usage))
+        );
     }
 }

@@ -46,6 +46,12 @@ The crate provides:
   `mount(8)` listing, `availability_name` for a fact list), `medium_name`,
   and `volume_health_name`. `df`'s GNU `Use%` is a fraction of `usable()`
   rather than of the medium, which is why both shares are named.
+- `system_config` — the machine's boot-time configuration store, read through
+  the ungated `SYSTEM_CONFIG` query and parsed by `lib/sysconfig`, the engine
+  `configure` writes through. `Ok(None)` is an installation that has never had
+  a store, which means the documented defaults; a document outside the grammar
+  is refused whole, exactly as the tool refuses it. This is how a surface with
+  no filesystem authority shows what the machine is configured to be.
 - `pressure::publish_depth` — publishing a reported memory-pressure band and
   publishing it to a `tairix_reclaim::ReportedPressure` gauge, the one
   definition every caching program keeps its band current through.

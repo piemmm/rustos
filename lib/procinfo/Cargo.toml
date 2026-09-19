@@ -38,6 +38,12 @@ tairix-resref = { path = "../resref", version = "=0.0.0" }
 # copy of the band vocabulary.
 tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 
+# The boot-time configuration store's one engine: `system_config` answers the
+# document's text, and this crate parses it through the same grammar, key
+# registry and value sets the `configure` tool writes through, so a surface
+# showing a setting and the tool changing it cannot disagree about it.
+tairix-sysconfig = { path = "../sysconfig", version = "=0.0.0" }
+
 # The `program`-feature client seams (`IpcTransport`, `RtOutput`) link the
 # freestanding userland runtime for `ipc_call` and the standard streams. It is
 # pulled only for the bare-metal targets a `Run` binary is actually built for;

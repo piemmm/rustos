@@ -100,13 +100,17 @@ resource limits, or — for `elevate` — the controlling terminal its
 echo-off password prompt must own); everything else is launched
 externally.
 
-`elevate <user> <program>` (`plans/CAPABILITY_USE.md` CU5) posts one
-synchronous IPC call to this console's login supervisor, which
+`elevate <user> <program> [argument ...]` (`plans/CAPABILITY_USE.md` CU5)
+posts one synchronous IPC call to this console's login supervisor, which
 re-authenticates the target account and runs the program as it; the exit
-code becomes `$?`. Driven through the fail-closed `Elevator` seam
-(`host.rs`), backed in the `Run` binary by `self_origin` + `ipc_call`;
-the shell itself holds no elevation authority and zeroises the password
-buffer on every path.
+code becomes `$?`. Operands after the program are handed to it verbatim,
+so an operator can run the tool that owns a store with one change
+(`elevate root /System/Commands/configure.app/Run os.loginType text`)
+rather than only being able to start it; a vector past the protocol's
+bounds is refused before the secret reaches the wire. Driven through the
+fail-closed `Elevator` seam (`host.rs`), backed in the `Run` binary by
+`self_origin` + `ipc_call`; the shell itself holds no elevation
+authority and zeroises the password buffer on every path.
 
 `ulimit [-a] [-H | -S] [<resource> [<value>]]` reports and imposes the
 process's own resource limits (`AGENTS.md` §24.3) over the `LimitStore`
