@@ -17,9 +17,9 @@ seek slider.
 | # | Item | Status |
 |---|---|---|
 | SND1 | `plans/SOUND.md`, the jump-sheet row, the corrected Settings reference, and the `plans/USB.md` scope change | done |
-| SND2 | `lib/abi`: `HwDeviceClass::Audio`, the PCM vocabulary, `audio_ring`, `audiochan-v1`, `audio-v1`, `CAP_AUDIO_DEVICE`, `CAP_AUDIO_CAPTURE` | planned |
+| SND2 | `lib/abi`: `HwDeviceClass::Audio`, the PCM vocabulary, `audio_ring`, `audiochan-v1`, `audio-v1` | done |
 | SND3 | `lib/audio`: conversion, mixer, resampler, channel mapping, clock model, routing policy, volume model, the stream client — all host-tested, plus the ring's loom model | planned |
-| SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; the end-to-end QEMU vertical asserting a sample-exact host WAV | planned |
+| SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | planned |
 | SND5 | `lib/abi` DMA-engine class trait (`DmaEngine`/`DmaChannel`, cyclic chains, discovered request lines); `drivers/dma/bcm2711` | planned |
 | SND6 | Isochronous transfer support: the endpoint kind and service-interval scheduling in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and feedback endpoints in `drivers/bus/usb/xhci` | planned |
 | SND7 | `drivers/audio/usb_uac`: UAC1 and UAC2, clock and feature units, explicit and implicit feedback | planned |
@@ -38,6 +38,14 @@ seek slider.
 
 Each item is complete before the next begins and carries its own tests and
 documentation.
+
+**Why the two capabilities sit in SND4 rather than beside the ABI.** A
+capability is added with the subsystem that enforces it, never ahead of it: it
+needs a live holder and a live enforcement point in the same change, and
+`CAP_AUDIO_DEVICE`'s holder (`audiod`) and enforcement point (the kernel, at
+the driver's restricted-sender endpoint) both arrive with SND4, as do
+`CAP_AUDIO_CAPTURE`'s. SND2's wire surface therefore names the authority in
+prose and the constants land with the code that checks them.
 
 **Why the two seams come before the decoders.** SND5 and SND6 are the plan's
 priority and sit immediately after the working base, ahead of everything that
@@ -922,9 +930,25 @@ the tests are chosen to check it rather than to check that nothing crashed.
   the layout at several scales.
 
 **Oracles.** The PCM ring is a lock-free producer/consumer protocol with an
-`Acquire`/`Release` pairing, so it carries a `loom` model and `lib/audio` is
-enrolled in `cargo xtask loom` — this is not optional and not satisfiable by
-the test matrix, which runs whichever interleaving the host happened to pick.
+`Acquire`/`Release` pairing, so it carries a `loom` model — not optional and
+not satisfiable by the test matrix, which runs whichever interleaving the host
+happened to pick, and on a total-store-ordered host would pass even with the
+orderings downgraded to `Relaxed`. Two facts bound what that model can be, and
+are recorded here so SND3 decides the shape with them in hand rather than
+re-deriving them:
+
+* the ring lives in `lib/abi/src/driver/audio_ring.rs`, so the enrolment is
+  **`tairix-abi`**, not `lib/audio`;
+* `loom` instruments its own atomics and cells, and the sample area is a plain
+  byte region two processes map — it cannot be a `loom::cell::UnsafeCell`, and
+  `AtomicU64`s cannot be carved out of shared bytes by `align_to` under the
+  model's substituted types. A model therefore covers the **counter pair** —
+  monotonicity, occupancy, and the release/acquire edges — over a constructor
+  that takes the two counters directly, and the "no torn frame" half stays with
+  `lib/abi/tests/audio_ring_spsc.rs`, which drives both sides concurrently over
+  one aliased region, and with `fuzz_audio`, which drives every operation over
+  positions a hostile peer could have written.
+
 `lib/audio` and `lib/audiochan` are enrolled in `cargo xtask miri` for the
 shared-memory accesses.
 

@@ -45,10 +45,7 @@ use crate::Errno;
 /// Alignment a ring region must have: that of the header's counters.
 const INDEX_ALIGN: usize = align_of::<AtomicU32>();
 
-/// Bytes assumed for one cache line. Only an upper bound matters — it
-/// keeps the producer and consumer counters off each other's line — and
-/// 64 covers every Tier-1 target.
-const CACHE_LINE_BYTES: usize = 64;
+use super::CACHE_LINE_BYTES;
 
 /// Byte length of one ring's control header: the free-running producer
 /// and consumer counters, each alone in a cache line.
@@ -74,15 +71,11 @@ pub const REGION_ALIGN_PADDING: usize = INDEX_ALIGN - 1;
 /// `buffer` is too short.
 ///
 /// [`FrameRings::bind`] requires an aligned region because the ring
-/// headers' counters are atomics. A cross-process region comes from
-/// `shm` and is page-aligned already; an in-process buffer (a host test,
-/// the single-address-space local frame service) is only byte-aligned, so
-/// it is over-allocated by [`REGION_ALIGN_PADDING`] and trimmed here —
-/// one definition, rather than each caller doing pointer arithmetic.
+/// headers' counters are atomics. An in-process buffer over-allocated by
+/// [`REGION_ALIGN_PADDING`] is trimmed to one here.
 #[must_use]
 pub fn aligned_region(buffer: &mut [u8], len: usize) -> Option<&mut [u8]> {
-    let offset = buffer.as_ptr().align_offset(INDEX_ALIGN);
-    buffer.get_mut(offset..offset.checked_add(len)?)
+    super::aligned_region(buffer, len, INDEX_ALIGN)
 }
 
 /// Byte length of one slot's per-frame offload-metadata prefix (the

@@ -672,6 +672,7 @@ fn hwtree_enum_macros(out: &mut String) {
         ("SERIAL", HwDeviceClass::Serial),
         ("RTC", HwDeviceClass::Rtc),
         ("ACCELERATOR", HwDeviceClass::Accelerator),
+        ("AUDIO", HwDeviceClass::Audio),
         ("OTHER", HwDeviceClass::Other),
     ] {
         let _ = writeln!(

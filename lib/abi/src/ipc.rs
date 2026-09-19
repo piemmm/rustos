@@ -33,7 +33,8 @@ pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 /// ([`crate::driver_store::DRIVER_STORE_ENDPOINT`]), the log-ingress
 /// journal ([`crate::log_ingress::LOG_INGRESS_ENDPOINT`]), the `VideoCore`
 /// mailbox service ([`crate::mailbox_ipc::MAILBOX_ENDPOINT`]), the System
-/// Information service ([`crate::sysinfo::SYSINFO_ENDPOINT`]), the seat
+/// Information service ([`crate::sysinfo::SYSINFO_ENDPOINT`]), the audio
+/// mixer service ([`crate::audio::AUDIO_ENDPOINT`]), the seat
 /// manager ([`crate::seat::SEATMGR_ENDPOINT`]), the display service
 /// ([`crate::display_ipc::DISPLAY_ENDPOINT`]), the desktop session's
 /// window service ([`crate::window_ipc::WINDOW_ENDPOINT`]),
@@ -49,7 +50,10 @@ pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 /// status surface ([`crate::raid_admin::RAID_CONTROL_ENDPOINT`]), the per-NIC
 /// driver device channels
 /// ([`crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE`] through
-/// `+ NET_CHANNEL_ENDPOINT_COUNT`), the per-console elevation
+/// `+ NET_CHANNEL_ENDPOINT_COUNT`), the per-audio-device driver device
+/// channels
+/// ([`crate::driver::audio_channel::AUDIO_CHANNEL_ENDPOINT_BASE`] through
+/// `+ AUDIO_CHANNEL_ENDPOINT_COUNT`), the per-console elevation
 /// supervisors ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
 /// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`), and the per-bus-child
 /// transfer endpoints ([`crate::hwtree::is_bus_child_endpoint`]).
@@ -65,6 +69,7 @@ pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 #[must_use]
 pub const fn is_reserved_endpoint(id: u64) -> bool {
     if id == crate::appdata_ipc::APPDATA_ENDPOINT
+        || id == crate::audio::AUDIO_ENDPOINT
         || id == crate::driver_store::DRIVER_STORE_ENDPOINT
         || id == crate::log_ingress::LOG_INGRESS_ENDPOINT
         || id == crate::mailbox_ipc::MAILBOX_ENDPOINT
@@ -87,6 +92,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         return true;
     }
     if crate::driver::net_channel::is_net_channel_endpoint(id)
+        || crate::driver::audio_channel::is_audio_channel_endpoint(id)
         || crate::hwtree::is_bus_child_endpoint(id)
     {
         return true;

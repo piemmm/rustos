@@ -73,6 +73,44 @@ pub fn decode_status_reply(bytes: &[u8]) -> Result<(), Errno> {
     Err(errno)
 }
 
+/// Stamp `err` onto a **payload-carrying** reply's leading status word,
+/// leaving the payload zeroed.
+///
+/// A protocol whose reply carries a fixed-width payload prefixes it with the
+/// same status word the status-only frame uses: zero and a populated payload
+/// on success, the negative [`Errno`] discriminant and a zeroed payload on
+/// refusal. The two halves of that convention live here rather than in each
+/// protocol, so an encoder and a decoder in different modules cannot disagree
+/// about which byte carries the refusal.
+pub(crate) fn put_refusal(out: &mut [u8], err: Errno) {
+    out[..STATUS_REPLY_LEN].copy_from_slice(&(-err.as_i32()).to_le_bytes());
+}
+
+/// Read a payload-carrying reply's status word, answering **exactly** the
+/// `len`-byte frame's payload.
+///
+/// Exactly, never a caller's longer buffer: a decoder that checks its payload
+/// has nothing past the fields its shape defines would otherwise read whatever
+/// the caller's buffer happened to hold after the frame.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` is shorter than `len`.
+/// * The decoded [`Errno`] — the service refused, or
+///   [`Errno::OutOfRange`] when the refusal is not a defined discriminant.
+pub(crate) fn take_payload(bytes: &[u8], len: usize) -> Result<&[u8], Errno> {
+    let Some(frame) = bytes.get(..len) else {
+        return Err(Errno::BufferTooSmall);
+    };
+    let mut raw = [0u8; STATUS_REPLY_LEN];
+    raw.copy_from_slice(&frame[..STATUS_REPLY_LEN]);
+    let status = i32::from_le_bytes(raw);
+    if status != 0 {
+        return Err(Errno::try_from_status(status).unwrap_or(Errno::OutOfRange));
+    }
+    Ok(&frame[STATUS_REPLY_LEN..])
+}
+
 /// Byte length of the page header following the status word: the
 /// record count (2) and a reserved pair that must be zero (2).
 pub const PAGE_HEADER_LEN: usize = 4;

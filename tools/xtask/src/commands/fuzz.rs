@@ -61,6 +61,11 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-abi",
+        test: "fuzz_audio",
+        description: "lib/abi audio wire surface (audio-v1 client protocol, audiochan-v1 device channel, the PCM ring's peer-written positions)",
+    },
+    Target {
+        package: "tairix-abi",
         test: "fuzz_desktop_layer",
         description: "lib/abi desktop-layer surface wire surface (the capability-gated requests, the two feed events, the terrain reply)",
     },

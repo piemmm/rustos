@@ -423,6 +423,9 @@ fn classify(node: &Node<'_>) -> HwDeviceClass {
         // that computes rather than moves: a crypto offload, a signal
         // processor, a media decode/encode engine.
         b"crypto" | b"dsp" | b"video-codec" => HwDeviceClass::Accelerator,
+        // The devicetree names for a sound device: the controller itself, a
+        // codec behind it, and the machine-level graph that binds the two.
+        b"sound" | b"audio" | b"codec" | b"i2s" => HwDeviceClass::Audio,
         b"soc" | b"bus" | b"pci" | b"pcie" | b"usb" | b"axi" => HwDeviceClass::Bus,
         _ => HwDeviceClass::Other,
     }

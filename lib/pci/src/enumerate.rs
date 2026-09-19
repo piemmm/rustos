@@ -1024,6 +1024,9 @@ fn device_class_from_base(base_class: u8) -> HwDeviceClass {
         0x02 => HwDeviceClass::Network,
         // Display controller.
         0x03 => HwDeviceClass::Display,
+        // Multimedia controller, which on every modern board is an HDA
+        // controller or a virtio sound device.
+        0x04 => HwDeviceClass::Audio,
         // Bridge (0x06) and serial-bus controller (0x0C, incl. USB
         // host controllers) are buses to further devices.
         0x06 | 0x0C => HwDeviceClass::Bus,

@@ -222,6 +222,7 @@ pub fn class_label(class: Option<HwDeviceClass>) -> &'static str {
         Some(HwDeviceClass::Serial) => "serial",
         Some(HwDeviceClass::Rtc) => "rtc",
         Some(HwDeviceClass::Accelerator) => "accelerator",
+        Some(HwDeviceClass::Audio) => "audio",
         Some(HwDeviceClass::Other) | None => "device",
     }
 }

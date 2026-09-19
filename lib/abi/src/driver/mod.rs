@@ -48,6 +48,9 @@ use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::{CapabilityId, Errno};
 
 pub mod accelerator;
+pub mod audio;
+pub mod audio_channel;
+pub mod audio_ring;
 pub mod block;
 pub mod bus;
 pub mod display;
@@ -85,6 +88,25 @@ pub use virtio_pci::{
     VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR,
     VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
 };
+
+/// Bytes assumed for one cache line by every shared-memory ring in the driver
+/// ABI. Only an upper bound matters — it keeps a ring's producer and consumer
+/// counters off each other's line, where every publish would invalidate the
+/// peer's read of the other counter — and 64 covers every Tier-1 target.
+pub(crate) const CACHE_LINE_BYTES: usize = 64;
+
+/// Cut an `align`-aligned `len`-byte region out of `buffer`, or [`None`] when
+/// `buffer` is too short once the alignment is paid for.
+///
+/// A cross-process ring region comes from `shm` and is page-aligned already;
+/// an in-process buffer (a host test, a single-address-space service) is only
+/// byte-aligned, so it is over-allocated and trimmed here. Each ring exposes
+/// this through its own typed door with its own padding constant; the
+/// arithmetic lives here once.
+pub(crate) fn aligned_region(buffer: &mut [u8], len: usize, align: usize) -> Option<&mut [u8]> {
+    let offset = buffer.as_ptr().align_offset(align);
+    buffer.get_mut(offset..offset.checked_add(len)?)
+}
 
 /// Sensitivity class of a payload buffer crossing the driver ABI.
 ///

@@ -137,6 +137,9 @@ pub enum HwDeviceClass {
     /// An offload engine that performs bounded units of work off-CPU: a
     /// crypto offload, an NPU, a media engine.
     Accelerator = 12,
+    /// An audio device: a sound card, codec controller, or digital audio
+    /// interface presenting sinks and sources.
+    Audio = 13,
     /// A device whose class is not modelled by `abi-v1`.
     Other = 65535,
 }
@@ -165,6 +168,7 @@ impl HwDeviceClass {
             10 => Some(Self::Serial),
             11 => Some(Self::Rtc),
             12 => Some(Self::Accelerator),
+            13 => Some(Self::Audio),
             65535 => Some(Self::Other),
             _ => None,
         }
@@ -2174,11 +2178,12 @@ mod tests {
             HwDeviceClass::Serial,
             HwDeviceClass::Rtc,
             HwDeviceClass::Accelerator,
+            HwDeviceClass::Audio,
             HwDeviceClass::Other,
         ] {
             assert_eq!(HwDeviceClass::from_u16(class.as_u16()), Some(class));
         }
-        assert_eq!(HwDeviceClass::from_u16(13), None);
+        assert_eq!(HwDeviceClass::from_u16(14), None);
         assert_eq!(HwDeviceClass::from_u16(64_000), None);
         assert_eq!(HwDeviceClass::default(), HwDeviceClass::Root);
     }

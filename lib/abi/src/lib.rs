@@ -18,6 +18,7 @@
 
 pub mod appdata_ipc;
 pub mod appinfo;
+pub mod audio;
 pub mod blkio;
 pub mod boot;
 pub mod bounded_text;

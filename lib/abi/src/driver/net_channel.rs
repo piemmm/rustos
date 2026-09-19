@@ -919,10 +919,7 @@ pub fn encode_facts_reply(result: Result<DeviceFacts, Errno>) -> [u8; NET_CHANNE
             body[MAC_ADDRESS_LEN + 15] = kind;
             put_u16(body, MAC_ADDRESS_LEN + 16, slots);
         }
-        Err(err) => {
-            let status = (-err.as_i32()).to_le_bytes();
-            out[..4].copy_from_slice(&status);
-        }
+        Err(err) => crate::reply::put_refusal(&mut out, err),
     }
     out
 }
@@ -936,17 +933,7 @@ pub fn encode_facts_reply(result: Result<DeviceFacts, Errno>) -> [u8; NET_CHANNE
 /// * [`Errno::OutOfRange`] — a corrupt status, link byte, reserved byte, or
 ///   offload/facts value that fails validation.
 pub fn decode_facts_reply(bytes: &[u8]) -> Result<DeviceFacts, Errno> {
-    if bytes.len() < NET_CHANNEL_FACTS_REPLY_LEN {
-        return Err(Errno::BufferTooSmall);
-    }
-    let mut status = [0u8; 4];
-    status.copy_from_slice(&bytes[..4]);
-    let status = i32::from_le_bytes(status);
-    if status != 0 {
-        let errno = Errno::try_from_status(status).ok_or(Errno::OutOfRange)?;
-        return Err(errno);
-    }
-    let body = &bytes[4..];
+    let body = crate::reply::take_payload(bytes, NET_CHANNEL_FACTS_REPLY_LEN)?;
     let mut mac = [0u8; MAC_ADDRESS_LEN];
     mac.copy_from_slice(&body[..MAC_ADDRESS_LEN]);
     let mtu = read_u32(body, MAC_ADDRESS_LEN);
@@ -1061,10 +1048,7 @@ pub fn encode_service_reply(
             };
             put_u32(body, service::HARVESTED, report.harvested);
         }
-        Err(err) => {
-            let status = (-err.as_i32()).to_le_bytes();
-            out[..4].copy_from_slice(&status);
-        }
+        Err(err) => crate::reply::put_refusal(&mut out, err),
     }
     out
 }
@@ -1078,17 +1062,7 @@ pub fn encode_service_reply(
 /// * [`Errno::OutOfRange`] — a corrupt status or a flag byte that is not
 ///   `0` or `1`.
 pub fn decode_service_reply(bytes: &[u8]) -> Result<ServiceReport, Errno> {
-    if bytes.len() < NET_CHANNEL_SERVICE_REPLY_LEN {
-        return Err(Errno::BufferTooSmall);
-    }
-    let mut status = [0u8; 4];
-    status.copy_from_slice(&bytes[..4]);
-    let status = i32::from_le_bytes(status);
-    if status != 0 {
-        let errno = Errno::try_from_status(status).ok_or(Errno::OutOfRange)?;
-        return Err(errno);
-    }
-    let body = &bytes[4..];
+    let body = crate::reply::take_payload(bytes, NET_CHANNEL_SERVICE_REPLY_LEN)?;
     let transmitted = read_u32(body, service::TRANSMITTED);
     let received = read_u32(body, service::RECEIVED);
     let filtered = read_u64(body, service::FILTERED);
