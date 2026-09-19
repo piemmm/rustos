@@ -18,8 +18,9 @@
 //! as artwork rather than as a rendered image, because the resolution the
 //! tile must be rendered at is the one the drawing is being rasterised at,
 //! which the producer of a resolution-independent drawing cannot know. The
-//! renderer sizes it from the fill ([`Pattern::tile_extent`]), draws it once,
-//! and reads it back at the repeated position this module resolves
+//! renderer sizes it from the fill ([`Pattern::tile_extent`]), draws one
+//! period of it — once per replica its [`TileFold`] folds in — and reads it
+//! back at the repeated position this module resolves
 //! ([`Pattern::tile_position`]).
 //!
 //! Sampling is total: no input produces a `NaN`, a division by zero, or a
@@ -69,6 +70,95 @@ pub enum Paint {
     Pattern(Pattern),
 }
 
+/// How many whole periods a tile's content may reach past its own tile, on
+/// any one side.
+///
+/// A fixed containment bound, not a capacity. Drawing the spill exactly means
+/// drawing the content once per replica that can reach the period being
+/// rendered, so this multiplies the one-off tile render by up to `(2k+1)²` —
+/// nine draws here against one for a confined tile.
+///
+/// One period is where an honest pattern ends: content reaching further
+/// overlaps its neighbour's neighbour, so the repeat has stopped being a
+/// repeat and the picture is artwork, more cheaply authored as artwork. A
+/// tile whose content is up to three periods across still folds.
+pub const MAX_TILE_FOLD: u32 = 1;
+
+/// The replicas of a tile drawn into one period, so content spilling past its
+/// own tile still appears in its neighbours.
+///
+/// A pattern is periodic, so the infinitely many replicas restricted to one
+/// period sum to the finitely many whose content reaches into it, folded back
+/// by whole periods. The result is one periodic tile again, so the wrap
+/// sampler and the per-pixel cost stay a confined tile's and only the tile's
+/// own render pays.
+///
+/// The overhangs cross over: content reaching past the tile's *right* edge is
+/// what a replica to its *left* spills back in, so a right overhang is
+/// counted in [`before`](Self::before).
+///
+/// Replicas draw in raster order — rows top to bottom, each row left to right
+/// — which is what blitting whole tiles across the plane produces, and is
+/// observable wherever two of them overlap.
+///
+/// The default draws the tile's own replica alone, which is the
+/// `overflow: hidden` a pattern is otherwise drawn under.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct TileFold {
+    /// Replicas drawn before the tile's own, on the x and y axes.
+    pub before: (u32, u32),
+    /// Replicas drawn after it.
+    pub after: (u32, u32),
+}
+
+impl TileFold {
+    /// The fold that draws content spanning `min..=max`, on a grid of which
+    /// `design` units square is one tile.
+    ///
+    /// `None` when the content reaches more than [`MAX_TILE_FOLD`] whole
+    /// periods past the tile on any side, which the caller refuses rather
+    /// than folding.
+    #[must_use]
+    pub fn reaching(min: (i32, i32), max: (i32, i32), design: u32) -> Option<Self> {
+        let period = i64::from(design.max(1));
+        let before = |far: i32| periods(i64::from(far) - period, period);
+        let after = |near: i32| periods(-i64::from(near), period);
+        Some(Self {
+            before: (before(max.0)?, before(max.1)?),
+            after: (after(min.0)?, after(min.1)?),
+        })
+    }
+
+    /// The replica grid this fold draws — `before + 1 + after` on each axis —
+    /// or `None` past [`MAX_TILE_FOLD`].
+    ///
+    /// A renderer asks before allocating, so a fold assembled by hand rather
+    /// than by [`reaching`](Self::reaching) fails closed instead of tiling
+    /// the machine to a halt.
+    #[must_use]
+    pub fn grid(self) -> Option<(u32, u32)> {
+        let axis = |before: u32, after: u32| {
+            (before <= MAX_TILE_FOLD && after <= MAX_TILE_FOLD).then_some(before + after + 1)
+        };
+        Some((
+            axis(self.before.0, self.after.0)?,
+            axis(self.before.1, self.after.1)?,
+        ))
+    }
+}
+
+/// `overhang` design units as whole `period`-unit periods, rounded up, or
+/// `None` past [`MAX_TILE_FOLD`].
+fn periods(overhang: i64, period: i64) -> Option<u32> {
+    if overhang <= 0 {
+        return Some(0);
+    }
+    let whole = (overhang - 1) / period + 1;
+    u32::try_from(whole)
+        .ok()
+        .filter(|count| *count <= MAX_TILE_FOLD)
+}
+
 /// A tile of artwork repeated across a fill.
 ///
 /// The tile is held as *artwork* rather than as an image because the
@@ -85,6 +175,16 @@ pub struct Pattern {
     /// Maps a point in the filled geometry's own coordinates into tile space,
     /// where one tile is the unit square.
     pub to_tile: Affine,
+    /// The replicas folded into that one tile for content that spills past
+    /// it.
+    pub fold: TileFold,
+    /// What the assembled tile is composited at.
+    ///
+    /// The fill's own opacity, weakening the tile once it is built rather
+    /// than layer by layer or replica by replica: SVG weakens the fill
+    /// operation as a whole, so two of the tile's layers would otherwise show
+    /// through one another and two overlapping replicas would each pay it.
+    pub opacity: u8,
 }
 
 impl Pattern {

@@ -463,12 +463,14 @@ taken; the build gate already refuses a master that draws nothing, so only
 the *partially* drawable case is at stake.
 
 The set at stake keeps shrinking. Clipping, masking, group opacity and
-`<pattern>` fills are now honoured; a `clip-path` or `mask` naming something
-the document does not define makes the element **not rendered** rather than
-rendered unclipped, and a paint server that is defined but paints nothing is
-`none` rather than the fallback colour written beside the reference — which
-is this question already answered, for the cases where the decoder can tell
-what the author meant.
+`<pattern>` fills are now honoured — including a tile whose content spills
+into the neighbouring repeats, which used to take the reference's fallback
+colour and so was itself a wrong picture; a `clip-path` or `mask` naming
+something the document does not define makes the element **not rendered**
+rather than rendered unclipped, and a paint server that is defined but paints
+nothing is `none` rather than the fallback colour written beside the
+reference — which is this question already answered, for the cases where the
+decoder can tell what the author meant.
 
 ## 13. What this plan deliberately does not cover
 

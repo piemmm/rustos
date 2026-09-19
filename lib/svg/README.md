@@ -43,9 +43,14 @@ decodes to a flat list.
 
 A `<pattern>` fill is artwork of its own rather than a colour: the layer
 carries the tile's nodes and the map from the drawing into tile space, and
-`lib/raster` renders one repeat at the density the fill reads it back at. A
+`lib/raster` renders one period at the density the fill reads it back at. A
 tile is a buffer in flight exactly as a group is, so both are charged against
 one nesting bound and a cycle of patterns painting one another ends at it.
+Content an author let spill past its tile (`overflow: visible`) is folded
+back: a pattern is periodic, so the replicas that reach one period are finite
+and drawing each of them into that period is exact rather than approximate.
+The fill's opacity weakens the assembled tile, because SVG weakens the fill
+operation as a whole and overlapping replicas must not each pay it.
 
 ## Untrusted input
 
@@ -76,10 +81,10 @@ The drawable part of SVG 1.1, in full:
   both spellings, the named-colour table, and `currentColor`;
 - linear and radial gradients, with units, spread, and `href` inheritance;
 - `<pattern>` as a paint server — `patternUnits`, `patternContentUnits`,
-  `patternTransform`, its own `viewBox`, and `href` inheritance of both
-  attributes and content — whose tile is rendered at the resolution the
-  drawing is being rasterised at, so a patterned fill stays as sharp as the
-  rest of the artwork;
+  `patternTransform`, its own `viewBox`, `href` inheritance of both
+  attributes and content, and `overflow` — whose tile is rendered at the
+  resolution the drawing is being rasterised at, so a patterned fill stays as
+  sharp as the rest of the artwork;
 - `clip-path` and `<clipPath>` (`clip-rule`, `clipPathUnits`, nesting),
   `mask` and `<mask>` (`maskUnits`, `maskContentUnits`, `mask-type`, the mask
   region), and group opacity, each composited in isolation;

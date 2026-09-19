@@ -114,6 +114,16 @@ This crate owns:
   paints **nothing** and says so — `fill_contours` answers whether the paint
   was realised, so a caller falls back rather than showing the shape in some
   other colour.
+- `TileFold` — the replicas a tile is drawn from when its content spills past
+  it (SVG's `overflow: visible`). A pattern is periodic, so the infinitely
+  many replicas restricted to one period sum to the finitely many whose
+  content reaches into it, folded back by whole periods: the buffer stays one
+  period, the wrap sampler and the per-pixel cost are unchanged, and only the
+  tile's own render pays. Replicas draw in raster order, which is observable
+  where two of them overlap. The overhangs cross over — content past the
+  tile's right edge is what the replica to its *left* brings back in — and
+  `MAX_TILE_FOLD` bounds how far a spill may reach, so a confined tile is the
+  same walk with a zero-sized window and an absurd one is refused.
 - `Affine` — SVG's `matrix(a b c d e f)`, the transform vector artwork is
   placed by and a gradient carries: `translate`, `scale`, `rotate_degrees`
   (and about a centre), `skew_x_degrees`/`skew_y_degrees`, `then` composition

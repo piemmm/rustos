@@ -10,7 +10,7 @@ use super::FillRule;
 use crate::affine::Affine;
 use crate::artwork::{Group, Layer, Node};
 use crate::color::{Color, Pixel};
-use crate::paint::{Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod};
+use crate::paint::{Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod, TileFold};
 use crate::surface::Surface;
 
 const RED: Color = Color::rgb(255, 0, 0);
@@ -523,9 +523,17 @@ fn wild_coordinates_neither_panic_nor_paint_outside_the_surface() {
 /// A pattern whose tile is `content` and whose repeat is `period` design
 /// units square.
 fn tiled(period: f64, content: Vec<Node>) -> Paint {
+    folded(period, content, TileFold::default(), u8::MAX)
+}
+
+/// A pattern that folds `fold`'s further replicas into its one tile and
+/// composites the assembled tile at `opacity`.
+fn folded(period: f64, content: Vec<Node>, fold: TileFold, opacity: u8) -> Paint {
     Paint::Pattern(Pattern {
         content,
         to_tile: Affine::scale(1.0 / period, 1.0 / period),
+        fold,
+        opacity,
     })
 }
 
@@ -595,7 +603,101 @@ fn a_tiling_that_collapses_paints_nothing_and_says_so() {
     let paint = Paint::Pattern(Pattern {
         content: vec![tile_stripe(16, RED)],
         to_tile: Affine::scale(0.0, 1.0),
+        fold: TileFold::default(),
+        opacity: u8::MAX,
     });
+    assert!(!surface.fill_contours(&[square(0, 8)], 8, FillRule::NonZero, &paint));
+    assert!(surface
+        .pixels()
+        .iter()
+        .all(|pixel| *pixel == Pixel::TRANSPARENT));
+}
+
+/// A layer covering the tile square `at..at+size` on the tile's own grid.
+fn tile_patch(at: i32, size: i32, color: Color) -> Node {
+    Node::Fill(Layer::filled(
+        Paint::Solid(color),
+        FillRule::NonZero,
+        vec![square(at, size)],
+    ))
+}
+
+/// Content spilling past its tile is drawn once per replica that reaches the
+/// period, so the spill appears where its neighbours put it.
+///
+/// The patch straddles the tile's far corner — three quarters of the way
+/// across to one and a quarter — so a confined tile keeps only the corner
+/// pixel inside it, while folding brings the other three corners in from the
+/// three neighbours that reach it.
+#[test]
+fn a_folded_tile_draws_what_its_neighbours_spill_in() {
+    let corners = TileFold {
+        before: (1, 1),
+        after: (0, 0),
+    };
+    let patch = || vec![tile_patch(12, 8, RED)];
+
+    let mut spilling = Surface::new(16, 16).expect("allocates");
+    let paint = folded(4.0, patch(), corners, u8::MAX);
+    assert!(spilling.fill_contours(&[square(0, 16)], 16, FillRule::NonZero, &paint));
+
+    let mut confined = Surface::new(16, 16).expect("allocates");
+    assert!(confined.fill_contours(
+        &[square(0, 16)],
+        16,
+        FillRule::NonZero,
+        &tiled(4.0, patch())
+    ));
+
+    let red = Some(RED.premultiply());
+    let clear = Some(Pixel::TRANSPARENT);
+    for repeat in 0..4 {
+        let (near, far) = (repeat * 4, repeat * 4 + 3);
+        assert_eq!(confined.get(far, far), red, "repeat {repeat} keeps its own");
+        assert_eq!(confined.get(near, near), clear, "and nothing else");
+        for corner in [(near, near), (far, near), (near, far), (far, far)] {
+            assert_eq!(
+                spilling.get(corner.0, corner.1),
+                red,
+                "repeat {repeat} should show the spill at {corner:?}"
+            );
+        }
+        assert_eq!(spilling.get(near + 1, near + 1), clear, "and no more");
+    }
+}
+
+/// The opacity weakens the assembled tile once. Four replicas overlap every
+/// pixel here, so weakening each of them would reach 239 rather than 128.
+#[test]
+fn an_assembled_tile_is_weakened_once_however_many_replicas_overlap() {
+    let mut surface = Surface::new(16, 16).expect("allocates");
+    let paint = folded(
+        4.0,
+        vec![tile_patch(0, 32, RED)],
+        TileFold {
+            before: (1, 1),
+            after: (0, 0),
+        },
+        128,
+    );
+    assert!(surface.fill_contours(&[square(0, 16)], 16, FillRule::NonZero, &paint));
+    assert_eq!(surface.get(2, 2), Some(RED.premultiply().scale_alpha(128)));
+}
+
+/// A fold assembled past the bound is refused rather than tiled for, so a
+/// hand-built pattern cannot ask the renderer for an unbounded draw.
+#[test]
+fn a_tile_folded_past_the_bound_is_refused() {
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    let paint = folded(
+        4.0,
+        vec![tile_patch(0, 16, RED)],
+        TileFold {
+            before: (crate::paint::MAX_TILE_FOLD + 1, 0),
+            after: (0, 0),
+        },
+        u8::MAX,
+    );
     assert!(!surface.fill_contours(&[square(0, 8)], 8, FillRule::NonZero, &paint));
     assert!(surface
         .pixels()

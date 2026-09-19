@@ -1984,12 +1984,22 @@ const TILE_WEIGHT: u32 = 256;
 /// derived from it so the two cannot drift apart.
 const TILE_SHIFT: u32 = 2 * TILE_WEIGHT.trailing_zeros();
 
-/// Render one repeat of `pattern` at the density `space` reads pixels at.
+/// Render one period of `pattern` at the density `space` reads pixels at.
 ///
 /// A tile is a small drawing of its own: the design grid stretched across the
 /// tile's own buffer. That buffer is also what confines the content to the
-/// tile, since a surface writes nothing outside itself — which is the
-/// `overflow: hidden` a pattern is drawn under.
+/// tile, since a surface writes nothing outside itself.
+///
+/// Content the author let spill past the tile is drawn by the further
+/// replicas of the [`TileFold`](crate::paint::TileFold), each translated a
+/// whole period. The buffer therefore stays one period, and the spill that
+/// leaves it is correct to drop: it belongs to a period some other replica
+/// already accounts for. A confined tile is the same walk with a zero-sized
+/// window.
+///
+/// The fill's opacity weakens the assembled tile rather than each replica.
+/// Scaling a premultiplied buffer is exactly compositing that one layer at
+/// it, and it costs no second buffer.
 ///
 /// A level of tile nesting holds a live buffer and a stack frame exactly as a
 /// group does, so it is charged against the same bound and refuses past it.
@@ -2002,11 +2012,41 @@ fn render_tile(
     if depth >= MAX_GROUP_DEPTH {
         return None;
     }
+    let (across, down) = pattern.fold.grid()?;
     let (width, height) = pattern.tile_extent(space.contour_per_pixel())?;
     let mut tile = Surface::new(width, height)?;
-    let over = tile.space_rect_region();
-    tile.draw_nodes(over, &pattern.content, design, depth + 1)
-        .then_some(tile)
+    // Both factors of every replica offset are already bounded — the replica
+    // count by `TileFold::grid`, the tile side by `tile_extent`.
+    let (left, top) = (
+        pattern.fold.before.0 * width,
+        pattern.fold.before.1 * height,
+    );
+    let mut drawn = true;
+    tile.with_origin(left, top, |tile| {
+        'fold: for row in 0..down {
+            for column in 0..across {
+                let over = Region {
+                    x: column * width,
+                    y: row * height,
+                    width,
+                    height,
+                };
+                if !tile.draw_nodes(over, &pattern.content, design, depth + 1) {
+                    drawn = false;
+                    break 'fold;
+                }
+            }
+        }
+    });
+    if !drawn {
+        return None;
+    }
+    if pattern.opacity != u8::MAX {
+        for pixel in &mut tile.pixels {
+            *pixel = pixel.scale_alpha(pattern.opacity);
+        }
+    }
+    Some(tile)
 }
 
 /// The tile pixel `pattern` puts at `point`, interpolated and wrapping at

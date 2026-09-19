@@ -64,7 +64,8 @@ pub use blur::{box_blur, BlurScratch};
 pub use color::{blend_solid_span, blend_span, div255, div255_biased, Color, Pixel, ROUND_NEAREST};
 pub use dither::DitherRow;
 pub use paint::{
-    Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod, MAX_TILE_EXTENT,
+    Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod, TileFold, MAX_TILE_EXTENT,
+    MAX_TILE_FOLD,
 };
 pub use reorient::Reorient;
 pub use resample::{resample, resample_window, Region, ResampleError, Rgba8Image};

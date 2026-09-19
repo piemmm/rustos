@@ -34,7 +34,9 @@
 
 use alloc::vec::Vec;
 
-use tairix_raster::{Affine, Color, FillRule, Group, Layer, Mask, MaskKind, Node, Paint, Pattern};
+use tairix_raster::{
+    Affine, Color, FillRule, Group, Layer, Mask, MaskKind, Node, Paint, Pattern, TileFold,
+};
 use tairix_util::mathf::{round_i32, sqrt};
 
 use crate::css::{Declaration, Stylesheet};
@@ -1027,31 +1029,27 @@ impl<'a> Decoder<'a> {
         if content.is_empty() {
             return Ok(Resolved::Nothing);
         }
-        // The tile buffer is what confines the content to the tile, which is
-        // the `overflow: hidden` a pattern is drawn under. Content an author
-        // asked to spill into the neighbouring repeats is a picture built
-        // from overlapping tiles, which a sampled tile cannot express — so
-        // the reference takes its fallback rather than being silently
-        // clipped to something the author did not draw.
-        let grid = f64::from(DESIGN_GRID);
-        if overflow == Overflow::Visible
-            && !rect_contains((0.0, 0.0, grid, grid), Affine::IDENTITY, &content)
-        {
-            return Ok(Resolved::Unresolved);
-        }
         let opacity = opacity_to_alpha(alpha);
         if opacity == 0 {
             return Ok(Resolved::Nothing);
         }
-        if opacity != u8::MAX {
-            // The tile is weakened as a unit rather than layer by layer: two
-            // of its layers weakened apart would show through each other.
-            self.fits_group()?;
-            content = grouped(opacity, None, content);
-        }
+        // The tile buffer confines the content to the tile, which is the
+        // `overflow: hidden` a pattern is drawn under. Content an author let
+        // spill into the neighbouring repeats is drawn by folding those
+        // neighbours back into the one period — exact, because a pattern is
+        // periodic — and a spill past the fold's bound is a budget overrun
+        // like any other.
+        let fold = match (overflow, design_bounds(&content)) {
+            (Overflow::Visible, Some((min, max))) => {
+                TileFold::reaching(min, max, DESIGN_GRID).ok_or(SvgError::TooComplex)?
+            }
+            _ => TileFold::default(),
+        };
         Ok(Resolved::Paint(Paint::Pattern(Pattern {
             content,
             to_tile: tile.to_tile,
+            fold,
+            opacity,
         })))
     }
 

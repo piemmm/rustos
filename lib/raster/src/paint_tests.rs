@@ -2,7 +2,10 @@
 
 use alloc::vec;
 
-use super::{Gradient, GradientKind, GradientStop, Pattern, SpreadMethod, MAX_TILE_EXTENT};
+use super::{
+    Gradient, GradientKind, GradientStop, Pattern, SpreadMethod, TileFold, MAX_TILE_EXTENT,
+    MAX_TILE_FOLD,
+};
 use crate::affine::Affine;
 use crate::color::Color;
 
@@ -237,6 +240,8 @@ fn tiling(to_tile: Affine) -> Pattern {
     Pattern {
         content: vec![],
         to_tile,
+        fold: TileFold::default(),
+        opacity: u8::MAX,
     }
 }
 
@@ -306,5 +311,109 @@ fn a_tile_position_refuses_a_point_the_map_sends_nowhere() {
     assert_eq!(
         tiling(Affine::IDENTITY).tile_position((f64::NAN, 0.0)),
         None
+    );
+}
+
+// --- folding a tile whose content spills past it --------------------------
+
+/// Content that stays inside its tile folds nothing, wherever in the tile it
+/// sits.
+#[test]
+fn content_inside_its_tile_needs_no_replicas() {
+    assert_eq!(
+        TileFold::reaching((0, 0), (64, 64), 64),
+        Some(TileFold::default())
+    );
+    assert_eq!(
+        TileFold::reaching((10, 20), (30, 40), 64),
+        Some(TileFold::default())
+    );
+    assert_eq!(TileFold::default().grid(), Some((1, 1)));
+}
+
+/// The overhangs cross over: content past the tile's far edge is what the
+/// replica *before* it spills back in, and content before the near edge what
+/// the one after it does.
+#[test]
+fn a_spill_is_folded_in_from_the_opposite_side() {
+    assert_eq!(
+        TileFold::reaching((0, 0), (65, 64), 64),
+        Some(TileFold {
+            before: (1, 0),
+            after: (0, 0)
+        })
+    );
+    assert_eq!(
+        TileFold::reaching((0, -1), (64, 64), 64),
+        Some(TileFold {
+            before: (0, 0),
+            after: (0, 1)
+        })
+    );
+    // A whole period either side is three replicas across, and the widest
+    // tile the bound admits.
+    assert_eq!(
+        TileFold::reaching((-64, 0), (128, 64), 64),
+        Some(TileFold {
+            before: (1, 0),
+            after: (1, 0)
+        })
+    );
+    assert_eq!(
+        TileFold {
+            before: (1, 0),
+            after: (1, 0)
+        }
+        .grid(),
+        Some((3, 1))
+    );
+}
+
+/// A replica is whole: a fraction of a period past the tile costs the same
+/// one as a full period does, because there is no fraction of a drawing.
+#[test]
+fn a_fraction_of_a_period_still_costs_a_whole_replica() {
+    for far in [65, 96, 128] {
+        assert_eq!(
+            TileFold::reaching((0, 0), (far, 64), 64).map(|fold| fold.before.0),
+            Some(1),
+            "{far} should fold one replica in"
+        );
+    }
+}
+
+/// The fold is a fixed containment bound: a spill past it is refused, and so
+/// is a fold assembled by hand rather than measured.
+#[test]
+fn a_fold_past_the_bound_is_refused() {
+    let period = 64;
+    let far = period * i32::try_from(MAX_TILE_FOLD + 2).expect("a small count");
+    assert_eq!(
+        TileFold::reaching(
+            (0, 0),
+            (far, period),
+            u32::try_from(period).expect("positive")
+        ),
+        None
+    );
+    let past = TileFold {
+        before: (MAX_TILE_FOLD + 1, 0),
+        after: (0, 0),
+    };
+    assert_eq!(past.grid(), None);
+}
+
+/// An extreme extent is arithmetic to refuse, not to overflow on, and a zero
+/// period is read as one exactly as the scan converter reads a zero design
+/// grid.
+#[test]
+fn an_extreme_extent_is_refused_rather_than_overflowing() {
+    assert_eq!(
+        TileFold::reaching((i32::MIN, i32::MIN), (i32::MAX, i32::MAX), 1),
+        None
+    );
+    assert_eq!(
+        TileFold::reaching((0, 0), (0, 0), 0),
+        Some(TileFold::default())
     );
 }

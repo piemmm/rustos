@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use tairix_raster::{
-    for_each_fill, Color, FillRule, Group, Layer, MaskKind, Node, Paint, Pattern, Surface,
+    for_each_fill, Color, FillRule, Group, Layer, MaskKind, Node, Paint, Pattern, Surface, TileFold,
 };
 
 use crate::error::SvgError;
@@ -1273,28 +1273,143 @@ fn a_stopless_gradient_paints_nothing_but_a_missing_one_falls_back() {
     assert_eq!(solid(&layers(&missing)[0]), Color::rgb(0, 0, 255));
 }
 
-/// A tile whose content an author asked to spill past it cannot be drawn by
-/// repeating one tile, so the reference takes its fallback rather than being
-/// silently clipped to a picture the author did not draw.
+/// A tile whose content an author asked to spill past it draws that spill in
+/// the neighbouring repeats, rather than being clipped to a picture the
+/// author did not draw.
+///
+/// The tile is four user units of an eight-unit document over sixteen
+/// pixels, so one repeat is eight pixels and one user unit is two. Its stripe
+/// covers user 3..5 — inside the tile from 3, and one unit past it — so each
+/// repeat shows its own stripe *and* the unit its left-hand neighbour spills
+/// in.
 #[test]
-fn a_tile_that_overflows_its_own_bounds_falls_back() {
-    let svg = document(
+fn a_tile_that_overflows_its_own_bounds_spills_into_its_neighbours() {
+    let spilling = document(
         r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
               overflow="visible">
-              <rect width="6" height="4" fill="#f00"/></pattern>
-            <rect width="8" height="8" fill="url(#p) #00f"/>"##,
+              <rect x="3" width="2" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
     );
-    assert_eq!(solid(&layers(&svg)[0]), Color::rgb(0, 0, 255));
+    assert_eq!(rendered_row(&spilling, 16, 8), "##....####....##");
 
-    // Content that stays inside its tile draws the same either way, so an
-    // `overflow` that cuts nothing off costs nothing.
+    // The same tile confined: only the unit inside it survives.
+    let hidden = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect x="3" width="2" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    assert_eq!(rendered_row(&hidden, 16, 8), "......##......##");
+}
+
+/// Which side a spill needs a replica on is the opposite of the side it
+/// spills toward: content past the tile's right edge is what the replica to
+/// its *left* brings back in.
+#[test]
+fn a_spill_is_folded_from_the_side_it_reaches_back_from() {
+    let rightward = only_pattern(&document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              overflow="visible">
+              <rect x="3" width="2" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    ));
+    assert_eq!(
+        rightward.fold,
+        TileFold {
+            before: (1, 0),
+            after: (0, 0)
+        }
+    );
+
+    let leftward = only_pattern(&document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              overflow="visible">
+              <rect x="-1" width="2" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    ));
+    assert_eq!(
+        leftward.fold,
+        TileFold {
+            before: (0, 0),
+            after: (1, 0)
+        }
+    );
+}
+
+/// An `overflow` that cuts nothing off folds nothing, so a tile inside its
+/// own bounds decodes and draws exactly as a confined one.
+#[test]
+fn an_overflow_that_spills_nothing_folds_nothing() {
     let inside = document(
         r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
               overflow="visible">
               <rect width="2" height="4" fill="#f00"/></pattern>
             <rect width="8" height="8" fill="url(#p)"/>"##,
     );
+    assert_eq!(only_pattern(&inside).fold, TileFold::default());
     assert_eq!(rendered_row(&inside, 16, 8), "####....####....");
+
+    let confined = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect width="2" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    assert_eq!(only_pattern(&confined).fold, TileFold::default());
+}
+
+/// Overlapping replicas draw in raster order, so the replica to the right
+/// paints over the one to its left.
+///
+/// The tile's blue band sits one period along from its red one, so each
+/// replica's blue lands exactly where the next replica's red does. Red is
+/// half-transparent, so which of the two is on top is the difference between
+/// a reddish blend and flat blue.
+#[test]
+fn overlapping_replicas_draw_in_raster_order() {
+    let svg = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              overflow="visible">
+              <rect width="2" height="4" fill="#f00" fill-opacity="0.5"/>
+              <rect x="4" width="2" height="4" fill="#00f"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
+    let mut surface = Surface::new(16, 16).expect("a small surface");
+    assert!(surface.draw_artwork(image.nodes(), image.design()));
+
+    let pixel = surface.get(2, 8).expect("an interior pixel");
+    assert!(
+        pixel.r > pixel.b,
+        "the later replica's red should sit over the earlier one's blue, got {pixel:?}"
+    );
+}
+
+/// The fold is bounded: content reaching more than a period past its tile is
+/// a budget overrun, refused like any other rather than folded.
+#[test]
+fn a_spill_past_the_fold_bound_is_refused() {
+    // Three periods of content — one past the tile on each side — is the
+    // widest tile the bound admits.
+    let admitted = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              overflow="visible">
+              <rect x="-4" width="12" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    assert_eq!(
+        only_pattern(&admitted).fold,
+        TileFold {
+            before: (1, 0),
+            after: (1, 0)
+        }
+    );
+
+    let refused = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              overflow="visible">
+              <rect width="10" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)"/>"##,
+    );
+    assert_eq!(decode_square(refused.as_bytes()), Err(SvgError::TooComplex));
 }
 
 /// A pattern's tile inherits from where the pattern sits, not from the shape
@@ -1313,21 +1428,32 @@ fn a_tile_inherits_from_its_own_place_in_the_document() {
     assert_eq!(solid(layer), Color::rgb(255, 0, 0));
 }
 
-/// A fill opacity weakens the whole tile as a unit, so two of its layers do
-/// not show through one another.
+/// A fill opacity weakens the assembled tile, not each of its parts: SVG
+/// weakens the fill operation as a whole, so neither two overlapping layers
+/// nor two overlapping replicas may each pay it.
 #[test]
-fn a_fill_opacity_weakens_the_tile_as_a_unit() {
+fn a_fill_opacity_weakens_the_assembled_tile() {
     let pattern = only_pattern(&document(
         r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse">
               <rect width="2" height="4" fill="#f00"/>
               <rect width="4" height="2" fill="#0f0"/></pattern>
             <rect width="8" height="8" fill="url(#p)" fill-opacity="0.5"/>"##,
     ));
-    let [Node::Group(group)] = pattern.content.as_slice() else {
-        panic!("expected one composited tile, got {:?}", pattern.content);
-    };
-    assert_eq!(group.opacity, 128);
-    assert_eq!(group.children.len(), 2);
+    assert_eq!(pattern.opacity, 128);
+    assert_eq!(pattern.content.len(), 2, "the layers stay unweakened");
+
+    // Two periods of opaque content, so every pixel is covered by two
+    // overlapping replicas. Weakening each one would composite to 191.
+    let doubled = document(
+        r##"<pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"
+              overflow="visible">
+              <rect width="8" height="4" fill="#f00"/></pattern>
+            <rect width="8" height="8" fill="url(#p)" fill-opacity="0.5"/>"##,
+    );
+    let image = decode_square(doubled.as_bytes()).expect("a decodable document");
+    let mut surface = Surface::new(16, 16).expect("a small surface");
+    assert!(surface.draw_artwork(image.nodes(), image.design()));
+    assert_eq!(surface.get(8, 8).map(|pixel| pixel.a), Some(128));
 }
 
 /// A tile is a buffer in flight exactly as a group is, so the two share one

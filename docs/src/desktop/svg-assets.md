@@ -115,7 +115,10 @@ below rather than showing half a composite (`AGENTS.md` §2.9).
 A pattern's tile is the same kind of level: a buffer in flight, holding a
 drawing of its own, so it is charged against the same nesting bound and
 refused past it rather than descending into a cycle of patterns painting one
-another.
+another. A fill's opacity weakens the *assembled* tile rather than each of
+its layers, which is what a group does for a subtree — the same rule, reached
+without a second buffer, because scaling a premultiplied tile is exactly
+compositing that one layer at it.
 
 ## Loading a whole asset set
 
@@ -289,13 +292,17 @@ authored rather than traced into a simpler form:
 - **Patterns**: `<pattern>` as a paint server, with `patternUnits`,
   `patternContentUnits`, `patternTransform`, its own `viewBox` and
   `preserveAspectRatio`, and `href` inheritance of both attributes and
-  content. The tile is drawn once at the resolution the drawing is being
-  rasterised at and repeated across the shape, so a patterned fill is as
-  sharp at any size as the rest of the artwork. A tile is confined to
+  content, and `overflow`. The tile is drawn at the resolution the drawing is
+  being rasterised at and repeated across the shape, so a patterned fill is
+  as sharp at any size as the rest of the artwork. A tile is confined to
   itself, which is the `overflow: hidden` a pattern is drawn under; content
-  an author asked to spill into the neighbouring repeats is a picture built
-  from overlapping tiles, which one repeated tile cannot express, so such a
-  reference takes its fallback colour rather than being silently clipped.
+  an author asked to spill into the neighbouring repeats is drawn by folding
+  those neighbours back into the one period. That is exact rather than
+  approximate — a pattern is periodic, so only finitely many replicas reach
+  one period — and it leaves the repeat periodic, so the sampler and the
+  per-pixel cost are a confined tile's. Overlapping replicas draw in raster
+  order, and a spill reaching more than a period past its tile is refused as
+  a budget overrun.
 - **Compositing**: `clip-path` and `<clipPath>` (`clip-rule`,
   `clipPathUnits`, nesting), `mask` and `<mask>` (`maskUnits`,
   `maskContentUnits`, `mask-type`, the mask region), and group opacity.

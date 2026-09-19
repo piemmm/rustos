@@ -74,6 +74,15 @@ const TEMPLATES: &[&[u8]] = &[
             <rect width="24" height="24" fill="url(#q) #048" fill-opacity="0.6"/>
             <circle cx="12" cy="12" r="8" fill="url(#p)" stroke="#000" stroke-width="2"
               opacity="0.5"/></svg>"##,
+    br##"<svg viewBox="0 0 24 24">
+            <pattern id="s" width="6" height="6" patternUnits="userSpaceOnUse"
+              overflow="visible">
+              <circle cx="3" cy="3" r="5" fill="#2a6" fill-opacity="0.5"/>
+              <rect x="-2" y="4" width="10" height="3" fill="#d51"/></pattern>
+            <pattern id="t" href="#s" width="5" height="5" patternUnits="userSpaceOnUse"
+              overflow="visible"/>
+            <rect width="24" height="12" fill="url(#s)" fill-opacity="0.4"/>
+            <circle cx="12" cy="18" r="6" fill="url(#t)"/></svg>"##,
     br##"<svg viewBox="0 0 16 16">
             <pattern id="a" width="4" height="4" patternUnits="userSpaceOnUse"
               patternContentUnits="objectBoundingBox">
