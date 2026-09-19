@@ -304,7 +304,7 @@ State composition is preferred over one enormous enum. A disabled destructive re
 | State | Meaning |
 |---|---|
 | `WindowActivationState` | Whether a frame is active, inactive, or requesting attention without stealing focus. |
-| `WindowSizeState` | Restored or maximized. Fullscreen is a separate application/session mode and is not represented by the size-toggle control. |
+| `WindowSizeState` | Restored, maximized, or fullscreen. The size-toggle control never *reaches* fullscreen: only the owning application asks for it, over the window channel, and a fullscreen window withdraws its decoration entirely, so no control renders for it. |
 | `WindowControlKind` | The exact window-manager command represented by a furniture button. |
 | `ScrollOrientation` | Vertical or horizontal layout over one shared behavioral implementation. |
 | `ScrollRange` | Content extent, viewport extent, and clamped offset used to derive thumb size and position. |
@@ -1153,7 +1153,7 @@ The size-toggle button represents `WindowControlKind::SizeToggle`.
 
 - In `WindowSizeState::Restored`, the glyph and accessible label describe the next action: `Maximize`.
 - In `WindowSizeState::Maximized`, the glyph and accessible label describe the next action: `Restore`.
-- Maximize fills the current session work area, not the physical display bounds, and is not fullscreen.
+- Maximize fills the current session work area, not the physical display bounds, and is not fullscreen. Fullscreen is `WindowSizeState::Fullscreen`, reached only by the owning application asking over the window channel; the toggle offers Maximize and Restore and nothing else, and is not rendered at all while the window is fullscreen (`plans/COMPOSITOR-WORK.md` Stage J).
 - Restore returns to the saved logical rectangle. If the work area, scale, or display arrangement changed, the window manager revalidates and clamps that rectangle so a usable title bar remains reachable.
 - Fixed-size or otherwise non-resizable windows render the control disabled with a concise reason.
 - The transition preserves client content and scroll position. Reduced-motion mode uses an immediate geometry change.

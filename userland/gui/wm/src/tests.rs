@@ -5116,6 +5116,282 @@ fn maximize_and_restore_toggles_size_state_and_geometry() {
     );
 }
 
+// ---- exclusive fullscreen (the third size state) ---------------------
+
+/// A decorated, resizable window on a 320×240 screen, already presenting
+/// pixels for the whole of it — so a fullscreen transition leaves a
+/// genuine full cover rather than a rectangle its client has yet to fill.
+fn fullscreenable_compositor() -> (Compositor, WindowId) {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(20, 20), opaque(320, 240, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    // Back to a windowed extent; the surface stays screen-sized, which is
+    // what the client would present once it is told it went fullscreen.
+    assert!(c.resize_window_client(id, 200, 120));
+    (c, id)
+}
+
+#[test]
+fn fullscreen_takes_the_whole_screen_and_withdraws_the_decoration() {
+    let (mut c, id) = fullscreenable_compositor();
+    let work_area = Rect::new(0, 0, 320, 200);
+    let windowed = c.window(id).unwrap().bounds();
+    assert!(c.window(id).unwrap().is_decorated());
+
+    let (state, client) = c
+        .set_window_size_state(id, WindowSizeState::Fullscreen, work_area)
+        .expect("fullscreen");
+
+    assert_eq!(state, WindowSizeState::Fullscreen);
+    // The screen, not the work area: fullscreen covers the taskbar band.
+    assert_eq!(c.window(id).unwrap().bounds(), c.screen_rect());
+    assert_eq!(client, c.screen_rect());
+    // The decoration is withdrawn whole: no band reserved, so the client
+    // *is* the window, and no furniture to draw or press.
+    assert!(!c.window(id).unwrap().is_decorated());
+    assert_eq!(c.window_client_rect(id), Some(c.screen_rect()));
+    assert!(c.window_drag_surface(id).is_none());
+    // An invisible title bar must not still be pressable. Every furniture
+    // reader goes inert together, so there is no title band to classify,
+    // no resize edge to grab, and no identity slot to fill.
+    for point in [Point::new(0, 0), Point::new(160, 2), Point::new(319, 239)] {
+        assert_eq!(c.frame_hit(id, point), None, "no furniture at {point:?}");
+        assert_eq!(c.pointer_target(point), Some(PointerTarget::Window(id)));
+    }
+    assert!(c.window_frame(id).is_none(), "no live furniture");
+    assert!(c.window_grab_region(id).is_none());
+    assert!(c.window_title_icon_side(id).is_none());
+    // The declaration outlives the furniture, so the window is still known
+    // to be resizable and can be brought back.
+    assert_eq!(c.window_declared_resizable(id), Some(true));
+    assert_ne!(windowed, c.screen_rect());
+}
+
+/// The software path is the mandatory one, and it needs no promotion of
+/// its own: an opaque run covering a row already skips the desktop, the
+/// background fill and every window under it. What it must prove is that
+/// the result is right — the whole screen is the window's own pixels,
+/// with no furniture drawn and no corner notched onto the desktop.
+#[test]
+fn the_software_composite_of_a_fullscreen_window_is_that_window_alone() {
+    let (mut c, id) = fullscreenable_compositor();
+    // Rounded corners while windowed; at the scan-out's own corner they
+    // would notch the display onto the desktop behind it.
+    assert!(c.set_corners(id, Corners::from_radius(8)));
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    assert!(c.window(id).unwrap().shape().is_none(), "cut to nothing");
+
+    c.composite();
+
+    let screen = c.screen_rect();
+    let back = c.back_buffer();
+    for (x, y) in [
+        (0, 0),
+        (screen.width - 1, 0),
+        (0, screen.height - 1),
+        (screen.width - 1, screen.height - 1),
+        (screen.width / 2, screen.height / 2),
+        // Where the title bar would have been.
+        (screen.width / 2, 2),
+    ] {
+        assert_eq!(
+            back.get(x, y),
+            Some(RED.premultiply()),
+            "({x}, {y}) is the window's own pixel, not desktop or furniture"
+        );
+    }
+}
+
+#[test]
+fn leaving_fullscreen_lands_exactly_where_it_started() {
+    let (mut c, id) = fullscreenable_compositor();
+    let work_area = Rect::new(0, 0, 320, 200);
+    let windowed = c.window(id).unwrap().bounds();
+
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, work_area)
+        .expect("fullscreen");
+    let (state, _) = c
+        .set_window_size_state(id, WindowSizeState::Restored, work_area)
+        .expect("restore");
+
+    assert_eq!(state, WindowSizeState::Restored);
+    assert_eq!(c.window(id).unwrap().bounds(), windowed);
+    assert!(c.window(id).unwrap().is_decorated());
+    assert_eq!(
+        c.window_frame(id).unwrap().furniture().size,
+        WindowSizeState::Restored
+    );
+}
+
+#[test]
+fn a_maximized_window_can_go_fullscreen_and_come_back_maximized() {
+    let (mut c, id) = fullscreenable_compositor();
+    let work_area = Rect::new(0, 0, 320, 200);
+    let windowed = c.window(id).unwrap().bounds();
+
+    c.toggle_window_size(id, work_area).expect("maximize");
+    let maximized = c.window(id).unwrap().bounds();
+
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, work_area)
+        .expect("fullscreen");
+    assert_eq!(c.window(id).unwrap().bounds(), c.screen_rect());
+
+    c.set_window_size_state(id, WindowSizeState::Maximized, work_area)
+        .expect("back to maximized");
+    assert_eq!(c.window(id).unwrap().bounds(), maximized);
+
+    // And the pre-maximize geometry survived the round trip through
+    // fullscreen, so a restore from here still lands where it began.
+    let (state, _) = c.toggle_window_size(id, work_area).expect("restore");
+    assert_eq!(state, WindowSizeState::Restored);
+    assert_eq!(c.window(id).unwrap().bounds(), windowed);
+}
+
+#[test]
+fn a_fullscreen_window_is_raised_over_everything_else() {
+    let (mut c, id) = fullscreenable_compositor();
+    let work_area = Rect::new(0, 0, 320, 200);
+    // A bar-like window above it in the stack, as the taskbar is.
+    let bar = c.add_window(Point::new(0, 200), opaque(320, 40, RED));
+    assert_eq!(c.window_at(Point::new(10, 210)), Some(bar));
+
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, work_area)
+        .expect("fullscreen");
+
+    // Exclusive means exclusive: nothing is over it, including the bar.
+    assert_eq!(c.window_at(Point::new(10, 210)), Some(id));
+}
+
+#[test]
+fn the_size_toggle_never_reaches_or_leaves_fullscreen() {
+    let (mut c, id) = fullscreenable_compositor();
+    let work_area = Rect::new(0, 0, 320, 200);
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, work_area)
+        .expect("fullscreen");
+    let bounds = c.window(id).unwrap().bounds();
+
+    // The control is not drawn at all while fullscreen, and pressing the
+    // one that was there before must not move the window.
+    assert!(c.toggle_window_size(id, work_area).is_none());
+    assert_eq!(c.window(id).unwrap().bounds(), bounds);
+    assert_eq!(
+        c.window(id).unwrap().size_state(),
+        WindowSizeState::Fullscreen
+    );
+}
+
+#[test]
+fn a_fullscreen_state_change_is_refused_where_it_cannot_apply() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let work_area = c.screen_rect();
+
+    assert!(c
+        .set_window_size_state(WindowId(9_999), WindowSizeState::Fullscreen, work_area)
+        .is_none());
+
+    // An undecorated window has no furniture and no declared sizing.
+    let plain = c.add_window(Point::new(10, 10), opaque(40, 30, RED));
+    assert!(c
+        .set_window_size_state(plain, WindowSizeState::Fullscreen, work_area)
+        .is_none());
+
+    // A fixed-size window has only the size it was created at.
+    let fixed = c.add_window(Point::new(10, 10), opaque(120, 90, RED));
+    let furniture = WindowFurnitureState {
+        activation: WindowActivationState::Active,
+        size: WindowSizeState::Restored,
+        movable: true,
+        resizable: false,
+    };
+    assert!(c.set_window_frame(fixed, WindowFrame::new(furniture)));
+    let before = c.window(fixed).unwrap().bounds();
+    assert!(c
+        .set_window_size_state(fixed, WindowSizeState::Fullscreen, work_area)
+        .is_none());
+    assert_eq!(c.window(fixed).unwrap().bounds(), before);
+
+    // A state already in force changes nothing and says so.
+    let (mut c, id) = fullscreenable_compositor();
+    assert!(c
+        .set_window_size_state(id, WindowSizeState::Restored, c.screen_rect())
+        .is_none());
+}
+
+#[test]
+fn a_fullscreen_surface_is_promoted_to_the_single_layer() {
+    let (mut c, id) = fullscreenable_compositor();
+    let mut display = MockAccel::new(mode(320, 240), generous_caps());
+
+    // Windowed: the background is beneath the window, so both are encoded.
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(display.layers.len(), 2, "background + window");
+
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    c.present_accelerated(&mut display).expect("present");
+
+    // Nothing behind it can contribute a pixel, so the scene *is* the one
+    // surface: no background fill, no composition pass, one flip.
+    assert_eq!(display.layers.len(), 1, "the fullscreen surface alone");
+    let only = &display.layers[0];
+    assert_eq!(
+        (only.width, only.height, only.dst_x, only.dst_y),
+        (320, 240, 0, 0)
+    );
+    assert_eq!(
+        layer_pixel(only, 0, 0),
+        [255, 0, 0, 255],
+        "the window's own pixels"
+    );
+    assert_eq!(layer_pixel(only, 319, 239), [255, 0, 0, 255]);
+    assert!(display.software_frame.is_empty());
+}
+
+#[test]
+fn promotion_waits_for_a_frame_that_genuinely_covers() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    // Presenting a surface smaller than the screen: going fullscreen
+    // resizes the window before its client has pixels for the new extent.
+    let id = c.add_window(Point::new(20, 20), opaque(200, 120, RED));
+    assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+
+    let mut display = MockAccel::new(mode(320, 240), generous_caps());
+    c.present_accelerated(&mut display).expect("present");
+
+    // Promoted with nothing beneath it, the margin the client has not
+    // painted would show whatever the scan-out last held. So it is not
+    // promoted: the background is still encoded under it.
+    assert_eq!(
+        display.layers.len(),
+        2,
+        "background still beneath a window that does not yet cover"
+    );
+
+    // Once the client presents at the new extent, the cover is genuine.
+    assert!(c.set_surface(id, opaque(320, 240, RED)));
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(display.layers.len(), 1, "promoted now it truly covers");
+}
+
+#[test]
+fn a_translucent_fullscreen_window_is_not_promoted() {
+    let (mut c, id) = fullscreenable_compositor();
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    assert!(c.set_opacity(id, 200));
+    let mut display = MockAccel::new(mode(320, 240), generous_caps());
+
+    c.present_accelerated(&mut display).expect("present");
+
+    // What is behind it is visible through it, so the scene is not one
+    // layer and the engine's fixed rounding would band it anyway.
+    assert!(display.layers.is_empty(), "no layer stack was handed over");
+    assert!(!display.software_frame.is_empty(), "composited in software");
+}
+
 #[test]
 fn size_toggle_is_refused_for_windows_that_cannot_maximize() {
     let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");

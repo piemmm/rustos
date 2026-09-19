@@ -468,7 +468,7 @@ impl Window {
     /// band between its two command clusters. `None` for an undecorated
     /// window, which has no title bar to be dragged by.
     pub(crate) fn drag_surface(&self, scale: Scale, theme: &Theme) -> Option<Rect> {
-        let frame = self.frame.as_ref()?;
+        let frame = self.frame()?;
         let band = frame.layout(self.bounds(), scale, theme).title_bar;
         Some(frame.title_bar().layout(band, scale, theme).drag)
     }
@@ -706,10 +706,27 @@ impl Window {
         }
     }
 
-    /// This window's window-manager-owned decoration frame, if it is decorated.
+    /// This window's window-manager-owned decoration frame, if it is
+    /// decorated — the *live* furniture, so a fullscreen window has none.
+    ///
+    /// Everything that lays furniture out, hit-tests it, or reports it to
+    /// the seat reads it here, which is what makes the withdrawal total:
+    /// a fullscreen window cannot be found to have a title bar to press,
+    /// a resize edge to grab, or an icon slot to fill. The retained value
+    /// is still updated in place — a retitle, an identity, an activation
+    /// all reach the field directly — so it is exact on return.
     #[must_use]
     pub fn frame(&self) -> Option<&WindowFrame> {
-        self.frame.as_ref()
+        self.frame.as_ref().filter(|_| self.is_decorated())
+    }
+
+    /// Whether the owning application declared this window resizable —
+    /// read from the retained frame, so it answers the same while
+    /// fullscreen, where the furniture is withdrawn but the declaration
+    /// stands. `None` for a window that was never decorated.
+    #[must_use]
+    pub fn declared_resizable(&self) -> Option<bool> {
+        self.frame.as_ref().map(|f| f.furniture().resizable)
     }
 
     /// This window's contribution to screen row `y`, resolved once for the
@@ -863,6 +880,13 @@ impl Window {
     /// what the rim curves around.
     pub(crate) fn shape(&self) -> Option<WindowShape> {
         let (ow, oh) = self.outer_size();
+        // A fullscreen window is cut to nothing: a rounded corner at the
+        // scan-out's own corner would notch the display onto the desktop
+        // behind it, and leave the surface short of the full cover a
+        // single-layer promotion needs.
+        if self.size_state.is_fullscreen() {
+            return None;
+        }
         let corners = match self.rim {
             Some(rim) => Corners::from_radius(rim.radius),
             None => self.corners,
@@ -1091,14 +1115,12 @@ impl Window {
     /// Re-resolve the decoration band for a new output `scale`/`theme`, so a
     /// runtime DPI or theme change re-sizes the reserved band.
     pub(crate) fn refresh_band(&mut self, scale: Scale, theme: &Theme) {
-        self.band = self.frame.as_ref().map(|f| f.insets(scale, theme));
-        self.rim = self.frame.as_ref().map(|f| f.rim(scale, theme));
+        let drawn = self.frame.as_ref().filter(|_| self.is_decorated());
+        self.band = drawn.map(|f| f.insets(scale, theme));
+        self.rim = drawn.map(|f| f.rim(scale, theme));
         // The same body the frame fills inside its rim, so the client area
         // and the decoration around it are one colour from one palette role.
-        self.plate = self
-            .frame
-            .as_ref()
-            .map(|_| Color::from(theme.palette().surface).premultiply());
+        self.plate = drawn.map(|_| Color::from(theme.palette().surface).premultiply());
     }
 
     /// Set the decorated window's activation, so the frame rim, title, and
@@ -1183,7 +1205,8 @@ impl Window {
         damage: &mut Region,
     ) -> Option<TitleBarEvent> {
         let bounds = self.bounds();
-        let frame = self.frame.as_mut()?;
+        let decorated = self.is_decorated();
+        let frame = self.frame.as_mut().filter(|_| decorated)?;
         let title_rect = frame.layout(bounds, scale, theme).title_bar;
         frame
             .title_bar_mut()
@@ -1206,7 +1229,8 @@ impl Window {
         damage: &mut Region,
     ) {
         let bounds = self.bounds();
-        let Some(frame) = self.frame.as_mut() else {
+        let decorated = self.is_decorated();
+        let Some(frame) = self.frame.as_mut().filter(|_| decorated) else {
             return;
         };
         let title_rect = frame.layout(bounds, scale, theme).title_bar;
@@ -1227,77 +1251,117 @@ impl Window {
         damage: &mut Region,
     ) -> Option<TitleBarEvent> {
         let bounds = self.bounds();
-        let frame = self.frame.as_mut()?;
+        let decorated = self.is_decorated();
+        let frame = self.frame.as_mut().filter(|_| decorated)?;
         let title_rect = frame.layout(bounds, scale, theme).title_bar;
         frame
             .title_bar_mut()
             .on_key(key, title_rect, scale, theme, damage)
     }
 
-    /// Toggle a decorated, resizable window between restored and maximized,
-    /// resizing it to as much of `work_area` (the session work rectangle) as
-    /// its declared resize range allows on maximize, and back to the
-    /// geometry it had when maximized on restore. Returns the new size state
-    /// and the resulting client rectangle, or `None` (changing nothing) for
-    /// an undecorated window, a non-resizable one, or when the resize itself
-    /// fails closed.
+    /// Toggle a decorated, resizable window between restored and maximized.
+    ///
+    /// The size toggle is a two-way control and never reaches fullscreen,
+    /// so a fullscreen window — which draws no control to press — is left
+    /// alone. Everything else is
+    /// [`set_size_state`](Self::set_size_state)'s.
+    pub(crate) fn toggle_size(
+        &mut self,
+        screen: Rect,
+        work_area: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<(WindowSizeState, Rect)> {
+        let target = match self.size_state {
+            WindowSizeState::Restored => WindowSizeState::Maximized,
+            WindowSizeState::Maximized => WindowSizeState::Restored,
+            WindowSizeState::Fullscreen => return None,
+        };
+        self.set_size_state(target, screen, work_area, scale, theme)
+    }
+
+    /// Put a decorated, resizable window into `target`, resizing it to
+    /// `screen` for fullscreen and to as much of `work_area` as its
+    /// declared resize range allows for maximize, and back to the geometry
+    /// it had before it left restored. Returns the new size state and the
+    /// resulting client rectangle, or `None` (changing nothing) for an
+    /// undecorated window, a non-resizable one, a state already in force,
+    /// or a resize that fails closed.
     ///
     /// An application whose content stops growing declares a ceiling, and
     /// maximize honours it: "as large as this window is useful" is a better
     /// answer than a screen filled with its dead margin. The window still
     /// takes the work area's origin, exactly as an unconstrained maximize
     /// does, so where a maximized window appears does not depend on whether
-    /// it has a ceiling.
+    /// it has a ceiling. **Fullscreen does not honour that ceiling**: the
+    /// app asked for this state by name rather than for "as large as
+    /// useful", and a fullscreen surface short of the scan-out would leave
+    /// the desktop showing around it and could not be promoted to one
+    /// layer.
+    ///
+    /// The frame is kept rather than removed while fullscreen, so its
+    /// title, identity and activation are exact when it comes back;
+    /// [`is_decorated`](Self::is_decorated) is what withdraws it, and the
+    /// band, rim, plate and silhouette all follow from that.
     ///
     /// The frame's furniture size is updated in step, so the size-toggle
     /// control shows the *next* action (Restore while maximized, Maximize
     /// while restored) and the decoration is repainted.
-    pub(crate) fn toggle_size(
+    pub(crate) fn set_size_state(
         &mut self,
+        target: WindowSizeState,
+        screen: Rect,
         work_area: Rect,
         scale: Scale,
         theme: &Theme,
     ) -> Option<(WindowSizeState, Rect)> {
-        let furniture = self.frame.as_ref()?.furniture();
-        if !furniture.resizable {
+        // The declaration, not the live furniture: a fullscreen window has
+        // none, and it still has to be able to leave.
+        if !self.declared_resizable()? || target == self.size_state {
             return None;
         }
-        let (target, next_state) = match self.size_state {
-            WindowSizeState::Restored => {
+        let was = self.size_state;
+        let held_restore = self.restore_outer;
+        // Read before the state moves: the outer rectangle includes the
+        // decoration band, and a window entering fullscreen is about to
+        // lose it.
+        let outer_before = self.bounds();
+        // The target's geometry is measured against the band the window
+        // will have *in* that state, so the state moves first: one leaving
+        // fullscreen sizes its client inside the band it is about to
+        // regain.
+        self.size_state = target;
+        self.refresh_band(scale, theme);
+        if was == WindowSizeState::Restored {
+            self.restore_outer = Some(outer_before);
+        }
+        let outer = match target {
+            WindowSizeState::Restored => held_restore.unwrap_or(outer_before),
+            WindowSizeState::Maximized => {
                 let held = self
                     .resize_bounds(scale, theme)
                     .clamp((work_area.width, work_area.height));
-                (
-                    Rect::new(work_area.left(), work_area.top(), held.0, held.1),
-                    WindowSizeState::Maximized,
-                )
+                Rect::new(work_area.left(), work_area.top(), held.0, held.1)
             }
-            WindowSizeState::Maximized => (
-                self.restore_outer.unwrap_or_else(|| self.bounds()),
-                WindowSizeState::Restored,
-            ),
+            WindowSizeState::Fullscreen => screen,
         };
-        if self.size_state == WindowSizeState::Restored {
-            self.restore_outer = Some(self.bounds());
-        }
-        if !self.resize_to_outer(target, scale, theme) {
+        if !self.resize_to_outer(outer, scale, theme) {
             // Fail closed: nothing moved, so do not record a state change or
             // strand the saved restore geometry.
-            if next_state == WindowSizeState::Maximized {
-                self.restore_outer = None;
-            }
+            self.size_state = was;
+            self.restore_outer = held_restore;
+            self.refresh_band(scale, theme);
             return None;
         }
-        self.size_state = next_state;
-        if next_state == WindowSizeState::Restored {
+        if target == WindowSizeState::Restored {
             self.restore_outer = None;
         }
         if let Some(frame) = self.frame.as_mut() {
             let mut furniture = frame.furniture();
-            furniture.size = next_state;
+            furniture.size = target;
             frame.set_furniture(furniture);
         }
-        Some((next_state, self.client_rect()))
+        Some((target, self.client_rect()))
     }
 
     /// Resize this window so its outer rectangle becomes `new_outer`: the
@@ -1399,8 +1463,14 @@ impl Window {
     /// compositor's residency pass uses to skip every undecorated window
     /// before it reaches the cache, so a plain window neither counts as a
     /// miss nor costs a lookup.
+    ///
+    /// A fullscreen window is not decorated. It keeps its frame value so
+    /// the title, identity and activation are exact when it returns, but
+    /// nothing draws it, nothing reserves a band for it, and nothing can
+    /// press it — this is the one predicate all of that follows from, so
+    /// an invisible title bar can never still be hit.
     pub(crate) const fn is_decorated(&self) -> bool {
-        self.frame.is_some()
+        self.frame.is_some() && !self.size_state.is_fullscreen()
     }
 
     /// The reserved furniture bands relative to the window's own outer

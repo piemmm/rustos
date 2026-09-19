@@ -36,7 +36,7 @@ use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
-use crate::server::{LayerSpec, PopupSpec, WindowSizing};
+use crate::server::{LayerSpec, PopupSpec, WindowSizeState, WindowSizing};
 
 /// An open target an application pulled, owned rather than borrowed from the
 /// reply buffer so the pull can be drained in a loop.
@@ -796,6 +796,32 @@ impl<T: WindowTransport> WindowClient<T> {
     /// * A transport failure, or a corrupt status frame.
     pub fn set_sizing(&mut self, window_id: u64, sizing: WindowSizing) -> Result<(), Errno> {
         self.status_call(&WindowRequest::SetSizing { window_id, sizing })
+    }
+
+    /// Ask for window `window_id` to be put into `state` — the app's half
+    /// of exclusive fullscreen.
+    ///
+    /// A success is only the acceptance. The state the window manager
+    /// actually applied arrives as a [`WindowEvent::Resized`] carrying it
+    /// alongside the new client extent, so an app lays out from the event
+    /// rather than from having asked. Leaving fullscreen means naming the
+    /// state to return to.
+    ///
+    /// The window manager keeps the display path: it sizes the surface to
+    /// the scan-out and withdraws the decoration, and the app presents
+    /// exactly as it always did. There is no framebuffer to seize.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — `window_id` is not one of the caller's own
+    ///   windows.
+    /// * [`Errno::NotSupported`] — the window cannot take the state; a
+    ///   fixed-size window has only the size it was created at.
+    /// * A transport failure, or a corrupt status frame.
+    ///
+    /// [`WindowEvent::Resized`]: tairix_abi::window_ipc::WindowEvent::Resized
+    pub fn set_size_state(&mut self, window_id: u64, state: WindowSizeState) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::SetSizeState { window_id, state })
     }
 
     /// Ask the session to run its trusted file picker for window

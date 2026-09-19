@@ -2020,9 +2020,10 @@ impl Compositor {
         id: WindowId,
         work_area: Rect,
     ) -> Option<(tairix_controls::WindowSizeState, Rect)> {
+        let screen = self.screen_rect();
         self.mutate_frame(id, |window, scale, theme, damage| {
             let before = window.bounds();
-            let result = window.toggle_size(work_area, scale, theme);
+            let result = window.toggle_size(screen, work_area, scale, theme);
             if result.is_some() {
                 damage.add(before);
                 damage.add(window.bounds());
@@ -2030,6 +2031,81 @@ impl Compositor {
             result
         })
         .flatten()
+    }
+
+    /// Put the decorated, resizable window named by `id` into `state`,
+    /// sizing it to the whole scan-out for fullscreen and to `work_area`
+    /// for maximize. Returns the new size state and the resulting client
+    /// rectangle (so the session can tell the app its new content size),
+    /// or `None` for an unknown, undecorated, or non-resizable window, a
+    /// state already in force, or a resize that failed closed. The union
+    /// of the old and new outer bounds is marked dirty.
+    ///
+    /// A window entering fullscreen is raised: nothing may be over it, or
+    /// it is not exclusive and cannot be promoted to one layer. Leaving
+    /// does not lower it — it still holds the focus the user gave it.
+    pub fn set_window_size_state(
+        &mut self,
+        id: WindowId,
+        state: tairix_controls::WindowSizeState,
+        work_area: Rect,
+    ) -> Option<(tairix_controls::WindowSizeState, Rect)> {
+        let screen = self.screen_rect();
+        let applied = self
+            .mutate_frame(id, |window, scale, theme, damage| {
+                let before = window.bounds();
+                let result = window.set_size_state(state, screen, work_area, scale, theme);
+                if result.is_some() {
+                    damage.add(before);
+                    damage.add(window.bounds());
+                }
+                result
+            })
+            .flatten()?;
+        if applied.0.is_fullscreen() {
+            self.raise(id);
+        }
+        Some(applied)
+    }
+
+    /// The front-most window that covers the whole scan-out opaquely as a
+    /// fullscreen surface, or `None` when the scene is an ordinary one.
+    ///
+    /// Everything behind such a window is invisible by construction, so
+    /// the scene *is* that one surface: the hardware encode emits it as
+    /// the single layer, with neither the background fill nor any window
+    /// under it, which is where exclusive fullscreen's tear-free flip
+    /// comes from. The software path needs nothing here — an opaque run
+    /// covering a row already skips every layer below it, and a second
+    /// occlusion mechanism beside that one is forbidden.
+    ///
+    /// Every condition is read from the compositor's own state, never
+    /// claimed by the client: visible, fullscreen, exactly the scan-out
+    /// rectangle, wholly opaque, cut to no shape, and holding presented
+    /// pixels for all of it.
+    ///
+    /// That last one is what makes dropping the background sound. A
+    /// window is resized before its app presents at the new extent, and
+    /// until it does, the margin samples transparent — harmless composited
+    /// over the desktop, but promoted with nothing beneath it would show
+    /// whatever the scan-out last held. So the promotion waits for the
+    /// frame that genuinely covers.
+    fn fullscreen_cover(&self) -> Option<&Window> {
+        let window = self
+            .windows
+            .iter()
+            .rev()
+            .find(|window| window.is_visible())?;
+        let bounds = window.bounds();
+        let covered = window.content().is_some_and(|content| {
+            content.width() >= bounds.width && content.height() >= bounds.height
+        });
+        (window.size_state().is_fullscreen()
+            && bounds == self.screen_rect()
+            && window.opacity() == u8::MAX
+            && window.shape().is_none()
+            && covered)
+            .then_some(window)
     }
 
     /// Remove a window; its last bounds are marked dirty.
@@ -2147,10 +2223,21 @@ impl Compositor {
     }
 
     /// The decoration frame of the window named by `id`, or `None` when the id
-    /// is unknown or the window is undecorated.
+    /// is unknown or the window is undecorated — which a fullscreen window is.
     #[must_use]
     pub fn window_frame(&self, id: WindowId) -> Option<&WindowFrame> {
         self.window(id).and_then(Window::frame)
+    }
+
+    /// Whether the application declared the window named by `id` resizable,
+    /// or `None` for an unknown or never-decorated window.
+    ///
+    /// Distinct from reading [`window_frame`](Self::window_frame): the
+    /// declaration outlives the furniture, so this answers the same while
+    /// the window is fullscreen and its decoration withdrawn.
+    #[must_use]
+    pub fn window_declared_resizable(&self, id: WindowId) -> Option<bool> {
+        self.window(id).and_then(Window::declared_resizable)
     }
 
     /// The screen rectangle the application content of the window named by `id`
@@ -3085,6 +3172,11 @@ impl Compositor {
     /// ([`set_reveal`](Self::set_reveal)) is in flight (the caller falls back
     /// to software either way). `fallback` carries the furniture the cache
     /// would not retain for this pass.
+    ///
+    /// A [`fullscreen_cover`](Self::fullscreen_cover) is promoted to the
+    /// single layer the scene actually is: the background fill and every
+    /// window under it are dropped, because none of them can contribute a
+    /// pixel. The cursor still rides on top where one is shown.
     fn encode_layers(&self, caps: &AccelCaps, fallback: &ChromeFallback) -> Option<Vec<LayerBuf>> {
         // The engine scans a layer out as the driver was handed it, so
         // nothing it composes passes through the reveal and the screen would
@@ -3093,8 +3185,21 @@ impl Compositor {
             return None;
         }
         let epoch = self.chrome_epoch();
-        let max_layers = usize::try_from(caps.max_layers).unwrap_or(usize::MAX);
         let mut layers = Vec::new();
+        if let Some(cover) = self.fullscreen_cover() {
+            let bounds = cover.bounds();
+            layers.push(self.encode_layer(
+                bounds.width,
+                bounds.height,
+                bounds.left(),
+                bounds.top(),
+                // A fullscreen window is undecorated, so it has no chrome
+                // to resolve and samples its own pixels alone.
+                |lx, ly| cover.sample_local(lx, ly, None),
+            )?);
+            self.encode_cursor_layer(&mut layers)?;
+            return admitted(layers, caps);
+        }
         layers.push(
             self.encode_layer(self.mode.width_px, self.mode.height_px, 0, 0, |_, _| {
                 Some(self.background.premultiply())
@@ -3125,25 +3230,26 @@ impl Compositor {
                 |lx, ly| window.sample_local(lx, ly, chrome),
             )?);
         }
-        if let Some(cursor) = &self.cursor {
-            let bounds = cursor.bounds();
-            layers.push(self.encode_layer(
-                bounds.width,
-                bounds.height,
-                bounds.left(),
-                bounds.top(),
-                |lx, ly| cursor.sample_local(lx, ly),
-            )?);
-        }
-        if layers.len() > max_layers {
-            return None;
-        }
-        for layer in &layers {
-            if layer.width > caps.max_width_px || layer.height > caps.max_height_px {
-                return None;
-            }
-        }
-        Some(layers)
+        self.encode_cursor_layer(&mut layers)?;
+        admitted(layers, caps)
+    }
+
+    /// Append the cursor as the top-most layer where one is shown.
+    /// `None` on an encode the allocator refused, exactly as
+    /// [`encode_layer`](Self::encode_layer) reports one.
+    fn encode_cursor_layer(&self, layers: &mut Vec<LayerBuf>) -> Option<()> {
+        let Some(cursor) = &self.cursor else {
+            return Some(());
+        };
+        let bounds = cursor.bounds();
+        layers.push(self.encode_layer(
+            bounds.width,
+            bounds.height,
+            bounds.left(),
+            bounds.top(),
+            |lx, ly| cursor.sample_local(lx, ly),
+        )?);
+        Some(())
     }
 
     /// Bake a `width`×`height` region into a premultiplied, display-format
@@ -4062,6 +4168,20 @@ fn encode_segment(bytes: &mut [u8], pixels: &[Pixel], order: ChannelOrder, revea
 /// unconditionally `None`, so skipping it is exact.
 fn covers(window: &Window, area: Rect) -> bool {
     window.is_visible() && !window.bounds().intersection(&area).is_empty()
+}
+
+/// `layers` if the engine can serve them all, else `None` so the caller
+/// composes the frame in software — never a partial hardware frame.
+fn admitted(layers: Vec<LayerBuf>, caps: &AccelCaps) -> Option<Vec<LayerBuf>> {
+    if layers.len() > usize::try_from(caps.max_layers).unwrap_or(usize::MAX) {
+        return None;
+    }
+    for layer in &layers {
+        if layer.width > caps.max_width_px || layer.height > caps.max_height_px {
+            return None;
+        }
+    }
+    Some(layers)
 }
 
 /// Claim `rect` in a compose plan, merging it with every rectangle it

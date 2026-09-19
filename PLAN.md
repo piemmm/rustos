@@ -4410,6 +4410,15 @@ per-app recipes (§2.2).
   it cannot leave stale pixels, and the accelerated layer path falling back to
   the software composite for such a frame). The trusted file picker stays
   undecorated session chrome. No app draws its own chrome.
+  **Exclusive fullscreen** is the third size state (Stage J):
+  `WindowRequest::SetSizeState` is the only way to reach it, the applied state
+  rides back on `WindowEvent::Resized` beside the new extent, and a fullscreen
+  window takes the scan-out, is raised over the taskbar, and has its decoration
+  withdrawn — kept, so title and identity are exact on return, but reported
+  undecorated so no invisible title bar can be pressed. A fullscreen surface
+  that genuinely covers the scan-out is promoted to the single hardware layer;
+  the software path needs no promotion, because an opaque run is already the
+  occlusion cull.
 - **Typed control-state vocabulary — DONE.** `lib/controls::state` is the §5
   model as composed typed Rust: `ControlKind`/`ControlRole`, a `ControlState`
   built from `FocusState`/`PointerState`/`SelectionState`/`ValidationState`/
@@ -4417,7 +4426,9 @@ per-app recipes (§2.2).
   §13 `ControlDisposition`, `ProgressValue`, and the window-furniture states
   (`WindowControlKind`/`WindowActivationState`/`WindowSizeState`/
   `WindowFurnitureState`). Composition over one giant enum; illegal states
-  unrepresentable.
+  unrepresentable. `WindowSizeState` is defined in `lib/abi` and re-exported
+  here: it travels on the window channel, so one definition serves both sides
+  and the app-declared `WindowSizing` sits beside the state it results in.
 - **Theme-token additions — DONE.** `lib/theme` carries the §6 Reactive Alloy
   tokens as data: semantic signal roles + `Palette::signal`, the control /
   furniture metrics (seam/rail/bead/thumb/min-thumb/extents), `MotionTheme`
@@ -9037,11 +9048,12 @@ discovered late:
   today** — no driver class, no mixer, no stream ABI, no capability — so the
   game is silent until that plan's working base lands. This is the single
   largest external dependency.
-- `plans/COMPOSITOR-WORK.md`: window **size states** (`Normal` / `Maximised` /
-  `Fullscreen`) on the window channel, and the compositor promoting a
-  scanout-sized fullscreen surface to one unblended layer. Exclusive fullscreen
-  is *not* a second display path and *not* a framebuffer seizure: taking it any
-  other way would be the private back-channel §17.3 forbids.
+- `plans/COMPOSITOR-WORK.md` Stage J — **done**: window **size states**
+  (`Restored` / `Maximized` / `Fullscreen`) on the window channel, and the
+  compositor promoting a scanout-sized fullscreen surface to one unblended
+  layer. Exclusive fullscreen is *not* a second display path and *not* a
+  framebuffer seizure: taking it any other way would be the private
+  back-channel §17.3 forbids.
 - `lib/crypto` gains X25519 key agreement (the audited `x25519-dalek`, the same
   family as the present `ed25519-dalek`), so the realm session handshake
   composes audited primitives rather than hand-rolling agreement (§2.12).

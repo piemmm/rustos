@@ -10,6 +10,24 @@ channel + WM-presented windows this builds on), and `plans/DISPLAY.md` (the
 seat/display model beneath it) first; every rule in all of them applies here
 without exception.
 
+## Ledger
+
+| # | Item | Status |
+|---|---|---|
+| A | WM depends on `lib/controls`; frame layout + reserved client rect | done |
+| B | Compose and render the furniture | done |
+| C | Furniture hit map + pointer/keyboard routing | done |
+| D | Typed control actions → window lifecycle | done |
+| E | Decorations live, documented, gated | done |
+| F | Client-driven resizability, live and per-app opt-in | done |
+| G | Resize actually reachable, and in-content pointer input | done |
+| H | Bounded resize, bounded move, and decorations that answer the pointer | done |
+| I | The client plate: a decorated window is never a hole | done |
+| J | Exclusive fullscreen, the third size state (`plans/WINTERSUN.md` P3) | done |
+
+Input-transparent overlays (`set_input_transparent`) landed alongside these
+and are recorded below rather than as a stage of their own.
+
 ## 0. Why this work exists (findings, binding for this plan)
 
 - **Decorations are the window manager's job, not the app's.** The design is
@@ -87,7 +105,7 @@ to the outer frame.
 
 ## 2. Stages
 
-**Status:** Stages A–I are **done**. Server-side window decorations are live:
+**Status:** Stages A–J are **done**. Server-side window decorations are live:
 every served application window is decorated by the window manager, client-driven
 resizability is live (the file viewer opens resizable and re-lays-out on
 `Resized`), and the whole-project validation gate is green.
@@ -586,6 +604,79 @@ one invariant:
 - **Released or unanswered pixels.** A window whose content went back under
   memory pressure, or whose app ignores the redraw request, reads as an empty
   window rather than a hole.
+
+### Stage J — Exclusive fullscreen, the third size state — DONE
+
+A window is `Restored`, `Maximized`, or `Fullscreen`. The three are mutually
+exclusive, so they are one value (`tairix_abi::window_ipc::WindowSizeState`,
+re-exported by `lib/controls`) rather than a state beside a flag that could
+contradict it. It lives in `lib/abi` because it now travels on the wire, and
+because it is the counterpart of `WindowSizing`, which was already there: the
+app declares what sizing it supports, and this is the state it was put in.
+
+What it guarantees:
+
+- **Only the app asks, and only the window manager decides.**
+  `WindowRequest::SetSizeState` (`OP_SET_SIZE_STATE` 26) names a window the
+  caller owns; the engine attests the caller and checks ownership before the
+  session is told anything. The session answers with the state it actually
+  applied as a `WindowEvent::Resized` carrying it **alongside** the new
+  client extent — one event, because the two are one fact about the window's
+  geometry and two could disagree (an app that learnt it was fullscreen
+  before it learnt its extent would lay out edge-to-edge at the old size). A
+  run still folds to the newest, exactly as a drag's extents do. The host
+  holds no event sink, so it queues what it owes (`SessionWindows::owed`) and
+  the serve loop delivers it, for the same reason the identity pass and the
+  menu chain are answered out there.
+- **The size toggle never reaches or leaves fullscreen.** It stays the
+  two-way Maximize/Restore control the controls spec describes, and is not
+  rendered at all while the window is fullscreen. `Window::toggle_size`
+  delegates to `set_size_state`, so there is one transition, not two.
+- **Fullscreen is the scan-out, and the content ceiling does not bound it.**
+  Maximize honours an app's declared ceiling ("as large as this window is
+  useful"); fullscreen does not, because the app asked for this state by
+  name, and a surface short of the scan-out would leave the desktop showing
+  around it and could not be promoted. The window is raised, so nothing —
+  the taskbar included — is over it.
+- **The decoration is withdrawn, not removed.** The `WindowFrame` value is
+  kept, so title, identity and activation are exact on return, and
+  `Window::is_decorated` is the single predicate everything follows from: no
+  band (the client *is* the window), no rim, no plate, no silhouette, and
+  `Window::frame` yields nothing — so there is no title bar to hit-test, no
+  resize edge to grab, and no identity slot to fill. An invisible title bar
+  can never still be pressed. The *declaration* outlives the furniture
+  (`window_declared_resizable`), so an app may restate its resize range while
+  fullscreen and be held to it when it returns.
+- **Promoted to a single layer, through the one display path.**
+  `Compositor::fullscreen_cover` reads every condition from the compositor's
+  own state, never from a client claim: visible, fullscreen, exactly the
+  scan-out rectangle, wholly opaque, cut to no shape, and holding presented
+  pixels for all of it. `encode_layers` then emits that surface alone — no
+  background fill, no window beneath — which is where the tear-free flip
+  comes from. The last condition is what makes dropping the background
+  sound: a window is resized before its app presents at the new extent, and
+  the margin between samples transparent, so the promotion waits for the
+  frame that genuinely covers and the scene composites normally until then.
+  The **software path needs no promotion**: an opaque run covering a row
+  already skips the desktop, the background fill and every window below it,
+  and a second occlusion mechanism beside that one is forbidden (§2.2,
+  `plans/FIX-DESKTOP-SPEEDUP.md` Stage B).
+- **Tests** cover: fullscreen takes the screen and withdraws every furniture
+  reader; leaving lands exactly where it started; a maximized window round
+  trips through fullscreen and still restores to its pre-maximize geometry;
+  the raise puts it over a bar-like window; the size toggle is inert while
+  fullscreen; unknown, undecorated, fixed-size and already-in-force are each
+  refused without moving anything; the software composite is that window's
+  pixels alone at all four corners and where the title bar would have been;
+  the accelerated encode is one layer; promotion waits for a covering frame;
+  a translucent fullscreen window is not promoted; the wire round-trips all
+  three states and refuses an unknown discriminant; the engine refuses a
+  foreign window and relays a host refusal; and the session sizes to the
+  screen and owes exactly one `Resized` carrying the state.
+
+This is `plans/WINTERSUN.md` P3, which WS5 (the game's client shell) is
+blocked on. Exclusive fullscreen is **not** a second display path: a game
+asks for the state and presents as it always did.
 
 ## 2.x Input-transparent overlays (landed)
 

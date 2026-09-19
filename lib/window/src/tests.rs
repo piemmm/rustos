@@ -34,7 +34,8 @@ use crate::client::{
 use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, CallerIdentity, CursorSetName, EventSink, HandOverDesk, LayerSpec,
-    OpenEntry, PopupSpec, WallpaperName, WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
+    OpenEntry, PopupSpec, WallpaperName, WindowHost, WindowServer, WindowSizeState, WindowSizing,
+    WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -179,6 +180,8 @@ struct RecordingHost {
     blur_sets: Vec<(u64, u16)>,
     retitled: Vec<(u64, String)>,
     resized_range: Vec<(u64, WindowSizing)>,
+    size_states: Vec<(u64, WindowSizeState)>,
+    refuse_size_state: Option<Errno>,
     app_bars: Vec<(ProcId, AppBar)>,
     app_bars_withdrawn: Vec<ProcId>,
     refuse_app_bar: Option<Errno>,
@@ -229,6 +232,8 @@ impl Default for RecordingHost {
             blur_sets: Vec::new(),
             retitled: Vec::new(),
             resized_range: Vec::new(),
+            size_states: Vec::new(),
+            refuse_size_state: None,
             app_bars: Vec::new(),
             app_bars_withdrawn: Vec::new(),
             refuse_app_bar: None,
@@ -352,6 +357,18 @@ impl WindowHost for RecordingHost {
             return Err(err);
         }
         self.resized_range.push((window_id, sizing));
+        Ok(())
+    }
+
+    fn window_size_state_changed(
+        &mut self,
+        window_id: u64,
+        state: WindowSizeState,
+    ) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_size_state {
+            return Err(err);
+        }
+        self.size_states.push((window_id, state));
         Ok(())
     }
 
@@ -505,6 +522,14 @@ impl WindowHost for MinimalHost {
         &mut self,
         _window_id: u64,
         _sizing: WindowSizing,
+    ) -> Result<(), Errno> {
+        Ok(())
+    }
+
+    fn window_size_state_changed(
+        &mut self,
+        _window_id: u64,
+        _state: WindowSizeState,
     ) -> Result<(), Errno> {
         Ok(())
     }
@@ -939,6 +964,7 @@ fn a_below_minimum_resize_is_not_answered_with_a_resize_of_the_client_s_own() {
         window_id: window,
         width_px: 1,
         height_px: 1,
+        state: WindowSizeState::Restored,
     };
     let mut waiter = WindowEvents::new(QueueSource::new([under.to_le_bytes()]));
     assert_eq!(waiter.wait(&mut client), Ok(Some(under)));
@@ -1111,6 +1137,37 @@ fn an_owner_restates_its_window_s_range_and_a_refusal_changes_nothing() {
     loopback.borrow_mut().host.refuse_sizing = Some(Errno::NotSupported);
     assert_eq!(client.set_sizing(window, range), Err(Errno::NotSupported));
     assert_eq!(loopback.borrow().host.resized_range.len(), 1);
+}
+
+#[test]
+fn an_owner_asks_for_a_size_state_and_a_refusal_changes_nothing() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "WinterSun").expect("A creates");
+    client
+        .set_size_state(window, WindowSizeState::Fullscreen)
+        .expect("the owner asks for fullscreen");
+    assert_eq!(
+        loopback.borrow().host.size_states,
+        [(window, WindowSizeState::Fullscreen)]
+    );
+
+    // A window the caller does not own never reaches the session: the id
+    // is a name, not a credential.
+    assert_eq!(
+        client.set_size_state(window + 1, WindowSizeState::Fullscreen),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(loopback.borrow().host.size_states.len(), 1);
+
+    // A host refusal is relayed and leaves the window where it is.
+    loopback.borrow_mut().host.refuse_size_state = Some(Errno::NotSupported);
+    assert_eq!(
+        client.set_size_state(window, WindowSizeState::Fullscreen),
+        Err(Errno::NotSupported)
+    );
+    assert_eq!(loopback.borrow().host.size_states.len(), 1);
 }
 
 #[test]
@@ -1820,6 +1877,7 @@ fn a_loop_that_owns_its_park_still_folds_a_resize_run() {
         window_id: window,
         width_px,
         height_px,
+        state: WindowSizeState::Restored,
     };
     // What a drag out and back in leaves queued: every sample the pointer
     // produced, ending on the size the window actually settled at.
@@ -1861,6 +1919,7 @@ fn a_run_of_resizes_folds_to_the_newest_extent() {
         window_id: window,
         width_px,
         height_px,
+        state: WindowSizeState::Restored,
     };
     let mut waiter = WindowEvents::new(QueueSource::new([
         resized(100, 50).to_le_bytes(),
@@ -1888,6 +1947,7 @@ fn folding_a_resize_run_keeps_every_other_event_in_order() {
         window_id,
         width_px,
         height_px: 50,
+        state: WindowSizeState::Restored,
     };
     let key = WindowEvent::Focus {
         window_id: window,
@@ -4053,6 +4113,14 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
             &mut self,
             _window_id: u64,
             _sizing: WindowSizing,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn window_size_state_changed(
+            &mut self,
+            _window_id: u64,
+            _state: WindowSizeState,
         ) -> Result<(), Errno> {
             Ok(())
         }

@@ -2446,6 +2446,19 @@ mod program {
                         |owner| identity.app_of(owner),
                     );
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
+                    // A request that moved real geometry — a size-state
+                    // change — owes its app the new extent, and the host
+                    // could not send it while the engine held the borrow.
+                    deliver_owed_events(
+                        &mut server,
+                        &mut sink,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut picker,
+                        &mut apps.service,
+                        &mut menu,
+                    );
                     // A chain this pass brought up has to reach the screen,
                     // and one it displaced has to be answered. Both run here
                     // rather than in the bridge, for the reason the identity
@@ -5299,9 +5312,13 @@ mod program {
                 // ones it has already been sent (`tairix_window`): an app
                 // slower than the pointer lags a frame, never a queue.
                 InputResponse::Resized { window } | InputResponse::ResizeEnded { window } => {
-                    if let (Some(window_id), Some(client)) = (
+                    if let (Some(window_id), Some(client), Some(state)) = (
                         windows.ipc_id(window),
                         compositor.window_client_rect(window),
+                        // Read rather than assumed: the state rides with
+                        // the extent, so the two cannot disagree about the
+                        // window a drag is resizing.
+                        compositor.window(window).map(tairix_wm::Window::size_state),
                     ) {
                         deliver(
                             server,
@@ -5316,6 +5333,7 @@ mod program {
                                 window_id,
                                 width_px: client.width,
                                 height_px: client.height,
+                                state,
                             },
                         );
                     }
@@ -7047,6 +7065,28 @@ mod program {
                 apps,
                 menu,
                 &WindowEvent::RedrawRequested { window_id },
+            );
+        }
+    }
+
+    /// Deliver the app-ward events the host produced while answering a
+    /// request and could not send itself, because the engine held the
+    /// borrow the delivery needs — the same reason the identity pass and
+    /// the menu chain are answered out here.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn deliver_owed_events<S: DirectorySource, F: FnMut() -> S>(
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
+    ) {
+        for event in windows.take_owed_events() {
+            deliver(
+                server, sink, shell, compositor, windows, picker, apps, menu, &event,
             );
         }
     }

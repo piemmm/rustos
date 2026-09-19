@@ -132,13 +132,26 @@ fn progress_value_clamps_above_full() {
 #[test]
 fn size_toggle_shows_the_next_action() {
     assert_eq!(
-        WindowSizeState::Restored.next_size_action(),
+        SizeAction::for_state(WindowSizeState::Restored),
         SizeAction::Maximize
     );
     assert_eq!(
-        WindowSizeState::Maximized.next_size_action(),
+        SizeAction::for_state(WindowSizeState::Maximized),
         SizeAction::Restore
     );
+}
+
+#[test]
+fn a_fullscreen_window_would_restore_and_is_not_decorated() {
+    // The toggle never reaches fullscreen, so nothing renders this; it is
+    // the answer a window returning from fullscreen needs.
+    assert_eq!(
+        SizeAction::for_state(WindowSizeState::Fullscreen),
+        SizeAction::Restore
+    );
+    assert!(WindowSizeState::Fullscreen.is_fullscreen());
+    assert!(!WindowSizeState::Maximized.is_fullscreen());
+    assert!(!WindowSizeState::Restored.is_fullscreen());
 }
 
 #[test]

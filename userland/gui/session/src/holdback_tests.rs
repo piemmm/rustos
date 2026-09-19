@@ -4,7 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
-use tairix_abi::window_ipc::{PointerAction, WindowEvent};
+use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowSizeState};
 use tairix_abi::Errno;
 
 use crate::holdback::{Delivery, HoldBack, HOLD_BACK_CAPACITY};
@@ -19,6 +19,7 @@ fn resized(window_id: u64, width_px: u32) -> WindowEvent {
         window_id,
         width_px,
         height_px: 100,
+        state: WindowSizeState::Restored,
     }
 }
 

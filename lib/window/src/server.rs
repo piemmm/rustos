@@ -42,7 +42,6 @@ use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
     encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply, encode_hand_over_reply,
     encode_menu_text_reply, encode_minted_id_reply, encode_open_target_reply, encode_terrain_reply,
@@ -54,6 +53,7 @@ use tairix_abi::window_ipc::{
     WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
     WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
+pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
 use tairix_abi::{CapabilityId, Errno};
 use tairix_display::{FrameRegion, ShmMapper};
 
@@ -394,6 +394,24 @@ pub trait WindowHost {
     /// whether the window has a grabber at all). The refusal is relayed to
     /// the client and the previous range stands.
     fn window_sizing_changed(&mut self, window_id: u64, sizing: WindowSizing) -> Result<(), Errno>;
+
+    /// A validated `SetSizeState`: the attested owner of live `window_id`
+    /// asked for it to be put into `state`. The host decides, and reports
+    /// the state it actually applied — with the resulting client extent —
+    /// as a `Resized` event.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot apply the state for — it is tearing
+    /// down, its compositor no longer holds the window, or the window
+    /// cannot take the state at all (a fixed-size window has no state but
+    /// the one it was created at). The refusal is relayed to the client
+    /// and the window stays where it is.
+    fn window_size_state_changed(
+        &mut self,
+        window_id: u64,
+        state: WindowSizeState,
+    ) -> Result<(), Errno>;
 
     /// `window_id` is gone — closed by its owner or torn down after the
     /// owner exited. Infallible: the window is already unmapped and
@@ -1242,6 +1260,9 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::SetSizing { window_id, sizing } => {
                 status(reply, self.set_sizing(host, caller, window_id, sizing))
             }
+            WindowRequest::SetSizeState { window_id, state } => {
+                status(reply, self.set_size_state(host, caller, window_id, state))
+            }
             WindowRequest::SetAppBar(ref bar) => status(reply, self.set_app_bar(host, caller, bar)),
             WindowRequest::SetBackdropBlur {
                 window_id,
@@ -1975,6 +1996,22 @@ impl<M: ShmMapper> WindowServer<M> {
     ) -> Result<(), Errno> {
         owned_window(&self.windows, caller, window_id)?;
         host.window_sizing_changed(window_id, sizing)
+    }
+
+    /// Ask the host to put `caller`'s window `window_id` into `state`.
+    ///
+    /// Ownership is checked before the host is told anything, exactly as a
+    /// retitle is, so a state aimed at another client's window answers
+    /// `NotFound` and changes nothing.
+    fn set_size_state(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        state: WindowSizeState,
+    ) -> Result<(), Errno> {
+        owned_window(&self.windows, caller, window_id)?;
+        host.window_size_state_changed(window_id, state)
     }
 
     /// Record `caller`'s icon-bar declaration and hand it to the host.

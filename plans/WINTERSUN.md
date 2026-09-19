@@ -89,23 +89,31 @@ discovered late.
 |---|---|---|---|
 | P1 | The audio stack exists at all: the PCM vocabulary, `audio_ring`, `audio-v1`, `audiochan-v1`, the engine, one driver, `audiod` | `plans/SOUND.md` SND2–SND4 | WS14 |
 | P2 | `lib/sound`'s decoder registry and the sandboxed decode seam | `plans/SOUND.md` SND9 | WS14 |
-| P3 | Window **size states** — `Normal` / `Maximised` / `Fullscreen` — on the window channel, and the compositor promoting a scanout-sized fullscreen surface to a single layer | `plans/COMPOSITOR-WORK.md` | WS5 |
+| P3 | Window **size states** — `Restored` / `Maximized` / `Fullscreen` — on the window channel, and the compositor promoting a scanout-sized fullscreen surface to a single layer | `plans/COMPOSITOR-WORK.md` Stage J | WS5 — **done** |
 | P4 | `lib/crypto` gains X25519 key agreement (`lib/crypto::agree`, over `x25519-dalek` 2.0.1 — pinned to the 2.x line so it shares the `curve25519-dalek` 4.x and `rand_core` 0.6 already beneath `ed25519-dalek`; its `zeroize` feature also pulls the compile-time `zeroize_derive`, so the footprint is that crate plus one proc macro rather than the single crate first estimated) | `lib/crypto` | WS1 — **done** |
 | P5 | Durable storage: `lib/recdb` through its transactional and recovery items | `plans/RECDB.md` RD1–RD6 | WS7 |
 | P6 | The figure engine: shapes, rig, clips, blending, and the art harness | `plans/FIGURE.md` FG1–FG5 | WS6 |
 | P7 | The GPU seam with a live backend | `plans/GPU.md` GP1–GP6 | WS19 |
 
-P3 is the only prerequisite that changes a shipped desktop contract, and it is
-desktop work the charter already wants: `SizeToggle` is a specified control
-(`plans/GUI-CONTROLS-DESIGN.md` §11) and `Compositor::toggle_window_size`
-already maximises, so the missing piece is a third state and its event, not a
-new mechanism. **Exclusive fullscreen is not a second display path.** A game
-does not seize the framebuffer: it asks for `Fullscreen`, the compositor sizes
-its surface to the scanout and promotes it to a single unblended layer, and the
-present goes through the one existing display path. That is where exclusive
-fullscreen's real benefit lives — no composition pass, a tear-free flip — and
-taking it any other way would be the private back-channel §17.3 forbids and the
-second blend path §2.2 forbids.
+P3 was the only prerequisite that changes a shipped desktop contract, and it
+landed as `plans/COMPOSITOR-WORK.md` Stage J. What WS5 can now rely on:
+`WindowSizeState` is three-valued and lives in `lib/abi` (re-exported by
+`lib/controls`); `WindowRequest::SetSizeState` asks, and the applied state
+comes back on `WindowEvent::Resized` **beside** the new client extent, so an
+app never learns one without the other. Fullscreen takes the scan-out rather
+than the work area, ignores the app's content ceiling, raises the window over
+the taskbar, and withdraws the decoration without discarding it.
+
+**Exclusive fullscreen is not a second display path.** A game does not seize
+the framebuffer: it asks for `Fullscreen`, the compositor sizes its surface to
+the scanout and promotes it to a single unblended layer, and the present goes
+through the one existing display path. That is where exclusive fullscreen's
+real benefit lives — no composition pass, a tear-free flip — and taking it any
+other way would be the private back-channel §17.3 forbids and the second blend
+path §2.2 forbids. The promotion is `Compositor::fullscreen_cover`, and it
+waits for a frame that genuinely covers the scanout: until the client presents
+at the new extent the scene composites normally, because a promoted layer has
+nothing beneath it to show through.
 
 ## 0. Binding decisions
 

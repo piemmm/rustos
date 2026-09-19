@@ -46,6 +46,8 @@
 
 use core::ops::{Deref, DerefMut};
 
+pub use tairix_abi::window_ipc::WindowSizeState;
+
 use tairix_theme::SignalRole;
 
 /// What a control fundamentally is.
@@ -630,34 +632,6 @@ pub enum WindowActivationState {
     AttentionRequested,
 }
 
-/// Whether a window is restored or maximized.
-///
-/// Fullscreen is a separate application/session mode and is *not* a size
-/// state of the size-toggle control (spec §5).
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
-pub enum WindowSizeState {
-    /// The window occupies its saved logical rectangle.
-    #[default]
-    Restored,
-    /// The window fills the session work area (not the physical display).
-    Maximized,
-}
-
-impl WindowSizeState {
-    /// The action the size-toggle control will perform *next* from this
-    /// state — the label and glyph a [`WindowControlKind::SizeToggle`] shows.
-    ///
-    /// A restored window offers [`SizeAction::Maximize`]; a maximized window
-    /// offers [`SizeAction::Restore`] (spec §11.22).
-    #[must_use]
-    pub const fn next_size_action(self) -> SizeAction {
-        match self {
-            WindowSizeState::Restored => SizeAction::Maximize,
-            WindowSizeState::Maximized => SizeAction::Restore,
-        }
-    }
-}
-
 /// The next action a size-toggle control will perform, used for its glyph and
 /// accessible name.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -666,6 +640,24 @@ pub enum SizeAction {
     Maximize,
     /// Return to the saved logical rectangle.
     Restore,
+}
+
+impl SizeAction {
+    /// The action a [`WindowControlKind::SizeToggle`] shows from `state` —
+    /// the one it will perform *next*, which is what its glyph and
+    /// accessible name describe (spec §11.22).
+    ///
+    /// A restored window offers [`Maximize`](Self::Maximize); a maximized
+    /// one offers [`Restore`](Self::Restore). A fullscreen window withdraws
+    /// its decoration, so no control renders this; the answer is the one a
+    /// returning window needs, and leaving fullscreen restores.
+    #[must_use]
+    pub const fn for_state(state: WindowSizeState) -> Self {
+        match state {
+            WindowSizeState::Restored => Self::Maximize,
+            WindowSizeState::Maximized | WindowSizeState::Fullscreen => Self::Restore,
+        }
+    }
 }
 
 /// The composed state of a window's furniture.
@@ -691,7 +683,7 @@ impl WindowFurnitureState {
     /// The next action a size-toggle control shows for this window.
     #[must_use]
     pub const fn size_action(self) -> SizeAction {
-        self.size.next_size_action()
+        SizeAction::for_state(self.size)
     }
 }
 

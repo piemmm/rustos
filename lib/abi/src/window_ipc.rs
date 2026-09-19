@@ -1555,6 +1555,63 @@ impl core::fmt::Debug for WindowTitle {
     }
 }
 
+/// Whether a window is restored, maximized, or fullscreen.
+///
+/// The three are mutually exclusive, so they travel as one value rather
+/// than as a flag beside a state that could contradict it — the same
+/// reason [`WindowSizing`] carries its range inside the variant it belongs
+/// to. It is the counterpart of that type: the app declares what sizing it
+/// supports, and this is the state the window manager put it in.
+///
+/// The size-toggle control never *reaches* [`Fullscreen`](Self::Fullscreen):
+/// it stays the two-way Maximize/Restore toggle, and only the owning
+/// application asks for fullscreen, with [`WindowRequest::SetSizeState`]. A
+/// fullscreen window withdraws its decoration entirely, so there is no
+/// control on screen to show an action for.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum WindowSizeState {
+    /// The window occupies its saved logical rectangle.
+    #[default]
+    Restored,
+    /// The window fills the session work area (not the physical display).
+    Maximized,
+    /// The window covers the whole display, decoration withdrawn.
+    Fullscreen,
+}
+
+impl WindowSizeState {
+    /// Whether the window covers the whole display with its decoration
+    /// withdrawn.
+    #[must_use]
+    pub const fn is_fullscreen(self) -> bool {
+        matches!(self, Self::Fullscreen)
+    }
+
+    /// The wire discriminant.
+    const fn wire(self) -> u8 {
+        match self {
+            Self::Restored => SIZE_STATE_RESTORED,
+            Self::Maximized => SIZE_STATE_MAXIMIZED,
+            Self::Fullscreen => SIZE_STATE_FULLSCREEN,
+        }
+    }
+
+    /// Decode a wire discriminant, refusing any value outside the closed
+    /// set rather than defaulting to one.
+    const fn from_wire(byte: u8) -> Result<Self, Errno> {
+        match byte {
+            SIZE_STATE_RESTORED => Ok(Self::Restored),
+            SIZE_STATE_MAXIMIZED => Ok(Self::Maximized),
+            SIZE_STATE_FULLSCREEN => Ok(Self::Fullscreen),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+const SIZE_STATE_RESTORED: u8 = 0;
+const SIZE_STATE_MAXIMIZED: u8 = 1;
+const SIZE_STATE_FULLSCREEN: u8 = 2;
+
 /// How the window manager may size one window: fixed at its create
 /// geometry, or resizable within the range of clients the app can lay out.
 ///
@@ -1836,6 +1893,34 @@ pub enum WindowRequest {
         /// The range the window manager is to hold an interactive resize
         /// to from here on.
         sizing: WindowSizing,
+    },
+    /// Ask for window `window_id` to be put into `state` — the app's half
+    /// of exclusive fullscreen, and the only way a window reaches
+    /// [`WindowSizeState::Fullscreen`].
+    ///
+    /// The window manager decides, and answers with the state it actually
+    /// applied as a [`WindowEvent::Resized`]. It is a request rather than a
+    /// command because the state is the session's to grant: a window that
+    /// cannot be sized at all, or one asking while it does not hold the
+    /// seat, is refused and stays where it is. Asking for the state already
+    /// in force changes nothing.
+    ///
+    /// Fullscreen is not a second display path. The window manager sizes
+    /// the surface to the scan-out, withdraws its decoration, and raises it
+    /// — the present still goes through the one display path every other
+    /// window uses. An app never reaches the framebuffer itself.
+    ///
+    /// Leaving fullscreen means asking for the state to return to, and
+    /// the window manager applies exactly that. The pre-maximize geometry
+    /// survives the round trip, so a window that maximized, went
+    /// fullscreen, and came back maximized still restores to where it
+    /// began. The request acts only on a window the caller owns.
+    SetSizeState {
+        /// The caller's own window whose state is asked to change (from the
+        /// `Create` reply).
+        window_id: u64,
+        /// The state asked for.
+        state: WindowSizeState,
     },
     /// Ask the session to run its **trusted file picker** for window
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6). The reply is only the
@@ -2245,6 +2330,8 @@ const OP_QUERY_WALLPAPERS: u16 = 23;
 const OP_RENDER_WALLPAPER: u16 = 24;
 /// Wire operation discriminant of [`WindowRequest::QueryCursorSets`].
 const OP_QUERY_CURSOR_SETS: u16 = 25;
+/// Ask for a window's size state (`WindowRequest::SetSizeState`).
+const OP_SET_SIZE_STATE: u16 = 26;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -2411,6 +2498,12 @@ const SIZING_MAX_HEIGHT: usize = SIZING_MAX_WIDTH + 4;
 const SET_SIZING_OFFSET: usize = 16;
 /// Encoded size of a [`WindowRequest::SetSizing`].
 const SET_SIZING_WIRE_LEN: usize = SET_SIZING_OFFSET + SIZING_WIRE_LEN;
+
+/// Byte offset of a [`WindowRequest::SetSizeState`]'s state, immediately
+/// after the window id it addresses.
+const SET_SIZE_STATE_OFFSET: usize = 16;
+/// Encoded size of a [`WindowRequest::SetSizeState`].
+const SET_SIZE_STATE_WIRE_LEN: usize = SET_SIZE_STATE_OFFSET + 1;
 
 /// Byte offset of a [`WindowRequest::SetTitle`] title length, immediately
 /// after the window id it retitles.
@@ -2603,6 +2696,7 @@ impl WindowRequest {
             Self::Resize { .. } => RESIZE_WIRE_LEN,
             Self::SetTitle { .. } => SET_TITLE_WIRE_LEN,
             Self::SetSizing { .. } => SET_SIZING_WIRE_LEN,
+            Self::SetSizeState { .. } => SET_SIZE_STATE_WIRE_LEN,
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
             Self::QueryDesktop => QUERY_DESKTOP_WIRE_LEN,
             Self::QueryWallpapers { .. } => QUERY_WALLPAPERS_WIRE_LEN,
@@ -2687,6 +2781,7 @@ impl WindowRequest {
             Self::Resize { .. } => OP_RESIZE,
             Self::SetTitle { .. } => OP_SET_TITLE,
             Self::SetSizing { .. } => OP_SET_SIZING,
+            Self::SetSizeState { .. } => OP_SET_SIZE_STATE,
             Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
             Self::QueryDesktop => OP_QUERY_DESKTOP,
             Self::QueryWallpapers { .. } => OP_QUERY_WALLPAPERS,
@@ -2746,6 +2841,10 @@ impl WindowRequest {
             Self::SetSizing { window_id, sizing } => {
                 put_u64(out, 8, window_id);
                 write_sizing(out, SET_SIZING_OFFSET, sizing);
+            }
+            Self::SetSizeState { window_id, state } => {
+                put_u64(out, 8, window_id);
+                out[SET_SIZE_STATE_OFFSET] = state.wire();
             }
             Self::HandOverLaunch {
                 ref run_path,
@@ -3024,6 +3123,7 @@ impl WindowRequest {
             }
             OP_SET_TITLE => read_set_title(bytes),
             OP_SET_SIZING => read_set_sizing(bytes),
+            OP_SET_SIZE_STATE => read_set_size_state(bytes),
             OP_TAKE_OPEN_TARGET => {
                 exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN)?;
                 Ok(Self::TakeOpenTarget)
@@ -3210,6 +3310,15 @@ fn read_set_sizing(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     let window_id = nonzero_id(read_u64(bytes, 8))?;
     let sizing = read_sizing(bytes, SET_SIZING_OFFSET)?;
     Ok(WindowRequest::SetSizing { window_id, sizing })
+}
+
+/// Decode a [`WindowRequest::SetSizeState`]: the window addressed and the
+/// state asked for, refusing any discriminant outside the closed set.
+fn read_set_size_state(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, SET_SIZE_STATE_WIRE_LEN)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let state = WindowSizeState::from_wire(bytes[SET_SIZE_STATE_OFFSET])?;
+    Ok(WindowRequest::SetSizeState { window_id, state })
 }
 
 fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
@@ -4859,6 +4968,15 @@ pub enum WindowEvent {
         width_px: u32,
         /// New client height in pixels; never zero.
         height_px: u32,
+        /// The size state the window is now in.
+        ///
+        /// It rides with the extent rather than arriving as its own event
+        /// because the two are one fact about the window's geometry, and
+        /// two events could disagree — an app that learnt it was fullscreen
+        /// before it learnt its new extent would lay out edge-to-edge at
+        /// the old size. It is a value to converge on exactly as the extent
+        /// is, so a run of samples still folds to the newest.
+        state: WindowSizeState,
     },
     /// The session released this window's retained content pixels to
     /// reclaim memory, and needs the window presented again.
@@ -5017,6 +5135,24 @@ impl WindowEvent {
     /// (the embedded [`KeyInput`] record is the widest).
     pub const WIRE_LEN: usize = 40;
 
+    /// Write a [`Self::Resized`]'s block into the already-headed frame
+    /// `out`. A no-op for any other event.
+    fn write_resized(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let Self::Resized {
+            width_px,
+            height_px,
+            state,
+            ..
+        } = *self
+        else {
+            return;
+        };
+        put_u16(out, 6, EV_RESIZED);
+        put_u32(out, 16, width_px);
+        put_u32(out, 20, height_px);
+        out[24] = state.wire();
+    }
+
     /// Write a [`Self::WallpaperRendered`]'s block into the already-headed
     /// frame `out`. A no-op for any other event.
     fn write_wallpaper_render(&self, out: &mut [u8; Self::WIRE_LEN]) {
@@ -5122,15 +5258,7 @@ impl WindowEvent {
             Self::Minimized { .. } => {
                 put_u16(&mut out, 6, EV_MINIMIZED);
             }
-            Self::Resized {
-                width_px,
-                height_px,
-                ..
-            } => {
-                put_u16(&mut out, 6, EV_RESIZED);
-                put_u32(&mut out, 16, width_px);
-                put_u32(&mut out, 20, height_px);
-            }
+            Self::Resized { .. } => self.write_resized(&mut out),
             Self::RedrawRequested { .. } => {
                 put_u16(&mut out, 6, EV_REDRAW_REQUESTED);
             }
@@ -5267,7 +5395,7 @@ impl WindowEvent {
                 })
             }
             EV_RESIZED => {
-                event_reserved_zero(bytes, 24)?;
+                event_reserved_zero(bytes, 25)?;
                 let width_px = read_u32(bytes, 16);
                 let height_px = read_u32(bytes, 20);
                 if width_px == 0 || height_px == 0 {
@@ -5277,6 +5405,7 @@ impl WindowEvent {
                     window_id,
                     width_px,
                     height_px,
+                    state: WindowSizeState::from_wire(bytes[24])?,
                 })
             }
             EV_MENU_CLOSED => {
@@ -5460,8 +5589,8 @@ mod tests {
         AppMenuRowView, AppMenuShortcut, BundleRunPath, DocumentName, HandOverDocument,
         HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PointerAction,
         TerrainPlate, TooltipText, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
-        WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
-        APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
+        WindowSizeState, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN,
+        APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
         APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
         APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
         APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
@@ -5479,17 +5608,17 @@ mod tests {
         OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PLACE_LAYER_WIRE_LEN,
         PRESENT_WIRE_LEN, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
         RENDER_WALLPAPER_SIDE_OFFSET, RENDER_WALLPAPER_WIRE_LEN, REQUEST_HEADER_LEN,
-        SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET,
-        SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET,
-        SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH,
-        SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN,
-        TOOLTIP_TEXT_MAX, WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
-        WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
-        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN,
-        WINDOW_MAX_FRAMES, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
-        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX, WINDOW_REQUEST_MAGIC,
-        WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
-        WINDOW_WALLPAPER_PREVIEW_MAX_SIDE,
+        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
+        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
+        SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
+        TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
+        WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT,
+        WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
+        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
+        WINDOW_PANE_NAME_MAX, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
+        WINDOW_WALLPAPERS_REPLY_MAX, WINDOW_WALLPAPER_PREVIEW_MAX_SIDE,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -7163,6 +7292,7 @@ mod tests {
             window_id: 4,
             width_px: 800,
             height_px: 600,
+            state: WindowSizeState::Restored,
         };
         let mut zero_w = base.to_le_bytes();
         zero_w[16..20].copy_from_slice(&0u32.to_le_bytes());
@@ -7177,12 +7307,66 @@ mod tests {
             Err(Errno::LengthOutOfRange)
         );
         let mut dirty = base.to_le_bytes();
-        dirty[24] = 1;
+        dirty[25] = 1;
         assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+        // The state is a closed set: a discriminant outside it is refused
+        // rather than read as the default.
+        let mut unknown_state = base.to_le_bytes();
+        unknown_state[24] = 3;
+        assert_eq!(
+            WindowEvent::from_bytes(&unknown_state),
+            Err(Errno::OutOfRange)
+        );
         // Minimized carries no payload past the window id; its tail is dirty-checked.
         let mut minimized = WindowEvent::Minimized { window_id: 4 }.to_le_bytes();
         minimized[16] = 1;
         assert_eq!(WindowEvent::from_bytes(&minimized), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn resized_carries_every_size_state_through_the_wire() {
+        for state in [
+            WindowSizeState::Restored,
+            WindowSizeState::Maximized,
+            WindowSizeState::Fullscreen,
+        ] {
+            let event = WindowEvent::Resized {
+                window_id: 4,
+                width_px: 1280,
+                height_px: 720,
+                state,
+            };
+            assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
+        }
+    }
+
+    #[test]
+    fn set_size_state_round_trips_and_refuses_a_zero_id_or_unknown_state() {
+        for state in [
+            WindowSizeState::Restored,
+            WindowSizeState::Maximized,
+            WindowSizeState::Fullscreen,
+        ] {
+            let request = WindowRequest::SetSizeState {
+                window_id: 9,
+                state,
+            };
+            assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
+        }
+        let base = WindowRequest::SetSizeState {
+            window_id: 9,
+            state: WindowSizeState::Fullscreen,
+        };
+        let mut zero_id = base.frame();
+        zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
+        let mut unknown = base.frame();
+        unknown[SET_SIZE_STATE_OFFSET] = 4;
+        assert_eq!(WindowRequest::from_bytes(&unknown), Err(Errno::OutOfRange));
+        assert_eq!(
+            WindowRequest::from_bytes(&base.frame().over_long(1)),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
@@ -7812,6 +7996,7 @@ mod tests {
                 window_id: 4,
                 width_px: 800,
                 height_px: 600,
+                state: WindowSizeState::Restored,
             },
             WindowEvent::Scrolled {
                 window_id: 4,

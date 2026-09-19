@@ -27,7 +27,7 @@ use tairix_abi::window_ipc::{
     WindowEvent, WindowRegion,
 };
 use tairix_abi::{AppIdentity as AttestedApp, Errno, ProcId};
-use tairix_controls::{ChainModel, PlatePlacement};
+use tairix_controls::{ChainModel, PlatePlacement, WindowSizeState};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::EventId;
@@ -188,6 +188,14 @@ pub struct SessionWindows {
     /// last frame-report decision. Drained with the report so a frame whose
     /// only content is the Switchboard's own paint is not reported back.
     presented: Vec<u64>,
+    /// App-ward events the host produced while answering a request and
+    /// the serve loop has yet to deliver.
+    ///
+    /// A host holds no event sink, and a size-state change still owes its
+    /// app the new extent — on the one `Resized` path every other extent
+    /// change takes, so the hold-back and the client's folding treat it
+    /// identically.
+    owed: Vec<WindowEvent>,
     /// The seat's desktop layer surface and its two feeds.
     pub layers: LayerState,
 }
@@ -216,6 +224,12 @@ impl SessionWindows {
     /// clearing the set so the next report decision starts fresh.
     pub fn take_presented(&mut self) -> Vec<u64> {
         core::mem::take(&mut self.presented)
+    }
+
+    /// The app-ward events the host owes since the last take, clearing the
+    /// queue so each is delivered once.
+    pub fn take_owed_events(&mut self) -> Vec<WindowEvent> {
+        core::mem::take(&mut self.owed)
     }
 
     /// Report every served window whose awaited frame has just reached the
@@ -431,24 +445,25 @@ pub fn window_control_event(
         WindowControlKind::Close => Some(WindowEvent::CloseRequested { window_id }),
         WindowControlKind::Minimize => Some(WindowEvent::Minimized { window_id }),
         WindowControlKind::PutToBack => None,
-        WindowControlKind::SizeToggle => resized.map(|client| WindowEvent::Resized {
+        WindowControlKind::SizeToggle => resized.map(|(state, client)| WindowEvent::Resized {
             window_id,
             width_px: client.width,
             height_px: client.height,
+            state,
         }),
     }
 }
 
 /// Perform the window-manager-local half of a title-bar command on the
-/// decorated window `wm`, reporting the new client rectangle where the
-/// command resized it.
+/// decorated window `wm`, reporting the new size state and client
+/// rectangle where the command resized it.
 fn apply_window_control(
     control: WindowControlKind,
     wm: WindowId,
     work_area: Rect,
     shell: &mut DesktopShell,
     compositor: &mut Compositor,
-) -> Option<Rect> {
+) -> Option<(WindowSizeState, Rect)> {
     match control {
         // Closing is never the window manager's to do: a served window's
         // client tears itself down, and a session-owned window's owner
@@ -462,9 +477,7 @@ fn apply_window_control(
             compositor.lower(wm);
             None
         }
-        WindowControlKind::SizeToggle => compositor
-            .toggle_window_size(wm, work_area)
-            .map(|(_, client)| client),
+        WindowControlKind::SizeToggle => compositor.toggle_window_size(wm, work_area),
     }
 }
 
@@ -1096,10 +1109,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             return Err(Errno::NotFound);
         };
         let wm = record.wm;
+        // The *declaration*, not the furniture currently drawn: a
+        // fullscreen window restating its range means the range it is held
+        // to when it returns.
         let decorated_resizable = self
             .compositor
-            .window_frame(wm)
-            .is_some_and(|frame| frame.furniture().resizable);
+            .window_declared_resizable(wm)
+            .unwrap_or(false);
         if decorated_resizable != sizing.resizable() {
             return Err(Errno::NotSupported);
         }
@@ -1112,6 +1128,33 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         } else {
             Err(Errno::NotFound)
         }
+    }
+
+    fn window_size_state_changed(
+        &mut self,
+        window_id: u64,
+        state: WindowSizeState,
+    ) -> Result<(), Errno> {
+        // The engine attested the caller and validated ownership; the
+        // geometry is the window manager's, so it decides and reports what
+        // it actually applied. A window it will not move is refused rather
+        // than half-applied.
+        let Some(record) = self.windows.records.get(&window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let wm = record.wm;
+        let work_area = self.shell.work_area(self.compositor);
+        let Some((applied, client)) = self.compositor.set_window_size_state(wm, state, work_area)
+        else {
+            return Err(Errno::NotSupported);
+        };
+        self.windows.owed.push(WindowEvent::Resized {
+            window_id,
+            width_px: client.width,
+            height_px: client.height,
+            state: applied,
+        });
+        Ok(())
     }
 
     fn tooltip_declared(
@@ -2543,6 +2586,89 @@ mod tests {
     }
 
     #[test]
+    fn an_app_asking_for_fullscreen_is_sized_to_the_screen_and_told_so() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+        };
+        let wm = open_one_sized(&mut host, 3, RESIZABLE);
+
+        host.window_size_state_changed(3, WindowSizeState::Fullscreen)
+            .expect("a resizable window may go fullscreen");
+
+        let screen = host.compositor.screen_rect();
+        assert_eq!(host.compositor.window(wm).expect("live").bounds(), screen);
+        // Fullscreen covers the taskbar band, so it is bigger than the
+        // work area a maximize would have taken.
+        assert!(host.shell.work_area(host.compositor).height < screen.height);
+        // The app learns its new extent and its new state together, on the
+        // one `Resized` path every other extent change takes.
+        assert_eq!(
+            host.windows.take_owed_events(),
+            [WindowEvent::Resized {
+                window_id: 3,
+                width_px: screen.width,
+                height_px: screen.height,
+                state: WindowSizeState::Fullscreen,
+            }]
+        );
+
+        // Asking again for the state already in force changes nothing and
+        // owes nothing, rather than reporting a resize that did not happen.
+        assert_eq!(
+            host.window_size_state_changed(3, WindowSizeState::Fullscreen),
+            Err(Errno::NotSupported)
+        );
+        assert!(host.windows.take_owed_events().is_empty());
+
+        // A window this session does not serve is refused by name.
+        assert_eq!(
+            host.window_size_state_changed(999, WindowSizeState::Fullscreen),
+            Err(Errno::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_fixed_size_app_is_refused_fullscreen_and_does_not_move() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+        };
+        let wm = open_one_sized(&mut host, 3, WindowSizing::Fixed);
+        let before = host.compositor.window(wm).expect("live").bounds();
+
+        assert_eq!(
+            host.window_size_state_changed(3, WindowSizeState::Fullscreen),
+            Err(Errno::NotSupported),
+            "a window with only the size it was created at has no state to take"
+        );
+        assert_eq!(host.compositor.window(wm).expect("live").bounds(), before);
+        assert!(host.windows.take_owed_events().is_empty());
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One linear end-to-end drive of all four command controls.
     fn clicking_each_title_bar_control_drives_the_window_lifecycle_end_to_end() {
         use tairix_wm::{InputEvent, InputResponse, PointerButton};
@@ -3355,6 +3481,7 @@ mod tests {
                 window_id: 7,
                 width_px: client.width,
                 height_px: client.height,
+                state: tairix_wm::WindowSizeState::Maximized,
             })
         );
         assert_eq!(
@@ -3380,6 +3507,7 @@ mod tests {
                 window_id: 7,
                 width_px: restored.width,
                 height_px: restored.height,
+                state: tairix_wm::WindowSizeState::Restored,
             })
         );
         assert_eq!(

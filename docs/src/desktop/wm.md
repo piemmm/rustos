@@ -240,6 +240,24 @@ with that window's opacity and rounded-corner coverage through the same
 matches pixel-for-pixel), and the cursor on top, then hands the stack to
 `AcceleratedDisplay::present_layers`.
 
+A **fullscreen window that covers the scan-out** is promoted to the
+single layer the scene actually is: the background fill and every window
+under it are dropped, because none of them can contribute a pixel. That
+is where exclusive fullscreen's benefit lives — no composition pass, one
+tear-free flip — and it is reached through the one display path every
+other window uses; no app ever touches the framebuffer.
+`Compositor::fullscreen_cover` reads every condition from the
+compositor's own state rather than from anything the client claims: the
+window must be visible, fullscreen, exactly the scan-out rectangle,
+wholly opaque, cut to no shape, **and** holding presented pixels for all
+of it. That last one is what makes dropping the background sound — a
+window is resized before its app presents at the new extent, and in
+between, its margin samples transparent, so the promotion waits for the
+frame that genuinely covers. The software path needs no promotion of its
+own: an opaque run covering a row already skips the desktop, the
+background fill and every window beneath it, and a second occlusion
+mechanism beside that one is forbidden (`AGENTS.md` §2.2).
+
 The software path is always the fallback: if the scene exceeds the
 engine's reported `AccelCaps` — more layers than it has planes, or a
 layer larger than it can source — the compositor composites the whole
@@ -1343,6 +1361,47 @@ as its colour. See [theming](./theming.md) for the four roles.
   with the new client size (nothing for a non-resizable window). These ride the
   existing window path, owner-validated by the engine; there is no ambient
   authority and no privileged force-quit button (`AGENTS.md` §4, §5.4).
+
+## The three size states
+
+A window is `Restored`, `Maximized`, or `Fullscreen`
+(`tairix_abi::window_ipc::WindowSizeState`). The three are mutually
+exclusive, so they travel as one value rather than as a flag beside a
+state that could contradict it.
+
+The **size-toggle control is a two-way toggle and never reaches
+fullscreen**: only the owning application asks, with
+`WindowRequest::SetSizeState`, and only a decorated, resizable window may
+take a state at all. The window manager decides and reports what it
+actually applied as a `WindowEvent::Resized` carrying the state alongside
+the new client extent — one event, because the two are one fact about the
+window's geometry and two events could disagree. A run of them still folds
+to the newest, exactly as a drag's extents do.
+
+* **Maximized** fills the session work area and honours the app's
+  declared content ceiling.
+* **Fullscreen** takes the whole scan-out and does **not** honour that
+  ceiling: the app asked for this state by name rather than for "as large
+  as useful", and a surface short of the scan-out would leave the desktop
+  showing around it and could not be promoted to one layer. The window is
+  raised, so nothing — the taskbar included — is over it.
+
+A fullscreen window's **decoration is withdrawn, not removed**. It keeps
+its `WindowFrame` value, so the title, identity and activation are exact
+when it comes back, but `Window::is_decorated` reports false and
+everything follows from that one predicate: no band is reserved (the
+client *is* the window), no rim, no plate, no silhouette — a rounded
+corner at the scan-out's own corner would notch the display onto the
+desktop behind it — and `Window::frame` yields nothing, so there is no
+title bar to hit-test, no resize edge to grab and no identity slot to
+fill. An invisible title bar can never still be pressed. What outlives
+the furniture is the *declaration*: `window_declared_resizable` still
+answers, so an app may restate its resize range while fullscreen and be
+held to it when it returns.
+
+Leaving fullscreen goes to the state asked for, and the pre-maximize
+geometry survives the round trip: a window that maximized, went
+fullscreen, and came back maximized still restores to where it began.
 
 ## Releasable window content
 
