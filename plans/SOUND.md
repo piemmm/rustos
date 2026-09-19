@@ -18,7 +18,7 @@ seek slider.
 |---|---|---|
 | SND1 | `plans/SOUND.md`, the jump-sheet row, the corrected Settings reference, and the `plans/USB.md` scope change | done |
 | SND2 | `lib/abi`: `HwDeviceClass::Audio`, the PCM vocabulary, `audio_ring`, `audiochan-v1`, `audio-v1` | done |
-| SND3 | `lib/audio`: conversion, mixer, resampler, channel mapping, clock model, routing policy, volume model, the stream client — all host-tested, plus the ring's loom model | planned |
+| SND3 | `lib/audio`: conversion, mixer, resampler, channel mapping, clock model, routing policy, volume model, the stream client — all host-tested, plus the ring's loom model | done |
 | SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | planned |
 | SND5 | `lib/abi` DMA-engine class trait (`DmaEngine`/`DmaChannel`, cyclic chains, discovered request lines); `drivers/dma/bcm2711` | planned |
 | SND6 | Isochronous transfer support: the endpoint kind and service-interval scheduling in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and feedback endpoints in `drivers/bus/usb/xhci` | planned |
@@ -302,14 +302,34 @@ Host-tested, `no_std`, no I/O, no window, no syscall. Everything that decides
   would make the 32-bit integer case exact too and was rejected: no consumer
   format produces meaningful 32-bit integer audio, and the honest narrower
   claim is worth more than a wider one nobody can hear.
-- **One resampler.** A polyphase windowed-sinc with a documented kernel
-  (Kaiser-windowed, stopband and transition width stated and *measured* in the
-  crate's tests, not asserted in its docs). The ratio is kept as an exact
-  rational where the rates admit one — 48000/44100 reduces to 160/147 — so
-  there is no accumulating phase error over an hour; only a drifting ratio
-  (invariant 3's linked-domain case) uses the fractional-delay path. Drivers
-  never resample and clients never need to: this is the only resampler in the
-  system and a second one is a review blocker.
+- **One resampler.** A polyphase Kaiser-windowed-sinc with its figures
+  *measured* from the built bank's own coefficients rather than asserted in
+  prose: passband edge at 0.43 of the lower rate, stopband from its Nyquist,
+  ≥ 100 dB rejection and < 0.1 dB ripple. Drivers never resample and clients
+  never need to: this is the only resampler in the system and a second one is
+  a review blocker.
+
+  The position is an integer input frame plus an integer remainder over the
+  reduced denominator — 48000/44100 is 160/147 and the step is exactly that —
+  so no floating-point accumulator advances per sample and an hour ends on the
+  frame the arithmetic says. The bank holds one row per denominator step where
+  the denominator fits, which is every pair in the standard rate family; the
+  interpolation weight between rows is then exactly zero. That is the same
+  fractional-delay mechanism the linked-domain drifting ratio uses, and it also
+  covers the case the plan first overlooked: a **static** pair with no common
+  factor needs more rows than a bounded bank can hold, so it interpolates too.
+  One code path; the exact case simply never engages the interpolation.
+
+  Two figures fall out of the filter design rather than being chosen: a
+  decimating ratio must reach the stopband by the *output's* Nyquist, so it
+  needs taps in proportion to the decimation factor (capped, past which the
+  transition widens rather than the per-sample work unbounding); and the
+  coefficient table depends on the ratio alone, so one bank per (source rate,
+  sink rate) serves every stream on a device.
+
+  `lib/util::mathf` gained `exp` for the window and the decibel curve, since
+  that module is the one home for `no_std` transcendental maths and a second
+  copy in `lib/audio` would be the duplication the charter forbids.
 - **Channel mapping.** An explicit matrix derived from source map to sink map,
   with the standard downmix coefficients (ITU-R BS.775) for 5.1 and 7.1 to
   stereo and a documented upmix. A pair of maps with no defined relationship
@@ -933,24 +953,57 @@ the tests are chosen to check it rather than to check that nothing crashed.
 `Acquire`/`Release` pairing, so it carries a `loom` model — not optional and
 not satisfiable by the test matrix, which runs whichever interleaving the host
 happened to pick, and on a total-store-ordered host would pass even with the
-orderings downgraded to `Relaxed`. Two facts bound what that model can be, and
-are recorded here so SND3 decides the shape with them in hand rather than
-re-deriving them:
+orderings downgraded to `Relaxed`. **Landed with SND3**: `tairix-abi` is
+enrolled in `cargo xtask loom` and `lib/abi/tests/loom.rs` holds the models.
 
-* the ring lives in `lib/abi/src/driver/audio_ring.rs`, so the enrolment is
-  **`tairix-abi`**, not `lib/audio`;
-* `loom` instruments its own atomics and cells, and the sample area is a plain
-  byte region two processes map — it cannot be a `loom::cell::UnsafeCell`, and
-  `AtomicU64`s cannot be carved out of shared bytes by `align_to` under the
-  model's substituted types. A model therefore covers the **counter pair** —
-  monotonicity, occupancy, and the release/acquire edges — over a constructor
-  that takes the two counters directly, and the "no torn frame" half stays with
-  `lib/abi/tests/audio_ring_spsc.rs`, which drives both sides concurrently over
-  one aliased region, and with `fuzz_audio`, which drives every operation over
-  positions a hostile peer could have written.
+The enrolment is `tairix-abi` rather than `lib/audio` because the ring lives in
+`lib/abi/src/driver/audio_ring.rs`. Two constraints shaped the model and are
+recorded here because they also bind any later ring (`net_ring` next):
 
-`lib/audio` and `lib/audiochan` are enrolled in `cargo xtask miri` for the
-shared-memory accesses.
+* `loom` substitutes its own atomic type, which is not eight bytes of shared
+  memory, so `PcmRing::bind` cannot exist in a `--cfg loom` build — the file
+  cfg-selects the atomics import, `bind` and the two header cell indices are
+  `cfg(not(loom))`, and a `cfg(loom)` `over_counters` constructor takes the two
+  positions directly. A `build.rs` registers the cfg, as `lib/sync` does.
+* The sample area is a plain byte region two processes map, so it cannot be a
+  `loom::cell::UnsafeCell` and the model checker cannot see accesses to it.
+  Each side therefore brings its own area and the model hangs a
+  `loom::cell::UnsafeCell` **payload** off the real edge instead: the producer
+  writes the cell then calls `write`, the consumer calls `read` and reads the
+  cell **only** where that returned frames, and nothing else — no join, no
+  lock, no second atomic — connects the two threads.
+
+  That last point is what makes the model sharp rather than ceremonial, and it
+  is why a counter-pair-only model was rejected: per-location coherence already
+  gives monotonicity, so a model with no data could not distinguish `Release`
+  from `Relaxed` at all. This one can, and was **verified to fail** by
+  downgrading the producer's store before it was accepted — loom reports
+  "Causality violation: Concurrent read and write accesses".
+
+The "no torn frame" half stays with `lib/abi/tests/audio_ring_spsc.rs`, which
+drives both sides concurrently over one genuinely aliased region, and with
+`fuzz_audio`, which drives every operation over positions a hostile peer could
+have written.
+
+`lib/audio` carries `forbid(unsafe_code)` and performs no shared-memory access
+of its own — it works on slices its caller owns — so `cargo xtask miri` has
+nothing there to interpret and the crate is not enrolled. `lib/audiochan` is
+SND4's, and is enrolled there if its accesses warrant it.
+
+**`tairix-abi` is enrolled in `cargo xtask miri` too, and the enrolment found
+a real one.** Both shared rings downgraded their header to a shared `&[u8]`
+before `align_to`, so the atomic counters were derived from a read-only
+provenance tag and *every publication was a write the borrow never granted*.
+Nothing could have caught it below the interpreter: the generated code is
+correct today, and the compiler is entitled to act on the aliasing claim at
+any time. Both `PcmRing::bind` and `FrameRings`/`net_ring`'s `bind` now take
+the mutable path (`align_to_mut`, then a shared reborrow of the atomics, whose
+interior mutability is what the peer's concurrent access needs), and the
+enrolment is the standing regression test. The scope is `--lib`: the
+`*_ring_spsc` integration tests deliberately alias two `&mut` views over one
+region because that is how two processes map one `shm` object, which is
+outside the aliasing model rather than inside it, and the shipped code never
+aliases within an address space.
 
 **Fuzzing.** A structure-aware generator per format in one registered
 `fuzz_sound` target; harnesses for the `audio-v1` and `audiochan-v1` decoders,

@@ -694,22 +694,28 @@ impl<'a> FrameRing<'a> {
             return Err(Errno::BufferTooSmall);
         }
         let (header, slots_region) = region.split_at_mut(RING_HEADER_LEN);
-        // Give up the exclusive borrow of the header: from here it is only
-        // ever read and written through the two atomics, which the peer
-        // accesses concurrently.
-        let header: &'a [u8] = header;
         // SAFETY: reinterpreting initialised `u8`s as `AtomicU32`s is the
-        // transmute `align_to` documents, and it is valid here: `AtomicU32`
-        // has `u32`'s layout and no invalid bit pattern, so every 4-byte
-        // group of the header is a legal value. `align_to` itself computes
-        // the split, so nothing is assumed about the region's alignment —
-        // a misaligned base simply yields a non-empty prefix, which is
-        // rejected below. Atomics rather than plain reads are precisely
-        // what a peer process concurrently accessing these bytes requires.
-        let (prefix, cells, _) = unsafe { header.align_to::<AtomicU32>() };
+        // transmute `align_to_mut` documents, and it is valid here:
+        // `AtomicU32` has `u32`'s layout and no invalid bit pattern, so every
+        // 4-byte group of the header is a legal value. The split is computed
+        // rather than assumed, so nothing is taken on trust about the
+        // region's alignment — a misaligned base simply yields a non-empty
+        // prefix, which is rejected below. Atomics rather than plain reads
+        // are precisely what a peer process concurrently accessing these
+        // bytes requires.
+        //
+        // The *mut* form matters: these counters are stored to. Casting
+        // through a shared `&[u8]` first would derive them from a read-only
+        // tag, making every publication a write the borrow never granted.
+        let (prefix, cells, _) = unsafe { header.align_to_mut::<AtomicU32>() };
         if !prefix.is_empty() {
             return Err(Errno::BadAlignment);
         }
+        // Shared from here, for the region's whole lifetime: the atomics'
+        // interior mutability is what the peer's concurrent access needs, and
+        // an exclusive borrow would claim a solitude that does not hold
+        // across an address space.
+        let cells: &'a [AtomicU32] = cells;
         let (Some(producer), Some(consumer)) = (cells.get(PRODUCER_CELL), cells.get(CONSUMER_CELL))
         else {
             return Err(Errno::BadAlignment);

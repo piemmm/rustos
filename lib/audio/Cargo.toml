@@ -1,0 +1,41 @@
+[package]
+name = "tairix-audio"
+description = "TAIRiX audio engine: everything that decides what samples come out. Saturating format conversion through an f32 pivot with narrowing-only dither, the one polyphase windowed-sinc resampler with exact rational stepping, explicit channel matrices with the ITU-R BS.775 downmix, the per-device linear clock fit, the pure routing policy, the one-multiply volume model, the mixer, and the client half of audio-v1. no_std, no I/O, no syscall, no unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The PCM vocabulary, the shared ring, and the `audio-v1` wire surface every
+# layer of the stack agrees on. The engine defines none of its own.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The self-optimising dispatch framework the sample-conversion kernel is
+# selected through: the capability gate, the mandatory self-verify against the
+# portable reference, and the fail-closed baseline are written once there.
+# `default-features = false` drops its optional heap-backed `OpsTables`, which
+# the engine does not build.
+tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = false }
+# The tree's predictable generator, which is what dither noise wants: a second
+# PRNG here would be duplication, and dither needs decorrelation rather than
+# unpredictability.
+tairix-rng = { path = "../rng", version = "=0.0.0" }
+# The seat vocabulary the routing policy arbitrates in, so a sink's lease and
+# a display's are the same identity rather than two spellings of one idea.
+tairix-seat = { path = "../seat", version = "=0.0.0" }
+# The set-once cell holding the resolved conversion kernel for the process.
+tairix-sync = { path = "../sync", version = "=0.0.0" }
+# `mathf` is the one home for `no_std` transcendental maths, so the filter
+# kernel and the decibel curve use the same `sin`/`exp` every other crate does;
+# `fallible` is how a working buffer is sized without panicking on exhaustion.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# Shared per-run seed / budget seam for the fuzz harness (never in a shipping
+# build).
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

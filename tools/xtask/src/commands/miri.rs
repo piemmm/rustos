@@ -191,6 +191,27 @@ pub const TARGETS: &[Target] = &[
         ),
     },
     Target {
+        package: "tairix-abi",
+        description: "the two shared-memory rings' headers: the atomic counters carved out of \
+                      a mapped region by `align_to_mut`, the MMIO and port-I/O accessors, and \
+                      the DMA descriptor views. The rings publish through those counters, so \
+                      deriving them from a read-only view made every publication a write the \
+                      borrow never granted — which only an interpreter can see",
+        features: &[],
+        scope: Scope::LibOnly(
+            "its `*_ring_spsc` integration tests deliberately alias two `&mut` views over one \
+             leaked region, which is how two processes map one `shm` object and is a situation \
+             outside the aliasing model entirely; the shipped code never aliases within an \
+             address space. The loom model does not build under the interpreter, and the fuzz \
+             harnesses read the clock for their budget, which isolation refuses",
+        ),
+        spread: Spread::PerCore(
+            "over fifteen hundred tests, and interpreted they cost five minutes end to end in \
+             one single-core process. Dealt across the host's cores the work is unchanged and \
+             the makespan falls to the longest single test",
+        ),
+    },
+    Target {
         package: "tairix-arch-api",
         description: "the HAL's shared unsafe floor: the frame-pointer unwinder's walk over a \
                       hostile stack, the page-table reclaim walk, and the per-CPU and quiesce \

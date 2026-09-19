@@ -454,6 +454,25 @@ mod tests {
     };
     const REGION_LEN: usize = GEOMETRY.region_len();
 
+    /// A region with the alignment the ring's atomic counters need.
+    ///
+    /// A bare `[u8; N]` has an alignment of one and only binds because a
+    /// stack slot usually happens to be wide enough; stating the requirement
+    /// is what lets the UB interpreter, which does not hand out incidental
+    /// alignment, run these tests at all.
+    #[repr(align(8))]
+    struct Region([u8; REGION_LEN]);
+
+    impl Region {
+        const fn new() -> Self {
+            Self([0u8; REGION_LEN])
+        }
+
+        fn bytes(&mut self) -> &mut [u8] {
+            &mut self.0
+        }
+    }
+
     fn facts(mac: MacAddress) -> DeviceFacts {
         DeviceFacts {
             mac,
@@ -546,9 +565,9 @@ mod tests {
     #[test]
     fn loopback_round_trip() {
         let mut n = MockNet::new();
-        let mut region = [0u8; REGION_LEN];
+        let mut region = Region::new();
         let mut rings =
-            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region.bytes(), GEOMETRY, BufferClass::NonSensitive).expect("bind");
         rings.tx.push(&[0xAA; 16]).expect("queue tx");
         let report = n.service(&mut rings).expect("service");
         assert_eq!(report.transmitted, 1);
@@ -563,9 +582,9 @@ mod tests {
     #[test]
     fn runt_tx_frames_are_dropped_without_wedging() {
         let mut n = MockNet::new();
-        let mut region = [0u8; REGION_LEN];
+        let mut region = Region::new();
         let mut rings =
-            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region.bytes(), GEOMETRY, BufferClass::NonSensitive).expect("bind");
         rings.tx.push(&[0x01; 4]).expect("queue runt");
         rings.tx.push(&[0x02; 20]).expect("queue good");
         let report = n.service(&mut rings).expect("service");
@@ -580,9 +599,9 @@ mod tests {
     #[test]
     fn rx_ring_full_backpressures_without_loss() {
         let mut n = MockNet::new();
-        let mut region = [0u8; REGION_LEN];
+        let mut region = Region::new();
         let mut rings =
-            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region.bytes(), GEOMETRY, BufferClass::NonSensitive).expect("bind");
         // Five frames through a four-slot RX ring: two service passes.
         for _ in 0..4 {
             rings.tx.push(&[0x33; 20]).expect("queue");
@@ -608,9 +627,9 @@ mod tests {
     #[test]
     fn sensitive_class_triggers_staging_scrub() {
         let mut n = MockNet::new();
-        let mut region = [0u8; REGION_LEN];
+        let mut region = Region::new();
         let mut rings =
-            FrameRings::bind(&mut region, GEOMETRY, BufferClass::Sensitive).expect("bind");
+            FrameRings::bind(region.bytes(), GEOMETRY, BufferClass::Sensitive).expect("bind");
         rings.tx.push(&[0xC3; 24]).expect("queue");
         n.service(&mut rings).expect("service");
         assert!(n.scrubbed_after_last_call);
@@ -620,9 +639,9 @@ mod tests {
     #[test]
     fn non_sensitive_class_leaves_staging() {
         let mut n = MockNet::new();
-        let mut region = [0u8; REGION_LEN];
+        let mut region = Region::new();
         let mut rings =
-            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region.bytes(), GEOMETRY, BufferClass::NonSensitive).expect("bind");
         rings.tx.push(&[0xC3; 24]).expect("queue");
         n.service(&mut rings).expect("service");
         assert!(!n.scrubbed_after_last_call);
@@ -632,12 +651,12 @@ mod tests {
     #[test]
     fn corrupt_ring_counters_fail_closed() {
         let mut n = MockNet::new();
-        let mut region = [0u8; REGION_LEN];
+        let mut region = Region::new();
         // Corrupt the TX ring's producer counter (second ring header).
         let tx_header = GEOMETRY.rx_ring_len();
-        region[tx_header..tx_header + 4].copy_from_slice(&100u32.to_le_bytes());
+        region.bytes()[tx_header..tx_header + 4].copy_from_slice(&100u32.to_le_bytes());
         let mut rings =
-            FrameRings::bind(&mut region, GEOMETRY, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region.bytes(), GEOMETRY, BufferClass::NonSensitive).expect("bind");
         assert_eq!(n.service(&mut rings), Err(DriverError::BadMagic));
     }
 }

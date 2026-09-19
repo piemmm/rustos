@@ -37,7 +37,30 @@
 //! as [`Errno::OutOfRange`], and works from that snapshot — a peer mutating
 //! its position mid-operation cannot steer a second read past the bound the
 //! first one checked.
+//!
+//! # The interleaving oracle
+//!
+//! A total-store-ordered host would pass this file's whole test suite with
+//! the orderings above downgraded to `Relaxed`, because on that hardware a
+//! release store and a relaxed one are the same instruction. `tests/loom.rs`
+//! is what catches that: under `--cfg loom` the two positions become the
+//! model checker's own atomics, and a payload the model writes before
+//! publishing and reads after acquiring is ordered by *this* code's
+//! release/acquire pair and nothing else — so a downgrade is a reported
+//! causality violation rather than a defect that surfaces years later on a
+//! weakly-ordered machine.
+//!
+//! The model checker substitutes its own atomic type, which is not eight
+//! bytes of shared memory and cannot be carved out of a mapped region, so
+//! [`PcmRing::bind`] does not exist in that build and the model constructs a
+//! ring over the two counters directly. The "no torn frame" half stays with
+//! `tests/audio_ring_spsc.rs`, which drives both sides concurrently over one
+//! aliased region.
 
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(not(loom))]
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::audio::{ring_bounds, Frames, SampleFormat, MAX_CHANNELS};
@@ -52,9 +75,14 @@ const INDEX_ALIGN: usize = align_of::<AtomicU64>();
 pub const PCM_RING_HEADER_LEN: usize = 2 * CACHE_LINE_BYTES;
 
 /// Index of the producer position among the header's atomic cells.
+///
+/// Absent under the interleaving model, which hands the positions in rather
+/// than carving them out of a mapped header.
+#[cfg(not(loom))]
 const PRODUCER_CELL: usize = 0;
 
 /// Index of the consumer position among the header's atomic cells.
+#[cfg(not(loom))]
 const CONSUMER_CELL: usize = CACHE_LINE_BYTES / INDEX_ALIGN;
 
 /// Extra bytes an in-process buffer needs so an aligned region can be cut
@@ -178,31 +206,70 @@ impl<'a> PcmRing<'a> {
     /// * [`Errno::BadAlignment`] — `region` is not aligned for the header's
     ///   atomic positions. Use [`aligned_region`] to cut an aligned view from
     ///   a plain in-process buffer.
+    #[cfg(not(loom))]
     pub fn bind(region: &'a mut [u8], geometry: PcmGeometry) -> Result<Self, Errno> {
         if region.len() != geometry.region_len() {
             return Err(Errno::BufferTooSmall);
         }
         let (header, samples) = region.split_at_mut(PCM_RING_HEADER_LEN);
-        // Give up the exclusive borrow of the header: from here it is only
-        // ever reached through the two atomics, which the peer accesses
-        // concurrently.
-        let header: &'a [u8] = header;
         // SAFETY: reinterpreting initialised `u8`s as `AtomicU64`s is the
-        // transmute `align_to` documents, and it is valid here: `AtomicU64`
-        // has `u64`'s layout and no invalid bit pattern, so every 8-byte
-        // group of the header is a legal value. `align_to` computes the split
-        // itself, so nothing is assumed about the region's alignment — a
-        // misaligned base yields a non-empty prefix, rejected below. Atomics
-        // rather than plain reads are precisely what a peer process
-        // concurrently accessing these bytes requires.
-        let (prefix, cells, _) = unsafe { header.align_to::<AtomicU64>() };
+        // transmute `align_to_mut` documents, and it is valid here:
+        // `AtomicU64` has `u64`'s layout and no invalid bit pattern, so every
+        // 8-byte group of the header is a legal value. The split is computed
+        // rather than assumed, so nothing is taken on trust about the
+        // region's alignment — a misaligned base yields a non-empty prefix,
+        // rejected below. Atomics rather than plain reads are precisely what
+        // a peer process concurrently accessing these bytes requires.
+        //
+        // The *mut* form matters: these cells are stored to. Casting through
+        // a shared `&[u8]` first would derive them from a read-only tag,
+        // making every publication a write the borrow never granted.
+        let (prefix, cells, _) = unsafe { header.align_to_mut::<AtomicU64>() };
         if !prefix.is_empty() {
             return Err(Errno::BadAlignment);
         }
+        // Shared from here, for the region's whole lifetime: the atomics'
+        // interior mutability is what the peer's concurrent access needs, and
+        // an exclusive borrow would claim a solitude that does not hold
+        // across an address space.
+        let cells: &'a [AtomicU64] = cells;
         let (Some(producer), Some(consumer)) = (cells.get(PRODUCER_CELL), cells.get(CONSUMER_CELL))
         else {
             return Err(Errno::BadAlignment);
         };
+        Ok(Self {
+            producer,
+            consumer,
+            samples,
+            geometry,
+            mask: u64::from(geometry.frames() - 1),
+        })
+    }
+
+    /// Bind a ring view over positions the caller already holds.
+    ///
+    /// Exists only for the interleaving model, which cannot reach the two
+    /// positions the way a mapped region does: the model checker substitutes
+    /// its own atomic type, so the header's bytes are not eight-byte cells to
+    /// be carved out of. The model hands the counters in directly and each
+    /// side brings its own sample area, so what the model covers is the
+    /// counter pair and the ordering edges between them — which is where the
+    /// release/acquire discipline lives.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] when `samples` is not exactly
+    /// [`PcmGeometry::samples_len`] bytes.
+    #[cfg(loom)]
+    pub fn over_counters(
+        producer: &'a AtomicU64,
+        consumer: &'a AtomicU64,
+        samples: &'a mut [u8],
+        geometry: PcmGeometry,
+    ) -> Result<Self, Errno> {
+        if samples.len() != geometry.samples_len() {
+            return Err(Errno::BufferTooSmall);
+        }
         Ok(Self {
             producer,
             consumer,

@@ -20,6 +20,13 @@ workspace = true
 
 [dependencies]
 
+# The interleaving oracle for the PCM ring's release/acquire pair, pulled in
+# only when a consumer opts in with `RUSTFLAGS="--cfg loom"` (which is what
+# `cargo xtask loom` does). Never a runtime dependency, and never present in
+# a TAIRiX build: the shipped crate has none.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [dev-dependencies]
 # The fuzz harness draws its inputs through the shared seed/budget
 # seam (`tairix_fuzzseed`): one place picks the per-run seed, logs it at

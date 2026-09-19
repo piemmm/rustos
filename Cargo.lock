@@ -523,6 +523,7 @@ dependencies = [
 name = "tairix-abi"
 version = "0.0.0"
 dependencies = [
+ "loom",
  "tairix-fuzzseed",
 ]
 
@@ -663,6 +664,19 @@ dependencies = [
  "tairix-multiboot2",
  "tairix-rng",
  "tairix-sync",
+]
+
+[[package]]
+name = "tairix-audio"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-cpuops",
+ "tairix-fuzzseed",
+ "tairix-rng",
+ "tairix-seat",
+ "tairix-sync",
+ "tairix-util",
 ]
 
 [[package]]

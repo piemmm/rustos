@@ -8,8 +8,8 @@
 use core::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, SQRT_2};
 
 use super::{
-    acos, atan, atan2, ceil, clamp, cos, fabs, floor, fmax, fmin, hypot, round, round_i32, sin,
-    sqrt, tan, trunc,
+    acos, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, round, round_i32,
+    sin, sqrt, tan, trunc,
 };
 
 /// The accuracy every transcendental function is held to: far finer than the
@@ -185,5 +185,62 @@ fn arctangent_inverts_the_tangent() {
     while angle < 1.5 {
         close(atan(tan(angle)), angle);
         angle += 0.13;
+    }
+}
+
+#[test]
+fn exponential_matches_the_reference_across_its_reduction() {
+    close(exp(0.0), 1.0);
+    close(exp(1.0), core::f64::consts::E);
+    close(exp(-1.0), 0.367_879_441_171_442_33);
+    close(exp(0.25), 1.284_025_416_687_741_4);
+    close(exp(-0.25), 0.778_800_783_071_404_9);
+    // Either side of the half-`ln(2)` fold, where `k` steps.
+    close(exp(0.34), 1.404_947_591_288_49);
+    close(exp(0.35), 1.419_067_548_593_257);
+    close(exp(10.0), 22_026.465_794_806_718);
+    close(exp(-10.0), 4.539_992_976_248_485_e-5);
+}
+
+/// A gain curve is the consumer, so the relative error is what matters over
+/// the whole range rather than the absolute one a fixed epsilon measures.
+#[test]
+fn exponential_is_accurate_relative_to_its_own_magnitude() {
+    let mut x = -300.0;
+    while x < 300.0 {
+        let got = exp(x);
+        let halved = exp(x / 2.0);
+        // `exp(x)` and `exp(x/2)^2` are computed through different reductions,
+        // so agreement between them is a check on both.
+        assert!(
+            fabs(got - halved * halved) <= 1e-12 * got,
+            "exp({x}) = {got} disagrees with exp({})^2 = {}",
+            x / 2.0,
+            halved * halved
+        );
+        x += 7.3;
+    }
+}
+
+/// Total like the rest of the module: the answer saturates rather than
+/// becoming an infinity or a `NaN` a caller would have to guard against.
+#[allow(
+    clippy::float_cmp,
+    reason = "the saturation endpoints are exact values, so a tolerance here \
+              would accept the infinity the function exists to avoid"
+)]
+#[test]
+fn exponential_saturates_instead_of_overflowing() {
+    assert_eq!(exp(1e9), f64::MAX);
+    assert_eq!(exp(f64::INFINITY), f64::MAX);
+    assert_eq!(exp(-1e9), 0.0);
+    assert_eq!(exp(f64::NEG_INFINITY), 0.0);
+    assert_eq!(exp(f64::NAN), 0.0);
+    // Everything it does answer is finite and non-negative.
+    let mut x = -750.0;
+    while x < 750.0 {
+        let got = exp(x);
+        assert!(got.is_finite() && got >= 0.0, "exp({x}) = {got}");
+        x += 11.0;
     }
 }

@@ -9243,3 +9243,77 @@ hostile module is refused or contained and the fuzz corpus is clean; a
 submission naming another context's resource is refused rather than clamped; an
 overrunning submission loses its context while every other survives; and the
 accelerated path's gain is a recorded measurement, not a claim.
+
+## SOUND — the audio stack (`plans/SOUND.md`)  **[IN PROGRESS — SND1–SND3 done; SND4 onward planned]**
+
+**Dependencies:** Stage 4.HW (discovery and driver autoload) and Stage 6
+(userland services) for SND4 onward; nothing outside the tree for SND1–SND3.
+`plans/NEW-DESKTOP-SETTINGS.md` §3's `Sound` row and `plans/WINTERSUN.md`'s
+audio prerequisite both gate on SND4's working base.
+
+**The shape, and why it is one path.** One client surface, one mixer, one
+device contract, and no bypass. The plan states the invariants and the
+comparison with what Linux, Windows and macOS each do; do not re-derive them
+here (§13).
+
+**What is built.**
+
+- **SND2 — `lib/abi`:** `HwDeviceClass::Audio`, the PCM vocabulary
+  (`SampleFormat`, `ChannelMap`, `Rate`, `Frames`, the endpoint facts), the
+  shared `PcmRing` transport both hops are carried over, the `audiochan-v1`
+  device channel, and the `audio-v1` client protocol.
+- **SND3 — `lib/audio`** (`tairix-audio`, `experimental`): the engine.
+  Saturating conversion through an `f32` pivot with narrowing-only
+  triangular dither and a `lib/cpuops` dispatch seam; the explicit channel
+  matrix with ITU-R BS.775's downmix coefficients and a fail-closed refusal
+  for an undefined layout pair; the one polyphase Kaiser-windowed-sinc
+  resampler with exact-rational stepping; the mixer; the per-device linear
+  clock fit; the pure routing policy; the volume model; and the `audio-v1`
+  client over an injected transport seam.
+
+  Its load-bearing guarantee is the **bit-exactness property** — a source of
+  twenty-four bits or fewer at unity gain, at a rate and channel map the
+  device accepts, with no other stream live, reaches the device byte-identical
+  — driven through every stage over the cross-product of encodings, rates,
+  channel layouts and block lengths. That property is why no exclusive or
+  bypass path exists anywhere in the stack. The resampler's stopband,
+  passband ripple and transition are **measured** from the built bank's own
+  coefficients, so the published figures cannot drift from the filter.
+
+  `lib/util::mathf` gained `exp` for the decibel curve and the window, since
+  that module is the one home for `no_std` transcendental maths.
+
+- **The oracles, and what they found.** `tairix-abi` is enrolled in both
+  `cargo xtask loom` and `cargo xtask miri`, and each enrolment paid for
+  itself immediately.
+
+  The loom model hangs a payload off the PCM ring's real release/acquire pair,
+  so a downgraded ordering is a reported causality violation rather than a
+  defect that surfaces years later on a weakly-ordered machine; it was
+  verified to fail by downgrading the producer's store before it was accepted.
+  A counter-pair-only model was rejected because per-location coherence
+  already gives monotonicity, so it could not have distinguished the two
+  orderings at all.
+
+  The miri enrolment found a **real soundness defect in both shared rings**,
+  present since each landed: the header was downgraded to a shared `&[u8]`
+  before `align_to`, so the atomic counters carried read-only provenance and
+  every publication was a write the borrow never granted. Fixed in `lib/abi`'s
+  `audio_ring` and `net_ring` alike (`align_to_mut`, then a shared reborrow of
+  the atomics), with the enrolment standing as the regression test. Nothing
+  below an interpreter could have caught it: the generated code is correct
+  today, and the compiler is entitled to act on the aliasing claim at any
+  time. Four `driver::net` test fixtures that were binding a byte array with
+  an alignment of one, and only working because a stack slot happened to be
+  wide enough, gained the alignment they actually require.
+
+**What remains** is the plan's own ledger, SND4 onward: the device-channel
+serve loop, the first driver, the mixer service with `CAP_AUDIO_DEVICE` and
+`CAP_AUDIO_CAPTURE` (both landing with the holder and enforcement point that
+`plans/SOUND.md` explains they were deferred for), the DMA-engine and
+isochronous-transfer seams the plan owns, the decoders, the two players, and
+desktop integration.
+
+**The `README.md` feature-matrix row lands with SND4's first working sink.**
+SND2 and SND3 add no runnable feature on any target: there is nothing yet a
+matrix could mark per architecture.

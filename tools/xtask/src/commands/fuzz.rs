@@ -70,6 +70,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/abi desktop-layer surface wire surface (the capability-gated requests, the two feed events, the terrain reply)",
     },
     Target {
+        package: "tairix-audio",
+        test: "fuzz_engine",
+        description: "lib/audio engine (sample conversion, the channel matrix, the mixer's shared accumulator, the resampler, the clock fit, and the volume model) over hostile samples, gains, layouts and ratios",
+    },
+    Target {
         package: "tairix-collections",
         test: "fuzz_collections",
         description: "lib/collections heap-backed tier (hash map, recency map, range map and set, spilling small vector) against naive models",

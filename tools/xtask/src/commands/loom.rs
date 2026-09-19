@@ -34,11 +34,20 @@ pub struct Target {
 }
 
 /// The crates carrying loom models.
-pub const TARGETS: &[Target] = &[Target {
-    package: "tairix-sync",
-    harness: "loom",
-    description: "the spin/MCS/RW locks, the seqlock, and the set-once cell",
-}];
+pub const TARGETS: &[Target] = &[
+    Target {
+        package: "tairix-sync",
+        harness: "loom",
+        description: "the spin/MCS/RW locks, the seqlock, and the set-once cell",
+    },
+    Target {
+        package: "tairix-abi",
+        harness: "loom",
+        description: "the shared PCM ring's release/acquire publication, which \
+                      a total-store-ordered host would pass with both orderings \
+                      downgraded to Relaxed",
+    },
+];
 
 /// The cfg that swaps `core`'s atomics for the model checker's. Applied
 /// through `RUSTFLAGS`, so it forces a rebuild of the target crate and its

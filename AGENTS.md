@@ -580,6 +580,9 @@ tairix/
 │   ├── appdata/         # App-data client: an app's own settings, layered and staged.
 │   ├── appload/         # Application-bundle load gate.
 │   ├── appstore/        # Installed-bundle discovery: the one program-store walk.
+│   ├── audio/           # Audio engine: conversion, mixing, the one resampler,
+│   │                    #   channel matrices, the device clock model, routing
+│   │                    #   policy, the volume model, the audio-v1 client.
 │   ├── binfmt/          # Read-only executable-container decoder (rxe/ELF64/wasm).
 │   ├── blkclient/       # Block-service client (RemoteBlock + its RtBlkCall transport).
 │   ├── bootload/        # Firmware-neutral boot-chain loader core.

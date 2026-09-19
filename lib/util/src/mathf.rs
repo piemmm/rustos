@@ -294,6 +294,54 @@ pub fn acos(x: f64) -> f64 {
     atan2(sqrt(1.0 - c * c), c)
 }
 
+/// Largest argument [`exp`] evaluates; above it the true result exceeds a
+/// double and the answer saturates.
+const EXP_MAX_ARG: f64 = 709.0;
+
+/// Smallest argument [`exp`] evaluates; below it the true result is under the
+/// smallest normal double and the answer is zero.
+const EXP_MIN_ARG: f64 = -708.0;
+
+/// `ln(2)`'s leading bits, chosen with a zero tail so `k * LN_2_HI` is exact.
+const LN_2_HI: f64 = 6.931_471_803_691_238e-1;
+
+/// The remainder of `ln(2)` past [`LN_2_HI`], subtracted separately so the
+/// range reduction keeps its low bits.
+const LN_2_LO: f64 = 1.908_214_929_270_587_7e-10;
+
+/// `e` raised to `x`.
+///
+/// Range-reduced to `x = k*ln(2) + r` with `|r| <= ln(2)/2`, where the Taylor
+/// series converges inside the double's last bit, then scaled by `2^k` through
+/// the exponent field.
+///
+/// Total, like the rest of this module, and saturating rather than infinite:
+/// an argument past the double's range answers [`f64::MAX`] or zero, and a
+/// `NaN` answers zero. A consumer converting a decibel gain therefore gets
+/// silence from a corrupt input rather than a `NaN` that would spread through
+/// everything it is multiplied into.
+#[must_use]
+pub fn exp(x: f64) -> f64 {
+    if x.is_nan() || x <= EXP_MIN_ARG {
+        return 0.0;
+    }
+    if x >= EXP_MAX_ARG {
+        return f64::MAX;
+    }
+    let k = round(x / core::f64::consts::LN_2);
+    let r = (x - k * LN_2_HI) - k * LN_2_LO;
+    let mut series = 1.0;
+    for n in (1..=14_u32).rev() {
+        series = 1.0 + series * r / f64::from(n);
+    }
+    // `k` is bounded by the saturating domain above, so the biased exponent
+    // stays inside the normal range and the scale is exact.
+    let Ok(biased) = u64::try_from(round_i32(k) + 1023) else {
+        return 0.0;
+    };
+    series * f64::from_bits(biased << 52)
+}
+
 #[cfg(test)]
 #[path = "mathf_tests.rs"]
 mod tests;
