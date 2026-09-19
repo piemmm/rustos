@@ -1,0 +1,35 @@
+[package]
+name = "tairix-test-client-frame-wasm32"
+description = "wasm32 integration test: WinterSun's client draws its reference frames to the digest tairix_wintersun_app::digest::REFERENCE_DIGEST under a real WebAssembly engine. The wasm32 leg of the cross-target rendering vertical whose bare-metal siblings are client_frame_qemu_{aarch64,riscv64,x86_64}."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# A `cdylib` the harness instantiates directly. Like its world-generator
+# and simulation siblings this one needs no browser and no DOM: the claim
+# is about arithmetic over a frame, so the module exports the digest and
+# the constant it must equal, and the harness compares them. wasm32 is
+# the leg most likely to catch a real divergence, being the only Tier-1
+# target with a 32-bit `usize` — a length or an index that had quietly
+# become part of a pixel shows up here and nowhere else.
+#
+# On a host build it compiles to an inert empty `cdylib`, so
+# `cargo build --workspace` stays green without the wasm toolchain.
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+# Library only: the `Run` binary's runtime brings a global allocator and a
+# panic handler, and this vertical supplies both itself.
+tairix-wintersun-app = { path = "../../../userland/games/wintersun/app", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

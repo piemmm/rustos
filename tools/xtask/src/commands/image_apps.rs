@@ -1214,19 +1214,80 @@ mod tests {
 
     /// The vector master a bundle ships in its own `Resources/`, decoded
     /// exactly as the desktop decodes it.
-    fn shipped_bundle_vector(bundle: &str, file: &str) -> tairix_icon::VectorIcon {
+    ///
+    /// `crate_dir` is the bundle's crate directory relative to the
+    /// workspace root, because a bundle's crate is not always a child of
+    /// `userland/apps` — a game's is under the `userland/games/` leaf
+    /// subtree.
+    fn shipped_bundle_vector(crate_dir: &str, file: &str) -> tairix_icon::VectorIcon {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
             .expect("the crate lives at <workspace>/tools/xtask")
-            .join("userland/apps")
-            .join(bundle)
+            .join(crate_dir)
             .join("Resources")
             .join(file);
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path:?} should ship: {e}"));
         let image = tairix_svg::decode(&bytes, tairix_svg::Viewport::Square)
             .unwrap_or_else(|e| panic!("{file} should decode: {e:?}"));
         tairix_icon::VectorIcon::from_svg(&image)
+    }
+
+    /// `wintersun.svg` is authored at a weight that reads on the dark
+    /// theme's raised surface, which is what the icon bar draws a slot on.
+    ///
+    /// The same trap the sapper icon fell into applies here and harder: a
+    /// winter scene's natural palette is pale blues on a dark ground, and
+    /// an icon drawn in the *scene's* own mid tones would disappear into
+    /// the bar while passing every "decodes and draws something" check.
+    /// So the authored weights are pinned: a clearly lit sky over the
+    /// tile, a warm disc that separates from it, snow well above the sky,
+    /// and shadowed faces a clear step below it rather than near-black.
+    #[test]
+    fn the_wintersun_icon_is_authored_to_read_on_the_dark_icon_bar() {
+        let tile = tairix_raster::Color::rgb(0x2B, 0x3F, 0x6B);
+        let sky = tairix_raster::Color::rgb(0x4A, 0x5F, 0x91);
+        let disc = tairix_raster::Color::rgb(0xFF, 0xD9, 0xA0);
+        let core = tairix_raster::Color::rgb(0xFF, 0xF0, 0xD2);
+        let far = tairix_raster::Color::rgb(0x6E, 0x82, 0xAE);
+        let snow = tairix_raster::Color::rgb(0xE8, 0xF1, 0xFA);
+        let shade = tairix_raster::Color::rgb(0x9F, 0xB6, 0xD6);
+        let cast = tairix_raster::Color::rgb(0x7F, 0x94, 0xBC);
+        let fir = tairix_raster::Color::rgb(0x1E, 0x3A, 0x34);
+        let trunk = tairix_raster::Color::rgb(0x16, 0x2B, 0x27);
+
+        let icon = shipped_bundle_vector("userland/games/wintersun/app", "wintersun.svg");
+        assert_eq!(tairix_raster::layer_count(icon.nodes()), 12);
+        for ink in [tile, sky, disc, core, far, snow, cast, trunk] {
+            assert_eq!(layers_painted(&icon, ink), 1, "one layer per authored tone");
+        }
+        // The two shadowed flanks of the near ridge, and the two firs.
+        assert_eq!(layers_painted(&icon, shade), 2);
+        assert_eq!(layers_painted(&icon, fir), 2);
+
+        // The sun must separate from the sky it sits in, or the icon is a
+        // blue square with a slightly different blue square on it.
+        let luminance = |c: tairix_raster::Color| {
+            (u32::from(c.r) * 30 + u32::from(c.g) * 59 + u32::from(c.b) * 11) / 100
+        };
+        assert!(
+            luminance(core) > luminance(sky) + 80,
+            "the sun does not separate from the sky"
+        );
+        assert!(
+            luminance(snow) > luminance(tile) + 80,
+            "the lit snow does not separate from the tile"
+        );
+
+        // A silhouette that decoded but drew almost nothing would still
+        // pass a "not empty" check, so pin the slot it actually covers.
+        let image = icon.rasterise(64).expect("renderable");
+        let drawn = image.pixels().iter().filter(|pixel| pixel.a > 0).count();
+        assert!(
+            drawn > 64 * 64 / 2,
+            "wintersun covers only {drawn} of {} pixels",
+            64 * 64
+        );
     }
 
     /// `sapper.svg` is authored at a weight that reads on the dark theme's
@@ -1252,7 +1313,7 @@ mod tests {
         let gleam = tairix_raster::Color::rgb(0xF3, 0xF8, 0xFC);
         let pennant = tairix_raster::Color::rgb(0xE5, 0x48, 0x4D);
 
-        let icon = shipped_bundle_vector("sapper", "sapper.svg");
+        let icon = shipped_bundle_vector("userland/apps/sapper", "sapper.svg");
         assert_eq!(tairix_raster::layer_count(icon.nodes()), 16);
         for ink in [tile, top, cell, rim, gleam, pennant] {
             assert_eq!(layers_painted(&icon, ink), 1, "one layer per authored tone");

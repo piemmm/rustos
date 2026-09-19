@@ -1,0 +1,120 @@
+[package]
+name = "tairix-wintersun-app"
+description = "WinterSun's client shell (plans/WINTERSUN.md WS5): the camera, the tiled software frame, the terrain splat and its light composite, the fixed-tick pacing the render interpolates over, the input drain, the three window size states, and the degradation ladder a blown frame budget turns. The host-tested behaviour is the crate's [lib]; the freestanding `Run` binary is the on-disk WinterSun.app bundle's entry point composing it over lib/window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The host-testable client. Everything with behaviour worth testing lives here
+# — the projection, the ladder, the terrain pass, the light composite, the
+# pacing, the input mapping and the size-state model — so the `Run` binary only
+# composes it, exactly as sapper and cinder do. A freestanding binary is
+# reachable by no host test, and a renderer that drew nothing would survive a
+# green pipeline unnoticed.
+[lib]
+name = "tairix_wintersun_app"
+path = "src/lib.rs"
+
+# The `Run` entry-point binary of the on-disk `WinterSun.app` bundle: a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert host
+# stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "tairix-wintersun-run"
+path = "src/run.rs"
+
+[dependencies]
+# The ground this crate draws: the synthesised materials, the height-offset
+# splat, the decals that wear a road into it, and the reference digest the
+# client frame digest folds in.
+tairix-wintersun-art = { path = "../art", version = "=0.0.0" }
+# What is actually there — the chunk grid, its material blends, its elevation
+# and its roads. The camera shows the world that crate decided.
+tairix-wintersun-world = { path = "../world", version = "=0.0.0" }
+# The authoritative states the render interpolates between, and the tick rate
+# that decides how far apart they are.
+tairix-wintersun-rules = { path = "../rules", version = "=0.0.0" }
+# The coordinate and intent vocabulary the camera projects and the input maps
+# into. A second `WorldPoint` would be two to keep in step.
+tairix-wintersun-net = { path = "../net", version = "=0.0.0" }
+# The one colour, pixel and surface vocabulary, and the one blend arithmetic.
+tairix-raster = { path = "../../../../lib/raster", version = "=0.0.0" }
+# Logical lengths and the one logical-to-physical conversion, so the client is
+# correct at any DPI and UI scale.
+tairix-geometry = { path = "../../../../lib/geometry", version = "=0.0.0" }
+# The tiles of a frame are disjoint slices of one buffer, which is exactly the
+# independence this crate's `for_each` is handed. `default-features = false`
+# takes the contract and the serial runner alone: the pool creates threads
+# through `lib/rt`, which brings a global allocator and a panic handler, and
+# the library must stay linkable where there is neither. The `run` feature
+# below turns the pool on for the binary.
+tairix-parallel = { path = "../../../../lib/parallel", version = "=0.0.0", default-features = false }
+# The pressure band the particle budget and the material cache are sized from,
+# and the budget policy the cache is built over.
+tairix-reclaim = { path = "../../../../lib/reclaim", version = "=0.0.0" }
+# The audit sink the material cache charges a refusal through.
+tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }
+# XXH64 over the frame's pixels: the digest the cross-target rendering claim is
+# made with, and the same mixer the art crate folds its own with.
+tairix-hash = { path = "../../../../lib/hash", version = "=0.0.0" }
+# The window channel's wire vocabulary: the size state a client asks for, the
+# events it is answered with, and the input events it drains.
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+# The desktop pointer and key vocabulary the input mapping reads.
+tairix-input = { path = "../../../../lib/input", version = "=0.0.0" }
+
+# The freestanding `Run` binary additionally drives the window channel's client
+# half and the pure-Rust userland runtime (`_start`, the allocator, the syscall
+# wrappers, the clock and the worker threads the frame's tiles run on).
+#
+# Optional, and behind the default `run` feature, because `tairix-rt` brings a
+# global allocator and a panic handler with it: a bare-metal *consumer* of this
+# crate's library — the four client-frame verticals, which link a boot heap and
+# their own panic handler — would otherwise inherit both and fail to link. The
+# image build takes the default features and gets the binary's whole runtime;
+# a vertical takes `default-features = false` and gets only the library.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-window = { path = "../../../../lib/window", version = "=0.0.0", optional = true }
+# The `Run` binary hands chunk generation to a worker through the shared
+# deferral desk, and asks the System Information API how many cores to size
+# its frame pool from. Neither is the library's business.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0", optional = true }
+tairix-procinfo = { path = "../../../../lib/procinfo", version = "=0.0.0", optional = true }
+
+# `run` is what the `Run` binary needs beyond the library, and is default so
+# the image build and every ordinary `cargo` invocation compose the program.
+[features]
+default = ["run"]
+run = [
+    # The worker pool the frame's tiles are handed to. Turned on here rather
+    # than declared a second time for the bare-metal target, because the
+    # library already names `tairix-parallel` for its `JobRunner` contract and
+    # one dependency with a feature is clearer than two entries for one crate.
+    "tairix-parallel/pool",
+    "dep:tairix-rt",
+    "dep:tairix-window",
+    "dep:tairix-util",
+    "dep:tairix-procinfo",
+]
+
+[dev-dependencies]
+# The budget measurement times the passes against the host's monotonic
+# clock and the band test needs a runner of its own; both are integration
+# tests, which link `std`.
+tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }
+tairix-reclaim = { path = "../../../../lib/reclaim", version = "=0.0.0" }
+# The invariant model: no sequence of legal ladder steps, camera moves or
+# window events leaves the client projecting outside the realm, shedding out of
+# order, or presenting a frame for an extent the window has moved on from.
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
+# The shared seed and budget policy, so this model is reproducible from its
+# printed seed exactly as every other model in the workspace is.
+tairix-fuzzseed = { path = "../../../../tests/fuzzseed", version = "=0.0.0", features = [
+    "proptest",
+] }

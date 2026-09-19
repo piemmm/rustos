@@ -1342,6 +1342,96 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
+    // WinterSun's client frame on aarch64 (`plans/WINTERSUN.md` WS5). Two
+    // composited frames are drawn in the guest from a fixed seed and every
+    // pixel folded, with the ground art's own digest folded in after them,
+    // into one number that must equal the constant every other Tier-1 target
+    // asserts. It is the cross-target *rendering* claim — the generator's
+    // f64 terrain, the art's integer splat and the client's integer shading,
+    // composed — and the only thing that builds the ground art for this
+    // target at all. A realm and a handful of chunks are solved before the
+    // first frame, which is why the budget is larger than its determinism
+    // siblings'.
+    QemuTest {
+        package: "tairix-test-client-frame-qemu-aarch64",
+        binary: "tairix-test-client-frame-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
+    // WinterSun's client frame on riscv64 (`plans/WINTERSUN.md` WS5). Two
+    // composited frames are drawn in the guest from a fixed seed and every
+    // pixel folded, with the ground art's own digest folded in after them,
+    // into one number that must equal the constant every other Tier-1 target
+    // asserts. It is the cross-target *rendering* claim — the generator's
+    // f64 terrain, the art's integer splat and the client's integer shading,
+    // composed — and the only thing that builds the ground art for this
+    // target at all. A realm and a handful of chunks are solved before the
+    // first frame, which is why the budget is larger than its determinism
+    // siblings'.
+    QemuTest {
+        package: "tairix-test-client-frame-qemu-riscv64",
+        binary: "tairix-test-client-frame-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
+    // WinterSun's client frame on x86_64 (`plans/WINTERSUN.md` WS5). Two
+    // composited frames are drawn in the guest from a fixed seed and every
+    // pixel folded, with the ground art's own digest folded in after them,
+    // into one number that must equal the constant every other Tier-1 target
+    // asserts. It is the cross-target *rendering* claim — the generator's
+    // f64 terrain, the art's integer splat and the client's integer shading,
+    // composed — and the only thing that builds the ground art for this
+    // target at all. A realm and a handful of chunks are solved before the
+    // first frame, which is why the budget is larger than its determinism
+    // siblings'.
+    QemuTest {
+        package: "tairix-test-client-frame-qemu-x86-64",
+        binary: "tairix-test-client-frame-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     QemuTest {
         package: "tairix-test-accessed-bit-qemu-aarch64",
         binary: "tairix-test-accessed-bit-qemu-aarch64",

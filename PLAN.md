@@ -8999,7 +8999,7 @@ app's private path.
 
 ---
 
-## WINTERSUN — the desktop RPG and its enabling libraries  **[IN PROGRESS — WS1–WS4 done (M0 met); WS5 onward planned]**
+## WINTERSUN — the desktop RPG and its enabling libraries  **[IN PROGRESS — WS1–WS5 done (M0 met); WS6 onward planned]**
 
 Plans: `plans/WINTERSUN.md` (the game), `plans/FIGURE.md` (characters and
 animation), `plans/RECDB.md` (durable storage). Each carries its own ledger;
@@ -9076,6 +9076,16 @@ rather than made top-level because `classify`'s fallthrough is `Layer::Tooling`,
 which is layering-*exempt* — a forgotten arm on a top-level tree would silently
 let game code name kernel internals, where a forgotten arm under `userland/`
 merely over-restricts and fails loudly.
+
+WS5 adds two accessors to `lib/raster` — `Surface::pixels_mut` and
+`Surface::resample_into` — so a software renderer writes the window's own
+pixels rather than composing a frame and copying it, and resamples into a
+destination it already holds rather than allocating a screen-sized surface per
+frame. It also hoists the sorted chunk-window lookup out of
+`rules::ChunkTerrain` into `world::chunk::ChunkWindow`, which the client and
+the simulation now share, and adds `userland/games/wintersun` to
+`tools/syshelp`'s app roots so a game bundle's `Help/` and `Resources/` trees
+are discovered like any other's.
 
 What reaches `lib/*` is only what the OS itself wants: `lib/recdb`, `lib/gpu`,
 and a `shape` module in `lib/raster`. All recorded in §3, with §17.4 gaining the

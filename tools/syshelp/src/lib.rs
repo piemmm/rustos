@@ -79,6 +79,13 @@ pub struct HelpFile {
     pub bytes: &'static [u8],
 }
 
+/// The source roots the build discovered bundles under.
+///
+/// The build script's own list, emitted rather than restated, so a
+/// consumer that walks the roots — this crate's tests, most of all —
+/// cannot be walking a shorter list than the discovery was.
+pub const APP_ROOTS: &[&str] = &include!(concat!(env!("OUT_DIR"), "/app_roots.rs"));
+
 /// Every command app's Help documents, discovered from the source tree at
 /// build time.
 ///
@@ -325,7 +332,7 @@ mod tests {
             .and_then(Path::parent)
             .expect("the crate lives at <workspace>/tools/syshelp");
         let mut store_of: BTreeMap<String, String> = BTreeMap::new();
-        for root in ["userland/apps", "userland/gui", "userland/shell"] {
+        for root in super::APP_ROOTS {
             let Ok(entries) = fs::read_dir(workspace.join(root)) else {
                 continue;
             };

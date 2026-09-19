@@ -70,6 +70,18 @@ const VERTICALS: &[Vertical] = &[
         artifact: "tairix_test_rules_determinism_wasm32.wasm",
         harness: "tests/integration/rules_determinism_wasm32/web/harness.mjs",
     },
+    // WinterSun's client frame under a real WebAssembly engine
+    // (`plans/WINTERSUN.md` WS5): the wasm32 leg of the cross-target
+    // rendering vertical whose bare-metal siblings run under QEMU. Its
+    // harness needs no browser — the subject is arithmetic over a frame —
+    // and wasm32 is the only Tier-1 target with a 32-bit `usize`, so a
+    // length or an index that had quietly become part of a pixel shows up
+    // here and nowhere else.
+    Vertical {
+        package: "tairix-test-client-frame-wasm32",
+        artifact: "tairix_test_client_frame_wasm32.wasm",
+        harness: "tests/integration/client_frame_wasm32/web/harness.mjs",
+    },
     // The `display`-row parity vertical: signed framebuffer `.rxe`
     // lifecycle presenting to a real canvas (`plans/WIRING.md`).
     Vertical {

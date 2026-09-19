@@ -252,6 +252,62 @@ const fn cell_index(cx: u32, cy: u32) -> usize {
     (((cy & mask) * CHUNK_CELLS) + (cx & mask)) as usize
 }
 
+/// A sorted, borrowed set of resident chunks, searched by cell.
+///
+/// Both the simulation and a client hold a window of the chunks around
+/// what they are working on and ask it which chunk a cell belongs to. The
+/// *fetching* is a cache with a memory budget and belongs to the process
+/// holding it; this is only the lookup, so there is one of it rather than
+/// one per consumer.
+#[derive(Copy, Clone, Debug)]
+pub struct ChunkWindow<'a> {
+    window: &'a [&'a Chunk],
+}
+
+impl<'a> ChunkWindow<'a> {
+    /// Wrap a window of chunks sorted strictly by coordinate.
+    ///
+    /// Sorted because the lookup binary-searches it: a window is as large
+    /// as the region its holder works over, and a linear scan of it per
+    /// cell would put that area on the hot path.
+    ///
+    /// # Errors
+    ///
+    /// [`WorldError::UnsortedWindow`] when the slice is not strictly
+    /// increasing. Strictly, so a duplicate coordinate is refused too:
+    /// two chunks claiming one coordinate would make an answer depend on
+    /// which the search landed on.
+    pub fn new(window: &'a [&'a Chunk]) -> Result<Self, WorldError> {
+        if !window.is_sorted_by(|a, b| a.coord() < b.coord()) {
+            return Err(WorldError::UnsortedWindow);
+        }
+        Ok(Self { window })
+    }
+
+    /// The chunk holding `cell`, or `None` when it is not resident.
+    #[must_use]
+    pub fn chunk(&self, cell: CellCoord) -> Option<&'a Chunk> {
+        let coord = cell.chunk();
+        let index = self
+            .window
+            .binary_search_by_key(&coord, |chunk| chunk.coord())
+            .ok()?;
+        self.window.get(index).copied()
+    }
+
+    /// How many chunks are resident.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.window.len()
+    }
+
+    /// Whether no chunk is resident.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.window.is_empty()
+    }
+}
+
 /// How far a build has got.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Phase {

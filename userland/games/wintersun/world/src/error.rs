@@ -12,4 +12,7 @@
 pub enum WorldError {
     /// The realm field or a chunk did not fit in memory.
     OutOfMemory,
+    /// A chunk window is not strictly sorted by coordinate, so it could
+    /// not be searched.
+    UnsortedWindow,
 }

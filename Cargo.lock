@@ -3181,6 +3181,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-client-frame-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+ "tairix-wintersun-app",
+]
+
+[[package]]
+name = "tairix-test-client-frame-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+ "tairix-wintersun-app",
+]
+
+[[package]]
+name = "tairix-test-client-frame-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-wintersun-app",
+]
+
+[[package]]
+name = "tairix-test-client-frame-wasm32"
+version = "0.0.0"
+dependencies = [
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-wintersun-app",
+]
+
+[[package]]
 name = "tairix-test-cross-cpu-tlb-shootdown-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -6084,6 +6127,30 @@ dependencies = [
  "tairix-raster",
  "tairix-rt",
  "tairix-theme",
+]
+
+[[package]]
+name = "tairix-wintersun-app"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "tairix-abi",
+ "tairix-fuzzseed",
+ "tairix-geometry",
+ "tairix-hash",
+ "tairix-input",
+ "tairix-log",
+ "tairix-parallel",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-reclaim",
+ "tairix-rt",
+ "tairix-util",
+ "tairix-window",
+ "tairix-wintersun-art",
+ "tairix-wintersun-net",
+ "tairix-wintersun-rules",
+ "tairix-wintersun-world",
 ]
 
 [[package]]

@@ -48,7 +48,16 @@ use std::path::{Path, PathBuf};
 /// session at `userland/gui/session`, bundle `desktop.app`) still lands
 /// under its real bundle name. Extending this list is a rare structural
 /// change, not a per-bundle edit.
-const APP_ROOTS: &[&str] = &["userland/apps", "userland/gui", "userland/shell"];
+///
+/// Emitted into the generated table as `APP_ROOTS` so the crate's own
+/// tests walk the same roots this discovery did. A second copy in a test
+/// silently stops testing whatever a new root adds.
+const APP_ROOTS: &[&str] = &[
+    "userland/apps",
+    "userland/games/wintersun",
+    "userland/gui",
+    "userland/shell",
+];
 
 /// One single-tree desktop graphics asset family: a source directory under
 /// the workspace root, the `/System/Graphics` subdirectory its files are
@@ -225,6 +234,16 @@ fn main() {
     fs::File::create(&dest)
         .and_then(|mut f| f.write_all(resource_rows.as_bytes()))
         .expect("write generated resource table");
+
+    let mut roots = String::from("[\n");
+    for root_rel in APP_ROOTS {
+        writeln!(roots, "    {root_rel:?},").expect("write to String");
+    }
+    roots.push(']');
+    let dest = PathBuf::from(env("OUT_DIR")).join("app_roots.rs");
+    fs::File::create(&dest)
+        .and_then(|mut f| f.write_all(roots.as_bytes()))
+        .expect("write generated app-root table");
 
     emit_graphics_table(&workspace);
 

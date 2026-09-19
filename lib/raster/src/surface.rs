@@ -520,6 +520,28 @@ impl Surface {
         Ok(out)
     }
 
+    /// Resample `region` of this surface into the whole of `dest`.
+    ///
+    /// The same kernel [`resampled`](Self::resampled) uses, writing into
+    /// a destination the caller already holds. For a consumer that
+    /// resamples every frame — a renderer presenting a reduced-scale
+    /// picture at the window's size — where allocating the destination
+    /// each time would be a screen-sized allocation per frame on the
+    /// path a machine reaches precisely because it is short of time.
+    ///
+    /// # Errors
+    ///
+    /// Every geometry refusal
+    /// [`resample_window`](crate::resample_window) states.
+    pub fn resample_into(&self, region: Region, dest: &mut Self) -> Result<(), ResampleError> {
+        resample_pixels(
+            (self.width, self.height, &self.pixels),
+            region,
+            (dest.width, dest.height),
+            &mut dest.pixels,
+        )
+    }
+
     /// Surface width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {
@@ -536,6 +558,25 @@ impl Surface {
     #[must_use]
     pub fn pixels(&self) -> &[Pixel] {
         &self.pixels
+    }
+
+    /// Borrow the pixels mutably, in row-major order.
+    ///
+    /// For a renderer that produces a whole surface itself — a software
+    /// frame writer, a decoder filling its output — where going through
+    /// the drawing operations above would mean composing a picture twice
+    /// and copying it once. The copy is the point: at screen sizes it is
+    /// megabytes a frame, and a caller that already has the pixels
+    /// should write them where they are going.
+    ///
+    /// Channels are **premultiplied**: every pixel written must satisfy
+    /// `r <= a`, `g <= a`, `b <= a`, or the blends everything else on
+    /// this surface performs will produce colours out of range. The
+    /// drawing methods maintain that themselves; a caller writing
+    /// directly takes it on.
+    #[must_use]
+    pub fn pixels_mut(&mut self) -> &mut [Pixel] {
+        &mut self.pixels
     }
 
     /// The premultiplied pixel at `(x, y)`, or `None` if out of bounds.

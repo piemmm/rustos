@@ -21,7 +21,7 @@
 //! closed rather than treating absence as open field.
 
 use tairix_wintersun_net::value::WorldPoint;
-use tairix_wintersun_world::chunk::Chunk;
+use tairix_wintersun_world::chunk::{Chunk, ChunkWindow};
 use tairix_wintersun_world::geom::{CellCoord, Elevation, CELL_SUB_UNITS, ELEVATION_SUB_UNITS};
 
 use crate::error::RuleError;
@@ -120,39 +120,26 @@ pub fn rise_legal(from: Option<TerrainCell>, to: Option<TerrainCell>) -> bool {
 /// are released, and hands a slice of them here for the duration of a step.
 #[derive(Copy, Clone, Debug)]
 pub struct ChunkTerrain<'a> {
-    window: &'a [&'a Chunk],
+    window: ChunkWindow<'a>,
 }
 
 impl<'a> ChunkTerrain<'a> {
-    /// Wrap a window of chunks, sorted by coordinate.
-    ///
-    /// Sorted because the lookup binary-searches it: a zone's window is as
-    /// large as the region it simulates, and a linear scan of it per cell
-    /// test would put the zone's area on the movement path.
+    /// Read a window of chunks, sorted by coordinate, as collision ground.
     ///
     /// # Errors
     ///
     /// [`RuleError::TerrainWindow`] when the slice is not sorted, since an
     /// unsorted window would silently answer `None` for chunks it holds.
     pub fn new(window: &'a [&'a Chunk]) -> Result<Self, RuleError> {
-        // Strictly increasing, so a duplicate coordinate is refused too: two
-        // chunks claiming one coordinate would make the lookup's answer
-        // depend on which the search landed on.
-        if !window.is_sorted_by(|a, b| a.coord() < b.coord()) {
-            return Err(RuleError::TerrainWindow);
-        }
-        Ok(Self { window })
+        ChunkWindow::new(window)
+            .map(|window| Self { window })
+            .map_err(|_| RuleError::TerrainWindow)
     }
 }
 
 impl Terrain for ChunkTerrain<'_> {
     fn cell(&self, cell: CellCoord) -> Option<TerrainCell> {
-        let coord = cell.chunk();
-        let index = self
-            .window
-            .binary_search_by_key(&coord, |chunk| chunk.coord())
-            .ok()?;
-        let chunk = self.window.get(index)?;
+        let chunk = self.window.chunk(cell)?;
         let (cx, cy) = cell.within_chunk();
         Some(TerrainCell {
             ground: chunk.elevation(cx, cy),

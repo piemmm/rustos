@@ -162,6 +162,7 @@
 - [The WinterSun world generator](./userland/wintersun-world.md)
 - [The WinterSun simulation](./userland/wintersun-rules.md)
 - [The WinterSun ground art](./userland/wintersun-art.md)
+- [The WinterSun client shell](./userland/wintersun-app.md)
 
 # Desktop
 

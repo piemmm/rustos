@@ -2444,3 +2444,48 @@ fn a_tinted_mask_blit_clips_like_every_other_blit() {
     // ...and nothing was drawn where the mask does not reach.
     assert_eq!(surface.get(2, 2).map(|p| p.a), Some(0));
 }
+
+#[test]
+fn pixels_mut_writes_the_same_storage_the_readers_see() {
+    let mut surface = Surface::new(3, 2).expect("a small surface");
+    let opaque = RED.premultiply();
+    surface.pixels_mut().fill(opaque);
+    assert_eq!(surface.get(2, 1), Some(opaque));
+    assert!(surface.pixels().iter().all(|p| *p == opaque));
+    assert_eq!(
+        surface.pixels_mut().len(),
+        6,
+        "row-major, width times height"
+    );
+
+    // Row-major, so the pixel at (2, 1) of a three-wide surface is index
+    // five, and a writer producing a whole frame can address it without
+    // going through `set`.
+    surface.pixels_mut()[5] = BLUE.premultiply();
+    assert_eq!(surface.get(2, 1), Some(BLUE.premultiply()));
+    assert_eq!(surface.get(0, 0), Some(opaque));
+}
+
+#[test]
+fn resample_into_matches_the_allocating_resample() {
+    let mut source = Surface::new(4, 4).expect("a small surface");
+    source.fill_rect(0, 0, 2, 4, RED);
+    source.fill_rect(2, 0, 2, 4, BLUE);
+    let region = crate::resample::Region {
+        x: 0,
+        y: 0,
+        width: 4,
+        height: 4,
+    };
+
+    let allocated = source.resampled(region, 8, 8).expect("the resample fits");
+    let mut held = Surface::new(8, 8).expect("a destination");
+    source
+        .resample_into(region, &mut held)
+        .expect("the resample fits");
+    assert_eq!(
+        held.pixels(),
+        allocated.pixels(),
+        "writing into a held destination differed from allocating one"
+    );
+}

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>WinterSun</title>
+  <!-- A low sun over a snow ridge, which is the game's whole art direction:
+       a shallow light that throws long shadows down a cold slope.
+
+       Every shape is a filled polygon and every curve is cut as integer line
+       segments, because the desktop's SVG subset draws fills rather than
+       strokes — an outline is a slightly larger fill behind the shape it
+       edges.
+
+       The palette is weighted to read against the dark theme's raised
+       surface, which the icon bar draws it on: a cold but clearly lit sky,
+       a warm disc that separates from it, lit snow well above the sky, and
+       the shadowed faces a clear step below it rather than near-black. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#2B3F6B" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <!-- Sky, lighter toward the horizon the sun sits on -->
+  <polygon fill="#4A5F91" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,140 20,140"/>
+
+  <!-- The sun: a low disc, cut as integer segments -->
+  <polygon fill="#FFD9A0" points="128,72 145,76 157,88 161,105 157,122 145,134 128,138 111,134 99,122 95,105 99,88 111,76"/>
+  <polygon fill="#FFF0D2" points="128,80 140,83 149,92 152,105 149,118 140,127 128,130 116,127 107,118 104,105 107,92 116,83"/>
+
+  <!-- The far ridge, in shadow: the sun is behind it -->
+  <polygon fill="#6E82AE" points="20,140 74,110 122,140 168,104 236,146 236,160 20,160"/>
+
+  <!-- The near ridge, lit on its sunward face and shadowed on the other -->
+  <polygon fill="#E8F1FA" points="20,196 20,178 66,144 118,182 168,150 236,190 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213"/>
+  <polygon fill="#9FB6D6" points="66,144 118,182 96,236 60,236 43,234 30,226 22,213 20,196 20,178"/>
+  <polygon fill="#9FB6D6" points="168,150 236,190 236,196 234,213 226,226 213,234 196,236 176,236"/>
+
+  <!-- Two firs on the near ridge, the long shadow the low sun casts running
+       away from it down the slope -->
+  <polygon fill="#7F94BC" points="86,166 150,196 140,204 76,176"/>
+  <polygon fill="#1E3A34" points="86,132 100,166 72,166"/>
+  <polygon fill="#1E3A34" points="86,148 104,182 68,182"/>
+  <polygon fill="#162B27" points="82,180 90,180 90,198 82,198"/>
+</svg>

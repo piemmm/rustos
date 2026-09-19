@@ -270,6 +270,7 @@ members = [
     # Userland — games. A leaf subtree: its crates compose each other and
     # `lib/*`, and nothing outside it may depend on them, so game code never
     # enters the OS libraries (`cargo xtask deps-check` enforces it).
+    "userland/games/wintersun/app",
     "userland/games/wintersun/art",
     "userland/games/wintersun/net",
     "userland/games/wintersun/rules",
@@ -426,6 +427,10 @@ members = [
     "tests/integration/enrol_qemu_aarch64",
     "tests/integration/servicectl_qemu_aarch64",
     "tests/integration/arxfs_image",
+    "tests/integration/client_frame_qemu_aarch64",
+    "tests/integration/client_frame_qemu_riscv64",
+    "tests/integration/client_frame_qemu_x86_64",
+    "tests/integration/client_frame_wasm32",
     "tests/integration/encrypted_root_image",
     "tests/integration/appbar_qemu_aarch64",
     "tests/integration/filepick_qemu_aarch64",

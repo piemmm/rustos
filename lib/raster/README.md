@@ -21,6 +21,13 @@ This crate owns:
   `get`/`set`, the `row_span_mut` write seam, `fill`, and clipped
   `fill_rect`/`fill_round_rect`. It is the rendered content of a window for the
   compositor and the painted body of the taskbar.
+- `Surface::pixels_mut` / `Surface::resample_into` — the whole-surface seam,
+  for a consumer that produces a picture itself rather than drawing one: a
+  software frame renderer writes its target's pixels where they are going, and
+  scales a reduced-resolution frame into a destination it already holds. Both
+  exist to remove a screen-sized copy or allocation per frame; a caller writing
+  pixels directly takes on the premultiplication invariant the drawing methods
+  maintain.
 - `Surface::with_clip` — the scoped clip window every write is confined to, so a
   view bounds what it paints to the area it owns even when it hands the surface
   to code that does not know it is clipped (see below).

@@ -79,6 +79,12 @@ pub const MODELS: &[Model] = &[
         description: "WinterSun zone invariants over generated action programs",
     },
     Model {
+        name: "wintersun-app",
+        package: "tairix-wintersun-app",
+        test: "proptest_model",
+        description: "WinterSun client-shell invariants over generated window and input programs",
+    },
+    Model {
         name: "wintersun-art",
         package: "tairix-wintersun-art",
         test: "proptest_model",

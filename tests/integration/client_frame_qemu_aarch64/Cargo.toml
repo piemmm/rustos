@@ -1,0 +1,40 @@
+[package]
+name = "tairix-test-client-frame-qemu-aarch64"
+description = "QEMU integration test: WinterSun's client draws its reference frames to the digest tairix_wintersun_app::digest::REFERENCE_DIGEST on aarch64. Two composited frames — a wide one at full quality and a close one with every degradation rung shed — are rendered in the guest from a fixed seed and folded, together with the ground art's own reference digest, into one number that must equal the constant every other Tier-1 target asserts. It is the cross-target rendering claim: the world generator's f64 terrain, the art crate's integer splat and the client's integer shading, composed, on a different compiler backend for a different ISA — and the first build of the ground art for this target at all."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding kernel ELF QEMU loads on the aarch64 board. It links the
+# aarch64 port for boot and console, a heap for the realm field, the
+# generated chunks, the synthesised material tiles and the two frame
+# buffers, and the client itself. The point of running it here rather
+# than on the host is that the arithmetic is compiled by a different
+# backend for a different ISA: a divergence in the generator's f64
+# lowering, in an integer narrowing in the splat, or in the light's
+# rounding shows up as a different digest and nowhere else.
+#
+# On the host target the crate has no test source and contributes nothing
+# to `cargo test`; the orchestrator is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-client-frame-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+# Library only: the `Run` binary's runtime brings a global allocator and a
+# panic handler, and this vertical supplies both itself.
+tairix-wintersun-app = { path = "../../../userland/games/wintersun/app", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

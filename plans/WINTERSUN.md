@@ -39,7 +39,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS2 | `wintersun/world`: the seed-pure chunked generator — uplift, hydrology, climate, biomes, roads, sites — and its cross-architecture determinism vertical | done |
 | WS3 | `wintersun/rules`: the fixed-tick authoritative step, space and collision, stats, damage, status effects | done |
 | WS4 | `wintersun/art`: material synthesis, the splat field, the decal and particle vocabulary, the WinterSun palette | done |
-| WS5 | The client shell: window, the three size states, input, frame pacing, camera, terrain draw | planned |
+| WS5 | The client shell: window, the three size states, input, frame pacing, camera, terrain draw | done |
 | WS6 | Figures on screen: presets, clips, the animation state machine, the locomotion join | planned |
 | WS7 | `Code/wintersun-store`: the schemas and the realm's single writer | planned |
 | WS8 | `Code/wintersund` + `Code/wintersun-zone`: the gateway, zone shards, interest management, back-pressure, the thousand-player floor | planned |
@@ -246,7 +246,7 @@ in `lib/raster` holding the parametric outline primitives that `cinder` and
 this game genuinely share (`plans/FIGURE.md` FG1). Nothing else.
 
 ```
-userland/games/wintersun/app/     # /Apps/WinterSun.app
+userland/games/wintersun/app/     # /System/Applications/wintersun.app
 ├── AppInfo                       #   signed manifest: kind = application
 ├── Run                           #   the client (and the listen-server host)
 ├── Code/wintersund               #   the dedicated gateway
@@ -490,6 +490,81 @@ know:
   Decals are polylines stamping weights and particles are points; nothing in
   WS4 wants an outline primitive. FG1 is WS6's prerequisite, not WS4's or
   WS5's.
+
+### What WS5 settled
+
+The client shell is built, in `wintersun/app`: the `[lib]` holds the camera,
+the ladder, the render target, the terrain lattice and its splat, the light,
+the tiled frame, the pacing, the input drain, the size-state model, the budget
+governor and the frame digest; the `[[bin]]` is the bundle's `Run` and only
+composes them. What a later item needs to know:
+
+- **The frame budget was measured, and it holds.** At 1280×720 on four
+  threads: terrain **4.1 ms** against its 5.0 ms allocation (81%), light
+  **1.7 ms** against 2.0 ms (87%), 5.8 ms of drawing in a 16.6 ms frame, a
+  3.49× speedup over one thread. The number this plan called "the single most
+  likely to be wrong" is right. `tests/budget.rs` is the measurement and
+  prints it; it asserts the *frame*-level claim rather than each pass's own
+  allocation, because the host is not the reference machine and a per-pass
+  assertion there would be measuring the machine.
+  - The light pass was **53% over budget** on its first measurement, entirely
+    because its buffer was shaded on the calling thread while only the
+    composite was distributed. Shading its texel rows through the same runner
+    brought it to 87%. That is the whole reason the measurement exists.
+- **A tile is a full-width band of rows**, not a square. Every pass steps
+  horizontally — the splat walks a span inside one cell row, the composite
+  walks a row of the buffer — so a vertical cut would divide the unit each is
+  built around. The per-tile bucketing a later item does is unaffected.
+- **The camera clamps where the view is projected, not where it is aimed**,
+  and carries the realm's extent to do it with. Clamping on being aimed is
+  correct until the window grows, at which point the wider view reaches past
+  an edge the camera had already settled against. The proptest model found it;
+  `look_at` now records a wish and `centre(w, h)` settles it.
+- **Shading is relative to the palette.** A slope facing neither way draws the
+  material's own colour. A plain multiply by a tint darkens every surface in
+  the world by whatever the tint's mid-point is, which is a palette change
+  wearing lighting's clothes. The relief term saturates at
+  `MAX_STEP_RISE_SUB_UNITS` — the rules' own slope/cliff line — so ground a
+  player can walk over is shaded across its whole range.
+- **The ladder's rung 4 turns the relief-shading stencil** (two cells, one
+  cell, none) until WS6's figures bring cast shadows for it to also govern.
+  The wider stencil is both the penumbra and the dearer, so narrowing it
+  before dropping the term is the right order either way.
+- **A paint reads nothing.** Chunk generation is handed to a worker through
+  the shared deferral desk; the frame draws the ground that has arrived and
+  marks the rest. The desk holds one request, which is the right policy: the
+  nearest missing chunk is always the best thing to be solving, and a
+  displaced ask is simply re-made next frame.
+- **The two debts to WS4 are paid.** The client vertical folds
+  `tairix_wintersun_art::digest::REFERENCE_DIGEST` in, and
+  `client_frame_qemu_{aarch64,riscv64,x86_64}` plus `client_frame_wasm32` are
+  what first build the ground art for each Tier-1 target — by the gate, not by
+  hand.
+- **`lib/raster` gained `pixels_mut` and `resample_into`.** The renderer
+  writes the window's own pixels at native scale rather than composing a frame
+  and copying it, and resamples into a destination the caller holds rather
+  than allocating a screen-sized surface per frame on the path a machine
+  reaches precisely because it is short of time.
+- **`world::chunk::ChunkWindow` is the one sorted-window lookup**, hoisted out
+  of `rules::ChunkTerrain`, which now wraps it. The client needs a chunk's
+  blend and the simulation needs its heights; both were binary-searching the
+  same slice the same way.
+- **The library takes `tairix-parallel` with `default-features = false`**, as
+  `lib/raster` does: the pool creates threads through `lib/rt`, which brings a
+  global allocator and a panic handler, and a bare-metal *consumer* of the
+  library — each of the four verticals — supplies both itself. The binary's
+  runtime sits behind the default `run` feature for the same reason.
+- **Still no `lib/cpuops` family.** The portable kernel makes its budget, so
+  adding per-architecture candidates now would be the speculative optimisation
+  the charter forbids. The splat is still shaped as the contiguous span
+  function such a candidate would replace.
+- **No fuzz target**, for WS4's reason: the client decodes nothing untrusted.
+  Its adversarial coverage is the proptest model, enrolled as `wintersun-app`.
+- **What WS5 deliberately does not draw**: figures (WS6), particles and
+  weather (WS13), the console and chat (WS15/WS16). The frame's pass order and
+  the budget name them now so each lands in a place that is already measured.
+  The camera follows an ordinary `rules` entity walking real collision ground,
+  so the body is there before the art for it is.
 
 ### Lighting, and why the name matters
 
