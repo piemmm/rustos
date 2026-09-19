@@ -188,6 +188,18 @@ All other shared crates. Watch for duplication that belongs behind one crate
 (§2.2), missing rustdoc (§6), and untrusted-input parsers without sandboxing /
 fuzzing (`lib/vt`, `lib/fdt`, `lib/svg`, `lib/font`, `lib/compress`).
 
+Known entry for this stage: **`lib/raster` has no public colour
+interpolation, so every consumer writes its own.** There are already four
+private near-duplicates with four different weight spellings —
+`color::mix(Pixel, Pixel, u8, bias)` (`pub(crate)`), `paint::mix(Color,
+Color, f64)`, `surface::lerp_color(Color, Color, step, last)`, and
+`tairix_theme::Color::mix(permille)` — and `wintersun/art`'s `palette::lerp`
+became a fifth, because none of them is both reachable and straight-alpha
+`Color` over an integer weight. The fix is one weighting vocabulary across
+`lib/raster` and `lib/theme` with the rest expressed over it; it is a shared
+`lib/*` refactor with its own blast radius, not something an unrelated diff
+may smuggle in.
+
 ### Stage V3 — `drivers/*` — Status: planned
 
 All driver crates. Watch for ambient authority (§4/§18.5), entry points that

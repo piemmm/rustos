@@ -1,0 +1,43 @@
+[package]
+name = "tairix-wintersun-art"
+description = "WinterSun's ground art (plans/WINTERSUN.md WS4): the palette, the materials it synthesises rather than ships, the height-offset splat that blends them, the decals that wear roads and rivers into the weight field, and the particle vocabulary. Integer arithmetic throughout, so a frame is bit-identical on every Tier-1 target by construction. no_std, forbids unsafe, and contains no floating point at all."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The material vocabulary and the per-cell weight vector are the world
+# generator's: the ground this crate draws is the ground that crate decided,
+# and a second material enum would be two to keep in step.
+tairix-wintersun-world = { path = "../world", version = "=0.0.0" }
+# `WorldPoint` and `WorldVector` are the wire's coordinate vocabulary, and a
+# splat keyed on world position has to key on the same one everything else uses.
+tairix-wintersun-net = { path = "../net", version = "=0.0.0" }
+# The one colour and pixel vocabulary, and the one blend arithmetic. A renderer
+# with its own premultiply is the second compositing path the charter forbids.
+tairix-raster = { path = "../../../../lib/raster", version = "=0.0.0" }
+# XXH64 over coordinates: the lattice under every grain, warp and fray field,
+# and the digest fold. Random access, not a sequence — a texel is answered
+# without generating its neighbours.
+tairix-hash = { path = "../../../../lib/hash", version = "=0.0.0" }
+# Synthesised material tiles are held like every other reclaimable cache in the
+# system: budgeted from the machine, charged to a ledger, given back on a band.
+tairix-reclaim = { path = "../../../../lib/reclaim", version = "=0.0.0" }
+# The audit sink the reclaim model charges a refusal through.
+tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }
+
+[dev-dependencies]
+# The invariant model: no sequence of legal stamps, accumulations or emissions
+# leaves a weight field unnormalised or a particle field over its budget.
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
+# The shared seed and budget policy, so this model is reproducible from its
+# printed seed exactly as every other model in the workspace is.
+tairix-fuzzseed = { path = "../../../../tests/fuzzseed", version = "=0.0.0", features = [
+    "proptest",
+] }

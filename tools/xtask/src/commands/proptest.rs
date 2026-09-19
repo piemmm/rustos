@@ -78,6 +78,12 @@ pub const MODELS: &[Model] = &[
         test: "proptest_model",
         description: "WinterSun zone invariants over generated action programs",
     },
+    Model {
+        name: "wintersun-art",
+        package: "tairix-wintersun-art",
+        test: "proptest_model",
+        description: "WinterSun weight-field and particle invariants over generated art programs",
+    },
 ];
 
 /// How long to run each model.

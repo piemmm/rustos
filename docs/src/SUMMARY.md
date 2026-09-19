@@ -160,6 +160,7 @@
 - [The WinterSun realm protocol](./userland/wintersun-net.md)
 - [The WinterSun world generator](./userland/wintersun-world.md)
 - [The WinterSun simulation](./userland/wintersun-rules.md)
+- [The WinterSun ground art](./userland/wintersun-art.md)
 
 # Desktop
 

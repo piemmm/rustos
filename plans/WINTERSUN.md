@@ -38,7 +38,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS1 | `Layer::UserGame` in `deps-check`, the `userland/games/` subtree, and `wintersun/net`: the wire vocabulary, framing, the authenticated session handshake, bounded decode, the fuzz target | done |
 | WS2 | `wintersun/world`: the seed-pure chunked generator — uplift, hydrology, climate, biomes, roads, sites — and its cross-architecture determinism vertical | done |
 | WS3 | `wintersun/rules`: the fixed-tick authoritative step, space and collision, stats, damage, status effects | done |
-| WS4 | `wintersun/art`: material synthesis, the splat field, the decal and particle vocabulary, the WinterSun palette | planned |
+| WS4 | `wintersun/art`: material synthesis, the splat field, the decal and particle vocabulary, the WinterSun palette | done |
 | WS5 | The client shell: window, the three size states, input, frame pacing, camera, terrain draw | planned |
 | WS6 | Figures on screen: presets, clips, the animation state machine, the locomotion join | planned |
 | WS7 | `Code/wintersun-store`: the schemas and the realm's single writer | planned |
@@ -408,6 +408,80 @@ texture read.
   asset is decoded in a §19.5 sandbox under a fixed byte bound and falls back
   to a built-in tier — the game does not get its own decode path
   (`plans/ICONS.md`).
+
+### What WS4 settled
+
+The palette, the material set, the splat kernel, the decal stamp and the
+particle vocabulary are built, in `wintersun/art`. What a later item needs to
+know:
+
+- **The crate contains no floating point at all**, and
+  `deny(clippy::float_arithmetic)` makes that a compile error. Value noise,
+  smoothstep, the blend, distance-to-segment and particle advection are all
+  shifts, masks, byte-wide weighted means and one exact integer square root.
+  So bit-identity across targets **follows from the language** rather than
+  from a test, and this crate therefore carries **no four-target QEMU
+  vertical** where WS2 and WS3 each carry one — four emulated machines would
+  be confirming Rust's integer semantics, not the code.
+  `digest::REFERENCE_DIGEST` exists for a digest's other job (an unintended
+  change to the art shows up as a moved number) and **WS5's client frame
+  vertical folds it in**, which is where the cross-target rendering claim
+  belongs: over a whole composited frame, not one crate.
+
+  **Two things WS5 owes this crate**, because nothing consumes it yet and so
+  nothing in the gate reaches it beyond the host suite, the proptest model and
+  clippy: the client vertical **folds `digest::REFERENCE_DIGEST` in**, and it
+  is what first pulls `wintersun/art` into a build for each Tier-1 target.
+  All four targets were confirmed to build at WS4
+  (`wasm32-unknown-unknown`, `aarch64-unknown-none`,
+  `riscv64gc-unknown-none-elf`, `x86_64-unknown-none`), but by hand rather
+  than by the gate, and a hand check does not stay true.
+- **The weight field is one mechanism with one mutation.**
+  `WeightField::cover` is the *over* operator on a weight vector, and
+  everything that changes the ground goes through it: road and river decals
+  now, WS13's snow accumulation and WS9/WS10's scorch marks later. Covering
+  takes the maximum rather than the sum, which is exactly what makes two
+  roads merge — a second stamp at the same coverage is a no-op — and a stamp
+  lighter than every material already on a full field is refused rather than
+  displacing something heavier.
+- **A span is the unit, not a pixel.** Everything a pixel needs beyond its
+  own texel read is linear along a horizontal run inside one cell row, so a
+  caller does the *vertical* interpolation (one `WeightField::lerp` per cell
+  row per raster row) and `splat::splat` steps the horizontal. That turns
+  four hash evaluations per pixel into four per span, and it is what the
+  budget assumes.
+- **Resolution is total, so the pass never fails.** A tile the cache will not
+  admit degrades to a coarser mip and then to the material's flat mid tone at
+  its standing height. `MaterialCache::ensure` reports residency and
+  `peek` reads it, deliberately as two calls: a splat needs four tiles at
+  once and four live borrows cannot come out of four mutable calls — and it
+  is the ask-then-paint shape an interactive loop wants anyway.
+- **The degradation ladder's first two rungs exist here.** Particle density
+  is `area / pressure band`, and `material::Quality` is the octave knob that
+  is also the tile cache's generation token. The remaining rungs (light
+  buffer, shadow softness, render scale) are WS5's, and `Quality` is where
+  the material rung is turned.
+- **No `lib/cpuops` family yet, deliberately.** A family with one portable
+  candidate selects nothing, and reaching for per-architecture intrinsics
+  before a measurement says the portable kernel misses its budget is the
+  speculative optimisation the charter forbids. The measurement is M1's exit
+  criterion. The kernel is already shaped as the contiguous span function such
+  a candidate would replace, so adding one later is adding a candidate, not a
+  reshape.
+- **No fuzz target, because there is no decoder.** Material rows are compiled
+  in, weight fields come from the generator's own output, and a decal path is
+  either that generator's road or a player-caused change `wintersun/net`
+  already bounds-checks and fuzzes. The adversarial coverage is the proptest
+  model, enrolled as `wintersun-art`.
+- **A material's standing height is an art-direction statement**, because the
+  relief is what decides which material wins a shared pixel: rock above
+  gravel above sand above water, glacier above snowfield. A river bank grades
+  through mud to shingle because shingle stands higher, not because anything
+  special-cases a bank.
+- **`lib/raster::shape` (FG1) was not needed and is still not built.**
+  Decals are polylines stamping weights and particles are points; nothing in
+  WS4 wants an outline primitive. FG1 is WS6's prerequisite, not WS4's or
+  WS5's.
 
 ### Lighting, and why the name matters
 

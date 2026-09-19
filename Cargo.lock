@@ -6082,6 +6082,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-wintersun-art"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-log",
+ "tairix-raster",
+ "tairix-reclaim",
+ "tairix-wintersun-net",
+ "tairix-wintersun-world",
+]
+
+[[package]]
 name = "tairix-wintersun-net"
 version = "0.0.0"
 dependencies = [
