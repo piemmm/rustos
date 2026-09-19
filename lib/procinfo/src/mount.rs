@@ -10,12 +10,13 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::driver::filesystem::MountFlags;
-use tairix_abi::sysinfo::{MountAvailability, MountListRequest, MountRecord, SysinfoQueryId};
+use tairix_abi::sysinfo::{MountListRequest, MountRecord, SysinfoQueryId};
 use tairix_abi::Errno;
 
 use crate::list::{field_lossy, walk_pages, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::Transport;
+use crate::volume::availability_marker;
 
 /// Number of [`MountRecord`]s requested per mount-list page.
 ///
@@ -85,14 +86,8 @@ pub fn for_each_mount(
 /// conflicted one never looks healthy (`plans/DEVICES.md` D4b).
 #[must_use]
 pub fn render_mount(record: &MountRecord) -> String {
-    let marker = match record.availability() {
-        MountAvailability::Available => "",
-        MountAvailability::UnavailableDirty => " [unavailable-dirty]",
-        MountAvailability::UnavailableLost => " [unavailable-lost]",
-        MountAvailability::RecoveryConflict => " [recovery-conflict]",
-        MountAvailability::Degraded => " [degraded]",
-        MountAvailability::Recovering => " [recovering]",
-    };
+    let marker = availability_marker(record.availability())
+        .map_or_else(String::new, |marker| format!(" [{marker}]"));
     format!(
         "{} on {} type {} ({}){}",
         field_lossy(record.source_bytes()),

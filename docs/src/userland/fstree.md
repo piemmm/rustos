@@ -39,10 +39,13 @@ what is built.
 - **Hidden entries.** Dot-named entries are hidden by default in both
   windows; `H` toggles them, with cursors clamped to the shrunken lists.
 - **Header, status, and command lines.** A top disk-statistics header
-  carries the listed path, the backing volume's free/total bytes (the
-  System Information API's `MOUNT_LIST` query through the shared
-  `tairix_procinfo` mount walk, best-effort — an unreachable service simply
-  omits the figure), and the item and tagged counts. A status band below
+  carries the listed path, the available/total bytes of the volume backing
+  it — available, not merely unallocated, so a format withholding a reserve
+  does not promise space it would refuse (the System Information API's
+  `MOUNT_LIST` query through the shared `tairix_procinfo` mount walk and its
+  `VolumeBytes` derivation, best-effort: an unreachable service, or a
+  backing mount that tracks no capacity, simply omits the figure) — and the
+  item and tagged counts. A status band below
   the windows shows the active window, sort order, and hidden/filter state,
   and a context command menu lists the active window's keys — or an error
   or the sort prompt when one is open.
@@ -381,10 +384,13 @@ remaining conveniences; every piece runs through the same seams and is
 host-tested end to end.
 
 - **The volume list (`V`).** `Fs::list_volumes` reports the published
-  storage roots (`VolumeInfo`: mount target, filesystem type, optional
-  free/total bytes); the production seam walks the same System
-  Information API `MOUNT_LIST` pages the status line's free-space figure
-  uses (`tairix_procinfo::for_each_mount`). The overlay lists one row
+  storage roots (`VolumeInfo`: mount target, filesystem type, and the
+  volume's optional `tairix_procinfo::VolumeBytes` — the one derivation
+  every surface reads a mount record's figures through, so this
+  application computes none of its own); the production seam walks the
+  same System Information API `MOUNT_LIST` pages the status line's
+  available-space figure uses (`tairix_procinfo::for_each_mount`). Each
+  row states available of total, matching the header. The overlay lists one row
   per volume (an unreported size renders `-`, never a zero-byte disk),
   Enter re-roots the whole session at the chosen target, and a refused
   root listing keeps the session and the list with the errno on the

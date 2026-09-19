@@ -328,6 +328,18 @@ on them, and a device whose driver declares no name is named by its volumes
 alone rather than by an invented identity — which the pane's capacity block
 states as an absent reading, never as a fabricated one.
 
+**How full a device is, is the share of the whole medium.** A storage
+entry's figure and its capacity block both read `used / total`, where used is
+the capacity less what is *unallocated* — so a format that withholds a
+metadata reserve is not reported as having spent it. The block states the
+reserve plainly by naming its rows for the figures they carry: `Capacity` is
+used of total, and `Available` is what an ordinary allocation may still
+consume, which on a reserved format is the smaller number. This is
+deliberately not `df`'s `Use%`, which divides by what a caller may allocate
+rather than by the medium and so reads higher on a reserved format; both
+derive from the one shared `lib/procinfo` model, which names each so neither
+surface can pick the wrong one (see [`sysinfo`](../abi/sysinfo.md)).
+
 **Every rail entry with a rate behind it carries a trace, from the counters
 the service deltas itself.** A storage device's entry carries both readings:
 its figure is how full it is — a level, which a trace would not say — and its

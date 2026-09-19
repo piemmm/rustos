@@ -18,8 +18,9 @@ use alloc::vec::Vec;
 use tairix_abi::FileKind;
 use tairix_glob::Pattern;
 use tairix_path::join;
+use tairix_procinfo::VolumeBytes;
 
-use crate::fs::{Fs, FsEntry, VolumeInfo, VolumeSpace};
+use crate::fs::{Fs, FsEntry, VolumeInfo};
 use crate::ops::FileOp;
 use crate::settings::Settings;
 use crate::tag::{Batch, TagSet};
@@ -491,8 +492,8 @@ pub struct Model {
     pub filter: Option<NameFilter>,
     /// The one-line message surface (errors, notices).
     pub message: Option<String>,
-    /// Free/total space of the volume backing the listed directory.
-    pub space: Option<VolumeSpace>,
+    /// What the volume backing the listed directory holds.
+    pub space: Option<VolumeBytes>,
     /// The modal surface currently shown, if any.
     pub overlay: Overlay,
     /// The open prompt, when a question is being asked.

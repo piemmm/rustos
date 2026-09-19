@@ -23,16 +23,14 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::sysinfo::{MountRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN};
 use tairix_controls::PressureKind;
+use tairix_procinfo::{availability_name, medium_name, VolumeBytes};
 use tairix_theme::SignalRole;
 
-use super::{
-    availability_name, health_state, health_text, medium_name, used_permille, volume_bytes,
-    VolumeBytes,
-};
+use super::health_text;
 use crate::format::{format_bytes, format_latency, format_rate, percent};
 use crate::model::{OwnerBundles, RollingMeters, VolumeService};
 use crate::sample::{DegradedField, Sample};
-use crate::view::reading::{absence_statement, HealthSeverity, Reading, ReadingFact, Unmeasured};
+use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
     BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
     ResourceControl, ResourceDevice, StorageId, TaskCostColumn, Trace,
@@ -106,11 +104,8 @@ impl<'a> StorageSubject<'a> {
     /// points is counted once rather than once per projection.
     fn held(&self) -> Option<VolumeBytes> {
         self.heads()
-            .filter_map(|(_, mount)| volume_bytes(mount))
-            .reduce(|held, next| VolumeBytes {
-                total: held.total.saturating_add(next.total),
-                available: held.available.saturating_add(next.available),
-            })
+            .filter_map(|(_, mount)| VolumeBytes::of(&mount.usage()))
+            .reduce(VolumeBytes::plus)
     }
 
     /// The medium the device declares, taking the first mount that names one
@@ -230,9 +225,7 @@ pub(super) fn device(
     bundles: &OwnerBundles,
 ) -> ResourceDevice {
     let id = subject.device_id();
-    let share = subject
-        .held()
-        .map(|held| used_permille(held.total, held.available));
+    let share = subject.held().map(VolumeBytes::used_permille);
     let service = meters.devices.volume_service(id);
     ResourceDevice {
         id,
@@ -447,7 +440,7 @@ fn capacity_facts(
                     format_bytes(held.total)
                 ),
             ));
-            facts.push(ReadingFact::text("Free", format_bytes(held.available)));
+            facts.push(ReadingFact::text("Available", format_bytes(held.available)));
         }
         None => facts.push(ReadingFact::absent("Capacity", Unmeasured::Unavailable)),
     }
@@ -484,7 +477,7 @@ fn volume_facts(subject: &StorageSubject<'_>) -> Vec<ReadingFact> {
         };
         let source = String::from_utf8_lossy(head.source_bytes()).into_owned();
         let fstype = String::from_utf8_lossy(head.fstype_bytes()).into_owned();
-        let capacity = volume_bytes(head).map_or_else(
+        let capacity = VolumeBytes::of(&head.usage()).map_or_else(
             || String::from("capacity unavailable"),
             |bytes| {
                 format!(
@@ -535,11 +528,10 @@ fn health(sample: &Sample, subject: &StorageSubject<'_>) -> BlockBody {
     let severity = subject
         .heads()
         .filter_map(|(volume, _)| super::find_volume_stats(Some(records.as_slice()), volume))
-        .map(|record| health_state(record.availability()))
+        .map(|record| record.availability().health())
         .max()
-        .unwrap_or_else(|| health_state(record.availability()));
+        .unwrap_or_else(|| record.availability().health());
     BlockBody::Health {
-        pill: String::from(pill_of(severity)),
         severity,
         facts: alloc::vec![
             ReadingFact::text("Completions", counters.completions.to_string()),
@@ -553,15 +545,6 @@ fn health(sample: &Sample, subject: &StorageSubject<'_>) -> BlockBody {
             ReadingFact::text("Unclassified faults", counters.faults.to_string()),
             ReadingFact::text("Summary", health_text(record)),
         ],
-    }
-}
-
-/// The pill a severity reads as.
-const fn pill_of(severity: HealthSeverity) -> &'static str {
-    match severity {
-        HealthSeverity::Healthy => "Healthy",
-        HealthSeverity::Degraded => "Degraded",
-        HealthSeverity::Failing => "Failing",
     }
 }
 

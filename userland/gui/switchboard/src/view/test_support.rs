@@ -4,7 +4,7 @@
 //! section's tests, so no section carries its own copy of the fixture the
 //! others already use.
 
-use tairix_abi::sysinfo::CpuCoreClass;
+use tairix_abi::sysinfo::{CpuCoreClass, VolumeHealth};
 use tairix_abi::{ProcId, PROC_ID_LEN};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -23,9 +23,9 @@ use super::resources::{
     ResourceReport, StorageId, TaskCostColumn, Trace,
 };
 use super::{
-    ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, HealthSeverity, Reading, ReadingFact,
-    RecoveryItem, SectionOutcome, Switchboard, SwitchboardAction, SwitchboardModel, TaskAuthority,
-    TaskSummary, Unmeasured,
+    ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, Reading, ReadingFact, RecoveryItem,
+    SectionOutcome, Switchboard, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskSummary,
+    Unmeasured,
 };
 
 pub(super) fn font() -> BitmapFont {
@@ -234,8 +234,7 @@ fn storage_device() -> ResourceDevice {
             PaneBlock::half(
                 "HEALTH",
                 BlockBody::Health {
-                    pill: alloc::string::String::from("Healthy"),
-                    severity: HealthSeverity::Healthy,
+                    severity: VolumeHealth::Healthy,
                     facts: alloc::vec![ReadingFact::text("Completions", "4,182,904")],
                 },
             ),

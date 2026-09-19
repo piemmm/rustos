@@ -20,7 +20,7 @@ use tairix_abi::net_ipc::{
 use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoRecord, KernelMemoryStats, MountAvailability, MountRecord,
-    MountVolumeState, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    MountVolumeState, VolumeHealth, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
     MOUNT_VOLUME_ID_LEN,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery, MemoryClass, MEMORY_CLASS_COUNT};
@@ -49,16 +49,14 @@ fn series_roles(trace: &Trace) -> (Option<SignalRole>, Option<SignalRole>) {
     }
 }
 
-use super::{build_resource_report, used_permille};
+use super::build_resource_report;
 use crate::derive::{derive_summary, Hysteresis};
 use crate::model::{OwnerBundles, RollingMeters, SessionReport, VolumeService};
 use crate::sample::{CoreBusy, MemoryPressureSample, Sample, ScopeVerdicts};
 use crate::view::resources::{
     BlockBody, CompositionPart, DeviceId, HeroInstrument, RailGroup, StorageId, Trace,
 };
-use crate::view::{
-    HealthSeverity, Reading, ReadingFact, ResourceDevice, ResourceReport, Unmeasured,
-};
+use crate::view::{Reading, ReadingFact, ResourceDevice, ResourceReport, Unmeasured};
 
 /// A caller holding nothing, so a refusal is a refusal of authority.
 struct NoAuthority;
@@ -177,9 +175,34 @@ fn mount_of(
 }
 
 /// A mount of [`VOLUME`] at `target` with `total`/`avail` blocks of `block`
-/// bytes each.
+/// bytes each, nothing withheld.
 fn mount(target: &str, block: u32, total: u64, avail: u64) -> MountRecord {
     mount_of("nvme0", target, VOLUME, block, total, avail)
+}
+
+/// A mount of [`VOLUME`] whose format withholds `free - avail` blocks from
+/// ordinary allocation.
+fn reserved_mount(target: &str, block: u32, total: u64, free: u64, avail: u64) -> MountRecord {
+    MountRecord::new(
+        b"nvme0",
+        target.as_bytes(),
+        b"arxfs",
+        MountFlags::default(),
+        MountVolumeState {
+            usage: VolumeStats {
+                block_size: block,
+                total_blocks: total,
+                free_blocks: free,
+                avail_blocks: avail,
+                files: 0,
+                files_free: 0,
+            },
+            availability: MountAvailability::Available,
+            medium: None,
+        },
+        VOLUME,
+    )
+    .expect("a valid mount record")
 }
 
 /// `record` with the live availability the mount snapshot would overlay.
@@ -498,12 +521,12 @@ fn a_devices_health_pill_takes_the_worst_of_the_volumes_on_it() {
         .blocks
         .iter()
         .find_map(|block| match &block.body {
-            BlockBody::Health { pill, severity, .. } => Some((pill.clone(), *severity)),
+            BlockBody::Health { severity, .. } => Some(*severity),
             _ => None,
         })
         .expect("the pane carries a health block");
-    assert_eq!(health.1, HealthSeverity::Failing);
-    assert_eq!(health.0, "Failing");
+    // The worst volume on the device decides, not whichever was read first.
+    assert_eq!(health, VolumeHealth::Failing);
     // Each volume's own availability is still stated beside it.
     assert_eq!(
         fact(device, "ARXFSSystem"),
@@ -695,12 +718,25 @@ fn a_storage_devices_capacity_comes_from_its_volumes_block_counts() {
 }
 
 #[test]
-fn a_volume_reporting_more_available_than_total_does_not_underflow() {
-    // A service reporting more free than total yields nought used rather
-    // than wrapping into a nearly-full disk.
-    assert_eq!(used_permille(10, 1_000), 0);
-    assert_eq!(used_permille(0, 0), 0);
-    assert_eq!(used_permille(u64::MAX, 0), 1_000);
+fn a_withheld_reserve_is_free_space_on_the_medium_not_used_space() {
+    // 100 blocks of 4 KiB: 40 unallocated, of which only 30 may be handed
+    // out. The reserve is empty, so it belongs to neither the used figure
+    // nor the share — reporting it as spent would show a volume fuller
+    // than it is.
+    let sample = Sample {
+        mounts: Some(alloc::vec![reserved_mount("System:", 4_096, 100, 40, 30)]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let volume = device(&report, UNSERVED);
+    assert_eq!(volume.reading, Reading::measured("60%"));
+    assert_eq!(
+        fact(volume, "Capacity"),
+        &Reading::measured("240.0 KiB of 400.0 KiB")
+    );
+    // And the row that states what may still be allocated is named for
+    // that figure, which on a reserved format is the smaller one.
+    assert_eq!(fact(volume, "Available"), &Reading::measured("120.0 KiB"));
 }
 
 /// A volume's cumulative service counters, as one sample reports them.

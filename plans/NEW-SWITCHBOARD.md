@@ -1155,9 +1155,10 @@ Superseded code is deleted, not renamed or left dead.
 
 **The shared reading vocabulary needs a surviving home before
 `system_data.rs` goes.** `Reading`, `Unmeasured`, `absence_statement`,
-`reading_text`, `selection_prompt`, `HealthSeverity` and the labelled-reading
-pair are read by Recovery and Tasks as well, so they move to their own module
-first; only the System-specific types (`SystemPage`, `SystemReport`,
+`reading_text`, `selection_prompt` and the labelled-reading pair are read by
+Recovery and Tasks as well, so they move to their own module first (a
+volume's banded health is not among them: it is the shared
+`tairix_abi::sysinfo::VolumeHealth` every surface reads); only the System-specific types (`SystemPage`, `SystemReport`,
 `HeadlineTile`, `TileInstrument`, `PageLine`, `SystemAction`) are deleted.
 `SystemFact` is renamed with the move — a type named after a deleted section
 misleads every later reader.

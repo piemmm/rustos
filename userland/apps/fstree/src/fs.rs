@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::time::Time64;
 use tairix_abi::{Errno, FileKind};
+use tairix_procinfo::VolumeBytes;
 
 /// One directory entry as the listing reports it: exactly the fields the
 /// kernel's `fs_readdir` stream carries per entry, so a listing never costs
@@ -31,18 +32,6 @@ pub struct FsEntry {
     pub modified: Time64,
 }
 
-/// Free/total byte counts of the volume backing a path, for the status
-/// line. `None` when the query is unavailable (no sysinfo service, or the
-/// caller lacks the query's capability) — the status line then simply
-/// omits the figure; absence is never an error.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct VolumeSpace {
-    /// Bytes still allocatable on the volume.
-    pub free_bytes: u64,
-    /// Total capacity of the volume in bytes.
-    pub total_bytes: u64,
-}
-
 /// One published storage root the volume list (`V`) offers: where it is
 /// mounted, what backs it, and its space figures when known.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,9 +42,9 @@ pub struct VolumeInfo {
     /// The mounted filesystem's type name (`arxfs`, `ext4`, …), as the
     /// mount table reports it.
     pub fstype: String,
-    /// Free/total bytes, or `None` when the volume cannot report them
+    /// What the volume holds, or `None` when it tracks no capacity
     /// (shown as absent, never fabricated).
-    pub space: Option<VolumeSpace>,
+    pub space: Option<VolumeBytes>,
 }
 
 /// The filesystem operations the landed stages perform: listings, the
@@ -74,9 +63,10 @@ pub trait Fs {
     /// list it. The model surfaces the error and keeps its previous state.
     fn list_dir(&mut self, path: &str) -> Result<Vec<FsEntry>, Errno>;
 
-    /// Report the free/total space of the volume backing `path`, or `None`
-    /// when the figure is unavailable (best-effort; never an error).
-    fn volume_space(&mut self, path: &str) -> Option<VolumeSpace>;
+    /// What the volume backing `path` holds, or `None` when no figure is
+    /// available (best-effort; never an error) — an unreachable service, or
+    /// a backing mount that tracks no capacity. The header then omits it.
+    fn volume_space(&mut self, path: &str) -> Option<VolumeBytes>;
 
     /// The published storage roots the session can open — the mounted
     /// volumes as the System Information API reports them. Best-effort by

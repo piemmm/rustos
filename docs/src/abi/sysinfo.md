@@ -649,6 +649,32 @@ the request/render libraries stay testable against in-memory fixtures.
   medium is one byte after `availability`, `0` meaning unknown and a known
   class its discriminant plus one; the seven bytes that follow it are
   reserved-must-be-zero and a decode refuses a record that sets them.
+
+  **The record's block counts are turned into facts in exactly one place.**
+  Every surface that reports a volume — `df`, `mount`, `sysmon`, the
+  desktop's Switchboard, Settings — reads the same derivation from
+  `lib/procinfo`'s `volume` module rather than multiplying block counts
+  itself: [`VolumeBytes`] (`total`/`free`/`available` bytes, with `used`,
+  `usable` and the `used_permille` share), the two availability spellings
+  (`availability_marker`, the bracketed `mount(8)` word; `availability_name`,
+  the prose a fact list reads), `medium_name`, and `volume_health_name`. A
+  volume cannot therefore read half-full on one surface and nearly-full on
+  another. The two *shares* it offers are deliberately distinct and both
+  named: `used_permille` is of the whole medium, which is what a desktop
+  capacity bar means, while `df`'s GNU `Use%` is of `usable()` — what a
+  caller may actually allocate. A withheld metadata reserve is unallocated
+  to both numerators, but only the first counts it as part of the medium,
+  so on a reserved format `df` reads the higher figure.
+
+  [`MountAvailability::health`] bands the six availability states into the
+  three [`VolumeHealth`] answers a reader acts on — nothing to do, watch it,
+  it is not serving. It is derived, never transmitted: the wire carries the
+  six-state availability. The banding preserves the
+  [`MountAvailability::severity`] ranking, so folding a stack of layers with
+  `worse_of` and banding the result agrees with banding each layer and taking
+  the worst. `lib/theme`'s `SignalRole::for_volume_health` is the one binding
+  from a band to the colour role a status pill is drawn in, so a degraded
+  disk cannot read amber on one surface and green on another.
 - [`ResourceLimitRecord`] — one row of the `RESOURCE_LIMITS` response: a
   resource's `kind` ([`LimitKind`]), its effective [`ResourceLimit`]
   (soft/hard), and the caller's current live `usage`. The query takes no
@@ -693,6 +719,10 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`MountRecord`]: ../../tairix_abi/sysinfo/struct.MountRecord.html
 [`MountRecord::medium`]: ../../tairix_abi/sysinfo/struct.MountRecord.html#method.medium
 [`MountAvailability`]: ../../tairix_abi/sysinfo/enum.MountAvailability.html
+[`MountAvailability::health`]: ../../tairix_abi/sysinfo/enum.MountAvailability.html#method.health
+[`MountAvailability::severity`]: ../../tairix_abi/sysinfo/enum.MountAvailability.html#method.severity
+[`VolumeHealth`]: ../../tairix_abi/sysinfo/enum.VolumeHealth.html
+[`VolumeBytes`]: ../../tairix_procinfo/volume/struct.VolumeBytes.html
 [`MOUNT_SOURCE_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_SOURCE_MAX.html
 [`MOUNT_TARGET_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_TARGET_MAX.html
 [`MOUNT_FSTYPE_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_FSTYPE_MAX.html

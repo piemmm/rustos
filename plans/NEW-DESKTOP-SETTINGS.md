@@ -36,7 +36,8 @@ dropped is a category the surface then has to lie about.
 | **DS3** | Appearance and Accessibility over the session's user-scope appearance registry, and the apply rendezvous every other user-scope write reuses | DS2 | DS3 | done |
 | **DS3b** | The cursor pair: a cursor-set store under `/System/Graphics/Cursors/<set>/` so `cursor.set` has a choice space at all, and a `cursor.size` factor in the session's cursor controller | DS3 | DS3b | done |
 | **DS4** | Wallpaper — the gallery absorbed into the pane over two served requests, `wallpaper.app` deleted, and *Change Background…* opening Settings at that pane | DS3 | DS4 | done |
-| **DS5** | Storage — one group per mount with its capacity track and health pill, over the mount→capacity derivation moved into `lib/procinfo` and shared with the Switchboard | DS2 | DS5 | planned |
+| **DS5a** | The shared volume view model: the mount record → capacity/health derivation in `lib/procinfo`, the `VolumeHealth` banding in `lib/abi`, the one band→role binding in `lib/theme`, and every private copy collapsed onto them | — | DS5a | done |
+| **DS5** | Storage — one group per mount with its capacity track and health pill, over the DS5a model | DS2, DS5a | DS5 | planned |
 | **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | planned |
 | **DS7** | Networking read — per-interface facts, link state, addresses and rates through the Switchboard's own client, plus the stack-wide `net.*` options | DS2, DS6 | DS7 | planned |
 | **DS8** | Networking write — `configure` grows the `lib/netconfig` registry, Ethernet and DNS stage and apply through it, and the stack adopts the change without a reboot | DS6, DS7 | DS8 | planned |
@@ -80,10 +81,10 @@ write path on landing.
   Concretely, the one reader is `lib/procinfo`: it already owns the paged
   walks over `MOUNT_LIST`, `USER_DIRECTORY`, the process list, the CPU-time
   stats and the pressure fetch, and both the Switchboard and the CLI tools
-  read through it. Settings adds no sampler of its own; where it needs a
-  derivation the Switchboard also needs — a mount record turned into a
-  capacity reading — the derivation moves into `lib/procinfo` and both read
-  it, rather than each keeping a private copy that will drift.
+  read through it. Settings adds no sampler of its own, and no derivation
+  either: a mount record becomes a capacity reading in `lib/procinfo`'s
+  `volume` module (DS5a), which every surface reads, rather than each
+  keeping a private copy that will drift.
 
 - **Settings holds no domain authority. It never holds any.** Its manifest is
   `CAP_CONSOLE_WRITE` + `CAP_SHM`, and nothing else — the same class as the
@@ -731,25 +732,70 @@ resolvable and an unknown one resolving to nothing; the session desk's
 backdrop-first, one-at-a-time and self-freeing rules; and the window
 channel's catalog page and render accept/refuse paths.
 
+### DS5a — the shared volume view model
+
+The mount record → capacity/health derivation lives in one home every
+surface reads, rather than in the Switchboard's private `resource_report`.
+
+- **`lib/procinfo::volume`** owns the reading→facts conversions: `VolumeBytes`
+  (`total`/`free`/`available`, with `used`, `usable`, `used_permille`, and a
+  saturating `plus` fold), the two availability spellings
+  (`availability_marker` for a `mount(8)` listing, `availability_name` for a
+  fact list), `medium_name`, and `volume_health_name`.
+- **`lib/abi`** carries the banding beside the state it bands:
+  `MountAvailability::health` → `VolumeHealth` (`Healthy`/`Degraded`/
+  `Failing`). Derived, never transmitted, and monotone in the existing
+  `severity` ranking, so folding a stack with `worse_of` and banding agrees
+  with banding each layer and taking the worst.
+- **`lib/theme`** carries the one band→`SignalRole` binding
+  (`SignalRole::for_volume_health`), because it owns the role vocabulary and
+  a CLI tool must not link a theme to print a mount table.
+
+**Two shares, both named, neither the other's default.** `used_permille` is
+of the whole medium — what a capacity bar means — while `df`'s GNU `Use%` is
+of `usable()`, what a caller may actually allocate. A withheld reserve is
+unallocated to both numerators but part of the medium to only the first, so
+`df` reads higher on a reserved format; it keeps the GNU definition it is
+bound to and reads it off the same model.
+
+Its callers: the Switchboard's storage pane (which bands health through
+the shared `VolumeHealth` alone, and whose capacity block names its rows
+`Capacity` and `Available` because the two figures differ), `sysmon`'s mount
+panel, `fstree`'s two volume walks, `stress`'s scratch-space probe, and
+`df`'s `byte_figures`. None keeps a copy, and `fstree`'s own `VolumeSpace`
+is gone: it held the same two facts.
+
 ### DS5 — Storage
 
 The per-medium used-space overview: one `FieldGroup` per mount walked from
 `MOUNT_LIST` through `lib/procinfo::for_each_mount`, each with its volume
-label, filesystem, device, mount point, a `MetricTile` capacity track over the
-volume's own `VolumeStats` block counts, and its `VOLUME_IO_HEALTH` state as a
-`StatusPill`. Read-only: mounting and unmounting are the file manager's and
-`mount`'s, and a second route to them is duplication. A volume whose stats or
-health could not be read renders unmeasured, never a full bar or a green pill.
+label, filesystem, device, mount point, a `MetricTile` capacity track over
+`VolumeBytes::used_permille`, and its banded `VolumeHealth` as a `StatusPill`
+toned through `SignalRole::for_volume_health`. Read-only: mounting and
+unmounting are the file manager's and `mount`'s, and a second route to them is
+duplication. A volume whose stats could not be read renders unmeasured, never
+a full bar or a green pill.
+
+**The health pill is the mount table's own availability, not the gated
+counters.** Settings holds neither `CAP_SYSINFO_KERNEL` nor
+`CAP_SYSINFO_GLOBAL`, so `VOLUME_IO_HEALTH`'s bucketed completions are the
+Switchboard's alone. It does not need them: `MOUNT_LIST` is ungated and its
+record already carries the live availability overlay a failing or recovering
+device sets, which is exactly what a pill states. The manifest stays
+`CAP_CONSOLE_WRITE` + `CAP_SHM`.
+
+**The mount walk is an IPC round trip, so it never runs on the loop that owes
+a frame.** It is read at bring-up beside the picture catalog and the cursor
+sets, and re-read through the existing `tairix_rt::work::Worker` desk —
+submitted, never awaited — so opening the pane shows what arrived and the
+answer lands as an ordinary wake. A pane that painted by reading is the
+defect the charter's interactive-surface rule names.
 
 **This must not become a second Storage page.** The Switchboard's System
 section already has one, and the two answer different questions — *how full is
-each medium* here, *is each volume healthy and how hard is it working* there —
-but they share a fact, so they must share its derivation. The mount record →
-capacity/health view model moves out of the Switchboard's private
-`view/system_data.rs` into `lib/procinfo` in this stage, and both surfaces are
-rebuilt on it. If that conversion turns out to be more than one clean
-increment, it is split out and staged before DS5 rather than shipped as a
-second copy.
+each medium* here, *is each volume healthy and how hard is it working* there.
+They share facts, and DS5a is where those facts are derived; neither surface
+keeps a copy.
 
 ### DS6 — the elevated-apply seam, and General
 
@@ -952,6 +998,14 @@ it has.
 **Shared machinery lands with its consumer.** DS6's argv extension and DS8's
 `configure` extension are each in the same increment as the pane that uses
 them, so nothing speculative is added ahead of a caller (`AGENTS.md` §2.4).
+
+**DS5a is the exception that proves that edge, and is not speculative.** It
+moves a derivation that already had a caller rather than adding one for a
+caller to come: every item it hoists was live in the Switchboard, `sysmon`,
+`fstree`, `stress` or `df` the day it landed, and each of those now reads the
+shared definition. DS5 becomes its second consumer. It is a separate
+increment only because a half-moved derivation with two callers is worse than
+either end state.
 
 ## 7. What this explicitly refuses to become
 

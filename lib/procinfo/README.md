@@ -39,6 +39,13 @@ The crate provides:
 - `for_each_mount` / `render_mount` / `render_options` — the paged
   mount-table walk and its `source on target type fstype (options)`
   rendering.
+- `volume` — the one mount-record view model every surface turns a record
+  into facts with: `VolumeBytes` (`total`/`free`/`available`, with `used`,
+  `usable`, the `used_permille` share of the whole medium, and a saturating
+  `plus` fold), the two availability spellings (`availability_marker` for a
+  `mount(8)` listing, `availability_name` for a fact list), `medium_name`,
+  and `volume_health_name`. `df`'s GNU `Use%` is a fraction of `usable()`
+  rather than of the medium, which is why both shares are named.
 - `pressure::publish_depth` — publishing a reported memory-pressure band and
   publishing it to a `tairix_reclaim::ReportedPressure` gauge, the one
   definition every caching program keeps its band current through.

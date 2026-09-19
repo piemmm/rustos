@@ -7,6 +7,8 @@
 //! and the default apps all read these same roles, which is what makes a
 //! theme switch apply consistently everywhere from one definition.
 
+use tairix_abi::sysinfo::VolumeHealth;
+
 use crate::color::Rgba;
 
 /// The semantic colours every theme provides.
@@ -291,4 +293,22 @@ pub enum SignalRole {
     NetReceive,
     /// Data sent on a network interface.
     NetSend,
+}
+
+impl SignalRole {
+    /// The role a volume in `health` is drawn in.
+    ///
+    /// One binding between a volume's banded state and the signal
+    /// vocabulary, so a degraded disk cannot read amber on one surface and
+    /// green on another. It lives here because this crate owns the roles;
+    /// the band itself is
+    /// [`MountAvailability::health`](tairix_abi::sysinfo::MountAvailability::health).
+    #[must_use]
+    pub const fn for_volume_health(health: VolumeHealth) -> Self {
+        match health {
+            VolumeHealth::Healthy => Self::Success,
+            VolumeHealth::Degraded => Self::Warning,
+            VolumeHealth::Failing => Self::Recovery,
+        }
+    }
 }

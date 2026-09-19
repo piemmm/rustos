@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{for_each_mount, Transport, WalkStep};
+use tairix_procinfo::{for_each_mount, Transport, VolumeBytes, WalkStep};
 use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
 
 use crate::command::{Command, Options};
@@ -118,7 +118,7 @@ fn select_all<'a>(options: &Options, mounts: &'a [Fs]) -> (Vec<&'a Fs>, u64) {
     let mut kept = Vec::new();
     let mut hidden = 0u64;
     for fs in mounts {
-        let pseudo = fs.usage.total_blocks == 0;
+        let pseudo = VolumeBytes::of(&fs.usage).is_none();
         let duplicate = !fs.source.is_empty() && seen_sources.contains(&fs.source.as_str());
         if pseudo || duplicate {
             hidden += 1;
@@ -351,13 +351,18 @@ fn block_unit_name(unit: u64) -> String {
     format!("{unit}B")
 }
 
-/// The byte totals a volume's usage reduces to: `(total, used, avail)`.
+/// The byte totals a volume's usage reduces to, widened for the `--total`
+/// sum: `(total, used, avail)`.
+///
+/// The shared derivation answers in bytes; a capacity-less mount has no
+/// figures at all and reports zeroes here, which is what `-a` shows it as.
 fn byte_figures(usage: &VolumeStats) -> (u128, u128, u128) {
-    let block = u128::from(usage.block_size);
-    let total = u128::from(usage.total_blocks) * block;
-    let free = u128::from(usage.free_blocks) * block;
-    let avail = u128::from(usage.avail_blocks) * block;
-    (total, total.saturating_sub(free), avail)
+    let held = VolumeBytes::of(usage).unwrap_or_default();
+    (
+        u128::from(held.total),
+        u128::from(held.used()),
+        u128::from(held.available),
+    )
 }
 
 /// One data row for `fs` in the selected format.
@@ -426,6 +431,10 @@ fn push_size_cells(cells: &mut Vec<Cell>, options: &Options, total: u128, used: 
         };
         cells.push(Cell::number(text));
     }
+    // The GNU `Use%`: a fraction of what a caller may allocate, so a
+    // withheld reserve is in neither the numerator nor the denominator.
+    // That is deliberately not the "how full is the medium" share a
+    // desktop capacity bar shows.
     cells.push(Cell::number(percentage(used, used + avail)));
 }
 

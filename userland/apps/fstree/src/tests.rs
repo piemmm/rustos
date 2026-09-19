@@ -27,7 +27,7 @@ use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::ParserSandbox;
 
 use crate::app::{handle_event, refresh_viewer, viewer_tick, walk_tick};
-use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeInfo, VolumeSpace};
+use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeInfo};
 use crate::info::{note_hidden_entries, Info};
 use crate::model::{
     ModePrompt, Model, Overlay, Pane, Prompt, RepeatOp, SettingsState, SortKey, View, Viewer,
@@ -39,6 +39,7 @@ use crate::settings::{SettingKey, Settings};
 use crate::tag::{TagEntry, TagRange};
 use crate::view_disasm::{Decode, DisasmPane, DisasmView};
 use crate::walk::{FlatEntry, WalkPurpose, WalkState, Walker};
+use tairix_procinfo::VolumeBytes;
 
 /// An in-memory filesystem: per-path listings, per-path file bytes,
 /// per-path modes, a denied set (listings and stats), a set-mode denial
@@ -54,7 +55,7 @@ struct FakeFs {
     set_denied: Vec<String>,
     set_modes: RefCell<Vec<(String, u32)>>,
     reads: CoreCell<usize>,
-    space: Option<VolumeSpace>,
+    space: Option<VolumeBytes>,
     /// `read` of this path fails with the errno.
     read_fail: Option<(String, Errno)>,
     /// `write` to this path fails with the errno.
@@ -85,9 +86,10 @@ impl FakeFs {
             set_denied: Vec::new(),
             set_modes: RefCell::new(Vec::new()),
             reads: CoreCell::new(0),
-            space: Some(VolumeSpace {
-                free_bytes: 500,
-                total_bytes: 1000,
+            space: Some(VolumeBytes {
+                total: 1000,
+                free: 500,
+                available: 500,
             }),
             read_fail: None,
             write_fail: None,
@@ -215,7 +217,7 @@ impl Fs for FakeFs {
         self.dirs.get(path).cloned().ok_or(Errno::NotFound)
     }
 
-    fn volume_space(&mut self, _path: &str) -> Option<VolumeSpace> {
+    fn volume_space(&mut self, _path: &str) -> Option<VolumeBytes> {
         self.space
     }
 
@@ -1151,6 +1153,27 @@ fn a_backing_without_attributes_says_so() {
 }
 
 // --- Renderer: golden grids ---------------------------------------------
+
+#[test]
+fn the_header_reports_what_may_be_allocated_not_what_is_unallocated() {
+    // A format withholding a reserve has more unallocated than allocatable.
+    // The header is labelled "Avail", so it must state the smaller figure:
+    // promising the reserve would promise space the driver would refuse.
+    let mut fs = fixture();
+    fs.space = Some(VolumeBytes {
+        total: 1000,
+        free: 500,
+        available: 300,
+    });
+    let m = model(&mut fs);
+    let mut window = Window::new(Pos::new(0, 0), Size::new(14, 60));
+    render(&m, &mut window);
+    assert!(
+        row_text(&window, 0).contains("Avail 300 of 1000 bytes"),
+        "got {}",
+        row_text(&window, 0)
+    );
+}
 
 #[test]
 fn the_frame_lays_out_panes_status_and_hints() {
@@ -2344,7 +2367,7 @@ impl Fs for SparseFs {
         Err(Errno::NotFound)
     }
 
-    fn volume_space(&mut self, _path: &str) -> Option<VolumeSpace> {
+    fn volume_space(&mut self, _path: &str) -> Option<VolumeBytes> {
         None
     }
 
@@ -3222,9 +3245,10 @@ fn volumed_fixture() -> FakeFs {
             VolumeInfo {
                 target: String::from("/"),
                 fstype: String::from("arxfs"),
-                space: Some(VolumeSpace {
-                    free_bytes: 500,
-                    total_bytes: 1000,
+                space: Some(VolumeBytes {
+                    total: 1000,
+                    free: 500,
+                    available: 500,
                 }),
             },
             VolumeInfo {
@@ -3283,9 +3307,9 @@ fn the_volume_list_renders_targets_types_and_space() {
     render(&m, &mut window);
     assert!(row_text(&window, 0).contains("Volumes"));
     assert!(row_text(&window, 1).contains("arxfs"));
-    assert!(row_text(&window, 1).contains("free 500/1000"));
+    assert!(row_text(&window, 1).contains("avail 500/1000"));
     let second = row_text(&window, 2);
-    assert!(second.contains("/data") && second.contains("free -"));
+    assert!(second.contains("/data") && second.contains("avail -"));
 }
 
 // --- Settings -------------------------------------------------------------

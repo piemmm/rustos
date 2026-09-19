@@ -17,19 +17,17 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::net_ipc::{NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, NetServerAddr};
 use tairix_abi::rlimit::{LimitKind, RLIMIT_INFINITY};
 use tairix_abi::sysinfo::{
-    CpuCoreClass, LoadAverage, MountAvailability, MountRecord, VolumeIoHealthRecord,
-    VolumeIoQueueRecord, VolumeIoStatsRecord,
+    CpuCoreClass, LoadAverage, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery};
 
 use crate::format::{format_bytes, format_duration};
 use crate::model::{display_name, OwnerBundles, RollingMeters, SessionReport};
 use crate::sample::{DegradedField, Sample};
-use crate::view::reading::{HealthSeverity, Reading, ReadingFact as SystemFact, Unmeasured};
+use crate::view::reading::{Reading, ReadingFact as SystemFact, Unmeasured};
 use crate::view::resources::{DeviceId, ResourceReport};
 
 mod consumers;
@@ -126,28 +124,6 @@ pub(crate) fn reading<T>(
     )
 }
 
-/// What a mounted volume holds, in bytes.
-///
-/// A named pair rather than a tuple: "total and available" and "used and
-/// total" are both plausible readings of two byte figures, and a caller that
-/// picks the wrong one reports a full disk as empty. Naming them makes that
-/// mistake unrepresentable.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(super) struct VolumeBytes {
-    /// The volume's whole capacity.
-    pub(super) total: u64,
-    /// What is still available on it.
-    pub(super) available: u64,
-}
-
-impl VolumeBytes {
-    /// What is in use: the capacity less what is available, saturating so a
-    /// service reporting more available than total reads as nothing used.
-    pub(super) const fn used(self) -> u64 {
-        self.total.saturating_sub(self.available)
-    }
-}
-
 /// The record for `volume_id` in one of the per-volume lists, or [`None`]
 /// where the list did not carry it.
 ///
@@ -182,34 +158,6 @@ impl VolumeKeyed for VolumeIoHealthRecord {
     fn key(&self) -> [u8; 16] {
         self.volume_id()
     }
-}
-
-/// What `mount` holds, or [`None`] when the format tracks no fixed capacity.
-fn volume_bytes(mount: &MountRecord) -> Option<VolumeBytes> {
-    let stats = mount.usage();
-    (stats.total_blocks > 0).then(|| {
-        let block = u64::from(stats.block_size);
-        VolumeBytes {
-            total: stats.total_blocks.saturating_mul(block),
-            available: stats.avail_blocks.saturating_mul(block),
-        }
-    })
-}
-
-/// The used fraction of `total` given `avail` free, in permille.
-///
-/// Saturating throughout: a service reporting more available than total
-/// yields nought used rather than an underflow. The scaling is done in
-/// [`u128`] because a volume of the size TAIRiX must serve overflows a
-/// [`u64`] once multiplied by a thousand, and a saturated numerator would
-/// under-report a full disk as very nearly empty.
-pub(super) fn used_permille(total: u64, avail: u64) -> u16 {
-    if total == 0 {
-        return 0;
-    }
-    let used = u128::from(total.saturating_sub(avail));
-    let permille = used.saturating_mul(1000) / u128::from(total);
-    u16::try_from(permille).unwrap_or(1000).min(1000)
 }
 
 /// The machine's identity facts, in the order the Overview page reads
@@ -403,42 +351,6 @@ fn health_text(record: &VolumeIoHealthRecord) -> String {
         return format!("{} completions, no faults", counters.completions);
     }
     faults.join(", ")
-}
-
-/// The severity a volume's availability implies, so a failing disk is
-/// drawn as a fault rather than as one more grey line.
-const fn health_state(availability: MountAvailability) -> HealthSeverity {
-    match availability {
-        MountAvailability::Available => HealthSeverity::Healthy,
-        MountAvailability::Degraded | MountAvailability::Recovering => HealthSeverity::Degraded,
-        MountAvailability::UnavailableDirty
-        | MountAvailability::UnavailableLost
-        | MountAvailability::RecoveryConflict => HealthSeverity::Failing,
-    }
-}
-
-/// A mount's availability in the words the mount table itself uses.
-const fn availability_name(availability: MountAvailability) -> &'static str {
-    match availability {
-        MountAvailability::Available => "available",
-        MountAvailability::UnavailableDirty => "unavailable (dirty)",
-        MountAvailability::UnavailableLost => "unavailable (lost)",
-        MountAvailability::RecoveryConflict => "recovery conflict",
-        MountAvailability::Degraded => "degraded",
-        MountAvailability::Recovering => "recovering",
-    }
-}
-
-/// The medium a volume lives on, or that the mount table did not classify
-/// it.
-const fn medium_name(medium: Option<BlkDeviceClass>) -> &'static str {
-    match medium {
-        Some(BlkDeviceClass::Rotational) => "rotational",
-        Some(BlkDeviceClass::SolidState) => "solid state",
-        Some(BlkDeviceClass::Removable) => "removable",
-        Some(BlkDeviceClass::Virtual) => "virtual",
-        None => "unclassified",
-    }
 }
 
 /// An interface name's bytes up to its first NUL — the wire carries a

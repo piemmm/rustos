@@ -46,11 +46,9 @@ mod program {
     use tairix_abi::{Errno, FileKind, InputMode, UnlinkFlags, STDOUT};
     use tairix_appdata::{RtHost, Settings as SettingsStore};
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
-    use tairix_fstree::{
-        run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo, VolumeSpace,
-    };
+    use tairix_fstree::{run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo};
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
+    use tairix_procinfo::{for_each_mount, IpcTransport, VolumeBytes, WalkStep};
     use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
     use tairix_rt::File;
     use tairix_sandbox::decode::DecodeService;
@@ -439,12 +437,14 @@ mod program {
             }
         }
 
-        fn volume_space(&mut self, path: &str) -> Option<VolumeSpace> {
+        fn volume_space(&mut self, path: &str) -> Option<VolumeBytes> {
             // The mount whose target is the longest prefix of `path` backs
-            // it. Best-effort by contract: an unreachable service or a
-            // failed walk yields `None` and the status line omits the
-            // figure — never an error, never a fabricated count.
-            let mut best: Option<(usize, VolumeSpace)> = None;
+            // it, and wins outright: one that reports no capacity omits the
+            // figure rather than letting the volume above it answer for
+            // bytes that would not land there. Best-effort by contract — an
+            // unreachable service or a failed walk omits it too, never an
+            // error and never a fabricated count.
+            let mut best: Option<(usize, Option<VolumeBytes>)> = None;
             let walked = for_each_mount(&IpcTransport, |record| {
                 let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
                     return Ok(WalkStep::Continue);
@@ -452,19 +452,13 @@ mod program {
                 if !path_has_prefix(path, target) {
                     return Ok(WalkStep::Continue);
                 }
-                let usage = record.usage();
-                let block = u64::from(usage.block_size);
-                let space = VolumeSpace {
-                    free_bytes: usage.free_blocks.saturating_mul(block),
-                    total_bytes: usage.total_blocks.saturating_mul(block),
-                };
                 if best.as_ref().is_none_or(|(len, _)| target.len() > *len) {
-                    best = Some((target.len(), space));
+                    best = Some((target.len(), VolumeBytes::of(&record.usage())));
                 }
                 Ok(WalkStep::Continue)
             });
             match walked {
-                Ok(()) => best.map(|(_, space)| space),
+                Ok(()) => best.and_then(|(_, held)| held),
                 Err(_) => None,
             }
         }
@@ -481,18 +475,10 @@ mod program {
                 };
                 let fstype =
                     String::from(core::str::from_utf8(record.fstype_bytes()).unwrap_or("?"));
-                let usage = record.usage();
-                let block = u64::from(usage.block_size);
-                // A volume that cannot report its size (an all-zero
-                // usage) shows an absent figure, never a zero-byte disk.
-                let space = (usage.total_blocks > 0).then(|| VolumeSpace {
-                    free_bytes: usage.free_blocks.saturating_mul(block),
-                    total_bytes: usage.total_blocks.saturating_mul(block),
-                });
                 volumes.push(VolumeInfo {
                     target: String::from(target),
                     fstype,
-                    space,
+                    space: VolumeBytes::of(&record.usage()),
                 });
                 Ok(WalkStep::Continue)
             });

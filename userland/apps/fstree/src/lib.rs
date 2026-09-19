@@ -98,7 +98,7 @@ pub mod walk;
 mod tests;
 
 pub use app::{handle_event, publish_settings, run, FstreeError};
-pub use fs::{Fs, FsEntry, RenameOutcome, VolumeInfo, VolumeSpace};
+pub use fs::{Fs, FsEntry, RenameOutcome, VolumeInfo};
 pub use info::{Info, NullInfo};
 pub use model::{Model, Pane, SettingsState, SortKey};
 pub use render::render;

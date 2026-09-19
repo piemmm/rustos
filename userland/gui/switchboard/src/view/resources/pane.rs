@@ -21,7 +21,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::sysinfo::CpuCoreClass;
+use tairix_abi::sysinfo::{CpuCoreClass, VolumeHealth};
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_icon::IconArtwork;
 use tairix_raster::{Color, Surface};
@@ -33,9 +33,10 @@ use tairix_controls::{
     MAX_CHART_SAMPLES,
 };
 use tairix_font::BitmapFont;
+use tairix_procinfo::volume_health_name;
 
 use super::device::Trace;
-use crate::view::reading::{reading_text, HealthSeverity, Reading, ReadingFact, Unmeasured};
+use crate::view::reading::{reading_text, Reading, ReadingFact, Unmeasured};
 
 /// The pane's headline reading and the instrument that gives it shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -185,10 +186,9 @@ pub enum BlockBody {
     Consumers(Vec<ConsumerRow>),
     /// A status pill and the readings it resolves from.
     Health {
-        /// The pill's own label.
-        pill: String,
-        /// How badly the device is faring, which tones the pill.
-        severity: HealthSeverity,
+        /// How badly the device is faring, which is both the pill's word
+        /// and its tone. One field, so the two cannot disagree.
+        severity: VolumeHealth,
         /// The buckets the pill resolves from.
         facts: Vec<ReadingFact>,
     },
@@ -581,14 +581,13 @@ fn push_block(
                     );
                 }
             }
-            BlockBody::Health {
-                pill,
-                severity,
-                facts,
-            } => {
+            BlockBody::Health { severity, facts } => {
                 push(
                     1,
-                    ItemBody::Pill(StatusPill::new(pill.clone()).with_tone(health_tone(*severity))),
+                    ItemBody::Pill(
+                        StatusPill::new(volume_health_name(*severity))
+                            .with_tone(SignalRole::for_volume_health(*severity)),
+                    ),
                 );
                 for fact in facts {
                     push(1, ItemBody::Fact(fact_list(fact)));
@@ -674,17 +673,6 @@ fn consumer_row(consumer: &ConsumerRow, kind: PressureKind) -> MetricTile {
             ProgressValue::new(consumer.share),
         )))
         .unplated()
-}
-
-/// The tone a volume's health pill is drawn in: a failing volume is a
-/// recovery matter, a degraded one a caution, a healthy one takes the
-/// ordinary success role.
-const fn health_tone(severity: HealthSeverity) -> SignalRole {
-    match severity {
-        HealthSeverity::Failing => SignalRole::Recovery,
-        HealthSeverity::Degraded => SignalRole::Warning,
-        HealthSeverity::Healthy => SignalRole::Success,
-    }
 }
 
 /// How many rows the whole flow claims — the scroll range's content extent.

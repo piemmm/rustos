@@ -21,7 +21,7 @@ use tairix_abi::{
     CONSOLE_INHERIT, SPAWN_SELF, SPAWN_UID_INHERIT, SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY,
     WAIT_PID_ANY,
 };
-use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
+use tairix_procinfo::{for_each_mount, IpcTransport, VolumeBytes, WalkStep};
 use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
 use tairix_stress::{
     completion_line, dispatch_line, refusal_line, run_scratch_paths, size_targets, summary_record,
@@ -385,8 +385,7 @@ fn scratch_free_bytes(scratch: &str) -> Option<u64> {
         if let Ok(target) = core::str::from_utf8(record.target_bytes()) {
             let better = best.is_none_or(|(len, _)| target.len() >= len);
             if better && path_covers(target, scratch) {
-                let usage = record.usage();
-                let free = u64::from(usage.block_size).saturating_mul(usage.avail_blocks);
+                let free = VolumeBytes::of(&record.usage()).map_or(0, |held| held.available);
                 best = Some((target.len(), free));
             }
         }

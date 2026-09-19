@@ -28,7 +28,9 @@
 //!   [`PROCESS_HEADER`], [`render_process`], and [`state_char`] — the
 //!   shared columnar rendering.
 //! * [`for_each_mount`] and [`render_mount`], the paged mount-table walk and
-//!   its `source on target type fstype (options)` row rendering.
+//!   its `source on target type fstype (options)` row rendering, over the
+//!   [`volume`] view model every surface turns a mount record into facts
+//!   with: [`VolumeBytes`], the availability spellings, and the medium name.
 //! * [`for_each_net_socket`], the paged open-socket-table walk the `ss`
 //!   socket-statistics tool renders.
 //! * [`for_each_raid_array`] and [`for_each_raid_member`], the paged
@@ -121,6 +123,7 @@ pub mod resolve;
 pub mod transport;
 pub mod users;
 pub mod valueread;
+pub mod volume;
 
 #[cfg(all(freestanding, feature = "program"))]
 pub use client::{IpcTransport, NamedSource, OpenError, RtOutput};
@@ -159,3 +162,6 @@ pub use resolve::{cpu_info, resolve, ResolveInfoError};
 pub use transport::{Output, Transport};
 pub use users::{for_each_user, user_name, user_names, USER_DIRECTORY_PAGE};
 pub use valueread::{read_value, MAX_VALUE_LEN};
+pub use volume::{
+    availability_marker, availability_name, medium_name, volume_health_name, VolumeBytes,
+};

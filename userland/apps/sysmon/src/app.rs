@@ -54,8 +54,8 @@ use core::fmt::Write as _;
 
 use tairix_curses::{char_width, str_width, truncate_to_width, Pos, Screen, Size, Tty, Window};
 use tairix_procinfo::{
-    field_lossy, format_count, format_load, format_size, format_tenths, format_uptime, state_char,
-    Transport, SIZE_WIDTH,
+    availability_marker, field_lossy, format_count, format_load, format_size, format_tenths,
+    format_uptime, state_char, Transport, VolumeBytes, SIZE_WIDTH,
 };
 use tairix_vt::{Attributes, BasicColor, Color};
 
@@ -588,20 +588,23 @@ fn storage_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
         return rows;
     }
     for record in records {
-        let usage = record.usage();
-        let block = u64::from(usage.block_size);
-        let total = usage.total_blocks.saturating_mul(block);
         let target = field_lossy(record.target_bytes());
         let fstype = field_lossy(record.fstype_bytes());
-        let condition = match record.availability() {
-            MountAvailability::Available => "",
-            MountAvailability::UnavailableDirty => "  [unavailable-dirty]",
-            MountAvailability::UnavailableLost => "  [unavailable-lost]",
-            MountAvailability::RecoveryConflict => "  [recovery-conflict]",
-            MountAvailability::Degraded => "  [degraded]",
-            MountAvailability::Recovering => "  [recovering]",
-        };
-        let text = if total == 0 {
+        let condition = availability_marker(record.availability())
+            .map_or_else(String::new, |marker| format!("  [{marker}]"));
+        let text = if let Some(held) = VolumeBytes::of(&record.usage()) {
+            let frac = u32::from(held.used_permille());
+            format!(
+                "{:<MOUNT_TARGET_COL$} {:<MOUNT_FSTYPE_COL$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>3}%  {}{condition}",
+                elide_middle(&target, MOUNT_TARGET_COL),
+                truncate_to_width(&fstype, MOUNT_FSTYPE_COL),
+                format_size(held.total),
+                format_size(held.used()),
+                format_size(held.available),
+                frac / 10,
+                text_bar(frac, 12),
+            )
+        } else {
             // No capacity known: state the identity, never a fabricated size.
             format!(
                 "{:<MOUNT_TARGET_COL$} {:<MOUNT_FSTYPE_COL$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>4}  capacity unknown{condition}",
@@ -611,20 +614,6 @@ fn storage_rows(snapshot: &Snapshot) -> Vec<PanelRow> {
                 "-",
                 "-",
                 "-",
-            )
-        } else {
-            let used = total.saturating_sub(usage.free_blocks.saturating_mul(block));
-            let avail = usage.avail_blocks.saturating_mul(block);
-            let frac = frac_tenths(used, total);
-            format!(
-                "{:<MOUNT_TARGET_COL$} {:<MOUNT_FSTYPE_COL$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>SIZE_WIDTH$} {:>3}%  {}{condition}",
-                elide_middle(&target, MOUNT_TARGET_COL),
-                truncate_to_width(&fstype, MOUNT_FSTYPE_COL),
-                format_size(total),
-                format_size(used),
-                format_size(avail),
-                frac / 10,
-                text_bar(frac, 12),
             )
         };
         rows.push(if record.availability() == MountAvailability::Available {

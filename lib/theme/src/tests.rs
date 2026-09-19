@@ -3,6 +3,7 @@
 use alloc::string::String;
 
 use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
+use tairix_abi::sysinfo::VolumeHealth;
 
 use crate::motion::MotionInteraction;
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
@@ -77,6 +78,40 @@ fn dark_and_light_palettes_differ_on_every_role() {
             l.signal(role),
             "signal role {role:?} differs"
         );
+    }
+}
+
+#[test]
+fn volume_health_tones_are_distinct_and_ordered_by_alarm() {
+    assert_eq!(
+        SignalRole::for_volume_health(VolumeHealth::Healthy),
+        SignalRole::Success
+    );
+    assert_eq!(
+        SignalRole::for_volume_health(VolumeHealth::Degraded),
+        SignalRole::Warning
+    );
+    assert_eq!(
+        SignalRole::for_volume_health(VolumeHealth::Failing),
+        SignalRole::Recovery
+    );
+    // No two bands share a role, so a reader scanning a row of pills never
+    // has to read the word to tell a failing volume from a healthy one.
+    for theme in [Theme::dark(), Theme::light()] {
+        let colour = |health| {
+            theme
+                .palette()
+                .signal(SignalRole::for_volume_health(health))
+        };
+        assert_ne!(
+            colour(VolumeHealth::Healthy),
+            colour(VolumeHealth::Degraded)
+        );
+        assert_ne!(
+            colour(VolumeHealth::Degraded),
+            colour(VolumeHealth::Failing)
+        );
+        assert_ne!(colour(VolumeHealth::Healthy), colour(VolumeHealth::Failing));
     }
 }
 

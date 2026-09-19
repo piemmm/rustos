@@ -2672,6 +2672,46 @@ impl MountAvailability {
             _ => None,
         }
     }
+
+    /// The three-band [`VolumeHealth`] this state falls in: the summary a
+    /// surface badges a volume with.
+    ///
+    /// [`severity`](Self::severity) ranks all six states so a stack can fold
+    /// them; this bands the ranking into the three answers a reader acts on —
+    /// nothing to do, watch it, it is not serving. One definition, so a
+    /// volume cannot read healthy on one surface and at-risk on another.
+    #[must_use]
+    pub const fn health(self) -> VolumeHealth {
+        match self {
+            Self::Available => VolumeHealth::Healthy,
+            Self::Degraded | Self::Recovering => VolumeHealth::Degraded,
+            Self::UnavailableDirty | Self::UnavailableLost | Self::RecoveryConflict => {
+                VolumeHealth::Failing
+            }
+        }
+    }
+}
+
+/// How badly a volume is faring, banded from its [`MountAvailability`].
+///
+/// Ordered by severity, so a device summarising several volumes takes the
+/// worst of them rather than whichever it read first. Its own three-state
+/// vocabulary rather than a task's recovery posture: a disk is not a
+/// process, and borrowing a type whose other states can never arise here
+/// would leave unreachable cases for a reader to puzzle over.
+///
+/// Derived, never transmitted: the wire carries the six-state
+/// [`MountAvailability`], and every surface bands it the same way through
+/// [`MountAvailability::health`].
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+pub enum VolumeHealth {
+    /// The volume is available and reports no fault.
+    #[default]
+    Healthy,
+    /// The volume is serving, but degraded or recovering.
+    Degraded,
+    /// The volume is unavailable: dirty, lost, or in recovery conflict.
+    Failing,
 }
 
 /// An edge-triggered change in a served volume's live health, derived by
@@ -6485,7 +6525,7 @@ mod tests {
         MemoryTotal, MountAvailability, MountListRequest, MountRecord, MountVolumeState,
         ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest,
         SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        UserDirectoryRecord, UserDirectoryRequest, VolumeStats, ENCODED_QUERY_TABLE,
+        UserDirectoryRecord, UserDirectoryRequest, VolumeHealth, VolumeStats, ENCODED_QUERY_TABLE,
         ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
         MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
         RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
@@ -7766,6 +7806,39 @@ mod tests {
             MountAvailability::Available.worse_of(MountAvailability::Recovering),
             MountAvailability::Recovering
         );
+    }
+
+    #[test]
+    fn health_bands_the_availability_ranking_monotonically() {
+        const ORDER: [MountAvailability; 6] = [
+            MountAvailability::Available,
+            MountAvailability::Degraded,
+            MountAvailability::Recovering,
+            MountAvailability::RecoveryConflict,
+            MountAvailability::UnavailableDirty,
+            MountAvailability::UnavailableLost,
+        ];
+        assert_eq!(MountAvailability::Available.health(), VolumeHealth::Healthy);
+        for state in [MountAvailability::Degraded, MountAvailability::Recovering] {
+            assert_eq!(state.health(), VolumeHealth::Degraded);
+        }
+        for state in [
+            MountAvailability::RecoveryConflict,
+            MountAvailability::UnavailableDirty,
+            MountAvailability::UnavailableLost,
+        ] {
+            assert_eq!(state.health(), VolumeHealth::Failing);
+        }
+        // Banding never reorders the ranking, so folding availabilities with
+        // `worse_of` and banding the result agrees with banding each and
+        // taking the worst band.
+        for a in ORDER {
+            for b in ORDER {
+                assert!(a.severity() > b.severity() || a.health() <= b.health());
+                assert_eq!(a.worse_of(b).health(), a.health().max(b.health()));
+            }
+        }
+        assert_eq!(VolumeHealth::default(), VolumeHealth::Healthy);
     }
 
     #[test]

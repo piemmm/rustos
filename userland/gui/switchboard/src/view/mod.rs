@@ -96,8 +96,7 @@ pub mod resources;
 pub mod tasks;
 
 pub use reading::{
-    absence_statement, reading_text, selection_prompt, HealthSeverity, Reading, ReadingFact,
-    Unmeasured,
+    absence_statement, reading_text, selection_prompt, Reading, ReadingFact, Unmeasured,
 };
 pub use recovery::{CrashSnapshot, FaultImpact, FaultMark, RecoveryControl, RecoveryItem};
 pub use resources::{

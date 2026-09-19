@@ -211,7 +211,7 @@ fn render_header(model: &Model, window: &mut Window, cols: u16) {
         let _ = write!(
             text,
             "   Avail {} of {} bytes",
-            space.free_bytes, space.total_bytes
+            space.available, space.total
         );
     }
     let _ = write!(text, "   {} items", model.visible_files().len());
@@ -511,10 +511,10 @@ fn render_volumes(model: &Model, window: &mut Window, body: u16, cols: u16) {
     reverse.reverse = true;
     for (line, (index, volume)) in (0..body - 2).zip(model.volumes.iter().enumerate()) {
         let space = match volume.space {
-            Some(space) => format!("{}/{}", space.free_bytes, space.total_bytes),
+            Some(space) => format!("{}/{}", space.available, space.total),
             None => String::from("-"),
         };
-        let text = format!("{:<24}  {:<8}  free {space}", volume.target, volume.fstype);
+        let text = format!("{:<24}  {:<8}  avail {space}", volume.target, volume.fstype);
         if index == model.volume_cursor {
             window.set_attributes(reverse);
         }

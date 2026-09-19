@@ -178,22 +178,3 @@ impl ReadingFact {
         Self::new(label, Reading::Absent(reason))
     }
 }
-
-/// How badly a volume is faring, as the mount table reports it.
-///
-/// Its own three-state vocabulary rather than a task's recovery posture: a
-/// disk is not a process, and borrowing a type whose other states can never
-/// arise here would leave unreachable cases for a reader to puzzle over.
-///
-/// Ordered by severity, so a device summarising several volumes takes the
-/// worst of them rather than whichever it read first.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
-pub enum HealthSeverity {
-    /// The volume is available and reports no fault.
-    #[default]
-    Healthy,
-    /// The volume is serving, but degraded or recovering.
-    Degraded,
-    /// The volume is unavailable: dirty, lost, or in recovery conflict.
-    Failing,
-}
