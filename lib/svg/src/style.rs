@@ -32,6 +32,18 @@ use crate::geom::{LineCap, LineJoin, StrokeStyle};
 use crate::number::{opacity_to_alpha, parse_length, parse_number, parse_opacity};
 use crate::xml::Element;
 
+/// Where one declaration in the cascade came from.
+///
+/// Only the `marker` shorthand reads it: SVG publishes that property to CSS
+/// alone, so a presentation attribute spelling it is not one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Source {
+    /// A presentation attribute on the element.
+    Attribute,
+    /// A stylesheet rule or a `style` declaration.
+    Declaration,
+}
+
 /// The most dash lengths accepted in one pattern.
 ///
 /// A fixed security bound: a dash pattern is a handful of lengths in every
@@ -61,14 +73,38 @@ pub enum PaintSpec {
     Reference(String, Option<Color>),
 }
 
-/// Which of a shape's fill and stroke layers is painted first.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum PaintOrder {
-    /// The fill, then the stroke over it: SVG's initial order.
-    #[default]
-    FillFirst,
-    /// The stroke, then the fill over it.
-    StrokeFirst,
+/// One of the three things a shape paints.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PaintSlot {
+    /// The interior.
+    Fill,
+    /// The outline.
+    Stroke,
+    /// The markers at the shape's vertices.
+    Markers,
+}
+
+/// The order a shape paints its fill, its stroke, and its markers in.
+///
+/// Always a permutation of the three: the property can only reorder what a
+/// shape draws, never drop part of it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PaintOrder([PaintSlot; 3]);
+
+impl Default for PaintOrder {
+    /// SVG's initial order: the fill, the stroke over it, the markers over
+    /// both.
+    fn default() -> Self {
+        Self([PaintSlot::Fill, PaintSlot::Stroke, PaintSlot::Markers])
+    }
+}
+
+impl PaintOrder {
+    /// The three slots, bottom first.
+    #[must_use]
+    pub const fn slots(self) -> [PaintSlot; 3] {
+        self.0
+    }
 }
 
 /// Whether a viewport-establishing element confines its content.
@@ -101,7 +137,7 @@ pub struct Style {
     pub color: Color,
     /// Which points a `<clipPath>` child of this element encloses.
     pub clip_rule: FillRule,
-    /// Which of a shape's two layers is painted first.
+    /// Which of a shape's fill, stroke, and markers is painted first.
     pub paint_order: PaintOrder,
     /// The group opacity, `0..=1`, applied to this element and its subtree.
     ///
@@ -116,6 +152,16 @@ pub struct Style {
     pub clip_path: Option<String>,
     /// The fragment name of the `<mask>` this element is masked by.
     pub mask: Option<String>,
+    /// The fragment name of the `<marker>` drawn at the shape's first vertex.
+    ///
+    /// The three marker properties inherit, unlike the compositing ones: a
+    /// marker is drawn once per vertex of each descendant shape, not once
+    /// around the subtree.
+    pub marker_start: Option<String>,
+    /// The `<marker>` drawn at every vertex but the first and the last.
+    pub marker_mid: Option<String>,
+    /// The `<marker>` drawn at the shape's last vertex.
+    pub marker_end: Option<String>,
     /// Whether a viewport-establishing element confines its content to the
     /// viewport.
     pub overflow: Overflow,
@@ -146,6 +192,9 @@ impl Default for Style {
             opacity: 1.0,
             clip_path: None,
             mask: None,
+            marker_start: None,
+            marker_mid: None,
+            marker_end: None,
             overflow: Overflow::default(),
             mask_kind: MaskKind::Luminance,
             display: true,
@@ -193,7 +242,7 @@ impl Style {
     ) -> Result<Self, SvgError> {
         let mut style = self.clone();
         for (name, value) in &element.attrs {
-            style.set(name, value.as_ref(), viewport)?;
+            style.set(name, value.as_ref(), viewport, Source::Attribute)?;
         }
         let inline = element.attr("style").unwrap_or("");
         for important in [false, true] {
@@ -201,10 +250,10 @@ impl Style {
                 .iter()
                 .filter(|declaration| declaration.important == important)
             {
-                style.set(rule.name, rule.value, viewport)?;
+                style.set(rule.name, rule.value, viewport, Source::Declaration)?;
             }
             for own in css::declarations(inline).filter(|own| own.important == important) {
-                style.set(own.name, own.value, viewport)?;
+                style.set(own.name, own.value, viewport, Source::Declaration)?;
             }
         }
         Ok(style)
@@ -212,7 +261,13 @@ impl Style {
 
     /// Apply one property. An unknown name is ignored; a known name with an
     /// unparsable value is an error.
-    fn set(&mut self, name: &str, value: &str, viewport: f64) -> Result<(), SvgError> {
+    fn set(
+        &mut self,
+        name: &str,
+        value: &str,
+        viewport: f64,
+        source: Source,
+    ) -> Result<(), SvgError> {
         let value = value.trim();
         match name {
             "fill" => self.fill = parse_paint(value)?,
@@ -228,9 +283,28 @@ impl Style {
             "stroke-dashoffset" => self.stroke_style.dash_offset = parse_length(value, viewport)?,
             "opacity" => self.opacity = parse_opacity(value)?,
             "clip-rule" => self.clip_rule = parse_fill_rule(value)?,
-            "paint-order" => self.paint_order = parse_paint_order(value),
+            // An invalid `paint-order` is a dropped declaration, so the
+            // element keeps whatever it inherited rather than snapping back
+            // to the initial order.
+            "paint-order" => {
+                if let Some(order) = parse_paint_order(value) {
+                    self.paint_order = order;
+                }
+            }
             "clip-path" => self.clip_path = parse_funciri(value)?,
             "mask" => self.mask = parse_funciri(value)?,
+            "marker-start" => self.marker_start = parse_funciri(value)?,
+            "marker-mid" => self.marker_mid = parse_funciri(value)?,
+            "marker-end" => self.marker_end = parse_funciri(value)?,
+            // SVG defines no `marker` presentation attribute, only the CSS
+            // shorthand, so an attribute of that name sets nothing — honouring
+            // it would draw markers no other renderer does.
+            "marker" if source == Source::Declaration => {
+                let shared = parse_funciri(value)?;
+                self.marker_start.clone_from(&shared);
+                self.marker_mid.clone_from(&shared);
+                self.marker_end = shared;
+            }
             "mask-type" => {
                 self.mask_kind = match value {
                     "alpha" => MaskKind::Alpha,
@@ -310,21 +384,44 @@ fn parse_funciri(value: &str) -> Result<Option<String>, SvgError> {
     Ok(Some(id.to_string()))
 }
 
-/// Parse a `paint-order`.
+/// Parse a `paint-order`, or `None` for a value CSS calls invalid.
 ///
-/// The property is a permutation of `fill`, `stroke`, and `markers`; only the
-/// first of fill and stroke to appear decides anything this decoder draws, and
-/// an unrecognised word leaves the initial order rather than refusing the
-/// document, which is what CSS does with an invalid value.
-fn parse_paint_order(value: &str) -> PaintOrder {
-    value
-        .split_ascii_whitespace()
-        .find_map(|word| match word {
-            "stroke" => Some(PaintOrder::StrokeFirst),
-            "fill" => Some(PaintOrder::FillFirst),
-            _ => None,
-        })
-        .unwrap_or_default()
+/// `normal` is the initial order. Otherwise the words name some of `fill`,
+/// `stroke`, and `markers`: those come first in the order they are written,
+/// and whichever are left follow in the initial order. An empty value, an
+/// unknown word, or a repeat is invalid, which CSS drops — it does not refuse
+/// the document and does not reset the property.
+fn parse_paint_order(value: &str) -> Option<PaintOrder> {
+    if value == "normal" {
+        return Some(PaintOrder::default());
+    }
+    let mut order = PaintOrder::default().0;
+    let mut named = 0;
+    for word in value.split_ascii_whitespace() {
+        let slot = match word {
+            "fill" => PaintSlot::Fill,
+            "stroke" => PaintSlot::Stroke,
+            "markers" => PaintSlot::Markers,
+            _ => return None,
+        };
+        // A fourth word can only repeat one of the three, so the index stays
+        // inside the array.
+        if order[..named].contains(&slot) {
+            return None;
+        }
+        order[named] = slot;
+        named += 1;
+    }
+    if named == 0 {
+        return None;
+    }
+    for slot in PaintOrder::default().0 {
+        if !order[..named].contains(&slot) {
+            order[named] = slot;
+            named += 1;
+        }
+    }
+    Some(PaintOrder(order))
 }
 
 /// Parse a `fill-rule` keyword.

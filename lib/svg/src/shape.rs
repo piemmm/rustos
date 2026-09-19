@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::error::SvgError;
-use crate::geom::{Point, SubPath};
+use crate::geom::{Point, SubPath, Vertices};
 use crate::number::{parse_length, Numbers};
 use crate::pathdata::{flatten_ellipse_arc, parse_path_data};
 use crate::xml::Element;
@@ -24,12 +24,28 @@ pub fn is_shape(name: &str) -> bool {
     )
 }
 
+/// Whether markers are drawn on `name`.
+///
+/// The four shapes whose vertices the author wrote. A `<rect>`, `<circle>`,
+/// or `<ellipse>` has none of its own: its outline is *this* module's
+/// flattening, so its "vertices" would be tolerance artefacts that move with
+/// the scale the shape is drawn at, and a marker would slide along the
+/// outline as the asset was rasterised larger.
+#[must_use]
+pub fn takes_markers(name: &str) -> bool {
+    matches!(name, "path" | "line" | "polyline" | "polygon")
+}
+
 /// Flatten one basic shape into sub-paths in its own user space.
 ///
 /// A shape that encloses nothing — a zero extent, a zero radius — yields an
 /// empty list rather than an error, because SVG defines those as simply not
 /// rendering. A *negative* extent is an error, because it is not geometry the
 /// author can have meant.
+///
+/// `vertices` collects where markers go, for the shapes that take them
+/// ([`takes_markers`]). The others leave it untouched, so a rectangle pays
+/// nothing for a feature it cannot carry.
 ///
 /// # Errors
 /// Returns the parse error of a malformed attribute, or
@@ -39,18 +55,19 @@ pub fn shape_subpaths(
     viewport: (f64, f64),
     tolerance: f64,
     max_points: usize,
+    vertices: Option<&mut Vertices>,
 ) -> Result<Vec<SubPath>, SvgError> {
     match node.name {
         "path" => match node.attr("d") {
-            Some(data) => parse_path_data(data, tolerance, max_points),
+            Some(data) => parse_path_data(data, tolerance, max_points, vertices),
             None => Ok(Vec::new()),
         },
         "rect" => rect(node, viewport, tolerance),
         "circle" => circle(node, viewport, tolerance),
         "ellipse" => ellipse(node, viewport, tolerance),
-        "line" => line(node, viewport),
-        "polyline" => points(node, false, max_points),
-        "polygon" => points(node, true, max_points),
+        "line" => line(node, viewport, vertices),
+        "polyline" => points(node, false, max_points, vertices),
+        "polygon" => points(node, true, max_points, vertices),
         _ => Ok(Vec::new()),
     }
 }
@@ -208,16 +225,29 @@ fn full_ellipse(centre: Point, radii: Point, tolerance: f64) -> Vec<SubPath> {
 }
 
 /// `<line>`, which has no area and so only ever shows as a stroke.
-fn line(node: &Element<'_>, viewport: (f64, f64)) -> Result<Vec<SubPath>, SvgError> {
+fn line(
+    node: &Element<'_>,
+    viewport: (f64, f64),
+    vertices: Option<&mut Vertices>,
+) -> Result<Vec<SubPath>, SvgError> {
     let x1 = length(node, "x1", viewport.0)?;
     let y1 = length(node, "y1", viewport.1)?;
     let x2 = length(node, "x2", viewport.0)?;
     let y2 = length(node, "y2", viewport.1)?;
+    if let Some(vertices) = vertices {
+        vertices.move_to((x1, y1))?;
+        vertices.line_to((x2, y2))?;
+    }
     Ok(alloc::vec![SubPath::open(alloc::vec![(x1, y1), (x2, y2)])])
 }
 
 /// `<polyline>` and `<polygon>`, which differ only in closure.
-fn points(node: &Element<'_>, closed: bool, max_points: usize) -> Result<Vec<SubPath>, SvgError> {
+fn points(
+    node: &Element<'_>,
+    closed: bool,
+    max_points: usize,
+    vertices: Option<&mut Vertices>,
+) -> Result<Vec<SubPath>, SvgError> {
     let Some(text) = node.attr("points") else {
         return Ok(Vec::new());
     };
@@ -236,6 +266,21 @@ fn points(node: &Element<'_>, closed: bool, max_points: usize) -> Result<Vec<Sub
     }
     if list.is_empty() {
         return Ok(Vec::new());
+    }
+    // Every point of a poly-shape is a command vertex, and its closure joins
+    // the two ends exactly as a path's `Z` does — so the same builder states
+    // the rule once for both.
+    if let Some(vertices) = vertices {
+        let mut walk = list.iter().copied();
+        if let Some(first) = walk.next() {
+            vertices.move_to(first)?;
+            for point in walk {
+                vertices.line_to(point)?;
+            }
+            if closed {
+                vertices.close()?;
+            }
+        }
     }
     Ok(alloc::vec![SubPath {
         points: list,

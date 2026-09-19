@@ -9,7 +9,7 @@ use crate::error::SvgError;
 use crate::geom::{LineCap, LineJoin};
 use crate::xml;
 
-use super::{PaintSpec, Style};
+use super::{PaintSlot, PaintSpec, Style};
 
 /// The viewport length a percentage resolves against in these tests.
 const VIEWPORT: f64 = 100.0;
@@ -235,5 +235,132 @@ fn the_fill_rule_keywords_both_parse() {
     assert_eq!(
         styled(r#"<rect fill-rule="nonzero"/>"#).fill_rule,
         FillRule::NonZero
+    );
+}
+
+// --- paint order, as a three-way permutation -------------------------------
+
+/// The initial order, which `normal` also spells outright.
+#[test]
+fn the_initial_paint_order_is_fill_then_stroke_then_markers() {
+    use PaintSlot::{Fill, Markers, Stroke};
+    assert_eq!(
+        styled("<rect/>").paint_order.slots(),
+        [Fill, Stroke, Markers]
+    );
+    assert_eq!(
+        styled(r#"<rect paint-order="normal"/>"#)
+            .paint_order
+            .slots(),
+        [Fill, Stroke, Markers]
+    );
+}
+
+/// Whichever slots are named come first in the order they are written, and
+/// whichever are left follow in the initial order.
+#[test]
+fn the_named_slots_come_first_and_the_rest_follow_initially() {
+    use PaintSlot::{Fill, Markers, Stroke};
+    for (value, expected) in [
+        ("markers fill stroke", [Markers, Fill, Stroke]),
+        ("stroke", [Stroke, Fill, Markers]),
+        ("markers", [Markers, Fill, Stroke]),
+        ("stroke markers", [Stroke, Markers, Fill]),
+        ("fill stroke markers", [Fill, Stroke, Markers]),
+        ("  stroke   fill  ", [Stroke, Fill, Markers]),
+    ] {
+        let style = styled(&format!(r#"<rect paint-order="{value}"/>"#));
+        assert_eq!(style.paint_order.slots(), expected, "{value}");
+    }
+}
+
+/// An invalid value is a dropped declaration, so the element keeps what it
+/// inherited rather than snapping back to the initial order — and the
+/// document is not refused over it, which is what CSS does.
+#[test]
+fn an_invalid_paint_order_is_dropped_rather_than_reset() {
+    use PaintSlot::{Fill, Markers, Stroke};
+    let parent = styled(r#"<g paint-order="stroke"/>"#);
+    for value in [
+        "",
+        "sideways",
+        "fill fill",
+        "stroke normal",
+        "markers markers",
+    ] {
+        let style = resolve(&parent, &format!(r#"<rect paint-order="{value}"/>"#))
+            .expect("a dropped declaration is not an error");
+        assert_eq!(
+            style.paint_order.slots(),
+            [Stroke, Fill, Markers],
+            "{value}"
+        );
+    }
+}
+
+/// Paint order inherits, so a container can set it for a whole subtree.
+#[test]
+fn paint_order_inherits() {
+    use PaintSlot::{Fill, Markers, Stroke};
+    let parent = styled(r#"<g paint-order="markers"/>"#);
+    assert_eq!(
+        parent.inherit().paint_order.slots(),
+        [Markers, Fill, Stroke]
+    );
+}
+
+// --- the marker properties -------------------------------------------------
+
+#[test]
+fn each_marker_property_takes_the_fragment_it_names() {
+    let style =
+        styled(r#"<path marker-start="url(#a)" marker-mid="url(#b)" marker-end="url(#c)"/>"#);
+    assert_eq!(style.marker_start.as_deref(), Some("a"));
+    assert_eq!(style.marker_mid.as_deref(), Some("b"));
+    assert_eq!(style.marker_end.as_deref(), Some("c"));
+}
+
+/// The marker properties inherit, unlike the compositing ones: a marker is
+/// drawn at every vertex of every descendant shape, not once around the
+/// subtree.
+#[test]
+fn the_marker_properties_inherit() {
+    let parent = styled(r#"<g marker-mid="url(#dot)"/>"#);
+    assert_eq!(parent.inherit().marker_mid.as_deref(), Some("dot"));
+    // Which is exactly what a clip does not do.
+    assert_eq!(
+        styled(r#"<g clip-path="url(#c)"/>"#).inherit().clip_path,
+        None
+    );
+}
+
+/// The `marker` shorthand sets all three at once.
+#[test]
+fn the_marker_shorthand_sets_all_three() {
+    let style = styled(r#"<path style="marker:url(#dot)"/>"#);
+    assert_eq!(style.marker_start.as_deref(), Some("dot"));
+    assert_eq!(style.marker_mid.as_deref(), Some("dot"));
+    assert_eq!(style.marker_end.as_deref(), Some("dot"));
+    assert_eq!(styled(r#"<path style="marker:none"/>"#).marker_start, None);
+}
+
+/// SVG publishes the shorthand to CSS alone — there is no `marker`
+/// presentation attribute — so an attribute of that name sets nothing, and
+/// honouring it would draw markers no other renderer does.
+#[test]
+fn the_marker_shorthand_is_not_a_presentation_attribute() {
+    let style = styled(r#"<path marker="url(#dot)"/>"#);
+    assert_eq!(style.marker_start, None);
+    assert_eq!(style.marker_mid, None);
+    assert_eq!(style.marker_end, None);
+}
+
+/// A marker value that is neither `none` nor a local reference names a
+/// composite this decoder cannot build, and is refused like a clip's.
+#[test]
+fn a_malformed_marker_reference_is_refused() {
+    assert_eq!(
+        resolve(&Style::default(), r#"<path marker-start="sideways"/>"#),
+        Err(SvgError::InvalidReference)
     );
 }

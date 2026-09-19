@@ -1580,3 +1580,378 @@ fn a_collapsed_placement_does_not_subdivide_a_curve() {
         "a collapsed arc should not be subdivided"
     );
 }
+
+// --- markers ---------------------------------------------------------------
+
+/// A marker whose content is the unit square, so a test reads straight off
+/// the contour where the instance landed and which way it faces.
+fn unit_marker(id: &str, ink: &str, extra: &str) -> alloc::string::String {
+    format!(
+        r#"<marker id="{id}" markerWidth="1" markerHeight="1"
+             markerUnits="userSpaceOnUse" {extra}>
+             <rect width="1" height="1" fill="{ink}"/></marker>"#
+    )
+}
+
+/// One user unit as a design coordinate pair.
+fn at(x: f64, y: f64) -> (i32, i32) {
+    let unit = f64::from(UNIT);
+    (
+        tairix_util::mathf::round_i32(x * unit),
+        tairix_util::mathf::round_i32(y * unit),
+    )
+}
+
+/// The start marker goes on the first vertex, the end marker on the last, and
+/// the mid marker on everything between — and they paint in that order.
+#[test]
+fn markers_are_drawn_at_the_first_the_middle_and_the_last_vertex() {
+    let svg = document(&format!(
+        r#"{}{}{}<polyline points="1,1 3,1 5,1" fill="none"
+             marker-start="url(#s)" marker-mid="url(#m)" marker-end="url(#e)"/>"#,
+        unit_marker("s", "#ff0000", ""),
+        unit_marker("m", "#00ff00", ""),
+        unit_marker("e", "#0000ff", ""),
+    ));
+    let decoded = layers(&svg);
+    assert_eq!(decoded.len(), 3);
+    assert_eq!(solid(&decoded[0]), Color::rgb(255, 0, 0));
+    assert_eq!(solid(&decoded[1]), Color::rgb(0, 255, 0));
+    assert_eq!(solid(&decoded[2]), Color::rgb(0, 0, 255));
+    assert_eq!(contour(&decoded[0])[0], at(1.0, 1.0));
+    assert_eq!(contour(&decoded[1])[0], at(3.0, 1.0));
+    assert_eq!(contour(&decoded[2])[0], at(5.0, 1.0));
+}
+
+/// A closed sub-path returns to where it began, so its first and last
+/// vertices are the same point and carry both end markers — with the mids on
+/// everything between, the corner the closure makes included.
+#[test]
+fn a_closed_sub_path_carries_both_end_markers_on_one_point() {
+    let svg = document(&format!(
+        r#"{}{}{}<polygon points="1,1 3,1 3,3 1,3" fill="none"
+             marker-start="url(#s)" marker-mid="url(#m)" marker-end="url(#e)"/>"#,
+        unit_marker("s", "#ff0000", ""),
+        unit_marker("m", "#00ff00", ""),
+        unit_marker("e", "#0000ff", ""),
+    ));
+    let decoded = layers(&svg);
+    assert_eq!(decoded.len(), 5);
+    assert_eq!(solid(&decoded[0]), Color::rgb(255, 0, 0));
+    for mid in &decoded[1..4] {
+        assert_eq!(solid(mid), Color::rgb(0, 255, 0));
+    }
+    assert_eq!(solid(&decoded[4]), Color::rgb(0, 0, 255));
+    // The start and the end sit on the one point the closure returns to.
+    assert_eq!(contour(&decoded[0])[0], at(1.0, 1.0));
+    assert_eq!(contour(&decoded[4])[0], at(1.0, 1.0));
+    assert_eq!(contour(&decoded[3])[0], at(1.0, 3.0));
+}
+
+/// A path of a single vertex is both the first and the last, so both end
+/// markers land on it and no mid does.
+#[test]
+fn a_single_vertex_carries_the_start_and_the_end_marker() {
+    let svg = document(&format!(
+        r#"{}{}{}<path d="M2 2" marker-start="url(#s)" marker-mid="url(#m)"
+             marker-end="url(#e)"/>"#,
+        unit_marker("s", "#ff0000", ""),
+        unit_marker("m", "#00ff00", ""),
+        unit_marker("e", "#0000ff", ""),
+    ));
+    let decoded = layers(&svg);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(solid(&decoded[0]), Color::rgb(255, 0, 0));
+    assert_eq!(solid(&decoded[1]), Color::rgb(0, 0, 255));
+}
+
+/// `orient="auto"` turns an instance to follow the path, and at a corner it
+/// takes the bisector of what arrives and what leaves.
+#[test]
+fn an_auto_oriented_marker_bisects_the_corner_it_sits_on() {
+    let svg = document(&format!(
+        r#"{}<polyline points="1,1 3,1 3,3" fill="none" marker-mid="url(#m)"/>"#,
+        unit_marker("m", "#000000", r#"orient="auto" overflow="visible""#),
+    ));
+    let decoded = layers(&svg);
+    assert_eq!(decoded.len(), 1);
+    let half = core::f64::consts::FRAC_1_SQRT_2;
+    assert_eq!(contour(&decoded[0])[0], at(3.0, 1.0));
+    // The marker's own positive x axis, one unit along the 45° bisector.
+    assert_eq!(contour(&decoded[0])[1], at(3.0 + half, 1.0 + half));
+}
+
+/// `auto-start-reverse` turns the start marker about and leaves every other
+/// one alone, which is what lets one arrowhead point out of both ends.
+#[test]
+fn auto_start_reverse_turns_only_the_start_marker_about() {
+    let svg = document(&format!(
+        r#"{}<polyline points="1,1 3,1" fill="none"
+             marker-start="url(#m)" marker-end="url(#m)"/>"#,
+        unit_marker(
+            "m",
+            "#000000",
+            r#"orient="auto-start-reverse" overflow="visible""#
+        ),
+    ));
+    let decoded = layers(&svg);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(contour(&decoded[0])[1], at(0.0, 1.0));
+    assert_eq!(contour(&decoded[1])[1], at(4.0, 1.0));
+}
+
+/// A stated angle ignores the path entirely.
+#[test]
+fn a_stated_orient_angle_ignores_the_path() {
+    let svg = document(&format!(
+        r#"{}<polyline points="1,1 3,1" fill="none" marker-start="url(#m)"/>"#,
+        unit_marker("m", "#000000", r#"orient="90" overflow="visible""#),
+    ));
+    let decoded = layers(&svg);
+    assert_eq!(contour(&decoded[0])[1], at(1.0, 2.0));
+}
+
+/// The default units measure a marker in the referencing element's stroke
+/// widths, so it grows with the line; `userSpaceOnUse` leaves it alone.
+#[test]
+fn stroke_width_units_scale_a_marker_and_user_space_units_do_not() {
+    let scaled = document(
+        r##"<marker id="m" markerWidth="1" markerHeight="1" overflow="visible">
+              <rect width="1" height="1" fill="#000000"/></marker>
+            <polyline points="1,1 3,1 3,3" fill="none" stroke="#123456" stroke-width="2"
+              marker-start="url(#m)"/>"##,
+    );
+    let decoded = layers(&scaled);
+    // The stroke, then the marker over it.
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(contour(&decoded[1])[0], at(1.0, 1.0));
+    assert_eq!(contour(&decoded[1])[1], at(3.0, 1.0));
+
+    let fixed = document(
+        r##"<marker id="m" markerWidth="1" markerHeight="1" markerUnits="userSpaceOnUse"
+              overflow="visible"><rect width="1" height="1" fill="#000000"/></marker>
+            <polyline points="1,1 3,1 3,3" fill="none" stroke="#123456" stroke-width="2"
+              marker-start="url(#m)"/>"##,
+    );
+    assert_eq!(contour(&layers(&fixed)[1])[1], at(2.0, 1.0));
+}
+
+/// `refX`/`refY` name the content point that lands on the vertex.
+#[test]
+fn the_reference_point_sits_on_the_vertex() {
+    let svg = document(
+        r##"<marker id="m" markerWidth="2" markerHeight="2" markerUnits="userSpaceOnUse"
+              refX="1" refY="1"><rect width="2" height="2" fill="#000000"/></marker>
+            <polyline points="4,4 6,4" fill="none" marker-start="url(#m)"/>"##,
+    );
+    let decoded = layers(&svg);
+    assert_eq!(contour(&decoded[0])[0], at(3.0, 3.0));
+    assert_eq!(contour(&decoded[0])[2], at(5.0, 5.0));
+}
+
+/// A marker's own `viewBox` fits its content to the viewport, so the drawing
+/// is authored in whatever coordinates suit it.
+#[test]
+fn a_marker_view_box_fits_its_content_to_the_viewport() {
+    let svg = document(
+        r##"<marker id="m" markerWidth="2" markerHeight="2" markerUnits="userSpaceOnUse"
+              viewBox="0 0 4 4"><rect width="4" height="4" fill="#000000"/></marker>
+            <polyline points="1,1 3,1" fill="none" marker-start="url(#m)"/>"##,
+    );
+    let decoded = layers(&svg);
+    assert_eq!(contour(&decoded[0])[0], at(1.0, 1.0));
+    assert_eq!(contour(&decoded[0])[2], at(3.0, 3.0));
+}
+
+/// A marker viewport clips its content like any other — but content already
+/// inside it composites identically without a group, so the isolation buffer
+/// is allocated only where the viewport actually cuts something.
+#[test]
+fn a_marker_clips_to_its_viewport_only_where_it_must() {
+    let fits = tree(&document(&format!(
+        r#"{}<polyline points="1,1 3,1" fill="none" marker-start="url(#m)"/>"#,
+        unit_marker("m", "#000000", ""),
+    )));
+    assert!(matches!(fits.as_slice(), [Node::Fill(_)]), "{fits:?}");
+
+    let spills = document(
+        r##"<marker id="m" markerWidth="1" markerHeight="1" markerUnits="userSpaceOnUse">
+              <rect width="4" height="4" fill="#000000"/></marker>
+            <polyline points="1,1 3,1" fill="none" marker-start="url(#m)"/>"##,
+    );
+    let clipped = only_group(&spills);
+    assert!(clipped.mask.is_some());
+    assert_eq!(clipped.opacity, u8::MAX);
+
+    // The same spill drawn where the author asked for no clip.
+    let visible = document(
+        r##"<marker id="m" markerWidth="1" markerHeight="1" markerUnits="userSpaceOnUse"
+              overflow="visible"><rect width="4" height="4" fill="#000000"/></marker>
+            <polyline points="1,1 3,1" fill="none" marker-start="url(#m)"/>"##,
+    );
+    assert!(matches!(tree(&visible).as_slice(), [Node::Fill(_)]));
+}
+
+/// `paint-order` reaches the markers too, not just the fill and the stroke.
+#[test]
+fn paint_order_moves_the_markers_with_the_other_two() {
+    let body = format!(
+        r##"{}<polyline points="1,1 3,1 3,3" fill="#ff0000" stroke="#0000ff"
+             stroke-width="1" marker-start="url(#m)""##,
+        unit_marker("m", "#00ff00", ""),
+    );
+    let normal = layers(&document(&format!("{body}/>")));
+    assert_eq!(solid(&normal[0]), Color::rgb(255, 0, 0));
+    assert_eq!(solid(&normal[1]), Color::rgb(0, 0, 255));
+    assert_eq!(solid(&normal[2]), Color::rgb(0, 255, 0));
+
+    let reordered = layers(&document(&format!(
+        r#"{body} paint-order="markers fill stroke"/>"#
+    )));
+    assert_eq!(solid(&reordered[0]), Color::rgb(0, 255, 0));
+    assert_eq!(solid(&reordered[1]), Color::rgb(255, 0, 0));
+    assert_eq!(solid(&reordered[2]), Color::rgb(0, 0, 255));
+}
+
+/// A marker takes its style from its own place in the document, not from the
+/// shape that placed it — there is no way in SVG 1.1 for a marker to be
+/// tinted by its user.
+#[test]
+fn a_marker_takes_its_own_place_in_the_document() {
+    let svg = document(
+        r##"<g fill="#ff0000"><marker id="m" markerWidth="1" markerHeight="1"
+              markerUnits="userSpaceOnUse"><rect width="1" height="1"/></marker></g>
+            <polyline points="1,1 3,1" fill="none" marker-start="url(#m)"/>"##,
+    );
+    let decoded = layers(&svg);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(solid(&decoded[0]), Color::rgb(255, 0, 0));
+}
+
+/// A `<marker>` is drawn only where it is referenced, never where it sits.
+#[test]
+fn a_marker_is_not_drawn_where_it_is_defined() {
+    let svg = document(&format!(
+        r##"{}<rect width="2" height="2" fill="#000000"/>"##,
+        unit_marker("m", "#ff0000", ""),
+    ));
+    assert_eq!(layers(&svg).len(), 1);
+}
+
+/// A reference to a marker the document does not define draws nothing and
+/// leaves the shape alone — a missing decoration cannot show more than the
+/// author asked for, so there is nothing to fail closed against.
+#[test]
+fn a_dangling_marker_reference_draws_nothing_and_keeps_the_shape() {
+    let svg = document(
+        r##"<polyline points="1,1 3,1 3,3" fill="#ff0000" marker-start="url(#nothing)"
+              marker-mid="url(#nothing)" marker-end="url(#nothing)"/>"##,
+    );
+    let decoded = layers(&svg);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(solid(&decoded[0]), Color::rgb(255, 0, 0));
+}
+
+/// Markers go on the shapes whose vertices the author wrote. A rectangle,
+/// circle, or ellipse has none of its own — its outline is the decoder's
+/// flattening — so it carries none.
+#[test]
+fn markers_are_ignored_on_the_shapes_that_have_no_authored_vertices() {
+    for shape in [
+        r##"<rect width="4" height="4" fill="#ff0000""##,
+        r##"<circle cx="4" cy="4" r="2" fill="#ff0000""##,
+        r##"<ellipse cx="4" cy="4" rx="2" ry="1" fill="#ff0000""##,
+    ] {
+        let svg = document(&format!(
+            r#"{}{shape} marker-start="url(#m)" marker-mid="url(#m)"
+                 marker-end="url(#m)"/>"#,
+            unit_marker("m", "#00ff00", ""),
+        ));
+        let decoded = layers(&svg);
+        assert_eq!(decoded.len(), 1, "{shape}");
+        assert_eq!(solid(&decoded[0]), Color::rgb(255, 0, 0), "{shape}");
+    }
+}
+
+/// An element's own opacity composites its markers with the rest of it as one
+/// unit: folding it into each would show the shape through its own
+/// decorations.
+#[test]
+fn an_elements_opacity_composites_its_markers_with_it() {
+    let svg = document(&format!(
+        r#"{}<polyline points="1,1 3,1" fill="none" opacity="0.5"
+             marker-start="url(#m)"/>"#,
+        unit_marker("m", "#000000", ""),
+    ));
+    let group = only_group(&svg);
+    assert!(group.opacity < u8::MAX);
+    assert!(group.mask.is_none());
+    assert_eq!(flatten(&group.children).len(), 1);
+}
+
+/// One instance is one element visit, so a marker placed at every vertex of a
+/// long path is bounded by the work it asks for — even when its content
+/// resolves to no paint at all and so charges no layer and no vertex.
+#[test]
+fn too_many_marker_instances_is_refused() {
+    let content = "<rect width=\"1\" height=\"1\" fill=\"none\"/>".repeat(20);
+    let marked = |points: usize| {
+        let mut list = alloc::string::String::new();
+        for index in 0..points {
+            let _ = write!(list, "{},{} ", index % 7, index % 5);
+        }
+        document(&format!(
+            r#"<marker id="m" markerWidth="1" markerHeight="1"
+                  markerUnits="userSpaceOnUse">{content}</marker>
+                <polyline points="{list}" fill="none" marker-mid="url(#m)"/>"#
+        ))
+    };
+    // Few enough instances to afford, and drawing nothing, so no other budget
+    // can be what turns the larger one away.
+    let affordable = decode_square(marked(1000).as_bytes()).expect("an affordable document");
+    assert_eq!(affordable.nodes().len(), 0);
+    assert_eq!(
+        decode_square(marked(4000).as_bytes()),
+        Err(SvgError::TooComplex)
+    );
+}
+
+/// A marker whose content places the same marker would never end; the visit
+/// budget is what stops it, like every other reference cycle.
+#[test]
+fn a_marker_that_places_itself_terminates() {
+    let svg = document(
+        r#"<marker id="m" markerWidth="1" markerHeight="1" markerUnits="userSpaceOnUse">
+              <polyline points="0,0 1,1" fill="none" marker-start="url(#m)"/></marker>
+            <polyline points="1,1 3,1" fill="none" marker-start="url(#m)"/>"#,
+    );
+    assert_eq!(decode_square(svg.as_bytes()), Err(SvgError::TooComplex));
+}
+
+/// A definition's own style is memoised, because it is resolved once per
+/// place it is referenced from — a marker, once per vertex. The viewport is
+/// part of what it is memoised against: a percentage length on the
+/// definition's ancestry resolves against whichever viewport the
+/// *referencing* element sits in, so the same definition genuinely has two
+/// answers and must not be handed the first one twice.
+#[test]
+fn a_definition_resolves_its_percentages_per_referencing_viewport() {
+    let svg = r##"<svg viewBox="0 0 8 8">
+        <g stroke-width="50%"><marker id="m" markerWidth="8" markerHeight="8"
+          markerUnits="userSpaceOnUse" overflow="visible">
+          <line x1="0" y1="0" x2="1" y2="0" stroke="#000000"/></marker></g>
+        <polyline points="1,1 3,1" fill="none" marker-start="url(#m)"/>
+        <svg x="0" y="4" width="4" height="4" viewBox="0 0 4 4" overflow="visible">
+          <polyline points="1,1 3,1" fill="none" marker-start="url(#m)"/></svg>
+        </svg>"##;
+    let decoded = layers(svg);
+    assert_eq!(decoded.len(), 2);
+    let height = |layer: &Layer| {
+        let (_, top, _, bottom) = box_of(layer);
+        bottom - top
+    };
+    // The root viewport's diagonal is eight user units, the nested one's is
+    // four, so the same `50%` stroke is twice as wide in the first.
+    assert_eq!(height(&decoded[0]), 4 * UNIT);
+    assert_eq!(height(&decoded[1]), 2 * UNIT);
+}

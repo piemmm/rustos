@@ -22,7 +22,7 @@ use core::f64::consts::{PI, TAU};
 use tairix_util::mathf::{acos, ceil, cos, hypot, sin, sqrt};
 
 use crate::error::SvgError;
-use crate::geom::{Point, SubPath};
+use crate::geom::{delta, Point, SubPath, Vertices};
 use crate::number::Numbers;
 
 /// The most segments any single curve or arc may be flattened into.
@@ -50,6 +50,12 @@ const MIN_TOLERANCE: f64 = 1e-4;
 /// filled but is a legitimate round-capped dot when stroked, so the decision
 /// belongs to the caller.
 ///
+/// `vertices` collects the *command* vertices and the path's true direction
+/// through each, which markers are placed at. It is opt-in because only a
+/// shape that references a marker has any use for them, and flattening has
+/// thrown the command structure away by the time anything downstream could
+/// rebuild it.
+///
 /// # Errors
 /// Returns [`SvgError::UnsupportedPath`] for an unknown command or a path
 /// that does not begin with a `moveto`, [`SvgError::InvalidNumber`] for a
@@ -60,9 +66,10 @@ pub fn parse_path_data(
     d: &str,
     tolerance: f64,
     max_points: usize,
+    vertices: Option<&mut Vertices>,
 ) -> Result<Vec<SubPath>, SvgError> {
     let mut numbers = Numbers::new(d);
-    let mut builder = Builder::new(clamp_tolerance(tolerance), max_points);
+    let mut builder = Builder::new(clamp_tolerance(tolerance), max_points, vertices);
     let mut previous: Option<char> = None;
 
     while !numbers.is_exhausted() {
@@ -87,7 +94,7 @@ pub fn parse_path_data(
         // would consume nothing and never terminate. SVG requires a new
         // sub-path to begin with a moveto anyway.
         if matches!(command, 'Z' | 'z') {
-            builder.close();
+            builder.close()?;
             previous = None;
             continue;
         }
@@ -106,7 +113,11 @@ fn clamp_tolerance(tolerance: f64) -> f64 {
 }
 
 /// Execute one parameter set of `command`.
-fn run(command: char, numbers: &mut Numbers<'_>, builder: &mut Builder) -> Result<(), SvgError> {
+fn run(
+    command: char,
+    numbers: &mut Numbers<'_>,
+    builder: &mut Builder<'_>,
+) -> Result<(), SvgError> {
     let relative = command.is_ascii_lowercase();
     match command.to_ascii_uppercase() {
         'M' => {
@@ -170,7 +181,7 @@ fn run(command: char, numbers: &mut Numbers<'_>, builder: &mut Builder) -> Resul
 }
 
 /// The sub-paths built so far and the pen state the next command starts from.
-struct Builder {
+struct Builder<'v> {
     subpaths: Vec<SubPath>,
     current: Vec<Point>,
     start: Point,
@@ -179,19 +190,22 @@ struct Builder {
     cubic_control: Option<Point>,
     /// The previous command's quadratic control point, which `T` reflects.
     quadratic_control: Option<Point>,
+    /// Where the command vertices go, for a caller that draws markers.
+    vertices: Option<&'v mut Vertices>,
     tolerance: f64,
     points_left: usize,
 }
 
-impl Builder {
-    fn new(tolerance: f64, max_points: usize) -> Self {
-        Self {
+impl Builder<'_> {
+    fn new(tolerance: f64, max_points: usize, vertices: Option<&mut Vertices>) -> Builder<'_> {
+        Builder {
             subpaths: Vec::new(),
             current: Vec::new(),
             start: (0.0, 0.0),
             cursor: (0.0, 0.0),
             cubic_control: None,
             quadratic_control: None,
+            vertices,
             tolerance,
             points_left: max_points,
         }
@@ -230,6 +244,9 @@ impl Builder {
         self.cursor = point;
         self.charge()?;
         self.current.push(point);
+        if let Some(vertices) = &mut self.vertices {
+            vertices.move_to(point)?;
+        }
         self.forget_controls();
         Ok(())
     }
@@ -237,6 +254,9 @@ impl Builder {
     /// Extend the current sub-path to `point`.
     fn line_to(&mut self, point: Point) -> Result<(), SvgError> {
         self.push(point)?;
+        if let Some(vertices) = &mut self.vertices {
+            vertices.line_to(point)?;
+        }
         self.forget_controls();
         Ok(())
     }
@@ -247,6 +267,8 @@ impl Builder {
         let mut points = Vec::new();
         flatten_cubic(from, c1, c2, to, self.tolerance, &mut points);
         self.extend(points)?;
+        let (leaving, arriving) = cubic_tangents(from, c1, c2, to);
+        self.curve_vertex(to, leaving, arriving)?;
         self.cubic_control = Some(c2);
         self.quadratic_control = None;
         Ok(())
@@ -258,6 +280,8 @@ impl Builder {
         let mut points = Vec::new();
         flatten_quadratic(from, control, to, self.tolerance, &mut points);
         self.extend(points)?;
+        let (leaving, arriving) = quadratic_tangents(from, control, to);
+        self.curve_vertex(to, leaving, arriving)?;
         self.quadratic_control = Some(control);
         self.cubic_control = None;
         Ok(())
@@ -274,10 +298,14 @@ impl Builder {
     ) -> Result<(), SvgError> {
         let from = self.cursor;
         let mut points = Vec::new();
-        match arc_centre(from, to, radii, rotation, large, sweep) {
+        let tangents = match arc_centre(from, to, radii, rotation, large, sweep) {
             // A zero radius, or an arc that ends where it began, degrades to
             // a straight line, exactly as the specification requires.
-            None => points.push(to),
+            None => {
+                points.push(to);
+                let chord = delta(from, to);
+                (chord, chord)
+            }
             Some(arc) => {
                 flatten_ellipse_arc(
                     arc.centre,
@@ -294,18 +322,32 @@ impl Builder {
                 if let Some(last) = points.last_mut() {
                     *last = to;
                 }
+                arc_tangents(&arc, rotation)
             }
-        }
+        };
         self.extend(points)?;
+        self.curve_vertex(to, tangents.0, tangents.1)?;
         self.forget_controls();
         Ok(())
     }
 
     /// Close the current sub-path; the pen returns to where it began.
-    fn close(&mut self) {
+    fn close(&mut self) -> Result<(), SvgError> {
         self.flush(true);
         self.cursor = self.start;
+        if let Some(vertices) = &mut self.vertices {
+            vertices.close()?;
+        }
         self.forget_controls();
+        Ok(())
+    }
+
+    /// Record the command vertex a curved segment ends at.
+    fn curve_vertex(&mut self, to: Point, leaving: Point, arriving: Point) -> Result<(), SvgError> {
+        match &mut self.vertices {
+            Some(vertices) => vertices.curve_to(to, leaving, arriving),
+            None => Ok(()),
+        }
     }
 
     /// Forget the reflected-control state, which only survives between two
@@ -464,6 +506,56 @@ pub fn flatten_ellipse_arc(
             centre.1 + sin_r * x + cos_r * y,
         ));
     }
+}
+
+/// The direction a cubic leaves `from` in and the direction it arrives at
+/// `to` in.
+///
+/// SVG orients a marker by the segment's *true* tangent, which for a cubic is
+/// the control-point direction — the first flattened chord only approximates
+/// it, and would swing the marker as the flattening tolerance changed with
+/// the scale the shape is drawn at. A control point coincident with its
+/// endpoint gives no direction, so the next point along stands in, which is
+/// the limit of the curve's own direction there.
+fn cubic_tangents(from: Point, c1: Point, c2: Point, to: Point) -> (Point, Point) {
+    (
+        first_direction([delta(from, c1), delta(from, c2), delta(from, to)]),
+        first_direction([delta(c2, to), delta(c1, to), delta(from, to)]),
+    )
+}
+
+/// [`cubic_tangents`] for a quadratic, which has one control point to fall
+/// back through instead of two.
+fn quadratic_tangents(from: Point, control: Point, to: Point) -> (Point, Point) {
+    (
+        first_direction([delta(from, control), delta(from, to)]),
+        first_direction([delta(control, to), delta(from, to)]),
+    )
+}
+
+/// The arc's tangents at its two ends, from the same centre parameterisation
+/// the flattener sweeps, so they are exact rather than chord approximations.
+fn arc_tangents(arc: &Arc, x_rotation_radians: f64) -> (Point, Point) {
+    let (cos_r, sin_r) = (cos(x_rotation_radians), sin(x_rotation_radians));
+    let facing = |angle: f64| {
+        let (dx, dy) = (-arc.radii.0 * sin(angle), arc.radii.1 * cos(angle));
+        let turned = (cos_r * dx - sin_r * dy, sin_r * dx + cos_r * dy);
+        if arc.sweep < 0.0 {
+            (-turned.0, -turned.1)
+        } else {
+            turned
+        }
+    };
+    (facing(arc.start), facing(arc.start + arc.sweep))
+}
+
+/// The first candidate that states a direction, or no direction when every
+/// one of them collapses.
+fn first_direction<const N: usize>(candidates: [Point; N]) -> Point {
+    candidates
+        .into_iter()
+        .find(|candidate| *candidate != (0.0, 0.0))
+        .unwrap_or((0.0, 0.0))
 }
 
 /// A point on a cubic Bézier.

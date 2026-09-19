@@ -6,10 +6,10 @@ use alloc::vec::Vec;
 use tairix_util::mathf::sqrt;
 
 use crate::error::SvgError;
-use crate::geom::{Point, SubPath};
+use crate::geom::{Point, SubPath, Vertex, Vertices};
 use crate::xml;
 
-use super::{is_shape, shape_subpaths};
+use super::{is_shape, shape_subpaths, takes_markers};
 
 /// The viewport percentages resolve against in these tests.
 const VIEWPORT: (f64, f64) = (100.0, 100.0);
@@ -31,7 +31,7 @@ fn flatten(tag: &str) -> Result<Vec<SubPath>, SvgError> {
     let document = format!("<svg>{tag}</svg>");
     let root = xml::parse(&document).expect("a document");
     let child = root.children.first().expect("a child element");
-    shape_subpaths(child, VIEWPORT, TOL, BUDGET)
+    shape_subpaths(child, VIEWPORT, TOL, BUDGET, None)
 }
 
 /// The bounds of every point in `subpaths`.
@@ -257,7 +257,82 @@ fn a_shape_that_exceeds_the_budget_is_refused() {
     let root = xml::parse(&document).expect("a document");
     let child = root.children.first().expect("a child element");
     assert_eq!(
-        shape_subpaths(child, VIEWPORT, TOL, 2),
+        shape_subpaths(child, VIEWPORT, TOL, 2, None),
         Err(SvgError::TooComplex)
     );
+}
+
+// --- the vertices markers are placed at -----------------------------------
+
+/// The vertices one shape element contributes.
+#[track_caller]
+fn vertices(tag: &str) -> Vec<Vertex> {
+    let document = format!("<svg>{tag}</svg>");
+    let root = xml::parse(&document).expect("a document");
+    let child = root.children.first().expect("a child element");
+    let mut sink = Vertices::new(BUDGET);
+    shape_subpaths(child, VIEWPORT, TOL, BUDGET, Some(&mut sink)).expect("a shape");
+    sink.finish()
+}
+
+/// Markers are drawn on the four shapes whose vertices the author wrote. The
+/// others have none of their own: their outlines are this module's
+/// flattening, so a marker would slide along them as the asset was rasterised
+/// larger.
+#[test]
+fn only_the_shapes_with_authored_vertices_take_markers() {
+    for name in ["path", "line", "polyline", "polygon"] {
+        assert!(takes_markers(name), "{name}");
+    }
+    for name in ["rect", "circle", "ellipse", "g", "text"] {
+        assert!(!takes_markers(name), "{name}");
+    }
+}
+
+/// A `<rect>`, `<circle>`, or `<ellipse>` leaves the sink alone, so it pays
+/// nothing for a feature it cannot carry.
+#[test]
+fn a_shape_that_takes_no_markers_reports_no_vertices() {
+    for tag in [
+        r#"<rect width="4" height="4"/>"#,
+        r#"<rect width="4" height="4" rx="1"/>"#,
+        r#"<circle r="4"/>"#,
+        r#"<ellipse rx="4" ry="2"/>"#,
+    ] {
+        assert!(vertices(tag).is_empty(), "{tag}");
+    }
+}
+
+/// A `<line>` has exactly its two ends, each with the one direction it runs.
+#[test]
+fn a_line_has_its_two_ends() {
+    let places = vertices(r#"<line x1="0" y1="0" x2="0" y2="10"/>"#);
+    assert_eq!(places.len(), 2);
+    assert_eq!(places[0].incoming, None);
+    assert_eq!(places[0].outgoing, Some((0.0, 1.0)));
+    assert_eq!(places[1].incoming, Some((0.0, 1.0)));
+    assert_eq!(places[1].outgoing, None);
+}
+
+/// Every point of a `<polyline>` is a vertex, and its two ends stay open.
+#[test]
+fn a_polyline_is_a_vertex_per_point() {
+    let places = vertices(r#"<polyline points="0,0 10,0 10,10"/>"#);
+    assert_eq!(places.len(), 3);
+    assert_eq!(places[0].incoming, None);
+    assert_eq!(places[2].outgoing, None);
+    assert_eq!(places[1].incoming, Some((1.0, 0.0)));
+    assert_eq!(places[1].outgoing, Some((0.0, 1.0)));
+}
+
+/// A `<polygon>` closes, so it carries the extra vertex the closure returns
+/// to and the join the two ends make there — exactly as a path's `Z` does.
+#[test]
+fn a_polygon_closes_like_a_path_does() {
+    let places = vertices(r#"<polygon points="0,0 10,0 10,10 0,10"/>"#);
+    assert_eq!(places.len(), 5);
+    assert_eq!(places[4].at, (0.0, 0.0));
+    assert_eq!(places[4].incoming, Some((0.0, -1.0)));
+    assert_eq!(places[0].incoming, Some((0.0, -1.0)));
+    assert_eq!(places[0].outgoing, Some((1.0, 0.0)));
 }

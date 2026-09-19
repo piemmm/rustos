@@ -11,6 +11,10 @@
 
 use alloc::vec::Vec;
 
+use tairix_util::mathf::hypot;
+
+use crate::error::SvgError;
+
 /// A point in the document's user space.
 pub type Point = (f64, f64);
 
@@ -53,6 +57,170 @@ impl SubPath {
     pub fn is_degenerate(&self) -> bool {
         self.points.len() < 3
     }
+}
+
+/// One marker position on a shape, and which way the path runs through it.
+///
+/// The directions are unit vectors in the shape's own user space. Either is
+/// absent where no segment lies on that side, or where the one that does has
+/// no length — a vertex with neither has no direction to orient a marker by.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Vertex {
+    /// Where the marker sits.
+    pub at: Point,
+    /// The direction the path arrives in.
+    pub incoming: Option<Point>,
+    /// The direction the path leaves in.
+    pub outgoing: Option<Point>,
+}
+
+/// The sub-path being accumulated, so closing it can join its two ends.
+struct Open {
+    /// Which vertex began it.
+    first: usize,
+    /// Where it began.
+    at: Point,
+}
+
+/// A shape's marker vertices, accumulated as its commands are read.
+///
+/// Markers sit at the vertices the *author* wrote, turned by the path's true
+/// direction there, and flattening throws both away — so they are taken while
+/// the command structure is still live. A caller that draws markers hands one
+/// of these to the parser; one that does not passes nothing and pays a branch
+/// per command.
+pub struct Vertices {
+    list: Vec<Vertex>,
+    open: Option<Open>,
+    limit: usize,
+}
+
+impl Vertices {
+    /// A collector holding at most `limit` vertices.
+    ///
+    /// A security bound rather than a capacity, and deliberately the
+    /// conservative one: an instance costs at least one element visit, so
+    /// bounding the list by the visits left keeps a hostile path's transient
+    /// vertex list to the same order as the geometry it accompanies.
+    #[must_use]
+    pub const fn new(limit: usize) -> Self {
+        Self {
+            list: Vec::new(),
+            open: None,
+            limit,
+        }
+    }
+
+    /// Begin a sub-path at `at`.
+    ///
+    /// # Errors
+    /// Returns [`SvgError::TooComplex`] once the limit is reached.
+    pub fn move_to(&mut self, at: Point) -> Result<(), SvgError> {
+        self.open = Some(Open {
+            first: self.list.len(),
+            at,
+        });
+        self.push(at, None)
+    }
+
+    /// Extend the sub-path to `to` along a straight segment.
+    ///
+    /// # Errors
+    /// Returns [`SvgError::TooComplex`] once the limit is reached.
+    pub fn line_to(&mut self, to: Point) -> Result<(), SvgError> {
+        let direction = match self.list.last() {
+            Some(previous) => delta(previous.at, to),
+            None => return self.move_to(to),
+        };
+        self.curve_to(to, direction, direction)
+    }
+
+    /// Extend the sub-path to `to` along a segment that leaves and arrives in
+    /// different directions.
+    ///
+    /// # Errors
+    /// Returns [`SvgError::TooComplex`] once the limit is reached.
+    pub fn curve_to(&mut self, to: Point, leaving: Point, arriving: Point) -> Result<(), SvgError> {
+        let Some(previous) = self.list.last_mut() else {
+            // Nothing precedes the segment, so it begins the sub-path.
+            return self.move_to(to);
+        };
+        previous.outgoing = normalise(leaving);
+        self.push(to, normalise(arriving))
+    }
+
+    /// Close the sub-path with a straight segment back to where it began.
+    ///
+    /// # Errors
+    /// Returns [`SvgError::TooComplex`] once the limit is reached.
+    pub fn close(&mut self) -> Result<(), SvgError> {
+        let Some(open) = self.open.as_ref() else {
+            return Ok(());
+        };
+        // A sub-path of one point has no two ends to join, and a closepath
+        // costs no point of the path budget, so letting a run of them each add
+        // a vertex would let a free command allocate without end.
+        let (first, start) = (open.first, open.at);
+        if self.list.len() <= first + 1 {
+            return Ok(());
+        }
+        let Some(end) = self.list.last_mut() else {
+            return Ok(());
+        };
+        let direction = normalise(delta(end.at, start));
+        end.outgoing = direction;
+        self.push(start, direction)?;
+
+        // The two ends are one point on one closed curve, so the turn there
+        // reads the same from either: in along the closing segment, out along
+        // the sub-path's first. A segment that follows without a moveto
+        // overwrites the latter, which is where the pen actually goes next.
+        let mut leaving = None;
+        if let Some(vertex) = self.list.get_mut(first) {
+            leaving = vertex.outgoing;
+            vertex.incoming = direction;
+        }
+        if let Some(end) = self.list.last_mut() {
+            end.outgoing = leaving;
+        }
+        self.open = Some(Open {
+            first: self.list.len() - 1,
+            at: start,
+        });
+        Ok(())
+    }
+
+    /// The vertices, in path order.
+    #[must_use]
+    pub fn finish(self) -> Vec<Vertex> {
+        self.list
+    }
+
+    /// Append one vertex, charging it against the limit.
+    fn push(&mut self, at: Point, incoming: Option<Point>) -> Result<(), SvgError> {
+        if self.list.len() >= self.limit {
+            return Err(SvgError::TooComplex);
+        }
+        self.list.push(Vertex {
+            at,
+            incoming,
+            outgoing: None,
+        });
+        Ok(())
+    }
+}
+
+/// The vector from `from` to `to`.
+pub(crate) fn delta(from: Point, to: Point) -> Point {
+    (to.0 - from.0, to.1 - from.1)
+}
+
+/// `vector` scaled to unit length, or `None` when it has no length to scale —
+/// which is how a coincident pair or a zero-length segment states that it
+/// gives no direction.
+pub(crate) fn normalise(vector: Point) -> Option<Point> {
+    let length = hypot(vector.0, vector.1);
+    (length > 0.0 && length.is_finite()).then(|| (vector.0 / length, vector.1 / length))
 }
 
 /// How a stroke ends an open sub-path.

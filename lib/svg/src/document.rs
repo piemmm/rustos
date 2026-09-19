@@ -41,12 +41,13 @@ use tairix_util::mathf::{round_i32, sqrt};
 
 use crate::css::{Declaration, Stylesheet};
 use crate::error::SvgError;
-use crate::geom::{bounds, Point, SubPath};
+use crate::geom::{bounds, Point, SubPath, Vertex, Vertices};
+use crate::marker::{Marker, Position};
 use crate::number::{opacity_to_alpha, parse_length, parse_number};
 use crate::paint::{PaintServers, PatternTile, Resolved};
-use crate::shape::{is_shape, shape_subpaths};
+use crate::shape::{is_shape, shape_subpaths, takes_markers};
 use crate::stroke::stroke_outline;
-use crate::style::{scale_alpha, Overflow, PaintOrder, PaintSpec, Style};
+use crate::style::{scale_alpha, Overflow, PaintOrder, PaintSlot, PaintSpec, Style};
 use crate::transform::{
     parse_aspect_ratio, parse_transform, parse_view_box, viewport_transform, Align, AspectRatio,
     ViewBox,
@@ -87,6 +88,22 @@ const MAX_TOTAL_VERTICES: usize = 65_536;
 ///
 /// A fixed security bound; it is also what makes a reference cycle terminate.
 const MAX_USE_DEPTH: usize = 8;
+
+/// How many elements one document may make this walk visit.
+///
+/// A `<use>`, a `<clipPath>`, a pattern tile, and a marker are each drawn once
+/// per *reference*, so a document can make the walk visit far more elements
+/// than it holds — and a marker multiplies hardest of all, because one `<path>`
+/// element places an instance at every vertex of its `d`. None of the other
+/// budgets catches that on its own: content that resolves to no paint charges
+/// no layer and no vertex, so an asset whose markers draw nothing could spin
+/// the walk for as long as it liked.
+///
+/// A fixed security bound on decode work, not a capacity: eight times
+/// [`xml::MAX_ELEMENTS`], so a document may be walked
+/// eight times over through reuse, which is far past any drawing and far short
+/// of the seconds an unbounded fan-out measured.
+const MAX_ELEMENT_VISITS: usize = 8 * xml::MAX_ELEMENTS;
 
 /// How deeply composited groups may nest before the document is refused.
 ///
@@ -220,7 +237,7 @@ pub fn decode(bytes: &[u8], viewport: Viewport) -> Result<SvgImage, SvgError> {
         root: &root,
         ids: Vec::new(),
         chains: Vec::new(),
-        colors: Vec::new(),
+        styles: Vec::new(),
         servers: PaintServers::collect(&root),
         sheet: Stylesheet::collect(&root)?,
         cascade: Vec::new(),
@@ -229,6 +246,7 @@ pub fn decode(bytes: &[u8], viewport: Viewport) -> Result<SvgImage, SvgError> {
         viewport: view_box.size,
         vertices_left: MAX_TOTAL_VERTICES,
         layers_left: MAX_LAYERS,
+        visits_left: MAX_ELEMENT_VISITS,
         nesting: 0,
     };
     decoder.index(&root);
@@ -316,7 +334,7 @@ struct Decoder<'a> {
     root: &'a Element<'a>,
     ids: Vec<(&'a str, &'a Element<'a>)>,
     chains: Vec<(&'a Element<'a>, Vec<&'a Element<'a>>)>,
-    colors: Vec<(&'a Element<'a>, Color)>,
+    styles: Vec<(&'a Element<'a>, (f64, f64), Style)>,
     servers: PaintServers<'a>,
     sheet: Stylesheet<'a>,
     cascade: Vec<Declaration<'a>>,
@@ -325,7 +343,20 @@ struct Decoder<'a> {
     viewport: (f64, f64),
     vertices_left: usize,
     layers_left: usize,
+    visits_left: usize,
     nesting: usize,
+}
+
+/// What every instance of one shape's markers shares.
+#[derive(Copy, Clone)]
+struct Instancing {
+    /// The referencing element's stroke width, which the default
+    /// `markerUnits` measures the marker in.
+    stroke_width: f64,
+    /// The shape's own placement onto the design grid.
+    transform: Affine,
+    /// How deep in `<use>` expansions the shape sits.
+    depth: usize,
 }
 
 impl<'a> Decoder<'a> {
@@ -369,12 +400,32 @@ impl<'a> Decoder<'a> {
     /// Resolve a referenced definition's own style and leave the selector
     /// path at it, ready for its children.
     ///
-    /// A `<clipPath>` or a `<mask>` is reached by reference, so what it
-    /// inherits is its own place in the document — not the style of whatever
-    /// element happened to point at it. The caller has already set the path
-    /// aside and restores it afterwards.
+    /// A `<clipPath>`, a `<mask>`, a pattern tile, or a marker is reached by
+    /// reference, so what it inherits is its own place in the document — not
+    /// the style of whatever element happened to point at it. The caller has
+    /// already set the path aside and restores it afterwards.
+    ///
+    /// The style is memoised, because the number of times a definition is
+    /// reached is not bounded by the document's size: a marker is resolved
+    /// once per vertex it is placed at, and re-walking its ancestor chain
+    /// each time would multiply the decode by the depth the author happened
+    /// to nest it at.
+    ///
+    /// The viewport is part of the key, not just the node: a percentage
+    /// length anywhere on the chain resolves against whichever viewport the
+    /// *referencing* element sits in, so a definition reached from two of
+    /// them genuinely has two answers.
     fn enter_definition(&mut self, node: &'a Element<'a>) -> Result<Style, SvgError> {
         let chain = self.chain_of(node);
+        if let Some(style) = self
+            .styles
+            .iter()
+            .find(|(key, viewport, _)| core::ptr::eq(*key, node) && *viewport == self.viewport)
+            .map(|(_, _, style)| style.clone())
+        {
+            self.path.extend_from_slice(&chain);
+            return Ok(style);
+        }
         let mut style = Style::default();
         for (index, element) in chain.iter().enumerate() {
             self.path.push(element);
@@ -385,27 +436,16 @@ impl<'a> Decoder<'a> {
                 resolved.inherit()
             };
         }
+        self.styles.push((node, self.viewport, style.clone()));
         Ok(style)
     }
 
     /// The `color` a referenced definition's own ancestry gives it.
-    ///
-    /// Memoised: the answer depends only on where the definition sits, and a
-    /// document may paint hundreds of shapes with one gradient.
     fn definition_color(&mut self, node: &'a Element<'a>) -> Result<Color, SvgError> {
-        if let Some((_, color)) = self
-            .colors
-            .iter()
-            .find(|(key, _)| core::ptr::eq(*key, node))
-        {
-            return Ok(*color);
-        }
         let outer = core::mem::take(&mut self.path);
         let resolved = self.enter_definition(node);
         self.path = outer;
-        let color = resolved?.color;
-        self.colors.push((node, color));
-        Ok(color)
+        Ok(resolved?.color)
     }
 
     /// Note that what follows is built inside `levels` further groups.
@@ -423,6 +463,19 @@ impl<'a> Decoder<'a> {
     /// The counterpart of [`enter`](Self::enter).
     fn leave(&mut self, levels: usize) {
         self.nesting -= levels;
+    }
+
+    /// Take one element visit from the document's budget.
+    ///
+    /// Charged wherever the walk reaches an element, however it got there, so
+    /// that a document which draws one subtree many times is bounded by the
+    /// work it asks for rather than by the elements it holds.
+    fn visit(&mut self) -> Result<(), SvgError> {
+        if self.visits_left == 0 {
+            return Err(SvgError::TooComplex);
+        }
+        self.visits_left -= 1;
+        Ok(())
     }
 
     /// Whether one more enclosing group still fits the nesting bound.
@@ -468,6 +521,7 @@ impl<'a> Decoder<'a> {
         depth: usize,
         out: &mut Vec<Node>,
     ) -> Result<(), SvgError> {
+        self.visit()?;
         let style = self.style_of(inherited, element)?;
         if !style.display {
             return Ok(());
@@ -801,7 +855,17 @@ impl<'a> Decoder<'a> {
         out: &mut Vec<Node>,
     ) -> Result<(), SvgError> {
         let tolerance = flatten_tolerance(transform);
-        let subpaths = shape_subpaths(element, self.viewport, tolerance, self.vertices_left)?;
+        // Only a shape that carries markers pays for the vertex list, and it
+        // cannot outrun the visits its instances would each cost anyway.
+        let marked = style.visible && takes_markers(element.name) && self.names_marker(style);
+        let mut vertices = marked.then(|| Vertices::new(self.visits_left));
+        let subpaths = shape_subpaths(
+            element,
+            self.viewport,
+            tolerance,
+            self.vertices_left,
+            vertices.as_mut(),
+        )?;
         if subpaths.is_empty() {
             return Ok(());
         }
@@ -813,9 +877,11 @@ impl<'a> Decoder<'a> {
         let stroked = style.stroke_style.width > 0.0 && !matches!(style.stroke, PaintSpec::None);
 
         // Two layers of one element overlap, so folding the element's opacity
-        // into each would show the fill through its own stroke. Those two are
+        // into each would show the fill through its own stroke. Those are
         // composited as a unit instead, at their own opacities. One layer
         // needs no buffer: painting it at the product is the same pixels.
+        // Markers always take the buffer, because a marker is a subtree that
+        // may overlap both the shape and the next instance of itself.
         //
         // Decided from the style rather than from the resolved paints, so
         // each is resolved exactly once — resolving twice to learn whether to
@@ -823,9 +889,10 @@ impl<'a> Decoder<'a> {
         // budget. A paint that turns out to resolve to nothing then costs an
         // isolation buffer it did not need, which is the same picture.
         let isolate = opacity != u8::MAX
-            && paints(&style.fill, style.fill_opacity)
-            && stroked
-            && style.stroke_opacity > 0.0;
+            && (marked
+                || (paints(&style.fill, style.fill_opacity)
+                    && stroked
+                    && style.stroke_opacity > 0.0));
         if isolate {
             self.fits_group()?;
         }
@@ -878,20 +945,189 @@ impl<'a> Decoder<'a> {
             None => None,
         };
 
-        let mut layers = Vec::new();
-        let ordered = match style.paint_order {
-            PaintOrder::StrokeFirst => [stroke, fill],
-            PaintOrder::FillFirst => [fill, stroke],
+        let markers = match vertices {
+            Some(vertices) => self.markers(
+                style,
+                &vertices.finish(),
+                Instancing {
+                    stroke_width: style.stroke_style.width,
+                    transform,
+                    depth,
+                },
+            )?,
+            None => Vec::new(),
         };
-        for layer in ordered.into_iter().flatten() {
-            self.push(layer, &mut layers)?;
-        }
+
+        let layers = self.ordered(style.paint_order, fill, stroke, markers)?;
         let mut drawn = if isolate {
             grouped(opacity, None, layers)
         } else {
             layers
         };
         out.append(&mut drawn);
+        Ok(())
+    }
+
+    /// Assemble what one shape draws, in the order it paints them.
+    fn ordered(
+        &mut self,
+        order: PaintOrder,
+        mut fill: Option<Layer>,
+        mut stroke: Option<Layer>,
+        mut markers: Vec<Node>,
+    ) -> Result<Vec<Node>, SvgError> {
+        let mut out = Vec::new();
+        for slot in order.slots() {
+            match slot {
+                PaintSlot::Fill => {
+                    if let Some(layer) = fill.take() {
+                        self.push(layer, &mut out)?;
+                    }
+                }
+                PaintSlot::Stroke => {
+                    if let Some(layer) = stroke.take() {
+                        self.push(layer, &mut out)?;
+                    }
+                }
+                PaintSlot::Markers => out.append(&mut markers),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether `style` names a marker this document actually defines.
+    fn names_marker(&self, style: &Style) -> bool {
+        [&style.marker_start, &style.marker_mid, &style.marker_end]
+            .into_iter()
+            .flatten()
+            .any(|id| self.marker(id).is_some())
+    }
+
+    /// The `<marker>` element with fragment id `id`.
+    fn marker(&self, id: &str) -> Option<&'a Element<'a>> {
+        self.find(id).filter(|node| node.name == "marker")
+    }
+
+    /// Draw this shape's markers, bottom first.
+    ///
+    /// SVG paints the start marker, then the mid markers in the order they
+    /// occur along the path, then the end marker — which is the order the
+    /// vertex walk meets them in, so one pass produces it. A shape of a single
+    /// vertex is both the first and the last, and carries both of those
+    /// markers on the one point.
+    ///
+    /// Each `<marker>` is read once for the whole shape; only its placement is
+    /// per vertex.
+    fn markers(
+        &mut self,
+        style: &Style,
+        vertices: &[Vertex],
+        shared: Instancing,
+    ) -> Result<Vec<Node>, SvgError> {
+        let ends = [
+            (
+                Position::Start,
+                self.resolve_marker(style.marker_start.as_deref())?,
+            ),
+            (
+                Position::Mid,
+                self.resolve_marker(style.marker_mid.as_deref())?,
+            ),
+            (
+                Position::End,
+                self.resolve_marker(style.marker_end.as_deref())?,
+            ),
+        ];
+        let last = vertices.len().saturating_sub(1);
+        let mut out = Vec::new();
+        for (index, vertex) in vertices.iter().enumerate() {
+            for (position, resolved) in &ends {
+                let here = match position {
+                    Position::Start => index == 0,
+                    Position::Mid => index != 0 && index != last,
+                    Position::End => index == last,
+                };
+                let Some((node, marker)) = resolved.filter(|_| here) else {
+                    continue;
+                };
+                self.instance(node, &marker, vertex, *position, shared, &mut out)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// The `<marker>` a property names, read once for the whole shape.
+    ///
+    /// A reference to a marker the document does not define draws nothing and
+    /// leaves the shape alone: unlike a missing clip, a missing decoration
+    /// cannot show more than the author asked for, so refusing the element
+    /// would lose a picture that is merely undecorated.
+    fn resolve_marker(
+        &mut self,
+        id: Option<&str>,
+    ) -> Result<Option<(&'a Element<'a>, Marker)>, SvgError> {
+        let Some(node) = id.and_then(|id| self.marker(id)) else {
+            return Ok(None);
+        };
+        Ok(Marker::read(node, self.viewport)?.map(|marker| (node, marker)))
+    }
+
+    /// Draw one instance of `node` at `vertex`.
+    ///
+    /// The content takes its style from the marker's own place in the
+    /// document, exactly as a clip's or a pattern tile's does — SVG 1.1 has no
+    /// way for a marker to be tinted by the shape that placed it. Its geometry
+    /// is no part of that shape's bounding box either, and its percentages
+    /// resolve against the viewport the marker establishes.
+    fn instance(
+        &mut self,
+        node: &'a Element<'a>,
+        marker: &Marker,
+        vertex: &Vertex,
+        position: Position,
+        shared: Instancing,
+        out: &mut Vec<Node>,
+    ) -> Result<(), SvgError> {
+        // One instance is one visit of the `<marker>` element, which is what
+        // bounds an empty marker placed at every vertex of a long path — and
+        // what makes a marker whose content places the same marker terminate.
+        self.visit()?;
+        let Some(placement) = marker.place(vertex, position, shared.stroke_width) else {
+            return Ok(());
+        };
+        let viewport = placement.viewport.then(shared.transform);
+        let content = placement.content.then(shared.transform);
+
+        let outer_path = core::mem::take(&mut self.path);
+        let built = self.enter_definition(node).and_then(|own| {
+            // A marker viewport clips like any other unless the author says
+            // otherwise; `display: none` on the element does not apply, since
+            // that is how the marker avoids being drawn where it is defined.
+            let levels = usize::from(own.overflow == Overflow::Hidden);
+            self.enter(levels)?;
+            let measuring = core::mem::take(&mut self.extents);
+            let outer_viewport = core::mem::replace(&mut self.viewport, marker.content_viewport);
+            let mut drawn = Vec::new();
+            let walked = self.walk_children(node, &own, content, shared.depth, &mut drawn);
+            self.viewport = outer_viewport;
+            self.extents = measuring;
+            walked?;
+            self.leave(levels);
+            Ok((own.overflow, drawn))
+        });
+        self.path = outer_path;
+
+        let (overflow, drawn) = built?;
+        let mut placed = if overflow == Overflow::Hidden {
+            self.clipped_to(
+                (0.0, 0.0, marker.viewport.0, marker.viewport.1),
+                viewport,
+                drawn,
+            )?
+        } else {
+            drawn
+        };
+        out.append(&mut placed);
         Ok(())
     }
 
@@ -1104,6 +1340,7 @@ impl<'a> Decoder<'a> {
     ) -> Result<(), SvgError> {
         let inherited = inherited.inherit();
         for child in &node.children {
+            self.visit()?;
             self.path.push(child);
             let resolved = self.style_of(&inherited, child);
             self.path.pop();
@@ -1133,6 +1370,7 @@ impl<'a> Decoder<'a> {
                 self.viewport,
                 flatten_tolerance(placed),
                 self.vertices_left,
+                None,
             )?;
             if subpaths.is_empty() {
                 continue;

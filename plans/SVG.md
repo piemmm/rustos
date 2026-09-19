@@ -35,11 +35,11 @@ opens a drawing as a document.
 | S17 | `<switch>` conditional processing: `systemLanguage`, empty conditions, drawable children only | done |
 | S18 | `paint-order` | done |
 | S19 | `<pattern>` as a paint server, including the `overflow: visible` fold | done |
-| S20 | `<marker>`: `marker-start` / `-mid` / `-end` | planned |
+| S20 | `<marker>`: `marker-start` / `-mid` / `-end`, and the element-visit bound their instancing needs | done |
 | S21 | `vector-effect="non-scaling-stroke"` | planned |
 
-`planned` items are not started; neither is a half-built part of a `done`
-one. Each needs something this crate does not yet have, stated under
+The one `planned` item is not started, and no `done` one is half-built. It
+needs something this crate does not yet have, stated under
 [What is left](#what-is-left).
 
 ---
@@ -104,9 +104,10 @@ Four decisions shape everything else:
 | `number` | SVG's number grammar: separator-free runs, arc flags, CSS absolute units, percentages, opacity |
 | `color` | CSS colour syntax: hex (3/4/6/8), `rgb()`/`rgba()`/`hsl()`/`hsla()` in both spellings, the named-colour table, `currentColor`, `none` |
 | `css` | The document's own `<style>` sheets: the selector subset, specificity, `!important`, and the declarations one element matches |
-| `geom` | `SubPath`, `StrokeStyle`, caps/joins, the object bounding box |
+| `geom` | `SubPath`, `StrokeStyle`, caps/joins, the object bounding box, and the marker-vertex currency (`Vertex`, `Vertices`) |
 | `pathdata` | The whole `d` grammar and curve/arc flattening to a tolerance |
 | `shape` | The basic shapes, including `rect`'s rounded-corner rules |
+| `marker` | `<marker>` placement: `refX`/`refY`, the viewport and its units, `orient`, and the one matrix per instance |
 | `stroke` | Stroke outline: segment quads, joins, caps, dashes |
 | `transform` | The `transform` grammar, `viewBox`, `preserveAspectRatio`, viewport fitting |
 | `style` | The presentation-property cascade: attribute, stylesheet, `style` declaration, inheritance |
@@ -209,12 +210,26 @@ a `type` that is neither absent nor `text/css` is ignored.
 
 Every asset is hostile until proven otherwise. `decode` is total for any byte
 string: no panic, no unbounded loop, no unbounded allocation, and no NaN or
-infinity reaching the geometry. The fixed bounds — element count, nesting
-depth, layer count, total vertices, group depth, tile extent, tile fold,
-stylesheet rules and declarations, segments per curve, dash-pattern length,
-gradient stops, `use` and `href` chain depth — are **security bounds, not
-capacities**: they do not scale with the machine and must not be raised to
-make an asset fit.
+infinity reaching the geometry. The fixed bounds — element count, **element
+visits**, nesting depth, layer count, total vertices, group depth, tile
+extent, tile fold, stylesheet rules and declarations, segments per curve,
+dash-pattern length, gradient stops, `use` and `href` chain depth — are
+**security bounds, not capacities**: they do not scale with the machine and
+must not be raised to make an asset fit.
+
+**Element visits bound decode *work*, where the others bound output.** A
+`<use>`, a `<clipPath>`, a pattern tile, and a marker are each drawn once per
+*reference*, so a document can make the walk visit far more elements than it
+holds — and content that resolves to no paint charges no layer and no vertex,
+so none of the output bounds notices. Measured on the unbounded form, a 188 KB
+document of four thousand `<use>`s over a four-thousand-element subtree that
+drew nothing took 1.2 s to decode, and 3.2 s with a stylesheet to match
+against; `<clipPath>` and `<pattern>` fan-outs were the same shape. Charging
+one visit wherever the walk reaches an element caps that at a few milliseconds
+and refuses the rest, and it is what makes a marker — which multiplies hardest
+of all, one `<path>` element placing an instance at every vertex of its `d` —
+bounded by the work it asks for rather than by the elements it holds. It is
+also what ends a marker that places itself.
 
 Isolation buffers are what a clip, a mask, a group opacity and a pattern
 tile cost, so the nesting bound is also a memory bound: it caps how many
@@ -312,17 +327,78 @@ keeps the picture correct at every size.
   layer at the opacity, and it costs no isolation buffer — so the decoder
   charges no nesting level for it either, and both sides moved together.
 
+## Markers
+
+A marker is a drawing placed at a shape's vertices and turned to follow the
+path through each. Two things about it cut across the rest of the crate.
+
+- **The vertices are the ones the author wrote, and the direction is the
+  curve's true tangent — both of which flattening destroys.** One geometry
+  currency means a curve stops being a curve in exactly one place, so there is
+  no second parse and no second flattening pass to recover them from: the
+  parser fills an opt-in `Vertices` sink *while* the command structure is
+  still live. A shape that references no marker passes nothing and pays a
+  branch per command, which is what keeps the common shapes out of it.
+- **The tangent is exact, never the first flattened chord.** The chord is free
+  and already there, but it is an artefact of the tolerance, which is resolved
+  against the placement a shape is drawn under — so a marker oriented by it
+  would swing as the asset was rasterised larger. A cubic's is its
+  control-point direction, a quadratic's likewise, an arc's comes from the
+  same centre parameterisation the flattener sweeps; a control point
+  coincident with its endpoint falls through to the next point along, which is
+  the limit of the curve's own direction there. They differ visibly: a cubic
+  whose first control point is a thousandth of a unit from its start leaves
+  along the x axis, where its first chord already points almost along y.
+
+The rest follows from mechanisms the crate already has.
+
+- **Only the four shapes with authored vertices take markers** — `path`,
+  `line`, `polyline`, `polygon`. A `<rect>`, `<circle>`, or `<ellipse>` has
+  none of its own: its outline is *this decoder's* flattening, so its
+  "vertices" would be tolerance artefacts and a marker would slide along the
+  outline as the asset was drawn larger. SVG 2 places markers on those shapes
+  too, against an *equivalent path* of arcs this crate has no notion of,
+  having flattened at parse time.
+- **A closed sub-path is one closed curve, so its two ends read the same
+  turn**: in along the closing segment, out along the sub-path's first. That
+  is one rule in the vertex builder, and it covers both what SVG says of the
+  initial vertex and of the closepath vertex — and a segment following a
+  closepath without a `moveto` overwrites the outgoing half, because that is
+  where the pen actually goes next. `marker-start` and `marker-end` belong to
+  the *path*, not to each sub-path, so a closed shape carries both on the one
+  point it returns to. An exact reversal has no bisector at all; approached
+  from either side the answer tends to one of the two perpendiculars, so a
+  perpendicular is what it takes rather than whatever the arithmetic would
+  otherwise fall out with.
+- **One placement matrix per instance.** `refX`/`refY`, `markerWidth`/
+  `markerHeight`, `markerUnits`, `orient`, and the marker's own `viewBox`/
+  `preserveAspectRatio` collapse into a single `Affine`, exactly as
+  `patternUnits`/`patternTransform`/bbox collapse into `Pattern::to_tile`, so
+  the walk that draws an instance takes no cases. The rotation is built
+  straight from the unit direction vector rather than from an angle, which is
+  exact and costs no trigonometry. The `<marker>` element is read once per
+  shape; only the matrix is per vertex.
+- **A marker takes its own place in the document**, like every other
+  referenced definition — SVG states outright that properties do not inherit
+  from the element referencing a marker into its contents. SVG 2's
+  `context-fill`/`context-stroke` are the sanctioned way across that boundary
+  and are not in SVG 1.1, so a marker here is never tinted by its user.
+- **`overflow` is the `<symbol>` mechanism**, unchanged: a viewport clip whose
+  "cuts nothing off, so costs nothing" fast path keeps a marker whose content
+  fits inside its viewport free of an isolation buffer, per instance.
+- **`paint-order` is a permutation of all three**: whichever slots the value
+  names come first in the order written, and whichever are left follow in the
+  initial order, with an invalid value dropped as CSS drops it rather than
+  resetting the property.
+- **An element's opacity composites its markers with the rest of it.** A
+  marker is a subtree that may overlap the shape and the next instance of
+  itself, so there is no single layer to fold the opacity into.
+
 ## What is left
 
-Each needs a capability the crate does not have; neither is a thinner version
+It needs a capability the crate does not have, and is not a thinner version
 of something already done.
 
-- **S20 `<marker>`.** Markers are placed at a path's *command* vertices with
-  the direction bisecting the segments that meet there. The decoder flattens
-  curves before anything downstream sees them, so the command vertices and
-  their tangents are gone by the time a marker would be placed; `pathdata`
-  must also report the un-flattened vertex list and its incoming/outgoing
-  directions.
 - **S21 `vector-effect="non-scaling-stroke"`.** The width is in the root
   viewport's units rather than the element's, so the outline must be built
   after the element's transform instead of before it. `stroke` is written
@@ -353,9 +429,10 @@ unsupported decoration not lose a whole asset, and it is the behaviour the
 desktop has today. Whether the drawable-element case should instead fail the
 document closed is recorded as an open item in `plans/ICONS.md`; it is a
 deliberate decision to make, not an oversight. The set at stake is now
-smaller than it was — clipping, masking, group opacity and patterns (spilling
-tiles included) are honoured rather than ignored, so the cases that render a
-*wrong* picture are the two `planned` items above and the non-goals.
+smaller than it was — clipping, masking, group opacity, patterns (spilling
+tiles included) and markers are honoured rather than ignored, so the cases
+that render a *wrong* picture are the one `planned` item above and the
+non-goals.
 Patterns also drew the distinction that answers part of the question: a reference naming a server
 the document does not define takes its fallback colour, while a server that
 is defined and paints nothing is `none` and takes none — so an *empty*

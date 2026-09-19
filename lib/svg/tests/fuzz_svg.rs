@@ -93,6 +93,23 @@ const TEMPLATES: &[&[u8]] = &[
             <clipPath id="c"><circle cx="4" cy="4" r="3"/></clipPath>
             <rect width="16" height="16" fill="url(#b)"/></svg>"##,
     br##"<svg viewBox="0 0 24 24">
+            <marker id="a" markerWidth="4" markerHeight="4" refX="2" refY="2"
+              orient="auto" viewBox="0 0 8 8" preserveAspectRatio="xMidYMid meet">
+              <path d="M0 0 L8 4 L0 8 Z" fill="#c33"/></marker>
+            <marker id="b" markerWidth="2" markerHeight="2" orient="auto-start-reverse"
+              overflow="visible" markerUnits="userSpaceOnUse">
+              <circle cx="1" cy="1" r="3" fill="#39c" fill-opacity="0.5"/></marker>
+            <marker id="c" markerWidth="3" markerHeight="3" orient="45grad"/>
+            <path d="M2 12 C2 2 22 2 22 12 S12 26 2 12 Z" fill="none" stroke="#345"
+              stroke-width="2" marker-start="url(#b)" marker-mid="url(#a)"
+              marker-end="url(#b)" paint-order="markers stroke fill"/>
+            <polyline points="1,1 6,2 11,1 16,4" fill="none" stroke-width="0.5"
+              style="marker:url(#a)" opacity="0.6"/>
+            <polygon points="18,18 22,18 22,22" marker-mid="url(#c)"
+              marker-end="url(#nothing)" stroke-width="3"/>
+            <line x1="1" y1="20" x2="6" y2="20" marker-start="url(#a)"
+              markerUnits="strokeWidth"/></svg>"##,
+    br##"<svg viewBox="0 0 24 24">
             <mask id="m" maskContentUnits="objectBoundingBox" style="mask-type:alpha">
               <rect width=".5" height="1" fill="#fff"/></mask>
             <mask id="n" maskUnits="userSpaceOnUse" x="1" y="1" width="8" height="8" mask="url(#m)">
@@ -143,6 +160,8 @@ const PROPERTIES: &[&str] = &[
     "paint-order",
     "clip-rule",
     "overflow",
+    "marker",
+    "marker-mid",
     "font-family",
 ];
 
@@ -308,8 +327,12 @@ fn decode_never_panics_for_any_input() {
                 }
             }
         }
+        let orient = ["auto", "auto-start-reverse", "30", "-1.5rad", "2turn"][bounded(next(), 4)];
         let generated = alloc_document(&format!(
-            r##"<path d="{data}" fill="#345" stroke="#987" stroke-width="0.4"/>"##
+            r##"<marker id="k" markerWidth="2" markerHeight="2" refX="1" orient="{orient}"
+                  overflow="visible"><rect width="3" height="3" fill="#0a0"/></marker>
+                <path d="{data}" fill="#345" stroke="#987" stroke-width="0.4"
+                  marker-start="url(#k)" marker-mid="url(#k)" marker-end="url(#k)"/>"##
         ));
         decode_never_panics(generated.as_bytes());
 

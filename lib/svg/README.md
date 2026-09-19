@@ -88,13 +88,19 @@ The drawable part of SVG 1.1, in full:
 - `clip-path` and `<clipPath>` (`clip-rule`, `clipPathUnits`, nesting),
   `mask` and `<mask>` (`maskUnits`, `maskContentUnits`, `mask-type`, the mask
   region), and group opacity, each composited in isolation;
-- `paint-order`, and a `<switch>`'s conditional-processing attributes.
+- `<marker>` and `marker-start`/`-mid`/`-end` (plus the `marker` shorthand) —
+  placed at the vertices the author wrote, turned by the path's true tangent
+  there rather than by a flattened chord, with `refX`/`refY`, `markerUnits`,
+  `orient` (including `auto-start-reverse`), the marker's own `viewBox` and
+  its `overflow` clip;
+- `paint-order` as a full permutation of fill, stroke, and markers, and a
+  `<switch>`'s conditional-processing attributes.
 
 It is a renderer for artwork, not a browser. Text, embedded images, filters,
-markers, and animation are **not drawn**; an element it cannot draw is
-skipped rather than refusing the document, so one unsupported decoration does
-not lose a whole asset. The staged design, what is left, and the open
-question about that choice are in `plans/SVG.md`.
+and animation are **not drawn**; an element it cannot draw is skipped rather
+than refusing the document, so one unsupported decoration does not lose a
+whole asset. The staged design, what is left, and the open question about
+that choice are in `plans/SVG.md`.
 
 ## Layout
 
@@ -106,10 +112,12 @@ question about that choice are in `plans/SVG.md`.
   specificity, `!important`, and the one declaration splitter the `style`
   attribute shares.
 - `number` — SVG's number, length, and coordinate-list grammar.
-- `geom` — `SubPath`, `StrokeStyle`, and the object bounding box: the one
-  geometry every stage hands on.
+- `geom` — `SubPath`, `StrokeStyle`, the object bounding box, and the
+  marker-vertex currency: the one geometry every stage hands on.
 - `pathdata` — the `d` grammar and curve/arc flattening.
 - `shape` — the basic shapes.
+- `marker` — `<marker>` placement: the reference point, the viewport and its
+  units, `orient`, and the one matrix per instance.
 - `stroke` — stroke outline: segment quads, joins, caps, dashes.
 - `transform` — the `transform` grammar and viewport fitting.
 - `style` — the property cascade.

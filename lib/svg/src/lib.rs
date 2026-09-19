@@ -41,10 +41,11 @@
 //! joins, miter limit, dashes), the property cascade with the document's own
 //! `<style>` sheets, the `style` attribute and inheritance, CSS colour syntax
 //! with named colours, linear and radial gradients, `<pattern>` fills,
-//! `clip-path`, `mask`, and group opacity.
+//! `clip-path`, `mask`, group opacity, and `<marker>` at the vertices a
+//! `<path>`, `<line>`, `<polyline>`, or `<polygon>` states.
 //!
 //! It is a *renderer* for artwork, not a browser: text, embedded images,
-//! filters, markers, animation, and scripting are not drawn. An element it
+//! filters, animation, and scripting are not drawn. An element it
 //! cannot draw is skipped rather than refused, so one unsupported decoration
 //! does not lose the whole asset; the open question of whether such an
 //! element should instead fail the document closed is recorded in
@@ -71,6 +72,7 @@ pub mod css;
 pub mod document;
 pub mod error;
 pub mod geom;
+pub mod marker;
 pub mod number;
 pub mod paint;
 pub mod pathdata;

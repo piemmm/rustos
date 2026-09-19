@@ -7,7 +7,7 @@ use core::f64::consts::PI;
 use tairix_util::mathf::{round, sqrt};
 
 use crate::error::SvgError;
-use crate::geom::Point;
+use crate::geom::{Point, Vertex, Vertices};
 
 use super::{
     cubic_at, flatten_cubic, flatten_ellipse_arc, flatten_quadratic, parse_path_data, MAX_SEGMENTS,
@@ -38,7 +38,7 @@ fn close_point(actual: Point, expected: Point) {
 /// The points of a path that parses to exactly one sub-path.
 #[track_caller]
 fn one(d: &str) -> Vec<Point> {
-    let subpaths = parse_path_data(d, TOL, BUDGET).expect("a valid path");
+    let subpaths = parse_path_data(d, TOL, BUDGET, None).expect("a valid path");
     assert_eq!(subpaths.len(), 1, "expected one sub-path from {d:?}");
     subpaths[0].points.clone()
 }
@@ -78,14 +78,15 @@ fn a_repeated_moveto_parameter_set_is_a_lineto() {
 
 #[test]
 fn a_second_moveto_starts_a_second_subpath() {
-    let subpaths = parse_path_data("M0 0 L5 0 M10 10 L15 10", TOL, BUDGET).expect("two sub-paths");
+    let subpaths =
+        parse_path_data("M0 0 L5 0 M10 10 L15 10", TOL, BUDGET, None).expect("two sub-paths");
     assert_eq!(subpaths.len(), 2);
     close_point(subpaths[1].points[0], (10.0, 10.0));
 }
 
 #[test]
 fn closepath_marks_the_subpath_and_returns_the_pen_to_its_start() {
-    let subpaths = parse_path_data("M10 10 L20 10 L20 20 Z M30 30 L40 30", TOL, BUDGET)
+    let subpaths = parse_path_data("M10 10 L20 10 L20 20 Z M30 30 L40 30", TOL, BUDGET, None)
         .expect("a closed then an open sub-path");
     assert_eq!(subpaths.len(), 2);
     assert!(subpaths[0].closed);
@@ -96,7 +97,8 @@ fn closepath_marks_the_subpath_and_returns_the_pen_to_its_start() {
 /// that follows without a moveto begins a fresh contour there.
 #[test]
 fn a_segment_after_a_closepath_begins_at_the_start_point() {
-    let subpaths = parse_path_data("M10 10 L20 10 Z L30 30", TOL, BUDGET).expect("two sub-paths");
+    let subpaths =
+        parse_path_data("M10 10 L20 10 Z L30 30", TOL, BUDGET, None).expect("two sub-paths");
     assert_eq!(subpaths.len(), 2);
     close_point(subpaths[1].points[0], (10.0, 10.0));
     close_point(subpaths[1].points[1], (30.0, 30.0));
@@ -107,7 +109,7 @@ fn a_segment_after_a_closepath_begins_at_the_start_point() {
 #[test]
 fn relative_movement_after_a_closepath_measures_from_the_start_point() {
     let subpaths =
-        parse_path_data("M10 10 L90 90 Z m5 5 l1 0", TOL, BUDGET).expect("two sub-paths");
+        parse_path_data("M10 10 L90 90 Z m5 5 l1 0", TOL, BUDGET, None).expect("two sub-paths");
     close_point(subpaths[1].points[0], (15.0, 15.0));
 }
 
@@ -306,11 +308,11 @@ fn a_full_sweep_closes_on_its_own_start() {
 #[test]
 fn a_path_must_begin_with_a_moveto() {
     assert_eq!(
-        parse_path_data("L10 10", TOL, BUDGET),
+        parse_path_data("L10 10", TOL, BUDGET, None),
         Err(SvgError::UnsupportedPath)
     );
     assert_eq!(
-        parse_path_data("Z", TOL, BUDGET),
+        parse_path_data("Z", TOL, BUDGET, None),
         Err(SvgError::UnsupportedPath)
     );
 }
@@ -318,7 +320,7 @@ fn a_path_must_begin_with_a_moveto() {
 #[test]
 fn an_unknown_command_is_refused() {
     assert_eq!(
-        parse_path_data("M0 0 X5 5", TOL, BUDGET),
+        parse_path_data("M0 0 X5 5", TOL, BUDGET, None),
         Err(SvgError::UnsupportedPath)
     );
 }
@@ -326,11 +328,11 @@ fn an_unknown_command_is_refused() {
 #[test]
 fn a_missing_parameter_is_refused() {
     assert_eq!(
-        parse_path_data("M0 0 L", TOL, BUDGET),
+        parse_path_data("M0 0 L", TOL, BUDGET, None),
         Err(SvgError::InvalidNumber)
     );
     assert_eq!(
-        parse_path_data("M0", TOL, BUDGET),
+        parse_path_data("M0", TOL, BUDGET, None),
         Err(SvgError::InvalidNumber)
     );
 }
@@ -338,22 +340,22 @@ fn a_missing_parameter_is_refused() {
 #[test]
 fn a_malformed_arc_flag_is_refused() {
     assert_eq!(
-        parse_path_data("M0 0 A1 1 0 5 1 2 2", TOL, BUDGET),
+        parse_path_data("M0 0 A1 1 0 5 1 2 2", TOL, BUDGET, None),
         Err(SvgError::InvalidNumber)
     );
 }
 
 #[test]
 fn an_empty_path_draws_nothing() {
-    assert_eq!(parse_path_data("", TOL, BUDGET), Ok(Vec::new()));
-    assert_eq!(parse_path_data("   ", TOL, BUDGET), Ok(Vec::new()));
+    assert_eq!(parse_path_data("", TOL, BUDGET, None), Ok(Vec::new()));
+    assert_eq!(parse_path_data("   ", TOL, BUDGET, None), Ok(Vec::new()));
 }
 
 /// A single-point sub-path is legal: it fills as nothing but strokes as a
 /// round-capped dot.
 #[test]
 fn a_lone_moveto_yields_a_single_point_subpath() {
-    let subpaths = parse_path_data("M10 10 Z", TOL, BUDGET).expect("one point");
+    let subpaths = parse_path_data("M10 10 Z", TOL, BUDGET, None).expect("one point");
     assert_eq!(subpaths.len(), 1);
     assert_eq!(subpaths[0].points.len(), 1);
     assert!(subpaths[0].closed);
@@ -362,7 +364,7 @@ fn a_lone_moveto_yields_a_single_point_subpath() {
 #[test]
 fn exceeding_the_point_budget_is_refused() {
     assert_eq!(
-        parse_path_data("M0 0 L1 1 L2 2 L3 3", TOL, 3),
+        parse_path_data("M0 0 L1 1 L2 2 L3 3", TOL, 3, None),
         Err(SvgError::TooComplex)
     );
 }
@@ -428,7 +430,7 @@ fn assorted_hostile_paths_never_panic() {
         "M0 0 A1 1 0 11 5 5",
     ];
     for case in cases {
-        if let Ok(subpaths) = parse_path_data(case, TOL, BUDGET) {
+        if let Ok(subpaths) = parse_path_data(case, TOL, BUDGET, None) {
             for point in subpaths.iter().flat_map(|sub| sub.points.iter()) {
                 assert!(point.0.is_finite() && point.1.is_finite(), "{case:?}");
             }
@@ -452,4 +454,167 @@ fn distance_to_segment(point: Point, a: Point, b: Point) -> f64 {
 fn distance(a: Point, b: Point) -> f64 {
     let (dx, dy) = (a.0 - b.0, a.1 - b.1);
     sqrt(dx * dx + dy * dy)
+}
+
+// --- the command vertices markers are placed at ---------------------------
+
+/// The vertices of a path, with the sink the parser fills for a shape that
+/// draws markers.
+#[track_caller]
+fn vertices(d: &str) -> Vec<Vertex> {
+    vertices_within(d, BUDGET).expect("a valid path")
+}
+
+#[track_caller]
+fn vertices_within(d: &str, limit: usize) -> Result<Vec<Vertex>, SvgError> {
+    let mut sink = Vertices::new(limit);
+    parse_path_data(d, TOL, BUDGET, Some(&mut sink))?;
+    Ok(sink.finish())
+}
+
+/// One vertex per command endpoint, wherever the flattener put its points.
+#[test]
+fn every_command_endpoint_is_a_vertex() {
+    let places: Vec<Point> = vertices("M0 0 L10 0 Q15 0 15 5 C15 10 10 10 5 10 H0 V0")
+        .iter()
+        .map(|vertex| vertex.at)
+        .collect();
+    assert_eq!(
+        places,
+        [
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (15.0, 5.0),
+            (5.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 0.0),
+        ]
+    );
+}
+
+/// An open path's two ends have one segment each, and everything between has
+/// both — which is what decides whether a marker bisects or simply follows.
+#[test]
+fn an_open_path_has_one_sided_ends() {
+    let places = vertices("M0 0 L10 0 L10 10");
+    assert_eq!(places[0].incoming, None);
+    close_point(places[0].outgoing.expect("a first segment"), (1.0, 0.0));
+    close_point(places[1].incoming.expect("an arrival"), (1.0, 0.0));
+    close_point(places[1].outgoing.expect("a departure"), (0.0, 1.0));
+    close_point(places[2].incoming.expect("a last segment"), (0.0, 1.0));
+    assert_eq!(places[2].outgoing, None);
+}
+
+/// A curve's direction is its *true* tangent, not the first flattened chord:
+/// a control point almost on top of its endpoint leaves a curve that departs
+/// at once, and the chord would swing the marker as the flattening tolerance
+/// changed with the scale the shape is drawn at.
+#[test]
+fn a_curve_reports_its_true_tangent_not_its_first_chord() {
+    let d = "M0 0 C0.001 0 0 10 10 10";
+    let places = vertices(d);
+    close_point(places[0].outgoing.expect("a departure"), (1.0, 0.0));
+
+    // The same curve's first flattened chord points almost the other way, so
+    // the two genuinely disagree here rather than happening to coincide.
+    let flattened = one(d);
+    let chord = (
+        flattened[1].0 - flattened[0].0,
+        flattened[1].1 - flattened[0].1,
+    );
+    assert!(
+        chord.1 > chord.0 * 10.0,
+        "the chord {chord:?} did not diverge from the tangent"
+    );
+}
+
+/// A control point coincident with its endpoint gives no direction, so the
+/// next point along stands in — which is the limit of the curve's own
+/// direction there.
+#[test]
+fn a_coincident_control_point_falls_through_to_the_next() {
+    let places = vertices("M0 0 C0 0 5 5 10 0");
+    close_point(
+        places[0].outgoing.expect("a departure"),
+        (0.5_f64.sqrt(), 0.5_f64.sqrt()),
+    );
+    let flat = vertices("M0 0 C0 0 0 0 10 0");
+    close_point(flat[0].outgoing.expect("a departure"), (1.0, 0.0));
+}
+
+/// An arc's ends take the tangent of the ellipse the flattener sweeps, so a
+/// quarter circle leaves and arrives perpendicular to its radii.
+#[test]
+fn an_arc_reports_the_ellipse_tangent_at_each_end() {
+    let places = vertices("M10 0 A10 10 0 0 1 0 10");
+    close_point(places[0].outgoing.expect("a departure"), (0.0, 1.0));
+    close_point(places[1].incoming.expect("an arrival"), (-1.0, 0.0));
+
+    // Sweeping the other way runs the tangents backwards.
+    let back = vertices("M10 0 A10 10 0 0 0 0 -10");
+    close_point(back[0].outgoing.expect("a departure"), (0.0, -1.0));
+}
+
+/// An arc SVG degrades to a straight line takes the straight line's
+/// direction rather than none at all.
+#[test]
+fn a_degenerate_arc_takes_its_chord() {
+    let places = vertices("M0 0 A0 0 0 0 1 10 0");
+    close_point(places[0].outgoing.expect("a departure"), (1.0, 0.0));
+    close_point(places[1].incoming.expect("an arrival"), (1.0, 0.0));
+}
+
+/// A zero-length segment gives no direction, so the vertex takes what the
+/// other side offers.
+#[test]
+fn a_zero_length_segment_contributes_no_direction() {
+    let places = vertices("M0 0 L0 0 L10 0");
+    assert_eq!(places[1].incoming, None);
+    close_point(places[1].outgoing.expect("a departure"), (1.0, 0.0));
+}
+
+/// Closing a sub-path adds the vertex the pen returns to, and the two ends
+/// are one point on one closed curve — so both read the same turn: in along
+/// the closing segment, out along the sub-path's first.
+#[test]
+fn a_closed_sub_path_joins_its_two_ends() {
+    let places = vertices("M0 0 L10 0 L10 10 L0 10 Z");
+    assert_eq!(places.len(), 5);
+    assert_eq!(places[4].at, (0.0, 0.0));
+    let closing = (0.0, -1.0);
+    close_point(places[4].incoming.expect("an arrival"), closing);
+    close_point(places[0].incoming.expect("a wrapped arrival"), closing);
+    close_point(places[4].outgoing.expect("a departure"), (1.0, 0.0));
+    close_point(places[0].outgoing.expect("a departure"), (1.0, 0.0));
+}
+
+/// A segment that follows a closepath without a moveto starts where the pen
+/// returned to, so that vertex leaves along the new segment rather than
+/// along the sub-path it just closed.
+#[test]
+fn a_segment_after_a_closepath_takes_the_closing_vertex_onward() {
+    let places = vertices("M0 0 L10 0 Z L0 10");
+    assert_eq!(places.len(), 4);
+    assert_eq!(places[2].at, (0.0, 0.0));
+    close_point(places[2].incoming.expect("an arrival"), (-1.0, 0.0));
+    close_point(places[2].outgoing.expect("a departure"), (0.0, 1.0));
+}
+
+/// A closepath costs no point of the path budget, so a run of them must not
+/// each add a vertex — otherwise a free command would allocate without end.
+#[test]
+fn a_run_of_closepaths_adds_at_most_one_vertex() {
+    assert_eq!(vertices("M0 0 L10 0 ZZZZZZZZ").len(), 3);
+    assert_eq!(vertices("M0 0 ZZZZZZZZ").len(), 1);
+}
+
+/// The vertex list is bounded like every other decode resource, and says so
+/// with the same error.
+#[test]
+fn too_many_vertices_is_refused() {
+    assert_eq!(
+        vertices_within("M0 0 L1 0 L2 0 L3 0", 3),
+        Err(SvgError::TooComplex)
+    );
+    assert!(vertices_within("M0 0 L1 0 L2 0", 3).is_ok());
 }

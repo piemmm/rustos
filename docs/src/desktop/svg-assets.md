@@ -306,8 +306,21 @@ authored rather than traced into a simpler form:
 - **Compositing**: `clip-path` and `<clipPath>` (`clip-rule`,
   `clipPathUnits`, nesting), `mask` and `<mask>` (`maskUnits`,
   `maskContentUnits`, `mask-type`, the mask region), and group opacity.
-- **Paint order**: `paint-order`, which may put a shape's stroke under its
-  fill.
+- **Markers**: `<marker>` with `marker-start`, `marker-mid`, `marker-end`
+  and the `marker` shorthand, on the four shapes whose vertices the author
+  writes (`<path>`, `<line>`, `<polyline>`, `<polygon>`). An instance is
+  placed at each of those vertices and turned by the path's *true* tangent
+  there — a curve's control-point direction, not its first flattened chord,
+  so a marker does not swing as the asset is rasterised larger — bisecting
+  the two segments at a corner. `refX`/`refY`, `markerWidth`/`markerHeight`,
+  `markerUnits`, `orient` (`auto`, `auto-start-reverse`, or an angle), the
+  marker's own `viewBox`/`preserveAspectRatio`, and its `overflow` clip all
+  collapse into one placement per instance. A marker takes its style from its
+  own place in the document rather than from the shape that placed it, and a
+  reference to a marker the document does not define simply draws nothing.
+- **Paint order**: `paint-order`, a permutation of a shape's fill, stroke,
+  and markers — so a stroke may go under its fill, or the markers under
+  both.
 - **Hotspot**: `data-hotspot-x` / `data-hotspot-y` on the `<svg>` element for
   cursor assets.
 
@@ -320,7 +333,7 @@ that is defined but paints nothing — a gradient with no stops, a pattern with
 no tile — is `none`, and takes no fallback.
 
 What it does **not** draw, because an artwork decoder is not a browser: text,
-embedded images, filters, markers, and animation. An element it cannot draw
+embedded images, filters, and animation. An element it cannot draw
 is skipped rather than refusing the document, so one unsupported decoration
 does not lose a whole asset; the open question about that choice is recorded
 in `plans/ICONS.md`. There is still exactly one rasterisation path

@@ -449,8 +449,8 @@ question this plan has not settled.
 
 `lib/svg` now decodes the drawable part of SVG 1.1 in full (`plans/SVG.md`),
 so an authored master ships as its designer drew it. What it still cannot
-draw — text, embedded images, filters, markers — it **skips**, rendering the
-rest of the document rather than refusing it.
+draw — text, embedded images, filters — it **skips**, rendering the rest of
+the document rather than refusing it.
 
 That is deliberate: one unsupported decoration should not lose a whole asset,
 and it is the behaviour every surface has today. But it cuts against failing
@@ -462,10 +462,10 @@ fallback. Which of the two the desktop wants is a decision this plan has not
 taken; the build gate already refuses a master that draws nothing, so only
 the *partially* drawable case is at stake.
 
-The set at stake keeps shrinking. Clipping, masking, group opacity and
-`<pattern>` fills are now honoured — including a tile whose content spills
-into the neighbouring repeats, which used to take the reference's fallback
-colour and so was itself a wrong picture; a `clip-path` or `mask` naming
+The set at stake keeps shrinking. Clipping, masking, group opacity,
+`<pattern>` fills and `<marker>` decorations are now honoured — including a
+tile whose content spills into the neighbouring repeats, which used to take
+the reference's fallback colour and so was itself a wrong picture; a `clip-path` or `mask` naming
 something the document does not define makes the element **not rendered**
 rather than rendered unclipped, and a paint server that is defined but paints
 nothing is `none` rather than the fallback colour written beside the
