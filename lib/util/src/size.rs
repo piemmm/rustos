@@ -187,6 +187,74 @@ pub fn format_u128(value: u128, buf: &mut [u8; SIZE_TEXT_MAX]) -> &str {
     core::str::from_utf8(&buf[..len]).unwrap_or("")
 }
 
+/// The binary units a desktop-prose byte count is scaled through, smallest
+/// first. Spelled in full (`GiB`, not `G`) because a surface with room for
+/// the unit reads better with it, which is the whole difference between this
+/// rendering and [`format_human`]'s.
+///
+/// The ladder reaches exbibytes because a byte count is a [`u64`] throughout
+/// the ABI: stopping a rung short would spell the top of its own domain as
+/// four figures of the rung below.
+const PROSE_UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+
+/// Where `bytes` lands on the binary ladder: the divisor that brings it under
+/// four digits, and the unit that divisor stands for.
+///
+/// Exposed so a caller rendering a *pair* of figures can scale both to the
+/// whole's unit — 512 MiB of 16 GiB reads as `0.5 / 16 GiB`, never as `512`
+/// against a whole in another unit. A count beyond the last unit saturates
+/// there rather than wrapping to a smaller, misleading number.
+#[must_use]
+pub fn binary_scale(bytes: u64) -> (u64, &'static str) {
+    let mut scale = 1u64;
+    let mut unit = 0usize;
+    while bytes / scale >= 1024 && unit + 1 < PROSE_UNITS.len() {
+        scale = scale.saturating_mul(1024);
+        unit = unit.saturating_add(1);
+    }
+    (scale, PROSE_UNITS.get(unit).copied().unwrap_or("B"))
+}
+
+/// `bytes` at `scale`, with one decimal place above whole bytes, written
+/// into `buf`.
+///
+/// One decimal is the most precision a scaled figure earns: a reader
+/// comparing two volumes needs the magnitude and one significant place, and
+/// more digits imply an accuracy the underlying block counts do not have.
+/// Truncating rather than rounding up, because this is a reading of what is
+/// there, not [`format_human`]'s never-under-report accounting.
+#[must_use]
+pub fn format_at_scale(bytes: u64, scale: u64, buf: &mut [u8; SIZE_TEXT_MAX]) -> &str {
+    if scale <= 1 {
+        return format_u128(u128::from(bytes), buf);
+    }
+    let mut len = encode_u128(u128::from(bytes / scale), buf);
+    let tenths = (bytes % scale).saturating_mul(10) / scale;
+    buf[len] = b'.';
+    // `tenths` is `0..=9` by construction, so the cast is lossless.
+    buf[len + 1] = b'0' + u8::try_from(tenths).unwrap_or(0);
+    len += 2;
+    core::str::from_utf8(&buf[..len]).unwrap_or("")
+}
+
+/// `bytes` in the largest binary unit that keeps it under four digits, with
+/// the unit spelled in full: `512 B`, `1.9 GiB`.
+///
+/// The desktop's prose rendering, as against [`format_human`]'s GNU one.
+/// They are two renderings of one quantity and neither is the other's
+/// default: `df` is bound to the GNU spelling and its ceiling rounding,
+/// while a settings pane or a resource card has the room to say `GiB` and
+/// reports what is there rather than what must not be under-reported.
+#[must_use]
+pub fn format_binary(bytes: u64, buf: &mut [u8; SIZE_TEXT_MAX]) -> &str {
+    let (scale, unit) = binary_scale(bytes);
+    let digits = format_at_scale(bytes, scale, buf).len();
+    buf[digits] = b' ';
+    let end = digits + 1 + unit.len();
+    buf[digits + 1..end].copy_from_slice(unit.as_bytes());
+    core::str::from_utf8(&buf[..end]).unwrap_or("")
+}
+
 /// Write `value` as decimal ASCII into the front of `buf`, returning the
 /// byte count. A `u128` has at most 39 digits, which always fits.
 fn encode_u128(mut value: u128, buf: &mut [u8; SIZE_TEXT_MAX]) -> usize {
@@ -219,7 +287,10 @@ fn unit_char(unit: char) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{blocks_ceil, format_human, parse_block_size, SizeScale, SIZE_TEXT_MAX};
+    use super::{
+        binary_scale, blocks_ceil, format_at_scale, format_binary, format_human, parse_block_size,
+        SizeScale, SIZE_TEXT_MAX,
+    };
 
     #[test]
     fn parses_the_rendering_words() {
@@ -328,5 +399,48 @@ mod tests {
         // 2^80 bytes = 1.0Y at powers of 1024.
         assert_eq!(format_human(1u128 << 80, 1024, &mut buf), "1.0Y");
         assert_eq!(format_human(u128::from(u64::MAX), 1024, &mut buf), "16E");
+    }
+
+    /// The prose rendering the desktop reads, against the GNU one `df` is
+    /// bound to: same quantity, two spellings, neither the other's default.
+    #[test]
+    fn the_prose_rendering_spells_its_unit_and_keeps_one_decimal() {
+        let mut buf = [0u8; SIZE_TEXT_MAX];
+        assert_eq!(format_binary(0, &mut buf), "0 B");
+        assert_eq!(format_binary(512, &mut buf), "512 B");
+        assert_eq!(format_binary(1023, &mut buf), "1023 B");
+        assert_eq!(format_binary(1024, &mut buf), "1.0 KiB");
+        assert_eq!(format_binary(2_040_109_465, &mut buf), "1.8 GiB");
+        // A count past the last unit saturates there rather than wrapping to
+        // a smaller, misleading number.
+        assert_eq!(format_binary(u64::MAX, &mut buf), "15.9 EiB");
+    }
+
+    /// Truncating, not GNU's ceiling: this is a reading of what is there,
+    /// so a volume a byte over a unit does not read as the next tenth up.
+    #[test]
+    fn the_two_renderings_round_opposite_ways_on_purpose() {
+        let mut prose = [0u8; SIZE_TEXT_MAX];
+        let mut gnu = [0u8; SIZE_TEXT_MAX];
+        let over = 1024 + 1;
+        assert_eq!(format_binary(over, &mut prose), "1.0 KiB");
+        assert_eq!(format_human(u128::from(over), 1024, &mut gnu), "1.1K");
+    }
+
+    /// The pair case the exposed scale exists for: both figures scaled to
+    /// the whole's unit, so `512 MiB of 16 GiB` reads as one quantity.
+    #[test]
+    fn a_pair_scales_both_figures_to_the_whole() {
+        let mut buf = [0u8; SIZE_TEXT_MAX];
+        let (scale, unit) = binary_scale(16 * 1024 * 1024 * 1024);
+        assert_eq!(unit, "GiB");
+        assert_eq!(format_at_scale(512 * 1024 * 1024, scale, &mut buf), "0.5");
+        assert_eq!(
+            format_at_scale(16 * 1024 * 1024 * 1024, scale, &mut buf),
+            "16.0"
+        );
+        // An unscaled ladder rung writes the count itself, with no decimal
+        // point a whole-byte figure has not earned.
+        assert_eq!(format_at_scale(7, 1, &mut buf), "7");
     }
 }

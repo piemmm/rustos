@@ -10,45 +10,25 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::Duration64;
-
-/// The binary units a byte count is scaled through, smallest first.
-const BYTE_UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+use tairix_util::size::{binary_scale, format_at_scale, format_binary, SIZE_TEXT_MAX};
 
 /// A byte count in the largest binary unit that keeps it under four
 /// digits, with one decimal place above a kibibyte (`"1.9 GiB"`) and whole
 /// bytes below it (`"512 B"`).
 ///
-/// One decimal is the most precision a scaled figure earns: a reader
-/// comparing two volumes needs the magnitude and one significant place,
-/// and more digits imply an accuracy the underlying block counts do not
-/// have. A count beyond the last unit saturates in that unit rather than
-/// wrapping to a smaller, misleading number.
+/// The scaling itself is the shared one, because the desktop's Settings
+/// reports a volume's capacity in the same words this page does and two
+/// ladders would let the same disk read differently on the two surfaces.
 #[must_use]
 pub fn format_bytes(bytes: u64) -> String {
-    let (scale, name) = byte_scale(bytes);
-    format!("{} {name}", digits_at(bytes, scale))
-}
-
-/// Where `bytes` lands on the binary ladder: the divisor that brings it under
-/// four digits, and the unit that divisor stands for.
-fn byte_scale(bytes: u64) -> (u64, &'static str) {
-    let mut scale = 1u64;
-    let mut unit = 0usize;
-    while bytes / scale >= 1024 && unit + 1 < BYTE_UNITS.len() {
-        scale = scale.saturating_mul(1024);
-        unit = unit.saturating_add(1);
-    }
-    (scale, BYTE_UNITS.get(unit).copied().unwrap_or("B"))
+    let mut buf = [0u8; SIZE_TEXT_MAX];
+    String::from(format_binary(bytes, &mut buf))
 }
 
 /// `bytes` at `scale`, with one decimal place above whole bytes.
 fn digits_at(bytes: u64, scale: u64) -> String {
-    if scale == 1 {
-        return format!("{bytes}");
-    }
-    let whole = bytes / scale;
-    let tenths = (bytes % scale).saturating_mul(10) / scale;
-    format!("{whole}.{tenths}")
+    let mut buf = [0u8; SIZE_TEXT_MAX];
+    String::from(format_at_scale(bytes, scale, &mut buf))
 }
 
 /// A byte count `of` a measured whole, as the figure a hero reads and the unit
@@ -61,7 +41,7 @@ fn digits_at(bytes: u64, scale: u64) -> String {
 /// that are not comparable.
 #[must_use]
 pub fn byte_parts(bytes: u64, of: u64) -> (String, String) {
-    let (scale, name) = byte_scale(of);
+    let (scale, name) = binary_scale(of);
     (
         digits_at(bytes, scale),
         format!("/ {} {name}", digits_at(of, scale)),

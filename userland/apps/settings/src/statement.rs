@@ -56,7 +56,7 @@ impl<'a> Statement<'a> {
                 tail: elsewhere,
                 needs: false,
             }),
-            PaneBacking::Composed => None,
+            PaneBacking::Composed(_) => None,
         }
     }
 

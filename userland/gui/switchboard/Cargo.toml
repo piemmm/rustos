@@ -43,6 +43,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # the process-list and CPU-time paging walks, and the memory-pressure fetch.
 # The sampler consumes these rather than duplicating them.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The shared size ladder every byte figure on this page is scaled through,
+# which the desktop's Settings reads too, so one disk cannot read `1.9 GiB`
+# on one surface and something else on the other.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The shared Reactive Alloy controls the screen is assembled from — window
 # furniture, meters, charts, the location breadcrumb, list rows, cards, action
 # rails, buttons, menus, and the one scrollbar — so this application paints no

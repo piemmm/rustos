@@ -26,6 +26,12 @@ there is no button to press afterwards; if the desktop refuses a change, the
 reason is reported on the standard error stream and the row goes back to what
 the desktop actually holds.
 
+**Storage** lists every mounted volume: where it is mounted, its filesystem,
+its device and medium, how full it is, and whether it is healthy. It is a
+report, not a control — mounting and unmounting are the file manager's and
+the `mount` command's — and a volume whose format keeps no fixed capacity
+says so rather than showing a bar. `df` reports the same figures at a shell.
+
 A category this system cannot serve says so plainly and names what would have
 to exist before it could. A category it can serve, whose controls this release
 does not yet draw, names where the setting is read or set instead. A control

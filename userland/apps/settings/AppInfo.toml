@@ -22,6 +22,12 @@
 # that already writes that store. Nothing in this application can be tricked
 # into an escalation, because there is no capability in it to escalate with.
 #
+# The readings it shows need no capability either: the Storage pane lists the
+# mount table through the ungated sysinfo-v1 MOUNT_LIST query, exactly as the
+# `df` command does. The Switchboard's per-device I/O counters are gated on
+# CAP_SYSINFO_KERNEL and are that surface's alone; a pane that merely reports
+# how full each volume is does not need them and does not ask.
+#
 # The launched process receives this set intersected with the launching user's
 # grants, never more.
 id = "os.tairix.settings"

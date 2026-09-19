@@ -2680,9 +2680,11 @@ dependencies = [
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
+ "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
  "tairix-theme",
+ "tairix-util",
  "tairix-wallpaper",
  "tairix-window",
 ]
@@ -2763,6 +2765,7 @@ dependencies = [
  "tairix-rt",
  "tairix-sandbox",
  "tairix-theme",
+ "tairix-util",
  "tairix-window",
 ]
 

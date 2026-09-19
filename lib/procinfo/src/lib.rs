@@ -163,5 +163,6 @@ pub use transport::{Output, Transport};
 pub use users::{for_each_user, user_name, user_names, USER_DIRECTORY_PAGE};
 pub use valueread::{read_value, MAX_VALUE_LEN};
 pub use volume::{
-    availability_marker, availability_name, medium_name, volume_health_name, VolumeBytes,
+    availability_marker, availability_name, medium_name, mount_name_bytes, volume_health_name,
+    VolumeBytes,
 };

@@ -24,13 +24,15 @@ use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
 use tairix_controls::{
     ComboBox, FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow,
 };
-use tairix_geometry::{to_i32, Rect, Region, Scale};
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{
     Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, Rgb, SettingsKey, WallpaperFit,
 };
+
+use crate::stack;
 
 /// The UI scales the surface offers, as percentages of the reference
 /// density.
@@ -667,7 +669,7 @@ impl Form {
     /// costs a shorter label and never a taller pane.
     #[must_use]
     pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
-        let gap = group_gap(scale, theme);
+        let gap = stack::gap(scale, theme);
         let plates: u32 = self
             .groups
             .iter()
@@ -865,9 +867,9 @@ impl Form {
 
     /// The groups drawn from `first`, each with where it is placed.
     ///
-    /// Only the groups that fit whole are placed: a plate half off the
-    /// bottom would draw its rows over the window's edge, and a reader
-    /// cannot press a row they cannot see.
+    /// One column across every group, resolved here rather than per plate,
+    /// and the expanded choice list placed against the row it belongs to.
+    /// The stacking itself is the shared one every plate column uses.
     fn layouts_from(&self, first: usize, place: FormPlace<'_>) -> Vec<(usize, FieldLayout)> {
         let FormPlace {
             bounds,
@@ -875,29 +877,20 @@ impl Form {
             scale,
             theme,
         } = place;
-        let gap = group_gap(scale, theme);
         let column = self
             .groups
             .iter()
             .map(|group| group.slot_column(bounds, scale, theme))
             .max()
             .unwrap_or(0);
-        let mut top = bounds.top().saturating_add(to_i32(gap));
-        let limit = bounds.bottom();
-        let mut placed = Vec::with_capacity(self.groups.len());
-        for (index, group) in self.groups.iter().enumerate().skip(first) {
-            let height = group.measured_height(scale, theme);
-            let rect = Rect::new(
-                bounds.left().saturating_add(to_i32(gap)),
-                top,
-                bounds.width.saturating_sub(gap.saturating_mul(2)),
-                height,
-            );
-            // The first group always draws, however short the column: a
-            // pane that seated nothing at all would be a blank window.
-            if rect.bottom() > limit && index > first {
-                break;
-            }
+        stack::place(bounds, first, self.groups.len(), scale, theme, |index| {
+            self.groups
+                .get(index)
+                .map_or(0, |group| group.measured_height(scale, theme))
+        })
+        .into_iter()
+        .filter_map(|(index, rect)| {
+            let group = self.groups.get(index)?;
             let layout = FieldLayout::new(rect, column);
             let popup =
                 group
@@ -913,16 +906,15 @@ impl Form {
                         | FieldControl::Reading(_)
                         | FieldControl::Unmeasured(_) => None,
                     });
-            placed.push((
+            Some((
                 index,
                 match popup {
                     Some(rect) => layout.with_popup(rect),
                     None => layout,
                 },
-            ));
-            top = top.saturating_add(to_i32(height.saturating_add(gap)));
-        }
-        placed
+            ))
+        })
+        .collect()
     }
 
     /// How many groups the column seats from the one it draws from.
@@ -949,25 +941,21 @@ impl Form {
     }
 
     /// The first group to draw from so that group `index` is seated.
-    ///
-    /// A group above the window becomes the first drawn; one below it
-    /// becomes the last. Each step may seat a different number of groups,
-    /// so the count is re-asked rather than assumed uniform.
     #[must_use]
     pub fn reveal_from(&self, index: usize, place: FormPlace<'_>) -> usize {
-        if index < self.first {
-            return index;
-        }
-        let mut want = self.first;
-        while want < index
-            && !self
-                .layouts_from(want, place)
-                .iter()
-                .any(|(seated, _)| *seated == index)
-        {
-            want = want.saturating_add(1);
-        }
-        want
+        stack::reveal_from(
+            self.first,
+            index,
+            place.bounds,
+            self.groups.len(),
+            place.scale,
+            place.theme,
+            |at| {
+                self.groups
+                    .get(at)
+                    .map_or(0, |group| group.measured_height(place.scale, place.theme))
+            },
+        )
     }
 
     /// The groups paired with where they are drawn.
@@ -999,13 +987,6 @@ impl Form {
     pub(crate) fn groups(&self) -> &[FieldGroup] {
         &self.groups
     }
-}
-
-/// The gap between stacked group plates, and between them and the column's
-/// own edges: the theme's control gap, so a pane breathes at whatever
-/// density the desktop is drawn at.
-fn group_gap(scale: Scale, theme: &Theme) -> u32 {
-    scale.scale_length(theme.metrics().control_gap).max(1)
 }
 
 impl Form {

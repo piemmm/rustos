@@ -26,11 +26,13 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
-use crate::appearance::{Form, FormOutcome, FormPlace};
+use crate::appearance::{FormOutcome, FormPlace};
+use crate::body::{self, Body, Drawn};
 use crate::frame::{resolve_frame, Overflow, ShellFrame};
-use crate::gallery::{Gallery, GalleryOutcome, PictureWanted};
-use crate::registry::{strip_rows, CategoryRow, Location, StripRow, CATEGORIES};
-use crate::statement;
+use crate::gallery::{GalleryOutcome, PictureWanted};
+use crate::registry::{strip_rows, CategoryRow, Location, PaneRow, StripRow, CATEGORIES};
+use crate::stack;
+use crate::volumes::VolumeReading;
 
 /// The trail's leading crumb: the surface itself, and — once the strip is
 /// shed — the way back to the category list.
@@ -42,9 +44,6 @@ const ROOT_CRUMB: &str = "Settings";
 /// at three type roles, so no one line height is the column's, and a reader
 /// turning a wheel wants a consistent step.
 const LINE_STEP: u64 = 24;
-
-/// How far one page-scroll moves the pane column, in physical pixels.
-const PAGE_STEP: u64 = 240;
 
 /// Which region of the shell holds the keyboard cursor.
 ///
@@ -128,17 +127,22 @@ pub struct Shell {
     pointer: Point,
     /// The desktop settings every composed pane's rows are built from.
     settings: DesktopSettings,
-    /// The form the pane on show composes, or `None` for one that states an
-    /// absence instead.
-    form: Option<Form>,
+    /// What the pane on show draws.
+    body: Body,
     /// The shipped pictures the desktop answered, empty until it has.
     catalog: Vec<CatalogItem>,
     /// The cursor sets the desktop offers besides the built-in one, empty
     /// until it has answered.
     cursor_sets: Vec<CursorSetId>,
-    /// The picture gallery the pane on show draws beneath its form, for the
-    /// one pane that has one.
-    gallery: Option<Gallery>,
+    /// The mounted volumes the caller last read for the Storage pane, empty
+    /// until it has.
+    volumes: Vec<VolumeReading>,
+    /// Set while the Storage pane is on show and the caller has not yet
+    /// answered a fresh mount walk for it.
+    ///
+    /// The walk is an IPC round trip, so the pane never makes it: it says
+    /// it wants one and draws what has already arrived.
+    volumes_wanted: bool,
 }
 
 impl Shell {
@@ -165,13 +169,14 @@ impl Shell {
             focus: Focus::Strip,
             pointer: Point::ORIGIN,
             settings,
-            form: None,
+            body: Body::Statement,
             catalog: Vec::new(),
             cursor_sets: Vec::new(),
-            gallery: None,
+            volumes: Vec::new(),
+            volumes_wanted: false,
         };
         shell.restate_trail();
-        shell.restate_form();
+        shell.restate_body();
         Some(shell)
     }
 
@@ -184,7 +189,7 @@ impl Shell {
     /// document already names.
     pub fn adopt_cursor_sets(&mut self, sets: Vec<CursorSetId>) {
         self.cursor_sets = sets;
-        self.restate_form();
+        self.restate_body();
     }
 
     /// Adopt the shipped picture catalog the desktop answered.
@@ -193,8 +198,30 @@ impl Shell {
     /// arrived — nothing at all, at first — and rebuilds when it lands.
     pub fn adopt_catalog(&mut self, catalog: Vec<CatalogItem>) {
         self.catalog = catalog;
-        if self.gallery.is_some() {
-            self.gallery = Some(Gallery::new(&self.catalog, &self.settings));
+        if self.body.gallery().is_some() {
+            self.restate_body();
+        }
+    }
+
+    /// Whether the caller should read the mount table for this window.
+    ///
+    /// Set when the Storage pane comes on show and cleared when a walk is
+    /// answered, so the volumes are as current as the last time the reader
+    /// looked at them without the pane ever waiting on a round trip.
+    #[must_use]
+    pub const fn volumes_wanted(&self) -> bool {
+        self.volumes_wanted
+    }
+
+    /// Adopt the mounted volumes the caller walked the mount table for.
+    ///
+    /// Requested, never awaited: the Storage pane opens on whatever has
+    /// arrived — nothing at all, at first — and rebuilds when it lands.
+    pub fn adopt_volumes(&mut self, volumes: Vec<VolumeReading>) {
+        self.volumes = volumes;
+        self.volumes_wanted = false;
+        if matches!(self.body, Body::Volumes(_)) {
+            self.restate_body();
         }
     }
 
@@ -209,29 +236,29 @@ impl Shell {
     ) -> Option<PictureWanted> {
         let frame = self.frame(viewport, scale, theme);
         let band = self.gallery_band(&frame, scale, theme)?;
-        self.gallery.as_ref()?.next_wanted(band, scale, theme)
+        self.body.gallery()?.next_wanted(band, scale, theme)
     }
 
     /// Adopt the pixels the desktop rendered for catalog position `index`,
     /// answering whether anything on screen changed.
     pub fn set_picture(&mut self, index: u16, side: u16, pixels: &[u8]) -> bool {
-        self.gallery
-            .as_mut()
+        self.body
+            .gallery_mut()
             .is_some_and(|gallery| gallery.set_picture(index, side, pixels))
     }
 
     /// Record that the desktop refused catalog position `index`, answering
     /// whether anything on screen changed.
     pub fn mark_picture_refused(&mut self, index: u16) -> bool {
-        self.gallery
-            .as_mut()
+        self.body
+            .gallery_mut()
             .is_some_and(|gallery| gallery.mark_refused(index))
     }
 
     /// Ask for every rendered picture again, because a picture is square
     /// at one side only and the desktop's scale has moved.
     pub fn invalidate_pictures(&mut self) {
-        if let Some(gallery) = &mut self.gallery {
+        if let Some(gallery) = self.body.gallery_mut() {
             gallery.invalidate_pictures();
         }
     }
@@ -271,7 +298,7 @@ impl Shell {
         // choice the reader made moved the rows on screen without moving
         // this, so an answer equal to the last one is exactly the refusal
         // that has to put them back.
-        let shown = match &self.form {
+        let shown = match self.body.form() {
             Some(form) => form.settings() == &settings,
             None => self.settings == settings,
         };
@@ -279,28 +306,38 @@ impl Shell {
         if shown {
             return;
         }
-        match &mut self.form {
-            Some(form) => form.adopt(&self.settings),
-            None => self.restate_form(),
-        }
-        if let Some(gallery) = &mut self.gallery {
-            gallery.adopt(&self.settings);
+        if self.body.form().is_some() {
+            self.body.adopt(&self.settings);
+        } else {
+            self.restate_body();
         }
     }
 
-    /// Build the form the pane on show composes, and the gallery it draws
-    /// beneath it, if it has either.
-    fn restate_form(&mut self) {
-        self.form = self
-            .location
-            .rows()
-            .and_then(|(_, pane)| pane.composition())
-            .map(|composition| Form::new(composition, &self.settings, &self.cursor_sets));
-        self.gallery = self
-            .location
-            .rows()
-            .is_some_and(|(_, pane)| pane.has_gallery())
-            .then(|| Gallery::new(&self.catalog, &self.settings));
+    /// Build what the pane on show draws.
+    fn restate_body(&mut self) {
+        let listed = matches!(self.body, Body::Volumes(_));
+        let answered = body::Answered {
+            settings: &self.settings,
+            cursor_sets: &self.cursor_sets,
+            catalog: &self.catalog,
+            volumes: &self.volumes,
+        };
+        self.body = match self.location.rows() {
+            Some((_, pane)) => Body::of(pane, &answered),
+            None => Body::Statement,
+        };
+        // Asked for when the pane that lists them *comes* on show, so the
+        // table is current each time the reader looks. Not on every rebuild:
+        // adopting an answered walk rebuilds too, and re-arming there would
+        // ask again for the table just handed over.
+        if !listed && matches!(self.body, Body::Volumes(_)) {
+            self.volumes_wanted = true;
+        }
+    }
+
+    /// The pane row on show, whose statement a stated absence draws from.
+    fn pane_row(&self) -> Option<&'static PaneRow> {
+        self.location.rows().map(|(_, pane)| pane)
     }
 
     /// The band the gallery is drawn in: what `frame.content` has left
@@ -310,10 +347,10 @@ impl Shell {
     /// and the pictures are what scrolls — and a window too short for both
     /// still shows the rows.
     fn gallery_band(&self, frame: &ShellFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
-        self.gallery.as_ref()?;
+        self.body.gallery()?;
         let header = self
-            .form
-            .as_ref()
+            .body
+            .form()
             .map_or(0, |form| form.measured_height(scale, theme));
         let height = frame.content.height.checked_sub(header)?;
         Some(Rect::new(
@@ -377,7 +414,7 @@ impl Shell {
             strip: bare
                 .sidebar
                 .is_some_and(|rect| self.strip.seated(rect, scale, theme) < self.rows.len()),
-            pane: self.gallery.as_ref().map_or_else(
+            pane: self.body.gallery().map_or_else(
                 || self.content_height(bare.content.width, scale, theme) > bare.content.height,
                 |gallery| {
                     self.gallery_band(&bare, scale, theme).is_some_and(|band| {
@@ -391,38 +428,37 @@ impl Shell {
         // the ranges are set from are the ones a bar has already been taken
         // out of.
         let frame = resolve_frame(viewport, scale, theme, overflow);
-        // Tile lines for a gallery, groups for a form — each is the unit
-        // the thing that scrolls actually moves in — and pixels for a
-        // statement, which is drawn at any offset.
-        let (extent, seen) = match (&self.gallery, &self.form) {
-            (Some(gallery), _) => {
-                let band = self
-                    .gallery_band(&frame, scale, theme)
-                    .unwrap_or(frame.content);
-                let range = gallery.scroll_range(band, scale, theme, self.scroll.model().offset());
-                (range.content_extent(), range.viewport_extent())
-            }
-            (None, Some(form)) => (
-                groups_as_extent(form.groups_len()),
-                groups_as_extent(form.seated(place(frame.content, viewport, scale, theme))),
-            ),
-            (None, None) => (
-                u64::from(self.content_height(frame.content.width, scale, theme)),
-                u64::from(frame.content.height),
-            ),
-        };
-        self.scroll
-            .set_model(self.scroll.model().resize(extent, seen));
+        // Tile lines for a gallery, plates for a form or a card column —
+        // each is the unit the thing that scrolls actually moves in — and
+        // pixels for a statement, which is drawn at any offset.
+        let band = self
+            .gallery_band(&frame, scale, theme)
+            .unwrap_or(frame.content);
+        let (extent, seen) = self.pane_row().map_or((0, 0), |pane| {
+            self.body.scroll_range(
+                pane,
+                place(frame.content, viewport, scale, theme),
+                band,
+                self.scroll.model().offset(),
+            )
+        });
+        self.scroll.set_model(stepped(
+            self.scroll.model().resize(extent, seen),
+            self.body.scrolls_in_pixels(),
+        ));
         // The strip's scroll is counted in *rows*, because that is the unit a
         // strip drawing from an entry of its own moves in.
         let seats = frame
             .sidebar
             .map_or(0, |rect| self.strip.seated(rect, scale, theme));
-        self.strip_scroll.set_model(
+        // In rows, because that is the unit a strip drawing from an entry
+        // of its own moves in.
+        self.strip_scroll.set_model(stepped(
             self.strip_scroll
                 .model()
-                .resize(rows_as_extent(self.rows.len()), rows_as_extent(seats)),
-        );
+                .resize(stack::as_extent(self.rows.len()), stack::as_extent(seats)),
+            false,
+        ));
     }
 
     /// Scroll the strip so row `index` is one the column shows.
@@ -478,17 +514,14 @@ impl Shell {
         }
         self.strip.set_first(first);
         self.strip_scroll
-            .set_model(self.strip_scroll.model().scroll_to(rows_as_extent(first)));
+            .set_model(self.strip_scroll.model().scroll_to(stack::as_extent(first)));
         damage.add(sidebar);
     }
 
     /// The pane's own height in a column `width` pixels wide.
     fn content_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
-        if let Some(form) = &self.form {
-            return form.measured_height(scale, theme);
-        }
-        self.location.rows().map_or(0, |(_, pane)| {
-            statement::measured_height(pane, width, scale, theme)
+        self.pane_row().map_or(0, |pane| {
+            self.body.measured_height(pane, width, scale, theme)
         })
     }
 
@@ -519,33 +552,22 @@ impl Shell {
         if let Some(rect) = frame.strip_scrollbar {
             self.strip_scroll.render(surface, rect, scale, theme);
         }
-        if let Some((_, pane)) = self.location.rows() {
+        if let Some(pane) = self.pane_row() {
             let column = self.pane_column(&frame);
+            let drawn = Drawn {
+                place: place(column, viewport, scale, theme),
+                column,
+                band: self
+                    .gallery_band(&frame, scale, theme)
+                    .unwrap_or(Rect::EMPTY),
+                offset: self.scroll.model().offset(),
+            };
             surface.with_clip(
                 u32::try_from(frame.content.left()).unwrap_or(0),
                 u32::try_from(frame.content.top()).unwrap_or(0),
                 frame.content.width,
                 frame.content.height,
-                |clipped| match (&self.gallery, &self.form) {
-                    (Some(gallery), form) => {
-                        if let Some(form) = form {
-                            form.render(clipped, place(frame.content, viewport, scale, theme));
-                        }
-                        if let Some(band) = self.gallery_band(&frame, scale, theme) {
-                            gallery.render(
-                                clipped,
-                                band,
-                                self.scroll.model().offset(),
-                                scale,
-                                theme,
-                            );
-                        }
-                    }
-                    (None, Some(form)) => {
-                        form.render(clipped, place(column, viewport, scale, theme));
-                    }
-                    (None, None) => statement::render(clipped, pane, column, scale, theme),
-                },
+                |clipped| self.body.render(clipped, pane, drawn, artwork),
             );
         }
         if let Some(rect) = frame.scrollbar {
@@ -577,18 +599,16 @@ impl Shell {
     ) {
         let column = self.pane_column(frame);
         let spot = place(column, viewport, scale, theme);
-        let Some(form) = &self.form else {
+        let Some(form) = self.body.form() else {
             return;
         };
         let want = form.reveal_from(form.focused_group(), spot);
         if want == form.first() {
             return;
         }
-        if let Some(form) = &mut self.form {
-            form.set_first(want);
-        }
+        self.body.set_first(want);
         self.scroll
-            .set_model(self.scroll.model().scroll_to(groups_as_extent(want)));
+            .set_model(self.scroll.model().scroll_to(stack::as_extent(want)));
         damage.add(frame.content);
     }
 
@@ -599,10 +619,11 @@ impl Shell {
     /// press lands on the row the reader can actually see. One definition,
     /// read by the paint and the hit test alike.
     fn pane_column(&self, frame: &ShellFrame) -> Rect {
-        if self.form.is_some() {
-            // A form is *placed* on the surface rather than clipped to it,
-            // so it never rides above the column's own top; it scrolls by
-            // whole groups instead, exactly as the strip scrolls by rows.
+        if !self.body.scrolls_in_pixels() {
+            // A plate is *placed* on the surface rather than clipped to it,
+            // so it never rides above the column's own top; such a body
+            // scrolls by whole plates instead, exactly as the strip scrolls
+            // by rows.
             return frame.content;
         }
         let offset = u32::try_from(self.scroll.model().offset()).unwrap_or(u32::MAX);
@@ -640,14 +661,15 @@ impl Shell {
                 return ShellOutcome::of(self.scrolled(frame.content, acted, damage));
             }
         }
-        if frame.content.contains(self.pointer) || self.form_is_listing() {
+        if frame.content.contains(self.pointer) || self.body.is_listing() {
             if let InputEvent::PointerScrolled { dx, dy } = event {
                 let acted = self.scroll.wheel(*dx, *dy, frame.content, damage);
                 return ShellOutcome::of(self.scrolled(frame.content, acted, damage));
             }
             let column = self.pane_column(&frame);
-            if let Some(form) = &mut self.form {
-                let acted = form.on_pointer(event, place(column, viewport, scale, theme), damage);
+            let spot = place(column, viewport, scale, theme);
+            if let Some(form) = self.body.form_mut() {
+                let acted = form.on_pointer(event, spot, damage);
                 if !matches!(acted, FormOutcome::Idle) {
                     self.focus_on(Focus::Content, viewport, scale, theme, damage);
                     return outcome_of(acted);
@@ -658,7 +680,7 @@ impl Shell {
             // the form has already answered for above.
             if let Some(band) = self.gallery_band(&frame, scale, theme) {
                 let offset = self.scroll.model().offset();
-                if let Some(gallery) = &mut self.gallery {
+                if let Some(gallery) = self.body.gallery_mut() {
                     let acted = gallery.on_pointer(event, band, offset, scale, theme, damage);
                     if acted.changed() {
                         self.focus_on(Focus::Content, viewport, scale, theme, damage);
@@ -668,11 +690,12 @@ impl Shell {
                         GalleryOutcome::Changed => ShellOutcome::Changed,
                         GalleryOutcome::Chose(settings) => {
                             self.settings = settings;
-                            if let Some(form) = &mut self.form {
-                                form.adopt(&self.settings);
-                                ShellOutcome::Apply(form.applied())
-                            } else {
-                                ShellOutcome::Changed
+                            match self.body.form_mut() {
+                                Some(form) => {
+                                    form.adopt(&self.settings);
+                                    ShellOutcome::Apply(form.applied())
+                                }
+                                None => ShellOutcome::Changed,
                             }
                         }
                     };
@@ -771,13 +794,9 @@ impl Shell {
             }
             Focus::Content => {
                 let column = self.pane_column(&frame);
-                if let Some(form) = &mut self.form {
-                    let acted = form.on_key(
-                        key,
-                        modifiers,
-                        place(column, viewport, scale, theme),
-                        damage,
-                    );
+                let spot = place(column, viewport, scale, theme);
+                if let Some(form) = self.body.form_mut() {
+                    let acted = form.on_key(key, modifiers, spot, damage);
                     if !matches!(acted, FormOutcome::Idle) {
                         self.reveal_focused_group(&frame, viewport, scale, theme, damage);
                         return outcome_of(acted);
@@ -797,13 +816,12 @@ impl Shell {
         match acted {
             Some(ScrollAction::ScrollTo { offset }) => {
                 self.scroll.set_model(self.scroll.model().scroll_to(offset));
-                // A form's scroll is counted in groups, because that is the
-                // unit a placed plate can move in — but on a pane whose
-                // gallery is what scrolls, the form is the fixed header and
-                // the offset is in tile lines, not groups.
-                if let (None, Some(form)) = (&self.gallery, &mut self.form) {
-                    form.set_first(usize::try_from(offset).unwrap_or(usize::MAX));
-                }
+                // A plate column's scroll is counted in plates, because that
+                // is the unit a placed plate can move in — while on a pane
+                // whose gallery is what scrolls, the form is the fixed
+                // header and the offset is in tile lines.
+                self.body
+                    .set_first(usize::try_from(offset).unwrap_or(usize::MAX));
                 damage.add(column);
                 true
             }
@@ -937,7 +955,7 @@ impl Shell {
         let frame = self.frame(viewport, scale, theme);
         self.location = location;
         self.scroll.set_model(self.scroll.model().scroll_to(0));
-        self.restate_form();
+        self.restate_body();
         self.restate_trail();
         self.restate_strip(viewport, scale, theme, damage);
         self.lay_out(viewport, scale, theme);
@@ -1087,16 +1105,10 @@ impl Shell {
         // A pane composing controls is reachable whether or not it is long
         // enough to scroll; one that only scrolls is reachable only when
         // there is something to scroll.
-        if self.form.is_some() || frame.scrollbar.is_some() {
+        if self.body.composes_controls() || frame.scrollbar.is_some() {
             ring.push(Focus::Content);
         }
         ring
-    }
-
-    /// Whether the form has a choice list open, which is modal: the list
-    /// keeps the pointer even when it hangs outside the pane's own column.
-    fn form_is_listing(&self) -> bool {
-        self.form.as_ref().is_some_and(Form::is_listing)
     }
 
     /// Move the cursor one step round the ring.
@@ -1141,8 +1153,8 @@ impl Shell {
         self.search.set_focused(focus == Focus::Search);
         self.trail.adopt_focus((focus == Focus::Trail).then_some(0));
         self.scroll
-            .set_focused(focus == Focus::Content && self.form.is_none());
-        if let Some(form) = &mut self.form {
+            .set_focused(focus == Focus::Content && !self.body.composes_controls());
+        if let Some(form) = self.body.form_mut() {
             form.set_focused(focus == Focus::Content);
             damage.add(frame.content);
         }
@@ -1246,20 +1258,30 @@ impl Shell {
     /// The form the pane on show composes, for a test that asks what it
     /// composed.
     #[cfg(test)]
-    pub(crate) fn form_for_test(&self) -> Option<&Form> {
-        self.form.as_ref()
+    pub(crate) fn form_for_test(&self) -> Option<&crate::appearance::Form> {
+        self.body.form()
+    }
+
+    /// The volume cards the pane on show draws, for a test that asks what
+    /// the machine reported.
+    #[cfg(test)]
+    pub(crate) fn readings_for_test(&self) -> Option<&crate::volumes::Readings> {
+        match &self.body {
+            Body::Volumes(readings) => Some(readings),
+            Body::Statement | Body::Form(_) | Body::Pictures { .. } => None,
+        }
     }
 
     /// Which group the form is drawing from.
     #[cfg(test)]
     pub(crate) fn form_first_for_test(&self) -> Option<usize> {
-        self.form.as_ref().map(Form::first)
+        self.body.form().map(crate::appearance::Form::first)
     }
 
     /// Which group and row the form's keyboard cursor is on.
     #[cfg(test)]
     pub(crate) fn form_group_cursor_for_test(&self) -> Option<(usize, usize)> {
-        self.form.as_ref().and_then(Form::cursor)
+        self.body.form().and_then(crate::appearance::Form::cursor)
     }
 
     /// The settings the shell is showing.
@@ -1301,21 +1323,6 @@ fn outcome_of(acted: FormOutcome) -> ShellOutcome {
     }
 }
 
-/// A group count as a form scroll's extent, for the same reason a row count
-/// is the strip's: a list of more entries than a `u64` can count is not one
-/// this surface could draw.
-fn groups_as_extent(groups: usize) -> u64 {
-    u64::try_from(groups).unwrap_or(u64::MAX)
-}
-
-/// A row count as the strip scroll's extent.
-///
-/// The strip's scroll is counted in rows, and a list of more rows than a
-/// `u64` can count is not one this surface could draw.
-fn rows_as_extent(rows: usize) -> u64 {
-    u64::try_from(rows).unwrap_or(u64::MAX)
-}
-
 /// The band a pane occupies: its column and whatever the scrollbar takes
 /// beside it, so a change that moves the bar reports the strip it vacated.
 fn pane_band(frame: &ShellFrame, viewport: Rect) -> Rect {
@@ -1329,13 +1336,27 @@ fn pane_band(frame: &ShellFrame, viewport: Rect) -> Rect {
 }
 
 /// The scroll model an unmeasured column starts at: nothing to scroll, and
-/// the step distances a settings pane scrolls by.
+/// nothing to move it by.
 ///
-/// A line is one body line and a page a whole viewport, which the shell
-/// re-derives from the column every time it is resized; at construction it has
-/// no column yet, so the model starts empty and the first layout sizes it.
+/// The steps belong to the unit the column turns out to be counted in, which
+/// only a layout knows, so a model with no column yet declares none — and a
+/// zero step moves nothing rather than a guessed distance.
 fn empty_scroll() -> ScrollModel {
-    ScrollModel::new(ScrollRange::new(0, 0, 0), LINE_STEP, PAGE_STEP)
+    ScrollModel::new(ScrollRange::new(0, 0, 0), 0, 0)
+}
+
+/// `model` with the step distances of the unit its extent is counted in.
+///
+/// A model's steps are in its own scroll unit, so a column counted in whole
+/// plates or rows steps by *one of them* — a pixel distance there would send
+/// a single wheel tick to the far end of the list. A page is what the column
+/// actually shows either way, which is what the reader expects a page to be.
+fn stepped(model: ScrollModel, in_pixels: bool) -> ScrollModel {
+    let seen = model.range().viewport_extent();
+    if in_pixels {
+        return ScrollModel::new(model.range(), LINE_STEP, seen.max(LINE_STEP));
+    }
+    ScrollModel::new(model.range(), 1, seen.max(1))
 }
 
 /// The strip a row list implies: a glyph and a disclosure chevron on each

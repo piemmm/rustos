@@ -103,7 +103,7 @@ adding a category is adding a row and a renderer, never editing the shell.
 
 ## Appearance and Accessibility
 
-Two of the three panes that compose real controls today. They are two views
+Two of the four panes that compose real controls today. They are two views
 of one registry: light/dark is Appearance's alone, and contrast, density,
 motion and the interface scale appear in both — from one definition, because
 a reader looks for them in either place.
@@ -169,6 +169,50 @@ have come back and a built-in glyph for those that have not, so the pane is
 usable from its first frame. A picture the desktop refuses is not asked for
 again. [The pinboard's page](./pinboard.md) has the whole arrangement.
 
+## Storage
+
+The fourth composed pane, and the only one whose rows are *discovered* rather
+than declared: there is no fixed table of settables behind it, just the
+volumes the machine turns out to have. One card each, in the mount table's
+own order:
+
+| What the card shows | Where it comes from |
+|---|---|
+| the volume's name, as its caption | its backing source, or its mount point where the table gives it no source — the same naming rule the Switchboard's device rail uses |
+| a health capsule on that caption line | `MountAvailability`, banded to `VolumeHealth` and toned through the one band→role binding |
+| mount point, filesystem, device, medium, availability | the mount record's own fields |
+| a capacity card with a track | `VolumeBytes`: how much of the *whole medium* is gone, the byte pair, and what is still available |
+
+Read-only throughout. Mounting and unmounting are the file manager's and
+`mount`'s, and a second route to them here would be two ways to do one thing;
+the pane composes no settable, so the column's keyboard is its scrollbar's.
+
+**Nothing is derived here.** Every figure comes from the one shared volume
+view model in `lib/procinfo`, which `df`, `sysmon` and the
+[Switchboard](switchboard.md) read too, so a disk cannot be half full on one
+surface and nearly full on another. The two shares stay distinct: the track is
+of the whole medium, which is what a capacity bar means, while `df`'s GNU
+`Use%` divides by what a caller may actually allocate and so reads higher on a
+format that withholds a reserve.
+
+**A volume that reports no capacity gets no bar.** The in-RAM layout mounts
+report an all-zero accounting; their card says the format tracks no fixed
+capacity rather than drawing a full bar or an invented percentage.
+
+**The pane needs no capability the bundle does not already hold.** `MOUNT_LIST`
+is ungated — the mount table is system-wide and secret-free, and `df` reads it
+the same way. The per-device I/O counters that *are* gated
+(`CAP_SYSINFO_KERNEL`) stay the Switchboard's alone: a pane reporting how full
+each volume is does not need them, and the health a capsule states is already
+in the mount record as the live availability overlay a degraded or recovering
+device sets.
+
+**The walk never runs on the loop that owes a frame.** It is an IPC round
+trip, so it goes to a worker on its own wait-set token: the pane asks when it
+comes on show, draws whatever has already arrived, and rebuilds when the
+answer lands as an ordinary wake. Coming back to the pane asks afresh, because
+unlike the shipped picture store the mount table moves.
+
 ## Absence is stated, never mimed
 
 A control that would change nothing is never drawn. Each pane declares what
@@ -199,7 +243,13 @@ refusal looks like. `plans/NEW-DESKTOP-SETTINGS.md` §2 is the full table and
 the staged source of truth; the shape of it is:
 
 - **read-only panes** (About, Storage) render a reading, or render *unmeasured*
-  when the reading could not be taken — never a fabricated zero;
+  when the reading could not be taken — never a fabricated zero. Storage draws
+  one card per mounted volume from the ungated `MOUNT_LIST` query, derived by
+  the shared volume view model every other surface reads, so it needs no
+  capability beyond the two the bundle already requests; the per-device I/O
+  counters that do need `CAP_SYSINFO_KERNEL` stay the Switchboard's alone.
+  The walk is an IPC round trip, so it runs on a worker and the pane draws
+  what has arrived rather than waiting;
 - **user-scope panes** (Appearance, Wallpaper, Lock Screen, Screensaver,
   Notifications, Keyboard, Mouse, Accessibility) post a document to the
   desktop session, which validates it, applies it and persists it to its own

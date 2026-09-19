@@ -60,6 +60,14 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # its pictures out with — the same one the file manager's icon view and the
 # desktop's own icon column use, so no second grid exists.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The one System Information API client every surface reads the machine
+# through: the ungated mount-table walk the Storage pane lists, and the
+# shared mount-record view model that turns a record into a capacity, a
+# medium and a health band. This pane derives nothing of its own.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The shared size ladder a capacity is spelled through, which the
+# Switchboard's storage page reads too.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # Everything only the freestanding `Run` binary links is pulled in for the
 # bare-metal targets it is actually built for; on the host the binary is an
@@ -80,6 +88,12 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, the allocator, and the syscall wrappers.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# On the real target the mount walk goes over the runtime `ipc_call`
+# transport; the base dependency stays host-neutral so host tests build the
+# readings from records directly.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
+    "program",
+] }
 # On the real target the `Run` binary composites glyphs through the sandboxed
 # font service over the runtime `ipc_call` transport; the base dependency
 # stays host-neutral so host tests inject the mock transport instead.

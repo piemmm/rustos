@@ -53,8 +53,9 @@ mod program {
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::NoArtwork;
     use tairix_input::InputEvent;
+    use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{Stderr, Write};
-    use tairix_settings::{Shell, ShellOutcome};
+    use tairix_settings::{Shell, ShellOutcome, VolumeReading};
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
@@ -68,6 +69,14 @@ mod program {
     /// to date through the park the loop is already in rather than by
     /// waiting for it.
     const APPLY_TOKEN: u64 = app::FIRST_APP_TOKEN;
+
+    /// The wait-set token of the mount walk's wake: readable exactly when a
+    /// fresh mount table has landed, so the Storage pane is brought up to
+    /// date through the park the loop is already in.
+    ///
+    /// Its own desk rather than the applier's: the two carry different work
+    /// and a shared latest-wins desk would let one evict the other.
+    const MOUNTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 1;
 
     /// The window's logical width at the reference density: the strip plus a
     /// content column wide enough for a pane's widest row.
@@ -130,6 +139,72 @@ mod program {
     /// The worker's body: the shared apply client's one round trip.
     fn send_apply(_: &mut (), document: &mut PinboardDocument) -> ApplyOutcome {
         tairix_wallpaper::apply(*document)
+    }
+
+    /// The mount walk: the system mount table, read through the one shared
+    /// client every surface reads it through.
+    ///
+    /// Carried out on a worker thread because it is a paged IPC round trip,
+    /// and a window that waited on it would stop answering for as long as
+    /// the service took. A walk that fails part way keeps what arrived —
+    /// listing the volumes it did learn about is better than listing none —
+    /// and states the reason rather than showing a shorter table silently.
+    type Mounts = tairix_rt::work::Worker<(), (), Vec<VolumeReading>>;
+
+    /// The mount walk's body.
+    fn read_mounts(_: &mut (), (): &mut ()) -> Vec<VolumeReading> {
+        let mut volumes = Vec::new();
+        if let Err(err) = for_each_mount(&IpcTransport, |record| {
+            volumes.push(VolumeReading::of(record));
+            Ok(WalkStep::Continue)
+        }) {
+            let _ = writeln!(
+                Stderr,
+                "settings: the mount table could not be read ({err:?}); the storage pane shows \
+                 what arrived"
+            );
+        }
+        volumes
+    }
+
+    /// The mount walk's client half: the desk it is submitted to, and
+    /// whether one is outstanding.
+    ///
+    /// One walk at a time, because the pane only ever wants the latest
+    /// answer and re-asking while one is in flight would spend a round trip
+    /// on a table it is about to be told anyway.
+    struct MountWalk<'a> {
+        worker: &'a Mounts,
+        pending: bool,
+    }
+
+    impl MountWalk<'_> {
+        /// Ask for a fresh mount table if the pane wants one and none is
+        /// outstanding, answering whether the pane changed.
+        ///
+        /// Submitted, never awaited: the answer arrives as an ordinary wake.
+        fn request(&mut self, shell: &mut Shell) -> bool {
+            if self.pending || !shell.volumes_wanted() {
+                return false;
+            }
+            // With no worker the walk was made on this thread and its
+            // answer is already on the desk.
+            if self.worker.submit(()) {
+                return self.settle(shell);
+            }
+            self.pending = true;
+            false
+        }
+
+        /// Adopt a landed mount table, answering whether the pane changed.
+        fn settle(&mut self, shell: &mut Shell) -> bool {
+            let Some(volumes) = self.worker.collect() else {
+                return false;
+            };
+            self.pending = false;
+            shell.adopt_volumes(volumes);
+            true
+        }
     }
 
     /// Ask the desktop session to adopt `document`, off the event loop.
@@ -400,6 +475,9 @@ mod program {
         /// readiness is a level peek, so leaving it undrained would report
         /// ready for ever and turn the park into a spin.
         applier: &'a Applier,
+        /// The mount walk's wake, drained on a [`MOUNTS_TOKEN`] wake for
+        /// the same reason.
+        mounts: &'a Mounts,
         /// Set when the park woke for a desktop change, cleared when the loop
         /// adopts it.
         desktop_moved: &'a Cell<bool>,
@@ -419,6 +497,12 @@ mod program {
                 // wait ends here rather than parking again on a ready source.
                 Wake::App(APPLY_TOKEN) => {
                     self.applier.wake().drain();
+                    Ok(Parked::Interrupted)
+                }
+                // The mount table landed. Draining is the whole of noticing
+                // it, and the answer is the loop's to adopt.
+                Wake::App(MOUNTS_TOKEN) => {
+                    self.mounts.wake().drain();
                     Ok(Parked::Interrupted)
                 }
                 Wake::PressureChanged => {
@@ -799,6 +883,76 @@ mod program {
         desktop_moved: &'a Cell<bool>,
         applier: &'a Applier,
         pictures: &'a mut Pictures,
+        mounts: &'a mut MountWalk<'a>,
+    }
+
+    /// Adopt whatever a worker answered while the loop was parked, and
+    /// redraw if anything did, answering whether the window is still
+    /// presentable.
+    ///
+    /// Both desks land a whole new set of rows, so the client is redrawn
+    /// rather than the one row a choice reported.
+    fn adopt_answers(
+        surface: &mut SettingsWindow,
+        shell: &mut Shell,
+        themes: &ThemeRegistry,
+        desktop: &Desktop,
+        applier: &Applier,
+        mounts: &mut MountWalk<'_>,
+    ) -> bool {
+        let mut landed = false;
+        if let Some(outcome) = applier.collect() {
+            adopt_apply(shell, outcome);
+            landed = true;
+        }
+        landed |= mounts.settle(shell);
+        if !landed {
+            return true;
+        }
+        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+        present_whole(surface, shell, themes, desktop)
+    }
+
+    /// Carry out what one event concluded, answering whether the program
+    /// is to end.
+    fn act(
+        acted: &Acted,
+        surface: &mut SettingsWindow,
+        shell: &mut Shell,
+        themes: &ThemeRegistry,
+        desktop: &Desktop,
+        applier: &Applier,
+        pictures: &mut Pictures,
+    ) -> bool {
+        match acted {
+            Acted::Quit => {
+                surface.close();
+                return true;
+            }
+            Acted::Apply(document) => {
+                // Submitted, not awaited: the answer arrives on the wake
+                // the worker nudges. With no worker to serve it the call
+                // was made here and its answer is already in hand.
+                if let Some(outcome) = submit_apply(applier, document) {
+                    adopt_apply(shell, outcome);
+                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+                }
+            }
+            Acted::Opened => {
+                if drain_open_targets(shell, surface, themes.active(), desktop.scale()) {
+                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+                }
+            }
+            Acted::Rendered {
+                index,
+                side,
+                rendered,
+            } => {
+                pictures.settle(shell, *index, *side, *rendered);
+            }
+            Acted::Idle | Acted::Changed | Acted::Whole => {}
+        }
+        false
     }
 
     fn run_event_loop(session: Session<'_>, mut events: WindowEvents<RtEventSource<'_>>) -> i32 {
@@ -810,16 +964,13 @@ mod program {
             desktop_moved,
             applier,
             pictures,
+            mounts,
         } = session;
         loop {
             // An answer the park drained is the loop's to adopt, whether or
             // not an event came with it.
-            if let Some(outcome) = applier.collect() {
-                adopt_apply(shell, outcome);
-                shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-                if !present_whole(surface, shell, themes, desktop) {
-                    return fail(EXIT_CHANNEL_LOST, "present refused");
-                }
+            if !adopt_answers(surface, shell, themes, desktop, applier, mounts) {
+                return fail(EXIT_CHANNEL_LOST, "present refused");
             }
             let event = match events.wait(surface.window.client()) {
                 Ok(Some(event)) => event,
@@ -859,38 +1010,20 @@ mod program {
                 &event,
                 &mut damage,
             );
-            match acted {
-                Acted::Quit => {
-                    surface.close();
-                    return 0;
-                }
-                Acted::Apply(ref document) => {
-                    // Submitted, not awaited: the answer arrives on the wake
-                    // the worker nudges. With no worker to serve it the call
-                    // was made here and its answer is already in hand.
-                    if let Some(outcome) = submit_apply(applier, document) {
-                        adopt_apply(shell, outcome);
-                        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-                    }
-                }
-                Acted::Opened => {
-                    if drain_open_targets(shell, surface, themes.active(), desktop.scale()) {
-                        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-                    }
-                }
-                Acted::Rendered {
-                    index,
-                    side,
-                    rendered,
-                } => {
-                    pictures.settle(shell, index, side, rendered);
-                }
-                Acted::Idle | Acted::Changed | Acted::Whole => {}
+            if act(&acted, surface, shell, themes, desktop, applier, pictures) {
+                return 0;
             }
             // Ask for the next picture the gallery wants, whatever this
             // round was: a navigation, a resize and an answered render all
             // change what it is waiting for.
             pictures.request(shell, surface, themes.active(), desktop.scale());
+            // And for the mount table, if this round put the storage pane on
+            // show. With no worker to serve it the walk was made here and
+            // the pane already holds its answer.
+            let volumes_landed = mounts.request(shell);
+            if volumes_landed {
+                shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+            }
             if matches!(event, WindowEvent::ContentReleased { .. }) {
                 surface.window.release_frames();
                 continue;
@@ -899,6 +1032,7 @@ mod program {
             // the whole client is redrawn rather than the one row the
             // choice reported.
             let whole = redraw
+                || volumes_landed
                 || matches!(
                     acted,
                     Acted::Whole | Acted::Apply(_) | Acted::Opened | Acted::Rendered { .. }
@@ -918,6 +1052,51 @@ mod program {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
         }
+    }
+
+    /// Start a worker, stating in this program's own words why a machine
+    /// that grants none will do its work on the event loop instead.
+    ///
+    /// Not a failure: a program with no thread is exactly as correct and
+    /// only as responsive as it was before there was a worker at all.
+    fn start_worker<S: Send + 'static, Req: Send + 'static, Ans: Send + 'static>(
+        worker: &alloc::sync::Arc<tairix_rt::work::Worker<S, Req, Ans>>,
+        what: &str,
+    ) {
+        if let Err(reason) = tairix_rt::work::Worker::start(worker) {
+            let _ = writeln!(
+                Stderr,
+                "settings: no {what} worker ({reason:?}); it is done on the event loop"
+            );
+        }
+    }
+
+    /// Add each worker's wake to the loop's wait-set.
+    ///
+    /// A refused add is fatal rather than tolerated: an answer nobody
+    /// collects would leave every row showing a value the desktop may never
+    /// have adopted, or a storage pane waiting for ever on a table that has
+    /// already landed.
+    fn watch_wakes(
+        set: u64,
+        wakes: &[(&tairix_rt::sync::WorkerWake, u64, &str)],
+    ) -> Result<(), i32> {
+        for (wake, token, refusal) in wakes {
+            let Some(read) = wake.read_end() else {
+                continue;
+            };
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                *token,
+            ) != 0
+            {
+                return Err(fail(app::EXIT_NO_EVENTS, refusal));
+            }
+        }
+        Ok(())
     }
 
     /// Program entry point.
@@ -949,35 +1128,31 @@ mod program {
                 "the settings registry holds no categories",
             );
         };
-        // The apply worker. A machine that grants none leaves the round
-        // trip on this task — where it would otherwise stall the window —
-        // and says so once rather than silently.
+        // Two desks, each its own: an apply and a mount walk carry
+        // different work, and one latest-wins desk would let either evict
+        // the other. Each would otherwise stall the window for a round trip.
         let applier = alloc::sync::Arc::new(Applier::new(
             send_apply,
             (),
             tairix_rt::sync::WorkerWake::create(),
         ));
-        if let Err(reason) = Applier::start(&applier) {
-            let _ = writeln!(
-                Stderr,
-                "settings: no apply worker ({reason:?}); the desktop is asked on the event loop"
-            );
-        }
+        start_worker(&applier, "apply");
         let _applier_guard = tairix_rt::work::WorkerGuard::new(&applier);
-        // A refused add is fatal rather than tolerated: an answer nobody
-        // collects would leave every row showing a value the desktop may
-        // never have adopted.
-        if let Some(read) = applier.wake().read_end() {
-            if tairix_rt::waitset_ctl(
-                binding.set(),
-                WaitSetOp::Add,
-                WaitSourceKind::Stream,
-                u64::from(read),
-                APPLY_TOKEN,
-            ) != 0
-            {
-                return fail(app::EXIT_NO_EVENTS, "apply wake refused");
-            }
+        let mounts = alloc::sync::Arc::new(Mounts::new(
+            read_mounts,
+            (),
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        start_worker(&mounts, "mount-table");
+        let _mounts_guard = tairix_rt::work::WorkerGuard::new(&mounts);
+        if let Err(code) = watch_wakes(
+            binding.set(),
+            &[
+                (applier.wake(), APPLY_TOKEN, "apply wake refused"),
+                (mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
+            ],
+        ) {
+            return code;
         }
 
         // Before the window opens, so the Wallpaper pane has its pictures
@@ -1000,6 +1175,11 @@ mod program {
                 );
             }
         }
+        // After the launch target, so a window opened *at* the storage pane
+        // has its volumes on its first frame rather than on a later wake.
+        // The pane asks for them again each time it comes on show, because
+        // unlike the picture store the mount table moves.
+        shell.adopt_volumes(read_mounts(&mut (), &mut ()));
         shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
 
         let server = match surface.open(event_endpoint, &shell, themes.active(), desktop.scale()) {
@@ -1012,6 +1192,7 @@ mod program {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
             applier: &applier,
+            mounts: &mounts,
             desktop_moved: &desktop_moved,
         });
         run_event_loop(
@@ -1023,6 +1204,10 @@ mod program {
                 desktop_moved: &desktop_moved,
                 applier: &applier,
                 pictures: &mut Pictures::new(),
+                mounts: &mut MountWalk {
+                    worker: &mounts,
+                    pending: false,
+                },
             },
             events,
         )

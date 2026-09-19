@@ -657,7 +657,10 @@ the request/render libraries stay testable against in-memory fixtures.
   itself: [`VolumeBytes`] (`total`/`free`/`available` bytes, with `used`,
   `usable` and the `used_permille` share), the two availability spellings
   (`availability_marker`, the bracketed `mount(8)` word; `availability_name`,
-  the prose a fact list reads), `medium_name`, and `volume_health_name`. A
+  the prose a fact list reads), `medium_name`, `volume_health_name`, and
+  `mount_name_bytes` — what the volume is *called*: its backing source, or
+  its mount point where the table reports no source, so a volume named one
+  way in the Switchboard's device rail is named the same way in Settings. A
   volume cannot therefore read half-full on one surface and nearly-full on
   another. The two *shares* it offers are deliberately distinct and both
   named: `used_permille` is of the whole medium, which is what a desktop

@@ -40,6 +40,7 @@ use tairix_theme::{TextRole, Theme};
 use crate::button::Button;
 use crate::combo::{ComboAction, ComboBox};
 use crate::damage;
+use crate::metric::StatusPill;
 use crate::paint::{
     centred_text_y, foreground, grab_after, inset, paint_row, paint_run, paint_surface_plate,
     plate_border, role_font, route_pointer, row_content_span, run_width, surface_rect,
@@ -725,6 +726,8 @@ fn combo_action(action: ComboAction) -> FieldAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FieldGroup {
     caption: String,
+    /// A state capsule on the caption's own line, at its trailing edge.
+    badge: Option<StatusPill>,
     rows: Vec<FieldRow>,
     footnote: Option<String>,
     focus: Option<usize>,
@@ -745,6 +748,7 @@ impl FieldGroup {
     pub fn new(caption: impl Into<String>, rows: Vec<FieldRow>) -> Self {
         Self {
             caption: caption.into(),
+            badge: None,
             rows,
             footnote: None,
             focus: None,
@@ -752,6 +756,27 @@ impl FieldGroup {
             hovered: RenderInvariant::new(None),
             armed: RenderInvariant::new(None),
         }
+    }
+
+    /// This group with a state capsule on its caption's own line, at the
+    /// trailing edge.
+    ///
+    /// The group places it rather than the owner, because it is the only
+    /// thing that can also take the room out of the caption: a badge an
+    /// owner drew over the band would sit on top of a long caption rather
+    /// than beside it. The caption elides into whatever is left, and a band
+    /// too narrow for both keeps the badge — the state of the thing is what
+    /// a reader is scanning for, and the name is still legible cut.
+    #[must_use]
+    pub fn with_badge(mut self, badge: StatusPill) -> Self {
+        self.badge = Some(badge);
+        self
+    }
+
+    /// The capsule on this group's caption line, if it carries one.
+    #[must_use]
+    pub fn badge(&self) -> Option<&StatusPill> {
+        self.badge.as_ref()
     }
 
     /// This group with a footnote beneath its rows — the sentence of
@@ -877,7 +902,7 @@ impl FieldGroup {
         plate_border(theme, scale)
             .saturating_mul(2)
             .saturating_add(pad.saturating_mul(2))
-            .saturating_add(Self::caption_height(scale, theme))
+            .saturating_add(self.caption_height(scale, theme))
             .saturating_add(gap)
             .saturating_add(rows)
             .saturating_add(self.footnote_height(scale, theme))
@@ -900,8 +925,15 @@ impl FieldGroup {
     }
 
     /// The height of the caption band above the rows.
-    fn caption_height(scale: Scale, theme: &Theme) -> u32 {
-        role_font(theme, scale, TextRole::SectionHeader).line_height()
+    ///
+    /// A badge rides on that line, so the band is the taller of the two —
+    /// otherwise a capsule would overhang the first row.
+    fn caption_height(&self, scale: Scale, theme: &Theme) -> u32 {
+        let text = role_font(theme, scale, TextRole::SectionHeader).line_height();
+        match self.badge {
+            Some(_) => text.max(StatusPill::measured_height(scale, theme)),
+            None => text,
+        }
     }
 
     /// The height this group's footnote band occupies below its rows — the gap
@@ -923,7 +955,7 @@ impl FieldGroup {
         let (pad, gap) = Self::insets(scale, theme);
         let top = iy
             .saturating_add(pad)
-            .saturating_add(Self::caption_height(scale, theme))
+            .saturating_add(self.caption_height(scale, theme))
             .saturating_add(gap);
         let bottom = iy
             .saturating_add(ih)
@@ -1067,7 +1099,25 @@ impl FieldGroup {
         if let Some((text_x, text_w)) =
             row_content_span(scale, theme, inner_x, inner_w, caption_font.line_height())
         {
-            let run = caption_font.elide_to_width(&self.caption, text_w);
+            let badge = self.badge.as_ref().map(|badge| {
+                let width = badge.measured_width(scale, theme).min(text_w);
+                let height = StatusPill::measured_height(scale, theme);
+                (
+                    badge,
+                    Rect::new(
+                        to_i32(text_x.saturating_add(text_w).saturating_sub(width)),
+                        to_i32(caption_top),
+                        width,
+                        height,
+                    ),
+                )
+            });
+            // Whatever the badge did not take, less a gap, so the two never
+            // touch and the caption is cut rather than drawn under it.
+            let caption_w = badge.as_ref().map_or(text_w, |(_, rect)| {
+                text_w.saturating_sub(rect.width.saturating_add(gap))
+            });
+            let run = caption_font.elide_to_width(&self.caption, caption_w);
             paint_run(
                 surface,
                 caption_font,
@@ -1076,6 +1126,9 @@ impl FieldGroup {
                 Color::from(theme.palette().on_surface_muted),
                 None,
             );
+            if let Some((badge, rect)) = badge {
+                badge.render(surface, rect, scale, theme);
+            }
         }
 
         let rects = self.row_rects(layout.bounds, scale, theme);

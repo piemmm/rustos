@@ -13,8 +13,9 @@ Two targets in one crate, the shape every windowed first-party app here takes:
 
 - the `[lib]` (`tairix_settings`) is the host-tested shell — the closed pane
   registry, the frame resolver, the sidebar/search/trail navigation, the
-  composed Appearance and Accessibility forms, and the one renderer for a
-  pane that states how the machine actually stands;
+  composed Appearance and Accessibility forms, the Storage pane's volume
+  cards, and the one renderer for a pane that states how the machine
+  actually stands;
 - the `[[bin]]` (`src/run.rs`) is the on-disk bundle's `Run` entry point,
   which composes that shell over the window channel. It is a freestanding
   pure-Rust program on the Tier-1 bare-metal targets and an inert stub on the
@@ -46,6 +47,14 @@ there.
   durable value when the session answers, so a refusal states its reason and
   puts the row back rather than leaving a value the next login would not
   restore.
+- **Storage reports what the machine holds and changes nothing.** One card
+  per mounted volume — its name, where it is mounted, its filesystem, device
+  and medium, a capacity track, and its banded health — derived by the one
+  shared volume view model (`lib/procinfo`), so a disk cannot read half full
+  here and nearly full in the Switchboard. A volume whose format tracks no
+  capacity says so rather than drawing a bar of nothing. The mount walk is an
+  IPC round trip and runs on a worker: the pane asks when it comes on show
+  and draws what has arrived.
 - **One registry table is the whole surface.** `registry::CATEGORIES` is the
   single definition of the sidebar strip, the search index, the location
   trail, the keyboard cursor and the pane dispatch, so a category cannot exist

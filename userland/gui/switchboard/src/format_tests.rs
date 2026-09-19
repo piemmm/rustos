@@ -25,7 +25,7 @@ fn the_largest_unit_is_the_last_one_rather_than_a_wrap() {
     let pib = 1024u64 * 1024 * 1024 * 1024 * 1024;
     assert_eq!(format_bytes(pib), "1.0 PiB");
     assert!(
-        format_bytes(u64::MAX).ends_with(" PiB"),
+        format_bytes(u64::MAX).ends_with(" EiB"),
         "a count past the last unit stays in it rather than wrapping"
     );
 }

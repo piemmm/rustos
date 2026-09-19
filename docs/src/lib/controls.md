@@ -153,6 +153,14 @@ about the machine:
   so an owner laying its groups out independently carries none of that
   arithmetic itself.
 
+A group may also carry a **badge** on its caption's own line
+(`FieldGroup::with_badge`): the `StatusPill` naming the state of the thing the
+group is about — a volume's health beside its name. The group places it rather
+than the owner, because it is the only thing that can also take the room out
+of the caption and out of the band's height; a badge an owner drew over the
+band would sit on top of a long caption and overhang the first row instead of
+sitting beside them.
+
 A group resolves the one slot column its controls line up in
 (`FieldGroup::slot_column`): the widest width any of its rows wants, or the
 half-span ceiling when a row's control takes whatever column it is given (a

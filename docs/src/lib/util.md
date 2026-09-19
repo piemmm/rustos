@@ -63,6 +63,15 @@ and panic-free throughout.
   units, an integer otherwise, re-tiering a rounded-up amount, in
   powers of 1024 or 1000). Values are `u128` internally so a 100 TB+
   volume's byte totals can never overflow (`AGENTS.md` §26.6).
+  Beside it, the *desktop's* prose rendering of the same quantity —
+  `format_binary` (`512 B`, `1.9 GiB`) over `binary_scale` and
+  `format_at_scale` — shared by the Switchboard's resource pages and the
+  Settings storage pane, so one disk cannot read two ways. The two
+  renderings are deliberately not each other's default: `df` is bound to
+  the GNU spelling and its ceiling rounding, while a surface with room for
+  the unit spells it out and truncates, because it reports what is there
+  rather than what must not be under-reported. The ladder reaches `EiB`
+  because a byte count is a `u64` throughout the ABI.
 * `count` — the GNU count grammar for the `-c`/`-n` values shared by the
   `head` and `tail` command apps (`plans/APPS.md`): `parse_decimal`
   reads a plain digit run and `parse_suffixed` a digit run with the GNU

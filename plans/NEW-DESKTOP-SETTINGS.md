@@ -31,13 +31,13 @@ dropped is a category the surface then has to lie about.
 
 | # | Stage | Depends on | Spec | Status |
 |---|---|---|---|---|
-| **DS1** | `lib/controls::form` — `FieldRow`/`FieldGroup`/`FieldControl`/`FieldLayout` over the row chrome hoisted into the shared `paint` core, the measured-width accessors the slot model needs, and a `widgets.app` gallery tab | — | DS1, §4 | done |
+| **DS1** | `lib/controls::form` — `FieldRow`/`FieldGroup`/`FieldControl`/`FieldLayout` over the row chrome hoisted into the shared `paint` core, the measured-width accessors the slot model needs, the caption-line badge, and a `widgets.app` gallery tab | — | DS1, §4 | done |
 | **DS2** | The `userland/apps/settings` crate and its shell: the closed `Category`/`Pane` registry, the vertical `Tabs` sidebar, the search index, the breadcrumb band, frame shedding, the absence-pane renderer, and the taskbar's *Settings…* row | DS1 | DS2 | done |
 | **DS3** | Appearance and Accessibility over the session's user-scope appearance registry, and the apply rendezvous every other user-scope write reuses | DS2 | DS3 | done |
 | **DS3b** | The cursor pair: a cursor-set store under `/System/Graphics/Cursors/<set>/` so `cursor.set` has a choice space at all, and a `cursor.size` factor in the session's cursor controller | DS3 | DS3b | done |
 | **DS4** | Wallpaper — the gallery absorbed into the pane over two served requests, `wallpaper.app` deleted, and *Change Background…* opening Settings at that pane | DS3 | DS4 | done |
 | **DS5a** | The shared volume view model: the mount record → capacity/health derivation in `lib/procinfo`, the `VolumeHealth` banding in `lib/abi`, the one band→role binding in `lib/theme`, and every private copy collapsed onto them | — | DS5a | done |
-| **DS5** | Storage — one group per mount with its capacity track and health pill, over the DS5a model | DS2, DS5a | DS5 | planned |
+| **DS5** | Storage — one card per mount with its capacity track and health pill, over the DS5a model | DS2, DS5a | DS5 | done |
 | **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | planned |
 | **DS7** | Networking read — per-interface facts, link state, addresses and rates through the Switchboard's own client, plus the stack-wide `net.*` options | DS2, DS6 | DS7 | planned |
 | **DS8** | Networking write — `configure` grows the `lib/netconfig` registry, Ethernet and DNS stage and apply through it, and the stack adopts the change without a reboot | DS6, DS7 | DS8 | planned |
@@ -319,7 +319,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | Language & Region | the bundle `Help/` locale set, `lib/sysconfig` | elevated `configure`; zones → `plans/TIMEZONES.md` | Authority Mark |
 | Sharing | — | — | pane states absence (§3) |
 | Users & Groups | ungated `USER_DIRECTORY` / `GROUP_DIRECTORY` roster + own record; other accounts' fields, lock state and grants only after admin authentication (DS9) | elevated user-admin tool (DS9) | Authority Mark, account unchanged |
-| Storage | `MOUNT_LIST` + each volume's `VolumeStats`, `VOLUME_IO_HEALTH` | — (read-only; mounting is the file manager's) | reading renders unmeasured |
+| Storage | ungated `MOUNT_LIST` alone — its `VolumeStats` and its availability overlay; `VOLUME_IO_HEALTH` needs `CAP_SYSINFO_KERNEL` and stays the Switchboard's | — (read-only; mounting is the file manager's) | reading renders unmeasured |
 
 **The one rule behind the table.** Settings never performs a privileged
 operation. It renders state, and it hands a typed intent to the process that
@@ -393,9 +393,9 @@ needs.
 Everything else a pane needs already exists:
 `Toggle`, `Checkbox`, `Radio`, `ComboBox`, `Slider`, `TextField`, `Button`,
 `Tabs` (the sidebar), `SearchField`, `Breadcrumb`, `ScrollBar`, `Menu`,
-`Dialog`, `FactList` (read-only panes), `MetricTile` (Storage' capacity
-tracks), `StatusPill` (a link state), and `ActionRail` where a pane commands a
-selected subject. **No new control is added for a job an existing one does.**
+`Dialog`, `FactList` (read-only panes), `MetricTile` (Storage's capacity
+tracks), `StatusPill` (a volume's health band, a link state), and
+`ActionRail` where a pane commands a selected subject. **No new control is added for a job an existing one does.**
 
 New `IconKind` glyphs, one per category, each with the mandatory first-party
 built-in vector glyph so the sidebar can never blank: `Settings`, `Appearance`,
@@ -767,35 +767,85 @@ is gone: it held the same two facts.
 
 ### DS5 — Storage
 
-The per-medium used-space overview: one `FieldGroup` per mount walked from
-`MOUNT_LIST` through `lib/procinfo::for_each_mount`, each with its volume
-label, filesystem, device, mount point, a `MetricTile` capacity track over
-`VolumeBytes::used_permille`, and its banded `VolumeHealth` as a `StatusPill`
-toned through `SignalRole::for_volume_health`. Read-only: mounting and
-unmounting are the file manager's and `mount`'s, and a second route to them is
-duplication. A volume whose stats could not be read renders unmeasured, never
-a full bar or a green pill.
+The per-medium used-space overview, in `userland/apps/settings/src/volumes.rs`:
+one **card** per mount walked from `MOUNT_LIST` through
+`lib/procinfo::for_each_mount`. A card is a `FieldGroup` captioned with the
+volume's name (`mount_name_bytes` — its source, else its mount point), with
+the banded `VolumeHealth` as a `StatusPill` toned through
+`SignalRole::for_volume_health` as the group's **badge**
+(`FieldGroup::with_badge`, added with this stage — the group places it,
+because it is the only thing that can also take the room out of the caption
+and out of the band's height, so a long volume name is cut rather than drawn
+under the capsule), rows for mount point / filesystem / device /
+medium / availability, and beneath it a `MetricTile` whose
+`MetricInstrument::Track` is `VolumeBytes::used_permille`. Both plates are one
+scrolled unit, so a capacity can never be on screen without its volume.
+Read-only: mounting and unmounting are the file manager's and `mount`'s, and a
+second route to them is duplication.
+
+**A volume that reports no capacity has no tile at all** — the card carries a
+`Capacity` row of `FieldControl::Unmeasured` instead, so the in-RAM layout
+mounts never draw a full bar or an invented percentage. A field the table left
+empty is likewise `Unmeasured`, never a blank a reader would take for a
+reading. The row labels are one list (`VOLUME_FACTS`), read by the registry's
+search index and drawn by the card, so a term that reaches the pane reaches a
+row it shows.
 
 **The health pill is the mount table's own availability, not the gated
 counters.** Settings holds neither `CAP_SYSINFO_KERNEL` nor
 `CAP_SYSINFO_GLOBAL`, so `VOLUME_IO_HEALTH`'s bucketed completions are the
 Switchboard's alone. It does not need them: `MOUNT_LIST` is ungated and its
 record already carries the live availability overlay a failing or recovering
-device sets, which is exactly what a pill states. The manifest stays
-`CAP_CONSOLE_WRITE` + `CAP_SHM`.
+device sets. The manifest stays `CAP_CONSOLE_WRITE` + `CAP_SHM`. The band is a
+summary, so the *exact* state stays on its own row — "recovering" and
+"degraded" must not collapse into one word.
 
 **The mount walk is an IPC round trip, so it never runs on the loop that owes
 a frame.** It is read at bring-up beside the picture catalog and the cursor
-sets, and re-read through the existing `tairix_rt::work::Worker` desk —
-submitted, never awaited — so opening the pane shows what arrived and the
-answer lands as an ordinary wake. A pane that painted by reading is the
-defect the charter's interactive-surface rule names.
+sets, and re-read through a second `tairix_rt::work::Worker` desk on its own
+wait-set token (`MOUNTS_TOKEN`) — submitted, never awaited. A second *desk*,
+not a second deferral scheme: the applier's is latest-wins over one job slot,
+so sharing it would let an apply and a walk evict each other. `Shell` says it
+wants one (`volumes_wanted`) when the pane *comes* on show and the `Run` binary
+submits; the answer lands as an ordinary wake. Leaving and returning asks
+afresh, because unlike the shipped picture store the mount table moves.
+
+**The three body shapes, and why the shell no longer spells two.** The pane
+column was `Option<Form>` + `Option<Gallery>`, matched as a tuple at every
+measure/render/scroll/input site, with `(Some(gallery), None)` a state that
+could not occur but had to be handled. It is now one `body::Body` enum —
+`Statement`, `Form`, `Pictures { form, gallery }`, `Volumes` — so the
+impossible pairing is unrepresentable and the storage body got a deliberate
+arm at each site rather than falling through a form's. Three predicates carry
+what the sites used to re-derive: `composes_controls` (is the column on the
+focus ring in its own right), `scrolls_in_pixels` (only a clipped statement
+is), and `is_listing`. The plate-stacking arithmetic `Form` carried is
+`stack::{place, reveal_from, gap, as_extent}`, shared with the volume cards,
+because a second copy of "place plates down a column, seat the ones that fit
+whole" is the duplication the charter forbids.
+
+**Scroll steps are in the unit the extent is counted in.** Found while wiring
+this: `ScrollModel`'s line and page steps are documented as being in the
+model's own scroll unit, but the shell handed every model a 24px/240px step —
+including the category strip, counted in *rows*, and a form, counted in
+*groups*. One wheel tick over the strip therefore jumped 24 rows, past every
+category in the list. A plate- or row-counted column now steps by one of them
+and pages by what the column shows; only a pixel-scrolled statement keeps the
+pixel step. Regression tests:
+`a_wheel_tick_over_the_strip_moves_one_category_row` and
+`the_storage_panes_column_scrolls_by_whole_volumes`.
 
 **This must not become a second Storage page.** The Switchboard's System
 section already has one, and the two answer different questions — *how full is
 each medium* here, *is each volume healthy and how hard is it working* there.
 They share facts, and DS5a is where those facts are derived; neither surface
-keeps a copy.
+keeps a copy. Two further shared pieces landed with this stage for the same
+reason: `lib/procinfo::mount_name_bytes` (the source-else-mount-point naming
+rule both surfaces use) and `lib/util::size::{binary_scale, format_at_scale,
+format_binary}` (the desktop's prose byte ladder, hoisted out of the
+Switchboard's private `format` module so a capacity reads the same on both).
+That ladder reaches `EiB`: a byte count is a `u64` throughout the ABI, and a
+rung short spells the top of its own domain as four figures of the rung below.
 
 ### DS6 — the elevated-apply seam, and General
 

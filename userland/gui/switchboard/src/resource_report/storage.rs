@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::sysinfo::{MountRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN};
 use tairix_controls::PressureKind;
-use tairix_procinfo::{availability_name, medium_name, VolumeBytes};
+use tairix_procinfo::{availability_name, medium_name, mount_name_bytes, VolumeBytes};
 use tairix_theme::SignalRole;
 
 use super::health_text;
@@ -145,12 +145,7 @@ impl<'a> StorageSubject<'a> {
     fn volume_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for (_, mount) in self.heads() {
-            let source = String::from_utf8_lossy(mount.source_bytes()).into_owned();
-            let name = if source.is_empty() {
-                String::from_utf8_lossy(mount.target_bytes()).into_owned()
-            } else {
-                source
-            };
+            let name = String::from_utf8_lossy(mount_name_bytes(mount)).into_owned();
             if !name.is_empty() && !names.contains(&name) {
                 names.push(name);
             }

@@ -17,12 +17,13 @@ use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::{Rgba, SignalRole, Theme};
 
 use crate::button::{Button, ButtonContent};
 use crate::combo::ComboBox;
 use crate::damage::sink;
 use crate::form::{FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow};
+use crate::metric::StatusPill;
 use crate::selector::Toggle;
 use crate::state::{AuthorityState, ControlState, SelectionState, ValidationState};
 use crate::testkit::{control_font, high_contrast};
@@ -1053,4 +1054,74 @@ fn a_group_reports_which_row_acted() {
             action: FieldAction::Set { on: true }
         })
     );
+}
+
+/// A badge rides the caption's own line, so the band has to be at least as
+/// tall as the capsule — otherwise it would overhang the first row.
+#[test]
+fn a_badged_caption_band_seats_the_capsule_above_the_first_row() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let rows = vec![toggle_row("One", false)];
+    let bare = FieldGroup::new("VOLUME", rows.clone());
+    let badged = bare
+        .clone()
+        .with_badge(StatusPill::new("Healthy").with_tone(SignalRole::Success));
+    assert_eq!(
+        badged.badge(),
+        Some(&StatusPill::new("Healthy").with_tone(SignalRole::Success))
+    );
+    assert!(bare.badge().is_none());
+
+    let grew = badged.measured_height(scale, &theme) - bare.measured_height(scale, &theme);
+    let band = StatusPill::measured_height(scale, &theme)
+        .saturating_sub(control_font(&theme, scale).line_height());
+    assert_eq!(grew, band, "the caption band did not grow with its badge");
+
+    let bounds = Rect::new(0, 0, W, badged.measured_height(scale, &theme));
+    let first = badged
+        .row_rect(0, bounds, scale, &theme)
+        .expect("the row fits its own measured height");
+    assert!(
+        first.top() >= bounds.top() + to_i32(StatusPill::measured_height(scale, &theme)),
+        "the first row starts inside the capsule's own band"
+    );
+}
+
+/// The caption is cut to what the badge leaves, never drawn under it: the
+/// badge's own pixels are the same whatever the caption's length.
+#[test]
+fn a_long_caption_is_cut_rather_than_drawn_under_its_badge() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let badge = StatusPill::new("Failing").with_tone(SignalRole::Recovery);
+    let rows = vec![toggle_row("One", false)];
+    let render = |caption: &str| {
+        let group = FieldGroup::new(caption, rows.clone()).with_badge(badge.clone());
+        let height = group.measured_height(scale, &theme);
+        let bounds = Rect::new(0, 0, W, height);
+        let mut surface = Surface::new(W, height).expect("a surface");
+        group.render(&mut surface, FieldLayout::new(bounds, 0), scale, &theme);
+        surface
+    };
+    let short = render("A");
+    let long = render("A VOLUME WHOSE NAME IS FAR LONGER THAN THIS PLATE IS WIDE");
+    assert_ne!(
+        short.pixels(),
+        long.pixels(),
+        "the two captions drew the same plate, so this proves nothing"
+    );
+
+    // The trailing quarter of the caption band is where the capsule sits.
+    let band = StatusPill::measured_height(scale, &theme).max(1);
+    let from = W - W / 4;
+    for y in 0..band {
+        for x in from..W {
+            assert_eq!(
+                short.pixels().get((y * W + x) as usize),
+                long.pixels().get((y * W + x) as usize),
+                "the long caption reached into the badge at ({x}, {y})"
+            );
+        }
+    }
 }

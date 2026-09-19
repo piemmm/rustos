@@ -6,7 +6,10 @@
 //! itself, the category list a shed strip becomes, and the scroll a pane too
 //! tall for its column gets.
 
+use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::desktop::{Appearance, Contrast, Density};
+use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
 use tairix_font::install_test_transport;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::NoArtwork;
@@ -19,6 +22,7 @@ use crate::appearance::{Composition, Setting};
 use crate::frame::{resolve_frame, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
 use crate::registry::{Category, Location, Pane, StripRow, CATEGORIES};
 use crate::shell::{Shell, ShellOutcome};
+use crate::volumes::VolumeReading;
 
 /// A window wide enough to seat the strip and a full content column.
 const WIDE: Rect = Rect::new(0, 0, 900, 640);
@@ -842,6 +846,46 @@ fn a_composed_panes_settings_are_the_labels_its_rows_actually_draw() {
         let row = pane.locate().expect("a located pane").1;
         assert_eq!(row.settings, composition.labels().as_slice(), "{pane:?}");
     }
+    // Storage's rows are discovered rather than declared, so its index is
+    // the labels its cards carry rather than a composition's — one list,
+    // read by the registry and drawn by the card.
+    let storage = Pane::Storage.locate().expect("a located pane").1;
+    assert_eq!(storage.settings, crate::volumes::VOLUME_FACTS);
+}
+
+/// A wheel tick moves one *row* of the category strip, because the strip's
+/// extent is counted in rows: a pixel step there sent a single tick past
+/// every category in the list.
+#[test]
+fn a_wheel_tick_over_the_strip_moves_one_category_row() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 260);
+    let mut shell = shell();
+    shell.lay_out(short, Scale::ONE, &theme);
+    let frame = shell.frame(short, Scale::ONE, &theme);
+    let sidebar = frame.sidebar.expect("a strip");
+    assert!(frame.strip_scrollbar.is_some(), "the strip scrolls");
+
+    let at = Point::new(
+        sidebar.left() + to_i32(sidebar.width / 2),
+        sidebar.top() + to_i32(sidebar.height / 2),
+    );
+    let mut sink = damage();
+    shell.on_pointer(
+        &InputEvent::PointerMoved { to: at },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    shell.on_pointer(
+        &InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    assert_eq!(shell.strip_first_for_test(), 1);
 }
 
 #[test]
@@ -967,4 +1011,219 @@ fn walking_back_up_scrolls_a_row_above_the_fold_into_view() {
         Some(0),
         "the column did not follow the cursor back to the top"
     );
+}
+
+/// The system volume, as the mount table reports it.
+fn volume(source: &[u8], target: &[u8], blocks: u64, free: u64) -> VolumeReading {
+    let record = MountRecord::new(
+        source,
+        target,
+        b"arxfs",
+        MountFlags::READ_ONLY,
+        MountVolumeState {
+            usage: VolumeStats {
+                block_size: 4096,
+                total_blocks: blocks,
+                free_blocks: free,
+                avail_blocks: free,
+                ..VolumeStats::default()
+            },
+            availability: MountAvailability::Available,
+            medium: Some(BlkDeviceClass::SolidState),
+        },
+        [0; 16],
+    )
+    .expect("a well-formed record");
+    VolumeReading::of(&record)
+}
+
+/// Where the storage pane lives.
+const STORAGE: Location = Location {
+    category: Category::Storage,
+    pane: Pane::Storage,
+};
+
+#[test]
+fn the_storage_pane_asks_for_the_mount_table_only_when_it_is_on_show() {
+    // The walk is an IPC round trip, so the pane never makes one itself: it
+    // says it wants one and draws whatever has already arrived. Asking for
+    // it on every navigation would spend a round trip per pane.
+    let mut shell = shell();
+    assert!(
+        !shell.volumes_wanted(),
+        "a pane that lists no volume asked for the mount table"
+    );
+
+    let theme = theme();
+    let mut sink = damage();
+    shell.go_to_for_test(STORAGE, WIDE, Scale::ONE, &theme, &mut sink);
+    assert!(shell.volumes_wanted(), "the pane on show asked for nothing");
+
+    shell.adopt_volumes(alloc::vec![volume(b"arx0p2", b"/System", 1024, 768)]);
+    assert!(
+        !shell.volumes_wanted(),
+        "an answered walk was asked for again"
+    );
+
+    // Leaving and coming back asks afresh, because unlike the picture store
+    // the mount table moves.
+    shell.go_to_for_test(
+        Location {
+            category: Category::Appearance,
+            pane: Pane::Appearance,
+        },
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    assert!(!shell.volumes_wanted());
+    shell.go_to_for_test(STORAGE, WIDE, Scale::ONE, &theme, &mut sink);
+    assert!(shell.volumes_wanted());
+}
+
+#[test]
+fn the_storage_pane_opens_on_what_has_arrived_and_grows_when_the_rest_does() {
+    let theme = theme();
+    let mut shell = shell_at(STORAGE);
+    // Nothing has been answered yet, so there is nothing to draw — and that
+    // is a pane with no cards, never a fabricated one.
+    let empty = shell
+        .readings_for_test()
+        .expect("the storage pane draws its volumes");
+    assert!(empty.is_empty());
+    let bare = shell.pane_height(600, Scale::ONE, &theme);
+
+    shell.adopt_volumes(alloc::vec![
+        volume(b"arx0p2", b"/System", 1024, 768),
+        volume(b"arx0p3", b"/Users", 4096, 1024),
+    ]);
+    let readings = shell
+        .readings_for_test()
+        .expect("the storage pane draws its volumes");
+    assert_eq!(readings.len(), 2);
+    assert_eq!(readings.caption(0), Some("arx0p2"));
+    assert_eq!(readings.caption(1), Some("arx0p3"));
+    assert!(
+        shell.pane_height(600, Scale::ONE, &theme) > bare,
+        "the answered volumes did not grow the column"
+    );
+}
+
+#[test]
+fn the_storage_panes_column_scrolls_by_whole_volumes() {
+    // A card is *placed* on the surface rather than clipped to it, so the
+    // pane scrolls by cards exactly as a form scrolls by groups; a pixel
+    // offset would make the card above the fold vanish instead of scroll.
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 300);
+    let mut shell = shell();
+    let mut sink = damage();
+    shell.go_to_for_test(STORAGE, short, Scale::ONE, &theme, &mut sink);
+    shell.adopt_volumes(alloc::vec![
+        volume(b"a", b"/Storage/a", 8, 4),
+        volume(b"b", b"/Storage/b", 8, 4),
+        volume(b"c", b"/Storage/c", 8, 4),
+    ]);
+    shell.lay_out(short, Scale::ONE, &theme);
+
+    let frame = shell.frame(short, Scale::ONE, &theme);
+    assert!(frame.scrollbar.is_some(), "three cards do not fit 300px");
+    let at = Point::new(
+        frame.content.left() + to_i32(frame.content.width / 2),
+        frame.content.top() + to_i32(frame.content.height / 2),
+    );
+    shell.on_pointer(
+        &InputEvent::PointerMoved { to: at },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    shell.on_pointer(
+        &InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    // One tick is one card, because the extent is counted in cards: a
+    // pixel step here would send a single tick to the end of the list.
+    assert_eq!(shell.scroll_offset(), 1);
+    assert_eq!(
+        shell.readings_for_test().expect("the storage pane").first(),
+        1,
+        "the column is scrolled but still draws from the first card"
+    );
+}
+
+#[test]
+fn the_storage_pane_offers_no_control_to_act_on() {
+    // Read-only: mounting and unmounting are the file manager's and
+    // `mount`'s, so the pane composes no settable and the pane column's
+    // keyboard is its scrollbar's.
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 300);
+    let mut shell = shell();
+    let mut sink = damage();
+    shell.go_to_for_test(STORAGE, short, Scale::ONE, &theme, &mut sink);
+    shell.adopt_volumes(alloc::vec![
+        volume(b"a", b"/Storage/a", 8, 4),
+        volume(b"b", b"/Storage/b", 8, 4),
+    ]);
+    shell.lay_out(short, Scale::ONE, &theme);
+    assert!(shell.form_for_test().is_none());
+
+    shell.focus_content_for_test(short, Scale::ONE, &theme);
+    // The column is on the focus ring because it scrolls, and what the
+    // keyboard drives there is the scrollbar: `Down` moves the column and
+    // nothing asks the desktop to change anything.
+    let acted = shell.on_key(
+        Key::Named(NamedKey::Down),
+        Modifiers::default(),
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    assert!(acted.changed());
+    assert_eq!(acted.document(), None, "a read-only pane posted a document");
+    assert_eq!(shell.scroll_offset(), 1);
+}
+
+#[test]
+fn the_storage_pane_draws_in_both_themes_and_at_both_densities() {
+    for theme in [Theme::dark(), Theme::light()] {
+        for scale in [Scale::ONE, Scale::from_percent(200).expect("a valid scale")] {
+            install_test_transport();
+            let mut shell = shell_at(STORAGE);
+            shell.adopt_volumes(alloc::vec![
+                volume(b"arx0p2", b"/System", 1024, 768),
+                // One that reports no capacity at all: it must render its
+                // stated absence rather than a bar of nothing.
+                VolumeReading::of(
+                    &MountRecord::new(
+                        b"",
+                        b"/",
+                        b"tairixfs",
+                        MountFlags::READ_ONLY,
+                        MountVolumeState {
+                            usage: VolumeStats::default(),
+                            availability: MountAvailability::Degraded,
+                            medium: None,
+                        },
+                        [0; 16],
+                    )
+                    .expect("a well-formed record"),
+                ),
+            ]);
+            shell.lay_out(WIDE, scale, &theme);
+            let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");
+            shell.render(&mut surface, WIDE, scale, &theme, &mut NoArtwork);
+            assert!(
+                surface.pixels().iter().any(|p| p.a > 0),
+                "the storage pane drew nothing"
+            );
+        }
+    }
 }

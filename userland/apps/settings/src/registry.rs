@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use tairix_icon::IconKind;
 
 use crate::appearance::{Composition, Setting};
+use crate::volumes::VOLUME_FACTS;
 
 /// One top-level entry of the sidebar: a group of related settings.
 ///
@@ -148,8 +149,8 @@ pub enum PaneBacking {
         needs: &'static str,
     },
     /// The pane composes real controls over a live reading and a real write
-    /// path, so there is no absence to state: the form is what it draws.
-    Composed,
+    /// path, so there is no absence to state: what it draws is what it says.
+    Composed(PaneContent),
     /// The readings and writes exist, and this surface does not yet compose
     /// them into controls.
     Elsewhere {
@@ -159,6 +160,23 @@ pub enum PaneBacking {
         /// looking for a surface that does not exist.
         elsewhere: &'static str,
     },
+}
+
+/// What a composed pane draws in the content column.
+///
+/// The three bodies the shell knows how to draw, declared here so a pane
+/// cannot claim controls it composes nothing for: the backing *is* the
+/// declaration, rather than a second field a row could contradict.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PaneContent {
+    /// A form of settables over the desktop's own settings document.
+    Form(Composition),
+    /// The Wallpaper pane: its form fixed at the top of the column, with
+    /// the shipped-picture gallery scrolling beneath it.
+    Pictures(Composition),
+    /// The mounted volumes, discovered at runtime and read-only: one card
+    /// per volume rather than a fixed table of settables.
+    Volumes,
 }
 
 /// One pane's registry row.
@@ -186,22 +204,14 @@ pub struct PaneRow {
 }
 
 impl PaneRow {
-    /// The form this pane composes, or `None` for one that states an
-    /// absence instead.
+    /// What this pane draws, or `None` for one that states an absence
+    /// instead.
     #[must_use]
-    pub const fn composition(&self) -> Option<Composition> {
-        match self.pane {
-            Pane::Appearance => Some(Composition::Appearance),
-            Pane::Accessibility => Some(Composition::Accessibility),
-            Pane::Wallpaper => Some(Composition::Wallpaper),
-            _ => None,
+    pub const fn content(&self) -> Option<PaneContent> {
+        match self.backing {
+            PaneBacking::Composed(content) => Some(content),
+            PaneBacking::None { .. } | PaneBacking::Elsewhere { .. } => None,
         }
-    }
-
-    /// Whether this pane draws a picture gallery beneath its form.
-    #[must_use]
-    pub const fn has_gallery(&self) -> bool {
-        matches!(self.pane, Pane::Wallpaper)
     }
 }
 
@@ -524,7 +534,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::Appearance,
             name: "appearance",
             title: "Appearance",
-            backing: PaneBacking::Composed,
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Appearance)),
             settings: APPEARANCE_SETTINGS,
         }],
     },
@@ -536,7 +546,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::Wallpaper,
             name: "wallpaper",
             title: "Wallpaper",
-            backing: PaneBacking::Composed,
+            backing: PaneBacking::Composed(PaneContent::Pictures(Composition::Wallpaper)),
             settings: WALLPAPER_SETTINGS,
         }],
     },
@@ -804,7 +814,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::Accessibility,
             name: "accessibility",
             title: "Accessibility",
-            backing: PaneBacking::Composed,
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Accessibility)),
             settings: ACCESSIBILITY_SETTINGS,
         }],
     },
@@ -864,13 +874,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::Storage,
             name: "storage",
             title: "Storage",
-            backing: PaneBacking::Elsewhere {
-                shows: "Each mounted volume: its label, its filesystem, how full it is, and \
-                        whether it is healthy.",
-                elsewhere: "Reported by the `df` command, and by the Switchboard's System \
-                            section.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Volumes),
+            settings: VOLUME_FACTS,
         }],
     },
 ];

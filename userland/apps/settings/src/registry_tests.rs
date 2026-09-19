@@ -142,14 +142,12 @@ fn every_pane_states_how_the_machine_stands() {
                     pane.pane
                 );
             }
-            // A composed pane makes no statement: its rows are what it
-            // says, and it must actually have some.
-            PaneBacking::Composed => {
-                assert!(
-                    pane.composition().is_some(),
-                    "{:?} claims controls it composes nothing for",
-                    pane.pane
-                );
+            // A composed pane makes no statement: what it draws is what it
+            // says. That it draws *something* is the backing's own
+            // declaration and so is a compile-time property; what still has
+            // to be checked is that a search can reach its rows.
+            PaneBacking::Composed(content) => {
+                assert_eq!(pane.content(), Some(content), "{:?}", pane.pane);
                 assert!(
                     !pane.settings.is_empty(),
                     "{:?} composes controls no search can reach",
@@ -166,7 +164,7 @@ fn a_pane_only_declares_settings_it_could_show() {
     // cannot exist without a row that shows it: a pane that composes no
     // controls declares none.
     for pane in CATEGORIES.iter().flat_map(|row| row.panes) {
-        if !matches!(pane.backing, PaneBacking::Composed) {
+        if !matches!(pane.backing, PaneBacking::Composed(_)) {
             assert!(
                 pane.settings.is_empty(),
                 "{:?} declares a setting it cannot show",

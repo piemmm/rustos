@@ -3,7 +3,7 @@
 //!
 //! Every surface that reports a mounted volume — `df`, `mount`, `sysmon`,
 //! the desktop's Switchboard and its Settings — turns the same
-//! [`MountRecord`](tairix_abi::sysinfo::MountRecord) into the same handful
+//! [`MountRecord`] into the same handful
 //! of facts. The block counts become bytes, the bytes become a share, and
 //! the availability becomes a word. Each of those is one derivation, so a
 //! volume cannot read half-full on one surface and nearly-full on another.
@@ -14,7 +14,7 @@
 
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::filesystem::VolumeStats;
-use tairix_abi::sysinfo::{MountAvailability, VolumeHealth};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, VolumeHealth};
 
 /// What a mounted volume holds, in bytes.
 ///
@@ -143,6 +143,22 @@ pub const fn availability_name(availability: MountAvailability) -> &'static str 
     }
 }
 
+/// The bytes a mount is named by: its backing source, or its mount point
+/// where the table reports no source, so no volume is ever nameless.
+///
+/// One rule, because a volume named one way in the Switchboard's device rail
+/// and another in the Settings storage pane is the same volume the reader
+/// cannot match up. Both fields may be empty — an in-RAM layout mount has
+/// neither — and an empty answer is the honest one: the caller states the
+/// absence rather than inventing an identity.
+#[must_use]
+pub fn mount_name_bytes(record: &MountRecord) -> &[u8] {
+    match record.source_bytes() {
+        [] => record.target_bytes(),
+        source => source,
+    }
+}
+
 /// A volume's banded health as the one word a status badge carries.
 #[must_use]
 pub const fn volume_health_name(health: VolumeHealth) -> &'static str {
@@ -169,11 +185,12 @@ pub const fn medium_name(medium: Option<BlkDeviceClass>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        availability_marker, availability_name, medium_name, volume_health_name, VolumeBytes,
+        availability_marker, availability_name, medium_name, mount_name_bytes, volume_health_name,
+        VolumeBytes,
     };
     use tairix_abi::blkio::BlkDeviceClass;
-    use tairix_abi::driver::filesystem::VolumeStats;
-    use tairix_abi::sysinfo::{MountAvailability, VolumeHealth};
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+    use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, VolumeHealth};
 
     fn stats(block_size: u32, total: u64, free: u64, avail: u64) -> VolumeStats {
         VolumeStats {
@@ -333,5 +350,29 @@ mod tests {
             assert_ne!(medium_name(Some(class)), medium_name(None));
         }
         assert_eq!(medium_name(None), "unclassified");
+    }
+
+    fn record(source: &[u8], target: &[u8]) -> MountRecord {
+        MountRecord::new(
+            source,
+            target,
+            b"arxfs",
+            MountFlags::default(),
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::Available,
+                medium: None,
+            },
+            [0; 16],
+        )
+        .expect("a well-formed record")
+    }
+
+    #[test]
+    fn a_mount_with_no_source_is_named_by_where_it_is_mounted() {
+        assert_eq!(mount_name_bytes(&record(b"arx0p2", b"/System")), b"arx0p2");
+        assert_eq!(mount_name_bytes(&record(b"", b"/System")), b"/System");
+        // Neither field is a name, so neither is invented: the caller says so.
+        assert_eq!(mount_name_bytes(&record(b"", b"")), b"");
     }
 }
