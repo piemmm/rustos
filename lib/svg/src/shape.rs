@@ -13,7 +13,7 @@ use crate::error::SvgError;
 use crate::geom::{Point, SubPath};
 use crate::number::{parse_length, Numbers};
 use crate::pathdata::{flatten_ellipse_arc, parse_path_data};
-use crate::xml::Node;
+use crate::xml::Element;
 
 /// Whether `name` is one of the elements this module draws.
 #[must_use]
@@ -35,7 +35,7 @@ pub fn is_shape(name: &str) -> bool {
 /// Returns the parse error of a malformed attribute, or
 /// [`SvgError::TooComplex`] once the shape would exceed `max_points`.
 pub fn shape_subpaths(
-    node: &Node<'_>,
+    node: &Element<'_>,
     viewport: (f64, f64),
     tolerance: f64,
     max_points: usize,
@@ -56,7 +56,7 @@ pub fn shape_subpaths(
 }
 
 /// One length attribute, resolved against `basis`, defaulting to zero.
-fn length(node: &Node<'_>, name: &str, basis: f64) -> Result<f64, SvgError> {
+fn length(node: &Element<'_>, name: &str, basis: f64) -> Result<f64, SvgError> {
     match node.attr(name) {
         Some(text) => parse_length(text, basis),
         None => Ok(0.0),
@@ -65,7 +65,7 @@ fn length(node: &Node<'_>, name: &str, basis: f64) -> Result<f64, SvgError> {
 
 /// One radius attribute, which may also be the keyword `auto` meaning "use
 /// the other axis".
-fn radius(node: &Node<'_>, name: &str, basis: f64) -> Result<Option<f64>, SvgError> {
+fn radius(node: &Element<'_>, name: &str, basis: f64) -> Result<Option<f64>, SvgError> {
     match node.attr(name) {
         None | Some("auto") => Ok(None),
         Some(text) => parse_length(text, basis).map(Some),
@@ -81,7 +81,11 @@ fn diagonal(viewport: (f64, f64)) -> f64 {
 }
 
 /// `<rect>`, with SVG's rounded-corner rules.
-fn rect(node: &Node<'_>, viewport: (f64, f64), tolerance: f64) -> Result<Vec<SubPath>, SvgError> {
+fn rect(
+    node: &Element<'_>,
+    viewport: (f64, f64),
+    tolerance: f64,
+) -> Result<Vec<SubPath>, SvgError> {
     let x = length(node, "x", viewport.0)?;
     let y = length(node, "y", viewport.1)?;
     let w = length(node, "width", viewport.0)?;
@@ -151,7 +155,11 @@ fn rect(node: &Node<'_>, viewport: (f64, f64), tolerance: f64) -> Result<Vec<Sub
 }
 
 /// `<circle>`.
-fn circle(node: &Node<'_>, viewport: (f64, f64), tolerance: f64) -> Result<Vec<SubPath>, SvgError> {
+fn circle(
+    node: &Element<'_>,
+    viewport: (f64, f64),
+    tolerance: f64,
+) -> Result<Vec<SubPath>, SvgError> {
     let cx = length(node, "cx", viewport.0)?;
     let cy = length(node, "cy", viewport.1)?;
     let r = length(node, "r", diagonal(viewport))?;
@@ -163,7 +171,7 @@ fn circle(node: &Node<'_>, viewport: (f64, f64), tolerance: f64) -> Result<Vec<S
 
 /// `<ellipse>`, whose radii may each be `auto` (meaning the other's value).
 fn ellipse(
-    node: &Node<'_>,
+    node: &Element<'_>,
     viewport: (f64, f64),
     tolerance: f64,
 ) -> Result<Vec<SubPath>, SvgError> {
@@ -200,7 +208,7 @@ fn full_ellipse(centre: Point, radii: Point, tolerance: f64) -> Vec<SubPath> {
 }
 
 /// `<line>`, which has no area and so only ever shows as a stroke.
-fn line(node: &Node<'_>, viewport: (f64, f64)) -> Result<Vec<SubPath>, SvgError> {
+fn line(node: &Element<'_>, viewport: (f64, f64)) -> Result<Vec<SubPath>, SvgError> {
     let x1 = length(node, "x1", viewport.0)?;
     let y1 = length(node, "y1", viewport.1)?;
     let x2 = length(node, "x2", viewport.0)?;
@@ -209,7 +217,7 @@ fn line(node: &Node<'_>, viewport: (f64, f64)) -> Result<Vec<SubPath>, SvgError>
 }
 
 /// `<polyline>` and `<polygon>`, which differ only in closure.
-fn points(node: &Node<'_>, closed: bool, max_points: usize) -> Result<Vec<SubPath>, SvgError> {
+fn points(node: &Element<'_>, closed: bool, max_points: usize) -> Result<Vec<SubPath>, SvgError> {
     let Some(text) = node.attr("points") else {
         return Ok(Vec::new());
     };

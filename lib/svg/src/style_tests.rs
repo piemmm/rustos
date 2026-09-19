@@ -26,7 +26,7 @@ fn resolve(parent: &Style, tag: &str) -> Result<Style, SvgError> {
     let document = format!("<svg>{tag}</svg>");
     let root = xml::parse(&document).expect("a document");
     let child = root.children.first().expect("a child element");
-    parent.apply(child, VIEWPORT)
+    parent.apply(child, VIEWPORT, &[])
 }
 
 // --- where a property comes from ------------------------------------------
@@ -115,22 +115,20 @@ fn display_none_does_not_inherit_but_visibility_does() {
 #[test]
 fn the_initial_fill_is_opaque_black_and_the_initial_stroke_is_none() {
     let style = Style::default();
-    assert_eq!(style.fill_color(), Some(Color::rgb(0, 0, 0)));
-    assert_eq!(style.stroke_color(), None);
+    assert_eq!(style.fill, PaintSpec::Color(Color::rgb(0, 0, 0)));
+    assert!((style.fill_opacity - 1.0).abs() < 1e-9);
+    assert_eq!(style.stroke, PaintSpec::None);
     assert_eq!(style.fill_rule, FillRule::NonZero);
 }
 
+/// The two opacities are separate properties; the product is the drawing's
+/// business, because a group opacity composites a subtree rather than a
+/// paint.
 #[test]
-fn fill_opacity_and_group_opacity_multiply() {
-    let style = styled(r#"<rect fill="black" fill-opacity="0.5" opacity="0.5"/>"#);
-    let color = style.fill_color().expect("a quarter-opaque black");
-    assert_eq!(color.a, 64);
-}
-
-#[test]
-fn a_fully_transparent_paint_is_nothing_at_all() {
-    let style = styled(r#"<rect fill="black" fill-opacity="0"/>"#);
-    assert_eq!(style.fill_color(), None);
+fn a_paint_opacity_and_a_group_opacity_are_held_apart() {
+    let style = styled(r#"<rect fill="black" fill-opacity="0.5" opacity="0.25"/>"#);
+    assert!((style.fill_opacity - 0.5).abs() < 1e-9);
+    assert!((style.opacity - 0.25).abs() < 1e-9);
 }
 
 /// CSS resolves `currentColor` against the element's *final* `color`, which
@@ -140,10 +138,11 @@ fn a_fully_transparent_paint_is_nothing_at_all() {
 fn current_color_resolves_against_the_final_color_property() {
     let style = styled(r##"<rect fill="currentColor" color="#00ff00"/>"##);
     assert_eq!(style.fill, PaintSpec::Current);
-    assert_eq!(style.fill_color(), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(style.color, Color::rgb(0, 255, 0));
 
     let reordered = styled(r##"<rect color="#00ff00" fill="currentColor"/>"##);
-    assert_eq!(reordered.fill_color(), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(reordered.fill, PaintSpec::Current);
+    assert_eq!(reordered.color, Color::rgb(0, 255, 0));
 }
 
 #[test]

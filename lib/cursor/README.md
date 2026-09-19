@@ -17,7 +17,8 @@ so the same definition is
 
 ## Layout
 
-- `vector` — `Vertex`, `Shape`, `VectorCursor`: the vector representation.
+- `vector` — `Shape` (the shared `tairix_raster` artwork layer) and
+  `VectorCursor`: the vector representation.
 - `raster` — `VectorCursor::rasterise` → `CursorImage` (a `lib/raster`
   `Surface` plus the hotspot in pixel coordinates).
 - `placed` — `PlacedCursor`: a `CursorImage` put somewhere. It stores the

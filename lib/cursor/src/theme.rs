@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use tairix_raster::Color;
 use tairix_theme::CursorKind;
 
-use crate::vector::{Shape, VectorCursor, Vertex};
+use crate::vector::{Shape, VectorCursor};
 
 /// The design-grid side every built-in cursor is authored on.
 const DESIGN: u32 = 32;
@@ -280,7 +280,7 @@ fn builtin_busy() -> VectorCursor {
         (28, 23),
     ];
     let outer = Shape::from_points(BUSY_PRIMARY, RING);
-    let inner = Shape::new(BUSY_SECONDARY, scaled_about(RING, 16, 16, 1, 2));
+    let inner = Shape::from_points(BUSY_SECONDARY, &scaled_about(RING, 16, 16, 1, 2));
     let shapes = alloc::vec![outer, inner];
     VectorCursor::new(DESIGN, 16, 16, shapes)
 }
@@ -291,7 +291,7 @@ fn builtin_busy() -> VectorCursor {
 /// outline mechanism, not a per-cursor hack).
 fn outlined(hotspot_x: i32, hotspot_y: i32, silhouette: &[(i32, i32)]) -> VectorCursor {
     let (cx, cy) = centroid(silhouette);
-    let outline = Shape::new(OUTLINE, scaled_about(silhouette, cx, cy, 6, 5));
+    let outline = Shape::from_points(OUTLINE, &scaled_about(silhouette, cx, cy, 6, 5));
     let body = Shape::from_points(BODY, silhouette);
     let shapes = alloc::vec![outline, body];
     VectorCursor::new(DESIGN, hotspot_x, hotspot_y, shapes)
@@ -310,9 +310,9 @@ fn centroid(points: &[(i32, i32)]) -> (i32, i32) {
 }
 
 /// Scale `points` about `(cx, cy)` by the rational factor `num/den`,
-/// returning design-grid [`Vertex`]es. A zero denominator leaves the points
+/// returning design-grid coordinate pairs. A zero denominator leaves the points
 /// unscaled rather than dividing by zero.
-fn scaled_about(points: &[(i32, i32)], cx: i32, cy: i32, num: i32, den: i32) -> Vec<Vertex> {
+fn scaled_about(points: &[(i32, i32)], cx: i32, cy: i32, num: i32, den: i32) -> Vec<(i32, i32)> {
     let den = if den == 0 { 1 } else { den };
     let scale = |c: i32, centre: i32| -> i32 {
         let offset = i64::from(c - centre) * i64::from(num) / i64::from(den);
@@ -321,6 +321,6 @@ fn scaled_about(points: &[(i32, i32)], cx: i32, cy: i32, num: i32, den: i32) -> 
     };
     points
         .iter()
-        .map(|&(x, y)| Vertex::new(scale(x, cx), scale(y, cy)))
+        .map(|&(x, y)| (scale(x, cx), scale(y, cy)))
         .collect()
 }

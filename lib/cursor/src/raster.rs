@@ -3,12 +3,12 @@
 //!
 //! Scaling is what makes the vector representation worthwhile: a cursor
 //! authored once on its design grid is rendered at whatever pixel size a
-//! display's DPI and the user's chosen pointer size call for. Each shape is
-//! filled through `lib/raster`'s single [`Surface::fill_contours`] path —
-//! every pixel taking the exact area the shape covers of it — and the stack
-//! through its one [`Surface::layered`] composition, so the cursor library
-//! owns no scan converter or colour arithmetic of its own. A degenerate
-//! side or cursor fails closed with `None` rather than panicking.
+//! display's DPI and the user's chosen pointer size call for. The artwork
+//! goes through `lib/raster`'s single [`Surface::draw_artwork`] path — every
+//! pixel taking the exact area a shape covers of it — and the stack through
+//! its one [`Surface::layered`] composition, so the cursor library owns no
+//! scan converter or colour arithmetic of its own. A degenerate side or
+//! cursor fails closed with `None` rather than panicking.
 //!
 //! The side is asked for in **pixels**, not as a factor of the asset's own
 //! design grid, because the grid is an authoring detail that differs
@@ -17,10 +17,8 @@
 //! sets would resize the pointer. The caller names the size it wants and
 //! every set honours it.
 
-use alloc::vec::Vec;
-
 use tairix_geometry::Point;
-use tairix_raster::Surface;
+use tairix_raster::{layer_count, Surface};
 use tairix_reclaim::CachedBytes;
 
 use crate::vector::VectorCursor;
@@ -82,10 +80,10 @@ impl VectorCursor {
     /// Rasterise this cursor into a `side`x`side` pixel image.
     ///
     /// Returns `None` for a zero `side`, a cursor whose design grid is
-    /// degenerate, or a pixel buffer that cannot be allocated — the caller
-    /// falls back to a smaller side or a different cursor rather than
-    /// crashing.
-    /// Each shape is filled through the shared [`Surface::fill_contours`] path
+    /// degenerate, a pixel buffer that cannot be allocated, or a group whose
+    /// isolation buffer cannot be — the caller falls back to a smaller side
+    /// or a different cursor rather than showing a half-composited one.
+    /// The artwork is drawn through the shared [`Surface::draw_artwork`] path
     /// in stack order, so a dark outline beneath a light body stays legible,
     /// and the stack goes through [`Surface::layered`] so the body meets that
     /// outline without the pale seam that compositing already-anti-aliased
@@ -97,18 +95,12 @@ impl VectorCursor {
             return None;
         }
 
-        let surface = Surface::layered(side, side, self.shapes().len(), |surface| {
-            for shape in self.shapes() {
-                let contours: Vec<Vec<(i32, i32)>> = shape
-                    .contours
-                    .iter()
-                    .map(|contour| contour.iter().map(|vertex| (vertex.x, vertex.y)).collect())
-                    .collect();
-                surface.fill_contours(&contours, design, shape.rule, &shape.paint);
-            }
+        let mut drawn = false;
+        let surface = Surface::layered(side, side, layer_count(self.nodes()), |surface| {
+            drawn = surface.draw_artwork(self.nodes(), design);
         })?;
 
-        Some(CursorImage {
+        drawn.then(|| CursorImage {
             surface,
             hotspot: self.scaled_hotspot(side, design),
         })

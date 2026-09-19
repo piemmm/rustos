@@ -28,8 +28,12 @@ fn scale() -> f64 {
 #[track_caller]
 fn only_paint(svg: &str) -> Paint {
     let image = decode_square(svg.as_bytes()).expect("a decodable document");
-    assert_eq!(image.layers().len(), 1, "expected exactly one layer");
-    image.layers()[0].paint.clone()
+    let layers = tairix_raster::layer_count(image.nodes());
+    assert_eq!(layers, 1, "expected exactly one layer");
+    let [tairix_raster::Node::Fill(layer)] = image.nodes() else {
+        panic!("expected one plain layer");
+    };
+    layer.paint.clone()
 }
 
 /// The colour a paint gives at a point in *user* coordinates.
@@ -304,7 +308,7 @@ fn a_gradient_with_no_extent_paints_its_last_stop() {
 fn a_gradient_with_no_stops_paints_nothing() {
     let svg = document(r#"<linearGradient id="g"/>"#, "url(#g)");
     let image = decode_square(svg.as_bytes()).expect("a decodable document");
-    assert!(image.layers().is_empty());
+    assert!(image.nodes().is_empty());
 }
 
 #[test]
@@ -314,7 +318,7 @@ fn an_unresolvable_reference_falls_back_to_the_colour_beside_it() {
 
     let bare = document("", "url(#missing)");
     let image = decode_square(bare.as_bytes()).expect("a decodable document");
-    assert!(image.layers().is_empty());
+    assert!(image.nodes().is_empty());
 }
 
 #[test]
@@ -354,6 +358,9 @@ fn a_gradient_may_stroke_as_well_as_fill() {
             <rect x="1" y="1" width="6" height="6" fill="none"
                   stroke="url(#g)" stroke-width="1"/></svg>"##;
     let image = decode_square(svg.as_bytes()).expect("a stroked gradient");
-    assert_eq!(image.layers().len(), 1);
-    assert!(matches!(image.layers()[0].paint, Paint::Gradient(_)));
+    assert_eq!(tairix_raster::layer_count(image.nodes()), 1);
+    let [tairix_raster::Node::Fill(layer)] = image.nodes() else {
+        panic!("expected one plain layer");
+    };
+    assert!(matches!(layer.paint, Paint::Gradient(_)));
 }

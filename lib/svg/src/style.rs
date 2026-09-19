@@ -1,10 +1,11 @@
 //! The presentation properties a shape is drawn with, and how they inherit.
 //!
-//! SVG spells the same property three ways — a presentation attribute
-//! (`fill="red"`), a declaration in the element's `style` attribute
-//! (`style="fill:red"`), and whatever the element inherited from its parent —
-//! with the `style` attribute winning over the attribute, and the attribute
-//! over the inherited value. That precedence lives here, once, so no shape or
+//! SVG spells the same property four ways — a presentation attribute
+//! (`fill="red"`), a rule in one of the document's `<style>` sheets
+//! (`.cls { fill: red }`), a declaration in the element's `style` attribute
+//! (`style="fill:red"`), and whatever the element inherited from its parent.
+//! The later three win in that order, and an `!important` declaration wins
+//! over every normal one. That precedence lives here, once, so no shape or
 //! container re-derives it.
 //!
 //! A [`Style`] is therefore a *resolved* value set: every property already
@@ -22,13 +23,14 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_raster::{Color, FillRule};
+use tairix_raster::{Color, FillRule, MaskKind};
 
 use crate::color::{parse_color, ColorSpec};
+use crate::css::{self, Declaration};
 use crate::error::SvgError;
 use crate::geom::{LineCap, LineJoin, StrokeStyle};
 use crate::number::{opacity_to_alpha, parse_length, parse_number, parse_opacity};
-use crate::xml::Node;
+use crate::xml::Element;
 
 /// The most dash lengths accepted in one pattern.
 ///
@@ -59,6 +61,27 @@ pub enum PaintSpec {
     Reference(String, Option<Color>),
 }
 
+/// Which of a shape's fill and stroke layers is painted first.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum PaintOrder {
+    /// The fill, then the stroke over it: SVG's initial order.
+    #[default]
+    FillFirst,
+    /// The stroke, then the fill over it.
+    StrokeFirst,
+}
+
+/// Whether a viewport-establishing element confines its content.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum Overflow {
+    /// Content outside the viewport is clipped away: SVG's initial value for
+    /// a `<symbol>` and a nested `<svg>`.
+    #[default]
+    Hidden,
+    /// Content is drawn wherever it falls.
+    Visible,
+}
+
 /// Every property that decides how one element is drawn, already resolved.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Style {
@@ -76,12 +99,31 @@ pub struct Style {
     pub stroke_style: StrokeStyle,
     /// The value `currentColor` stands for.
     pub color: Color,
+    /// Which points a `<clipPath>` child of this element encloses.
+    pub clip_rule: FillRule,
+    /// Which of a shape's two layers is painted first.
+    pub paint_order: PaintOrder,
     /// The group opacity, `0..=1`, applied to this element and its subtree.
     ///
     /// Unlike the fill and stroke opacities this one does *not* inherit: it
     /// is applied where it is written and reset for the children, because SVG
     /// composites the subtree as a unit.
     pub opacity: f64,
+    /// The fragment name of the `<clipPath>` this element is clipped to.
+    ///
+    /// Non-inheriting, like the other compositing properties: a clip applies
+    /// to the subtree as a unit rather than to each descendant again.
+    pub clip_path: Option<String>,
+    /// The fragment name of the `<mask>` this element is masked by.
+    pub mask: Option<String>,
+    /// Whether a viewport-establishing element confines its content to the
+    /// viewport.
+    pub overflow: Overflow,
+    /// Which channel of a `<mask>` element's own content is its factor.
+    ///
+    /// Only a `<mask>` reads it, so like the other compositing properties it
+    /// does not inherit.
+    pub mask_kind: MaskKind,
     /// Whether the element and its subtree are drawn at all.
     pub display: bool,
     /// Whether the element itself is drawn (its children may still be).
@@ -99,7 +141,13 @@ impl Default for Style {
             stroke_opacity: 1.0,
             stroke_style: StrokeStyle::default(),
             color: Color::rgb(0, 0, 0),
+            clip_rule: FillRule::NonZero,
+            paint_order: PaintOrder::default(),
             opacity: 1.0,
+            clip_path: None,
+            mask: None,
+            overflow: Overflow::default(),
+            mask_kind: MaskKind::Luminance,
             display: true,
             visible: true,
         }
@@ -113,13 +161,21 @@ impl Style {
     pub fn inherit(&self) -> Self {
         Self {
             opacity: 1.0,
+            clip_path: None,
+            mask: None,
+            overflow: Overflow::default(),
+            mask_kind: MaskKind::Luminance,
             display: true,
             ..self.clone()
         }
     }
 
-    /// This style with `node`'s own presentation attributes and `style`
-    /// declarations applied, in SVG's precedence order.
+    /// This style with `element`'s own properties applied, in the cascade's
+    /// precedence order.
+    ///
+    /// `cascade` is the declarations the document's stylesheets match on this
+    /// element, already ordered by specificity and source order with the
+    /// `!important` ones last ([`Stylesheet::cascade`](crate::css::Stylesheet::cascade)).
     ///
     /// `viewport` is the diagonal length percentages resolve against, which
     /// is what SVG defines a percentage length with no axis to be measured
@@ -129,17 +185,26 @@ impl Style {
     /// Returns the parse error of the first property that is understood but
     /// malformed, so a bad colour or width refuses the document rather than
     /// drawing something the author did not write.
-    pub fn apply(&self, node: &Node<'_>, viewport: f64) -> Result<Self, SvgError> {
+    pub fn apply(
+        &self,
+        element: &Element<'_>,
+        viewport: f64,
+        cascade: &[Declaration<'_>],
+    ) -> Result<Self, SvgError> {
         let mut style = self.clone();
-        for (name, value) in &node.attrs {
+        for (name, value) in &element.attrs {
             style.set(name, value.as_ref(), viewport)?;
         }
-        if let Some(inline) = node.attr("style") {
-            for declaration in inline.split(';') {
-                let Some((name, value)) = declaration.split_once(':') else {
-                    continue;
-                };
-                style.set(name.trim(), value.trim(), viewport)?;
+        let inline = element.attr("style").unwrap_or("");
+        for important in [false, true] {
+            for rule in cascade
+                .iter()
+                .filter(|declaration| declaration.important == important)
+            {
+                style.set(rule.name, rule.value, viewport)?;
+            }
+            for own in css::declarations(inline).filter(|own| own.important == important) {
+                style.set(own.name, own.value, viewport)?;
             }
         }
         Ok(style)
@@ -162,6 +227,22 @@ impl Style {
             "stroke-dasharray" => self.stroke_style.dashes = parse_dashes(value, viewport)?,
             "stroke-dashoffset" => self.stroke_style.dash_offset = parse_length(value, viewport)?,
             "opacity" => self.opacity = parse_opacity(value)?,
+            "clip-rule" => self.clip_rule = parse_fill_rule(value)?,
+            "paint-order" => self.paint_order = parse_paint_order(value),
+            "clip-path" => self.clip_path = parse_funciri(value)?,
+            "mask" => self.mask = parse_funciri(value)?,
+            "mask-type" => {
+                self.mask_kind = match value {
+                    "alpha" => MaskKind::Alpha,
+                    _ => MaskKind::Luminance,
+                }
+            }
+            "overflow" => {
+                self.overflow = match value {
+                    "visible" | "auto" => Overflow::Visible,
+                    _ => Overflow::Hidden,
+                }
+            }
             "color" => {
                 if let ColorSpec::Value(color) = parse_color(value)? {
                     self.color = color;
@@ -172,41 +253,6 @@ impl Style {
             _ => {}
         }
         Ok(())
-    }
-
-    /// The colour a fill is drawn in, with both opacities folded in, or
-    /// `None` when nothing is painted.
-    ///
-    /// A reference to a paint server has no colour of its own; the caller
-    /// resolves it and applies [`Style::alpha`] itself.
-    #[must_use]
-    pub fn fill_color(&self) -> Option<Color> {
-        self.paint_color(&self.fill, self.fill_opacity)
-    }
-
-    /// The colour a stroke is drawn in, with both opacities folded in.
-    #[must_use]
-    pub fn stroke_color(&self) -> Option<Color> {
-        self.paint_color(&self.stroke, self.stroke_opacity)
-    }
-
-    /// The alpha multiplier one of this element's paints carries: its own
-    /// opacity times the group opacity.
-    #[must_use]
-    pub fn alpha(&self, paint_opacity: f64) -> f64 {
-        (paint_opacity * self.opacity).clamp(0.0, 1.0)
-    }
-
-    /// `paint`'s colour scaled by `paint_opacity` and the group opacity, or
-    /// `None` when it paints nothing.
-    fn paint_color(&self, paint: &PaintSpec, paint_opacity: f64) -> Option<Color> {
-        let base = match paint {
-            PaintSpec::None => return None,
-            PaintSpec::Color(color) => *color,
-            PaintSpec::Current => self.color,
-            PaintSpec::Reference(_, fallback) => (*fallback)?,
-        };
-        scale_alpha(base, self.alpha(paint_opacity))
     }
 }
 
@@ -243,6 +289,42 @@ fn parse_paint(value: &str) -> Result<PaintSpec, SvgError> {
         ColorSpec::Value(color) => PaintSpec::Color(color),
         ColorSpec::Current => PaintSpec::Current,
     })
+}
+
+/// Parse a `clip-path` or `mask` value into the fragment it names.
+///
+/// `none` applies nothing. Anything else must be a local `url(#id)`: this
+/// crate resolves no external reference, and a CSS basic shape is a composite
+/// it cannot build — so both are refused rather than quietly drawn without
+/// the clip the author asked for.
+fn parse_funciri(value: &str) -> Result<Option<String>, SvgError> {
+    if value == "none" {
+        return Ok(None);
+    }
+    let rest = value
+        .strip_prefix("url(")
+        .ok_or(SvgError::InvalidReference)?;
+    let (reference, _) = rest.split_once(')').ok_or(SvgError::InvalidReference)?;
+    let name = reference.trim().trim_matches(['"', '\'']);
+    let id = name.strip_prefix('#').ok_or(SvgError::InvalidReference)?;
+    Ok(Some(id.to_string()))
+}
+
+/// Parse a `paint-order`.
+///
+/// The property is a permutation of `fill`, `stroke`, and `markers`; only the
+/// first of fill and stroke to appear decides anything this decoder draws, and
+/// an unrecognised word leaves the initial order rather than refusing the
+/// document, which is what CSS does with an invalid value.
+fn parse_paint_order(value: &str) -> PaintOrder {
+    value
+        .split_ascii_whitespace()
+        .find_map(|word| match word {
+            "stroke" => Some(PaintOrder::StrokeFirst),
+            "fill" => Some(PaintOrder::FillFirst),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Parse a `fill-rule` keyword.

@@ -1,10 +1,9 @@
 //! A minimal, fail-closed XML element scanner for the SVG subset.
 //!
-//! The decoder does not need a general XML tree: every WM/desktop asset is a
-//! flat list of shape elements under one `<svg>` root, so the scanner yields
-//! the document's **start tags** in order and ignores text, comments,
-//! processing instructions, the doctype, and closing tags. Anything
-//! structurally broken — an unterminated tag, quote, or comment — is a
+//! The decoder does not need a general XML tree: it yields the document's
+//! elements in order with their attributes and character data, and ignores
+//! comments, processing instructions, and the doctype. Anything structurally
+//! broken — an unterminated tag, quote, or comment — is a
 //! [`SvgError::Malformed`] rejection, never a panic.
 //!
 //! Slicing is always at ASCII delimiters (`<`, `>`, `=`, quotes, whitespace),
@@ -36,13 +35,12 @@ pub const MAX_DEPTH: usize = 64;
 /// decoder allocate before it has drawn anything.
 pub const MAX_ELEMENTS: usize = 8192;
 
-/// One element of the parsed document: its name, attributes, and children.
+/// One element of the parsed document: its name, attributes, character data,
+/// and children.
 ///
-/// Text, comments, processing instructions, and the doctype are dropped — no
-/// part of the supported subset reads character data, so keeping it would be
-/// weight the decoder never looks at.
+/// Comments, processing instructions, and the doctype are dropped.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Node<'a> {
+pub struct Element<'a> {
     /// The element's name: the local name for SVG elements, and the raw
     /// prefixed name for an element in some other namespace (which therefore
     /// matches nothing the decoder draws).
@@ -50,11 +48,20 @@ pub struct Node<'a> {
     /// The attributes in document order, each a `(name, value)` pair. A value
     /// carrying an entity reference is decoded, and so owns its text.
     pub attrs: Vec<(&'a str, Cow<'a, str>)>,
+    /// The element's own character data, with entity references decoded and
+    /// CDATA sections taken verbatim, in document order.
+    ///
+    /// A run that is entirely whitespace is dropped: `<style>` is the only
+    /// element of the supported subset that reads its text, and CSS does not
+    /// care where an element's children left blank lines. Dropping them is
+    /// what keeps a document of a thousand indented shapes from carrying a
+    /// thousand owned strings of indentation.
+    pub text: Cow<'a, str>,
     /// The element's children, in document order.
-    pub children: Vec<Node<'a>>,
+    pub children: Vec<Element<'a>>,
 }
 
-impl Node<'_> {
+impl<'a> Element<'a> {
     /// The value of attribute `name`, or `None` if the element lacks it.
     #[must_use]
     pub fn attr(&self, name: &str) -> Option<&str> {
@@ -70,6 +77,18 @@ impl Node<'_> {
     pub fn href(&self) -> Option<&str> {
         self.attr("href").or_else(|| self.attr("xlink:href"))
     }
+
+    /// Append one run of character data, borrowing while it is the only one.
+    fn push_text(&mut self, run: Cow<'a, str>) {
+        if run.is_empty() {
+            return;
+        }
+        if self.text.is_empty() {
+            self.text = run;
+            return;
+        }
+        self.text.to_mut().push_str(&run);
+    }
 }
 
 /// Parse `input` into the document's root element.
@@ -79,36 +98,51 @@ impl Node<'_> {
 /// or element, or a close tag that does not match the element it ends;
 /// [`SvgError::MissingRoot`] when the document holds no element; and
 /// [`SvgError::TooComplex`] when it exceeds [`MAX_DEPTH`] or [`MAX_ELEMENTS`].
-pub fn parse(input: &str) -> Result<Node<'_>, SvgError> {
+pub fn parse(input: &str) -> Result<Element<'_>, SvgError> {
     let bytes = input.as_bytes();
     let n = bytes.len();
-    let mut root: Option<Node<'_>> = None;
-    let mut stack: Vec<Node<'_>> = Vec::new();
+    let mut root: Option<Element<'_>> = None;
+    let mut stack: Vec<Element<'_>> = Vec::new();
     let mut namespaces: Vec<(&str, &str)> = Vec::new();
     let mut count = 0_usize;
     let mut i = 0;
+    let mut text_from = 0_usize;
 
     while i < n {
         if bytes[i] != b'<' {
             i += 1;
             continue;
         }
+        if let Some(open) = stack.last_mut() {
+            open.push_text(decode_entities(significant(&input[text_from..i])));
+        }
         let next = bytes.get(i + 1).copied().ok_or(SvgError::Malformed)?;
         if input[i..].starts_with("<!--") {
             i = find_sub(input, i + 4, "-->").ok_or(SvgError::Malformed)? + 3;
+            text_from = i;
             continue;
         }
         if input[i..].starts_with("<![CDATA[") {
-            i = find_sub(input, i + 9, "]]>").ok_or(SvgError::Malformed)? + 3;
+            let end = find_sub(input, i + 9, "]]>").ok_or(SvgError::Malformed)?;
+            if let Some(open) = stack.last_mut() {
+                // A CDATA section is character data verbatim: no entity in it
+                // is a reference, which is the whole reason an author wraps a
+                // stylesheet in one.
+                open.push_text(Cow::Borrowed(&input[i + 9..end]));
+            }
+            i = end + 3;
+            text_from = i;
             continue;
         }
         if next == b'!' || next == b'?' {
             i = find_tag_end(bytes, i + 1).ok_or(SvgError::Malformed)? + 1;
+            text_from = i;
             continue;
         }
         let close = find_tag_end(bytes, i + 1).ok_or(SvgError::Malformed)?;
         let content = &input[i + 1..close];
         i = close + 1;
+        text_from = i;
 
         if let Some(name) = content.strip_prefix('/') {
             let ended = stack.pop().ok_or(SvgError::Malformed)?;
@@ -153,9 +187,18 @@ pub fn parse(input: &str) -> Result<Node<'_>, SvgError> {
     }
 }
 
+/// A character-data run, or the empty string when it holds nothing but
+/// whitespace.
+fn significant(run: &str) -> &str {
+    if run.bytes().all(|b| b.is_ascii_whitespace()) {
+        return "";
+    }
+    run
+}
+
 /// Forget the namespace prefixes `node` declared, now that its scope has
 /// ended.
-fn drop_namespaces(namespaces: &mut Vec<(&str, &str)>, node: &Node<'_>) {
+fn drop_namespaces(namespaces: &mut Vec<(&str, &str)>, node: &Element<'_>) {
     let declared = node
         .attrs
         .iter()
@@ -186,11 +229,11 @@ fn local_name<'a>(name: &'a str, namespaces: &[(&str, &str)]) -> &'a str {
 }
 
 /// Parse the text *between* `<` and `>` of a start tag into a childless
-/// [`Node`], recording any namespace prefixes it declares.
+/// [`Element`], recording any namespace prefixes it declares.
 fn parse_start_tag<'a>(
     content: &'a str,
     namespaces: &mut Vec<(&'a str, &'a str)>,
-) -> Result<Node<'a>, SvgError> {
+) -> Result<Element<'a>, SvgError> {
     let trimmed = content.trim();
     let body = trimmed.strip_suffix('/').unwrap_or(trimmed).trim_end();
     let (raw_name, rest) = match body.find(char::is_whitespace) {
@@ -207,12 +250,13 @@ fn parse_start_tag<'a>(
             namespaces.push((prefix, value));
         }
     }
-    Ok(Node {
+    Ok(Element {
         name: local_name(raw_name, namespaces),
         attrs: raw
             .into_iter()
             .map(|(key, value)| (key, decode_entities(value)))
             .collect(),
+        text: Cow::Borrowed(""),
         children: Vec::new(),
     })
 }

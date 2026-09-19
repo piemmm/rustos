@@ -40,6 +40,18 @@ This crate owns:
   rather than a sorted pass per sample row: 175 µs for a 4096-edge contour
   over a 128×128 surface, against 0.3 ms sorting four sample rows per pixel
   row and 409 ms probing every edge for every sub-sample.
+- `Surface::draw_artwork` — draw a whole `artwork` tree: filled `Layer`s
+  bottom first, and a `Group` wherever a clip, a mask, or a group opacity
+  composites a subtree as a unit. Those three are one mechanism rather than
+  three, because each asks for a subtree to be rendered into its own buffer
+  and then weakened by a per-pixel factor — a clip is a `Mask` read as
+  `Alpha`, a `<mask>` the same group read as `Luminance`. Isolation is not
+  cosmetic: weakening each shape and compositing is a different picture from
+  compositing and then weakening. A group that cannot be allocated, or a tree
+  nested past `MAX_GROUP_DEPTH`, draws **nothing** and says so, so a caller
+  falls back to its own artwork rather than showing half a composite. This is
+  the one walk of an artwork tree: the cursor, icon, and document-viewer paths
+  all reach the scan converter through it (`AGENTS.md` §2.2).
 - `Surface::layered` — paint a stack of filled shapes and resolve the seams
   between them. Anti-aliasing and compositing do not commute: where one
   layer's soft edge meets the next one's, two partial alphas blend as if they

@@ -24,15 +24,17 @@ and that form is cached and re-rendered only on a scale or theme change:
 ```
 
 `tairix_svg::decode(bytes, viewport)` returns an `SvgImage`: a design grid
-(`design()`), an ordered stack of filled layers (`layers()`, bottom layer
-first — each an `SvgLayer { paint, rule, contours }`), and an optional pointer
-hotspot (`hotspot()`). A layer is several contours under one fill rule rather
-than a single ring, because a path with a hole and any stroke outline at all
-are both many rings filled as one. That is exactly the shape `lib/cursor`'s
-`VectorCursor` and `lib/icon`'s `VectorIcon` hold, so the conversion is a
-direct field map and the asset still rasterises through `lib/raster`'s single
-scan converter — there is no second rasterisation path (`AGENTS.md` §2.2).
-The cursor and icon libraries expose the wrappers
+(`design()`), the artwork drawn on it (`nodes()`, bottom first), and an
+optional pointer hotspot (`hotspot()`). The artwork is `lib/raster`'s shared
+`artwork` tree: filled `Layer { paint, rule, contours }` nodes, and a `Group`
+wherever a clip, a mask, or a group opacity composites a subtree as a unit. A
+layer is several contours under one fill rule rather than a single ring,
+because a path with a hole and any stroke outline at all are both many rings
+filled as one. That is exactly the shape `lib/cursor`'s `VectorCursor` and
+`lib/icon`'s `VectorIcon` hold, so the conversion is a direct field map and
+the asset still rasterises through `lib/raster`'s single scan converter
+(`Surface::draw_artwork`) — there is no second rasterisation path
+(`AGENTS.md` §2.2). The cursor and icon libraries expose the wrappers
 `tairix_cursor::decode_svg` and `tairix_icon::decode_svg`.
 
 `viewport` chooses the shape the drawing is fitted to, and is the only thing
@@ -54,7 +56,7 @@ normalised across the whole grid — filling both axes — and `source_extent()`
 carries the proportions it was authored in, so a consumer that rasterises into
 a surface of that shape gets the picture undistorted, with the grid's full
 precision on both axes and no letter-box bands to find and crop. That works
-because `Surface::fill_contours` stretches the grid across the surface it is
+because `Surface::draw_artwork` stretches the grid across the surface it is
 given: normalising in the decoder and un-normalising in the surface's own
 shape is one uniform scale, so the scan converter needs no non-square grid of
 its own.
@@ -63,7 +65,7 @@ Its production consumer is the parser sandbox's view service, which opens an
 SVG document as the second backing behind the same open/page/render/band
 protocol a raster document uses (`plans/VIEW.md`). A viewer zoomed in states
 the extent the whole drawing is scaled to and the one rectangle of it the
-window shows, and `Surface::layered_window` rasterises the contours straight
+window shows, and `Surface::layered_window` draws the artwork straight
 into that rectangle: `source_extent()` rounded to pixels is what "actual
 size" means for a picture that has none of its own, every zoom level is drawn
 at full precision rather than resampled from one, and a magnification larger
@@ -88,6 +90,27 @@ larger scale, so a drawing already close to the total-vertex bound can pass it
 under `Natural` and be admitted under `Square`. The bound is a containment
 bound and is not relaxed to suit a shape (`AGENTS.md` §24.4); the refusal is
 the bound doing its job on the geometry actually produced.
+
+## Compositing: one mechanism for three features
+
+Group opacity, clipping, and masking each ask for a subtree to be drawn *as a
+unit* and then composited through a per-pixel factor, so they are one
+mechanism rather than three. A clip is a mask whose content is the clip's
+shapes filled opaque white and read as alpha; a `<mask>` is the same group
+read as luminance; a group opacity is that group with no mask at all. The
+mask's own region rectangle, a clip on a `<clipPath>`, and a mask on a
+`<mask>` all fall out of the model rather than being special cases.
+
+Isolation is not cosmetic. Weakening each shape and compositing is a
+different picture from compositing and then weakening — two overlapping
+opaque shapes at half opacity show the lower one through the upper only in
+the first — so the subtree really is rendered into its own buffer. The
+decoder therefore emits a group **only where one changes the picture**: a
+plain `<g>` costs nothing, a shape that produces one layer folds its own
+opacity into that layer's alpha, and a viewport or mask region that cuts
+nothing off its content adds no group at all. A group whose buffer cannot be
+allocated draws nothing and says so, so the caller falls back to the tier
+below rather than showing half a composite (`AGENTS.md` §2.9).
 
 ## Loading a whole asset set
 
@@ -245,20 +268,36 @@ authored rather than traced into a simpler form:
 - **Strokes**: `stroke`, `stroke-width`, caps, joins, miter limit, and
   dashes. A stroke becomes its own filled layer, painted over the fill in
   SVG's own order.
-- **Style**: presentation attributes, the `style` attribute, and inheritance
-  down the tree, including `currentColor`.
+- **Style**: the property cascade — presentation attributes, the document's
+  own `<style>` sheets, the `style` attribute, and inheritance down the tree,
+  including `currentColor`. The selector subset is type, class, id, universal
+  and any compound of those, in a selector list, with the descendant and
+  child combinators; specificity is CSS's `(id, class, type)` triple and
+  `!important` wins. A rule outside the subset — an attribute selector, a
+  pseudo-class, an at-rule — is *dropped*, exactly as an unknown property
+  already is, because that is what the construct means: refusing the document
+  would lose an asset over a `@media print` block it would never have drawn.
 - **Colour**: every hex form, `rgb()`/`rgba()`/`hsl()`/`hsla()` in both
   spellings, and the CSS named colours.
 - **Gradients**: linear and radial, with units, spread, `gradientTransform`,
   and `href` inheritance between definitions.
+- **Compositing**: `clip-path` and `<clipPath>` (`clip-rule`,
+  `clipPathUnits`, nesting), `mask` and `<mask>` (`maskUnits`,
+  `maskContentUnits`, `mask-type`, the mask region), and group opacity.
+- **Paint order**: `paint-order`, which may put a shape's stroke under its
+  fill.
 - **Hotspot**: `data-hotspot-x` / `data-hotspot-y` on the `<svg>` element for
   cursor assets.
 
+A reference to a `<clipPath>` or `<mask>` the document does not define means
+the element is **not rendered**, rather than rendered unclipped: an empty
+picture is an honest refusal where a wrong one is not (`AGENTS.md` §5.4).
+
 What it does **not** draw, because an artwork decoder is not a browser: text,
-embedded images, filters, masks, clipping paths, patterns, animation, and CSS
-stylesheets. An element it cannot draw is skipped rather than refusing the
-document, so one unsupported decoration does not lose a whole asset; the open
-question about that choice is recorded in `plans/ICONS.md`. There is still
-exactly one rasterisation path (`AGENTS.md` §2.2), and pre-rasterised bitmap
-assets may exist as a cache or fallback but are never the only path. The
-staged design is `plans/SVG.md`.
+embedded images, filters, patterns, markers, and animation. An element it
+cannot draw is skipped rather than refusing the document, so one unsupported
+decoration does not lose a whole asset; the open question about that choice is
+recorded in `plans/ICONS.md`. There is still exactly one rasterisation path
+(`AGENTS.md` §2.2), and pre-rasterised bitmap assets may exist as a cache or
+fallback but are never the only path. The staged design, and what is left, are
+in `plans/SVG.md`.

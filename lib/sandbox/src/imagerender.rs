@@ -32,8 +32,8 @@
 //!
 //! An **SVG** icon decodes into the desktop's shared vector form
 //! (`tairix_svg::decode` then `tairix_icon::VectorIcon::from_svg`) and
-//! rasterises directly onto a `side`×`side` surface through the one
-//! polygon-fill path every vector asset shares (`VectorIcon::rasterise`);
+//! rasterises directly onto a `side`×`side` surface through the one artwork
+//! path every vector asset shares (`VectorIcon::rasterise`);
 //! the premultiplied surface is un-premultiplied back to straight alpha for
 //! the wire.
 //!
@@ -2469,22 +2469,16 @@ impl ViewBacking {
                     .map_err(|_| ViewRefusal::Unrenderable)
             }
             Self::Vector { drawing, .. } => {
+                let mut drawn = false;
                 let surface = Surface::layered_window(
                     extent,
                     band,
-                    drawing.layers().len(),
+                    tairix_raster::layer_count(drawing.nodes()),
                     |surface, over| {
-                        for layer in drawing.layers() {
-                            surface.fill_contours_over(
-                                over,
-                                &layer.contours,
-                                drawing.design(),
-                                layer.rule,
-                                &layer.paint,
-                            );
-                        }
+                        drawn = surface.draw_artwork_over(over, drawing.nodes(), drawing.design());
                     },
                 )
+                .filter(|_| drawn)
                 .ok_or(ViewRefusal::Unrenderable)?;
                 write_straight_alpha(&surface, out)
                     .then_some(())

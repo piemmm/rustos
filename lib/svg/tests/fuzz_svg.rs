@@ -15,6 +15,8 @@
 //! fuzz --soak` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
+use core::fmt::Write as _;
+
 use tairix_svg::{decode, SvgError, Viewport};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -52,8 +54,27 @@ const TEMPLATES: &[&[u8]] = &[
           <rect width="24" height="24" fill="url(#a)" opacity="0.75"/></svg>"##,
     br#"<svg viewBox="0 0 40 10" preserveAspectRatio="xMinYMax slice">
             <switch><g requiredExtensions="urn:x"><rect width="9" height="9"/></g>
+            <rect systemLanguage="zz" width="2" height="2"/>
             <svg x="1" y="1" width="8" height="8" viewBox="0 0 4 4"><rect width="4" height="4"/></svg>
             </switch></svg>"#,
+    br##"<svg viewBox="0 0 24 24">
+            <style>/* c */ rect, .k > g .j { fill: #123; stroke-width: 2 !important }
+              #d { clip-rule: evenodd } * { paint-order: stroke }
+              @media print { rect { fill: #fff } }</style>
+            <clipPath id="c" clipPathUnits="objectBoundingBox"><circle cx=".5" cy=".5" r=".4"/></clipPath>
+            <clipPath id="d" clip-path="url(#c)"><rect width="9" height="9"/><use href="#p"/></clipPath>
+            <path id="p" d="M0 0 h8 v8 z"/>
+            <g class="k"><g><rect class="j" width="20" height="20" clip-path="url(#d)"/></g></g>
+          </svg>"##,
+    br##"<svg viewBox="0 0 24 24">
+            <mask id="m" maskContentUnits="objectBoundingBox" style="mask-type:alpha">
+              <rect width=".5" height="1" fill="#fff"/></mask>
+            <mask id="n" maskUnits="userSpaceOnUse" x="1" y="1" width="8" height="8" mask="url(#m)">
+              <circle cx="12" cy="12" r="9" fill="#888"/></mask>
+            <symbol id="s" viewBox="0 0 4 4" overflow="visible"><rect width="6" height="6"/></symbol>
+            <g opacity="0.4" mask="url(#n)"><use href="#s" x="2" y="2" width="12" height="9"/>
+              <rect width="9" height="9" fill="#357" stroke="#753" stroke-width="1" opacity=".5"/></g>
+          </svg>"##,
 ];
 
 /// Path-data command letters, so a generated `d` reaches every arm of the
@@ -64,6 +85,39 @@ const COMMANDS: &[u8] = b"MmLlHhVvCcSsQqTtAaZz";
 /// separator rules turn on.
 const NUMBERS: &[&str] = &[
     "0", "1", "-1", ".5", "-.5", "7.", "1e2", "-3E-2", "1.5", "1000000", "-0", "0.0001",
+];
+
+/// Selector spellings a generated sheet draws from, inside the subset and
+/// outside it.
+const SELECTORS: &[&str] = &[
+    "*",
+    "rect",
+    ".j",
+    "#r",
+    "rect.j",
+    ".k rect",
+    ".k > .j",
+    "g+rect",
+    "rect:hover",
+    "rect[x]",
+    ".k > .j rect",
+    "",
+    ">rect",
+];
+
+/// Property names a generated sheet draws from: some the cascade reads, some
+/// it ignores.
+const PROPERTIES: &[&str] = &[
+    "fill",
+    "fill-opacity",
+    "opacity",
+    "stroke-width",
+    "clip-path",
+    "mask",
+    "paint-order",
+    "clip-rule",
+    "overflow",
+    "font-family",
 ];
 
 /// Low byte of `x`, without a narrowing `as` cast.
@@ -77,9 +131,16 @@ fn bounded(x: u64, max: usize) -> usize {
     usize::try_from(x % span).unwrap_or(0)
 }
 
+/// The pixel side the accepted artwork is rendered at.
+///
+/// Small on purpose: what is being checked is that the renderer accepts what
+/// the decoder produced, which the geometry decides and the size does not.
+const RENDER_SIDE: u32 = 16;
+
 /// Decode arbitrary bytes: must never panic, and anything it accepts must be
-/// artwork a consumer can draw — no layer without contours, and no more
-/// vertices than the decoder's own bound admits.
+/// artwork a consumer can draw — no layer without contours, no more vertices
+/// or layers than the decoder's own bounds admit, and a tree the one renderer
+/// will actually draw rather than turn away.
 fn decode_never_panics(bytes: &[u8]) {
     let square = decode(bytes, Viewport::Square);
     let natural = decode(bytes, Viewport::Natural);
@@ -95,11 +156,22 @@ fn decode_never_panics(bytes: &[u8]) {
     );
     for image in [square, natural].into_iter().flatten() {
         let mut vertices = 0usize;
-        for layer in image.layers() {
+        let mut layers = 0usize;
+        tairix_raster::for_each_fill(image.nodes(), &mut |layer| {
             assert!(!layer.contours.is_empty(), "a layer with nothing to fill");
             vertices += layer.contours.iter().map(Vec::len).sum::<usize>();
-        }
+            layers += 1;
+        });
         assert!(vertices <= 65_536, "{vertices} vertices past the bound");
+        assert!(layers <= 1024, "{layers} layers past the bound");
+        // Whatever the decoder accepts, the one renderer draws: a tree nested
+        // past the renderer's bound would decode and then refuse to appear.
+        let mut surface =
+            tairix_raster::Surface::new(RENDER_SIDE, RENDER_SIDE).expect("a small surface");
+        assert!(
+            surface.draw_artwork(image.nodes(), image.design()),
+            "the renderer refused artwork the decoder accepted"
+        );
     }
 }
 
@@ -173,7 +245,27 @@ fn decode_never_panics_for_any_input() {
         ));
         decode_never_panics(generated.as_bytes());
 
-        // 4. Pure noise straight into the decoder.
+        // 4. A generated stylesheet: the selector and declaration grammar,
+        //    so the cascade's own parser is reached deliberately.
+        let mut sheet = String::new();
+        let rules = bounded(next(), 6);
+        for _ in 0..rules {
+            let selector = SELECTORS[bounded(next(), SELECTORS.len() - 1)];
+            let property = PROPERTIES[bounded(next(), PROPERTIES.len() - 1)];
+            let value = NUMBERS[bounded(next(), NUMBERS.len() - 1)];
+            let _ = write!(sheet, "{selector}{{{property}:{value}");
+            match bounded(next(), 3) {
+                0 => sheet.push_str("!important}"),
+                1 => sheet.push_str(";}"),
+                _ => sheet.push('}'),
+            }
+        }
+        let styled = alloc_document(&format!(
+            r#"<style>{sheet}</style><g class="k"><rect id="r" class="j" width="9" height="9"/></g>"#
+        ));
+        decode_never_panics(styled.as_bytes());
+
+        // 5. Pure noise straight into the decoder.
         let nlen = bounded(next(), MAX_NOISE);
         let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 29)).collect();
         decode_never_panics(&noise);

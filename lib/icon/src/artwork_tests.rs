@@ -763,7 +763,7 @@ fn shipped_vector(name: &str) -> crate::vector::VectorIcon {
 
 /// How many of `icon`'s layers are painted flat in `color`.
 fn layers_painted(icon: &crate::vector::VectorIcon, color: tairix_raster::Color) -> usize {
-    icon.layers()
+    crate::tests::fills(icon)
         .iter()
         .filter(|layer| layer.paint == tairix_raster::Paint::Solid(color))
         .count()
@@ -785,7 +785,7 @@ fn the_folder_icons_draw_the_artwork_they_were_authored_with() {
 
     // A back plate with its tab, a front body, and a flat top accent.
     let folder = shipped_vector("folder.svg");
-    assert_eq!(folder.layers().len(), 3);
+    assert_eq!(crate::tests::fills(&folder).len(), 3);
     for ink in [plate, body, accent] {
         assert_eq!(layers_painted(&folder, ink), 1);
     }
@@ -793,7 +793,7 @@ fn the_folder_icons_draw_the_artwork_they_were_authored_with() {
     // The same folder with three papers stacked between plate and body, each
     // paper an edge, a fill, and a two-layer turned corner.
     let filled = shipped_vector("folder-filled.svg");
-    assert_eq!(filled.layers().len(), 15);
+    assert_eq!(crate::tests::fills(&filled).len(), 15);
     for ink in [plate, body, accent] {
         assert_eq!(layers_painted(&filled, ink), 1);
     }

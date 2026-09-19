@@ -70,4 +70,4 @@ pub use store::{
 };
 pub use svg::decode as decode_svg;
 pub use theme::CursorTheme;
-pub use vector::{Shape, VectorCursor, Vertex};
+pub use vector::{Shape, VectorCursor};

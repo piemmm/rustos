@@ -1,42 +1,27 @@
 //! Building a [`VectorCursor`] from a decoded SVG asset.
 //!
-//! Cursors are authored as SVG (the SVG-first asset rule). A
-//! decoded [`SvgImage`] is a square design grid plus an ordered stack of
-//! filled layers — exactly a cursor's [`Shape`] stack — and it carries
-//! the optional pointer hotspot (`data-hotspot-x`/`data-hotspot-y`). The
-//! conversion is a direct field map, so the cursor still rasterises through
-//! `lib/raster`'s single scan converter. An asset without a
-//! declared hotspot pins it to the design-grid origin.
-
-use alloc::vec::Vec;
+//! Cursors are authored as SVG (the SVG-first asset rule). A decoded
+//! [`SvgImage`] is a square design grid plus the shared artwork tree —
+//! exactly a cursor's own — and it carries the optional pointer hotspot
+//! (`data-hotspot-x`/`data-hotspot-y`). The conversion is a direct field map,
+//! so the cursor still rasterises through `lib/raster`'s single scan
+//! converter. An asset without a declared hotspot pins it to the design-grid
+//! origin.
 
 use tairix_svg::{SvgError, SvgImage};
 
-use crate::vector::{Shape, VectorCursor, Vertex};
+use crate::vector::VectorCursor;
 
 impl VectorCursor {
-    /// Build a cursor from a decoded [`SvgImage`], preserving its design grid,
-    /// per-layer paints and fill rules, bottom-first layer order, and pointer
-    /// hotspot.
+    /// Build a cursor from a decoded [`SvgImage`], preserving its design
+    /// grid, its artwork, and its pointer hotspot.
     ///
     /// An asset that declares no hotspot pins it to the design-grid origin
     /// `(0, 0)`.
     #[must_use]
     pub fn from_svg(image: &SvgImage) -> Self {
-        let shapes = image
-            .layers()
-            .iter()
-            .map(|layer| {
-                let contours: Vec<Vec<Vertex>> = layer
-                    .contours
-                    .iter()
-                    .map(|contour| contour.iter().map(|&(x, y)| Vertex::new(x, y)).collect())
-                    .collect();
-                Shape::filled(layer.paint.clone(), layer.rule, contours)
-            })
-            .collect();
         let (hotspot_x, hotspot_y) = image.hotspot().unwrap_or((0, 0));
-        Self::new(image.design(), hotspot_x, hotspot_y, shapes)
+        Self::from_artwork(image.design(), hotspot_x, hotspot_y, image.nodes().to_vec())
     }
 }
 

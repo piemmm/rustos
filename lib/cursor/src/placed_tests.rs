@@ -8,20 +8,12 @@ use tairix_raster::Color;
 
 use super::PlacedCursor;
 use crate::raster::CursorImage;
-use crate::vector::{Shape, VectorCursor, Vertex};
+use crate::vector::{Shape, VectorCursor};
 
 /// An opaque `size`×`size` cursor whose hotspot is at `(hx, hy)`.
 fn image(size: u32, hx: i32, hy: i32) -> CursorImage {
     let s = i32::try_from(size).unwrap_or(i32::MAX);
-    let shape = Shape::new(
-        Color::rgb(255, 255, 255),
-        vec![
-            Vertex::new(0, 0),
-            Vertex::new(s, 0),
-            Vertex::new(s, s),
-            Vertex::new(0, s),
-        ],
-    );
+    let shape = Shape::from_points(Color::rgb(255, 255, 255), &[(0, 0), (s, 0), (s, s), (0, s)]);
     VectorCursor::new(size, hx, hy, vec![shape])
         .rasterise(size)
         .expect("renderable")
@@ -31,14 +23,9 @@ fn image(size: u32, hx: i32, hy: i32) -> CursorImage {
 /// transparent.
 fn half_image(size: u32) -> CursorImage {
     let s = i32::try_from(size).unwrap_or(i32::MAX);
-    let shape = Shape::new(
+    let shape = Shape::from_points(
         Color::rgb(255, 0, 0),
-        vec![
-            Vertex::new(0, 0),
-            Vertex::new(s / 2, 0),
-            Vertex::new(s / 2, s),
-            Vertex::new(0, s),
-        ],
+        &[(0, 0), (s / 2, 0), (s / 2, s), (0, s)],
     );
     VectorCursor::new(size, 0, 0, vec![shape])
         .rasterise(size)

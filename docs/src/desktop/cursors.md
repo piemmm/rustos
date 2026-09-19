@@ -9,10 +9,14 @@ depending on one another (`AGENTS.md` §17.4). The crate is `no_std`,
 
 ## The vector representation
 
-A cursor is a `VectorCursor`: an ordered stack of filled `Shape`s over a
-square design grid, plus a hotspot. A shape is what it is painted with, which
-points it encloses (its fill rule), and the contours that bound them — lists
-of `Vertex`es. Because the artwork is geometry rather than a fixed bitmap:
+A cursor is a `VectorCursor`: filled `Shape`s over a square design grid, plus
+a hotspot. A shape is what it is painted with, which points it encloses (its
+fill rule), and the contours that bound them — lists of `(x, y)` design-grid
+coordinates. It is the shared `lib/raster` artwork layer, so a built-in cursor
+and one decoded from SVG are the same thing to the rasteriser; a decoded one
+may also carry groups, where a clip, a mask, or a group opacity composites
+part of the artwork as a unit. Because the artwork is geometry rather than a
+fixed bitmap:
 
 - **Scaling** is exact: `VectorCursor::rasterise(side)` renders the artwork
   into a `side`x`side` pixel image, whatever design grid it was authored on.

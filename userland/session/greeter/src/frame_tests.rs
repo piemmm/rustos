@@ -1,7 +1,7 @@
 use alloc::vec;
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-use tairix_cursor::{CursorImage, PlacedCursor, Shape, VectorCursor, Vertex};
+use tairix_cursor::{CursorImage, PlacedCursor, Shape, VectorCursor};
 use tairix_geometry::{Point, Rect};
 use tairix_raster::{Color, Pixel, Surface};
 
@@ -40,15 +40,7 @@ fn numbered(mode: &DisplayMode) -> Surface {
 /// pointer position is also the origin it draws from.
 fn cursor(size: u32, colour: Color) -> CursorImage {
     let s = i32::try_from(size).expect("a tiny cursor");
-    let shape = Shape::new(
-        colour,
-        vec![
-            Vertex::new(0, 0),
-            Vertex::new(s / 2, 0),
-            Vertex::new(s / 2, s),
-            Vertex::new(0, s),
-        ],
-    );
+    let shape = Shape::from_points(colour, &[(0, 0), (s / 2, 0), (s / 2, s), (0, s)]);
     VectorCursor::new(size, 0, 0, vec![shape])
         .rasterise(size)
         .expect("renderable")

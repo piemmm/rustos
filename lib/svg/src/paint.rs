@@ -20,7 +20,7 @@ use crate::geom::Point;
 use crate::number::{parse_length, parse_number, parse_opacity};
 use crate::style::scale_alpha;
 use crate::transform::parse_transform;
-use crate::xml::Node;
+use crate::xml::Element;
 
 /// The most colour stops accepted in one gradient.
 ///
@@ -36,7 +36,7 @@ const MAX_HREF_DEPTH: usize = 8;
 /// Every paint server the document defines, indexed by fragment id.
 #[derive(Clone, Debug, Default)]
 pub struct PaintServers<'a> {
-    entries: Vec<(&'a str, &'a Node<'a>)>,
+    entries: Vec<(&'a str, &'a Element<'a>)>,
 }
 
 impl<'a> PaintServers<'a> {
@@ -46,14 +46,14 @@ impl<'a> PaintServers<'a> {
     /// be defined anywhere, and a shape may reference one that appears after
     /// it.
     #[must_use]
-    pub fn collect(root: &'a Node<'a>) -> Self {
+    pub fn collect(root: &'a Element<'a>) -> Self {
         let mut servers = Self::default();
         servers.walk(root);
         servers
     }
 
     /// Record `node` if it is a paint server, then its children.
-    fn walk(&mut self, node: &'a Node<'a>) {
+    fn walk(&mut self, node: &'a Element<'a>) {
         if matches!(node.name, "linearGradient" | "radialGradient") {
             if let Some(id) = node.attr("id") {
                 self.entries.push((id, node));
@@ -64,8 +64,17 @@ impl<'a> PaintServers<'a> {
         }
     }
 
+    /// The paint server with fragment id `id`, if the document defines one.
+    ///
+    /// A caller needs it to resolve what the server's own place in the
+    /// document gives it — the `color` a `currentColor` stop stands for.
+    #[must_use]
+    pub fn node(&self, id: &str) -> Option<&'a Element<'a>> {
+        self.find(id)
+    }
+
     /// The element with fragment id `id`, if the document defines one.
-    fn find(&self, id: &str) -> Option<&'a Node<'a>> {
+    fn find(&self, id: &str) -> Option<&'a Element<'a>> {
         self.entries
             .iter()
             .find(|(name, _)| *name == id)
@@ -161,7 +170,7 @@ impl<'a> PaintServers<'a> {
     }
 
     /// `node` followed by the gradients it inherits from, nearest first.
-    fn chain(&self, node: &'a Node<'a>) -> Vec<&'a Node<'a>> {
+    fn chain(&self, node: &'a Element<'a>) -> Vec<&'a Element<'a>> {
         let mut chain = alloc::vec![node];
         let mut current = node;
         while chain.len() < MAX_HREF_DEPTH {
@@ -183,7 +192,7 @@ impl<'a> PaintServers<'a> {
 
     /// The colour stops of the nearest gradient in `chain` that defines any.
     fn stops(
-        chain: &[&'a Node<'a>],
+        chain: &[&'a Element<'a>],
         alpha: f64,
         current_color: Color,
     ) -> Result<Vec<GradientStop>, SvgError> {
@@ -211,7 +220,7 @@ impl<'a> PaintServers<'a> {
 }
 
 /// The value of `name` on the nearest gradient in the chain that carries it.
-fn attribute<'a>(chain: &[&'a Node<'a>], name: &str) -> Option<&'a str> {
+fn attribute<'a>(chain: &[&'a Element<'a>], name: &str) -> Option<&'a str> {
     chain.iter().find_map(|node| node.attr(name))
 }
 
@@ -247,7 +256,7 @@ impl Basis {
 /// One gradient coordinate: the attribute if present, else `fraction` of the
 /// basis, which is how SVG spells every one of their initial values.
 fn coordinate<'a>(
-    chain: &[&'a Node<'a>],
+    chain: &[&'a Element<'a>],
     name: &str,
     basis: f64,
     fraction: f64,
@@ -261,7 +270,7 @@ fn coordinate<'a>(
 /// The canonical placement of a linear gradient: the map taking the unit x
 /// axis onto the gradient vector, or `None` when the vector has no length.
 fn linear_placement<'a>(
-    chain: &[&'a Node<'a>],
+    chain: &[&'a Element<'a>],
     basis: &Basis,
 ) -> Result<(GradientKind, Option<Affine>), SvgError> {
     let x1 = coordinate(chain, "x1", basis.x, 0.0)?;
@@ -290,7 +299,7 @@ fn linear_placement<'a>(
 /// circle onto the gradient's circle, plus its focal point in that unit
 /// space.
 fn radial_placement<'a>(
-    chain: &[&'a Node<'a>],
+    chain: &[&'a Element<'a>],
     basis: &Basis,
 ) -> Result<(GradientKind, Option<Affine>), SvgError> {
     let cx = coordinate(chain, "cx", basis.x, 0.5)?;
@@ -315,7 +324,11 @@ fn radial_placement<'a>(
 }
 
 /// Parse one `<stop>`.
-fn parse_stop(node: &Node<'_>, alpha: f64, current_color: Color) -> Result<GradientStop, SvgError> {
+fn parse_stop(
+    node: &Element<'_>,
+    alpha: f64,
+    current_color: Color,
+) -> Result<GradientStop, SvgError> {
     let mut color = Color::rgb(0, 0, 0);
     let mut opacity = 1.0;
     let mut offset = 0.0;

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-svg"
-description = "TAIRiX shared SVG image-decoding library: a fail-closed, first-party no_std decoder for the WM/desktop SVG-first asset subset, producing the shared filled-polygon vector form the cursors and icons rasterise through lib/raster's single polygon path (PLAN.md Stage 7)."
+description = "TAIRiX shared SVG image-decoding library: a fail-closed, first-party no_std decoder for the WM/desktop SVG-first asset subset, producing the shared lib/raster artwork tree the cursors, icons and document viewer rasterise through its single scan converter (PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

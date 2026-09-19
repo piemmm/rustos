@@ -11,7 +11,7 @@ use tairix_theme::CursorSetId;
 use crate::registry::{CursorRegistry, CursorRegistryError};
 use crate::store::CURSOR_BASE_SIDE_PX;
 use crate::theme::CursorTheme;
-use crate::vector::{Shape, VectorCursor, Vertex};
+use crate::vector::{Shape, VectorCursor};
 
 /// The side every built-in cursor here is rendered at: the reference side
 /// the desktop draws a pointer at before density and pointer size, which is
@@ -42,16 +42,17 @@ fn set_id(name: &str) -> CursorSetId {
 /// An opaque square cursor filling its whole `size`×`size` design grid.
 fn solid_square(size: u32, fill: Color) -> VectorCursor {
     let s = i32::try_from(size).unwrap_or(i32::MAX);
-    let shape = Shape::new(
-        fill,
-        vec![
-            Vertex::new(0, 0),
-            Vertex::new(s, 0),
-            Vertex::new(s, s),
-            Vertex::new(0, s),
-        ],
-    );
+    let shape = Shape::from_points(fill, &[(0, 0), (s, 0), (s, s), (0, s)]);
     VectorCursor::new(size, 0, 0, vec![shape])
+}
+
+/// Every filled shape of a cursor, flattened out of whatever groups
+/// composite it — which is all of them for the flat built-in set.
+#[track_caller]
+pub(crate) fn fills(cursor: &VectorCursor) -> alloc::vec::Vec<Shape> {
+    let mut shapes = alloc::vec::Vec::new();
+    tairix_raster::for_each_fill(cursor.nodes(), &mut |layer| shapes.push(layer.clone()));
+    shapes
 }
 
 #[test]
@@ -111,10 +112,7 @@ fn solid_square_fills_every_pixel_opaque() {
 
 #[test]
 fn shape_with_fewer_than_three_vertices_is_skipped() {
-    let degenerate = Shape::new(
-        Color::rgb(255, 0, 0),
-        vec![Vertex::new(0, 0), Vertex::new(4, 4)],
-    );
+    let degenerate = Shape::from_points(Color::rgb(255, 0, 0), &[(0, 0), (4, 4)]);
     let cursor = VectorCursor::new(4, 0, 0, vec![degenerate]);
     let image = cursor.rasterise(4).expect("renderable");
     let surface = image.surface();
@@ -127,14 +125,9 @@ fn shape_with_fewer_than_three_vertices_is_skipped() {
 
 #[test]
 fn translucent_fill_blends_rather_than_overwrites() {
-    let shape = Shape::new(
+    let shape = Shape::from_points(
         Color::rgba(255, 255, 255, 128),
-        vec![
-            Vertex::new(0, 0),
-            Vertex::new(4, 0),
-            Vertex::new(4, 4),
-            Vertex::new(0, 4),
-        ],
+        &[(0, 0), (4, 0), (4, 4), (0, 4)],
     );
     let cursor = VectorCursor::new(4, 0, 0, vec![shape]);
     let image = cursor.rasterise(4).expect("renderable");
@@ -389,8 +382,9 @@ fn decodes_an_svg_cursor_with_its_hotspot() {
     assert_eq!(cursor.design_size(), tairix_svg::DESIGN_GRID);
     assert_eq!(cursor.hotspot_x(), HOTSPOT.0);
     assert_eq!(cursor.hotspot_y(), HOTSPOT.1);
-    assert_eq!(cursor.shapes().len(), 2);
-    assert_eq!(solid(&cursor.shapes()[1]), Color::rgb(255, 255, 255));
+    let shapes = fills(&cursor);
+    assert_eq!(shapes.len(), 2);
+    assert_eq!(solid(&shapes[1]), Color::rgb(255, 255, 255));
 }
 
 #[test]

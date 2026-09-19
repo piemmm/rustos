@@ -1203,10 +1203,13 @@ mod tests {
 
     /// How many of `icon`'s layers are painted flat in `colour`.
     fn layers_painted(icon: &tairix_icon::VectorIcon, colour: tairix_raster::Color) -> usize {
-        icon.layers()
-            .iter()
-            .filter(|layer| layer.paint == tairix_raster::Paint::Solid(colour))
-            .count()
+        let mut painted = 0;
+        tairix_raster::for_each_fill(icon.nodes(), &mut |layer| {
+            if layer.paint == tairix_raster::Paint::Solid(colour) {
+                painted += 1;
+            }
+        });
+        painted
     }
 
     /// The vector master a bundle ships in its own `Resources/`, decoded
@@ -1250,7 +1253,7 @@ mod tests {
         let pennant = tairix_raster::Color::rgb(0xE5, 0x48, 0x4D);
 
         let icon = shipped_bundle_vector("sapper", "sapper.svg");
-        assert_eq!(icon.layers().len(), 16);
+        assert_eq!(tairix_raster::layer_count(icon.nodes()), 16);
         for ink in [tile, top, cell, rim, gleam, pennant] {
             assert_eq!(layers_painted(&icon, ink), 1, "one layer per authored tone");
         }

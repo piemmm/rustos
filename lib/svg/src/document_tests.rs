@@ -6,13 +6,15 @@
 //! every malformed or unaffordable document is a precise [`SvgError`] and
 //! never a panic.
 
+use core::fmt::Write as _;
+
 use alloc::format;
 use alloc::vec::Vec;
 
-use tairix_raster::{Color, FillRule, Paint};
+use tairix_raster::{for_each_fill, Color, FillRule, Group, Layer, MaskKind, Node, Paint};
 
 use crate::error::SvgError;
-use crate::{decode, SvgLayer, Viewport, DESIGN_GRID};
+use crate::{decode, Viewport, DESIGN_GRID};
 
 /// Fit a document to the square slot, which is what all but the viewport's
 /// own tests are about.
@@ -30,13 +32,22 @@ fn grid() -> i32 {
 /// number.
 const UNIT: i32 = 256;
 
-/// The layers a document decodes to.
+/// The layers a document decodes to, flattened out of whatever groups
+/// composite them.
 #[track_caller]
-fn layers(svg: &str) -> Vec<SvgLayer> {
-    decode_square(svg.as_bytes())
-        .expect("a decodable document")
-        .layers()
-        .to_vec()
+fn layers(svg: &str) -> Vec<Layer> {
+    flatten(
+        decode_square(svg.as_bytes())
+            .expect("a decodable document")
+            .nodes(),
+    )
+}
+
+/// Every filled layer of an artwork tree, in drawing order.
+fn flatten(nodes: &[Node]) -> Vec<Layer> {
+    let mut layers = Vec::new();
+    for_each_fill(nodes, &mut |layer| layers.push(layer.clone()));
+    layers
 }
 
 /// A document with `body` inside an eight-unit square view box.
@@ -46,7 +57,7 @@ fn document(body: &str) -> alloc::string::String {
 
 /// The solid colour a layer paints with.
 #[track_caller]
-fn solid(layer: &SvgLayer) -> Color {
+fn solid(layer: &Layer) -> Color {
     match layer.paint {
         Paint::Solid(color) => color,
         Paint::Gradient(_) => panic!("expected a solid paint"),
@@ -55,7 +66,7 @@ fn solid(layer: &SvgLayer) -> Color {
 
 /// The one contour of a single-contour layer.
 #[track_caller]
-fn contour(layer: &SvgLayer) -> &[(i32, i32)] {
+fn contour(layer: &Layer) -> &[(i32, i32)] {
     assert_eq!(layer.contours.len(), 1, "expected one contour");
     &layer.contours[0]
 }
@@ -475,7 +486,7 @@ fn assorted_hostile_documents_never_panic() {
     ];
     for case in cases {
         if let Ok(image) = decode_square(case.as_bytes()) {
-            for layer in image.layers() {
+            for layer in flatten(image.nodes()) {
                 assert!(!layer.contours.is_empty(), "{case:?} made an empty layer");
             }
         }
@@ -488,7 +499,7 @@ fn assorted_hostile_documents_never_panic() {
 #[track_caller]
 fn only_contour(svg: &str, viewport: Viewport) -> Vec<(i32, i32)> {
     let image = decode(svg.as_bytes(), viewport).expect("a decodable document");
-    let decoded = image.layers().to_vec();
+    let decoded = flatten(image.nodes());
     assert_eq!(decoded.len(), 1, "expected one layer");
     contour(&decoded[0]).to_vec()
 }
@@ -586,11 +597,516 @@ fn a_stroke_is_carried_into_the_stretch_rather_than_dropped_from_it() {
     // spans the wider axis further than the narrow one.
     let svg = r#"<svg viewBox="0 0 16 4"><line x1="0" y1="2" x2="16" y2="2" stroke="black" stroke-width="2"/></svg>"#;
     let image = decode(svg.as_bytes(), Viewport::Natural).expect("a decodable document");
-    let decoded = image.layers().to_vec();
+    let decoded = flatten(image.nodes());
     assert_eq!(decoded.len(), 1, "the stroke is the only layer");
     let points = contour(&decoded[0]);
     let height = points.iter().map(|&(_, y)| y).max().unwrap_or(0)
         - points.iter().map(|&(_, y)| y).min().unwrap_or(0);
     // Two user units of a four-unit box is half the grid once stretched.
     assert_eq!(height, grid() / 2);
+}
+
+// --- compositing: group opacity, clipping, masking ------------------------
+
+/// The artwork a document decodes to, top level only.
+#[track_caller]
+fn tree(svg: &str) -> Vec<Node> {
+    decode_square(svg.as_bytes())
+        .expect("a decodable document")
+        .nodes()
+        .to_vec()
+}
+
+/// The one group a document decodes to.
+#[track_caller]
+fn only_group(svg: &str) -> Group {
+    match tree(svg).as_slice() {
+        [Node::Group(group)] => group.clone(),
+        other => panic!("expected one group, got {} node(s)", other.len()),
+    }
+}
+
+/// The axis-aligned box a layer's contours fall inside.
+#[track_caller]
+fn box_of(layer: &Layer) -> (i32, i32, i32, i32) {
+    layer
+        .contours
+        .iter()
+        .flatten()
+        .fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN), |acc, point| {
+            (
+                acc.0.min(point.0),
+                acc.1.min(point.1),
+                acc.2.max(point.0),
+                acc.3.max(point.1),
+            )
+        })
+}
+
+/// A group opacity composites the subtree as a unit, because weakening each
+/// shape first and compositing after is a different picture.
+#[test]
+fn a_container_opacity_becomes_a_group() {
+    let group = only_group(&document(
+        r#"<g opacity="0.5"><rect width="8" height="8" fill="red"/></g>"#,
+    ));
+    assert_eq!(group.opacity, 128);
+    assert!(group.mask.is_none());
+    assert_eq!(group.children.len(), 1);
+    // The child keeps its own colour: the opacity is the group's.
+    assert_eq!(solid(&flatten(&group.children)[0]).a, 255);
+}
+
+/// One layer composited at a group opacity is the same pixels as that layer
+/// painted at the product, so the common translucent shape costs no buffer.
+#[test]
+fn a_lone_layer_folds_its_elements_opacity_instead_of_grouping() {
+    let decoded = tree(&document(
+        r#"<rect width="8" height="8" fill="red" opacity="0.5"/>"#,
+    ));
+    let [Node::Fill(layer)] = decoded.as_slice() else {
+        panic!("expected one plain layer");
+    };
+    assert_eq!(solid(layer).a, 128);
+}
+
+/// A fill and its own stroke overlap, so folding the opacity into each would
+/// show the fill through the stroke.
+#[test]
+fn a_fill_and_its_stroke_are_composited_as_a_unit() {
+    let group = only_group(&document(
+        r#"<rect width="6" height="6" fill="red" stroke="blue" stroke-width="2" opacity="0.5"/>"#,
+    ));
+    assert_eq!(group.opacity, 128);
+    let inner = flatten(&group.children);
+    assert_eq!(inner.len(), 2);
+    assert_eq!(solid(&inner[0]).a, 255);
+    assert_eq!(solid(&inner[1]).a, 255);
+}
+
+#[test]
+fn a_fully_transparent_element_draws_nothing() {
+    assert!(tree(&document(r#"<rect width="8" height="8" opacity="0"/>"#)).is_empty());
+}
+
+#[test]
+fn a_clip_path_becomes_an_alpha_mask_of_its_shapes() {
+    let group = only_group(&document(
+        r#"<clipPath id="c"><rect width="4" height="8"/></clipPath>
+           <rect width="8" height="8" fill="red" clip-path="url(#c)"/>"#,
+    ));
+    assert_eq!(group.opacity, 255);
+    let mask = group.mask.expect("a clip mask");
+    assert_eq!(mask.kind, MaskKind::Alpha);
+    let shapes = flatten(&mask.content);
+    assert_eq!(shapes.len(), 1);
+    // The clip covers the left half of the eight-unit box, opaquely.
+    assert_eq!(box_of(&shapes[0]), (0, 0, 4 * UNIT, 8 * UNIT));
+    assert_eq!(solid(&shapes[0]).a, 255);
+    assert_eq!(flatten(&group.children).len(), 1);
+}
+
+/// Several shapes in one clip union, because opaque over opaque is opaque —
+/// which is why a clip needs no second rule for it.
+#[test]
+fn a_clip_path_with_several_shapes_keeps_them_all() {
+    let group = only_group(&document(
+        r#"<clipPath id="c"><rect width="4" height="8"/><circle cx="6" cy="6" r="2"/></clipPath>
+           <rect width="8" height="8" fill="red" clip-path="url(#c)"/>"#,
+    ));
+    assert_eq!(flatten(&group.mask.expect("a clip mask").content).len(), 2);
+}
+
+/// `objectBoundingBox` units are fractions of the clipped element's own box,
+/// which only drawing that element can say.
+#[test]
+fn a_bounding_box_clip_is_resolved_against_the_element_it_clips() {
+    let group = only_group(&document(
+        r#"<clipPath id="c" clipPathUnits="objectBoundingBox"><rect width="0.5" height="1"/></clipPath>
+           <rect x="2" y="2" width="4" height="4" fill="red" clip-path="url(#c)"/>"#,
+    ));
+    let shapes = flatten(&group.mask.expect("a clip mask").content);
+    // Half of a box running 2..6 on both axes is 2..4 across and 2..6 down.
+    assert_eq!(box_of(&shapes[0]), (2 * UNIT, 2 * UNIT, 4 * UNIT, 6 * UNIT));
+}
+
+/// A container's bounding box is its descendants' geometry in its own space,
+/// accumulated as the subtree is drawn.
+#[test]
+fn a_bounding_box_clip_on_a_container_uses_the_subtrees_box() {
+    let group = only_group(&document(
+        r#"<clipPath id="c" clipPathUnits="objectBoundingBox"><rect width="1" height="0.5"/></clipPath>
+           <g clip-path="url(#c)"><rect x="1" y="1" width="2" height="2" fill="red"/>
+           <rect x="3" y="3" width="2" height="2" fill="blue"/></g>"#,
+    ));
+    let shapes = flatten(&group.mask.expect("a clip mask").content);
+    // The union runs 1..5 on both axes; the top half of that is 1..3 down.
+    assert_eq!(box_of(&shapes[0]), (UNIT, UNIT, 5 * UNIT, 3 * UNIT));
+}
+
+/// The object bounding box is the geometry's, whatever it is drawn with, so
+/// a stroke must not widen it.
+#[test]
+fn a_bounding_box_ignores_the_stroke_width() {
+    let group = only_group(&document(
+        r#"<clipPath id="c" clipPathUnits="objectBoundingBox"><rect width="1" height="1"/></clipPath>
+           <g clip-path="url(#c)"><rect x="2" y="2" width="4" height="4" fill="red"
+              stroke="blue" stroke-width="2"/></g>"#,
+    ));
+    let shapes = flatten(&group.mask.expect("a clip mask").content);
+    assert_eq!(box_of(&shapes[0]), (2 * UNIT, 2 * UNIT, 6 * UNIT, 6 * UNIT));
+}
+
+/// A clip on a `<clipPath>` intersects the two, which nests rather than
+/// needing a rule of its own.
+#[test]
+fn a_clip_path_may_itself_be_clipped() {
+    let group = only_group(&document(
+        r#"<clipPath id="outer"><rect width="8" height="4"/></clipPath>
+           <clipPath id="inner" clip-path="url(#outer)"><rect width="4" height="8"/></clipPath>
+           <rect width="8" height="8" fill="red" clip-path="url(#inner)"/>"#,
+    ));
+    let content = group.mask.expect("a clip mask").content;
+    let [Node::Group(nested)] = content.as_slice() else {
+        panic!("expected the inner clip to be clipped in turn");
+    };
+    assert_eq!(
+        nested.mask.as_ref().expect("the outer clip").kind,
+        MaskKind::Alpha
+    );
+}
+
+/// Drawing an element unclipped because the clip could not be found would be
+/// a wrong picture where an empty one is an honest refusal.
+#[test]
+fn an_unresolvable_clip_or_mask_reference_draws_nothing() {
+    for reference in ["clip-path", "mask"] {
+        let svg = document(&format!(
+            r#"<rect width="8" height="8" fill="red" {reference}="url(#nope)"/>"#
+        ));
+        assert!(tree(&svg).is_empty(), "{reference} drew unmasked artwork");
+    }
+    // A reference that names an element of the wrong kind is no better.
+    let crossed = document(
+        r#"<mask id="m"><rect width="8" height="8" fill="white"/></mask>
+            <rect width="8" height="8" fill="red" clip-path="url(#m)"/>"#,
+    );
+    assert!(tree(&crossed).is_empty());
+}
+
+#[test]
+fn a_mask_reads_its_contents_luminance_by_default() {
+    let group = only_group(&document(
+        r#"<mask id="m"><rect width="4" height="8" fill="white"/></mask>
+           <rect width="8" height="8" fill="red" mask="url(#m)"/>"#,
+    ));
+    let mask = group.mask.expect("a mask");
+    assert_eq!(mask.kind, MaskKind::Luminance);
+    assert_eq!(flatten(&mask.content).len(), 1);
+}
+
+#[test]
+fn a_mask_may_ask_for_its_alpha_instead() {
+    for spelling in [r#"mask-type="alpha""#, r#"style="mask-type:alpha""#] {
+        let svg = document(&format!(
+            r#"<mask id="m" {spelling}><rect width="4" height="8" fill="white"/></mask>
+               <rect width="8" height="8" fill="red" mask="url(#m)"/>"#
+        ));
+        assert_eq!(
+            only_group(&svg).mask.expect("a mask").kind,
+            MaskKind::Alpha,
+            "{spelling}"
+        );
+    }
+}
+
+/// The region bounds the mask itself; content outside it is cut away rather
+/// than let through.
+#[test]
+fn a_mask_region_narrower_than_its_content_clips_it() {
+    let group = only_group(&document(
+        r#"<mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="4" height="8">
+             <rect width="8" height="8" fill="white"/>
+           </mask>
+           <rect width="8" height="8" fill="red" mask="url(#m)"/>"#,
+    ));
+    let content = group.mask.expect("a mask").content;
+    let [Node::Group(region)] = content.as_slice() else {
+        panic!("expected the content to be confined to the region");
+    };
+    let bounds = flatten(&region.mask.as_ref().expect("the region").content);
+    assert_eq!(box_of(&bounds[0]), (0, 0, 4 * UNIT, 8 * UNIT));
+}
+
+/// The default region is a tenth past the object box on every side, which no
+/// content authored inside that box reaches — so it costs no buffer.
+#[test]
+fn a_mask_region_wider_than_its_content_adds_no_group() {
+    let group = only_group(&document(
+        r#"<mask id="m"><rect width="8" height="8" fill="white"/></mask>
+           <rect width="8" height="8" fill="red" mask="url(#m)"/>"#,
+    ));
+    let content = group.mask.expect("a mask").content;
+    assert!(matches!(content.as_slice(), [Node::Fill(_)]));
+}
+
+#[test]
+fn mask_content_units_place_the_content_in_the_elements_box() {
+    let group = only_group(&document(
+        r#"<mask id="m" maskContentUnits="objectBoundingBox">
+             <rect width="0.5" height="1" fill="white"/>
+           </mask>
+           <rect x="2" y="2" width="4" height="4" fill="red" mask="url(#m)"/>"#,
+    ));
+    let shapes = flatten(&group.mask.expect("a mask").content);
+    assert_eq!(box_of(&shapes[0]), (2 * UNIT, 2 * UNIT, 4 * UNIT, 6 * UNIT));
+}
+
+/// Nesting past the renderer's bound is refused here rather than decoded into
+/// a tree the renderer would then have to turn away.
+#[test]
+fn groups_nested_past_the_bound_refuse_the_document() {
+    let mut body = alloc::string::String::from(r#"<rect width="8" height="8" fill="red"/>"#);
+    for _ in 0..=tairix_raster::MAX_GROUP_DEPTH {
+        body = format!(r#"<g opacity="0.5">{body}</g>"#);
+    }
+    assert_eq!(
+        decode_square(document(&body).as_bytes()),
+        Err(SvgError::TooComplex)
+    );
+}
+
+/// A clip's own shapes are artwork the renderer must fill, so they are
+/// charged against the same budgets everything else is.
+#[test]
+fn a_clips_geometry_is_charged_against_the_layer_budget() {
+    let mut body = alloc::string::String::new();
+    for index in 0..1100 {
+        let _ = write!(
+            body,
+            r#"<clipPath id="c{index}"><rect width="8" height="8"/></clipPath>
+               <rect width="8" height="8" fill="red" clip-path="url(#c{index})"/>"#
+        );
+    }
+    assert_eq!(
+        decode_square(document(&body).as_bytes()),
+        Err(SvgError::TooComplex)
+    );
+}
+
+// --- viewports a `<use>` establishes --------------------------------------
+
+/// A `<symbol>`'s own `viewBox` is fitted to the extent the `<use>` states,
+/// which is what makes one symbol serve every size it is drawn at.
+#[test]
+fn a_symbol_is_fitted_to_the_extent_its_use_states() {
+    let svg = r##"<svg viewBox="0 0 8 8">
+        <symbol id="s" viewBox="0 0 2 2"><rect width="2" height="2" fill="red"/></symbol>
+        <use href="#s" width="8" height="8"/></svg>"##;
+    let decoded = layers(svg);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(box_of(&decoded[0]), (0, 0, 8 * UNIT, 8 * UNIT));
+}
+
+#[test]
+fn a_symbol_is_confined_to_the_slot_it_was_given() {
+    let svg = r##"<svg viewBox="0 0 8 8">
+        <symbol id="s"><rect width="8" height="8" fill="red"/></symbol>
+        <use href="#s" width="4" height="8"/></svg>"##;
+    let group = only_group(svg);
+    let bounds = flatten(&group.mask.expect("the viewport clip").content);
+    assert_eq!(box_of(&bounds[0]), (0, 0, 4 * UNIT, 8 * UNIT));
+}
+
+#[test]
+fn a_nested_viewport_may_let_its_content_spill() {
+    let svg = r##"<svg viewBox="0 0 8 8">
+        <symbol id="s" overflow="visible"><rect width="8" height="8" fill="red"/></symbol>
+        <use href="#s" width="4" height="8"/></svg>"##;
+    assert!(matches!(tree(svg).as_slice(), [Node::Fill(_)]));
+}
+
+#[test]
+fn a_nested_svg_clips_to_its_own_viewport() {
+    let svg = r#"<svg viewBox="0 0 8 8">
+        <svg width="4" height="8"><rect width="8" height="8" fill="red"/></svg></svg>"#;
+    let group = only_group(svg);
+    let bounds = flatten(&group.mask.expect("the viewport clip").content);
+    assert_eq!(box_of(&bounds[0]), (0, 0, 4 * UNIT, 8 * UNIT));
+}
+
+// --- conditional processing ------------------------------------------------
+
+/// A condition this decoder cannot show is satisfied is not met, which is
+/// what reaches the unconditional fallback an author writes beside it.
+#[test]
+fn a_switch_passes_over_a_condition_it_cannot_meet() {
+    for condition in [
+        r#"systemLanguage="zz""#,
+        r#"requiredExtensions="http://example.invalid""#,
+        r#"requiredFeatures="http://example.invalid""#,
+    ] {
+        let svg = document(&format!(
+            r#"<switch><rect {condition} width="4" height="4" fill="red"/>
+               <rect width="8" height="8" fill="blue"/></switch>"#
+        ));
+        let decoded = layers(&svg);
+        assert_eq!(decoded.len(), 1, "{condition}");
+        assert_eq!(solid(&decoded[0]), Color::rgb(0, 0, 255), "{condition}");
+    }
+}
+
+/// An empty condition requires nothing, so it is met.
+#[test]
+fn a_switch_takes_a_candidate_whose_condition_is_empty() {
+    let svg = document(
+        r#"<switch><rect requiredFeatures="" width="4" height="4" fill="red"/>
+           <rect width="8" height="8" fill="blue"/></switch>"#,
+    );
+    assert_eq!(solid(&layers(&svg)[0]), Color::rgb(255, 0, 0));
+}
+
+/// Only a graphics or container element is a candidate; a `<desc>` first
+/// child would otherwise swallow the whole switch.
+#[test]
+fn a_switch_skips_a_child_that_draws_nothing_by_kind() {
+    let svg = document(
+        r#"<switch><desc>what this is</desc><rect width="8" height="8" fill="blue"/></switch>"#,
+    );
+    let decoded = layers(&svg);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(solid(&decoded[0]), Color::rgb(0, 0, 255));
+}
+
+// --- paint order -----------------------------------------------------------
+
+#[test]
+fn paint_order_may_put_the_stroke_under_the_fill() {
+    let body = r#"<rect width="8" height="8" fill="red" stroke="blue" stroke-width="2""#;
+    let normal = layers(&document(&format!("{body}/>")));
+    assert_eq!(solid(&normal[0]), Color::rgb(255, 0, 0));
+    assert_eq!(solid(&normal[1]), Color::rgb(0, 0, 255));
+
+    for order in ["stroke", "stroke fill", "markers stroke fill"] {
+        let reordered = layers(&document(&format!(r#"{body} paint-order="{order}"/>"#)));
+        assert_eq!(solid(&reordered[0]), Color::rgb(0, 0, 255), "{order}");
+        assert_eq!(solid(&reordered[1]), Color::rgb(255, 0, 0), "{order}");
+    }
+}
+
+// --- the stylesheet in the cascade ----------------------------------------
+
+/// Presentation attribute, then stylesheet, then the `style` attribute, then
+/// whatever is `!important` — the order the cascade defines.
+#[test]
+fn the_stylesheet_sits_between_the_attribute_and_the_style_declaration() {
+    let attribute_only = document(
+        r##"<style>rect{fill:#00ff00}</style><rect width="8" height="8" fill="#ff0000"/>"##,
+    );
+    assert_eq!(solid(&layers(&attribute_only)[0]), Color::rgb(0, 255, 0));
+
+    let with_style = document(
+        r##"<style>rect{fill:#00ff00}</style>
+            <rect width="8" height="8" fill="#ff0000" style="fill:#0000ff"/>"##,
+    );
+    assert_eq!(solid(&layers(&with_style)[0]), Color::rgb(0, 0, 255));
+
+    let important = document(
+        r#"<style>rect{fill:#00ff00 !important}</style>
+            <rect width="8" height="8" style="fill:#0000ff"/>"#,
+    );
+    assert_eq!(solid(&layers(&important)[0]), Color::rgb(0, 255, 0));
+}
+
+/// A stylesheet reaches every property the cascade carries, not just paints.
+#[test]
+fn a_stylesheet_may_set_any_property_the_cascade_holds() {
+    let svg = document(
+        r#"<style>.c{fill-rule:evenodd;opacity:0.5;clip-rule:evenodd}</style>
+            <path class="c" d="M0 0 H8 V8 H0 Z M2 2 H6 V6 H2 Z"/>"#,
+    );
+    let decoded = tree(&svg);
+    let [Node::Fill(layer)] = decoded.as_slice() else {
+        panic!("expected one plain layer");
+    };
+    assert_eq!(layer.rule, FillRule::EvenOdd);
+    assert_eq!(solid(layer).a, 128);
+}
+
+/// A `clip-path` this decoder cannot build is refused rather than drawn
+/// without the clip the author asked for: a clean fallback beats a wrong
+/// picture.
+#[test]
+fn a_clip_or_mask_value_outside_the_subset_refuses_the_document() {
+    for value in ["inset(1px)", "circle(50%)", "url(other.svg#c)"] {
+        let svg = document(&format!(
+            r#"<rect width="8" height="8" fill="red" clip-path="{value}"/>"#
+        ));
+        assert_eq!(
+            decode_square(svg.as_bytes()),
+            Err(SvgError::InvalidReference),
+            "{value}"
+        );
+    }
+}
+
+/// `mask-type` reaches the mask through the same cascade every other
+/// property does, so a stylesheet may set it.
+#[test]
+fn a_stylesheet_may_choose_a_masks_channel() {
+    let svg = document(
+        r#"<style>#m{mask-type:alpha}</style>
+           <mask id="m"><rect width="4" height="8" fill="white"/></mask>
+           <rect width="8" height="8" fill="red" mask="url(#m)"/>"#,
+    );
+    assert_eq!(only_group(&svg).mask.expect("a mask").kind, MaskKind::Alpha);
+}
+
+/// `overflow` reaches a nested viewport through the cascade too.
+#[test]
+fn a_stylesheet_may_let_a_nested_viewport_spill() {
+    let svg = r#"<svg viewBox="0 0 8 8"><style>svg{overflow:visible}</style>
+        <svg width="4" height="8"><rect width="8" height="8" fill="red"/></svg></svg>"#;
+    assert!(matches!(tree(svg).as_slice(), [Node::Fill(_)]));
+}
+
+/// A definition is reached by reference, so what it inherits is its own place
+/// in the document — not the style of whatever element pointed at it.
+#[test]
+fn a_mask_inherits_from_its_own_ancestors_not_its_user() {
+    // The mask's rect states no fill, so it takes the one its own ancestry
+    // gives it: white from the root, not the referencing group's black.
+    let svg = r#"<svg viewBox="0 0 8 8" fill="white">
+        <mask id="m"><rect width="8" height="8"/></mask>
+        <g fill="black"><rect width="8" height="8" fill="red" mask="url(#m)"/></g></svg>"#;
+    let group = only_group(svg);
+    let content = flatten(&group.mask.expect("a mask").content);
+    assert_eq!(solid(&content[0]), Color::rgb(255, 255, 255));
+}
+
+#[test]
+fn a_clip_inherits_its_rule_from_its_own_ancestors() {
+    let svg = r#"<svg viewBox="0 0 8 8" clip-rule="evenodd">
+        <clipPath id="c"><rect width="8" height="8"/></clipPath>
+        <g clip-rule="nonzero"><rect width="8" height="8" fill="red" clip-path="url(#c)"/></g></svg>"#;
+    let group = only_group(svg);
+    let shapes = flatten(&group.mask.expect("a clip mask").content);
+    assert_eq!(shapes[0].rule, FillRule::EvenOdd);
+}
+
+/// A stop's `currentColor` is the `color` the gradient's own ancestry gives
+/// it, for the same reason a mask's content is.
+#[test]
+fn a_gradient_stops_current_color_comes_from_the_gradient_not_its_user() {
+    let svg = r##"<svg viewBox="0 0 8 8" color="#00ff00">
+        <linearGradient id="g"><stop offset="0" stop-color="currentColor"/>
+          <stop offset="1" stop-color="currentColor"/></linearGradient>
+        <g color="#ff0000"><rect width="8" height="8" fill="url(#g)"/></g></svg>"##;
+    let decoded = layers(svg);
+    let Paint::Gradient(gradient) = &decoded[0].paint else {
+        panic!("expected a gradient paint");
+    };
+    for stop in &gradient.stops {
+        assert_eq!(stop.color, Color::rgb(0, 255, 0));
+    }
 }

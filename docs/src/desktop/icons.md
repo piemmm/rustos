@@ -10,14 +10,16 @@ arithmetic of its own — exactly like `lib/cursor`.
 
 ## The vector representation
 
-An icon is a `VectorIcon`: an ordered stack of filled `IconLayer`s over a
-square design grid. A layer is what it is painted with, which points it
-encloses (its fill rule), and the contours that bound them — lists of
-`(x, y)` design-grid coordinates. A multi-part glyph — a battery body plus
-its terminal, a bell plus its clapper — is built by stacking layers; a single
-layer holds several contours because a shape with a hole, and any stroke
-outline, are both many rings filled as one through the shared scan
-converter.
+An icon is a `VectorIcon`: filled `IconLayer`s over a square design grid. A
+layer is what it is painted with, which points it encloses (its fill rule),
+and the contours that bound them — lists of `(x, y)` design-grid coordinates.
+It is the shared `lib/raster` artwork layer, so a built-in glyph and one
+decoded from SVG are the same thing to the rasteriser. A multi-part glyph — a
+battery body plus its terminal, a bell plus its clapper — is built by stacking
+layers; a single layer holds several contours because a shape with a hole, and
+any stroke outline, are both many rings filled as one through the shared scan
+converter. A decoded document may also carry groups, where a clip, a mask, or
+a group opacity composites part of the drawing as a unit.
 
 - **Scaling** is exact: `VectorIcon::rasterise(side)` renders the design grid
   across a fresh `side`×`side` `Surface`, transparent everywhere the glyph

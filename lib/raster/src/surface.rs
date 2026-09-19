@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use tairix_reclaim::CachedBytes;
 use tairix_util::fallible;
 
+use crate::artwork::{Group, MaskKind, Node, MAX_GROUP_DEPTH};
 use crate::color::{blend_span, blend_span_mapped, dither_tiles, div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
 use crate::paint::Paint;
@@ -1061,6 +1062,133 @@ impl Surface {
     ) {
         let space = SampleSpace::design(design, (over.x, over.y, over.width, over.height));
         self.fill_scan(contours, space, rule, paint);
+    }
+
+    /// Draw an artwork tree: filled layers bottom first, each [`Group`]
+    /// composited as a unit through its opacity and mask.
+    ///
+    /// This is [`fill_contours`](Self::fill_contours) for a whole drawing
+    /// rather than one layer, and it is the only walk of an
+    /// [`artwork`](crate::artwork) tree — the cursor, icon, and document
+    /// paths all reach the scan converter through here.
+    ///
+    /// Returns whether the whole tree was drawn. A group needs an isolation
+    /// buffer of this surface's own extent (two under a mask), so a machine
+    /// short of memory, or a tree nested past
+    /// [`MAX_GROUP_DEPTH`], yields `false`
+    /// — and that group contributes **nothing**, so a caller falls back to
+    /// its own artwork rather than showing a half-composited picture.
+    pub fn draw_artwork(&mut self, nodes: &[Node], design: u32) -> bool {
+        self.draw_artwork_over(self.space_rect_region(), nodes, design)
+    }
+
+    /// [`draw_artwork`](Self::draw_artwork) with the design grid stretched
+    /// across `over` rather than across this buffer, exactly as
+    /// [`fill_contours_over`](Self::fill_contours_over) is to
+    /// [`fill_contours`](Self::fill_contours).
+    pub fn draw_artwork_over(&mut self, over: Region, nodes: &[Node], design: u32) -> bool {
+        self.draw_nodes(over, nodes, design, 0)
+    }
+
+    /// One level of the artwork walk.
+    fn draw_nodes(&mut self, over: Region, nodes: &[Node], design: u32, depth: usize) -> bool {
+        let mut whole = true;
+        for node in nodes {
+            match node {
+                Node::Fill(layer) => {
+                    self.fill_contours_over(
+                        over,
+                        &layer.contours,
+                        design,
+                        layer.rule,
+                        &layer.paint,
+                    );
+                }
+                Node::Group(group) => whole &= self.draw_group(over, group, design, depth),
+            }
+        }
+        whole
+    }
+
+    /// Draw one group into a buffer of this surface's own shape, weaken it by
+    /// its mask, and composite it at its opacity.
+    fn draw_group(&mut self, over: Region, group: &Group, design: u32, depth: usize) -> bool {
+        if depth >= MAX_GROUP_DEPTH {
+            return false;
+        }
+        if group.opacity == 0 {
+            return true;
+        }
+        let Some(mut isolated) = self.isolated() else {
+            return false;
+        };
+        if !isolated.draw_nodes(over, &group.children, design, depth + 1) {
+            return false;
+        }
+        if let Some(mask) = &group.mask {
+            let Some(mut factors) = self.isolated() else {
+                return false;
+            };
+            if !factors.draw_nodes(over, &mask.content, design, depth + 1) {
+                return false;
+            }
+            isolated.weaken_by(&factors, mask.kind);
+        }
+        self.compose(&isolated, group.opacity);
+        true
+    }
+
+    /// A transparent buffer of this surface's own extent, carrying its stated
+    /// origin and clip window so artwork drawn into it lands where it would
+    /// have landed here.
+    fn isolated(&self) -> Option<Self> {
+        let mut buffer = Self::new(self.width, self.height)?;
+        buffer.origin = self.origin;
+        buffer.clip = self.clip;
+        Some(buffer)
+    }
+
+    /// Weaken every pixel by the matching pixel of `factors`, which shares
+    /// this buffer's shape.
+    fn weaken_by(&mut self, factors: &Self, kind: MaskKind) {
+        self.pair_rows(factors, |span, source| {
+            for (pixel, factor) in span.iter_mut().zip(source) {
+                *pixel = pixel.scale_alpha(kind.factor(*factor));
+            }
+        });
+    }
+
+    /// Composite a buffer of this surface's own shape over it at `strength`.
+    fn compose(&mut self, src: &Self, strength: u8) {
+        if strength == 0 {
+            return;
+        }
+        self.pair_rows(src, |span, source| {
+            blend_span(span, source, strength, DitherRow::NEAREST, 0);
+        });
+    }
+
+    /// Hand each writable row of this buffer the matching row of `other`,
+    /// which shares its shape, origin, and clip window.
+    ///
+    /// Both reach their pixels through the one row seam, so a composited
+    /// group is confined exactly as every other write is, and the pairing is
+    /// two row slices rather than the placement a [`blit`](Self::blit) has to
+    /// resolve.
+    fn pair_rows(&mut self, other: &Self, mut lay: impl FnMut(&mut [Pixel], &[Pixel])) {
+        let (left, top, width, height) = self.space_rect();
+        for row in self.admitted_rows(top, height) {
+            let Some((first, span)) = self.row_span_mut(row, left, width) else {
+                continue;
+            };
+            let Ok(columns) = u32::try_from(span.len()) else {
+                continue;
+            };
+            let Some((_, source)) = other.row_span(row, first, columns) else {
+                continue;
+            };
+            lay(span, source);
+        }
     }
 
     /// Fill an anti-aliased polygon whose vertices are already in *device*

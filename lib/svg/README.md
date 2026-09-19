@@ -19,8 +19,9 @@ trusted computing base does not grow for an asset format.
 - a **square design grid** (`design()`, always `DESIGN_GRID` units a side —
   every asset is fitted to it, honouring `preserveAspectRatio`, so a consumer
   never rescales between assets),
-- an ordered stack of filled **layers** (`layers()`, bottom layer first), each
-  an `SvgLayer { paint, rule, contours }`, plus
+- the **artwork** drawn on it (`nodes()`, bottom first): `tairix_raster`
+  `Layer`s, and a `Group` wherever a clip, a mask, or a group opacity
+  composites a subtree as a unit, plus
 - an optional pointer **hotspot** (`hotspot()`) for cursor assets, and the
   authored design box (`source_extent()`) for a caller that has something to
   say about the *shape* an asset was drawn in.
@@ -29,10 +30,16 @@ A layer is several contours under one fill rule rather than a single ring,
 because a path with a hole and any stroke outline at all are both many rings
 filled as one. That is exactly the vector form `lib/cursor`'s `VectorCursor`
 and `lib/icon`'s `VectorIcon` rasterise through `lib/raster`'s single scan
-converter, so the pipeline converts an asset **once** into this fast-draw form
-and never re-parses SVG on the hot compositing path (`AGENTS.md` §10, §2.2).
-`tairix_cursor::decode_svg` and `tairix_icon::decode_svg` wrap this decoder
-for their respective vector forms.
+converter (`Surface::draw_artwork`), so the pipeline converts an asset
+**once** into this fast-draw form and never re-parses SVG on the hot
+compositing path (`AGENTS.md` §10, §2.2). `tairix_cursor::decode_svg` and
+`tairix_icon::decode_svg` wrap this decoder for their respective vector forms.
+
+Group opacity, clipping, and masking are one mechanism, not three: each asks
+for a subtree to be composited as a unit and then weakened by a per-pixel
+factor, so a clip is a mask whose content is the clip's shapes filled opaque
+white. A group is emitted only where it changes the picture, so a flat asset
+decodes to a flat list.
 
 ## Untrusted input
 
@@ -55,23 +62,33 @@ The drawable part of SVG 1.1, in full:
   arcs, flattened to a bounded error rather than a fixed segment count;
 - the whole `transform` grammar, and `viewBox` with `preserveAspectRatio`;
 - strokes — width, caps, joins, miter limit, and dashes;
-- the presentation-property cascade, including the `style` attribute and
-  inheritance;
+- the property cascade — presentation attributes, the document's own
+  `<style>` sheets (type, class, id, universal and compound selectors, the
+  descendant and child combinators, specificity and `!important`), the
+  `style` attribute, and inheritance;
 - CSS colour syntax — every hex form, `rgb()`/`rgba()`/`hsl()`/`hsla()` in
   both spellings, the named-colour table, and `currentColor`;
-- linear and radial gradients, with units, spread, and `href` inheritance.
+- linear and radial gradients, with units, spread, and `href` inheritance;
+- `clip-path` and `<clipPath>` (`clip-rule`, `clipPathUnits`, nesting),
+  `mask` and `<mask>` (`maskUnits`, `maskContentUnits`, `mask-type`, the mask
+  region), and group opacity, each composited in isolation;
+- `paint-order`, and a `<switch>`'s conditional-processing attributes.
 
 It is a renderer for artwork, not a browser. Text, embedded images, filters,
-masks, clipping paths, patterns, animation, and CSS stylesheets are **not
-drawn**; an element it cannot draw is skipped rather than refusing the
-document, so one unsupported decoration does not lose a whole asset. The
-staged design and the open question about that choice are in `plans/SVG.md`.
+patterns, markers, and animation are **not drawn**; an element it cannot draw
+is skipped rather than refusing the document, so one unsupported decoration
+does not lose a whole asset. The staged design, what is left, and the open
+question about that choice are in `plans/SVG.md`.
 
 ## Layout
 
-- `document` — `SvgImage`, `SvgLayer`, the tree walk, and the top-level
-  `decode` entry point (with the decode resource limits, `AGENTS.md` §2.9).
-- `xml` — the element tree: nesting, entities, namespaces, depth bounds.
+- `document` — `SvgImage`, the tree walk, and the top-level `decode` entry
+  point (with the decode resource limits, `AGENTS.md` §2.9).
+- `xml` — the element tree: nesting, entities, namespaces, character data,
+  depth bounds.
+- `css` — the document's own `<style>` sheets: the selector subset,
+  specificity, `!important`, and the one declaration splitter the `style`
+  attribute shares.
 - `number` — SVG's number, length, and coordinate-list grammar.
 - `geom` — `SubPath`, `StrokeStyle`, and the object bounding box: the one
   geometry every stage hands on.
@@ -79,7 +96,7 @@ staged design and the open question about that choice are in `plans/SVG.md`.
 - `shape` — the basic shapes.
 - `stroke` — stroke outline: segment quads, joins, caps, dashes.
 - `transform` — the `transform` grammar and viewport fitting.
-- `style` — the presentation-property cascade.
+- `style` — the property cascade.
 - `paint` — gradients and paint-server resolution.
 - `color` — CSS colour syntax → a `lib/raster` `Color`.
 - `error` — the closed `SvgError` rejection set.
@@ -90,8 +107,9 @@ Like `lib/geometry`, `lib/theme`, `lib/raster`, `lib/font`, `lib/cursor`, and
 `lib/icon`, this crate lives in `lib/*` so the cursor and icon libraries
 consume it without depending on the window manager (`AGENTS.md` §17.4). It is
 `no_std`, `#![forbid(unsafe_code)]`, and owns no colour arithmetic,
-rasterisation, or float maths of its own: `Color`, `Affine`, `FillRule`, and
-`Paint` come from `lib/raster`, and the bounded `no_std` maths from
+rasterisation, or float maths of its own: `Color`, `Affine`, `FillRule`,
+`Paint`, and the artwork tree itself come from `lib/raster`, and the bounded
+`no_std` maths from
 `lib/util`'s `mathf` (shared with the glyph rasteriser, so no external libm
 enters the trusted computing base).
 

@@ -1921,17 +1921,9 @@ fn pointer_position_tracks_motion() {
 /// A solid opaque `size`×`size` cursor image in `color`, hotspot at the
 /// top-left, built through the shared cursor library.
 pub(crate) fn solid_cursor(size: u32, color: Color) -> tairix_cursor::CursorImage {
-    use tairix_cursor::{Shape, VectorCursor, Vertex};
+    use tairix_cursor::{Shape, VectorCursor};
     let s = i32::try_from(size).expect("small");
-    let shape = Shape::new(
-        color,
-        alloc::vec![
-            Vertex::new(0, 0),
-            Vertex::new(s, 0),
-            Vertex::new(s, s),
-            Vertex::new(0, s),
-        ],
-    );
+    let shape = Shape::from_points(color, &[(0, 0), (s, 0), (s, s), (0, s)]);
     VectorCursor::new(size, 0, 0, alloc::vec![shape])
         .rasterise(size)
         .expect("renderable")

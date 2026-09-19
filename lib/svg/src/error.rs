@@ -28,6 +28,11 @@ pub enum SvgError {
     InvalidNumber,
     /// A colour or paint value was outside the accepted syntax.
     InvalidColor,
+    /// A `clip-path` or `mask` value was neither `none` nor a reference to
+    /// something in this document, so it names a composite the decoder could
+    /// not build. Rendering the element without it would be a wrong picture,
+    /// so the document is refused instead.
+    InvalidReference,
     /// A `path` command was unknown, or its parameters did not parse.
     UnsupportedPath,
     /// The XML was structurally malformed (an unterminated tag, quote, or

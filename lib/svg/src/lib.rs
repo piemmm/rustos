@@ -11,13 +11,14 @@
 //! # What it produces
 //!
 //! [`decode`] turns an SVG byte string into an [`SvgImage`]: a design grid
-//! plus an ordered stack of filled polygon [`SvgLayer`]s (bottom layer
-//! first), and an optional pointer hotspot. A [`Viewport`] chooses the shape
-//! the drawing is fitted to — the square slot an icon or cursor occupies, or
-//! the document's own proportions a viewer shows a picture at — and nothing
-//! else about it. That is exactly the vector form
-//! `lib/cursor`'s `VectorCursor` and `lib/icon`'s `VectorIcon` already
-//! rasterise through `lib/raster`'s single polygon path, so the SVG-first
+//! plus the shared `tairix_raster` artwork tree drawn on it (filled layers
+//! bottom first, with a group wherever a clip, a mask, or a group opacity
+//! composites a subtree as a unit), and an optional pointer hotspot. A
+//! [`Viewport`] chooses the shape the drawing is fitted to — the square slot
+//! an icon or cursor occupies, or the document's own proportions a viewer
+//! shows a picture at — and nothing else about it. That is exactly the vector
+//! form `lib/cursor`'s `VectorCursor` and `lib/icon`'s `VectorIcon` already
+//! rasterise through `lib/raster`'s single scan converter, so the SVG-first
 //! pipeline converts an asset **once** into this fast-draw form and never
 //! re-parses SVG on the hot compositing path.
 //!
@@ -37,16 +38,17 @@
 //! `<line>`, `<polyline>`, `<polygon>`), the whole path grammar including
 //! cubic and quadratic curves and elliptical arcs, the whole `transform`
 //! grammar, `viewBox` with `preserveAspectRatio`, strokes (width, caps,
-//! joins, miter limit, dashes), the presentation-property cascade with the
-//! `style` attribute and inheritance, CSS colour syntax with named colours,
-//! and linear and radial gradients.
+//! joins, miter limit, dashes), the property cascade with the document's own
+//! `<style>` sheets, the `style` attribute and inheritance, CSS colour syntax
+//! with named colours, linear and radial gradients, `clip-path`, `mask`, and
+//! group opacity.
 //!
 //! It is a *renderer* for artwork, not a browser: text, embedded images,
-//! filters, masks, clipping paths, patterns, animation, and scripting are not
-//! drawn. An element it cannot draw is skipped rather than refused, so one
-//! unsupported decoration does not lose the whole asset; the open question of
-//! whether such an element should instead fail the document closed is
-//! recorded in `plans/ICONS.md`.
+//! filters, patterns, markers, animation, and scripting are not drawn. An
+//! element it cannot draw is skipped rather than refused, so one unsupported
+//! decoration does not lose the whole asset; the open question of whether
+//! such an element should instead fail the document closed is recorded in
+//! `plans/ICONS.md`.
 //!
 //! ```
 //! let svg = br##"<svg viewBox="0 0 10 10">
@@ -55,7 +57,7 @@
 //! let image = tairix_svg::decode(svg, tairix_svg::Viewport::Square)
 //!     .expect("a stroked circle");
 //! // The fill, then the stroke over it: SVG's painting order.
-//! assert_eq!(image.layers().len(), 2);
+//! assert_eq!(image.nodes().len(), 2);
 //! ```
 
 #![no_std]
@@ -65,6 +67,7 @@
 extern crate alloc;
 
 pub mod color;
+pub mod css;
 pub mod document;
 pub mod error;
 pub mod geom;
@@ -77,5 +80,5 @@ pub mod style;
 pub mod transform;
 pub mod xml;
 
-pub use document::{decode, SvgImage, SvgLayer, Viewport, DESIGN_GRID};
+pub use document::{decode, SvgImage, Viewport, DESIGN_GRID};
 pub use error::SvgError;

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-icon"
-description = "TAIRiX shared desktop-icon library: scalable, themeable vector icon glyphs (notification/status icons) rasterised onto a lib/raster surface through the single exact-area fill_polygon path, used by the taskbar without owning a scan converter (PLAN.md Stage 7)."
+description = "TAIRiX shared desktop-icon library: scalable, themeable vector icon glyphs (notification/status icons) rasterised onto a lib/raster surface through the single exact-area artwork path, used by the taskbar without owning a scan converter (PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

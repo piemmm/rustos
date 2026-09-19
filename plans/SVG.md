@@ -1,8 +1,5 @@
 # SVG — the first-party vector-asset decoder (`lib/svg`)
 
-Status: **done** for the drawable core; the deliberate non-goals and the one
-open question are recorded at the end.
-
 Binding under `AGENTS.md`. SVG is the canonical source format for the
 desktop's chrome and for icon artwork that is authored as vectors, so this
 crate is on the path of every cursor, status glyph, window decoration, and
@@ -11,8 +8,39 @@ and is rolled in house: an asset format must not widen the trusted computing
 base with an external parser.
 
 Read first: `plans/ICONS.md` (the asset tiers and the decode cache every
-surface draws through), `docs/src/desktop/svg-assets.md`, `plans/DISPLAY.md` for where
-the rasterised result goes.
+surface draws through), `docs/src/desktop/svg-assets.md`, `plans/DISPLAY.md`
+for where the rasterised result goes, `plans/VIEW.md` for the viewer that
+opens a drawing as a document.
+
+## Ledger
+
+| Item | What it is | State |
+|---|---|---|
+| S1 | XML scanner: nesting, self-closing tags, CDATA/PI/doctype, entities, namespace prefixes, depth and element bounds | done |
+| S2 | Number, length, percentage, opacity and arc-flag grammar | done |
+| S3 | Colour grammar: hex 3/4/6/8, `rgb()`/`rgba()`/`hsl()`/`hsla()`, named colours, `currentColor` | done |
+| S4 | The `d` grammar, curve and elliptical-arc flattening to a tolerance | done |
+| S5 | Basic shapes, including `rect`'s rounded-corner rules | done |
+| S6 | Stroke outline: segment quads, joins, caps, dashes | done |
+| S7 | The `transform` grammar, `viewBox`, `preserveAspectRatio`, viewport fitting | done |
+| S8 | Presentation-property cascade: attribute, `style` declaration, inheritance | done |
+| S9 | Gradients: definitions, `href` inheritance, units, spread, per-use resolution | done |
+| S10 | The tree walk: `<g>`, `<defs>`, `<use>`, `<switch>`, nested `<svg>` | done |
+| S11 | Shared artwork tree (`lib/raster::artwork`) and its one renderer | done |
+| S12 | Group opacity, composited in isolation | done |
+| S13 | `clip-path` / `<clipPath>`: `clip-rule`, `clipPathUnits`, nesting | done |
+| S14 | `mask` / `<mask>`: `maskUnits`, `maskContentUnits`, `mask-type`, the mask region | done |
+| S15 | CSS stylesheets: `<style>`, the selector subset, specificity, `!important` | done |
+| S16 | `<symbol>` / `<use>` viewport, and `overflow` clipping of a nested viewport | done |
+| S17 | `<switch>` conditional processing: `systemLanguage`, empty conditions, drawable children only | done |
+| S18 | `paint-order` | done |
+| S19 | `<pattern>` as a paint server | planned |
+| S20 | `<marker>`: `marker-start` / `-mid` / `-end` | planned |
+| S21 | `vector-effect="non-scaling-stroke"` | planned |
+
+`planned` items are not started; none of them is a half-built part of a
+`done` one. Each needs something this crate does not yet have, stated under
+[What is left](#what-is-left).
 
 ---
 
@@ -23,10 +51,12 @@ the rasterised result goes.
 on the hot path.
 
 An `SvgImage` is a design grid (`DESIGN_GRID`, 2048 units a side) plus an
-ordered stack of `SvgLayer`s, bottom first. A layer is a `Paint`, a
-`FillRule`, and a list of **contours** in design-grid coordinates.
+ordered artwork tree, bottom first: `tairix_raster::artwork::Node`s, each
+either a `Layer` (a `Paint`, a `FillRule`, and a list of **contours** in
+design-grid coordinates) or a `Group` (a subtree composited as a unit through
+an opacity and an optional mask).
 
-Three decisions shape everything else:
+Four decisions shape everything else:
 
 - **One geometry currency.** Curves, arcs, basic shapes, and stroke outlines
   all become flattened `SubPath`s in user space as early as possible
@@ -37,6 +67,11 @@ Three decisions shape everything else:
   join) cannot be one ring. Contours are filled together under one rule, so
   the pieces merge or cancel as the rule says instead of being composited over
   each other — which would double-blend a translucent stroke.
+- **The artwork form lives in `lib/raster`, and so does its renderer.** The
+  decoder builds it and the cursor, icon, and viewer paths draw it; a second
+  definition or a second walk of it in each consumer is what the charter
+  forbids. `Affine`, `FillRule`, and `Paint` were already there for the same
+  reason.
 - **One design grid for every asset, and a `Viewport` that chooses its
   shape.** Whatever a document's own `viewBox` says, it is fitted to the same
   grid, so a consumer never rescales between assets and curve flattening has a
@@ -45,7 +80,7 @@ Three decisions shape everything else:
   square slot rather than stretched or refused — the desktop's asset form.
   `Viewport::Natural` normalises the drawing across both axes for a consumer
   that will rasterise into the drawing's own shape, which is the viewer
-  showing a picture (`plans/VIEW.md`): `Surface::fill_contours` stretches the
+  showing a picture (`plans/VIEW.md`): `Surface::draw_artwork` stretches the
   grid across the surface it is given, so normalising here and un-normalising
   there is one uniform scale and the scan converter needs no non-square grid.
   `source_extent()` carries the authored proportions the consumer sizes that
@@ -61,37 +96,141 @@ Three decisions shape everything else:
 
 | Module | What it owns |
 |---|---|
-| `xml` | The element tree: nesting, self-closing tags, CDATA/PI/doctype, entity decoding, namespace-prefix resolution, depth and element bounds |
+| `xml` | The element tree: nesting, self-closing tags, CDATA/PI/doctype, entity decoding, namespace-prefix resolution, character data, depth and element bounds |
 | `number` | SVG's number grammar: separator-free runs, arc flags, CSS absolute units, percentages, opacity |
 | `color` | CSS colour syntax: hex (3/4/6/8), `rgb()`/`rgba()`/`hsl()`/`hsla()` in both spellings, the named-colour table, `currentColor`, `none` |
+| `css` | The document's own `<style>` sheets: the selector subset, specificity, `!important`, and the declarations one element matches |
 | `geom` | `SubPath`, `StrokeStyle`, caps/joins, the object bounding box |
 | `pathdata` | The whole `d` grammar and curve/arc flattening to a tolerance |
 | `shape` | The basic shapes, including `rect`'s rounded-corner rules |
 | `stroke` | Stroke outline: segment quads, joins, caps, dashes |
 | `transform` | The `transform` grammar, `viewBox`, `preserveAspectRatio`, viewport fitting |
-| `style` | The presentation-property cascade: attribute, `style` declaration, inheritance |
+| `style` | The presentation-property cascade: attribute, stylesheet, `style` declaration, inheritance |
 | `paint` | Gradients: definitions, `href` inheritance, units, spread, per-use resolution |
-| `document` | The tree walk that turns all of the above into layers |
+| `document` | The tree walk that turns all of the above into the artwork tree |
 
-`Affine`, `FillRule`, and `Paint` live in `lib/raster`, not here: the
-rasteriser and the decoder both need them, so they have one definition. The
-`no_std` float maths (`sqrt`, `sin`, `atan2`, rounding) lives in
+The `no_std` float maths (`sqrt`, `sin`, `atan2`, rounding) lives in
 `lib/util::mathf`, shared with the glyph rasteriser in `lib/fontface`.
+
+## Compositing: one mechanism for three features
+
+Group opacity, clipping, and masking are not three problems. Each one asks
+for a subtree to be drawn *as a unit* and then composited through a
+per-pixel factor, so the crate has exactly one answer:
+
+```
+Group { opacity, mask: Option<Mask>, children }
+Mask  { kind: Alpha | Luminance, content: Vec<Node> }
+```
+
+- **Group opacity** is a group with no mask. Compositing the subtree and then
+  weakening it is not the same picture as weakening each shape and
+  compositing — two overlapping opaque shapes at 50% show the lower one
+  through the upper only in the second — so the subtree really is rendered
+  into its own buffer.
+- **A clip** is a mask whose content is the clip's shapes filled opaque
+  white, read as `Alpha`. Several shapes in one `<clipPath>` union exactly
+  because opaque over opaque is opaque, and a `clip-path` *on* a `<clipPath>`
+  is a group inside the mask's own content — so nesting needs no second rule.
+- **A `<mask>`** is the same group with `Luminance`, which is why the mask's
+  own region rectangle, and a clip or a nested mask inside it, all fall out
+  of the model rather than being special cases.
+
+The decoder emits a group **only where one changes the picture**: full
+opacity, no clip, and no mask means the children are spliced into the parent
+list and nothing is allocated. A shape that produces a single layer folds its
+own `opacity` into that layer's alpha, because one layer composited at a
+group opacity is the same pixels as that layer painted at the product — the
+isolation buffer is allocated only where two layers of the same element (a
+fill and its stroke) actually overlap.
+
+Rendering is `Surface::draw_artwork`, and it fails closed: a group whose
+isolation buffer cannot be allocated, or a tree deeper than the renderer's
+own bound, draws **nothing** and reports it, so the caller falls back to the
+tier below rather than showing a half-composited picture.
+
+## What a reference inherits
+
+A `<clipPath>`, a `<mask>`, and a gradient are reached by *reference*, and
+what they inherit is their own place in the document — not the style of
+whatever element pointed at them. That is what makes one definition mean the
+same thing wherever it is used: a mask whose content states no fill takes the
+fill its own ancestors give it, a clip takes its `clip-rule` the same way, and
+a `currentColor` stop stands for the `color` the gradient sits in. The chain
+from the root down to a definition is found once per definition a document
+actually references, and memoised.
+
+A `<use>` is the exception, and deliberately: SVG defines its content as
+inheriting from the `<use>` itself, which is what lets one symbol be tinted
+per user.
+
+## The cascade
+
+Four sources set a property, in this order — later wins:
+
+1. presentation attributes (`fill="red"`),
+2. normal declarations from the document's `<style>` sheets, ordered by
+   selector specificity then source order,
+3. normal declarations in the element's own `style` attribute,
+4. `!important` declarations, stylesheet then `style` attribute.
+
+The selector subset is type (`rect`), class (`.cls`), id (`#id`), universal
+(`*`), any compound of those (`rect.a.b`), a selector list (`a, b`), and the
+descendant and child combinators. Specificity is CSS's `(id, class, type)`
+triple.
+
+A rule this decoder cannot parse — an at-rule, an attribute selector, a
+pseudo-class — is **dropped**, exactly as an unknown *property* already is,
+because that is what the declaration means: it does not apply. Refusing the
+document instead would lose an asset over a `@media print` block it would
+never have drawn. A declaration whose property *is* understood but whose
+value is malformed is still an error, so a bad colour fails closed.
+
+`<style>` is the only element whose character data is read. A stylesheet with
+a `type` that is neither absent nor `text/css` is ignored.
 
 ## Untrusted input
 
 Every asset is hostile until proven otherwise. `decode` is total for any byte
 string: no panic, no unbounded loop, no unbounded allocation, and no NaN or
 infinity reaching the geometry. The fixed bounds — element count, nesting
-depth, layer count, total vertices, segments per curve, dash-pattern length,
-gradient stops, `use` and `href` chain depth — are **security bounds, not
-capacities**: they do not scale with the machine and must not be raised to
-make an asset fit.
+depth, layer count, total vertices, group depth, stylesheet rules and
+declarations, segments per curve, dash-pattern length, gradient stops, `use`
+and `href` chain depth — are **security bounds, not capacities**: they do not
+scale with the machine and must not be raised to make an asset fit.
+
+Isolation buffers are what a clip, a mask, and a group opacity cost, so the
+group-depth bound is also a memory bound: it caps how many full-extent
+surfaces one asset can have live at once, and the renderer refuses rather
+than allocating past it.
 
 A document that is malformed, or whose numbers, colours, or transforms are
 outside the grammar, is refused **whole** with a precise `SvgError`; the
 caller falls back to the tier below (`plans/ICONS.md`). Nothing is
 half-applied.
+
+## What is left
+
+Each needs a capability the crate does not have; none is a thinner version of
+something already done.
+
+- **S19 `<pattern>`.** A pattern is a tile of rendered artwork repeated
+  across a shape, so it is a *paint* whose source is pixels rather than a
+  colour ramp. `tairix_raster::Paint` has no such kind, and adding one means
+  the scan converter's paint sampler gains a tiled-surface source and the
+  tile gains a render of its own. That is `lib/raster` work with its own
+  fixed bounds on tile extent, not decoder work.
+- **S20 `<marker>`.** Markers are placed at a path's *command* vertices with
+  the direction bisecting the segments that meet there. The decoder flattens
+  curves before anything downstream sees them, so the command vertices and
+  their tangents are gone by the time a marker would be placed; `pathdata`
+  must also report the un-flattened vertex list and its incoming/outgoing
+  directions.
+- **S21 `vector-effect="non-scaling-stroke"`.** The width is in the root
+  viewport's units rather than the element's, so the outline must be built
+  after the element's transform instead of before it. `stroke` is written
+  against the pre-transform geometry, and both spaces must stay available to
+  it.
 
 ## Deliberate non-goals
 
@@ -102,18 +241,21 @@ adding one would be a new plan of its own:
   `lib/fontface`'s job, and artwork ships its lettering as outlines.
 - Embedded raster images (`<image>`), which would nest one decoder in
   another.
-- Filters, masks, clipping paths, and patterns.
-- Animation (SMIL), scripting, external references of any kind, and CSS
-  stylesheets (`<style>` blocks and selectors); the `style` *attribute* is
-  supported.
+- Filters.
+- Animation (SMIL), scripting, and external references of any kind. A
+  stylesheet is read only from the document's own `<style>` elements; an
+  `@import` is not fetched.
 
 ## Open question
 
 `AGENTS.md` fails closed by default, but an element this decoder cannot draw
 is currently **skipped** rather than refusing the document — so an asset
-carrying, say, a clipping path renders unclipped instead of falling back to
-the tier below. Skipping is what lets one unsupported decoration not lose a
-whole asset, and it is the behaviour the desktop has today. Whether the
-drawable-element case should instead fail the document closed is recorded as
-an open item in `plans/ICONS.md`; it is a deliberate decision to make, not an
-oversight.
+carrying, say, a `<pattern>` fill renders with the pattern's fallback colour
+instead of falling back to the tier below. Skipping is what lets one
+unsupported decoration not lose a whole asset, and it is the behaviour the
+desktop has today. Whether the drawable-element case should instead fail the
+document closed is recorded as an open item in `plans/ICONS.md`; it is a
+deliberate decision to make, not an oversight. The set at stake is now
+smaller than it was — clipping, masking, and group opacity are honoured
+rather than ignored, so the cases that render a *wrong* picture are the three
+`planned` items above and the non-goals.

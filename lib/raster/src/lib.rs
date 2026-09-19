@@ -16,7 +16,10 @@
 //! closed contours resolved under a [`FillRule`] and painted with a flat
 //! colour or a gradient ([`paint`]), reached as [`Surface::fill_contours`].
 //! [`Affine`] is the transform that places such artwork, and the one a
-//! gradient carries.
+//! gradient carries. A whole drawing — a cursor, an icon glyph, a decoded
+//! SVG document — is an [`artwork`] tree of such layers, with the [`Group`]s
+//! that clipping, masking and group opacity all need, drawn through the one
+//! walk of it ([`Surface::draw_artwork`]).
 //!
 //! There is exactly one definition of the colour algebra here, so it is
 //! never duplicated into a sibling crate. Compositing over an 8-bit
@@ -38,6 +41,7 @@
 extern crate alloc;
 
 pub mod affine;
+pub mod artwork;
 pub mod blur;
 pub mod color;
 pub mod dither;
@@ -52,6 +56,9 @@ pub mod surface;
 mod tests;
 
 pub use affine::Affine;
+pub use artwork::{
+    for_each_fill, layer_count, Group, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
+};
 pub use blur::{box_blur, BlurScratch};
 pub use color::{blend_solid_span, blend_span, div255, div255_biased, Color, Pixel, ROUND_NEAREST};
 pub use dither::DitherRow;
