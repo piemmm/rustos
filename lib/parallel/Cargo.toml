@@ -17,9 +17,13 @@ workspace = true
 # must stay linkable in-kernel, where there is no userland thread to spawn.
 default = ["pool"]
 pool = ["dep:tairix-rt", "dep:tairix-abi"]
-# The order-shuffling `Reversed` runner a pass's host tests prove bit-identity
-# against. A consumer enables it as a dev-dependency feature; this crate's own
-# tests reach it through `cfg(test)`, so it is never part of a production build.
+# The shared host test runners: the order-shuffling `Reversed` a pass proves
+# bit-identity against, and the real-thread `Threaded` that proves the pieces
+# are disjoint when they run at once. A consumer enables it as a
+# dev-dependency feature; this crate's own tests reach it through `cfg(test)`,
+# so it is never part of a production build. `Threaded` needs host threads, so
+# the feature links `std` — a bare-metal build that enabled it would fail to
+# link rather than quietly gain a host runtime.
 test-util = []
 
 [dependencies]

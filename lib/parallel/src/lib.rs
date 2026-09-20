@@ -33,6 +33,13 @@
 #[cfg(feature = "pool")]
 extern crate alloc;
 
+// `Threaded` needs real host threads, and thus `std`. It is reached only
+// through a `dev-dependencies` edge, so a shipping build never enables the
+// feature and stays `no_std`; one that did would fail to link rather than
+// quietly acquire a host runtime.
+#[cfg(any(test, feature = "test-util"))]
+extern crate std;
+
 #[cfg(feature = "pool")]
 pub mod pool;
 
@@ -186,6 +193,62 @@ unsafe impl JobRunner for Reversed {
     }
 }
 
+/// A runner that spreads its pieces over `width` real host threads, each
+/// claiming indices from one shared cursor.
+///
+/// Test scaffolding, behind the `test-util` feature, and the companion to
+/// [`Reversed`]: that one proves a split is order-independent on a single
+/// thread, this one proves the pieces really are disjoint when they run at
+/// once. Only a genuinely concurrent runner can, and it is what puts the
+/// element hand-off below under a thread sanitiser or an interpreter's
+/// data-race detector.
+///
+/// Spawning is per dispatch rather than from a held pool because the subject
+/// is the hand-off, not the scheduling: a pool would add its own
+/// synchronisation between the jobs and blunt exactly what this is for.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Copy, Clone, Debug)]
+pub struct Threaded {
+    width: usize,
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl Threaded {
+    /// A runner spreading its pieces over `width` threads.
+    ///
+    /// A zero width still runs on one thread: the split asks for at least one
+    /// piece, and a runner that spawned nothing would leave it unvisited.
+    #[must_use]
+    pub const fn new(width: usize) -> Self {
+        Self { width }
+    }
+}
+
+// SAFETY: every index of `0..count` is handed to `job` at most once — the
+// cursor's `fetch_add` gives each index to exactly one thread — and `scope`
+// joins every thread before it returns, so no invocation outlives the call.
+#[cfg(any(test, feature = "test-util"))]
+unsafe impl JobRunner for Threaded {
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
+        let next = core::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..self.width.max(1) {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if index >= count {
+                        return;
+                    }
+                    job(index);
+                });
+            }
+        });
+    }
+}
+
 /// A raw pointer to the elements of one [`for_each`] call, shared with that
 /// call's jobs.
 ///
@@ -289,6 +352,30 @@ mod tests {
         for_each(&SERIAL, &mut forwards, &stamp);
         for_each(&Reversed::new(4), &mut backwards, &stamp);
         assert_eq!(forwards, backwards);
+    }
+
+    /// The hand-off under real concurrency: the pieces are disjoint, so
+    /// running them at once must write exactly what running them in turn
+    /// wrote. An interpreter's data-race detector reads this as the claim
+    /// about `Elements` that a single-threaded runner structurally cannot
+    /// make.
+    #[test]
+    fn running_the_pieces_at_once_writes_what_running_them_in_turn_wrote() {
+        let mut serial = [0u64; 256];
+        let mut concurrent = [0u64; 256];
+        let stamp = |slot: &mut u64| *slot = slot.wrapping_mul(2).wrapping_add(0x9E37_79B9);
+        for_each(&SERIAL, &mut serial, &stamp);
+        for_each(&Threaded::new(4), &mut concurrent, &stamp);
+        assert_eq!(serial, concurrent);
+    }
+
+    /// A runner claiming no width still visits every element, because the
+    /// split asks for a piece even when nothing can run in parallel.
+    #[test]
+    fn a_threaded_runner_of_no_width_still_visits_every_element() {
+        let mut items = [0u32; 8];
+        for_each(&Threaded::new(0), &mut items, &|item| *item += 1);
+        assert!(items.iter().all(|&count| count == 1));
     }
 
     #[test]

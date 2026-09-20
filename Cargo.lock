@@ -798,7 +798,6 @@ dependencies = [
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
- "tairix-inline",
  "tairix-input",
  "tairix-raster",
  "tairix-rng",
@@ -2528,6 +2527,7 @@ dependencies = [
 name = "tairix-raster"
 version = "0.0.0"
 dependencies = [
+ "tairix-inline",
  "tairix-parallel",
  "tairix-reclaim",
  "tairix-rng",

@@ -104,9 +104,16 @@ run = [
 ]
 
 [dev-dependencies]
+# The shared host test runners, so this crate keeps no private copy of them
+# and stays free of `unsafe` in every target it builds: `Reversed` varies the
+# band split the picture must not depend on, and `Threaded` runs the bands at
+# once. Both `unsafe impl`s live beside the trait they discharge, in a crate
+# the undefined-behaviour oracle interprets.
+tairix-parallel = { path = "../../../../lib/parallel", version = "=0.0.0", default-features = false, features = [
+    "test-util",
+] }
 # The budget measurement times the passes against the host's monotonic
-# clock and the band test needs a runner of its own; both are integration
-# tests, which link `std`.
+# clock; both are integration tests, which link `std`.
 tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }
 tairix-reclaim = { path = "../../../../lib/reclaim", version = "=0.0.0" }
 # The invariant model: no sequence of legal ladder steps, camera moves or

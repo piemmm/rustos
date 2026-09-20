@@ -6,6 +6,7 @@
 //! shows through everywhere the creature is not.
 
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_raster::shape::{self, Scratch, Shape};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
@@ -14,7 +15,6 @@ use crate::fur::{self, falloff_table, Blob, FALLOFF_STEPS};
 use crate::layout::{PenLayout, COMPANION_FEET};
 use crate::pen::{Pen, Whereabouts};
 use crate::project::contact_shadow;
-use crate::shape::{self, Scratch, Shape};
 
 /// The shared falloff table and anything else a paint needs more than once.
 ///
@@ -53,9 +53,9 @@ impl Painter {
         let (rx, ry, alpha) = contact_shadow(BODY_RADIUS, pose.lift);
         fur::shadow(surface, pose.at.x, pose.at.y, rx, ry, alpha);
         for part in parts(pose) {
-            // Fur is the one shape with no outline: it is a soft splat, so it
+            // A splat is the one shape with no outline: it is soft, so it
             // takes the falloff path rather than the scan converter.
-            if let Shape::Fur { radius } = part.shape {
+            if let Shape::Splat { radius } = part.shape {
                 fur::splat(
                     surface,
                     &Blob {

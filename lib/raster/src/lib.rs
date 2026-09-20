@@ -51,6 +51,7 @@ pub mod reorient;
 pub mod resample;
 pub mod round;
 pub mod scan;
+pub mod shape;
 pub mod surface;
 
 #[cfg(test)]
@@ -71,4 +72,5 @@ pub use reorient::Reorient;
 pub use resample::{resample, resample_window, Region, ResampleError, Rgba8Image};
 pub use round::{round_rect_coverage, round_rect_radius};
 pub use scan::{FillRule, MAX_DRAWING_EXTENT};
+pub use shape::{Placed, Shape};
 pub use surface::{RowBand, RowBands, Surface, MAX_SURFACE_PIXELS, SUBPIXEL};

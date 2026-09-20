@@ -150,6 +150,20 @@ pub const TARGETS: &[Target] = &[
         spread: Spread::OneProcess,
     },
     Target {
+        package: "tairix-parallel",
+        description: "the index-to-element erasure every parallel pass runs through: the raw \
+                      element pointer `for_each` hands its jobs, the `Send`/`Sync` claims that \
+                      carry it into a job closure, and the `&mut` each job reconstructs from \
+                      it. Every runner in the tree — the compositor's bands, the raster \
+                      passes, the client's frame — reaches undefined behaviour through this \
+                      one block if the pieces are not disjoint, and the shared `Threaded` \
+                      runner makes that claim under real threads where the interpreter's \
+                      data-race detector can read it",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
         package: "tairix-kalloc",
         description: "the kernel heap's in-band boundary tags: the physical back-link a \
                       coalesce dereferences, the block a split carves off, the descriptor an \

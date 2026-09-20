@@ -8,7 +8,7 @@
 //!
 //! This is the *soft* half of the creature. His silhouette — the skull, the
 //! limbs, the ears, the garment — is outlines rather than splats, and lives in
-//! [`crate::shape`]; a blob cannot state a cat.
+//! [`tairix_raster::shape`]; a blob cannot state a cat.
 
 use tairix_raster::{Color, Surface};
 use tairix_util::mathf;

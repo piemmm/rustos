@@ -73,29 +73,37 @@ scaling him is scaling one number.
 
 ## How he is drawn
 
-Sixty-four parts, each a body-local position and one of five shapes. A circle
-cannot state a cat, so only the genuinely soft-edged parts are discs:
+Sixty-four parts, each a body-local position and one shape. The shapes
+themselves are not his: they are `lib/raster`'s parametric outline primitives
+(`tairix_raster::shape`), shared with the game's figure engine, and they carry
+no anatomy — a `Taper` is a taper, and only this crate's rig calls one a leg.
+A circle cannot state a cat, so only the genuinely soft-edged parts are discs.
+He uses five of the six:
 
-* a **mass** — an ellipse pulled some of the way out towards its own bounding
-  box, so the corners round while the flats stay flat. The trunk, the skull,
-  the haunch, and the eyes;
-* a **limb** — tapered from the joint at its own origin down to a rounded foot,
-  and rotated about that origin as it swings, so a leg pivots where it meets
-  the body instead of sliding beneath it;
-* an **ear** — a wedge whose tip leans outwards and whose base tucks below the
-  skull, so no seam shows where the two meet;
-* a **drape** — a panel of cloth with a scalloped hem, which is what stops the
-  cape reading as a card taped on;
-* **fur** — a radial splat with a small deterministic angular ripple, for the
-  cheek ruffs and the tail's banded plume, where a crisp edge would read as
-  moulded plastic. The ripple comes from the part's own identity, so it is the
-  same every frame: fur that re-rippled would boil.
+* a **`Superellipse`** — an ellipse pulled some of the way out towards its own
+  bounding box, so the corners round while the flats stay flat. The trunk, the
+  skull, the haunch, and the eyes;
+* a **`Taper`** — tapered from the joint at its own origin down to a rounded
+  foot, and rotated about that origin as it swings, so a leg pivots where it
+  meets the body instead of sliding beneath it;
+* a **`Wedge`** — its tip leaning outwards and its base tucking below the
+  skull, so no seam shows where the two meet. His ears;
+* a **`ScallopedPanel`** — a panel of cloth with a scalloped hem, which is what
+  stops the cape reading as a card taped on;
+* a **`Splat`** — a radial blob with a small deterministic angular ripple, for
+  the cheek ruffs and the tail's banded plume, where a crisp edge would read as
+  moulded plastic. It is the one primitive with no traced outline; the ripple
+  comes from the part's own identity, so it is the same every frame, and fur
+  that re-rippled would boil.
+
+The sixth, `BevelledPanel`, is a hard-edged panel with a bevelled rim — armour
+drawn as a superellipse reads as flesh — and he has no use for it.
 
 Every outline is symmetric about its own vertical axis, which is what keeps the
 turnaround free — an asymmetric shape would need mirroring, and mirroring is
-the per-direction branch the camera exists to avoid. The ear is the deliberate
-exception: it leans, and the pair leans apart rather than either one being
-handed.
+the per-direction branch the camera exists to avoid. The wedge is the
+deliberate exception: it leans, and the pair leans apart rather than either one
+being handed.
 
 Outlines are filled through `lib/raster`'s one anti-aliased scan converter, so
 there is no second rasteriser and the edge quality is the desktop's own. Every

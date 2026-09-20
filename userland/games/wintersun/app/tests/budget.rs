@@ -5,33 +5,40 @@
 //! most likely number in this plan to be wrong". This is where it stops
 //! being a guess: the passes are timed at the baseline resolution over
 //! generated terrain, and the numbers are printed so a run says what the
-//! renderer actually costs rather than only whether it passed.
+//! renderer actually costs.
 //!
-//! # What this can and cannot assert
+//! # Why no elapsed time is asserted here
 //!
-//! The host is not the reference machine and a debug build is not a
-//! release one, so a tight assertion here would fail for reasons that
-//! say nothing about the renderer. What is asserted is the *shape*:
-//! every pass is timed, the terrain pass is the expensive one (it has
-//! the largest allocation for a reason, and a frame where something else
-//! dominates means the balance has moved), and neither pass exceeds a
-//! ceiling generous enough that only a real regression — an order of
-//! magnitude, not a percentage — reaches it.
+//! A wall-clock threshold in a test is a claim about the machine, not
+//! about the renderer. The same unchanged code passes on a fast host and
+//! fails on a slower one, so the failure says only that the host was
+//! slow — a flake with the machine as its seed, and one that cannot be
+//! fixed by retrying. The budget is therefore *evidence*: the milestone's
+//! exit criterion is read from this output and recorded in the plan, and
+//! nothing here fails because a host took longer. `cargo xtask bench`
+//! states the same rule for the raster and compositor families, and
+//! `kernel/mem`'s ramzip tiers and `kernel/core`'s reclaim integration
+//! print their costs the same way.
 //!
-//! The budget is stated for a *four-core* machine, so the measurement is
-//! taken on one thread and on four: the first says what the renderer
-//! costs, the second says whether distributing the bands buys what the
-//! plan assumed it would. The pool the real client uses is `lib/rt`'s
-//! and is bare-metal only, so the threaded runner here is the host's own
-//! — the subject is how the work divides, not which threads run it.
+//! # What is gated, and where
 //!
-//! Run it alone to read the numbers:
+//! The deterministic claims about this code live where they can be made
+//! without a clock: pass attribution against a controlled clock in the
+//! crate's own `frame` tests, and the band decomposition in
+//! `tests/bands.rs`. That file cuts a frame into bands on a *serial*
+//! runner, so it tests the decomposition and says nothing about
+//! threading. This is the only place a genuinely concurrent runner draws,
+//! so the claim it can make — and does, below — is that handing the bands
+//! to real threads yields the identical picture. A torn hand-off or an
+//! overlapping slice changes a pixel on any machine, fast or slow.
+//!
+//! Read the numbers with:
 //! `cargo test -p tairix-wintersun-app --release --test budget -- --nocapture`
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::hint::black_box;
 use std::time::Instant;
 
-use tairix_parallel::JobRunner;
+use tairix_parallel::{JobRunner, Threaded};
 use tairix_raster::color::Pixel;
 use tairix_reclaim::{PressureBand, ReportedPressure};
 use tairix_wintersun_app::budget::{FrameTimes, Pass, BASELINE_HEIGHT, BASELINE_WIDTH, FRAME_NS};
@@ -49,49 +56,14 @@ use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
-/// The ceiling a pass must stay under, as a multiple of its budget.
-///
-/// Wide on purpose: a developer's host under a debug profile is not the
-/// reference machine, so anything tighter would be measuring the machine.
-/// An order of magnitude is not a slow host, it is a regression.
-const CEILING: u64 = 10;
-
 /// Frames timed, so a single scheduling hiccup does not decide the
 /// answer. The best is reported, because the question is what the
 /// renderer costs, not what the machine was doing at the time.
 const RUNS: usize = 5;
 
-/// How many cores the budget is stated for.
+/// How many cores the budget is stated for, and so how many threads the
+/// bands are handed to.
 const REFERENCE_CORES: usize = 4;
-
-/// A runner that spreads jobs over `threads` host threads, claiming
-/// indices from a shared cursor exactly as the real pool does.
-struct Threaded(usize);
-
-// SAFETY: every index of `0..count` is handed to `job` at most once —
-// the cursor's `fetch_add` gives each index to exactly one thread — and
-// `scope` joins every thread before it returns, so no invocation
-// outlives the call.
-unsafe impl JobRunner for Threaded {
-    fn width(&self) -> usize {
-        self.0
-    }
-
-    fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
-        let next = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..self.0 {
-                scope.spawn(|| loop {
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    if index >= count {
-                        return;
-                    }
-                    job(index);
-                });
-            }
-        });
-    }
-}
 
 /// A clock that reads the host's monotonic time.
 struct Host(Instant);
@@ -111,8 +83,9 @@ impl tairix_log::Sink for Quiet {
 static SINK: Quiet = Quiet;
 static PRESSURE: ReportedPressure = ReportedPressure::unknown();
 
-/// Measure a whole frame at the baseline, best of [`RUNS`].
-fn measure(runner: &dyn JobRunner) -> FrameTimes {
+/// Draw the baseline frame [`RUNS`] times, returning the cheapest run's
+/// per-pass costs and the picture every run drew.
+fn measure(runner: &dyn JobRunner) -> (FrameTimes, Vec<Pixel>) {
     let params = RealmParams::new(RealmSpec {
         extent_chunks: 64,
         coarse_samples: 64,
@@ -172,11 +145,14 @@ fn measure(runner: &dyn JobRunner) -> FrameTimes {
                 &clock,
             )
             .expect("the frame draws");
+        // The frame is timed and then not read until the last run, so the
+        // measurement is only honest if the optimiser cannot see that.
+        black_box(&target);
         if run == 0 || times.total() < best.total() {
             best = times;
         }
     }
-    best
+    (best, target)
 }
 
 /// Print one measurement's per-pass costs against their budgets.
@@ -185,76 +161,60 @@ fn report(label: &str, times: &FrameTimes) {
     println!("WinterSun frame at {BASELINE_WIDTH}x{BASELINE_HEIGHT}, {label}:");
     for pass in Pass::ALL {
         let spent = times.spent(pass);
+        // A derived `Debug` ignores the width, so the name is rendered
+        // before it is padded or the columns come out ragged.
+        let name = format!("{pass:?}");
         println!(
-            "  {pass:<10?} {:>7} us  (budget {:>7} us, {:>4}%)",
+            "  {name:<10} {:>7} us  (budget {:>7} us, {:>4}%)",
             micros(spent),
             micros(pass.budget_ns()),
             spent.saturating_mul(100) / pass.budget_ns().max(1),
         );
     }
     println!(
-        "  {:<10} {:>7} us  (frame {:>7} us)",
+        "  {:<10} {:>7} us  (frame {:>7} us, {:>4}%)",
         "total",
         micros(times.total()),
-        micros(FRAME_NS)
+        micros(FRAME_NS),
+        times.total().saturating_mul(100) / FRAME_NS.max(1),
     );
 }
 
 #[test]
-fn the_frame_budget_is_measured_per_pass_at_the_baseline() {
-    let times = measure(&tairix_parallel::SERIAL);
-    let micros = |ns: u64| ns / 1_000;
+fn the_baseline_frame_is_measured_and_threading_does_not_change_it() {
+    let (times, serial) = measure(&tairix_parallel::SERIAL);
     report("one thread", &times);
 
-    let threaded = measure(&Threaded(REFERENCE_CORES));
+    let (threaded, concurrent) = measure(&Threaded::new(REFERENCE_CORES));
     report(&format!("{REFERENCE_CORES} threads"), &threaded);
     println!(
-        "  speedup {}.{:02}x on {REFERENCE_CORES} threads",
+        "  speedup {}.{:02}x on {REFERENCE_CORES} threads (bench estimate, not a guarantee)",
         times.total() / threaded.total().max(1),
         (times.total() * 100 / threaded.total().max(1)) % 100,
     );
 
-    // The claim the budget rests on: with the bands distributed, the
-    // drawing fits inside one frame with room for the passes later items
-    // add. Stated against the *whole* frame rather than each pass's own
-    // allocation, because this host is not the reference machine and a
-    // per-pass assertion here would be measuring the machine — while a
-    // drawing pass that no longer fits a frame at all is a regression on
-    // any machine.
-    assert!(
-        threaded.total() <= FRAME_NS,
-        "the drawing passes cost {} us of a {} us frame on {REFERENCE_CORES} threads",
-        micros(threaded.total()),
-        micros(FRAME_NS)
+    // The claim that does not depend on the machine: the bands are
+    // disjoint, so running them at once draws what running them in turn
+    // drew. `tests/bands.rs` cuts the frame on a serial runner and so
+    // cannot see a torn hand-off; this runner genuinely races.
+    assert_eq!(
+        serial.len(),
+        concurrent.len(),
+        "the two runners drew different extents"
     );
-
+    // Two blank frames are identical, so the comparison below only means
+    // something once the baseline frame is known to be painted.
     assert!(
-        threaded.total() < times.total(),
-        "distributing the bands over {REFERENCE_CORES} threads did not make the \
-         frame faster ({} us against {} us); the budget assumes it does",
-        micros(threaded.total()),
-        micros(times.total())
+        serial.iter().all(|p| p.a == 255),
+        "the baseline frame left holes"
     );
-
+    let differing = serial
+        .iter()
+        .zip(&concurrent)
+        .enumerate()
+        .find(|(_, (a, b))| a != b);
     assert!(
-        times.spent(Pass::Terrain) > 0 && times.spent(Pass::Light) > 0,
-        "a pass that did work reported none"
-    );
-    for pass in [Pass::Terrain, Pass::Light] {
-        let ceiling = pass.budget_ns().saturating_mul(CEILING);
-        assert!(
-            times.spent(pass) <= ceiling,
-            "{pass:?} cost {} us against a {} us ceiling — that is a regression, \
-             not a slow host",
-            micros(times.spent(pass)),
-            micros(ceiling)
-        );
-    }
-    assert!(
-        times.spent(Pass::Terrain) > times.spent(Pass::Light),
-        "the ground is no longer the expensive pass ({} us against {} us); the \
-         budget's balance has moved and the plan's table should move with it",
-        micros(times.spent(Pass::Terrain)),
-        micros(times.spent(Pass::Light))
+        differing.is_none(),
+        "handing the bands to {REFERENCE_CORES} threads changed the picture: {differing:?}"
     );
 }

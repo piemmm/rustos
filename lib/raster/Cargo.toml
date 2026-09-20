@@ -31,6 +31,9 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # sized by image geometry takes, so a surface a machine short of memory
 # refuses is a `None` and not an allocation abort.
 tairix-util = { path = "../util", version = "=0.0.0" }
+# The fixed arrays an outline is traced into, so the shape path touches no
+# allocator and a generator cannot exceed a buffer it was sized against.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared order-shuffling runner the frost's bit-identity tests compose

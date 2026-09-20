@@ -25,11 +25,11 @@
 
 use alloc::vec::Vec;
 
+use tairix_raster::shape::{Placed, Shape};
 use tairix_raster::Color;
 use tairix_util::mathf;
 
 use crate::project::{project, Body, Ground};
-use crate::shape::{Placed, Shape};
 
 /// Cinder's coat and costume, from the mascot sheet's palette swatch.
 ///
@@ -246,12 +246,12 @@ const SKELETON: [Part; PART_COUNT] = {
 
     /// A rounded volume.
     const fn mass(rx: f64, ry: f64, square: f64) -> Shape {
-        Shape::Mass { rx, ry, square }
+        Shape::Superellipse { rx, ry, square }
     }
 
     /// A soft splat of fur.
     const fn fur(radius: f64) -> Shape {
-        Shape::Fur { radius }
+        Shape::Splat { radius }
     }
 
     [
@@ -268,13 +268,13 @@ const SKELETON: [Part; PART_COUNT] = {
         // --- the four limbs: a tapered shank pivoting in its joint, with a
         // --- dark pad at the foot. The joint masses below are what they grow
         // --- out of ---
-        part(LIMB_JOINTS[0], Shape::Limb { length: 31.0, top: 5.4, foot: 3.6 }, FUR_DEEP, Attach::Limb(0)),
+        part(LIMB_JOINTS[0], Shape::Taper { length: 31.0, top: 5.4, foot: 3.6 }, FUR_DEEP, Attach::Limb(0)),
         part(Body::new(-13.0,  9.5,  3.4), mass(3.9, 2.7, 0.40), PAW, Attach::Limb(0)),
-        part(LIMB_JOINTS[1], Shape::Limb { length: 31.0, top: 5.4, foot: 3.6 }, FUR_DEEP, Attach::Limb(1)),
+        part(LIMB_JOINTS[1], Shape::Taper { length: 31.0, top: 5.4, foot: 3.6 }, FUR_DEEP, Attach::Limb(1)),
         part(Body::new(-13.0, -9.5,  3.4), mass(3.9, 2.7, 0.40), PAW, Attach::Limb(1)),
-        part(LIMB_JOINTS[2], Shape::Limb { length: 29.0, top: 4.6, foot: 3.4 }, FUR_DEEP, Attach::Limb(2)),
+        part(LIMB_JOINTS[2], Shape::Taper { length: 29.0, top: 4.6, foot: 3.4 }, FUR_DEEP, Attach::Limb(2)),
         part(Body::new( 11.0,  8.5,  3.4), mass(3.6, 2.5, 0.40), PAW, Attach::Limb(2)),
-        part(LIMB_JOINTS[3], Shape::Limb { length: 29.0, top: 4.6, foot: 3.4 }, FUR_DEEP, Attach::Limb(3)),
+        part(LIMB_JOINTS[3], Shape::Taper { length: 29.0, top: 4.6, foot: 3.4 }, FUR_DEEP, Attach::Limb(3)),
         part(Body::new( 11.0, -8.5,  3.4), mass(3.6, 2.5, 0.40), PAW, Attach::Limb(3)),
 
         // --- the trunk: a chain of rounded masses along the spine, squarer at
@@ -293,12 +293,12 @@ const SKELETON: [Part; PART_COUNT] = {
 
         // --- the cape: a panel gathered over the shoulders and one down each
         // --- flank, with the sheet's flap and its orange piping ---
-        part(Body::new( -4.0,   0.0, 38.0), Shape::Drape { rx: 12.5, ry: 16.0, folds: 3 }, SLATE_SHADE, Attach::Trunk),
-        part(Body::new( -3.0,  10.5, 34.0), Shape::Drape { rx:  7.0, ry: 15.0, folds: 2 }, SLATE_SHADE, Attach::Trunk),
-        part(Body::new( -3.0, -10.5, 34.0), Shape::Drape { rx:  7.0, ry: 15.0, folds: 2 }, SLATE_SHADE, Attach::Trunk),
+        part(Body::new( -4.0,   0.0, 38.0), Shape::ScallopedPanel { rx: 12.5, ry: 16.0, folds: 3 }, SLATE_SHADE, Attach::Trunk),
+        part(Body::new( -3.0,  10.5, 34.0), Shape::ScallopedPanel { rx:  7.0, ry: 15.0, folds: 2 }, SLATE_SHADE, Attach::Trunk),
+        part(Body::new( -3.0, -10.5, 34.0), Shape::ScallopedPanel { rx:  7.0, ry: 15.0, folds: 2 }, SLATE_SHADE, Attach::Trunk),
         part(Body::new( -7.0,  11.0, 27.0), mass(5.0, 5.8, 0.78), FUR_MID,   Attach::Trunk),
         part(Body::new( -7.0,  11.4, 27.0), mass(4.3, 5.1, 0.78), SLATE_DEEP, Attach::Trunk),
-        part(Body::new(  4.0,   0.0, 39.0), Shape::Drape { rx: 12.0, ry: 12.0, folds: 3 }, SLATE,      Attach::Trunk),
+        part(Body::new(  4.0,   0.0, 39.0), Shape::ScallopedPanel { rx: 12.0, ry: 12.0, folds: 3 }, SLATE,      Attach::Trunk),
 
         // --- the cream chest blaze, over the cape's front edge so it reads as
         // --- fur showing above a garment ---
@@ -307,7 +307,7 @@ const SKELETON: [Part; PART_COUNT] = {
         // --- the cowl: a wrap at the neck with a fold hanging at the front ---
         part(Body::new(  9.0, 0.0, 45.0), mass(9.0, 4.6, 0.46), SLATE_SHADE, Attach::Trunk),
         part(Body::new( 13.0, 0.0, 44.0), mass(9.5, 5.0, 0.46), SLATE,       Attach::Trunk),
-        part(Body::new( 15.0, 0.0, 40.0), Shape::Drape { rx: 6.5, ry: 7.0, folds: 2 }, SLATE_SHADE, Attach::Trunk),
+        part(Body::new( 15.0, 0.0, 40.0), Shape::ScallopedPanel { rx: 6.5, ry: 7.0, folds: 2 }, SLATE_SHADE, Attach::Trunk),
 
         // --- the skull: a narrow wedge, and the layered crown the sheet draws
         // --- as a rosette of guard hairs ---
@@ -316,12 +316,12 @@ const SKELETON: [Part; PART_COUNT] = {
         part(Body::new( 17.0,  0.0, 58.0), fur(8.6),               FUR_BRIGHT, Attach::Head),
 
         // --- the ears: tall wedges leaning apart, set close on the crown ---
-        part(Body::new( 14.0,  8.0, 62.0), Shape::Ear { half_width: 6.4, height: 13.0, lean:  3.4 }, FUR_MID,    Attach::Head),
-        part(Body::new( 14.0, -8.0, 62.0), Shape::Ear { half_width: 6.4, height: 13.0, lean: -3.4 }, FUR_MID,    Attach::Head),
-        part(Body::new( 15.2,  8.2, 62.6), Shape::Ear { half_width: 3.9, height:  9.2, lean:  2.6 }, CREAM_SHADE, Attach::Head),
-        part(Body::new( 15.4,  8.2, 62.4), Shape::Ear { half_width: 3.2, height:  8.0, lean:  2.4 }, CREAM,      Attach::Head),
-        part(Body::new( 15.2, -8.2, 62.6), Shape::Ear { half_width: 3.9, height:  9.2, lean: -2.6 }, CREAM_SHADE, Attach::Head),
-        part(Body::new( 15.4, -8.2, 62.4), Shape::Ear { half_width: 3.2, height:  8.0, lean: -2.4 }, CREAM,      Attach::Head),
+        part(Body::new( 14.0,  8.0, 62.0), Shape::Wedge { half_width: 6.4, height: 13.0, lean:  3.4 }, FUR_MID,    Attach::Head),
+        part(Body::new( 14.0, -8.0, 62.0), Shape::Wedge { half_width: 6.4, height: 13.0, lean: -3.4 }, FUR_MID,    Attach::Head),
+        part(Body::new( 15.2,  8.2, 62.6), Shape::Wedge { half_width: 3.9, height:  9.2, lean:  2.6 }, CREAM_SHADE, Attach::Head),
+        part(Body::new( 15.4,  8.2, 62.4), Shape::Wedge { half_width: 3.2, height:  8.0, lean:  2.4 }, CREAM,      Attach::Head),
+        part(Body::new( 15.2, -8.2, 62.6), Shape::Wedge { half_width: 3.9, height:  9.2, lean: -2.6 }, CREAM_SHADE, Attach::Head),
+        part(Body::new( 15.4, -8.2, 62.4), Shape::Wedge { half_width: 3.2, height:  8.0, lean: -2.4 }, CREAM,      Attach::Head),
 
         // --- the cream mask: spiky cheek ruffs the eyes read against ---
         part(Body::new( 17.0,  9.8, 47.0), fur(6.8), CREAM,       Attach::Head),
@@ -543,7 +543,7 @@ fn lidded(part: &Part, pose: &Pose) -> Shape {
     }
     let openness = pose.eyes.openness();
     match part.shape {
-        Shape::Mass { rx, ry, square } => Shape::Mass {
+        Shape::Superellipse { rx, ry, square } => Shape::Superellipse {
             rx,
             ry: ry * openness,
             square,

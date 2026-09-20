@@ -38,7 +38,6 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
-tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
