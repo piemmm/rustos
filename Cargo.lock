@@ -3103,6 +3103,7 @@ dependencies = [
  "tairix-kernel",
  "tairix-kernel-core",
  "tairix-log",
+ "tairix-test-audio-wire",
 ]
 
 [[package]]
@@ -3115,6 +3116,7 @@ dependencies = [
  "tairix-kernel",
  "tairix-kernel-core",
  "tairix-log",
+ "tairix-test-audio-wire",
 ]
 
 [[package]]
@@ -3125,6 +3127,7 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kernel",
  "tairix-log",
+ "tairix-test-audio-wire",
 ]
 
 [[package]]

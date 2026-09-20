@@ -42,6 +42,14 @@ and then `Attach`es it. A `stream_id` is a service-issued token checked against
 the kernel-attested caller, so a guessed id cannot reach another principal's
 stream, and zero is reserved — it is what a truncated frame carries.
 
+A client that simply wants "the speakers" opens on device zero. Enumerated
+device identities start at one, so zero names no real device and is free to
+mean *this machine's default in the direction asked for*. That spares the
+common case a round trip it would otherwise spend enumerating, and spares it
+the race of the default changing between that enumeration and the open. A
+machine with no default adopted refuses the open rather than substituting a
+device the caller never asked for.
+
 ## Role, not a configuration file
 
 `StreamRole` is the one input a program gives the router beyond its format:

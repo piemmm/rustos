@@ -381,6 +381,7 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testsink::RecordingSink;
 
     use alloc::vec;
     use core::cell::RefCell;
@@ -513,27 +514,6 @@ mod tests {
     impl DriverStoreCall for FailingCatalogue {
         fn call(&mut self, _request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             tairix_abi::driver_store::encode_error_reply(reply, Errno::PermissionDenied)
-        }
-    }
-
-    struct RecordingSink {
-        ids: RefCell<Vec<u32>>,
-    }
-
-    impl RecordingSink {
-        fn new() -> Self {
-            Self {
-                ids: RefCell::new(Vec::new()),
-            }
-        }
-        fn ids(&self) -> Vec<u32> {
-            self.ids.borrow().clone()
-        }
-    }
-
-    impl Sink for RecordingSink {
-        fn write_event(&self, event: &Event<'_>) {
-            self.ids.borrow_mut().push(event.id.0);
         }
     }
 

@@ -224,9 +224,10 @@ pub fn bind_new_channels(
                     "netchan device channel bound to network stack",
                     &iface,
                     node_location,
+                    None,
                 );
             }
-            Err(_) => {
+            Err(err) => {
                 audit(
                     sink,
                     events::NETSTACK_BIND_FAILED,
@@ -234,6 +235,7 @@ pub fn bind_new_channels(
                     "netchan device-channel bind to network stack failed; will retry",
                     &iface,
                     node_location,
+                    Some(err),
                 );
             }
         }
@@ -284,25 +286,44 @@ fn audit(
     message: &'static str,
     iface: &[u8; IF_NAME_LEN],
     node_location: u64,
+    error: Option<Errno>,
 ) {
     let len = iface.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
     let name = core::str::from_utf8(&iface[..len]).unwrap_or("?");
+    let named = [
+        Field {
+            key: "iface",
+            value: FieldValue::Str(name),
+        },
+        Field {
+            key: "node",
+            value: FieldValue::UnsignedInt(node_location),
+        },
+    ];
+    // On a refusal the record must name what the stack said, or it reports
+    // a failure with no cause.
+    let refused;
+    let fields = match error {
+        Some(err) => {
+            refused = [
+                named[0],
+                named[1],
+                Field {
+                    key: "error",
+                    value: FieldValue::Error(err),
+                },
+            ];
+            &refused[..]
+        }
+        None => &named[..],
+    };
     log_event(
         sink,
         &Event {
             level,
             id,
             message,
-            fields: &[
-                Field {
-                    key: "iface",
-                    value: FieldValue::Str(name),
-                },
-                Field {
-                    key: "node",
-                    value: FieldValue::UnsignedInt(node_location),
-                },
-            ],
+            fields,
         },
     );
 }

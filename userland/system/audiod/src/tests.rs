@@ -52,6 +52,10 @@ fn rate(hz: u32) -> Rate {
 struct FixtureDevice {
     configured: Option<ConfigureGrant>,
     running: bool,
+    /// Draining: take no more, and stop once what is queued has gone —
+    /// the real driver's behaviour, which is what makes a drain complete
+    /// only after playout.
+    draining: bool,
     position: Frames,
     played: Vec<u8>,
     /// Frames a capture endpoint hands back, drawn from here in order.
@@ -68,6 +72,7 @@ impl FixtureDevice {
         Self {
             configured: None,
             running: false,
+            draining: false,
             position: Frames::ZERO,
             played: Vec::new(),
             captured: Vec::new(),
@@ -148,7 +153,7 @@ impl Audio for FixtureDevice {
     }
 
     fn drain(&mut self, _endpoint: u16) -> Result<(), DriverError> {
-        self.running = false;
+        self.draining = true;
         Ok(())
     }
 
@@ -175,6 +180,10 @@ impl Audio for FixtureDevice {
             written
         };
         self.position = Frames::new(self.position.get() + u64::from(transferred));
+        if self.draining && ring.readable_frames().unwrap_or(0) == 0 {
+            self.running = false;
+            self.draining = false;
+        }
         self.now =
             Time64::new(self.now.secs(), self.now.subsec_nanos() + 1_000_000).unwrap_or(self.now);
         Ok(AudioServiced {
@@ -508,6 +517,14 @@ impl Fixture {
         }
         .encode();
         self.service.on_device_notify(0, &frame, &DiscardSink);
+        if !serviced.report.running {
+            let done = tairix_abi::driver::audio_channel::AudioChannelNotify::Drained {
+                endpoint: 0,
+                position: serviced.report.position,
+            }
+            .encode();
+            self.service.on_device_notify(0, &done, &DiscardSink);
+        }
     }
 
     /// What the device was handed.
@@ -824,5 +841,114 @@ fn closing_the_last_stream_releases_the_endpoint() {
     assert!(
         fixture.device.borrow().audio().configured.is_none(),
         "the device is released with its last stream"
+    );
+}
+
+#[test]
+fn starting_a_sink_hands_the_device_its_first_periods() {
+    // The device only interrupts once it has completed a transfer, and the
+    // driver only moves frames when it is serviced. Filling the shared ring
+    // is therefore not priming: unless `Start` also posts, the device is
+    // clocked with an empty queue and nothing ever wakes anybody. Note that
+    // no `period()` is driven here — the fixture's period stands in for the
+    // driver's own interrupt path, which cannot fire before a first post.
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let caller = caller(7, &[]);
+    let grant = fixture.open_playback(&caller, DEVICE_HZ, 2_048);
+    let samples = signal(1_500);
+    assert_eq!(fixture.client_write(&grant, &samples), 1_500);
+
+    let reply = fixture.call(
+        &caller,
+        &AudioRequest::Start {
+            stream_id: grant.stream_id,
+            at: Frames::ZERO,
+        },
+    );
+    decode_status_reply(&reply).expect("started");
+
+    assert!(
+        !fixture.played().is_empty(),
+        "the device was clocked with nothing queued, so it can never interrupt"
+    );
+}
+
+#[test]
+fn a_drain_completes_only_once_the_device_has_played_out() {
+    // The frames the mixer hands over sit in the driver's own transfers
+    // long after the shared ring runs dry. Completing the drain when the
+    // ring empties cuts the tail off every sound; the stream stays
+    // `Draining` until the device says it played out.
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let caller = caller(7, &[]);
+    let grant = fixture.open_playback(&caller, DEVICE_HZ, 2_048);
+    let samples = signal(1_500);
+    assert_eq!(fixture.client_write(&grant, &samples), 1_500);
+
+    let reply = fixture.call(
+        &caller,
+        &AudioRequest::Start {
+            stream_id: grant.stream_id,
+            at: Frames::ZERO,
+        },
+    );
+    decode_status_reply(&reply).expect("started");
+    let reply = fixture.call(
+        &caller,
+        &AudioRequest::Drain {
+            stream_id: grant.stream_id,
+        },
+    );
+    decode_status_reply(&reply).expect("draining");
+
+    let state = decode_state_reply(&fixture.call(
+        &caller,
+        &AudioRequest::State {
+            stream_id: grant.stream_id,
+        },
+    ))
+    .expect("state");
+    assert_eq!(
+        state.state,
+        StreamState::Draining,
+        "asking the device to drain is not the device having drained"
+    );
+
+    for _ in 0..16 {
+        fixture.period();
+    }
+    let state = decode_state_reply(&fixture.call(
+        &caller,
+        &AudioRequest::State {
+            stream_id: grant.stream_id,
+        },
+    ))
+    .expect("state");
+    assert_eq!(state.state, StreamState::Idle, "the device played it out");
+}
+
+#[test]
+fn the_last_stream_closing_gives_the_device_back() {
+    // Holding a configured stream and its shared region after the last
+    // client has gone keeps the hardware open for the life of the driver.
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let caller = caller(7, &[]);
+    let grant = fixture.open_playback(&caller, DEVICE_HZ, 2_048);
+    assert!(fixture.device.borrow().audio().configured.is_some());
+
+    let reply = fixture.call(
+        &caller,
+        &AudioRequest::Close {
+            stream_id: grant.stream_id,
+        },
+    );
+    decode_status_reply(&reply).expect("closed");
+
+    assert!(
+        fixture.device.borrow().audio().configured.is_none(),
+        "the device stream was released"
     );
 }

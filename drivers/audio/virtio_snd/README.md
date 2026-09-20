@@ -37,6 +37,14 @@ an answer:
   five channels, seven — is refused rather than guessed at.
 * **A position this stack cannot place** → the whole map is left unpublished
   rather than half-read.
+* **A device that advertises jacks or channel maps and then declines the
+  query** → the same undescribed state as a device that advertised none.
+  Both are descriptive classes, so a refusal leaves the endpoint's jack
+  unknown and its map absent; it never fails the bring-up. QEMU's
+  virtio-sound does exactly this — it reports whatever counts its command
+  line was given and answers `NOT_SUPP` to both — and it plays audio
+  perfectly well. A refused *stream* description is different and stays
+  fatal: a stream that cannot be described cannot be driven.
 
 A format the engine cannot convert is simply not advertised; a stream that
 offers *only* such formats is a device fault, because it can carry no audio

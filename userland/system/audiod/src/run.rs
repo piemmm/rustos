@@ -80,15 +80,33 @@ mod program {
         tairix_abi::audio::notify_endpoint_for(pid, index as u64)
     }
 
-    /// One mapped shared PCM region.
+    /// One shared PCM region this service holds, and where it came from.
+    ///
+    /// Only a region this service *created* carries a kernel id, because
+    /// only its owner may delegate it onward; a region a client granted is
+    /// mapped and read, never re-granted.
+    enum Backing {
+        Created(tairix_rt::shm::SharedRegion),
+        Adopted(tairix_rt::shm::MappedGrant),
+    }
+
+    impl Backing {
+        fn bytes_mut(&mut self) -> &mut [u8] {
+            match self {
+                Self::Created(region) => region.bytes_mut(),
+                Self::Adopted(grant) => grant.bytes_mut(),
+            }
+        }
+    }
+
+    /// One mapped shared PCM region, unmapped when its backing drops.
     struct Mapping {
         id: RegionId,
-        /// Base of the mapping, released verbatim by the matching unmap.
-        base: u64,
-        /// Full mapped byte length, page-rounded by the kernel.
-        len: usize,
-        /// The exclusive ring view: the first `used` bytes of the mapping.
-        bytes: &'static mut [u8],
+        /// The agreed ring's own byte length. A mapping is page-rounded and
+        /// so may be longer; the ring binds the exact geometry and nothing
+        /// beyond it.
+        used: usize,
+        backing: Backing,
     }
 
     /// The live region host, over the unprivileged anonymous shared-memory
@@ -106,43 +124,13 @@ mod program {
             }
         }
 
-        /// Map `handle` and take an exclusive view of its first `used` bytes.
-        fn map(&mut self, handle: u64, used: usize) -> Result<RegionId, Errno> {
-            let mut mapped_len = 0u64;
-            let mapped = tairix_rt::shm_map(handle, &mut mapped_len);
-            if mapped < 0 {
-                return Err(Errno::from_syscall(mapped));
-            }
-            let (Ok(base), Ok(addr), Ok(len)) = (
-                u64::try_from(mapped),
-                usize::try_from(mapped),
-                usize::try_from(mapped_len),
-            ) else {
-                return Err(Errno::DeviceFault);
-            };
-            if len < used {
-                let _ = tairix_rt::shm_unmap(base, len);
-                return Err(Errno::BufferTooSmall);
-            }
-            // SAFETY: `shm_map` mapped `len` bytes (>= `used`, checked above)
-            // of zeroed, cacheable, RW (non-executable) memory into this
-            // process at `addr`, owned here until the matching `shm_unmap`.
-            // The view covers only the first `used` bytes — the geometry both
-            // sides agreed — so the exclusive `&mut [u8]` is a sound subset,
-            // and nothing else in this address space aliases it: every other
-            // mapping came from a different grant. The peer maps the same
-            // frames through its own grant; the ring's atomic positions are
-            // what order the two sides' access to the samples.
-            let bytes = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, used) };
+        /// Record `backing`, whose agreed ring is its first `used` bytes,
+        /// under a fresh local identity.
+        fn record(&mut self, backing: Backing, used: usize) -> RegionId {
             let id = RegionId(self.next);
             self.next = self.next.wrapping_add(1).max(1);
-            self.mappings.push(Mapping {
-                id,
-                base,
-                len,
-                bytes,
-            });
-            Ok(id)
+            self.mappings.push(Mapping { id, used, backing });
+            id
         }
 
         fn slot(&mut self, region: RegionId) -> Option<usize> {
@@ -154,21 +142,23 @@ mod program {
 
     impl RegionHost for RtRegions {
         fn create(&mut self, len: usize) -> Result<RegionId, Errno> {
-            let mut handle = 0u64;
-            let created = tairix_rt::shm_create(len, &mut handle);
-            if created < 0 {
-                return Err(Errno::from_syscall(created));
-            }
-            self.map(handle, len)
+            let region = tairix_rt::shm::SharedRegion::create(len).ok_or(Errno::OutOfMemory)?;
+            Ok(self.record(Backing::Created(region), len))
         }
 
         fn adopt(&mut self, grant: u64, len: usize) -> Result<RegionId, Errno> {
-            self.map(grant, len)
+            let mapped = tairix_rt::shm::MappedGrant::map(grant, len)?;
+            Ok(self.record(Backing::Adopted(mapped), len))
         }
 
         fn grant(&mut self, region: RegionId, endpoint: u64) -> Result<u64, Errno> {
             let slot = self.slot(region).ok_or(Errno::NotFound)?;
-            let granted = tairix_rt::shm_grant(self.mappings[slot].base, endpoint);
+            // Delegation names the region by its kernel id. A region this
+            // service only holds a grant for is not its to pass on.
+            let Backing::Created(created) = &self.mappings[slot].backing else {
+                return Err(Errno::PermissionDenied);
+            };
+            let granted = tairix_rt::shm_grant(created.id(), endpoint);
             if granted < 0 {
                 return Err(Errno::from_syscall(granted));
             }
@@ -178,15 +168,20 @@ mod program {
 
         fn bytes(&mut self, region: RegionId) -> Result<&mut [u8], Errno> {
             let slot = self.slot(region).ok_or(Errno::NotFound)?;
-            Ok(self.mappings[slot].bytes)
+            let mapping = &mut self.mappings[slot];
+            let used = mapping.used;
+            mapping
+                .backing
+                .bytes_mut()
+                .get_mut(..used)
+                .ok_or(Errno::BufferTooSmall)
         }
 
         fn release(&mut self, region: RegionId) {
             let Some(slot) = self.slot(region) else {
                 return;
             };
-            let mapping = self.mappings.remove(slot);
-            let _ = tairix_rt::shm_unmap(mapping.base, mapping.len);
+            self.mappings.remove(slot);
         }
     }
 
@@ -387,15 +382,17 @@ mod program {
         if bound != 0 && bound != -i64::from(Errno::AlreadyExists.as_i32().unsigned_abs()) {
             return Err(Errno::from_syscall(bound));
         }
-        if tairix_rt::waitset_ctl(
+        // A message port, not a call endpoint: the driver *notifies* this
+        // side, it never calls it.
+        let added = tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
-            WaitSourceKind::Endpoint,
+            WaitSourceKind::Port,
             port,
             device_token(index),
-        ) != 0
-        {
-            return Err(Errno::NoSpace);
+        );
+        if added != 0 {
+            return Err(Errno::from_syscall(added));
         }
         service.bind_device(
             endpoint_id,

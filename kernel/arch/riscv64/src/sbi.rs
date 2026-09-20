@@ -40,6 +40,10 @@ const SBI_SET_TIMER: usize = 0x00;
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 const SBI_CONSOLE_PUTCHAR: usize = 0x01;
 
+/// SBI legacy extension id for `console_getchar`.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+const SBI_CONSOLE_GETCHAR: usize = 0x02;
+
 /// SBI v0.2 IPI extension id (ASCII `"sPI"`).
 pub const SBI_EXT_IPI: usize = 0x73_5049;
 
@@ -169,6 +173,38 @@ pub fn console_putchar(byte: u8) {
 /// let theirs be.
 #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
 pub fn console_putchar(_byte: u8) {}
+
+/// Take one byte from the SBI console, or [`None`] when none is pending.
+///
+/// The legacy `console_getchar` service is a *non-blocking* drain: it
+/// answers `-1` when the firmware holds no input, which is what lets a
+/// console reader poll it and park between polls rather than spin.
+#[must_use]
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub fn console_getchar() -> Option<u8> {
+    let ret: isize;
+    // SAFETY: an `ecall` with `a7 = 0x02` is the documented SBI legacy
+    // `console_getchar` service. It reads no guest memory, writes none, and
+    // clobbers only the SBI-defined return registers `a0`/`a1`; `a0` carries
+    // the byte, or `-1` when the firmware has nothing buffered.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") SBI_CONSOLE_GETCHAR,
+            inout("a0") 0usize => ret,
+            lateout("a1") _,
+            options(nostack),
+        );
+    }
+    u8::try_from(ret).ok()
+}
+
+/// Inert on the host build: there is no firmware holding input.
+#[must_use]
+#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+pub fn console_getchar() -> Option<u8> {
+    None
+}
 
 /// Send an inter-processor interrupt to every hart selected by
 /// `(hart_mask, hart_mask_base)` via the SBI v0.2 IPI extension.
@@ -373,5 +409,13 @@ mod tests {
             value: 0
         }
         .is_success());
+    }
+
+    #[test]
+    fn the_host_console_drain_reports_nothing_pending() {
+        // Off-target there is no firmware holding input. The console reader
+        // above this treats `None` as a short read and parks, so the stub
+        // must answer "nothing pending" rather than pretend a byte arrived.
+        assert_eq!(console_getchar(), None);
     }
 }

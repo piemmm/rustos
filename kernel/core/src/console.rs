@@ -262,6 +262,22 @@ pub trait ConsoleRead {
         self.read(buf)
     }
 
+    /// How often a parked reader must come back to this device, for a
+    /// backing with **no wake source at all**.
+    ///
+    /// [`None`], the default, means an interrupt pushes into the console
+    /// queue and that push wakes the reader, so it arms no timer. A port
+    /// whose firmware console raises no receive interrupt (the riscv64 SBI
+    /// legacy console) returns its interval and [`BlockingConsoleRead`]
+    /// parks on a one-shot timer for that long instead of forever.
+    ///
+    /// Only override it where no interrupt exists: declaring an interval on
+    /// a device that has one downgrades a lost wake from a visible hang to a
+    /// silent latency bug.
+    fn poll_interval_ns(&self) -> Option<u64> {
+        None
+    }
+
     /// Mark the reads that follow as secret (password) entry (`secret ==
     /// true`) or ordinary echoed entry (`secret == false`).
     ///
@@ -1215,14 +1231,22 @@ where
         loop {
             // The nearest one-shot wake this wait needs: the secret
             // feedback's animation frame (armed only while a password
-            // marker is on screen) and/or the caller's own read deadline.
-            // An ordinary unbounded read has neither, parks with no
+            // marker is on screen), the caller's own read deadline, and —
+            // only on a backing with no interrupt to wake it — that
+            // device's re-poll interval. An ordinary unbounded read on an
+            // interrupt-fed console has none of the three, parks with no
             // deadline, and takes no timer wake-ups at all (tickless).
+            let repoll = self.inner.poll_interval_ns().map(|interval| {
+                crate::waitq::wait_now_ns()
+                    .unwrap_or(0)
+                    .saturating_add(interval)
+            });
             let deadline = self
                 .secret
                 .and_then(SecretFeedback::deadline_ns)
                 .unwrap_or(crate::waitq::NO_DEADLINE)
-                .min(limit_ns.unwrap_or(crate::waitq::NO_DEADLINE));
+                .min(limit_ns.unwrap_or(crate::waitq::NO_DEADLINE))
+                .min(repoll.unwrap_or(crate::waitq::NO_DEADLINE));
             // Register **before** polling so a push arriving in the window
             // between the empty poll and the park is not lost: the producer's
             // [`crate::waitq::console_wake`] then `unpark`s this task and the
@@ -1283,13 +1307,13 @@ where
             // whose edge *produces* this console's next byte) would be
             // starved.
             //
-            // The wait is **event-driven**: a [`crate::waitq::console_wake`]
-            // from a keyboard- or UART-backed console's input push unparks
-            // the reader the instant a byte lands. There is no timed re-poll
-            // of the *device*; the only finite deadlines ever registered
-            // here are the secret feedback's animation tick and the
-            // caller's own read bound, so an ordinary unbounded read still
-            // arms no one-shot at all.
+            // The wait is **event-driven** wherever the device can wake it: a
+            // [`crate::waitq::console_wake`] from a keyboard- or UART-backed
+            // console's input push unparks the reader the instant a byte
+            // lands, and such a read arms no one-shot at all. A backing that
+            // raises no receive interrupt (`poll_interval_ns`) is the one
+            // case that re-polls, and then on a one-shot deadline so the CPU
+            // still sleeps between polls — never a busy-yield.
             //
             // With no waker hook there is no scheduler to park on, so fail
             // closed rather than busy-spin.
@@ -1388,6 +1412,23 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::test_arch::TestArch;
+
+    /// A backing with no interrupt behind it, like the riscv64 firmware
+    /// console.
+    struct PolledRead;
+
+    /// An arbitrary non-zero interval; only its propagation is under test.
+    const POLLED_INTERVAL_NS: u64 = 1_000_000;
+
+    impl ConsoleRead for PolledRead {
+        fn read(&self, _buf: &mut [u8]) -> Result<usize, Errno> {
+            Ok(0)
+        }
+
+        fn poll_interval_ns(&self) -> Option<u64> {
+            Some(POLLED_INTERVAL_NS)
+        }
+    }
 
     /// A scripted inner device: hands out a fixed byte string once, then
     /// reports empty polls (or a scripted error), recording how many
@@ -1623,6 +1664,26 @@ mod tests {
             "the park must resolve the live CPU, not reuse one read before the loop (saw {})",
             arch.current_cpu_reads()
         );
+    }
+
+    #[test]
+    fn only_a_backing_with_no_wake_source_asks_to_be_re_polled() {
+        // The interrupt-fed backings push into the console queue, and that
+        // push wakes the parked reader. If one of them ever declared a
+        // re-poll interval, a lost or masked interrupt would stop being a
+        // visible hang and become an invisible latency bug instead — which
+        // is precisely the failure that hid a masked console line on x86_64
+        // behind readers that happened to carry their own deadline. The
+        // default is `None` and these must keep it.
+        static INNER: ScriptedRead = ScriptedRead::with_bytes(b"hi");
+        assert_eq!(INNER.poll_interval_ns(), None);
+        assert_eq!(ConsoleInputQueue::new().poll_interval_ns(), None);
+        assert_eq!(NullConsoleRead.poll_interval_ns(), None);
+
+        // A backing that genuinely has no interrupt (the riscv64 firmware
+        // console) is the one case that opts in, and the adapter then has a
+        // finite deadline to park on rather than waiting forever.
+        assert_eq!(PolledRead.poll_interval_ns(), Some(POLLED_INTERVAL_NS));
     }
 
     #[test]

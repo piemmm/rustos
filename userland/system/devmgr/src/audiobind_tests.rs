@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::*;
+use crate::testsink::RecordingSink;
 use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HwResource, HW_NODE_ROOT};
 use tairix_log::DiscardSink;
 
@@ -82,4 +83,22 @@ fn a_refused_hand_off_is_retried_rather_than_recorded() {
     bind_new_channels(&nodes, &mut state, &mut bind, &DiscardSink);
     assert!(state.is_bound(100), "retried and bound");
     assert_eq!(*bind.calls.borrow(), alloc::vec![100, 100]);
+}
+
+#[test]
+fn a_refusal_records_what_the_audio_service_said() {
+    // A record that says only "failed" leaves an operator nothing to act
+    // on; the errno is the whole diagnosis.
+    let nodes = alloc::vec![audiochan_node(1, 100)];
+    let mut state = AudioBindState::new();
+    let mut bind = RecordingBind::new(alloc::vec![Err(Errno::PermissionDenied)]);
+    let sink = RecordingSink::new();
+    bind_new_channels(&nodes, &mut state, &mut bind, &sink);
+
+    let id = events::AUDIOD_BIND_FAILED.0;
+    assert_eq!(sink.field_of(id, "endpoint").as_deref(), Some("100"));
+    assert!(
+        sink.field_of(id, "error").is_some(),
+        "the refusal record carries what the service said"
+    );
 }

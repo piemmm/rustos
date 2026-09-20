@@ -652,9 +652,13 @@ impl Arch {
 /// limit rather than a choice: `wav` records what the guest plays and cannot
 /// supply capture, so a device declaring a capture stream would be
 /// advertising a capability the host has not got (QEMU says so, on stderr,
-/// every run). It is given channel maps and one jack so the driver's
-/// published-map and jack-state paths are exercised rather than only its
-/// defaults.
+/// every run).
+///
+/// The channel maps and jack are asked for because QEMU *advertises* both
+/// counts in its configuration space and then answers `NOT_SUPP` to both
+/// query classes — it implements neither. They therefore exercise the
+/// driver's tolerance of a device that will not describe itself, which is
+/// the behaviour of the one sound card this vertical can actually run.
 #[must_use]
 pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
     let Some(path) = spec.audio_wav_path.as_ref() else {
@@ -1811,7 +1815,7 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
             return Ok(done);
         }
         if let Some(status) = child.try_wait()? {
-            return Ok(exit_reason(spec, serial_script.step, &*injections, status));
+            return Ok(exit_reason(spec, serial_script, &*injections, status));
         }
         if let Some(result) = completed_drain_result(reader, "serial output") {
             serial_closed = result.is_ok();
@@ -1872,6 +1876,7 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
             return Ok(DoneReason::CeilingExceeded {
                 silent_for,
                 cpu_state,
+                script_pending: serial_script.incomplete_reason(&spec.serial_input),
             });
         }
         if heartbeat.idle_for(Instant::now()) >= spec.timeout {
@@ -1883,7 +1888,10 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
             return Ok(if serial_closed {
                 DoneReason::DrainFailed(String::from("serial output closed before QEMU exited"))
             } else {
-                DoneReason::TimedOut { cpu_state }
+                DoneReason::TimedOut {
+                    cpu_state,
+                    script_pending: serial_script.incomplete_reason(&spec.serial_input),
+                }
             });
         }
         std::thread::sleep(tick);
@@ -1935,6 +1943,20 @@ impl ProgressClock {
     }
 }
 
+/// Append a runner-side note to the captured transcript under the
+/// `tairix-qemu:` banner, so the report explains why the run was cut short
+/// exactly as a guest diagnostic would. A run with nothing to say adds
+/// nothing, keeping a clean transcript clean.
+fn note_on_transcript(serial: &mut String, note: Option<&str>) {
+    let Some(note) = note else { return };
+    if !serial.is_empty() && !serial.ends_with('\n') {
+        serial.push('\n');
+    }
+    serial.push_str("tairix-qemu: ");
+    serial.push_str(note);
+    serial.push('\n');
+}
+
 /// Convert the completed supervision reason and captured output into the
 /// architecture-specific public outcome.
 fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outcome {
@@ -1960,32 +1982,34 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
             spec.arch.outcome_from_status(code, serial)
         }
         DoneReason::CompletedByGate => Outcome::Pass { serial },
-        DoneReason::TimedOut { cpu_state } => Outcome::Timeout {
-            budget: spec.timeout,
-            serial,
+        DoneReason::TimedOut {
             cpu_state,
-        },
+            script_pending,
+        } => {
+            note_on_transcript(&mut serial, script_pending.as_deref());
+            Outcome::Timeout {
+                budget: spec.timeout,
+                serial,
+                cpu_state,
+            }
+        }
         DoneReason::CeilingExceeded {
             silent_for,
             cpu_state,
-        } => Outcome::RuntimeCeilingExceeded {
-            ceiling: spec.runtime_ceiling(),
-            silent_for,
-            serial,
-            cpu_state,
-        },
+            script_pending,
+        } => {
+            note_on_transcript(&mut serial, script_pending.as_deref());
+            Outcome::RuntimeCeilingExceeded {
+                ceiling: spec.runtime_ceiling(),
+                silent_for,
+                serial,
+                cpu_state,
+            }
+        }
         DoneReason::InjectionFailed(reason)
         | DoneReason::DrainFailed(reason)
         | DoneReason::ObserverAbandoned(reason) => {
-            // The failure message rides the serial log so the report
-            // explains *why* the run was cut short, exactly as a guest
-            // diagnostic would.
-            if !serial.is_empty() && !serial.ends_with('\n') {
-                serial.push('\n');
-            }
-            serial.push_str("tairix-qemu: ");
-            serial.push_str(&reason);
-            serial.push('\n');
+            note_on_transcript(&mut serial, Some(&reason));
             Outcome::Fail { status: -1, serial }
         }
     }
@@ -2011,6 +2035,36 @@ struct SerialScriptState {
     step: usize,
     search_from: usize,
     matched: Option<PendingSerialStep>,
+}
+
+impl SerialScriptState {
+    /// Why the scripted exchange is unfinished, or [`None`] once every step
+    /// was sent.
+    ///
+    /// Reported on *every* way a run can end short, because it is the fact
+    /// that assigns the failure: a step still waiting on its marker means the
+    /// runner never typed, so the guest cannot be blamed for not answering,
+    /// whereas a marker matched with the line part-written says the guest was
+    /// typed at and stopped consuming. Without it a killed run reads as a
+    /// guest that simply never completed.
+    fn incomplete_reason(&self, steps: &[SerialInjection]) -> Option<String> {
+        let step = steps.get(self.step)?;
+        let progress = match &self.matched {
+            None => format!("its marker {:?} was never seen", step.ready_marker),
+            Some(pending) => format!(
+                "its marker {:?} matched and {} of {} bytes of {:?} were typed",
+                step.ready_marker,
+                pending.byte,
+                step.line.len(),
+                step.line,
+            ),
+        };
+        Some(format!(
+            "serial input script incomplete: {} of {} steps sent ({progress})",
+            self.step,
+            steps.len(),
+        ))
+    }
 }
 
 struct PendingSerialStep {
@@ -2109,6 +2163,8 @@ enum DoneReason {
         /// Every vCPU's register file at the kill, with kernel-text
         /// addresses resolved.
         cpu_state: String,
+        /// The scripted exchange left unfinished at the kill, if any.
+        script_pending: Option<String>,
     },
     /// The run hit its absolute wall-clock ceiling while still alive; the
     /// child was killed. Carries how long the guest had been silent, which
@@ -2120,6 +2176,8 @@ enum DoneReason {
         /// Every vCPU's register file at the kill, with kernel-text
         /// addresses resolved.
         cpu_state: String,
+        /// The scripted exchange left unfinished at the kill, if any.
+        script_pending: Option<String>,
     },
     /// The [`Spec::completion_gate`] tripped: the out-of-guest observer
     /// (the `netpeer` link peer) confirmed success, so the child was
@@ -3041,17 +3099,12 @@ impl InjectionState {
 /// status decides the outcome.
 fn exit_reason(
     spec: &Spec,
-    serial_step: usize,
+    serial_script: &SerialScriptState,
     injections: &InjectionState,
     status: std::process::ExitStatus,
 ) -> DoneReason {
-    if serial_step < spec.serial_input.len() {
-        return DoneReason::InjectionFailed(format!(
-            "serial input script incomplete: {serial_step} of {} steps sent \
-             before exit (next marker {:?} never seen)",
-            spec.serial_input.len(),
-            spec.serial_input[serial_step].ready_marker,
-        ));
+    if let Some(reason) = serial_script.incomplete_reason(&spec.serial_input) {
+        return DoneReason::InjectionFailed(reason);
     }
     if let Some(reason) = injections.incomplete_reason(spec) {
         return DoneReason::InjectionFailed(reason.into());
@@ -3398,6 +3451,7 @@ mod tests {
             DoneReason::CeilingExceeded {
                 silent_for: Duration::from_millis(20),
                 cpu_state: String::new(),
+                script_pending: None,
             },
             &spec,
             "campaign log".into(),
@@ -3422,6 +3476,7 @@ mod tests {
             DoneReason::CeilingExceeded {
                 silent_for: Duration::from_secs(355),
                 cpu_state: String::new(),
+                script_pending: None,
             },
             &spec,
             "boot log".into(),
@@ -3440,13 +3495,95 @@ mod tests {
         assert!(matches!(
             outcome_from_done(
                 DoneReason::TimedOut {
-                    cpu_state: String::new()
+                    cpu_state: String::new(),
+                    script_pending: None,
                 },
                 &spec,
                 "boot log".into()
             ),
             Outcome::Timeout { budget, .. } if budget == Duration::from_secs(60)
         ));
+    }
+
+    #[test]
+    fn a_run_killed_mid_script_names_the_step_it_was_waiting_on() {
+        // Regression: a run killed at its ceiling or inactivity budget said
+        // only that the guest never finished, even when the runner itself had
+        // not yet typed the next line. That misassigns the failure — the guest
+        // was never asked — and it cost a whole diagnosis cycle on the x86_64
+        // audio vertical. Every short ending now states the script's position.
+        let steps = [
+            SerialInjection {
+                ready_marker: "Password".into(),
+                delay_after_marker: Duration::ZERO,
+                line: "root\n".into(),
+            },
+            SerialInjection {
+                ready_marker: "root@tairix ~% ".into(),
+                delay_after_marker: Duration::ZERO,
+                line: "audiotone\n".into(),
+            },
+        ];
+
+        // Waiting on a marker: the runner has typed nothing, so the guest
+        // cannot be blamed for not answering.
+        let waiting = SerialScriptState {
+            step: 1,
+            search_from: 8,
+            matched: None,
+        };
+        let note = waiting
+            .incomplete_reason(&steps)
+            .expect("an unfinished script must explain itself");
+        assert!(note.contains("1 of 2 steps sent"), "{note}");
+        assert!(note.contains("\"root@tairix ~% \""), "{note}");
+        assert!(note.contains("never seen"), "{note}");
+
+        // Marker matched with the line part-typed: the guest *was* typed at
+        // and stopped consuming, which is the opposite diagnosis.
+        let typed_at = SerialScriptState {
+            step: 1,
+            search_from: 8,
+            matched: Some(PendingSerialStep {
+                matched_end: 23,
+                send_at: Instant::now(),
+                byte: 3,
+            }),
+        };
+        let note = typed_at
+            .incomplete_reason(&steps)
+            .expect("a part-typed step must explain itself");
+        assert!(note.contains("3 of 10 bytes"), "{note}");
+        assert!(note.contains("matched"), "{note}");
+
+        // A completed script has nothing to report, so a clean run's
+        // transcript stays clean.
+        let done = SerialScriptState {
+            step: 2,
+            search_from: 23,
+            matched: None,
+        };
+        assert_eq!(done.incomplete_reason(&steps), None);
+
+        // The note reaches the report: it rides the transcript, which is
+        // what every runner persists and prints.
+        let spec = Spec::for_x86_64_kernel("/tmp/k");
+        let killed = outcome_from_done(
+            DoneReason::CeilingExceeded {
+                silent_for: Duration::ZERO,
+                cpu_state: String::new(),
+                script_pending: waiting.incomplete_reason(&steps),
+            },
+            &spec,
+            "boot log".into(),
+        );
+        assert!(
+            killed
+                .serial()
+                .contains("tairix-qemu: serial input script incomplete"),
+            "the ceiling report must carry the script note: {:?}",
+            killed.serial(),
+        );
     }
 
     #[test]

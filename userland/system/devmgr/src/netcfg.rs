@@ -383,9 +383,10 @@ mod tests {
     use core::cell::RefCell;
 
     use super::*;
+
+    use crate::testsink::RecordingSink;
     use tairix_abi::net_ipc::IF_NAME_LEN;
     use tairix_abi::Errno;
-    use tairix_log::Event;
 
     /// A scripted config source: hands out a queued `load` result per call.
     struct ScriptedSource {
@@ -465,22 +466,6 @@ mod tests {
         }
     }
 
-    struct RecordingSink {
-        ids: RefCell<Vec<u32>>,
-    }
-    impl RecordingSink {
-        fn new() -> Self {
-            Self {
-                ids: RefCell::new(Vec::new()),
-            }
-        }
-    }
-    impl Sink for RecordingSink {
-        fn write_event(&self, event: &Event<'_>) {
-            self.ids.borrow_mut().push(event.id.0);
-        }
-    }
-
     // A flat test builder mirroring the six independent wire flags of
     // `NetworkSettings`; an enum would only obscure the mapping the test
     // is asserting.
@@ -531,10 +516,7 @@ mod tests {
         deliver_network_settings(&mut source, &mut state, &mut netstack, &sink);
         assert!(!state.is_delivered(), "an unreadable store defers delivery");
         assert!(netstack.applied.borrow().is_empty(), "nothing pushed");
-        assert!(
-            sink.ids.borrow().is_empty(),
-            "the expected early state is quiet"
-        );
+        assert!(sink.ids().is_empty(), "the expected early state is quiet");
     }
 
     #[test]
@@ -548,7 +530,7 @@ mod tests {
         assert!(state.is_delivered());
         assert_eq!(*netstack.applied.borrow(), alloc::vec![policy]);
         assert_eq!(
-            sink.ids.borrow().as_slice(),
+            sink.ids().as_slice(),
             &[events::NETWORK_SETTINGS_DELIVERED.0]
         );
         // Re-reading the same document costs the stack nothing.
@@ -573,7 +555,7 @@ mod tests {
         deliver_network_settings(&mut source, &mut state, &mut netstack, &sink);
         assert_eq!(*netstack.applied.borrow(), alloc::vec![shipped, edited]);
         assert_eq!(
-            sink.ids.borrow().as_slice(),
+            sink.ids().as_slice(),
             &[
                 events::NETWORK_SETTINGS_DELIVERED.0,
                 events::NETWORK_SETTINGS_DELIVERED.0
@@ -595,7 +577,7 @@ mod tests {
         assert!(state.is_delivered(), "retried and delivered");
         assert_eq!(*netstack.applied.borrow(), alloc::vec![policy, policy]);
         assert_eq!(
-            sink.ids.borrow().as_slice(),
+            sink.ids().as_slice(),
             &[
                 events::NETWORK_SETTINGS_DELIVERY_FAILED.0,
                 events::NETWORK_SETTINGS_DELIVERED.0
@@ -651,7 +633,7 @@ mod tests {
         let sink = RecordingSink::new();
         deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
         assert!(netstack.ifconfigs.borrow().is_empty(), "nothing pushed");
-        assert!(sink.ids.borrow().is_empty(), "the early state is quiet");
+        assert!(sink.ids().is_empty(), "the early state is quiet");
     }
 
     #[test]
@@ -673,16 +655,13 @@ mod tests {
         // First bump: interface not bound yet — retried silently.
         deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
         assert_eq!(netstack.ifconfigs.borrow().len(), 1);
-        assert!(
-            sink.ids.borrow().is_empty(),
-            "a not-yet-bound iface is quiet"
-        );
+        assert!(sink.ids().is_empty(), "a not-yet-bound iface is quiet");
 
         // Second bump: the interface bound; the config is delivered.
         deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
         assert_eq!(netstack.ifconfigs.borrow().len(), 2);
         assert_eq!(
-            sink.ids.borrow().as_slice(),
+            sink.ids().as_slice(),
             &[events::NETWORK_IFCONFIG_DELIVERED.0]
         );
 
@@ -709,7 +688,7 @@ mod tests {
         deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
         deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
         assert_eq!(
-            sink.ids.borrow().as_slice(),
+            sink.ids().as_slice(),
             &[events::NETWORK_IFCONFIG_REJECTED.0],
             "the config error is surfaced loud exactly once"
         );
@@ -765,11 +744,11 @@ mod tests {
         let sink = RecordingSink::new();
 
         deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
-        assert!(sink.ids.borrow().is_empty(), "nothing to reject yet");
+        assert!(sink.ids().is_empty(), "nothing to reject yet");
 
         deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
         assert_eq!(
-            sink.ids.borrow().as_slice(),
+            sink.ids().as_slice(),
             &[events::NETWORK_IFCONFIG_REJECTED.0],
             "an edit that breaks an interface is surfaced, not swallowed"
         );

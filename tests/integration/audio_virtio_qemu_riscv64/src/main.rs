@@ -31,7 +31,8 @@
 //!
 //! It reuses the entire production riscv64 boot pipeline unchanged. The only
 //! difference is that it is a dedicated test bin the harness drives; there is
-//! no in-kernel QEMU-exit shortcut to leak into a production build.
+//! the audit-stream observer that ends the run on the scripted exit; it lives
+//! in this test bin, so no QEMU-exit shortcut leaks into a production build.
 
 #![cfg_attr(itest_riscv64, no_std)]
 #![cfg_attr(itest_riscv64, no_main)]
@@ -43,9 +44,58 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use tairix_arch_riscv64::{handle_panic_via_serial, SERIAL_SINK};
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::riscv64::boot as boot_riscv64;
+    use tairix_log::{Event, EventId, FieldValue, Sink};
+    use tairix_test_audio_wire::COMMAND;
+
+    /// `SyscallInvoked`, the audited record the finisher below counts.
+    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
+
+    /// Whether the fixture's own audited `exit` has been seen.
+    static TONE_EXITED: AtomicBool = AtomicBool::new(false);
+
+    /// The string value of `event`'s field `key`, if present.
+    fn field_str<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
+        event.fields.iter().find_map(|field| {
+            if field.key == key {
+                match field.value {
+                    FieldValue::Str(s) => Some(s),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Sink that replays every event through [`SERIAL_SINK`] and finishes
+    /// the run once the fixture's audited `exit` has been seen and the
+    /// shell's own scripted `exit` follows it.
+    ///
+    /// The second exit is what makes the witness sound: the host script
+    /// sends it only after the guest has printed its PASS line, so a
+    /// fixture that failed never reaches it and the run times out instead.
+    struct AudioSink;
+
+    impl Sink for AudioSink {
+        fn write_event(&self, event: &Event<'_>) {
+            SerialSink::new().write_event(event);
+            if event.id != SYSCALL_INVOKED_EVENT_ID || field_str(event, "sc") != Some("exit") {
+                return;
+            }
+            if field_str(event, "comm") == Some(COMMAND) {
+                TONE_EXITED.store(true, Ordering::Release);
+            } else if TONE_EXITED.load(Ordering::Acquire) {
+                qemu_exit::exit_success();
+            }
+        }
+    }
+
+    static AUDIT_SINK: AudioSink = AudioSink;
 
     /// Static boot heap.
     ///
@@ -78,14 +128,10 @@ mod kernel {
     /// calls (via `tairix_arch_riscv64_main`).
     ///
     /// Forwards the SBI hand-off values (`a0` = hartid, `a1` = DTB) to the
-    /// production boot pipeline with [`SERIAL_SINK`] taking both the log and the
-    /// audit streams, so every boot/autoload/bind/echo record reaches the QEMU
-    /// transcript for diagnosis. The guest does not self-exit: the harness ends
-    /// the run when the host peer confirms the echo round-trip (its success
-    /// gate), so teardown can never precede that confirmation. Boot at the
-    /// default `Info` filter: keeping the noisier `Debug` syscall trace off the
-    /// wire stops the NULL-console login read-retry chatter from crowding the
-    /// network timeline out of a failing run's serial tail.
+    /// production boot pipeline. [`SERIAL_SINK`] carries the log stream so
+    /// every boot/autoload/bind record reaches the QEMU transcript, and
+    /// [`AudioSink`] observes the audit stream to finish the run once the
+    /// fixture and then the shell have exited.
     #[no_mangle]
     pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         boot_riscv64::boot(
@@ -93,8 +139,10 @@ mod kernel {
             dtb,
             &ALLOCATOR,
             &SERIAL_SINK,
-            &SERIAL_SINK,
-            tairix_log::Level::Info,
+            &AUDIT_SINK,
+            // `SyscallInvoked` is `Debug`, below the default filter, and
+            // the finisher above counts it.
+            tairix_log::Level::Debug,
         )
     }
 }

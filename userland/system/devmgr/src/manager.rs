@@ -242,9 +242,9 @@ fn event_message(id: EventId) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testsink::RecordingSink;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use core::cell::RefCell;
     use tairix_abi::{CapabilityId, DriverBindKey, HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
 
     struct MockLoader {
@@ -288,49 +288,6 @@ mod tests {
             let handle = DriverHandle::from_raw(self.next).expect("non-zero test handle");
             self.next += 1;
             Ok(handle)
-        }
-    }
-
-    struct CapturedEvent {
-        id: u32,
-        fields: Vec<(String, String)>,
-    }
-
-    struct RecordingSink {
-        events: RefCell<Vec<CapturedEvent>>,
-    }
-
-    impl RecordingSink {
-        fn new() -> Self {
-            Self {
-                events: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn ids(&self) -> Vec<u32> {
-            self.events.borrow().iter().map(|e| e.id).collect()
-        }
-
-        fn field_of(&self, id: u32, key: &str) -> Option<String> {
-            self.events
-                .borrow()
-                .iter()
-                .find(|e| e.id == id)
-                .and_then(|e| e.fields.iter().find(|(k, _)| k == key))
-                .map(|(_, v)| v.clone())
-        }
-    }
-
-    impl Sink for RecordingSink {
-        fn write_event(&self, event: &Event<'_>) {
-            self.events.borrow_mut().push(CapturedEvent {
-                id: event.id.0,
-                fields: event
-                    .fields
-                    .iter()
-                    .map(|f| (f.key.to_string(), f.value.to_string()))
-                    .collect(),
-            });
         }
     }
 

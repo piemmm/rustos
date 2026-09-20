@@ -39,9 +39,9 @@ use tairix_abi::driver::audio_channel::{
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
+use tairix_abi::{CapabilityId, DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
 use tairix_caps::CapabilitySet;
-use tairix_log::{log, Event, EventId, Level};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
 
 use crate::exit;
@@ -51,6 +51,42 @@ use crate::AudioChannelServer;
 /// beacon an audio driver emits once its device is live and its endpoint is
 /// bound.
 const AUDIOCHAN_READY: EventId = EventId(4210);
+
+/// Diagnostic event id: an audio driver process giving up, carrying the
+/// reason it could not serve its device.
+const AUDIOCHAN_FAILED: EventId = EventId(4211);
+
+/// Diagnostic event id: an attach the driver refused because the region the
+/// mixer granted is smaller than the geometry the two agreed.
+const AUDIOCHAN_SHORT_REGION: EventId = EventId(4212);
+
+/// Record why this driver process is ending abnormally, then return `code`
+/// for the runtime to exit with.
+///
+/// An autoloaded driver is detached, so nothing reads its `stderr`; without
+/// this an operator sees only the supervisor's exit code, which names the
+/// stage that gave up but never what refused it. `detail` carries the typed
+/// refusal where the failure had one.
+///
+/// One definition for every audio driver process, beside the codes it
+/// reports, so two drivers cannot describe the same failure differently.
+#[must_use]
+pub fn fail(code: i32, reason: &'static str, detail: Option<DriverError>) -> i32 {
+    let field = detail.map(|err| Field {
+        key: "error",
+        value: FieldValue::SignedInt(i64::from(err as i32)),
+    });
+    log(
+        &LogSink,
+        &Event {
+            level: Level::Error,
+            id: AUDIOCHAN_FAILED,
+            message: reason,
+            fields: field.as_slice(),
+        },
+    );
+    code
+}
 
 /// Wait-set token for a device-channel call doorbell on the claimed endpoint.
 const CALL_TOKEN: u64 = 1;
@@ -95,15 +131,27 @@ struct Region {
 /// a diagnosable reason rather than degrading into a busy re-poll.
 pub fn serve<A: Audio>(audio: A, irq_handle: u64) -> i32 {
     let Some(endpoint) = claim_channel_endpoint() else {
-        return exit::NO_SERVICE;
+        return fail(
+            exit::NO_SERVICE,
+            "audiochan: no reserved device-channel endpoint could be claimed and bound",
+            None,
+        );
     };
     if emit_audiochan_node(endpoint).is_none() {
-        return exit::NO_SERVICE;
+        return fail(
+            exit::NO_SERVICE,
+            "audiochan: the device-channel node could not be published to the hardware tree",
+            None,
+        );
     }
 
     let set = tairix_rt::waitset_create();
     if set < 0 {
-        return exit::NO_SERVICE;
+        return fail(
+            exit::NO_SERVICE,
+            "audiochan: the serve wait set could not be created",
+            None,
+        );
     }
     #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
     let set = set as u64;
@@ -122,7 +170,11 @@ pub fn serve<A: Audio>(audio: A, irq_handle: u64) -> i32 {
             IRQ_TOKEN,
         ) != 0
     {
-        return exit::NO_SERVICE;
+        return fail(
+            exit::NO_SERVICE,
+            "audiochan: the call endpoint and device interrupt could not be joined into the serve wait set",
+            None,
+        );
     }
 
     log(
@@ -205,7 +257,11 @@ fn serve_loop<A: Audio>(mut server: AudioChannelServer<A>, set: u64, endpoint: u
         let mut token = 0u64;
         let woke = tairix_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
         if woke < 0 {
-            return exit::NO_SERVICE;
+            return fail(
+                exit::NO_SERVICE,
+                "audiochan: the serve wait set faulted; the device is no longer being served",
+                None,
+            );
         }
         if woke != 0 {
             // A spurious/lapsed wake with no ready source; re-park.
@@ -281,6 +337,19 @@ fn report_endpoint<A: Audio>(
                                 endpoint,
                                 position: serviced.report.position,
                                 lost_frames: serviced.lost_frames,
+                            },
+                        );
+                    }
+                    // A drain the device has played out: the mixer handed
+                    // these frames over long before they were heard, so only
+                    // this side can say when the last one was.
+                    if !serviced.report.running {
+                        notify(
+                            server,
+                            endpoint,
+                            AudioChannelNotify::Drained {
+                                endpoint,
+                                position: serviced.report.position,
                             },
                         );
                     }
@@ -484,6 +553,31 @@ fn attach<A: Audio>(
         // service it.
         let _ = server.detach(params.endpoint);
         let _ = tairix_rt::shm_unmap(base, map_len);
+        // Both sizes, because "too small" without them names no defect: the
+        // mixer sizes the region and the driver checks it, so which of the
+        // two is wrong is only visible from the pair.
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Error,
+                id: AUDIOCHAN_SHORT_REGION,
+                message: "audiochan: the granted region is smaller than the agreed ring",
+                fields: &[
+                    Field {
+                        key: "mapped",
+                        value: FieldValue::UnsignedInt(map_len as u64),
+                    },
+                    Field {
+                        key: "expected",
+                        value: FieldValue::UnsignedInt(expected as u64),
+                    },
+                    Field {
+                        key: "ring_frames",
+                        value: FieldValue::UnsignedInt(u64::from(params.ring_frames)),
+                    },
+                ],
+            },
+        );
         return encode_status_reply(Err(Errno::BufferTooSmall));
     }
     // SAFETY: `shm_map` mapped `map_len` bytes (>= `expected`, verified

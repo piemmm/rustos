@@ -373,6 +373,16 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                     device::send(&mut self.notifier, port, notify);
                 }
             }
+            AudioChannelNotify::Drained { endpoint, position } => {
+                let Some(slot) = self.endpoint_slot(device, endpoint) else {
+                    return;
+                };
+                if let Some(active) = self.active_mut(device, slot) {
+                    active.position = position;
+                    active.running = false;
+                }
+                self.settle_drain(device, slot);
+            }
             AudioChannelNotify::JackChanged { endpoint, jack } => {
                 let Some(slot) = self.endpoint_slot(device, endpoint) else {
                     return;
@@ -481,16 +491,29 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             return;
         }
         let index = endpoint.index;
-        if !device.lost {
-            let _ = device.channel.drain(index);
+        if device.lost {
+            // Nothing will ever play these out, so the wait would never end.
+            Self::settle_streams(device_index, slot, streams, notifier);
+            return;
         }
-        if let Some(active) = device
-            .endpoints
-            .get_mut(slot)
-            .and_then(|endpoint| endpoint.active.as_mut())
-        {
-            active.running = false;
-        }
+        // Asking the device to drain is not the drain finishing: the frames
+        // already handed over are in the driver's own transfers, and only it
+        // can say when the last one was heard. The streams stay `Draining`
+        // until its `Drained` notify arrives.
+        let _ = device.channel.drain(index);
+    }
+
+    /// Complete every draining stream on `(device, slot)` — the device has
+    /// played out what it held.
+    fn settle_drain(&mut self, device_index: usize, slot: usize) {
+        let Self {
+            streams, notifier, ..
+        } = self;
+        Self::settle_streams(device_index, slot, streams, notifier);
+    }
+
+    /// Move each draining stream on `(device_index, slot)` to `Idle`.
+    fn settle_streams(device_index: usize, slot: usize, streams: &mut [Stream], notifier: &mut N) {
         for stream in streams.iter_mut() {
             if !stream.on(device_index, slot) || stream.state != StreamState::Draining {
                 continue;
@@ -555,6 +578,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 if capture {
                     Self::audit_capture(sink, caller, events::CAPTURE_REFUSED, "no such source");
                 }
+                Self::audit_refusal(sink, params, "no endpoint to route to", err);
                 return Err(err);
             }
         };
@@ -580,9 +604,55 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                         "source unavailable",
                     );
                 }
+                Self::audit_refusal(sink, params, "the endpoint could not be programmed", err);
                 Err(err)
             }
         }
+    }
+
+    /// Record a device that could not be primed, naming what refused it.
+    fn audit_refusal_device(sink: &dyn Sink, channel_endpoint: u64, err: Errno) {
+        audit(
+            sink,
+            events::STREAM_REFUSED,
+            Level::Warn,
+            "the device would not take the stream's first periods",
+            &[
+                Field {
+                    key: "endpoint",
+                    value: FieldValue::UnsignedInt(channel_endpoint),
+                },
+                Field {
+                    key: "error",
+                    value: FieldValue::Error(err),
+                },
+            ],
+        );
+    }
+
+    /// Record a refused open with what refused it, so a machine with no
+    /// sound names its reason instead of failing silently.
+    fn audit_refusal(sink: &dyn Sink, params: &OpenParams, stage: &'static str, err: Errno) {
+        audit(
+            sink,
+            events::STREAM_REFUSED,
+            Level::Warn,
+            stage,
+            &[
+                Field {
+                    key: "device",
+                    value: FieldValue::UnsignedInt(u64::from(params.device_id)),
+                },
+                Field {
+                    key: "capture",
+                    value: FieldValue::Bool(params.direction == StreamDirection::Capture),
+                },
+                Field {
+                    key: "error",
+                    value: FieldValue::Error(err),
+                },
+            ],
+        );
     }
 
     /// Which endpoint a request lands on: the routing policy for a sink, the
@@ -828,9 +898,17 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             .and_then(|endpoint| endpoint.active.as_ref())
             .is_some_and(|active| active.running);
         // A sink is primed before it is clocked, or its first period is a
-        // gap; a source has nothing to prime and is clocked first.
+        // gap; a source has nothing to prime and is clocked first. Filling
+        // the ring is only half of it: the driver has to be told to move
+        // those frames onto the device, because nothing has interrupted yet
+        // to make it do so on its own.
         if direction == StreamDirection::Playback && !already {
             self.pump(device_index, slot, sink);
+            let device = self.devices.get_mut(device_index).ok_or(Errno::NotFound)?;
+            if let Err(err) = device::prime_endpoint(device, slot) {
+                Self::audit_refusal_device(sink, device.channel_endpoint, err);
+                return Err(err);
+            }
         }
         if !already {
             let device = self.devices.get_mut(device_index).ok_or(Errno::NotFound)?;
@@ -890,7 +968,10 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             self.resolve_gains(device_index, slot);
             return;
         }
-        let Some(device) = self.devices.get_mut(device_index) else {
+        let Self {
+            devices, regions, ..
+        } = self;
+        let Some(device) = devices.get_mut(device_index) else {
             return;
         };
         let Some(endpoint) = device.endpoints.get(slot) else {
@@ -901,19 +982,25 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             .active
             .as_ref()
             .is_some_and(|active| active.running);
-        if running && !device.lost {
-            let position = endpoint
-                .active
-                .as_ref()
-                .map_or(Frames::ZERO, |active| active.position);
-            let _ = device.channel.stop(index, position);
+        if !device.lost {
+            if running {
+                let position = endpoint
+                    .active
+                    .as_ref()
+                    .map_or(Frames::ZERO, |active| active.position);
+                let _ = device.channel.stop(index, position);
+            }
+            // Nobody is playing on it, so hand the endpoint back instead of
+            // holding the device's stream and the shared region open for the
+            // life of the driver. The next open configures it afresh.
+            let _ = device.channel.detach(index);
         }
         if let Some(active) = device
             .endpoints
             .get_mut(slot)
-            .and_then(|endpoint| endpoint.active.as_mut())
+            .and_then(|endpoint| endpoint.active.take())
         {
-            active.running = false;
+            regions.release(active.region);
         }
     }
 

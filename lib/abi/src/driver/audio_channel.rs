@@ -924,6 +924,8 @@ const NOTIFY_PERIOD: u8 = 1;
 const NOTIFY_XRUN: u8 = 2;
 /// Wire byte for a jack-state-change notification.
 const NOTIFY_JACK: u8 = 3;
+/// Wire byte for a drain-completed notification.
+const NOTIFY_DRAINED: u8 = 4;
 
 /// The driver → mixer wake.
 ///
@@ -932,9 +934,10 @@ const NOTIFY_JACK: u8 = 3;
 /// channel woke is the port it arrived on; which endpoint is in the frame.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AudioChannelNotify {
-    /// A period boundary passed: here is the clock pair the mixer's linear fit
-    /// is built from, and the mixer should issue the next
-    /// [`AudioChannelRequest::Service`].
+    /// A period boundary passed: here is the clock pair the mixer's linear
+    /// fit is built from. The driver has already moved that period itself —
+    /// its own interrupt is what woke it — so this reports progress and asks
+    /// the mixer to refill the ring, not to fetch the frames.
     PeriodElapsed {
         /// The endpoint whose period elapsed.
         endpoint: u16,
@@ -952,6 +955,18 @@ pub enum AudioChannelNotify {
         position: Frames,
         /// How many frames were lost.
         lost_frames: u64,
+    },
+    /// A draining endpoint has played out everything it held: its queue is
+    /// empty, nothing is in flight, and the device has been stopped.
+    ///
+    /// The mixer cannot work this out for itself — the frames it handed over
+    /// sit in the driver's own in-flight transfers — so a drain is complete
+    /// when the driver says so, never when the shared ring merely runs dry.
+    Drained {
+        /// The endpoint that finished draining.
+        endpoint: u16,
+        /// The device's frame position at the end of playout.
+        position: Frames,
     },
     /// A connector was occupied or vacated.
     JackChanged {
@@ -993,6 +1008,11 @@ impl AudioChannelNotify {
                 put_u16(&mut out, notify::ENDPOINT, *endpoint);
                 put_u64(&mut out, notify::POSITION, position.get());
                 put_u64(&mut out, notify::LOST_FRAMES, *lost_frames);
+            }
+            Self::Drained { endpoint, position } => {
+                out[notify::KIND] = NOTIFY_DRAINED;
+                put_u16(&mut out, notify::ENDPOINT, *endpoint);
+                put_u64(&mut out, notify::POSITION, position.get());
             }
             Self::JackChanged { endpoint, jack } => {
                 out[notify::KIND] = NOTIFY_JACK;
@@ -1048,6 +1068,12 @@ impl AudioChannelNotify {
                     position,
                     sampled_at: Time64::from_bytes(&bytes[notify::SAMPLED_AT..])?,
                 })
+            }
+            NOTIFY_DRAINED => {
+                if lost_frames != 0 || bytes[notify::JACK] != 0 || !sampled_at_clean {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::Drained { endpoint, position })
             }
             NOTIFY_XRUN => {
                 if bytes[notify::JACK] != 0 || !sampled_at_clean {

@@ -112,10 +112,28 @@ three things on the `BootInfo` hand-off:
   `serial::write_console_bytes` (no `\n` translation, unlike the boot-log
   `SbiWriter`) — is the `stream_write` (fd 1) backing PID 1 writes its
   banner through (`AGENTS.md` §16.4 / §20), listed as the only entry of
-  the `BootInfo::with_consoles` console list. Its read half is the
-  fail-closed `NULL_CONSOLE_READ`: the SBI legacy console exposes no
-  non-blocking input drain, so fd 0 reads fail closed this slice (a real
-  input backing is a later increment).
+  the `BootInfo::with_consoles` console list. Its read half is
+  `RiscvUartConsoleRead`, draining the SBI legacy `console_getchar`
+  service: the call answers one buffered byte or "nothing pending".
+  Without it the port could write a prompt but never read the answer,
+  which left the interactive root unlock reachable on every port but this
+  one.
+
+  Unlike the sibling ports there is no receive interrupt behind it — the
+  firmware console raises none — so the backing declares a re-poll interval
+  (`ConsoleRead::poll_interval_ns`) and `BlockingConsoleRead` parks a
+  waiting reader on a one-shot timer for that long instead of forever. The
+  CPU still sleeps between polls and the kernel stays tickless; the timer is
+  armed only while a reader is actually blocked on console input. The
+  interval is sized so a sender at a standard line rate cannot overrun the
+  16-byte FIFO beneath the firmware between drains. A port whose console
+  *does* interrupt leaves the default `None`, so a lost wake there stays a
+  visible hang rather than becoming a silent latency bug.
+
+  Console 0's read half is wrapped in the shared `GatedConsoleRead`, as on
+  the sibling ports: `login` is withheld until the unlock kthread has read
+  the root passphrase off the same console and opened the gate, so the two
+  cannot split a typed line between them.
 - **PID 1 spawn seam (`with_init`).** `riscv64::init_spawn::RiscvInitSpawn`
   builds the embedded `init` (`Run`) program's image in its own Sv39
   address space (the shared 4 GiB `identity_gigapages()` window plus the

@@ -81,17 +81,20 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
         // we return.
         return;
     };
-    // The COM1 console receive line is not an `irq_wait`-bound source: it
-    // drives the interrupt-fed console queue directly. When this GSI fires,
-    // drain the 16550 receive FIFO into the console queue (whose push wakes
-    // the reader parked in `BlockingConsoleRead` via `console_wake`) before
-    // the generic `IrqTable::fire`/`irq_wake` below runs — the x86_64 analogue
-    // of the aarch64 device-IRQ dispatch's console drain. The `fire` for this
-    // GSI is a harmless `Stray` (the line is unbound), so the drain is the
-    // whole effect.
+    // The console receive line feeds the console queue directly and is
+    // deliberately unbound. It must never reach `IrqTable::fire`, which masks
+    // the controller line *before* it discovers the line is unbound —
+    // containment for a stray edge, but on the console that silently disabled
+    // the line after the first keystroke. The aarch64 dispatch short-circuits
+    // its UART line for the same reason.
     #[cfg(all(freestanding, kernel_isa = "x86_64"))]
     if crate::x86_64::com1_rx::com1_console_gsi() == Some(gsi) {
         crate::x86_64::com1_rx::drain_com1_into_console();
+        // The drain may have made a parked reader runnable.
+        tairix_kernel_core::note_preempt_tick(
+            tairix_arch_x86_64::preempt::current_cpu_id_from_lapic(),
+        );
+        return;
     }
     let Ok(Some(table)) = IRQ_TABLE_SLOT.get() else {
         // Slot empty or poisoned. The boot pipeline installs the

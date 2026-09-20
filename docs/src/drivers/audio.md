@@ -185,7 +185,11 @@ information request; there is no table keyed on what the device claims to be.
 Where the device publishes nothing the driver says so rather than inventing an
 answer: no jacks means every endpoint reports `JackState::Unknown`, and no
 channel maps means the conventional layout for the reported channel count — or
-a refusal, for a count with no conventional reading.
+a refusal, for a count with no conventional reading. A device that advertises
+a count and then declines the query reaches the same undescribed state: jacks
+and channel maps are descriptive, so a refusal costs their description and not
+the device. A refused *stream* description stays fatal, because a stream that
+cannot be described cannot be driven.
 
 A rate or encoding the device cannot do is **substituted** with the nearest it
 can, so the mixer adapts and owns the conversion the difference implies.

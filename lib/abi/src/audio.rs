@@ -394,7 +394,12 @@ pub enum AudioRequest {
 /// There is no channel count: the channel map carries it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct OpenParams {
-    /// The device to open on, as enumerated.
+    /// The device to open on, as enumerated — or **zero for this machine's
+    /// default** in the direction asked for. Enumerated identities start at
+    /// one, so zero can never name a real device; a client with no
+    /// preference spends no round trip enumerating and cannot race the
+    /// default changing under it. With no default adopted the open is
+    /// refused rather than resolved to an arbitrary device.
     pub device_id: u32,
     /// Playback or capture. Capture demands the capture capability.
     pub direction: StreamDirection,

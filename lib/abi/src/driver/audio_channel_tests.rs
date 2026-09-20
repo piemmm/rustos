@@ -517,6 +517,10 @@ fn every_notification_round_trips() {
             position: Frames::new(48_000),
             lost_frames: 96,
         },
+        AudioChannelNotify::Drained {
+            endpoint: 1,
+            position: Frames::new(12_000),
+        },
         AudioChannelNotify::JackChanged {
             endpoint: 2,
             jack: JackState::Present,

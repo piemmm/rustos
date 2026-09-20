@@ -449,9 +449,40 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
     /// [`Stream::published_map`] empty; the facts path then reports the
     /// conventional layout for the channel count, which is what a channel
     /// count with no positions means.
+    /// Run one *descriptive* info query, or report that the device declines
+    /// the whole class.
+    ///
+    /// Jacks and channel maps describe a device; they are not what drives
+    /// it. A device may advertise a count in its configuration and still
+    /// answer `NOT_SUPP` (QEMU's virtio-sound does exactly that), and such a
+    /// device plays audio perfectly well — so the refusal leaves the stream
+    /// undescribed rather than failing a bring-up that would otherwise have
+    /// succeeded. Nothing is invented in its place: the map stays absent and
+    /// the jack unknown. A refused `PCM_INFO` does not come through here and
+    /// stays fatal, because a stream that cannot be described cannot be
+    /// driven.
+    fn describe(
+        &mut self,
+        code: u32,
+        id: u32,
+        size: usize,
+    ) -> Result<Option<[u8; wire::MAX_INFO_RECORD_LEN]>, DriverError> {
+        match self.query_info(code, id, size) {
+            Ok(record) => Ok(Some(record)),
+            Err(DriverError::NotImplemented) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     fn read_chmaps(&mut self, chmaps: u32) -> Result<(), DriverError> {
         for id in 0..chmaps {
-            let record = self.query_info(wire::request::CHMAP_INFO, id, wire::chmap_info::LEN)?;
+            // The refusal is of the class, not of this record, so there is
+            // nothing to gain from asking for the rest.
+            let Some(record) =
+                self.describe(wire::request::CHMAP_INFO, id, wire::chmap_info::LEN)?
+            else {
+                break;
+            };
             let direction = match record[wire::chmap_info::DIRECTION] {
                 wire::direction::OUTPUT => StreamDirection::Playback,
                 wire::direction::INPUT => StreamDirection::Capture,
@@ -489,7 +520,10 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
     /// no detection" means.
     fn read_jacks(&mut self, jacks: u32) -> Result<(), DriverError> {
         for id in 0..jacks {
-            let record = self.query_info(wire::request::JACK_INFO, id, wire::jack_info::LEN)?;
+            let Some(record) = self.describe(wire::request::JACK_INFO, id, wire::jack_info::LEN)?
+            else {
+                break;
+            };
             let connected = record[wire::jack_info::CONNECTED] != 0;
             let state = if connected {
                 JackState::Present
@@ -1156,6 +1190,9 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
             StreamDirection::Playback => self.fill_playback(endpoint, ring)?,
             StreamDirection::Capture => self.post_capture(endpoint)?,
         }
+        if direction == StreamDirection::Playback {
+            self.finish_drain_if_played_out(endpoint, ring)?;
+        }
         let stream = self.stream(endpoint)?;
         let moved = stream
             .transferred
@@ -1245,6 +1282,35 @@ impl<T: Transport> VirtioSnd<'_, T> {
     /// A capture completion also copies the captured frames into the shared
     /// ring, because the payload is only readable while the buffer is back in
     /// this driver's hands.
+    /// Stop a draining endpoint once everything it held has reached the
+    /// device: the shared ring is empty and no transfer is still in flight.
+    ///
+    /// Only this side can tell: the frames the mixer handed over live in
+    /// this driver's own in-flight buffers, so a ring that has run dry is
+    /// not yet a stream that has been heard. The report's `running` going
+    /// false is what tells the mixer the drain is done.
+    fn finish_drain_if_played_out(
+        &mut self,
+        endpoint: u16,
+        ring: &mut PcmRing<'_>,
+    ) -> Result<(), DriverError> {
+        let stream = self.stream(endpoint)?;
+        if !stream.draining || !stream.running {
+            return Ok(());
+        }
+        let in_flight = stream.periods.iter().any(|period| period.posted.is_some());
+        let readable = ring.readable_frames().map_err(|_| DriverError::BadMagic)?;
+        if in_flight || readable != 0 {
+            return Ok(());
+        }
+        let id = self.stream(endpoint)?.id;
+        self.stream_command(wire::request::PCM_STOP, id)?;
+        let stream = self.stream_mut(endpoint)?;
+        stream.running = false;
+        stream.draining = false;
+        Ok(())
+    }
+
     fn reap_transfers(&mut self, endpoint: u16, ring: &mut PcmRing<'_>) -> Result<(), DriverError> {
         let direction = self.stream(endpoint)?.direction;
         let (queue, _) = self.transfer_queue(direction);

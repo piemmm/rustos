@@ -63,6 +63,9 @@ pub mod observe;
 pub mod service;
 pub mod store;
 
+#[cfg(test)]
+mod testsink;
+
 pub use autoload::{
     match_and_load, unload_vanished, AutoloadState, NodeBindings, NodeDriver, NodeReport,
     ReportedNodes,

@@ -39,9 +39,11 @@ mod program {
     };
     use tairix_abi::driver::audio::{ChannelMap, Frames, Rate, SampleFormat, StreamDirection};
     use tairix_abi::driver::audio_ring::{PcmGeometry, PcmRing};
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{Errno, ORIGIN_WIRE_LEN};
     use tairix_audio::stream::{AudioTransport, StreamClient};
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::shm::SharedRegion;
     use tairix_test_audio_wire as wire;
 
     /// Exit code when the audio service refused, or was not there.
@@ -58,6 +60,15 @@ mod program {
     /// a few hundred of them. Exceeding it means the stack stopped making
     /// progress, which is a failure to report rather than to wait out.
     const MAX_WAKES: usize = 4_096;
+
+    /// Wait-set token for the stream's notify mailbox.
+    const NOTIFY_TOKEN: u64 = 1;
+
+    /// How long one park may wait for the next drain event before the run is
+    /// declared stalled. Generous: an emulated machine clocks a period far
+    /// slower than the hardware would, and this bounds a wedged run rather
+    /// than pacing a healthy one.
+    const DRAIN_WAIT_NS: u64 = 10_000_000_000;
 
     /// The live `audio-v1` transport: one `ipc_call` to the service's
     /// reserved rendezvous, and a parked receive on this stream's own notify
@@ -116,7 +127,7 @@ mod program {
 
     /// Open the stream, bind its notify port, and hand the service a ring
     /// the whole signal fits in.
-    fn arm(transport: &mut RtAudio) -> Result<(StreamClient, Region, PcmGeometry), i32> {
+    fn arm(transport: &mut RtAudio) -> Result<(StreamClient, SharedRegion, PcmGeometry), i32> {
         let Ok(rate) = Rate::new(wire::RATE_HZ) else {
             return Err(NO_SERVICE);
         };
@@ -151,14 +162,14 @@ mod program {
             grant.channel_map.channels(),
         )
         .map_err(|err| fail("the granted ring has no shape", err, NO_REGION))?;
-        let Some(region) = Region::create(geometry.region_len()) else {
-            return Err(fail(
+        let region = SharedRegion::create(geometry.region_len()).ok_or_else(|| {
+            fail(
                 "the PCM ring could not be created",
                 Errno::OutOfMemory,
                 NO_REGION,
-            ));
-        };
-        let handle = tairix_rt::shm_grant(region.base, AUDIO_ENDPOINT);
+            )
+        })?;
+        let handle = tairix_rt::shm_grant(region.id(), AUDIO_ENDPOINT);
         if handle < 0 {
             return Err(fail(
                 "the ring could not be granted",
@@ -175,27 +186,29 @@ mod program {
 
     fn main() -> i32 {
         let mut transport = RtAudio { notify_port: 0 };
-        let (mut stream, region, geometry) = match arm(&mut transport) {
+        let (mut stream, mut region, geometry) = match arm(&mut transport) {
             Ok(armed) => armed,
             Err(code) => return code,
         };
-        // Queue the whole signal *before* the device is clocked: a device
-        // that cannot run dry makes the capture exact.
-        let mut samples = vec![0u8; wire::SIGNAL_FRAMES * wire::FRAME_BYTES];
-        if wire::fill_signal(&mut samples) != samples.len() {
+        // Queue the whole stream *before* the device is clocked: a device
+        // that cannot run dry makes the capture exact. The signal is
+        // followed by its silent tail, so the signal has left the host
+        // backend's buffer before the stream ends.
+        let mut samples = vec![0u8; wire::STREAM_FRAMES * wire::FRAME_BYTES];
+        if wire::fill_signal(&mut samples) != wire::SIGNAL_FRAMES * wire::FRAME_BYTES {
             return fail(
                 "the signal did not fit its buffer",
                 Errno::BufferTooSmall,
                 NOT_PLAYED,
             );
         }
-        let mut ring = match PcmRing::bind(region.bytes, geometry) {
+        let mut ring = match PcmRing::bind(region.bytes_mut(), geometry) {
             Ok(ring) => ring,
             Err(err) => return fail("the ring would not bind", err, NO_REGION),
         };
         match stream.write_at(&mut ring, Frames::ZERO, &samples) {
             Ok(written)
-                if written.sample_frames as usize == wire::SIGNAL_FRAMES
+                if written.sample_frames as usize == wire::STREAM_FRAMES
                     && written.silence_frames == 0 => {}
             Ok(written) => {
                 let _ = written;
@@ -213,9 +226,36 @@ mod program {
         }
 
         // Park on the stream's own mailbox until the service says the drain
-        // completed. Never a poll: each wake is a service event.
+        // completed. An empty mailbox is `WouldBlock`, so the wait is the
+        // wait set — re-reading the port in a loop would spin through the
+        // whole budget without ever giving the service a chance to run.
+        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
+            return fail(
+                "no wait set for the drain",
+                Errno::NotImplemented,
+                NOT_PLAYED,
+            );
+        };
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Port,
+            transport.notify_port,
+            NOTIFY_TOKEN,
+        ) != 0
+        {
+            return fail(
+                "the notify port would not join the wait set",
+                Errno::NotImplemented,
+                NOT_PLAYED,
+            );
+        }
         let mut frame = [0u8; AUDIO_NOTIFY_LEN];
         for _ in 0..MAX_WAKES {
+            let mut token = 0u64;
+            if tairix_rt::waitset_wait(set, DRAIN_WAIT_NS, &mut token) != 0 {
+                break;
+            }
             let Ok(len) = transport.wait_notify(&mut frame) else {
                 continue;
             };
@@ -239,6 +279,13 @@ mod program {
             write_stderr_line("audiotone: frames were lost on a ring sized to hold them all");
             return NOT_PLAYED;
         }
+        // Close what was opened, before claiming success: the endpoint is
+        // released only when its last stream goes, and a device told to
+        // release is a device that has finished with the frames rather than
+        // one still holding some.
+        if let Err(err) = stream.close(&mut transport) {
+            return fail("the stream would not close", err, NOT_PLAYED);
+        }
         let mut marker = [0u8; 128];
         let mut cursor = Cursor {
             buf: &mut marker,
@@ -251,44 +298,6 @@ mod program {
             return NOT_PLAYED;
         }
         0
-    }
-
-    /// One anonymous shared region this process owns, mapped for its life.
-    struct Region {
-        base: u64,
-        bytes: &'static mut [u8],
-    }
-
-    impl Region {
-        /// Create and map a region of exactly `len` usable bytes.
-        fn create(len: usize) -> Option<Self> {
-            let mut handle = 0u64;
-            if tairix_rt::shm_create(len, &mut handle) < 0 {
-                return None;
-            }
-            let mut mapped_len = 0u64;
-            let mapped = tairix_rt::shm_map(handle, &mut mapped_len);
-            if mapped < 0 {
-                return None;
-            }
-            let (base, addr, full) = (
-                u64::try_from(mapped).ok()?,
-                usize::try_from(mapped).ok()?,
-                usize::try_from(mapped_len).ok()?,
-            );
-            if full < len {
-                return None;
-            }
-            // SAFETY: `shm_map` mapped `full` bytes (>= `len`, checked above)
-            // of zeroed, RW, non-executable memory at `addr`, owned by this
-            // process for the rest of its life — the fixture never unmaps it.
-            // The view covers the first `len` bytes, exactly the geometry the
-            // grant describes, and nothing else in this address space aliases
-            // them. The audio service maps the same frames through its own
-            // grant; the ring's atomic positions order the two sides.
-            let bytes = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, len) };
-            Some(Self { base, bytes })
-        }
     }
 
     tairix_rt::entry!(main);

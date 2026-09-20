@@ -39,6 +39,23 @@ seek slider.
 Each item is complete before the next begins and carries its own tests and
 documentation.
 
+**What SND4 guarantees.** The vertical passes on all three Tier-1 QEMU
+targets: boot, discovery, signed-bundle autoload of the driver into its own
+user process, the published channel, `audiod` adopting the device as the
+default sink, and `audiotone` playing through a scripted root shell. A frame
+crosses two real process boundaries and two shared PCM rings before it
+reaches the card. PASS needs both witnesses — the guest's `AUDIO PASS` and
+the host-side check that QEMU's `wav` capture holds every one of the 12 000
+signal frames byte for byte — because a mixer that substituted, resampled or
+dropped frames would still print the witness. The three ports' captures are
+byte-identical over the signal region.
+
+The capture legitimately loses the backend's last buffered tick, so the guest
+plays a silence pad and the comparison trims it. The comparison itself is
+exact and must stay so: relaxing it to a frame-count tolerance would excuse
+genuinely dropped frames, which is the one thing this vertical exists to
+catch.
+
 **Why the two capabilities sit in SND4 rather than beside the ABI.** A
 capability is added with the subsystem that enforces it, never ahead of it: it
 needs a live holder and a live enforcement point in the same change, and

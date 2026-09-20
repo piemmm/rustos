@@ -189,9 +189,9 @@ scenario; it is a live exercise of the A3 console and belongs with A3.
 
 ### A3 — Interrupt-driven console + login/session supervision (`in progress`)
 
-**The interrupt-driven COM1 console is implemented and host-tested**; its
-live verticals are blocked on `plans/OPEN-DEFECTS.md` D7 (a separate A2
-MSI-X defect), not on the console work. Done-state:
+**The interrupt-driven COM1 console is implemented and live-proven**: the
+x86_64 audio vertical drives a scripted passphrase, graphical `login` form,
+and shell command over it on a real guest boot. Done-state:
 
 - COM1 receive is interrupt-driven, replacing the fail-closed
   `NULL_CONSOLE_READ`: `tairix_arch_x86_64::serial` gained the 16550 RX
@@ -206,6 +206,18 @@ MSI-X defect), not on the console work. Done-state:
   installs the unlock-gated interrupt-fed read half; and `root_unlock`'s
   `X86UnlockConsole` arms the receive interrupt and hands the interactive
   read half to the unlock kthread.
+- **The console GSI never reaches the `irq_wait` table.**
+  `IrqTable::fire` masks the controller line *before* it discovers the line
+  is unbound — deliberate containment for a stray edge, but COM1's line is
+  unbound by design (it feeds the console queue, not `irq_wait`), so falling
+  through to `fire` after the drain masked GSI 4 at the IO-APIC on the first
+  keystroke and never unmasked it. `production_external_irq_dispatch` now
+  drains and returns, latching the reschedule, exactly as the aarch64
+  device-IRQ dispatch short-circuits its UART line. Only an *unbounded*
+  console read exposed this: a reader carrying its own deadline (the
+  secret-entry animation, a TUI's timed read) re-polls and drains the FIFO in
+  its own context regardless, which is why the unlock passphrase and the
+  `login` form worked while the shell's first plain read parked forever.
 - **The lossless backpressured FIFO→`ConsoleInputQueue` drain is one shared
   definition** (`kernel/tairix-kernel/src/console_uart.rs`
   `drain_fifo_into_console`, host-tested), used by both the x86_64 16550 and

@@ -51,7 +51,7 @@ pub use server::{AudioChannelServer, Serviced};
 #[cfg(target_os = "none")]
 mod serve;
 #[cfg(target_os = "none")]
-pub use serve::serve;
+pub use serve::{fail, serve};
 
 /// The reserved, fail-closed process exit codes an audio driver binary ends
 /// with when it cannot serve its device.

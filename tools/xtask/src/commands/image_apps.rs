@@ -380,7 +380,7 @@ pub fn audiotone_store_files(
         arch,
         profile,
         "tests/integration/audio_program",
-        "audiotone",
+        tairix_test_audio_wire::COMMAND,
         &FILES,
     )
 }

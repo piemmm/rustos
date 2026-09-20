@@ -49,7 +49,7 @@ mod program {
     use tairix_abi::driver::virtio_pci::{virtio_pci_windows, VirtioPciWindows};
     use tairix_abi::time::MonotonicClock;
     use tairix_abi::{CapabilityId, DriverError, MmioMapper};
-    use tairix_audiochan::exit;
+    use tairix_audiochan::{exit, fail};
     use tairix_caps::CapabilitySet;
     use tairix_drv_audio_virtio_snd::VirtioSnd;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
@@ -90,6 +90,11 @@ mod program {
         caps
     }
 
+    /// Why a bring-up gave up once the transport was built, on either bus.
+    /// The `error` field the record carries is what the device or the kernel
+    /// actually refused with.
+    const OPEN_REFUSED: &str = "virtio-snd: the device refused its bring-up";
+
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -99,11 +104,22 @@ mod program {
         // The QEMU `virt` virtio interconnect snoops the CPU caches, so the
         // DMA carve is coherent kernel-side and no cache-maintenance shim is
         // supplied here, which keeps the program platform-neutral.
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
-            return exit::NO_HOST;
+        let host = match RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) {
+            Ok(host) => host,
+            Err(err) => {
+                return fail(
+                    exit::NO_HOST,
+                    "virtio-snd: the driver host could not be built from the delivered grants",
+                    Some(err),
+                )
+            }
         };
         if host.irq_line().is_none() {
-            return exit::NO_RESOURCES;
+            return fail(
+                exit::NO_RESOURCES,
+                "virtio-snd: the matched node granted no interrupt line",
+                None,
+            );
         }
         // Bound through the host, which caches the handle, rather than by
         // calling the trap directly: the device bring-up below parks on
@@ -112,11 +128,19 @@ mod program {
         // device is live is safe here because its event sources stay masked
         // until the mixer attaches a region, so no event can be dropped in
         // the window.
-        if host.bind_irq().is_err() {
-            return exit::BRINGUP_FAILED;
+        if let Err(err) = host.bind_irq() {
+            return fail(
+                exit::BRINGUP_FAILED,
+                "virtio-snd: the granted interrupt line could not be bound",
+                Some(err),
+            );
         }
         let Some(irq_handle) = host.irq_handle() else {
-            return exit::BRINGUP_FAILED;
+            return fail(
+                exit::BRINGUP_FAILED,
+                "virtio-snd: the interrupt line bound but minted no handle",
+                None,
+            );
         };
 
         // The clock every period's `(position, sampled_at)` pair is stamped
@@ -129,32 +153,63 @@ mod program {
         match virtio_pci_windows(host.resources()) {
             Ok(windows) => {
                 let Some(transport) = build_pci_transport(&host, &windows) else {
-                    return exit::BRINGUP_FAILED;
+                    return fail(
+                        exit::BRINGUP_FAILED,
+                        "virtio-snd: a granted virtio-PCI config window could not be mapped",
+                        None,
+                    );
                 };
-                let Ok(audio) = VirtioSnd::open(transport, vhost, mclock) else {
-                    return exit::BRINGUP_FAILED;
+                let audio = match VirtioSnd::open(transport, vhost, mclock) {
+                    Ok(audio) => audio,
+                    Err(err) => return fail(exit::BRINGUP_FAILED, OPEN_REFUSED, Some(err)),
                 };
                 tairix_audiochan::serve(audio, irq_handle)
             }
             // No role-tagged window at all: a single-aperture MMIO delivery.
             Err(DriverError::NotFound) => {
-                let Ok((base, len)) = sole_register_window(host.resources()) else {
-                    return exit::NO_RESOURCES;
+                let (base, len) = match sole_register_window(host.resources()) {
+                    Ok(window) => window,
+                    Err(err) => {
+                        return fail(
+                            exit::NO_RESOURCES,
+                            "virtio-snd: the matched node granted no single register window",
+                            Some(err),
+                        )
+                    }
                 };
-                let Ok(window) = host.map_window(base, len) else {
-                    return exit::BRINGUP_FAILED;
+                let window = match host.map_window(base, len) {
+                    Ok(window) => window,
+                    Err(err) => {
+                        return fail(
+                            exit::BRINGUP_FAILED,
+                            "virtio-snd: the granted register window could not be mapped",
+                            Some(err.as_driver_error()),
+                        )
+                    }
                 };
-                let Ok(transport) = MmioTransport::new(window) else {
-                    return exit::BRINGUP_FAILED;
+                let transport = match MmioTransport::new(window) {
+                    Ok(transport) => transport,
+                    Err(err) => {
+                        return fail(
+                            exit::BRINGUP_FAILED,
+                            "virtio-snd: the mapped window is not a virtio-MMIO transport",
+                            Some(err.as_driver_error()),
+                        )
+                    }
                 };
-                let Ok(audio) = VirtioSnd::open(transport, vhost, mclock) else {
-                    return exit::BRINGUP_FAILED;
+                let audio = match VirtioSnd::open(transport, vhost, mclock) {
+                    Ok(audio) => audio,
+                    Err(err) => return fail(exit::BRINGUP_FAILED, OPEN_REFUSED, Some(err)),
                 };
                 tairix_audiochan::serve(audio, irq_handle)
             }
             // Some virtio-PCI windows but not the full four — a malformed,
             // mis-provisioned node. Fail closed rather than half-bind.
-            Err(_) => exit::NO_RESOURCES,
+            Err(err) => fail(
+                exit::NO_RESOURCES,
+                "virtio-snd: the node's virtio-PCI windows are incomplete",
+                Some(err),
+            ),
         }
     }
 

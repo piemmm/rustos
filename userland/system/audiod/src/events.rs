@@ -36,3 +36,10 @@ pub const CAPTURE_CLOSED: EventId = EventId(4226);
 
 /// The service claimed its `audio-v1` rendezvous and is serving.
 pub const AUDIOD_READY: EventId = EventId(4227);
+
+/// A stream open the service refused, carrying what it refused with.
+///
+/// Capture refusals also raise [`CAPTURE_REFUSED`], which is the
+/// security-relevant record; this one is the diagnosis, and covers playback
+/// too — without it a machine whose sound does not work says nothing at all.
+pub const STREAM_REFUSED: EventId = EventId(4228);

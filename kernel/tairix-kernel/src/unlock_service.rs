@@ -205,6 +205,15 @@ impl ConsoleRead for GatedConsoleRead {
         }
         self.inner.read(buf)
     }
+
+    fn poll_interval_ns(&self) -> Option<u64> {
+        // A backing with no interrupt needs its re-poll whichever side of
+        // the gate the caller is on: while the gate is shut the withheld
+        // reader must come back to see it open, and once open it must come
+        // back for the bytes. Swallowing the inner's interval here would
+        // park such a reader forever.
+        self.inner.poll_interval_ns()
+    }
 }
 
 /// Audit event: the in-kernel root-unlock service lifecycle (started /
@@ -887,6 +896,51 @@ mod tests {
         assert_eq!(gated.read(&mut buf), Ok(1));
         assert_eq!(buf[0], b'x');
         assert_eq!(INNER.polls.load(core::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// A backing with no interrupt behind it, like the riscv64 SBI console.
+    struct PolledRead;
+
+    /// An arbitrary non-zero interval; only its propagation is under test.
+    const POLLED_INTERVAL_NS: u64 = 1_000_000;
+
+    impl ConsoleRead for PolledRead {
+        fn read(&self, _buf: &mut [u8]) -> Result<usize, Errno> {
+            Ok(0)
+        }
+
+        fn poll_interval_ns(&self) -> Option<u64> {
+            Some(POLLED_INTERVAL_NS)
+        }
+    }
+
+    #[test]
+    fn the_gate_forwards_a_polled_backings_repoll_interval_both_ways() {
+        // Regression: the gate wraps console 0, so swallowing the inner's
+        // interval would park a reader on an interrupt-less console forever
+        // — shut, because it never comes back to see the gate open; open,
+        // because it never comes back for the bytes. The interval must
+        // survive the wrapper in both states.
+        static INNER: PolledRead = PolledRead;
+        static GATE: Console0Gate = Console0Gate::new();
+        let gated = GatedConsoleRead::new(&INNER, &GATE);
+
+        assert!(!GATE.is_open());
+        assert_eq!(gated.poll_interval_ns(), Some(POLLED_INTERVAL_NS));
+        GATE.open();
+        assert_eq!(gated.poll_interval_ns(), Some(POLLED_INTERVAL_NS));
+    }
+
+    #[test]
+    fn the_gate_reports_no_repoll_for_an_interrupt_fed_backing() {
+        // The inverse matters as much: a console that *is* woken by its
+        // interrupt must not acquire a re-poll through the wrapper, or a
+        // lost wake would degrade to a latency bug instead of a visible
+        // hang.
+        static INNER: CountingRead = CountingRead::new();
+        static GATE: Console0Gate = Console0Gate::new();
+        let gated = GatedConsoleRead::new(&INNER, &GATE);
+        assert_eq!(gated.poll_interval_ns(), None);
     }
 
     #[test]

@@ -75,7 +75,9 @@ use tairix_arch_riscv64::{
 use tairix_kernel_core::boot_audit_ring::{
     boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
 };
-use tairix_kernel_core::{kernel_main, BootInfo, ConsoleWrite, IrqRouting, KernelArch};
+use tairix_kernel_core::{
+    kernel_main, BootInfo, ConsoleRead, ConsoleWrite, IrqRouting, KernelArch,
+};
 use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use tairix_kernel_sched_api::SchedulerConfig;
 use tairix_log::{log, Event, EventId, Field, Level, Sink, TeeSink};
@@ -572,11 +574,7 @@ fn arm_preemption(timebase_hz: u64) {
 /// stream **backing** the spawner attaches to fd 1,
 /// not a program-facing interface.
 ///
-/// No [`tairix_kernel_core::ConsoleRead`] half is installed: the SBI
-/// legacy console exposes no non-blocking input drain, so fd 0 reads
-/// fail closed until a real input backing lands — PID
-/// 1 `init` and the embedded `Shell` `Run` program only *write* (a
-/// banner) and `spawn`, so this slice needs no console input.
+/// Its input half is [`RiscvUartConsoleRead`].
 #[derive(Debug, Default, Copy, Clone)]
 pub struct RiscvUartConsole;
 
@@ -594,14 +592,72 @@ impl ConsoleWrite for RiscvUartConsole {
 /// [`tairix_arch_riscv64::SERIAL_SINK`].
 pub static RISCV_UART_CONSOLE: RiscvUartConsole = RiscvUartConsole;
 
-/// The riscv64 boot console list: the SBI console is the only console.
-/// Its read half is the fail-closed [`tairix_kernel_core::NULL_CONSOLE_READ`]
-/// (the SBI legacy console exposes no non-blocking input drain), so fd 0
-/// reads keep failing closed exactly as before.
+/// How long a parked console reader sleeps between drains of the firmware
+/// console.
+///
+/// The SBI legacy console raises no receive interrupt, so nothing can wake
+/// a reader when a byte lands and the reader must come back for it. The
+/// interval is sized so a sender running at a standard line rate cannot
+/// overrun the 16-byte receive FIFO underneath the firmware between two
+/// drains: 16 bytes at 115200 baud 8N1 take about 1.4 ms to accumulate, so
+/// draining every millisecond keeps the FIFO from filling. It is armed only
+/// while a reader is actually blocked on console input, never as a
+/// system-wide tick.
+const SBI_CONSOLE_POLL_INTERVAL_NS: u64 = 1_000_000;
+
+/// The SBI console's input half: the legacy `console_getchar` drain.
+///
+/// The service answers one buffered byte or "nothing pending", which is the
+/// short-read contract this trait is written to. Unlike aarch64's
+/// `UartConsoleRead` and x86_64's `Com1ConsoleRead` there is no receive
+/// interrupt behind it, so this backing declares
+/// [`SBI_CONSOLE_POLL_INTERVAL_NS`] and the shared blocking reader parks on
+/// a one-shot timer for that long rather than forever. Without a read half
+/// at all the port could write a prompt but never read the answer, which
+/// left the interactive root unlock unreachable on this port alone.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct RiscvUartConsoleRead;
+
+impl ConsoleRead for RiscvUartConsoleRead {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, tairix_abi::Errno> {
+        let mut read = 0;
+        while read < buf.len() {
+            let Some(byte) = tairix_arch_riscv64::sbi::console_getchar() else {
+                break;
+            };
+            buf[read] = byte;
+            read += 1;
+        }
+        Ok(read)
+    }
+
+    fn poll_interval_ns(&self) -> Option<u64> {
+        Some(SBI_CONSOLE_POLL_INTERVAL_NS)
+    }
+}
+
+/// The single `'static` [`RiscvUartConsoleRead`] the console list carries.
+pub static RISCV_UART_CONSOLE_READ: RiscvUartConsoleRead = RiscvUartConsoleRead;
+
+/// Console-0's read half, gated on the in-kernel root-unlock service's
+/// ownership latch: a `stream_read` from `login` is withheld until the
+/// unlock kthread has finished reading the root passphrase off the same
+/// console and opened the gate, so the two never split a typed line between
+/// them. The sibling of x86_64's `GATED_COM1_READ` and aarch64's
+/// `GATED_UART_READ`; without it `login` drained bytes the unlock kthread
+/// was waiting for and the first passphrase attempt derived a wrong key.
+static GATED_RISCV_CONSOLE_READ: crate::unlock_service::GatedConsoleRead =
+    crate::unlock_service::GatedConsoleRead::new(
+        &RISCV_UART_CONSOLE_READ,
+        &crate::unlock_service::CONSOLE0_GATE,
+    );
+
+/// The riscv64 boot console list: the SBI console is the only console,
+/// with both halves wired.
 pub static RISCV_UART_CONSOLES: [tairix_kernel_core::ConsoleDevice; 1] =
     [tairix_kernel_core::ConsoleDevice::new(
         &RISCV_UART_CONSOLE,
-        &tairix_kernel_core::NULL_CONSOLE_READ,
+        &GATED_RISCV_CONSOLE_READ,
     )];
 
 /// Failure modes of [`boot`] and [`build_boot_memory_map`].
@@ -1163,10 +1219,9 @@ pub fn try_boot(
         &DISPATCH_SLOT,
         heap,
     )
-    // Install the SBI console as the only console-list entry so PID 1
-    // `init` and its session can write their startup banners. Its read half is the fail-closed
-    // `NULL_CONSOLE_READ`: the SBI legacy console exposes no
-    // non-blocking input drain, so fd 0 fails closed this slice.
+    // Install the SBI console as the only console-list entry: its write
+    // half carries the startup banners and its read half drains the
+    // legacy `console_getchar` service, so fd 0 reads reach the operator.
     .with_consoles(&RISCV_UART_CONSOLES)
     // Record the device-tree-discovered installed-RAM total so the core
     // mints the `boot_facts_get` machine summary from it.

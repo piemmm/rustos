@@ -128,32 +128,54 @@ pub fn bind_new_channels(
                     Level::Info,
                     "audiochan device channel bound to audio service",
                     endpoint,
+                    None,
                 );
             }
-            Err(_) => audit(
+            Err(err) => audit(
                 sink,
                 events::AUDIOD_BIND_FAILED,
                 Level::Warn,
                 "audiochan device-channel bind to audio service failed; will retry",
                 endpoint,
+                Some(err),
             ),
         }
     }
 }
 
 /// Emit one audit record carrying the channel endpoint the decision was
-/// about, so an operator can correlate it with the driver that published it.
-fn audit(sink: &dyn Sink, id: EventId, level: Level, message: &'static str, endpoint: u64) {
+/// about, so an operator can correlate it with the driver that published it,
+/// and — on a refusal — what the service actually said, without which the
+/// record names a failure but not its cause.
+fn audit(
+    sink: &dyn Sink,
+    id: EventId,
+    level: Level,
+    message: &'static str,
+    endpoint: u64,
+    error: Option<Errno>,
+) {
+    let endpoint = Field {
+        key: "endpoint",
+        value: FieldValue::UnsignedInt(endpoint),
+    };
+    let fields = match error {
+        Some(err) => &[
+            endpoint,
+            Field {
+                key: "error",
+                value: FieldValue::Error(err),
+            },
+        ][..],
+        None => &[endpoint][..],
+    };
     log_event(
         sink,
         &Event {
             level,
             id,
             message,
-            fields: &[Field {
-                key: "endpoint",
-                value: FieldValue::UnsignedInt(endpoint),
-            }],
+            fields,
         },
     );
 }

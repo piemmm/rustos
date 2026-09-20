@@ -113,7 +113,7 @@ pub(crate) struct Active {
     /// The device ring's shape.
     geometry: PcmGeometry,
     /// The device ring this service created and granted to the driver.
-    region: RegionId,
+    pub(crate) region: RegionId,
     /// The measured device clock, from the `(position, sampled_at)` pairs the
     /// driver reports.
     pub(crate) clock: ClockModel,
@@ -721,6 +721,29 @@ pub(crate) fn pump_endpoint<H: RegionHost>(
             harvest_source(active, device_index, slot, streams, regions, notifier)
         }
     }
+}
+
+/// Move what the ring now holds onto the device, and adopt what the driver
+/// reports.
+///
+/// The steady state is driver-driven: a period interrupt wakes the driver,
+/// it moves a period itself and notifies the mixer. A stream that has never
+/// run has interrupted nothing, so unless the first periods are posted here
+/// the device is clocked with an empty queue, never completes a transfer,
+/// and so never interrupts — the ring stays full and the stream never
+/// advances.
+pub(crate) fn prime_endpoint(device: &mut Device, slot: usize) -> Result<(), Errno> {
+    let index = device.endpoints.get(slot).ok_or(Errno::NotFound)?.index;
+    let report = device.channel.service(index)?;
+    if let Some(active) = device
+        .endpoints
+        .get_mut(slot)
+        .and_then(|endpoint| endpoint.active.as_mut())
+    {
+        active.position = report.position;
+        let _ = active.clock.observe(report.position, report.sampled_at);
+    }
+    Ok(())
 }
 
 /// Fill the device ring with mixed periods while it has room and a live

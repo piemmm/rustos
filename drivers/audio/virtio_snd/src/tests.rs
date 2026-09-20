@@ -43,22 +43,37 @@ struct DeviceSpec {
     streams: alloc::vec::Vec<(u8, u64, u64, u8, u8)>,
     /// Status the next control request answers with, if not `OK`.
     refuse: Option<u32>,
+    /// Control codes this device answers `NOT_SUPP` to, leaving the rest
+    /// implemented — how a real device declines one query class.
+    not_supported: alloc::vec::Vec<u32>,
 }
 
 impl DeviceSpec {
     /// A QEMU-shaped device: one output and one input, S16/S32 at the
-    /// standard rates, stereo, and no jacks or channel maps at all.
+    /// standard rates, stereo, and jacks and channel maps *advertised in the
+    /// configuration but not answerable* — which is what QEMU's
+    /// virtio-sound does, and what the end-to-end vertical runs it as.
     fn qemu() -> Self {
         let formats = (1u64 << wire::format::S16) | (1u64 << wire::format::S32);
         let rates = (1u64 << 6) | (1u64 << 7) | (1u64 << 10);
         Self {
-            jacks: 0,
-            chmaps: 0,
+            jacks: 1,
+            chmaps: 2,
             streams: vec![
                 (wire::direction::OUTPUT, formats, rates, 1, 2),
                 (wire::direction::INPUT, formats, rates, 1, 2),
             ],
             refuse: None,
+            not_supported: vec![wire::request::JACK_INFO, wire::request::CHMAP_INFO],
+        }
+    }
+
+    /// The same device with every query implemented, as a card that does
+    /// describe its topology presents.
+    fn describing() -> Self {
+        Self {
+            not_supported: alloc::vec::Vec::new(),
+            ..Self::qemu()
         }
     }
 }
@@ -103,6 +118,10 @@ fn mock_device(spec: &DeviceSpec, log: &Rc<RefCell<DeviceLog>>) -> MockTransport
             let code = wire::read_u32(request, 0);
             if let Some(status) = control_spec.refuse {
                 wire::put_u32(reply, 0, status);
+                return Ok(u32::try_from(wire::HDR_LEN).expect("small"));
+            }
+            if control_spec.not_supported.contains(&code) {
+                wire::put_u32(reply, 0, wire::status::NOT_SUPP);
                 return Ok(u32::try_from(wire::HDR_LEN).expect("small"));
             }
             wire::put_u32(reply, 0, wire::status::OK);
@@ -290,7 +309,7 @@ fn bring_up_reads_what_the_device_says_rather_than_assuming_it() {
 
 #[test]
 fn published_jacks_and_channel_maps_are_used_where_the_device_offers_them() {
-    let mut spec = DeviceSpec::qemu();
+    let mut spec = DeviceSpec::describing();
     spec.jacks = 2;
     spec.chmaps = 2;
     let log = Rc::new(RefCell::new(DeviceLog::default()));
@@ -301,6 +320,45 @@ fn published_jacks_and_channel_maps_are_used_where_the_device_offers_them() {
     let sink = device.endpoint_facts(0).expect("sink facts");
     assert_eq!(sink.jack, JackState::Present);
     assert_eq!(sink.channel_map, ChannelMap::STEREO);
+}
+
+#[test]
+fn a_device_that_advertises_jacks_and_maps_but_answers_neither_still_comes_up() {
+    // QEMU's virtio-sound advertises the counts its command line was given
+    // and answers `NOT_SUPP` to both query classes. Refusing bring-up over
+    // that would reject a device the driver can drive; the streams are what
+    // carry audio, and they described themselves.
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let spec = DeviceSpec::qemu();
+    assert!(spec.jacks > 0 && spec.chmaps > 0, "the queries are issued");
+    let device = VirtioSnd::open(mock_device(&spec, &log), &host, &clock).expect("comes up");
+
+    // Undescribed, never invented: the conventional layout is what the
+    // facts fall back to, and the jack is honestly unknown.
+    let sink = device.endpoint_facts(0).expect("sink facts");
+    assert_eq!(sink.jack, JackState::Unknown);
+    assert_eq!(sink.channel_map, ChannelMap::STEREO);
+}
+
+#[test]
+fn a_device_that_will_not_describe_its_streams_is_still_refused() {
+    // The tolerance above is for the descriptive classes only. A stream
+    // that cannot be described cannot be driven, so a refused `PCM_INFO`
+    // stays a bring-up failure rather than yielding a device with no
+    // usable endpoint.
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let mut spec = DeviceSpec::qemu();
+    spec.not_supported.push(wire::request::PCM_INFO);
+    assert_eq!(
+        VirtioSnd::open(mock_device(&spec, &log), &host, &clock)
+            .err()
+            .expect("refused"),
+        DriverError::NotImplemented
+    );
 }
 
 #[test]

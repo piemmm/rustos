@@ -28,7 +28,6 @@ use tairix_drv_bus_virtio::MmioTransport;
 use tairix_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use tairix_kernel_core::{
     ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, YieldHandle,
-    NULL_CONSOLE_READ,
 };
 use tairix_kernel_irq::{IrqController, IrqTable};
 use tairix_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, MmioMap, VirtAddr};
@@ -111,10 +110,10 @@ fn wfi_fallback_park(table: &IrqTable, handle: IrqHandle) {
 /// they flip together. Opening the gate lets `login`'s gated console reads
 /// through; resolving the late users-database flips a `login` parked on the
 /// pending `users_db_read` into its prompt — against the installed database if
-/// the unlock succeeded, else fail-closed deny-all. No receive-interrupt arm:
-/// the SBI console exposes no interrupt-driven input this slice, so `login`
-/// fails closed on fd 0 (a real interactive console-input path is a separate,
-/// later tranche).
+/// the unlock succeeded, else fail-closed deny-all. There is no
+/// receive-interrupt to arm, unlike the sibling ports: the firmware console
+/// raises none, so a parked reader comes back on the backing's declared
+/// re-poll interval instead.
 fn release_console0_to_login() {
     CONSOLE0_GATE.open();
     // Nudge the console wait-queue so any `login` already parked on the
@@ -128,13 +127,11 @@ fn release_console0_to_login() {
 /// primary console through.
 ///
 /// The SBI console is the primary console: its write half streams the
-/// passphrase prompt, and its read half is the fail-closed
-/// [`NULL_CONSOLE_READ`] (the SBI legacy console exposes no non-blocking input
-/// drain), so `unlock_root_disk_interactively`'s first passphrase read returns
-/// an error and the unlock gives up fail-closed at once — never a reader parked
-/// forever on input that cannot arrive (which would deadlock `login`). Login is
-/// then refused (the correct secure default): the users database resolves
-/// deny-all and the console-0 gate opens.
+/// passphrase prompt and its read half drains the legacy `console_getchar`
+/// service, so an operator can answer the prompt on this port exactly as on
+/// the others. The drain is non-blocking, so the shared reader parks between
+/// polls rather than spinning, and a console that never delivers a byte
+/// leaves the unlock waiting rather than mounting on a guess.
 struct RiscvUnlockConsole;
 
 /// The single `'static` [`RiscvUnlockConsole`] the bring-up hands the shared
@@ -149,7 +146,8 @@ impl UnlockConsole for RiscvUnlockConsole {
         &'static (dyn ConsoleRead + Sync + 'static),
     ) {
         let write: &'static dyn ConsoleWrite = &crate::riscv64::boot::RISCV_UART_CONSOLE;
-        let read: &'static (dyn ConsoleRead + Sync + 'static) = &NULL_CONSOLE_READ;
+        let read: &'static (dyn ConsoleRead + Sync + 'static) =
+            &crate::riscv64::boot::RISCV_UART_CONSOLE_READ;
         (write, read)
     }
 

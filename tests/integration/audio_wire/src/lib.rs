@@ -40,9 +40,30 @@ pub const SIGNAL_FRAMES: usize = 12_000;
 /// inside the PCM ring vocabulary's fixed ceiling.
 pub const RING_FRAMES: u32 = 16_384;
 
+/// Silent frames the guest plays after the signal, so the signal itself is
+/// out of the host backend's buffer before the stream ends.
+///
+/// A backend writes its file a tick at a time and flushes the rest only
+/// when it closes; a guest that ends the run itself never gives it that
+/// chance, so without a tail the last tick of *signal* is lost. Padding
+/// moves the loss onto silence, which the comparison trims anyway. Far
+/// longer than any plausible tick, and sized with the signal to fit one
+/// ring load so the whole stream is still queued before the device starts.
+pub const SILENCE_TAIL_FRAMES: usize = 4_384;
+
+/// Frames the guest queues in total: the signal then its silent tail.
+pub const STREAM_FRAMES: usize = SIGNAL_FRAMES + SILENCE_TAIL_FRAMES;
+
+const _: () = assert!(STREAM_FRAMES <= RING_FRAMES as usize);
+
 /// The witness line the guest prints once the drain has completed and the
 /// device has reported no lost frames.
 pub const PASS_MARKER: &str = "AUDIO PASS";
+
+/// The fixture's command word: the name its bundle installs under and the
+/// `comm` its audited exit carries, so the image builder and the guest's
+/// own finisher cannot name different programs.
+pub const COMMAND: &str = "audiotone";
 
 /// Samples quieter than this count as silence when the host trims the
 /// backend's own lead-in and tail.
@@ -86,6 +107,7 @@ pub fn fill_signal(out: &mut [u8]) -> usize {
     if out.len() < bytes {
         return 0;
     }
+    out[bytes..].fill(0);
     for frame in 0..SIGNAL_FRAMES {
         for channel in 0..CHANNELS {
             let at = (frame * CHANNELS + channel) * 2;
@@ -210,6 +232,12 @@ fn parse_wav(wav: &[u8]) -> Result<(u16, u32, u16, &[u8]), WavMismatch> {
         }
         if id == b"data" {
             let (channels, rate, bits) = format.ok_or(WavMismatch::NotWave)?;
+            // A writer patches this length in when it closes the file. A
+            // zero means it never got to: the samples are there, only the
+            // header never caught up, so the payload is the rest of the
+            // file. QEMU's backend leaves exactly this behind whenever the
+            // guest ends the run itself.
+            let end = if len == 0 { wav.len() } else { end };
             return Ok((channels, rate, bits, &wav[body..end]));
         }
         // Chunks are padded to an even length.
@@ -287,6 +315,33 @@ mod tests {
             payload_matches_signal(&[0u8; 64]),
             Err(WavMismatch::NotWave)
         );
+    }
+
+    #[test]
+    fn a_capture_whose_silent_tail_was_never_flushed_still_matches() {
+        // What the host loses is the backend's last buffered tick. With a
+        // silent tail that loss falls on silence, and the signal is whole.
+        let mut stream = vec![0u8; STREAM_FRAMES * FRAME_BYTES];
+        assert_eq!(fill_signal(&mut stream), SIGNAL_FRAMES * FRAME_BYTES);
+        let kept = (SIGNAL_FRAMES + 8) * FRAME_BYTES;
+        let wav = wav(&stream[..kept]);
+
+        assert_eq!(payload_matches_signal(&wav), Ok(()));
+    }
+
+    #[test]
+    fn an_unfinalised_capture_is_read_to_the_end_of_the_file() {
+        // A writer killed before it closed the file leaves both size fields
+        // zero; the samples are still there, and refusing to read them
+        // reports silence where there was sound.
+        let mut payload = vec![0u8; SIGNAL_FRAMES * FRAME_BYTES];
+        assert_eq!(fill_signal(&mut payload), payload.len());
+        let mut wav = wav(&payload);
+        wav[4..8].copy_from_slice(&0u32.to_le_bytes());
+        let data_len = wav.len() - payload.len() - 4;
+        wav[data_len..data_len + 4].copy_from_slice(&0u32.to_le_bytes());
+
+        assert_eq!(payload_matches_signal(&wav), Ok(()));
     }
 
     #[test]

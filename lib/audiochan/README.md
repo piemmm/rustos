@@ -71,3 +71,10 @@ unmap the region either way. Set-up refusals in `serve` return a reserved
 `exit` code (the same numbers `lib/netchan` uses, so one supervisor table
 reads both classes), so a driver that cannot serve ends with a diagnosable
 reason rather than degrading into a busy re-poll.
+
+An autoloaded driver is detached, so nothing reads its `stderr` and the exit
+code alone would name only the stage that gave up. Every such refusal is
+therefore recorded through `fail`, which writes the reason — and the typed
+refusal behind it, where there was one — to the system log before returning
+the code. It lives here, beside the codes, so two audio drivers cannot
+describe the same failure differently.
