@@ -381,10 +381,22 @@ wan.ipv6.method  slaac
 The file is read post-unlock by the device manager and applied to
 `netstack` per interface, atomically and idempotently — a malformed or
 inconsistent document is refused whole and the running configuration is
-left untouched (fail closed). The image ships an empty document ("no
-managed interfaces beyond loopback"); the installer, or a future
-`configure`-class writer, fills in the operator's interfaces through the
-same engine. The stack-wide switches (`net.ipv4.enabled`,
+left untouched (fail closed). It is re-read on every hardware-tree
+generation bump, and an interface is re-delivered only when its own message
+changed, so an administrator's edit reaches the running stack without a
+reboot while an untouched interface is not reconfigured for nothing.
+
+The image ships an empty document ("no managed interfaces beyond
+loopback"); the installer and `configure` fill in the operator's interfaces
+through the same engine. `configure wan.ipv4.method dhcp wan.ipv4.address
+""` sets and removes per-interface settings — the empty value is how a
+setting is removed, since that registry has no defaults to fall back to —
+and hands the changed interfaces to the running stack itself over the
+capability-gated admin surface, so a change takes effect at once. An
+interface *removed* from the document keeps running until the next boot:
+the admin surface carries no message that retires one, and `configure` says
+so rather than implying otherwise. The stack-wide switches
+(`net.ipv4.enabled`,
 `net.ipv6.enabled`, `net.ipv6.privacy`, `net.tcp.syncookies`,
 `net.tcp.keepalive`, `net.tcp.ecn`) live separately in `system.conf` and
 are set with `configure` (§6.2). See

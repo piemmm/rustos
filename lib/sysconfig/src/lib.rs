@@ -111,7 +111,7 @@ use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::net_ipc::NetworkSettings;
 use tairix_abi::time::Duration64;
 use tairix_abi::MAX_TIME_SERVERS;
-use tairix_util::conf::strip_comment;
+use tairix_util::conf::{strip_comment, ValueShape};
 
 /// The directory that holds the boot-time configuration store.
 pub const CONFIG_DIR: &str = "/System/Settings/Configuration";
@@ -462,19 +462,6 @@ impl RefreshCadence {
             Self::Weekly => 7 * 24 * HOUR,
         })
     }
-}
-
-/// What a registry key accepts.
-///
-/// Most keys carry a closed set of canonical spellings; a key whose value is
-/// inherently open — a list of host names — describes its accepted form
-/// instead, and its own parser is what admits or refuses a spelling.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ValueShape {
-    /// One of these canonical spellings, and nothing else.
-    Closed(&'static [&'static str]),
-    /// Free-form text of this described form.
-    Free(&'static str),
 }
 
 /// One key of the closed configuration registry.

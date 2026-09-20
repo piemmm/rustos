@@ -93,6 +93,17 @@ pub const VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID: u32 = region(6);
 /// region base.
 pub const VIRTUAL_BUS_NODE_ID: u32 = region(7);
 
+/// First synthetic id for a probed virtio-MMIO **audio** child node
+/// ([`crate::hwdiscovery::observe_virtio_mmio_audio_devices`]). One id per
+/// enumerated sound slot, so distinct cards stay distinct.
+pub const VIRTIO_AUDIO_PROBE_NODE_BASE_ID: u32 = region(8);
+
+/// First synthetic id for a probed virtio-**PCI** audio child node
+/// ([`crate::hwdiscovery::observe_virtio_pci_audio_devices`]). A distinct
+/// region from the MMIO audio base, so a port that probes the PCI bus for
+/// sound keeps every card's node id unambiguous.
+pub const VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID: u32 = region(9);
+
 // A single probe walk emits at most one id per enumerated bus slot
 // (`bus.enumerate` fills at most `MAX_SLOTS`; an overfull bus fails closed),
 // so the highest id a walk can reach in its region is
@@ -109,7 +120,7 @@ mod tests {
     use super::*;
 
     /// Every reserved base, in region order, for the disjointness sweep.
-    const BASES: [u32; 8] = [
+    const BASES: [u32; 10] = [
         VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_INPUT_PROBE_NODE_BASE_ID,
         BOOT_DISPLAY_NODE_ID,
@@ -118,6 +129,8 @@ mod tests {
         VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID,
         VIRTUAL_BUS_NODE_ID,
+        VIRTIO_AUDIO_PROBE_NODE_BASE_ID,
+        VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID,
     ];
 
     #[test]

@@ -10,12 +10,17 @@
 //!    never panics.
 //! 3. Every rendered document is itself within the length bound, so a
 //!    render can never produce a store the reader would reject as too long.
+//! 4. A [`ConfigDraft`] either refuses, or commits a configuration that
+//!    satisfies (2) and (3) — so no sequence of writer edits can produce a
+//!    store the next reader would refuse.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
-use tairix_netconfig::{NetworkConfig, MAX_BOND_MEMBERS, MAX_CONFIG_LEN, MAX_INTERFACES};
+use tairix_netconfig::{
+    ConfigDraft, IfaceKey, NetworkConfig, MAX_BOND_MEMBERS, MAX_CONFIG_LEN, MAX_INTERFACES,
+};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -68,6 +73,7 @@ const SUFFIXES: &[&str] = &[
     "bond.mode",
     "bond.monitor-interval",
     "bond.primary",
+    "dns.servers",
     "bogus",
 ];
 const VALUES: &[&str] = &[
@@ -93,6 +99,9 @@ const VALUES: &[&str] = &[
     "200",
     "eth0",
     "virtio-net@0",
+    "9.9.9.9,2001:db8::53",
+    "9.9.9.9,9.9.9.9",
+    "224.0.0.1",
     "",
 ];
 
@@ -155,6 +164,58 @@ fn structured_documents_round_trip_and_never_panic() {
         for _ in 0..SMOKE_ITERATIONS {
             let doc = build_document(&mut rng);
             check(&doc);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+/// Apply one random edit to `draft`: a set of a drawn key to a drawn value,
+/// or an unset of a drawn key. A refused set is an expected outcome, not a
+/// failure — what matters is that it leaves the draft committable.
+fn edit_draft(rng: &mut Lcg, draft: &mut ConfigDraft) {
+    let iface = rng.pick(IFACES);
+    let index = usize::try_from(rng.next_u64() % IfaceKey::ALL.len() as u64).expect("index fits");
+    let Some(key) = IfaceKey::ALL.get(index).copied() else {
+        return;
+    };
+    if rng.next_u64().is_multiple_of(4) {
+        draft.unset(iface, key);
+        return;
+    }
+    let _ = draft.set(iface, key, rng.pick(VALUES));
+}
+
+#[test]
+fn drafted_documents_commit_consistent_or_refuse() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "drafted_documents_commit_consistent_or_refuse",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            // Start from whatever parses, so edits land on real documents as
+            // often as on the empty one.
+            let base = NetworkConfig::parse(&build_document(&mut rng)).unwrap_or_default();
+            let mut draft = base.edit();
+            for _ in 0..(rng.next_u64() % 12) {
+                edit_draft(&mut rng, &mut draft);
+            }
+            let Ok(config) = draft.commit() else {
+                continue;
+            };
+            let rendered = config.render();
+            assert!(
+                rendered.len() <= MAX_CONFIG_LEN,
+                "a committed store exceeds the bound"
+            );
+            assert_eq!(
+                NetworkConfig::parse(&rendered).expect("a committed store re-parses"),
+                config,
+                "a committed store is not a round trip"
+            );
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

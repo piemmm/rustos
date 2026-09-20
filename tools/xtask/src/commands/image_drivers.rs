@@ -95,6 +95,11 @@ pub const FRAMEBUFFER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"framebu
 /// `-M virt` two-process netstack autoload vertical's disk plants it at.
 pub const VIRTIO_NET_STORE_PATH: &[&[u8]] = &[b"Drivers", b"network", b"virtio_net", b"Run"];
 
+/// Store path of the virtio sound driver bundle: class `audio`, the
+/// `virtio_snd` leaf naming the (vendor-neutral) driver. The class namespace
+/// above the leaf names what the device *is*, never who made it.
+pub const VIRTIO_SND_STORE_PATH: &[&[u8]] = &[b"Drivers", b"audio", b"virtio_snd", b"Run"];
+
 /// `/System`-volume-relative store path of the GENET link-layer driver
 /// bundle (the Raspberry Pi 4B's on-board gigabit Ethernet).
 pub const GENET_STORE_PATH: &[&[u8]] = &[b"Drivers", b"network", b"genet", b"Run"];
@@ -667,6 +672,48 @@ pub fn build_virtio_net_bundle(
     )
 }
 
+/// Build and sign the virtio sound driver bundle.
+///
+/// It maps its granted register window (`CAP_MMIO_MAP`), carves its DMA
+/// period buffers (`CAP_MEM_DMA`), parks on the device interrupt its serve
+/// loop waits on (`CAP_IRQ_BIND`), maps the mixer's granted PCM regions
+/// (`CAP_SHM`), claims and binds the reserved device-channel endpoint
+/// (`CAP_IPC_ENDPOINT`, `CAP_IPC_BIND_PRIVILEGED`), publishes its
+/// `audiochan` node (`CAP_HW_EMIT`), and emits its readiness beacon
+/// (`CAP_LOG_EMIT`) — the same set the virtio-net bundle carries. It
+/// deliberately does **not** hold `CAP_AUDIO_DEVICE`: that is the authority
+/// to *command* an audio driver, which the mixer holds and this process is
+/// the subject of. Carries `tairix_drv_audio_virtio_snd::BIND_KEYS`, so it
+/// autoloads against a discovered virtio sound device on either bus (and
+/// stays unbound on a machine that presents none).
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_virtio_snd_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-audio-virtio-snd",
+        &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+            CapabilityId::HW_EMIT,
+            CapabilityId::LOG_EMIT,
+        ],
+        tairix_drv_audio_virtio_snd::BIND_KEYS,
+        profile,
+    )
+}
+
 /// Build and sign the GENET link-layer driver bundle.
 ///
 /// The Raspberry Pi 4B's on-board gigabit NIC: it maps its granted register
@@ -993,6 +1040,34 @@ pub fn autoload_driver_store_files(
                     build_virtio_net_bundle(ctx, arch, profile)?,
                 ),
             ])
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// The signed **virtio sound driver bundle alone**, paired with its store
+/// path — the `/System/Drivers/` set the audio verticals plant. Those
+/// verticals drive the guest over a text (UART) console, so they carry only
+/// the sound driver: a display driver would take over console 0 and defeat
+/// the serial-scripted login. Built once per xtask process and memoised.
+///
+/// # Errors
+///
+/// As [`build_virtio_snd_bundle`].
+pub fn audio_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            Ok(vec![store_file(
+                VIRTIO_SND_STORE_PATH,
+                build_virtio_snd_bundle(ctx, arch, profile)?,
+            )])
         })
         .as_ref()
         .map(Vec::as_slice)

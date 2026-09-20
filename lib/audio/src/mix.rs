@@ -173,6 +173,11 @@ impl Mixer {
     /// zeroed bytes: an unsigned encoding's quiet value is mid-scale, and
     /// zeroes there would be a click at full negative deflection.
     ///
+    /// The contributions arrive as an *iterator*, walked exactly once, so a
+    /// service whose live streams live in its own records folds them in
+    /// without building a per-period collection — the one place an
+    /// otherwise allocation-free period path would have had to allocate.
+    ///
     /// # Errors
     ///
     /// * [`Errno::OutOfRange`] — `frames` is past the configured period.
@@ -180,9 +185,9 @@ impl Mixer {
     /// * [`Errno::NotSupported`] — a stream's matrix does not answer the
     ///   sink's channel count, which means it was derived against a different
     ///   sink.
-    pub fn mix(
+    pub fn mix<'a>(
         &mut self,
-        streams: &[StreamMix<'_>],
+        streams: impl IntoIterator<Item = StreamMix<'a>>,
         frames: usize,
         out: &mut [u8],
     ) -> Result<usize, Errno> {
@@ -198,6 +203,7 @@ impl Mixer {
         let mut contributors = 0usize;
         let mut resolution = 0u32;
         for stream in streams {
+            let stream = &stream;
             if stream.matrix.destinations() != channels {
                 return Err(Errno::NotSupported);
             }

@@ -11,11 +11,29 @@ use crate::FontError;
 /// Coverage sample rows per pixel row (vertical supersampling).
 const SAMPLE_ROWS: u32 = 4;
 
-/// Line segments each quadratic Bézier is flattened into.
+/// Line segments each quadratic Bézier is flattened into on the way to a
+/// coverage bitmap.
 ///
 /// Eight chords keep the flattening error well under a tenth of a pixel at the
-/// atlas's native size, invisible at 16 coverage levels.
+/// atlas's native size, invisible at 16 coverage levels. A fixed count suits
+/// a bitmap and only a bitmap; [`Face::glyph_outline`] hands its curves on
+/// unflattened so a caller drawing at another size chooses its own accuracy.
 const QUAD_SEGMENTS: u32 = 8;
+
+/// The most outline points one glyph may decode, across every component of a
+/// composite.
+///
+/// A validation bound on a hostile face, not a capacity: the heaviest glyph
+/// in the committed faces is 584 points, in a 31k-glyph CJK face.
+pub(crate) const MAX_OUTLINE_POINTS: u32 = 8192;
+
+/// The most composite component records one glyph may decode, across every
+/// nesting level. Real composites are a handful; an accented letter is two.
+pub(crate) const MAX_COMPONENTS: u32 = 256;
+
+/// The deepest a composite glyph may nest components, so a cyclic composite
+/// fails closed instead of overflowing the stack.
+const MAX_COMPOSITE_DEPTH: u32 = 4;
 
 /// Widest glyph bitmap, in pixels, the engine will lay out.
 ///
@@ -380,8 +398,9 @@ impl<'a> Face<'a> {
             let Some(glyph) = self.glyph_for(u32::from(ch)) else {
                 continue;
             };
-            let mut sink = OutlineSink::uniform(1.0, 0.0);
-            if outline_glyph(self, glyph, &mut sink, 0).is_err() || sink.segments.is_empty() {
+            let mut sink = RasterSink::uniform(1.0, 0.0);
+            let walked = Outliner::new(self, &mut sink).glyph(glyph, Affine::IDENTITY, 0);
+            if walked.is_err() || sink.segments.is_empty() {
                 continue;
             }
             let reach = sink.segments.iter().fold(None, |reach: Option<f64>, seg| {
@@ -446,7 +465,8 @@ impl<'a> Face<'a> {
         };
         let contour_count = self.r.i16(start)?;
         if contour_count < 0 {
-            return Ok(decode_components(&self.r, start)?.len());
+            let mut budget = MAX_COMPONENTS;
+            return Ok(decode_components(&self.r, start, &mut budget)?.len());
         }
         let contour_count = usize::from(contour_count.unsigned_abs());
         if contour_count == 0 {
@@ -478,6 +498,29 @@ impl<'a> Face<'a> {
         Ok((start != end).then_some((self.tables.glyf + start, self.tables.glyf + end)))
     }
 
+    /// The contours of `glyph`'s outline, in the face's own font units with
+    /// y up, instanced exactly as the rasteriser sees it.
+    ///
+    /// Curves come through as quadratics rather than chords: a caller drawing
+    /// at its own scale flattens once, to the accuracy that scale needs. Font
+    /// units are the face's, so divide by
+    /// [`units_per_em`](Self::units_per_em) for em fractions and flip y for a
+    /// space that grows downward — the two consumers place a glyph
+    /// differently, so neither conversion belongs here.
+    ///
+    /// A glyph with no outline (a space) yields no contours.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FontError`] for a glyph id past the face's count, a
+    /// malformed or unsupported outline, or one whose point or component
+    /// count runs past the bounds a hostile face is held to.
+    pub fn glyph_outline(&self, glyph: u16) -> Result<Vec<Contour>, FontError> {
+        let mut sink = ContourSink::new();
+        Outliner::new(self, &mut sink).glyph(glyph, Affine::IDENTITY, 0)?;
+        Ok(sink.finish())
+    }
+
     /// Rasterise `glyph` into `bitmap_width × geometry.height` bytes of 4-bit
     /// (`0..=15`) coverage, row-major, one value per byte.
     ///
@@ -503,9 +546,9 @@ impl<'a> Face<'a> {
             return Err(err("glyph cell is implausibly wide"));
         }
         let scale = px_per_em / f64::from(self.units_per_em);
-        let sink = OutlineSink {
+        let sink = RasterSink {
             scale_x: self.cell_scale(geometry.width, scale).unwrap_or(scale),
-            ..OutlineSink::uniform(scale, f64::from(geometry.baseline))
+            ..RasterSink::uniform(scale, f64::from(geometry.baseline))
         };
         let segments = self.fitted_outline(glyph, sink, Axes::RowsAndColumns)?;
         Ok(rasterise(&segments, geometry, bitmap_width))
@@ -522,11 +565,11 @@ impl<'a> Face<'a> {
         bitmap_width: u32,
     ) -> Result<Vec<u8>, FontError> {
         let scale = px_per_em / f64::from(self.units_per_em);
-        let mut sink = OutlineSink {
+        let mut sink = RasterSink {
             scale_x: self.cell_scale(geometry.width, scale).unwrap_or(scale),
-            ..OutlineSink::uniform(scale, f64::from(geometry.baseline))
+            ..RasterSink::uniform(scale, f64::from(geometry.baseline))
         };
-        outline_glyph(self, glyph, &mut sink, 0)?;
+        Outliner::new(self, &mut sink).glyph(glyph, Affine::IDENTITY, 0)?;
         Ok(rasterise(&sink.segments, geometry, bitmap_width))
     }
 
@@ -539,10 +582,10 @@ impl<'a> Face<'a> {
     fn fitted_outline(
         &self,
         glyph: u16,
-        mut sink: OutlineSink,
+        mut sink: RasterSink,
         axes: Axes,
     ) -> Result<Vec<Segment>, FontError> {
-        outline_glyph(self, glyph, &mut sink, 0)?;
+        Outliner::new(self, &mut sink).glyph(glyph, Affine::IDENTITY, 0)?;
         gridfit::fit(
             &mut sink.segments,
             axes,
@@ -608,7 +651,7 @@ impl<'a> Face<'a> {
         height: u32,
     ) -> Result<GlyphRaster, FontError> {
         let scale = px_per_em / f64::from(self.units_per_em);
-        let sink = OutlineSink::uniform(scale, f64::from(baseline));
+        let sink = RasterSink::uniform(scale, f64::from(baseline));
         let mut segments = self.fitted_outline(glyph, sink, Axes::Rows)?;
         let Some(left_edge) = ink_left_edge(&segments) else {
             return Ok(GlyphRaster {
@@ -853,21 +896,72 @@ impl Affine {
     }
 }
 
-/// Collects an outline as segments, flattening quadratics and applying the
-/// font-unit → pixel transform (including the composite component transform).
-struct OutlineSink {
+/// One segment of a glyph contour, continuing from the previous point.
+///
+/// Quadratics come through whole. How finely a curve must be flattened
+/// depends on the size it is finally drawn at, which only the caller knows,
+/// so choosing a chord count here would fix it in the wrong place.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum OutlineSegment {
+    /// A straight line.
+    Line {
+        /// Where the segment ends.
+        to: (f64, f64),
+    },
+    /// A quadratic Bézier.
+    Quadratic {
+        /// The off-curve control point.
+        control: (f64, f64),
+        /// Where the segment ends.
+        to: (f64, f64),
+    },
+}
+
+/// One closed contour of a glyph outline, in the face's font units with y up.
+///
+/// The segments run in order from `start`, and the last returns to it, so the
+/// contour is closed by construction. Contours fill by **non-zero winding**,
+/// the TrueType rule: a counter is a contour wound against the one enclosing
+/// it rather than a shape in its own right, which is what cuts the holes in
+/// `o`, `B` and `8`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Contour {
+    /// Where the contour begins and ends.
+    pub start: (f64, f64),
+    /// The segments, in order.
+    pub segments: Vec<OutlineSegment>,
+}
+
+/// Where a decoded glyph outline is delivered: the face's own font units,
+/// y up, with the composite-component transform already applied.
+///
+/// One walk feeds both consumers, so an outline cannot be decoded two
+/// different ways. [`RasterSink`] flattens and maps into pixel space as the
+/// segments arrive; [`ContourSink`] keeps the quadratics whole for
+/// [`Face::glyph_outline`].
+trait OutlineSink {
+    /// Begin a closed contour at `start`.
+    fn begin(&mut self, start: (f64, f64));
+
+    /// A straight segment.
+    fn line(&mut self, from: (f64, f64), to: (f64, f64));
+
+    /// A quadratic Bézier segment.
+    fn quad(&mut self, from: (f64, f64), control: (f64, f64), to: (f64, f64));
+}
+
+/// Flattens an outline into the pixel-space segments the scanline fill reads.
+struct RasterSink {
     segments: Vec<Segment>,
     /// Pixels per font unit across. A cell grid narrows this so the face's
     /// advance lands exactly on the cell; everything else matches `scale_y`.
     scale_x: f64,
     /// Pixels per font unit down.
     scale_y: f64,
-    origin_x: f64,
     baseline_y: f64,
-    transform: Affine,
 }
 
-impl OutlineSink {
+impl RasterSink {
     /// A sink scaling both axes alike, for an outline drawn at its own
     /// proportions.
     fn uniform(scale: f64, baseline_y: f64) -> Self {
@@ -875,44 +969,90 @@ impl OutlineSink {
             segments: Vec::new(),
             scale_x: scale,
             scale_y: scale,
-            origin_x: 0.0,
             baseline_y,
-            transform: Affine::IDENTITY,
         }
     }
 
-    fn to_px(&self, x: f64, y: f64) -> (f64, f64) {
-        let (fx, fy) = self.transform.apply(x, y);
-        (
-            self.origin_x + fx * self.scale_x,
-            self.baseline_y - fy * self.scale_y,
-        )
+    fn to_px(&self, (x, y): (f64, f64)) -> (f64, f64) {
+        (x * self.scale_x, self.baseline_y - y * self.scale_y)
     }
+}
 
-    fn line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
-        let (px0, py0) = self.to_px(x0, y0);
-        let (px1, py1) = self.to_px(x1, y1);
-        self.segments.push(Segment {
-            x0: px0,
-            y0: py0,
-            x1: px1,
-            y1: py1,
-        });
+impl OutlineSink for RasterSink {
+    /// A winding fill reads its contours off the crossings, so it needs no
+    /// contour identity.
+    fn begin(&mut self, _start: (f64, f64)) {}
+
+    fn line(&mut self, from: (f64, f64), to: (f64, f64)) {
+        let (x0, y0) = self.to_px(from);
+        let (x1, y1) = self.to_px(to);
+        self.segments.push(Segment { x0, y0, x1, y1 });
     }
 
     /// Flatten the quadratic Bézier into [`QUAD_SEGMENTS`] chords.
-    fn quad(&mut self, x0: f64, y0: f64, cx: f64, cy: f64, x1: f64, y1: f64) {
-        let mut px = x0;
-        let mut py = y0;
+    fn quad(&mut self, from: (f64, f64), control: (f64, f64), to: (f64, f64)) {
+        let mut previous = from;
         for i in 1..=QUAD_SEGMENTS {
             let t = f64::from(i) / f64::from(QUAD_SEGMENTS);
             let u = 1.0 - t;
-            let nx = u * u * x0 + 2.0 * u * t * cx + t * t * x1;
-            let ny = u * u * y0 + 2.0 * u * t * cy + t * t * y1;
-            self.line(px, py, nx, ny);
-            px = nx;
-            py = ny;
+            let next = (
+                u * u * from.0 + 2.0 * u * t * control.0 + t * t * to.0,
+                u * u * from.1 + 2.0 * u * t * control.1 + t * t * to.1,
+            );
+            self.line(previous, next);
+            previous = next;
         }
+    }
+}
+
+/// Collects an outline as closed contours with their curves intact.
+struct ContourSink {
+    done: Vec<Contour>,
+    open: Contour,
+}
+
+impl ContourSink {
+    fn new() -> Self {
+        Self {
+            done: Vec::new(),
+            open: Contour {
+                start: (0.0, 0.0),
+                segments: Vec::new(),
+            },
+        }
+    }
+
+    /// The contours, in outline order.
+    fn finish(mut self) -> Vec<Contour> {
+        if !self.open.segments.is_empty() {
+            self.done.push(self.open);
+        }
+        self.done
+    }
+}
+
+impl OutlineSink for ContourSink {
+    fn begin(&mut self, start: (f64, f64)) {
+        let finished = core::mem::replace(
+            &mut self.open,
+            Contour {
+                start,
+                segments: Vec::new(),
+            },
+        );
+        if !finished.segments.is_empty() {
+            self.done.push(finished);
+        }
+    }
+
+    fn line(&mut self, _from: (f64, f64), to: (f64, f64)) {
+        self.open.segments.push(OutlineSegment::Line { to });
+    }
+
+    fn quad(&mut self, _from: (f64, f64), control: (f64, f64), to: (f64, f64)) {
+        self.open
+            .segments
+            .push(OutlineSegment::Quadratic { control, to });
     }
 }
 
@@ -924,57 +1064,247 @@ struct Point {
     on_curve: bool,
 }
 
-/// Append `glyph`'s outline segments to `sink`, recursing through composite
-/// glyphs. `depth` bounds the recursion so a malformed cyclic composite fails
-/// closed instead of overflowing the stack.
-fn outline_glyph(
-    face: &Face<'_>,
-    glyph: u16,
-    sink: &mut OutlineSink,
-    depth: u32,
-) -> Result<(), FontError> {
-    if depth > 4 {
-        return Err(err("composite glyph nesting deeper than 4"));
-    }
-    let Some((start, end)) = face.glyf_range(glyph)? else {
-        return Ok(());
-    };
-    let contour_count = face.r.i16(start)?;
-    if contour_count >= 0 {
-        outline_simple(
+/// Walks a glyph's `glyf` outline into a sink, instancing it against the
+/// face's variation coordinates on the way.
+///
+/// Both budgets are charged across the *whole* walk rather than per nesting
+/// level. A per-level cap still multiplies with depth — 65535 components each
+/// naming another such composite is an expansion no depth bound alone makes
+/// finite — so the count a malformed face can demand is held by one running
+/// total instead.
+struct Outliner<'a, 'f, S: OutlineSink> {
+    face: &'a Face<'f>,
+    sink: &'a mut S,
+    points_left: u32,
+    components_left: u32,
+}
+
+impl<'a, 'f, S: OutlineSink> Outliner<'a, 'f, S> {
+    fn new(face: &'a Face<'f>, sink: &'a mut S) -> Self {
+        Self {
             face,
-            glyph,
-            start,
-            end,
-            usize::from(contour_count.unsigned_abs()),
             sink,
-        )
-    } else {
-        outline_composite(face, glyph, start, sink, depth)
+            points_left: MAX_OUTLINE_POINTS,
+            components_left: MAX_COMPONENTS,
+        }
+    }
+
+    /// Decode `glyph` under `transform`, recursing through composite glyphs.
+    fn glyph(&mut self, glyph: u16, transform: Affine, depth: u32) -> Result<(), FontError> {
+        if depth > MAX_COMPOSITE_DEPTH {
+            return Err(err("composite glyph nesting too deep"));
+        }
+        let Some((start, end)) = self.face.glyf_range(glyph)? else {
+            return Ok(());
+        };
+        let contour_count = self.face.r.i16(start)?;
+        if contour_count >= 0 {
+            let contour_count = usize::from(contour_count.unsigned_abs());
+            self.simple(glyph, start, end, contour_count, transform)
+        } else {
+            self.composite(glyph, start, transform, depth)
+        }
+    }
+
+    /// Decode a simple glyph's contours, applying its `gvar` deltas (with IUP
+    /// for untouched points) when the face is instanced.
+    fn simple(
+        &mut self,
+        glyph: u16,
+        start: usize,
+        end: usize,
+        contour_count: usize,
+        transform: Affine,
+    ) -> Result<(), FontError> {
+        let face = self.face;
+        let r = &face.r;
+        let mut at = start + 10;
+        let mut contour_ends = Vec::with_capacity(contour_count);
+        for _ in 0..contour_count {
+            contour_ends.push(r.u16(at)?);
+            at += 2;
+        }
+        let point_count = match contour_ends.last() {
+            Some(&last) => usize::from(last) + 1,
+            None => return Ok(()),
+        };
+        self.charge_points(point_count)?;
+        let SimplePoints { flags, mut coords } = decode_points(r, at, end, point_count)?;
+        if let Some(var) = &face.var {
+            let base = coords.clone();
+            let mut deltas = vec![(0.0, 0.0); point_count + 4];
+            let applied = var.gvar.deltas(
+                r,
+                &face.coords,
+                glyph,
+                point_count,
+                Some((&contour_ends, &base)),
+                &mut deltas,
+            )?;
+            if applied {
+                for (point, delta) in coords.iter_mut().zip(&deltas) {
+                    point.0 += delta.0;
+                    point.1 += delta.1;
+                }
+            }
+        }
+
+        let mut first = 0usize;
+        for &contour_end in &contour_ends {
+            let last = usize::from(contour_end);
+            if last < first || last >= point_count {
+                return Err(err("contour end indices not monotonic"));
+            }
+            let points: Vec<Point> = (first..=last)
+                .map(|i| {
+                    let (x, y) = transform.apply(coords[i].0, coords[i].1);
+                    Point {
+                        x,
+                        y,
+                        on_curve: flags[i] & 0x01 != 0,
+                    }
+                })
+                .collect();
+            self.contour(&points);
+            first = last + 1;
+        }
+        Ok(())
+    }
+
+    /// Decode a composite glyph: recurse into each component with its affine
+    /// transform composed onto the one placing this glyph. When the face is
+    /// instanced, the composite's `gvar` deltas shift each component's
+    /// placement offset before it recurses (and the component itself is
+    /// varied by its own `gvar` data).
+    fn composite(
+        &mut self,
+        glyph: u16,
+        start: usize,
+        transform: Affine,
+        depth: u32,
+    ) -> Result<(), FontError> {
+        let face = self.face;
+        let components = decode_components(&face.r, start, &mut self.components_left)?;
+        let mut offsets: Vec<(f64, f64)> = components.iter().map(|c| (c.dx, c.dy)).collect();
+        if let Some(var) = &face.var {
+            let n = components.len();
+            let mut deltas = vec![(0.0, 0.0); n + 4];
+            if var
+                .gvar
+                .deltas(&face.r, &face.coords, glyph, n, None, &mut deltas)?
+            {
+                for (offset, delta) in offsets.iter_mut().zip(&deltas) {
+                    offset.0 += delta.0;
+                    offset.1 += delta.1;
+                }
+            }
+        }
+        for (component, &(dx, dy)) in components.iter().zip(&offsets) {
+            let placed = transform.then(&Affine {
+                a: component.a,
+                b: component.b,
+                c: component.c,
+                d: component.d,
+                dx,
+                dy,
+            });
+            self.glyph(component.glyph, placed, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    /// Emit one closed contour of on/off-curve points as lines and
+    /// quadratics, synthesising the implied on-curve midpoints between
+    /// consecutive off-curve points per the TrueType outline rules.
+    fn contour(&mut self, points: &[Point]) {
+        if points.is_empty() {
+            return;
+        }
+        // Establish the starting on-curve point per the TrueType rules: the
+        // first on-curve point, or — when every point is off-curve — the
+        // implied midpoint between the last and first points.
+        let (start, offset) = if let Some(i) = points.iter().position(|p| p.on_curve) {
+            (points[i], i)
+        } else {
+            let a = points[points.len() - 1];
+            let b = points[0];
+            let mid = Point {
+                x: f64::midpoint(a.x, b.x),
+                y: f64::midpoint(a.y, b.y),
+                on_curve: true,
+            };
+            (mid, points.len() - 1)
+        };
+        self.sink.begin((start.x, start.y));
+        let mut current = start;
+        let mut pending_control: Option<Point> = None;
+        for k in 1..=points.len() {
+            let p = points[(offset + k) % points.len()];
+            match (p.on_curve, pending_control) {
+                (true, None) => {
+                    self.sink.line((current.x, current.y), (p.x, p.y));
+                    current = p;
+                }
+                (true, Some(c)) => {
+                    self.sink
+                        .quad((current.x, current.y), (c.x, c.y), (p.x, p.y));
+                    current = p;
+                    pending_control = None;
+                }
+                (false, None) => pending_control = Some(p),
+                (false, Some(c)) => {
+                    let mid = Point {
+                        x: f64::midpoint(c.x, p.x),
+                        y: f64::midpoint(c.y, p.y),
+                        on_curve: true,
+                    };
+                    self.sink
+                        .quad((current.x, current.y), (c.x, c.y), (mid.x, mid.y));
+                    current = mid;
+                    pending_control = Some(p);
+                }
+            }
+        }
+        // Close the contour, through a trailing control point if one is
+        // pending.
+        if let Some(c) = pending_control {
+            self.sink
+                .quad((current.x, current.y), (c.x, c.y), (start.x, start.y));
+        } else {
+            let closed = current.x.total_cmp(&start.x) == core::cmp::Ordering::Equal
+                && current.y.total_cmp(&start.y) == core::cmp::Ordering::Equal;
+            if !closed {
+                self.sink.line((current.x, current.y), (start.x, start.y));
+            }
+        }
+    }
+
+    /// Charge `count` outline points against the glyph's budget.
+    fn charge_points(&mut self, count: usize) -> Result<(), FontError> {
+        let count = u32::try_from(count).unwrap_or(u32::MAX);
+        self.points_left = self
+            .points_left
+            .checked_sub(count)
+            .ok_or(err("glyph outline exceeds the point bound"))?;
+        Ok(())
     }
 }
 
-/// Decode a simple glyph's contours into `sink`, applying its `gvar` deltas
-/// (with IUP for untouched points) when the face is instanced.
-fn outline_simple(
-    face: &Face<'_>,
-    glyph: u16,
-    start: usize,
+/// A simple glyph's decoded points: one flag byte and one coordinate pair per
+/// point, in outline order.
+struct SimplePoints {
+    flags: Vec<u8>,
+    coords: Vec<(f64, f64)>,
+}
+
+/// Decode a simple glyph's flags and coordinate arrays, which follow its
+/// contour ends and its hinting bytecode.
+fn decode_points(
+    r: &Reader<'_>,
+    mut at: usize,
     end: usize,
-    contour_count: usize,
-    sink: &mut OutlineSink,
-) -> Result<(), FontError> {
-    let r = &face.r;
-    let mut at = start + 10;
-    let mut contour_ends = Vec::with_capacity(contour_count);
-    for _ in 0..contour_count {
-        contour_ends.push(r.u16(at)?);
-        at += 2;
-    }
-    let point_count = match contour_ends.last() {
-        Some(&last) => usize::from(last) + 1,
-        None => return Ok(()),
-    };
+    point_count: usize,
+) -> Result<SimplePoints, FontError> {
     let instruction_len = usize::from(r.u16(at)?);
     at += 2 + instruction_len;
 
@@ -1027,106 +1357,10 @@ fn outline_simple(
         return Err(err("simple glyph overruns its loca range"));
     }
 
-    let mut coords: Vec<(f64, f64)> = (0..point_count)
+    let coords = (0..point_count)
         .map(|i| (f64::from(xs[i]), f64::from(ys[i])))
         .collect();
-    if let Some(var) = &face.var {
-        let base = coords.clone();
-        let mut deltas = vec![(0.0, 0.0); point_count + 4];
-        let applied = var.gvar.deltas(
-            r,
-            &face.coords,
-            glyph,
-            point_count,
-            Some((&contour_ends, &base)),
-            &mut deltas,
-        )?;
-        if applied {
-            for (point, delta) in coords.iter_mut().zip(&deltas) {
-                point.0 += delta.0;
-                point.1 += delta.1;
-            }
-        }
-    }
-
-    let mut first = 0usize;
-    for &contour_end in &contour_ends {
-        let last = usize::from(contour_end);
-        if last < first || last >= point_count {
-            return Err(err("contour end indices not monotonic"));
-        }
-        let points: Vec<Point> = (first..=last)
-            .map(|i| Point {
-                x: coords[i].0,
-                y: coords[i].1,
-                on_curve: flags[i] & 0x01 != 0,
-            })
-            .collect();
-        emit_contour(&points, sink);
-        first = last + 1;
-    }
-    Ok(())
-}
-
-/// Emit one closed contour of on/off-curve points as lines and quadratics,
-/// synthesising the implied on-curve midpoints between consecutive off-curve
-/// points per the TrueType outline rules.
-fn emit_contour(points: &[Point], sink: &mut OutlineSink) {
-    if points.is_empty() {
-        return;
-    }
-    // Establish the starting on-curve point per the TrueType rules: the first
-    // on-curve point, or — when every point is off-curve — the implied
-    // midpoint between the last and first points.
-    let (start, offset) = if let Some(i) = points.iter().position(|p| p.on_curve) {
-        (points[i], i)
-    } else {
-        let a = points[points.len() - 1];
-        let b = points[0];
-        let mid = Point {
-            x: f64::midpoint(a.x, b.x),
-            y: f64::midpoint(a.y, b.y),
-            on_curve: true,
-        };
-        (mid, points.len() - 1)
-    };
-    let mut current = start;
-    let mut pending_control: Option<Point> = None;
-    for k in 1..=points.len() {
-        let p = points[(offset + k) % points.len()];
-        match (p.on_curve, pending_control) {
-            (true, None) => {
-                sink.line(current.x, current.y, p.x, p.y);
-                current = p;
-            }
-            (true, Some(c)) => {
-                sink.quad(current.x, current.y, c.x, c.y, p.x, p.y);
-                current = p;
-                pending_control = None;
-            }
-            (false, None) => pending_control = Some(p),
-            (false, Some(c)) => {
-                let mid = Point {
-                    x: f64::midpoint(c.x, p.x),
-                    y: f64::midpoint(c.y, p.y),
-                    on_curve: true,
-                };
-                sink.quad(current.x, current.y, c.x, c.y, mid.x, mid.y);
-                current = mid;
-                pending_control = Some(p);
-            }
-        }
-    }
-    // Close the contour, through a trailing control point if one is pending.
-    if let Some(c) = pending_control {
-        sink.quad(current.x, current.y, c.x, c.y, start.x, start.y);
-    } else {
-        let closed = current.x.total_cmp(&start.x) == core::cmp::Ordering::Equal
-            && current.y.total_cmp(&start.y) == core::cmp::Ordering::Equal;
-        if !closed {
-            sink.line(current.x, current.y, start.x, start.y);
-        }
-    }
+    Ok(SimplePoints { flags, coords })
 }
 
 /// One decoded component of a composite glyph: which glyph it places, its
@@ -1142,16 +1376,22 @@ struct Component {
     d: f64,
 }
 
-/// Decode a composite glyph's component records.
+/// Decode a composite glyph's component records, charging each against
+/// `budget`.
 ///
 /// Only plain xy offsets are supported; point-matching args and Apple's
-/// scaled-component-offset interpretation fail closed. The count is bounded so
-/// a malformed record with the more-components flag stuck set cannot loop
-/// without limit.
-fn decode_components(r: &Reader<'_>, start: usize) -> Result<Vec<Component>, FontError> {
+/// scaled-component-offset interpretation fail closed.
+fn decode_components(
+    r: &Reader<'_>,
+    start: usize,
+    budget: &mut u32,
+) -> Result<Vec<Component>, FontError> {
     let mut at = start + 10;
     let mut components = Vec::new();
     loop {
+        *budget = budget
+            .checked_sub(1)
+            .ok_or(err("composite expands past the component bound"))?;
         let flags = r.u16(at)?;
         let glyph = r.u16(at + 2)?;
         at += 4;
@@ -1208,53 +1448,8 @@ fn decode_components(r: &Reader<'_>, start: usize) -> Result<Vec<Component>, Fon
         if flags & 0x0020 == 0 {
             break;
         }
-        if components.len() > usize::from(u16::MAX) {
-            return Err(err("composite has too many components"));
-        }
     }
     Ok(components)
-}
-
-/// Decode a composite glyph: recurse into each component with its affine
-/// transform composed onto the sink. When the face is instanced, the `gvar`
-/// deltas for the composite shift each component's placement offset before it
-/// recurses (and the component itself is varied by its own `gvar` data).
-fn outline_composite(
-    face: &Face<'_>,
-    glyph: u16,
-    start: usize,
-    sink: &mut OutlineSink,
-    depth: u32,
-) -> Result<(), FontError> {
-    let components = decode_components(&face.r, start)?;
-    let mut offsets: Vec<(f64, f64)> = components.iter().map(|c| (c.dx, c.dy)).collect();
-    if let Some(var) = &face.var {
-        let n = components.len();
-        let mut deltas = vec![(0.0, 0.0); n + 4];
-        if var
-            .gvar
-            .deltas(&face.r, &face.coords, glyph, n, None, &mut deltas)?
-        {
-            for (offset, delta) in offsets.iter_mut().zip(&deltas) {
-                offset.0 += delta.0;
-                offset.1 += delta.1;
-            }
-        }
-    }
-    for (component, &(dx, dy)) in components.iter().zip(&offsets) {
-        let saved = sink.transform;
-        sink.transform = saved.then(&Affine {
-            a: component.a,
-            b: component.b,
-            c: component.c,
-            d: component.d,
-            dx,
-            dy,
-        });
-        outline_glyph(face, component.glyph, sink, depth + 1)?;
-        sink.transform = saved;
-    }
-    Ok(())
 }
 
 /// The pixel geometry a glyph is rasterised into: the cell width in pixels, the

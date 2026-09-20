@@ -1,10 +1,10 @@
 //! Shape tests: that each form is the form it claims to be, that every
-//! outline fits the buffer it is traced into, and that a fill lands where the
-//! part was placed.
+//! outline fits the buffer it is traced into, and that a fill lands where
+//! the shape was placed.
 
 use super::{fill, Placed, Scratch, Shape, MAX_VERTICES};
+use crate::{Color, Pixel, Surface};
 use tairix_inline::ArrayVec;
-use tairix_raster::{Color, Pixel, Surface};
 use tairix_util::mathf;
 
 const RED: Color = Color::rgb(0xFF, 0x00, 0x00);
@@ -23,29 +23,34 @@ fn covered(surface: &Surface) -> usize {
     surface.pixels().iter().filter(|pixel| pixel.a > 0).count()
 }
 
-/// Every shape a body part can be, at the sizes the skeleton uses.
-fn every_shape() -> [Shape; 5] {
+/// Every primitive, at representative sizes.
+fn every_shape() -> [Shape; 6] {
     [
-        Shape::Fur { radius: 9.0 },
-        Shape::Mass {
+        Shape::Splat { radius: 9.0 },
+        Shape::Superellipse {
             rx: 13.5,
             ry: 13.0,
             square: 0.3,
         },
-        Shape::Limb {
+        Shape::Taper {
             length: 31.0,
             top: 5.4,
             foot: 3.6,
         },
-        Shape::Ear {
+        Shape::Wedge {
             half_width: 6.4,
             height: 13.0,
             lean: 3.4,
         },
-        Shape::Drape {
+        Shape::ScallopedPanel {
             rx: 12.5,
             ry: 16.0,
             folds: 3,
+        },
+        Shape::BevelledPanel {
+            rx: 11.0,
+            ry: 7.5,
+            bevel: 2.5,
         },
     ]
 }
@@ -55,30 +60,40 @@ fn every_outline_fits_the_buffer_it_is_traced_into() {
     // The build-time assertions cover the authored parameters; this covers the
     // extremes, including a fold count past the bound.
     let extremes = [
-        Shape::Mass {
+        Shape::Superellipse {
             rx: 0.0,
             ry: 0.0,
             square: 1.0,
         },
-        Shape::Limb {
+        Shape::Taper {
             length: -5.0,
             top: 0.0,
             foot: 0.0,
         },
-        Shape::Ear {
+        Shape::Wedge {
             half_width: 0.0,
             height: 0.0,
             lean: 0.0,
         },
-        Shape::Drape {
+        Shape::ScallopedPanel {
             rx: 1.0,
             ry: 1.0,
             folds: 0,
         },
-        Shape::Drape {
+        Shape::ScallopedPanel {
             rx: 1.0,
             ry: 1.0,
             folds: u32::MAX,
+        },
+        Shape::BevelledPanel {
+            rx: 0.0,
+            ry: 0.0,
+            bevel: 0.0,
+        },
+        Shape::BevelledPanel {
+            rx: -3.0,
+            ry: 4.0,
+            bevel: f64::MAX,
         },
     ];
     for shape in every_shape().into_iter().chain(extremes) {
@@ -95,12 +110,12 @@ fn every_outline_fits_the_buffer_it_is_traced_into() {
 fn a_hem_asking_for_more_lobes_than_the_bound_is_gathered_coarsely_not_truncated() {
     // Truncating the ring would close the panel through the wrong vertices and
     // draw a shape nobody authored, so the fold count is clamped instead.
-    let wild = traced(Shape::Drape {
+    let wild = traced(Shape::ScallopedPanel {
         rx: 10.0,
         ry: 10.0,
         folds: u32::MAX,
     });
-    let bounded = traced(Shape::Drape {
+    let bounded = traced(Shape::ScallopedPanel {
         rx: 10.0,
         ry: 10.0,
         folds: 4,
@@ -110,19 +125,19 @@ fn a_hem_asking_for_more_lobes_than_the_bound_is_gathered_coarsely_not_truncated
 }
 
 #[test]
-fn fur_has_no_outline_because_it_is_a_splat() {
-    assert!(traced(Shape::Fur { radius: 9.0 }).is_empty());
+fn a_splat_has_no_outline_because_the_caller_composites_it() {
+    assert!(traced(Shape::Splat { radius: 9.0 }).is_empty());
 }
 
 #[test]
-fn a_mass_at_zero_squareness_is_an_ellipse_and_at_full_reaches_its_corners() {
+fn a_superellipse_at_zero_squareness_is_an_ellipse_and_at_full_reaches_its_corners() {
     let radii = (10.0, 6.0);
-    let round = traced(Shape::Mass {
+    let round = traced(Shape::Superellipse {
         rx: radii.0,
         ry: radii.1,
         square: 0.0,
     });
-    let boxy = traced(Shape::Mass {
+    let boxy = traced(Shape::Superellipse {
         rx: radii.0,
         ry: radii.1,
         square: 1.0,
@@ -152,7 +167,7 @@ fn every_outline_is_symmetric_about_its_own_vertical_axis() {
     // avoid. An ear is the deliberate exception — it leans, and the pair leans
     // apart rather than either one being handed.
     for shape in every_shape() {
-        if matches!(shape, Shape::Ear { .. } | Shape::Fur { .. }) {
+        if matches!(shape, Shape::Wedge { .. } | Shape::Splat { .. }) {
             continue;
         }
         let outline = traced(shape);
@@ -173,8 +188,8 @@ fn every_outline_is_symmetric_about_its_own_vertical_axis() {
 }
 
 #[test]
-fn a_limb_hangs_below_its_joint_so_a_swing_pivots_where_it_meets_the_body() {
-    let outline = traced(Shape::Limb {
+fn a_taper_hangs_below_its_origin_so_a_turn_pivots_about_that_end() {
+    let outline = traced(Shape::Taper {
         length: 30.0,
         top: 5.0,
         foot: 3.0,
@@ -189,17 +204,17 @@ fn a_limb_hangs_below_its_joint_so_a_swing_pivots_where_it_meets_the_body() {
         .fold(f64::INFINITY, f64::min);
     assert!(
         (highest - 0.0).abs() < 1.0e-9,
-        "the joint is the local origin, so nothing rises above it"
+        "the origin is the local zero, so nothing rises above it"
     );
     assert!(
         lowest <= -30.0,
-        "the foot must reach the limb's full length ({lowest})"
+        "the end must reach the taper's full length ({lowest})"
     );
 }
 
 #[test]
-fn an_ear_tucks_its_base_below_the_skull_so_no_seam_shows() {
-    let outline = traced(Shape::Ear {
+fn a_wedge_tucks_its_base_below_its_anchor_so_no_seam_shows() {
+    let outline = traced(Shape::Wedge {
         half_width: 6.0,
         height: 12.0,
         lean: 3.0,
@@ -216,10 +231,86 @@ fn an_ear_tucks_its_base_below_the_skull_so_no_seam_shows() {
     assert!((tip - 12.0).abs() < 1.0e-9, "the tip reaches its height");
 }
 
+/// The primitive that reads as plate rather than flesh: square sides with
+/// the corners cut, and never the rounded rim a superellipse has.
+#[test]
+fn a_bevelled_panel_keeps_square_sides_and_cuts_only_its_corners() {
+    let (rx, ry, bevel) = (10.0, 6.0, 2.0);
+    let outline = traced(Shape::BevelledPanel { rx, ry, bevel });
+    assert_eq!(outline.len(), 8, "one cut corner is two vertices");
+
+    // Two vertices sit on each side's full extent, which is what keeps the
+    // side flat instead of bowing the way a rounded rim does.
+    let on_right = outline.iter().filter(|&&(x, _)| (x - rx).abs() < 1.0e-9);
+    assert_eq!(on_right.count(), 2, "the right side is a flat edge");
+    let on_top = outline.iter().filter(|&&(_, y)| (y - ry).abs() < 1.0e-9);
+    assert_eq!(on_top.count(), 2, "the top is a flat edge");
+
+    // No vertex reaches the bounding box's corner: that is the cut.
+    assert!(
+        !outline
+            .iter()
+            .any(|&(x, y)| (x.abs() - rx).abs() < 1.0e-9 && (y.abs() - ry).abs() < 1.0e-9),
+        "a corner survived the bevel"
+    );
+    for &(x, y) in &outline {
+        assert!(
+            x.abs() <= rx + 1.0e-9 && y.abs() <= ry + 1.0e-9,
+            "({x}, {y}) escaped the panel's own extent"
+        );
+    }
+}
+
+/// A bevel deeper than the panel is clamped to the shorter half-extent, so
+/// the deepest cut a caller can ask for is where the corners meet rather
+/// than an inside-out ring.
+#[test]
+fn a_bevel_deeper_than_the_panel_is_clamped_to_the_shorter_half_extent() {
+    let (rx, ry) = (8.0, 5.0);
+    let absurd = traced(Shape::BevelledPanel {
+        rx,
+        ry,
+        bevel: 1.0e6,
+    });
+    let deepest = traced(Shape::BevelledPanel {
+        rx,
+        ry,
+        bevel: mathf::fmin(rx, ry),
+    });
+    assert_eq!(absurd, deepest, "an over-deep bevel is not the deepest one");
+
+    // Clamped, the short sides close to nothing and the long ones keep the
+    // flat the cut could not eat into.
+    for &(x, y) in &absurd {
+        assert!(
+            x.abs() <= rx + 1.0e-9 && y.abs() <= ry + 1.0e-9,
+            "({x}, {y}) escaped the panel's own extent"
+        );
+    }
+    let widest = absurd.iter().map(|&(x, _)| x).fold(f64::MIN, f64::max);
+    assert!(
+        (widest - rx).abs() < 1.0e-9,
+        "the clamp must not shrink the panel ({widest})"
+    );
+}
+
+/// A negative half-extent is floored rather than mirrored, so a caller
+/// cannot turn a panel inside out by sign alone.
+#[test]
+fn a_bevelled_panel_floors_a_negative_half_extent() {
+    let outline = traced(Shape::BevelledPanel {
+        rx: -4.0,
+        ry: 6.0,
+        bevel: 1.0,
+    });
+    for &(x, _) in &outline {
+        assert!(x.abs() < 1.0e-9, "a floored width still spread to {x}");
+    }
+}
+
 #[test]
 fn a_hem_is_not_a_straight_edge() {
-    // A panel with a flat hem reads as a card taped to the creature.
-    let outline = traced(Shape::Drape {
+    let outline = traced(Shape::ScallopedPanel {
         rx: 10.0,
         ry: 12.0,
         folds: 3,
@@ -234,12 +325,12 @@ fn a_hem_is_not_a_straight_edge() {
     let lowest = hem.iter().copied().fold(f64::INFINITY, f64::min);
     assert!(
         highest - lowest > 1.0,
-        "the hem must rise and fall to read as cloth"
+        "the hem must rise and fall rather than run straight"
     );
 }
 
 #[test]
-fn a_fill_lands_where_the_part_was_placed() {
+fn a_fill_lands_where_the_shape_was_placed() {
     let mut surface = blank(64);
     let mut scratch = Scratch::new();
     fill(
@@ -248,7 +339,7 @@ fn a_fill_lands_where_the_part_was_placed() {
             x: 20.0,
             y: 20.0,
             turn: 0.0,
-            shape: Shape::Mass {
+            shape: Shape::Superellipse {
                 rx: 6.0,
                 ry: 6.0,
                 square: 0.0,
@@ -282,7 +373,7 @@ fn a_turn_rotates_the_outline_about_its_own_origin() {
                 x: 48.0,
                 y: 48.0,
                 turn,
-                shape: Shape::Limb {
+                shape: Shape::Taper {
                     length: 30.0,
                     top: 5.0,
                     foot: 3.0,
@@ -319,7 +410,7 @@ fn a_transparent_colour_and_a_degenerate_shape_draw_nothing() {
             x: 16.0,
             y: 16.0,
             turn: 0.0,
-            shape: Shape::Mass {
+            shape: Shape::Superellipse {
                 rx: 8.0,
                 ry: 8.0,
                 square: 0.0,
@@ -331,7 +422,7 @@ fn a_transparent_colour_and_a_degenerate_shape_draw_nothing() {
             x: 16.0,
             y: 16.0,
             turn: 0.0,
-            shape: Shape::Fur { radius: 8.0 },
+            shape: Shape::Splat { radius: 8.0 },
             color: RED,
             seed: 0,
         },
@@ -354,7 +445,7 @@ fn a_shape_placed_far_off_the_surface_stays_off_it() {
                 x: at,
                 y: at,
                 turn: 0.0,
-                shape: Shape::Mass {
+                shape: Shape::Superellipse {
                     rx: 8.0,
                     ry: 8.0,
                     square: 0.0,

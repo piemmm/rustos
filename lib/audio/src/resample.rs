@@ -369,13 +369,22 @@ fn as_f32(value: f64) -> f32 {
     value as f32
 }
 
-/// One stream's resampling state over a shared [`FilterBank`].
+/// One stream's resampling state, driven over a shared [`FilterBank`].
+///
+/// The state is per stream and the coefficients are per rate pair, so the
+/// bank is *passed to* [`process`](Self::process) rather than held here: a
+/// service holding both in one stream record would otherwise need a
+/// self-reference, and building a resampler per period would reset the
+/// filter memory every period — an audible discontinuity.
 ///
 /// Holds only the per-channel history the filter spans, so a stream costs a
 /// few kibibytes rather than a copy of the coefficients.
 #[derive(Debug)]
-pub struct Resampler<'bank> {
-    bank: &'bank FilterBank,
+pub struct Resampler {
+    /// The ratio the history was sized and stepped for. A [`FilterBank`] is
+    /// determined entirely by its ratio, so this is what tells a bank that
+    /// belongs to this resampler from one that does not.
+    ratio: Ratio,
     channels: usize,
     /// The last [`FilterBank::taps`] input frames, interleaved, indexed by
     /// frame number modulo the tap count. Zero-initialised, which is the
@@ -392,15 +401,19 @@ pub struct Resampler<'bank> {
     remainder: u32,
 }
 
-impl<'bank> Resampler<'bank> {
-    /// A resampler over `bank` for `channels` interleaved channels.
+impl Resampler {
+    /// A resampler for `channels` interleaved channels, sized for `bank`.
+    ///
+    /// Every later [`process`](Self::process) must be handed a bank of the
+    /// same ratio; the buffers are sized here and reused, so the per-period
+    /// path allocates nothing.
     ///
     /// # Errors
     ///
     /// * [`Errno::OutOfRange`] — `channels` is zero or past the vocabulary's
     ///   maximum.
     /// * [`Errno::OutOfMemory`] — the history could not be allocated.
-    pub fn new(bank: &'bank FilterBank, channels: usize) -> Result<Self, Errno> {
+    pub fn new(bank: &FilterBank, channels: usize) -> Result<Self, Errno> {
         if channels == 0 || channels > MAX_CHANNELS {
             return Err(Errno::OutOfRange);
         }
@@ -413,7 +426,7 @@ impl<'bank> Resampler<'bank> {
             )
         };
         Ok(Self {
-            bank,
+            ratio: bank.ratio(),
             channels,
             history,
             taps,
@@ -421,6 +434,13 @@ impl<'bank> Resampler<'bank> {
             whole: 0,
             remainder: 0,
         })
+    }
+
+    /// The ratio this resampler steps at, and therefore the only
+    /// [`FilterBank`] it may be driven over.
+    #[must_use]
+    pub const fn ratio(&self) -> Ratio {
+        self.ratio
     }
 
     /// Discard the filter's memory and return to the start of the stream.
@@ -439,8 +459,8 @@ impl<'bank> Resampler<'bank> {
     /// Zero for the copying bank; half the tap span otherwise, which is the
     /// latency the resampling stage contributes to a stream's grant.
     #[must_use]
-    pub const fn latency_frames(&self) -> usize {
-        self.bank.taps() / 2
+    pub fn latency_frames(&self) -> usize {
+        self.taps.len() / 2
     }
 
     /// An upper bound on the output frames `input_frames` themselves produce,
@@ -451,32 +471,43 @@ impl<'bank> Resampler<'bank> {
     /// what it actually moved rather than promising to move everything.
     #[must_use]
     pub fn max_output_frames(&self, input_frames: usize) -> usize {
-        if self.bank.is_unity() {
+        if self.ratio.is_unity() {
             return input_frames;
         }
-        let ratio = self.bank.ratio();
-        let produced = u64::try_from(input_frames).unwrap_or(u64::MAX) * u64::from(ratio.output());
-        usize::try_from(produced / u64::from(ratio.input())).unwrap_or(usize::MAX) + 1
+        let produced =
+            u64::try_from(input_frames).unwrap_or(u64::MAX) * u64::from(self.ratio.output());
+        usize::try_from(produced / u64::from(self.ratio.input())).unwrap_or(usize::MAX) + 1
     }
 
-    /// Resample interleaved frames from `input` into `output`, returning the
-    /// input frames consumed and the output frames produced.
+    /// Resample interleaved frames from `input` into `output` over `bank`,
+    /// returning the input frames consumed and the output frames produced.
     ///
     /// Consumption stops when `output` is full, so a caller that under-sized
     /// its destination loses nothing: the unconsumed input is offered again.
     ///
     /// # Errors
     ///
-    /// [`Errno::LengthOutOfRange`] when either side is not a whole number of
-    /// frames — a partial frame would rotate every later channel.
-    pub fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<(usize, usize), Errno> {
+    /// * [`Errno::NotSupported`] — `bank` is not this resampler's: its ratio
+    ///   differs from the one the history was sized and stepped for, so
+    ///   filtering over it would silently produce the wrong audio.
+    /// * [`Errno::LengthOutOfRange`] — either side is not a whole number of
+    ///   frames; a partial frame would rotate every later channel.
+    pub fn process(
+        &mut self,
+        bank: &FilterBank,
+        input: &[f32],
+        output: &mut [f32],
+    ) -> Result<(usize, usize), Errno> {
+        if bank.ratio() != self.ratio {
+            return Err(Errno::NotSupported);
+        }
         if !input.len().is_multiple_of(self.channels) || !output.len().is_multiple_of(self.channels)
         {
             return Err(Errno::LengthOutOfRange);
         }
         let in_frames = input.len() / self.channels;
         let out_frames = output.len() / self.channels;
-        if self.bank.is_unity() {
+        if self.ratio.is_unity() {
             let moved = in_frames.min(out_frames);
             output[..moved * self.channels].copy_from_slice(&input[..moved * self.channels]);
             self.pushed += u64::try_from(moved).unwrap_or(0);
@@ -493,7 +524,7 @@ impl<'bank> Resampler<'bank> {
             consumed += 1;
             while produced < out_frames && self.producible() {
                 let slot = &mut output[produced * self.channels..(produced + 1) * self.channels];
-                self.emit(slot);
+                self.emit(bank, slot);
                 produced += 1;
             }
         }
@@ -510,7 +541,7 @@ impl<'bank> Resampler<'bank> {
 
     /// The tap count as the modulus the history ring is indexed by.
     fn modulus(&self) -> u64 {
-        u64::try_from(self.bank.taps()).unwrap_or(1).max(1)
+        u64::try_from(self.taps.len()).unwrap_or(1).max(1)
     }
 
     /// Whether the next output's whole tap window is in the history.
@@ -520,7 +551,7 @@ impl<'bank> Resampler<'bank> {
 
     /// One past the newest input frame the next output reads.
     fn window_base(&self) -> u64 {
-        self.whole + u64::try_from(self.bank.taps() / 2).unwrap_or(0) + 1
+        self.whole + u64::try_from(self.taps.len() / 2).unwrap_or(0) + 1
     }
 
     /// The channels the resampler was built for.
@@ -530,17 +561,17 @@ impl<'bank> Resampler<'bank> {
     }
 
     /// Produce one output frame and advance the position by the exact ratio.
-    fn emit(&mut self, out: &mut [f32]) {
-        let ratio = self.bank.ratio();
+    fn emit(&mut self, bank: &FilterBank, out: &mut [f32]) {
+        let ratio = self.ratio;
         let denominator = u64::from(ratio.output());
-        let scaled = u64::from(self.remainder) * u64::from(self.bank.phases());
+        let scaled = u64::from(self.remainder) * u64::from(bank.phases());
         let phase = u32::try_from(scaled / denominator).unwrap_or(0);
         // Zero whenever the bank has a row per denominator step, which is what
         // makes the exact case exact: there is nothing between rows to blend.
         let blend = as_f32(
             f64::from(u32::try_from(scaled % denominator).unwrap_or(0)) / f64::from(ratio.output()),
         );
-        self.blend_taps(phase, blend);
+        self.blend_taps(bank, phase, blend);
         let base = self.window_base();
         let modulus = self.modulus();
         for (channel, slot) in out.iter_mut().enumerate().take(self.channels) {
@@ -563,15 +594,15 @@ impl<'bank> Resampler<'bank> {
     ///
     /// Built once per output frame rather than once per channel, so a
     /// multi-channel stream pays the blend once.
-    fn blend_taps(&mut self, phase: u32, blend: f32) {
-        let lower = self.bank.row(phase);
+    fn blend_taps(&mut self, bank: &FilterBank, phase: u32, blend: f32) {
+        let lower = bank.row(phase);
         if blend == 0.0 {
             for (slot, value) in self.taps.iter_mut().zip(lower) {
                 *slot = *value;
             }
             return;
         }
-        let upper = self.bank.row(phase + 1);
+        let upper = bank.row(phase + 1);
         for (slot, (low, high)) in self.taps.iter_mut().zip(lower.iter().zip(upper)) {
             *slot = low + (high - low) * blend;
         }

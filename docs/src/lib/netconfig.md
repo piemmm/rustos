@@ -119,14 +119,63 @@ bond member may not carry a `dns.servers` key.
   comment plus one line per **set** key, in declaration + registry order,
   so render→parse round-trips exactly and shows exactly the live config).
 - `NetworkConfig::{interfaces, interface}` — the parsed interface set.
+- `NetworkConfig::edit() -> ConfigDraft`, `ConfigDraft::{set, unset, commit}`
+  — the writer's side (see below).
 - `InterfaceConfig` — one interface's `Option`-per-key state plus the
   effective-value accessors
   (`kind`/`ipv4_method`/`ipv6_method`/`members`/`dns_servers`).
-- `IfaceKey::{ALL, name, from_name}` — the closed registry.
+- `IfaceKey::{ALL, name, from_name, shape}` — the closed registry, each key
+  stating what it accepts in the shared `tairix_util::conf::ValueShape`
+  vocabulary; a closed key's spellings are its own value enum's `VALUES`,
+  derived from that enum's `ALL` and `as_str` so the set a chooser offers
+  and the set the parser admits cannot drift.
+- `InterfaceConfigPlan::{of, message_for, bond_for}` — the document → wire
+  projection (see below).
 - `IfaceKind` / `Ipv4Method` / `Ipv6Method` / `BondMode` / `MacAddr` /
   `Ipv4Cidr` / `Ipv6Cidr` — the typed value vocabulary.
 
+## What the document means to the running stack
+
+`InterfaceConfigPlan::of(&config)` projects a parsed document onto the
+`netstack-v1` messages that ask the running stack to *be* it: one
+`NetInterfaceConfigMsg` per deliverable interface (a plain interface's
+addressing, an address-less member's rename, a bond's own alias-matched
+addressing), one `NetBondConfigMsg` per bond, and the aliases of interfaces
+the document cannot bind to hardware at all. One mapping because two
+consumers make it — the device manager delivers it at boot and on every
+hardware-tree bump, and `configure` pushes it after writing a live edit — so
+neither can invent its own reading of what a setting means. `message_for` /
+`bond_for` answer what a plan carries for one alias, which is how a consumer
+tells an interface an edit changed from one it left alone.
+
+## Changing the document
+
+A whole-document invariant cannot be checked a key at a time. Moving an
+interface from `static` addressing to `dhcp` has to drop `ipv4.address` and
+change `ipv4.method` together: either half on its own is a document the
+parser refuses, and no ordering of the two avoids that. So a writer works on
+a `ConfigDraft` — `NetworkConfig::edit()` — applies as many `set`/`unset`
+calls as its invocation names, and `commit()`s once. Until the commit the
+configuration the draft came from is untouched, so a refusal can never leave
+a partly-applied change anywhere, and a committed `NetworkConfig` is always
+one the parser accepts back.
+
+`set` takes the value in the spelling the document holds and checks it
+against the key's typed set exactly as a parsed line is checked. There is no
+empty value: every key in the registry refuses one, which is what makes the
+empty string an unambiguous spelling for *unset* on a writer's command line
+(`configure`'s, for instance) with nothing for it to collide with.
+
+`commit` checks two things the per-key path cannot. It re-runs the
+whole-document consistency check, and it refuses a document whose render
+would exceed `MAX_CONFIG_LEN` — `MAX_INTERFACES` fully specified interfaces
+render past that bound, and a store the writer had just written would then be
+refused by the next reader. An interface left declaring no key at all is
+dropped, since it would write no line and keeping it would make the
+render→parse round trip inexact.
+
 The crate is `no_std` + `alloc`, performs no I/O, holds no authority, is
 host-unit-tested in `src/lib.rs`, and is fuzzed by `tests/fuzz_netconfig.rs`
-(registered with `cargo xtask fuzz`). Stability tier: experimental
-(`lib/netconfig/README.md`).
+(registered with `cargo xtask fuzz`) — which covers the writer too: no
+sequence of draft edits may commit a store the next parse would refuse.
+Stability tier: experimental (`lib/netconfig/README.md`).

@@ -202,6 +202,10 @@ tairix-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }
 # device-logic crate (the `lib/virtio_input`
 # precedent), arch-neutral, so its host tests run on the CI host; the kernel
 # names it without a kernel→driver dependency.
+# The virtio sound driver's single-source device id, so the discovery probe
+# that emits its hardware-tree node and the driver's own bind table cannot
+# disagree about which device type is a sound card.
+tairix-drv-audio-virtio-snd = { path = "../../drivers/audio/virtio_snd", version = "=0.0.0" }
 tairix-virtio-net = { path = "../../lib/virtio_net", version = "=0.0.0" }
 # Zero-on-drop for the passphrase-derived `VolumeKey` on the boot stack
 # (secret hygiene). The same audited crate `kernel/mem`

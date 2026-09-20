@@ -37,10 +37,45 @@ opens a drawing as a document.
 | S19 | `<pattern>` as a paint server, including the `overflow: visible` fold | done |
 | S20 | `<marker>`: `marker-start` / `-mid` / `-end`, and the element-visit bound their instancing needs | done |
 | S21 | `vector-effect="non-scaling-stroke"`: the outline built in the host space, and what stands in for that space here | done |
+| S22 | Glyph outlines out of `lib/fontface`: a public contour API, so text reaches this crate as geometry and never as pixels | done |
+| S23 | The font seam: resolving `font-family`/`font-weight`/`font-style`/`font-stretch` to a face at decode time, injected and capability-scoped | planned |
+| S24 | `<text>` and `<tspan>`: the `x`/`y`/`dx`/`dy`/`rotate` lists, `text-anchor`, white-space and `xml:space`, `letter-spacing`/`word-spacing`, `textLength`/`lengthAdjust` | planned |
+| S25 | The text property cascade: the `font-*` family, the baselines (`dominant-baseline`, `alignment-baseline`, `baseline-shift`), `text-decoration` | planned |
+| S26 | `<textPath>`: glyphs laid along a path, `startOffset`, `method`, `spacing`, `side` | planned |
+| S27 | Bidirectional text and shaping: UAX#9, `direction`/`unicode-bidi`, OpenType `GSUB`/`GPOS`, `writing-mode` and vertical text | planned |
+| S28 | The SVG 1.1 text leftovers: `<tref>`, and SVG fonts (`<font>`, `<glyph>`, `<altGlyph>`) | planned |
+| S29 | `<image>`: `href` and `data:` URIs, its own `preserveAspectRatio`, decoded through `lib/image` inside the parser sandbox, with a nested-document recursion bound | planned |
+| S30 | The filter region and graph: `<filter>`, `filterUnits`, `primitiveUnits`, the region rectangle, `color-interpolation-filters`, the artwork-tree filter node and the renderer's evaluator | planned |
+| S31 | Source and plumbing primitives: `feFlood`, `feOffset`, `feMerge`/`feMergeNode`, `feTile`, `feImage`, and the named inputs | planned |
+| S32 | Colour primitives: `feColorMatrix`, `feComponentTransfer` with its four transfer functions, `feBlend`, `feComposite` including `arithmetic` | planned |
+| S33 | Spatial primitives: `feGaussianBlur` over `lib/raster`'s box blur, `feMorphology`, `feConvolveMatrix`, `feDisplacementMap`, `feDropShadow` | planned |
+| S34 | Lighting and noise: `feDiffuseLighting` and `feSpecularLighting` with all three light sources, and `feTurbulence`'s exactly-specified generator | planned |
+| S35 | The time model: what an animated `SvgImage` is, and how decoding once survives a picture that varies with time | planned |
+| S36 | `<animate>`, `<set>`, `<animateTransform>`: `from`/`to`/`by`/`values`, `calcMode`, `keyTimes`, `keySplines`, `additive`, `accumulate` | planned |
+| S37 | `<animateMotion>` and `<mpath>`, including `rotate="auto"` along the motion path | planned |
+| S38 | The timing graph: `begin`/`end` lists, offsets, syncbase and repeat timing, `restart`, `fill`, `repeatCount`/`repeatDur`, `min`/`max` | planned |
+| S39 | The CSS surface currently dropped: attribute selectors, pseudo-classes, `@media`, `@supports`, `@font-face`, custom properties with `var()`, and `calc()` | planned |
+| S40 | CSS presentation of geometry: `transform` as a property with `transform-origin`/`transform-box`, `mix-blend-mode` and `isolation`, and the shorthand function forms of `filter`/`clip-path`/`mask` | planned |
+| S41 | The remaining `vector-effect` values: `non-scaling-size`, `non-rotation`, `fixed-position` | planned |
+| S42 | Structural leftovers: `<view>`, `<cursor>`, `<a>` link regions with `pointer-events`, and `<title>`/`<desc>`/`<metadata>` as retained metadata | planned |
+| S43 | Colour management: `color-interpolation` (linearRGB gradients and compositing), `<color-profile>`/ICC, and the `shape-rendering`/`text-rendering`/`image-rendering` hints | planned |
+| S44 | External references, capability-gated: `@import`, an `href` into another document, external fonts and images | planned |
+| S45 | `<foreignObject>`: undrawable, so a `<switch>` takes its fallback sibling | planned |
+| S46 | The scripted-document model: where a script runs, what a live document is, and which consumers may enable one at all | planned |
+| S47 | The ECMAScript engine: parse, interpret, collect, and the bounded execution budget that makes it abortable | planned |
+| S48 | The SVG DOM binding: the document/element/attribute/style interfaces, and the mutation path back into the artwork tree | planned |
+| S49 | Events and timers: `load`/pointer/keyboard events with the hit testing they need, `setTimeout`/`setInterval`/`requestAnimationFrame` | planned |
 
-Every item is `done` and none is half-built: the decoder draws the whole of
-the subset this plan set out to draw. What it does not draw is the
-[deliberate non-goals](#deliberate-non-goals), and nothing else.
+S1–S22 are `done` and none is half-built. S23–S44 are the rest of SVG, which
+this crate must draw and does not yet: text, embedded images, filters,
+animation, the CSS surface the cascade still drops, and the reference
+resolution that reaches outside the document. S45–S49 follow from the
+decisions recorded under [Decisions taken](#decisions-taken).
+
+Until an item lands its elements are **silently skipped** by the walk, which
+is the behaviour the [Open question](#open-question) is about — and while the
+list below is non-empty, that question has a live answer rather than a
+theoretical one.
 
 ---
 
@@ -450,47 +485,210 @@ this inverts that order and needs both spaces at once.
   paid for. The host tolerance cannot buy more output either: the stroker
   still floors it and still caps the segments of an arc.
 
-## Deliberate non-goals
+## Text
 
-Not deferred work — these are outside what an artwork decoder is for, and
-adding one would be a new plan of its own:
+Text is the largest missing piece and the one that needs a capability from
+outside this crate before any of it can be written.
 
-- Text (`<text>`, `<tspan>`, fonts, text layout). Glyph rendering is
-  `lib/fontface`'s job, and artwork ships its lettering as outlines.
-- Embedded raster images (`<image>`), which would nest one decoder in
-  another.
-- Filters.
-- Animation (SMIL), scripting, and external references of any kind. A
-  stylesheet is read only from the document's own `<style>` elements; an
-  `@import` is not fetched.
-- The `vector-effect` values beside `non-scaling-stroke` —
-  `non-scaling-size`, `non-rotation`, `fixed-position`. SVG 2 records them
-  as at risk of being dropped for want of implementations, and
-  `non-scaling-size` in particular suppresses scaling of the whole user
-  coordinate system, of which a non-scaling stroke is one consequence:
-  drawing half of it would be a wrong picture where drawing none of it is a
-  missing decoration. They parse as the valid CSS they are and ask for
-  nothing.
+- **A glyph is geometry, never pixels.** SVG text is filled, stroked,
+  gradient-painted, clipped, masked and transformed exactly as a `<path>` is,
+  and an `SvgImage` is resolution-independent. So a glyph must arrive as
+  contours and join the one geometry currency — `SubPath`s through the single
+  flattening step — not as a rasterised cell. Anything else would fix a
+  resolution at decode time and put text on a second rasterisation path, both
+  of which this crate exists to avoid.
+- **`lib/fontface` exposes that (S22, done):
+  `Face::glyph_outline(glyph) -> Vec<Contour>`.** A `Contour` is a start point
+  and an ordered run of `OutlineSegment::{Line, Quadratic}` closing back on
+  it. What it settled, because S24 builds directly on each:
+  - **Quadratics come through whole, and there is no tolerance parameter.**
+    A caller-supplied tolerance would put a second flattening step in the
+    crate; a fixed chord count would facet a glyph as the asset is drawn
+    larger, the defect already rejected for marker tangents and for the
+    design-grid tolerance. `lib/svg` instead flattens through its own
+    `flatten_quadratic`, at the tolerance the *placement* resolves — the same
+    single step every other curve in the document takes, so a glyph is
+    subdivided exactly as a `<path>` of the same shape would be. TrueType
+    outlines are quadratic throughout, so nothing else is needed.
+  - **Font units, y up, nothing pre-applied.** The y-flip and the
+    `font-size / units_per_em` scale stay with the caller, because the two
+    consumers place a glyph differently: the rasteriser flips about a baseline
+    row in a pixel cell, S24 flips about the baseline in user units as part of
+    the text transform it is building anyway. `Face::units_per_em` was already
+    public.
+  - **Contours are closed, and winding is the fill.** TrueType fills non-zero,
+    so a counter is a contour wound against the one enclosing it, not a
+    separate shape — S24 emits one `Layer` per glyph run with
+    `FillRule::NonZero` and all contours together, exactly as a multi-contour
+    `<path>` does. `lib/fontface` names no `FillRule`; it states the
+    convention and `lib/svg` names its own type.
+  - **One walk, genuinely shared.** The decode is a single traversal of `glyf`
+    over a private sink trait, with the rasteriser and the outline API as its
+    two implementations — not a second decoder beside the old one. Measured:
+    the generated console atlas is byte-identical, and rasterising D2Coding's
+    19,966 mapped glyphs costs 0.4641 s through the shared walk against
+    0.4628 s before it, so the sharing is free and adds no per-glyph
+    allocation to the atlas path.
+  - **The bounds are charged across the whole walk.** Outline points and
+    composite component records are each held to a total per glyph, not a cap
+    per nesting level — a per-level cap multiplies with depth, and the walk
+    could previously expand a malformed composite without end. The existing
+    composite-depth bound stays. These are validation bounds on a hostile
+    face, not capacities.
+- **The font is resolved through an injected seam (S23), never ambient.** This
+  crate is `no_std` and has no file access; the faces live in `/System/Fonts`
+  behind the font service (`plans/FONT-SERVICE.md`). `decode` therefore takes a
+  font provider the caller supplies, capability-scoped like the help engine's
+  read seam, and a caller that supplies none decodes documents without text
+  rather than gaining ambient authority. A document naming a family the
+  provider cannot furnish falls back through the generic families and finally
+  fails closed — it must not silently draw nothing, because absent lettering is
+  a wrong picture, not a missing decoration.
+- **Layout is the part that is genuinely hard.** S24 is the positioning model
+  (per-character `x`/`y`/`dx`/`dy`/`rotate` lists, anchoring, white-space
+  collapsing under `xml:space`, `textLength` adjustment). S27 is bidi and
+  shaping: UAX#9 reordering and OpenType `GSUB`/`GPOS`, neither of which
+  `lib/fontface` has today. Latin text is correct without S27; Arabic, Hebrew,
+  and the Indic and CJK scripts are not, so S27 is what makes the claim "full"
+  true rather than "full for scripts that need no shaping".
+- **New bounds.** Glyph count per document, total outline points (against the
+  existing vertex budget), `<tspan>` nesting, and the resolved text length —
+  all fixed containment bounds, sized like the rest.
+- **The order is S22 (done), then S23–S26, then S27.** The outline API came
+  first because nothing else could start without it; Latin, Greek and Cyrillic
+  text then works correctly through S26, and S27 adds the scripts that need
+  reordering and shaping. Each stage is complete in itself rather than a
+  thinner version of the next — a script that needs shaping is not
+  half-drawn before S27, it is skipped like any other element this decoder
+  cannot yet draw.
+
+## Embedded images
+
+- **The decoder exists; the seam does not.** `lib/image` already reads PNG,
+  JPEG, GIF, BMP, ICO, TIFF and WebP, with sequence support and its own
+  `DecodeLimits`. S29 adds no format work — it adds `<image>`, the `data:` URI
+  grammar, the element's own `preserveAspectRatio` fit, and a raster carrier in
+  the artwork tree, which today holds only colour, gradient and pattern paints.
+- **Nesting a decoder in a decoder is the risk, so it is bounded and
+  sandboxed.** The decode runs in the minimum-capability parser sandbox, under
+  fixed input-byte and output-pixel bounds, and a malformed image fails closed
+  to drawing nothing rather than taking the asset with it. An `<image>` naming
+  an SVG re-enters this decoder, so it charges the same recursion and
+  element-visit budgets the rest of the walk does.
+
+## Filters
+
+- **A filter is pixels, so it is a new kind of artwork node.** Group, mask and
+  pattern already give the renderer a subtree drawn into its own buffer; a
+  filter is that buffer plus a primitive graph evaluated over it. The graph
+  belongs in `lib/raster` beside the renderer that runs it, not in the decoder,
+  which builds and bounds it (S30).
+- **The filter region is the memory bound.** It is stated in user or
+  bounding-box units and can be made enormous, so it is clamped like a
+  pattern tile's extent — a fixed containment bound, refused rather than
+  allocated past.
+- **`color-interpolation-filters` defaults to linearRGB**, which is the trap in
+  this area: a filter graph evaluated in sRGB gives visibly wrong results for
+  blur and lighting. The conversion is part of S30, not an afterthought in each
+  primitive.
+- **Two primitives are exactly specified and must be bit-faithful.**
+  `feTurbulence`'s Perlin generator is given as reference code in the
+  specification, and `feGaussianBlur` is defined as three successive box blurs
+  at a stated width — which `lib/raster`'s `box_blur` already provides, so that
+  one is composition rather than new arithmetic.
+
+## Animation
+
+- **This is the one item that changes what an `SvgImage` is**, and the decision
+  belongs in S35 before S36–S38 are written. Today the type is a static artwork
+  tree decoded once and blitted many times, which is the crate's central
+  performance claim. A document that changes with time cannot be that, and the
+  two honest shapes are: decode at a stated time, so the consumer asks for the
+  picture at *t* and caching stays per (asset, time); or an animated image
+  carrying the timeline, which the consumer steps. The first keeps the existing
+  type and the existing cache, and costs a decode per distinct time; the second
+  decodes once but makes every consumer time-aware. Neither is free, and
+  choosing without measuring the compositor cost would be a guess.
+- **The timing graph is the substance, not the interpolation.** `begin`/`end`
+  are lists of offsets, syncbase references to other animations, event
+  triggers and repeat triggers, and they form a dependency graph that can be
+  cyclic — so it is bounded and must terminate, like every other reference
+  chain here.
+- **Bounds.** Timeline length, animation count, and resolved repeat count, all
+  fixed.
+
+## Decisions taken
+
+Both were raised rather than settled inside this plan, and both are now
+decided. What each obliges is recorded here because it shapes items above.
+
+- **`<foreignObject>` is undrawable, and says so (S45).** Its content is
+  another language — in practice HTML — so drawing it means an HTML parser,
+  the CSS box model and a layout engine inside an asset decoder. Instead it
+  is treated as an element this decoder cannot draw, which is exactly what
+  makes a `<switch>` choose the sibling fallback beside it. That is how
+  documents in the wild already degrade, it needs no new mechanism, and it is
+  a *defined* answer rather than a silent skip.
+
+- **Scripting is in, and containment is the whole design (S46–S49).** The
+  decision is to support it; the obligation that comes with it is that a
+  script must not be able to reach anything the picture does not need.
+  - **A scripted document is a different product from an asset.** Everything
+    else this crate decodes is converted once and blitted many times. A
+    script makes the document *live*: it mutates the DOM, it runs on a timer,
+    it responds to input, and it has no decode that is ever finished. S46
+    settles that boundary before S47 is written, and it depends on the time
+    model (S35), because a live document is the animated case with a second
+    source of change.
+  - **Scripting is opt-in per consumer, and the desktop's asset paths never
+    opt in.** A cursor, a status glyph, window furniture and an icon are
+    decoded from files the user did not choose to run, on the compositor's
+    path; there is no picture worth an execution engine there. The consumer
+    that legitimately enables it is a document *viewer* opening a file the
+    user asked for (`plans/VIEW.md`). The capability to run a script is
+    therefore granted by the caller, defaults to absent, and is refused
+    rather than assumed.
+  - **It runs in its own process, not the caller's.** The engine lives behind
+    the minimum-capability parser sandbox: a dedicated address space holding
+    one IPC endpoint and nothing else — no filesystem, no network, no spawn,
+    no capability delegation inward. A script that crashes, hangs or is
+    killed costs its own sandbox and returns an error to the caller, exactly
+    as a malformed parse does.
+  - **Execution is budgeted and abortable.** An instruction budget, a
+    wall-clock budget and a heap ceiling, all fixed containment bounds. There
+    is no "run until it finishes": a script over budget is stopped and the
+    document keeps the last picture it had. This is the one place in the
+    crate where the work is genuinely unbounded by the input's size, so the
+    budget is the only thing standing in for every other bound here.
+  - **Whether the engine is first-party is a sub-decision still to take.**
+    Rolling an ECMAScript implementation in house is a larger trusted
+    computing base than the whole of the rest of `lib/svg`, and doing it
+    badly is worse than a vetted dependency — the reasoning the charter
+    already applies to cryptography. It is called out here so it is chosen
+    deliberately when S47 starts, not defaulted into.
 
 ## Open question
 
 `AGENTS.md` fails closed by default, but an element this decoder cannot draw
 is currently **skipped** rather than refusing the document — so an asset
-carrying an undrawable decoration renders without it instead of falling back
-to the tier below. Skipping is what lets one
-unsupported decoration not lose a whole asset, and it is the behaviour the
-desktop has today. Whether the drawable-element case should instead fail the
-document closed is recorded as an open item in `plans/ICONS.md`; it is a
-deliberate decision to make, not an oversight. The set at stake has stopped
-shrinking, there being nothing left to shrink it by: clipping, masking, group
-opacity, patterns (spilling tiles included), markers and non-scaling strokes
-are all honoured, so the only cases that still render a *wrong* picture are
-the deliberate non-goals. That makes it a materially different question from
-the one it started as. It is no longer worth waiting for the decoder to catch
-up; it is a decision about text, embedded images, filters and animation,
-which are not going to be drawn.
-Patterns also drew the distinction that answers part of the question: a reference naming a server
-the document does not define takes its fallback colour, while a server that
-is defined and paints nothing is `none` and takes none — so an *empty*
-pattern or gradient no longer renders as a fallback colour it was never
-given.
+carrying one renders without it instead of falling back to the tier below.
+Skipping is what lets one unsupported decoration not lose a whole asset, and
+it is the behaviour the desktop has today. Whether the drawable-element case
+should instead fail the document closed is recorded as an open item in
+`plans/ICONS.md`; it is a deliberate decision to make, not an oversight.
+
+While S23–S44 are outstanding the question is live rather than theoretical:
+skipping currently means a document with text draws no lettering, and an
+asset whose meaning *is* its lettering then renders as a wrong picture with
+no signal. That argues for distinguishing the two cases rather than choosing
+one globally — a missing decoration is safely skipped, where missing content
+is not — and the distinction is only worth encoding once there is something
+behind it. As each item lands the set shrinks; the answer should be taken
+against the set that remains, not the set that happens to be unimplemented
+today.
+
+Patterns drew the distinction that answers part of the question: a reference
+naming a server the document does not define takes its fallback colour, while
+a server that is defined and paints nothing is `none` and takes none — so an
+*empty* pattern or gradient no longer renders as a fallback colour it was
+never given.

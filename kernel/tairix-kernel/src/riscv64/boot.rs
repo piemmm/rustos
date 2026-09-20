@@ -1335,6 +1335,14 @@ fn seed_hardware_tree(
         let _ = crate::hwdiscovery::observe_virtio_mmio_network_devices(
             &bus, &slot_irq, &mut sink, log_sink,
         );
+
+        // A sound card is discovered by the same walk as a NIC — one slot's
+        // register window, its coherent DMA constraint and its decoded
+        // interrupt line — so the autoloaded user-space driver can park on
+        // the device's own period interrupt.
+        let _ = crate::hwdiscovery::observe_virtio_mmio_audio_devices(
+            &bus, &slot_irq, &mut sink, log_sink,
+        );
     }
 
     // Leak the buffered tree to `'static` (a one-shot boot publish, never a

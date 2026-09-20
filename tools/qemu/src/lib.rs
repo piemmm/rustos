@@ -639,6 +639,38 @@ impl Arch {
     }
 }
 
+/// The `-audiodev`/`-device` pair that attaches a virtio sound device behind
+/// QEMU's `wav` backend, or nothing when the run asked for no capture.
+///
+/// One definition for all three ports: the backend's rate, channel count and
+/// sample format are the vertical's own, so the recording needs no conversion
+/// to be compared sample for sample, and `device` names the per-bus flavour
+/// (`virtio-sound-device` on a `virt` board's MMIO transport,
+/// `virtio-sound-pci` on x86_64).
+///
+/// The device presents exactly **one** stream, and that is the backend's own
+/// limit rather than a choice: `wav` records what the guest plays and cannot
+/// supply capture, so a device declaring a capture stream would be
+/// advertising a capability the host has not got (QEMU says so, on stderr,
+/// every run). It is given channel maps and one jack so the driver's
+/// published-map and jack-state paths are exercised rather than only its
+/// defaults.
+#[must_use]
+pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
+    let Some(path) = spec.audio_wav_path.as_ref() else {
+        return Vec::new();
+    };
+    let mut backend = OsString::from("wav,id=snd0,path=");
+    backend.push(path.as_os_str());
+    backend.push(",out.frequency=48000,out.channels=2,out.format=s16");
+    vec![
+        OsString::from("-audiodev"),
+        backend,
+        OsString::from("-device"),
+        OsString::from(format!("{device},audiodev=snd0,streams=1,chmaps=2,jacks=1")),
+    ]
+}
+
 /// Multiple of the inactivity budget that bounds a run's total wall clock
 /// when the run does not declare a ceiling of its own.
 ///
@@ -747,6 +779,11 @@ pub struct Spec {
     /// decoded something. `None` leaves the host clock, which is what every
     /// vertical without an RTC driver wants.
     pub rtc_base_unix_secs: Option<i64>,
+    /// Where QEMU's `wav` audio backend writes what the emulated sound card
+    /// received. `Some` attaches a virtio sound device behind that backend;
+    /// `None` attaches no sound device at all — the path *is* the request,
+    /// so a device with nowhere to record to cannot be configured.
+    pub audio_wav_path: Option<PathBuf>,
     /// Extra arguments appended verbatim to the QEMU command line after the
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
@@ -918,6 +955,7 @@ impl Spec {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
+            audio_wav_path: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -1050,6 +1088,7 @@ impl Spec {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
+            audio_wav_path: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -1080,6 +1119,7 @@ impl Spec {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
+            audio_wav_path: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -1183,6 +1223,18 @@ impl Spec {
     #[must_use]
     pub fn with_ramfb(mut self) -> Self {
         self.devices.ramfb = true;
+        self
+    }
+
+    /// Attach a virtio sound device behind QEMU's `wav` audio backend,
+    /// recording what the emulated card receives into `path`.
+    ///
+    /// Any file already at `path` is left alone here — the caller removes a
+    /// stale capture before the run, exactly as it does for a screendump, so
+    /// an assertion can never read the previous run's bytes.
+    #[must_use]
+    pub fn with_audio_wav(mut self, path: impl Into<PathBuf>) -> Self {
+        self.audio_wav_path = Some(path.into());
         self
     }
 
@@ -4095,6 +4147,7 @@ mod tests {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
+            audio_wav_path: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),

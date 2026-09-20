@@ -1301,6 +1301,9 @@ where
     // enumeration error leaves the NIC undiscovered; whatever was collected is
     // seeded regardless.
     let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(pci, &route_irq, sink, log);
+    // A sound card is discovered by the same PCI walk as a NIC, so one
+    // signed driver bundle binds on either bus.
+    let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(pci, &route_irq, sink, log);
 
     // Emit every virtio-input function (a `-device virtio-keyboard-pci` /
     // `virtio-mouse-pci`) as an interrupt-driven input node carrying its four

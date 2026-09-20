@@ -105,11 +105,23 @@ pub const NETWORK_IFCONFIG_REJECTED: EventId = EventId(13_016);
 /// surfaces a hand edit.)
 pub const CONFIG_DOCUMENT_MALFORMED: EventId = EventId(13_017);
 
+/// A discovered audio device-channel node (`compatible = "tairix,audiochan"`,
+/// emitted by a bound audio driver process) was handed to the audio service:
+/// the device manager `ipc_call`ed `audiod` `BindDriver` with the node's
+/// endpoint and the service adopted it.
+pub const AUDIOD_BOUND: EventId = EventId(13_018);
+/// An audio device-channel node was observed but could not be handed to the
+/// audio service (it refused the bind, or its rendezvous was unreachable).
+/// The channel stays unbound and the hand-off is retried on the next
+/// generation bump — never an error (fail-soft, like the driver store being
+/// unavailable).
+pub const AUDIOD_BIND_FAILED: EventId = EventId(13_019);
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 17] = [
+    const ALL: [EventId; 19] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -127,6 +139,8 @@ mod tests {
         NETWORK_IFCONFIG_DELIVERED,
         NETWORK_IFCONFIG_DELIVERY_FAILED,
         NETWORK_IFCONFIG_REJECTED,
+        AUDIOD_BOUND,
+        AUDIOD_BIND_FAILED,
     ];
 
     #[test]

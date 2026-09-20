@@ -1070,6 +1070,7 @@ mod tests {
             names,
             [
                 "applib",
+                "audiod",
                 "basename",
                 "cat",
                 "chmod",
@@ -1167,6 +1168,7 @@ mod tests {
         assert_eq!(
             services,
             [
+                "audiod",
                 "confd",
                 "devmgr",
                 "fontd",

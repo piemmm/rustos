@@ -20,6 +20,17 @@
 //! sets are pinned disjoint by a test over both registries rather than left
 //! to the accident that none collides today.
 //!
+//! Both registries are settable. An invocation names keys from either, they
+//! are resolved against one working copy of each document before a byte is
+//! written, and only a document the invocation actually names is rewritten.
+//! The per-interface registry has no defaults to fall back to, so it needs a
+//! spelling for **unset**: the empty value. No key in that registry accepts
+//! an empty value — the engine pins that — which is what makes the spelling
+//! unambiguous, and it is what lets one invocation move an interface from a
+//! static address to DHCP (`configure wan.ipv4.method dhcp wan.ipv4.address
+//! "" wan.ipv4.gateway ""`), a change neither half of which is a consistent
+//! document on its own.
+//!
 //! # What this crate is
 //!
 //! The pure, host-testable core of the tool: the [`parse`]r that maps a
@@ -64,11 +75,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_abi::net_ipc::NetworkSettings;
+use tairix_abi::net_ipc::{NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings};
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
-use tairix_netconfig::{IfaceKey, NetworkConfig};
-use tairix_sysconfig::{Key, SystemConfig, ValueShape};
+use tairix_netconfig::{IfaceKey, InterfaceConfigPlan, NetworkConfig};
+use tairix_sysconfig::{Key, SystemConfig};
+use tairix_util::conf::ValueShape;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `configure`'s own Help tree is
@@ -77,10 +89,12 @@ pub const USAGE: &str = "usage: configure [<key> [<value> [<key> <value>]...]] [
 
 /// Most `<key> <value>` pairs one invocation may set.
 ///
-/// The registry is closed and small, so setting every key at once is the
-/// widest an invocation can meaningfully be; a longer command line names a
-/// key twice and is refused rather than applied in some order.
-pub const MAX_PAIRS: usize = tairix_sysconfig::Key::ALL.len();
+/// Both registries are closed, so every key of both at once is the widest an
+/// invocation can meaningfully be; a longer command line names a key twice
+/// and is refused rather than applied in some order. Derived from the two
+/// registries rather than picked, so neither can outgrow it.
+pub const MAX_PAIRS: usize =
+    tairix_sysconfig::Key::ALL.len() + tairix_netconfig::MAX_INTERFACES * IfaceKey::ALL.len();
 
 /// One thing the `configure` tool can do.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,6 +127,14 @@ pub enum ConfigureError {
     UnknownKey,
     /// The value is outside the named key's closed set.
     InvalidValue(Key),
+    /// A per-interface setting was refused: the value is outside the key's
+    /// set, the alias is malformed, or the store already declares as many
+    /// interfaces as it may.
+    InterfaceRefused(IfaceKey, tairix_netconfig::ConfigError),
+    /// The edited network document does not hold together (a static method
+    /// with no address, a bond with too few members, a document that would
+    /// outgrow the store bound). Nothing was written.
+    NetworkInconsistent(tairix_netconfig::ConfigError),
     /// The store document on disk could not be fully parsed by the shared
     /// engine (a hand edit outside the grammar); a set refuses rather than
     /// guess at a merge.
@@ -128,6 +150,8 @@ pub enum ConfigureError {
     /// The store could not be written (e.g. the caller may not change
     /// system settings).
     Write(Errno),
+    /// The network store could not be written.
+    NetworkWrite(Errno),
     /// The terminal output could not be delivered.
     Output(Errno),
 }
@@ -149,6 +173,25 @@ impl fmt::Display for ConfigureError {
                     write!(f, "invalid value for {}; expected {form}", key.name())
                 }
             },
+            Self::InterfaceRefused(key, err) => match (err, key.shape()) {
+                (tairix_netconfig::ConfigError::InvalidValue, ValueShape::Closed(values)) => {
+                    write!(f, "invalid value for {}; valid:", key.name())?;
+                    for value in values {
+                        write!(f, " {value}")?;
+                    }
+                    Ok(())
+                }
+                (tairix_netconfig::ConfigError::InvalidValue, ValueShape::Free(form)) => {
+                    write!(f, "invalid value for {}; expected {form}", key.name())
+                }
+                _ => write!(f, "{}: {err}", key.name()),
+            },
+            Self::NetworkInconsistent(err) => {
+                write!(
+                    f,
+                    "the network configuration would not hold together: {err}"
+                )
+            }
             Self::Malformed(err) => write!(f, "store not understood: {err}"),
             Self::Read(err) => write!(f, "cannot read the store: {err}"),
             Self::NetworkRead(err) => write!(f, "cannot read the network store: {err}"),
@@ -156,6 +199,7 @@ impl fmt::Display for ConfigureError {
                 write!(f, "network store not understood: {err}")
             }
             Self::Write(err) => write!(f, "cannot write the store: {err}"),
+            Self::NetworkWrite(err) => write!(f, "cannot write the network store: {err}"),
             Self::Output(err) => write!(f, "cannot write output: {err}"),
         }
     }
@@ -187,7 +231,7 @@ pub trait Store {
     fn write(&self, text: &str) -> Result<(), Errno>;
 }
 
-/// Reads the per-interface network-configuration document.
+/// Reads and replaces the per-interface network-configuration document.
 ///
 /// Separate from [`Store`] because it is a different document with a
 /// different engine (`lib/netconfig`), not a second view of the same one.
@@ -204,6 +248,16 @@ pub trait NetworkStore {
     /// interface's hardware identity and this machine's static addressing
     /// and is not world-readable.
     fn read(&self) -> Result<Option<String>, Errno>;
+
+    /// Replace the network document with `text` (creating it, and its
+    /// directory, when absent).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises — notably
+    /// [`Errno::PermissionDenied`] when the caller may not change the
+    /// machine's network configuration.
+    fn write(&self, text: &str) -> Result<(), Errno>;
 }
 
 /// Applies the stack-wide `net.*` policy to the running network stack.
@@ -224,6 +278,24 @@ pub trait NetPolicy {
     /// `CAP_NET_ADMIN`, or [`Errno::NotFound`] when no network stack is
     /// running. The store write has already succeeded either way.
     fn apply(&self, settings: NetworkSettings) -> Result<(), Errno>;
+
+    /// Ask the running stack to adopt one managed interface's configuration
+    /// — the same framed message the device manager delivers at boot, so a
+    /// live edit and a boot-time read cannot mean different things.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the endpoint raises, notably [`Errno::NotFound`] when
+    /// the interface has not bound to a device yet.
+    fn apply_interface(&self, config: &NetInterfaceConfigMsg) -> Result<(), Errno>;
+
+    /// Compose (or recompose) a bond interface in the running stack.
+    ///
+    /// # Errors
+    ///
+    /// As [`apply_interface`](Self::apply_interface); [`Errno::NotFound`]
+    /// additionally means a declared member has not bound yet.
+    fn apply_bond(&self, config: &NetBondConfigMsg) -> Result<(), Errno>;
 }
 
 /// Writes bytes to one of the tool's output streams.
@@ -290,7 +362,7 @@ pub fn run(
     command: Command<'_>,
     locale: Option<&str>,
     store: &dyn Store,
-    network: &dyn NetworkStore,
+    netstore: &dyn NetworkStore,
     policy: &dyn NetPolicy,
     help: &dyn HelpSource,
     output: &dyn Output,
@@ -317,7 +389,7 @@ pub fn run(
             // Then every per-interface key the network store actually
             // holds. Only the set ones: that document has no defaults to
             // print, and a wall of unset keys would say nothing.
-            for iface in load_network(network)?.interfaces() {
+            for iface in load_network(netstore)?.interfaces() {
                 for key in IfaceKey::ALL {
                     if let Some(value) = iface.render_value(*key) {
                         text.push_str(&iface.name);
@@ -342,7 +414,7 @@ pub fn run(
                 // not have.
                 Named::Interface(iface, key) => format!(
                     "{}\n",
-                    load_network(network)?
+                    load_network(netstore)?
                         .interface(iface)
                         .and_then(|found| found.render_value(key))
                         .unwrap_or_default()
@@ -353,49 +425,252 @@ pub fn run(
                 .map_err(ConfigureError::Output)
         }
         Command::Set(pairs) => {
-            // Every pair is resolved and applied to one working copy before
-            // a byte is written, so a command line that names an unknown
-            // key or an invalid value changes nothing at all rather than
-            // applying the pairs that came before it.
-            let mut config = load(store)?;
-            let mut network = false;
-            let mut seen: Vec<Key> = Vec::with_capacity(pairs.len());
-            for (name, value) in &pairs {
-                let key = Key::from_name(name).ok_or(ConfigureError::UnknownKey)?;
-                // A key named twice is a command line with two intents for
-                // one setting; there is no order in which both are honoured.
-                if seen.contains(&key) {
-                    return Err(ConfigureError::Usage);
-                }
-                seen.push(key);
-                config
-                    .set(key, value)
-                    .map_err(|_| ConfigureError::InvalidValue(key))?;
-                network |= key.is_network();
+            // Every pair is resolved and applied to one working copy of each
+            // document before a byte is written, so a command line that
+            // names an unknown key or an invalid value changes nothing at
+            // all rather than applying the pairs that came before it.
+            let named = resolve_all(&pairs)?;
+            let machine = apply_machine(&named, store)?;
+            let network = apply_network(&named, netstore)?;
+
+            // Only a document this invocation actually names is rewritten;
+            // each is rendered and replaced whole. The two are separate
+            // files with no transaction between them, so a command naming
+            // both writes them in order and reports the first refusal —
+            // having already validated both, so a refusal here is the
+            // filesystem's answer and not a half-understood intent.
+            if let Some(config) = machine.as_ref() {
+                store
+                    .write(&config.render())
+                    .map_err(ConfigureError::Write)?;
             }
-            store
-                .write(&config.render())
-                .map_err(ConfigureError::Write)?;
-            if !network {
+            if let Some((_, edited)) = network.as_ref() {
+                if let Err(err) = netstore.write(&edited.render()) {
+                    // Two files, no transaction between them: if the machine
+                    // document already landed, saying only that the network
+                    // one did not would leave the reader believing nothing
+                    // was written.
+                    if machine.is_some() {
+                        let _ = diagnostics.write_all(SAVED_MACHINE_ONLY.as_bytes());
+                    }
+                    return Err(ConfigureError::NetworkWrite(err));
+                }
+            }
+
+            // Persisting a change is only half of it: the running stack
+            // learns of it over its own admin surface. Applying is a
+            // separate, refusable action — a refusal (no stack running, or
+            // no `CAP_NET_ADMIN`) leaves the saved setting standing for the
+            // next boot and is reported rather than fatal.
+            let mut notice = String::new();
+            if let Some(config) = machine.as_ref() {
+                let keys = machine_network_keys(&named);
+                if !keys.is_empty() {
+                    if let Err(err) = policy.apply(config.network_settings()) {
+                        notice.push_str(&deferred_notice(&keys, err));
+                    }
+                }
+            }
+            if let Some((current, edited)) = network.as_ref() {
+                notice.push_str(&apply_interfaces(current, edited, policy));
+            }
+            if notice.is_empty() {
                 return Ok(());
             }
-            // A `net.*` key describes the running stack, so persisting it is
-            // only half the change. Applying it is a separate, refusable
-            // action: a refusal (no stack running, or no `CAP_NET_ADMIN`)
-            // leaves the saved setting standing for the next boot and is
-            // reported rather than fatal.
-            match policy.apply(config.network_settings()) {
-                Ok(()) => Ok(()),
-                // A diagnostic, so it never lands in the stdout a script
-                // parses. One notice for the whole policy, because one
-                // delivery carries all of it.
-                Err(err) => diagnostics
-                    .write_all(deferred_notice(&seen, err).as_bytes())
-                    .map_err(ConfigureError::Output),
-            }
+            // A diagnostic, so it never lands in the stdout a script parses.
+            diagnostics
+                .write_all(notice.as_bytes())
+                .map_err(ConfigureError::Output)
         }
     }
 }
+
+/// Resolve every `<key> <value>` pair against the two registries, refusing a
+/// key named twice.
+///
+/// One pass before anything is loaded, so a command line that says two
+/// things about one setting — there is no order in which both are honoured —
+/// changes nothing.
+fn resolve_all<'a>(
+    pairs: &[(&'a str, &'a str)],
+) -> Result<Vec<(Named<'a>, &'a str)>, ConfigureError> {
+    let mut named: Vec<(Named<'a>, &'a str)> = Vec::with_capacity(pairs.len());
+    for (name, value) in pairs {
+        let key = resolve(name)?;
+        if named.iter().any(|(seen, _)| *seen == key) {
+            return Err(ConfigureError::Usage);
+        }
+        named.push((key, value));
+    }
+    Ok(named)
+}
+
+/// The machine document with every flat-registry pair applied, or [`None`]
+/// when the invocation names none of them — a command that changes only an
+/// interface must not rewrite the machine's store.
+fn apply_machine(
+    named: &[(Named<'_>, &str)],
+    store: &dyn Store,
+) -> Result<Option<SystemConfig>, ConfigureError> {
+    if !named.iter().any(|(key, _)| matches!(key, Named::System(_))) {
+        return Ok(None);
+    }
+    let mut config = load(store)?;
+    for (key, value) in named {
+        let Named::System(key) = key else {
+            continue;
+        };
+        config
+            .set(*key, value)
+            .map_err(|_| ConfigureError::InvalidValue(*key))?;
+    }
+    Ok(Some(config))
+}
+
+/// The network document as it stands and as the per-interface pairs would
+/// leave it, or [`None`] when the invocation names none of them.
+///
+/// The edits accumulate on one draft and are checked whole at the commit,
+/// because a consistency rule spanning keys — moving an interface from a
+/// static address to DHCP — has no ordering in which each half alone is a
+/// document the parser would accept.
+fn apply_network(
+    named: &[(Named<'_>, &str)],
+    store: &dyn NetworkStore,
+) -> Result<Option<(NetworkConfig, NetworkConfig)>, ConfigureError> {
+    if !named
+        .iter()
+        .any(|(key, _)| matches!(key, Named::Interface(..)))
+    {
+        return Ok(None);
+    }
+    let current = load_network(store)?;
+    let mut draft = current.edit();
+    for (key, value) in named {
+        let Named::Interface(iface, key) = key else {
+            continue;
+        };
+        // The empty value is the registry's spelling for *unset*: it has no
+        // defaults, so removing a key is the only way to move an interface
+        // off a method that requires one. No key accepts an empty value, so
+        // the spelling can never be mistaken for setting one.
+        if value.is_empty() {
+            draft.unset(iface, *key);
+            continue;
+        }
+        draft
+            .set(iface, *key, value)
+            .map_err(|err| ConfigureError::InterfaceRefused(*key, err))?;
+    }
+    let edited = draft
+        .commit()
+        .map_err(ConfigureError::NetworkInconsistent)?;
+    Ok(Some((current, edited)))
+}
+
+/// The `net.*` keys this invocation set, which is what a refused live apply
+/// names in its notice.
+fn machine_network_keys(named: &[(Named<'_>, &str)]) -> Vec<Key> {
+    named
+        .iter()
+        .filter_map(|(key, _)| match key {
+            Named::System(key) if key.is_network() => Some(*key),
+            Named::System(_) | Named::Interface(..) => None,
+        })
+        .collect()
+}
+
+/// Ask the running stack to adopt the interfaces the edit actually changed,
+/// answering with the notice a refusal earns (empty when everything landed).
+///
+/// Only what changed: the plan an interface implies is compared either side
+/// of the edit, so an interface the command line did not touch is not
+/// reconfigured, and one it did — including a member whose bond took it over
+/// — is.
+fn apply_interfaces(
+    current: &NetworkConfig,
+    edited: &NetworkConfig,
+    policy: &dyn NetPolicy,
+) -> String {
+    let before = InterfaceConfigPlan::of(current);
+    let after = InterfaceConfigPlan::of(edited);
+    let mut notice = String::new();
+    for msg in &after.messages {
+        if before.message_for(&msg.alias).as_ref() == Some(msg) {
+            continue;
+        }
+        if let Err(err) = policy.apply_interface(msg) {
+            notice.push_str(&interface_notice(&msg.alias, err));
+        }
+    }
+    for bond in &after.bonds {
+        if before.bond_for(&bond.alias).as_ref() == Some(bond) {
+            continue;
+        }
+        if let Err(err) = policy.apply_bond(bond) {
+            notice.push_str(&interface_notice(&bond.alias, err));
+        }
+    }
+    // An interface the edit removed keeps running with the configuration the
+    // stack was last given: the admin surface carries no "forget this
+    // interface" message, so saying so is the only honest answer.
+    for msg in &before.messages {
+        if after.message_for(&msg.alias).is_none() {
+            notice.push_str(&removed_notice(&msg.alias));
+        }
+    }
+    for reject in &after.rejected {
+        // Only one this edit broke: an interface that was already
+        // unbindable is not this invocation's news, and calling it "saved"
+        // would claim the run had touched it.
+        if !before.rejected.contains(reject) {
+            notice.push_str(&rejected_notice(reject));
+        }
+    }
+    notice
+}
+
+/// One interface alias as text, for a diagnostic.
+fn alias_text(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> &str {
+    let len = alias
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(alias.len());
+    core::str::from_utf8(&alias[..len]).unwrap_or("?")
+}
+
+/// The notice a saved-but-not-applied interface change reports.
+fn interface_notice(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN], err: Errno) -> String {
+    format!(
+        "{}: saved; the running network stack did not accept it ({err}); it applies at next \
+         boot\n",
+        alias_text(alias)
+    )
+}
+
+/// The notice an interface dropped from the document earns: the store no
+/// longer declares it, but the stack has no message that would retire it.
+fn removed_notice(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> String {
+    format!(
+        "{}: removed from the configuration; the running network stack keeps it until next \
+         boot\n",
+        alias_text(alias)
+    )
+}
+
+/// The notice an interface the plan refuses earns: it is saved, but nothing
+/// can bind it to hardware, so it will never come up.
+fn rejected_notice(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> String {
+    format!(
+        "{}: saved; it has neither match.mac nor match.node, so no device can be bound to it\n",
+        alias_text(alias)
+    )
+}
+
+/// What a run reports when the machine document was written and the network
+/// one was then refused: the two are separate files with nothing spanning
+/// them, so which half stands has to be said rather than inferred.
+const SAVED_MACHINE_ONLY: &str = "the machine settings were saved; the network settings were not\n";
 
 /// The notice a saved-but-not-applied `net.*` change reports: the settings
 /// are persisted, the running stack did not take them, and why.
@@ -479,9 +754,10 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::net_ipc::NetworkSettings;
+    use tairix_abi::net_ipc::{NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings};
     use tairix_abi::Errno;
     use tairix_help::HelpSource;
+    use tairix_netconfig::IfaceKey;
     use tairix_sysconfig::{Key, SystemConfig};
 
     use super::{
@@ -525,30 +801,43 @@ mod tests {
     /// An in-memory network store fixture: `None` models "no managed
     /// interfaces", which is what an absent document means.
     struct MemNetStore {
-        text: Option<String>,
+        text: RefCell<Option<String>>,
         read_err: Option<Errno>,
+        write_err: Option<Errno>,
     }
 
     impl MemNetStore {
         fn empty() -> Self {
             Self {
-                text: None,
+                text: RefCell::new(None),
                 read_err: None,
+                write_err: None,
             }
         }
 
         fn holding(text: &str) -> Self {
             Self {
-                text: Some(String::from(text)),
-                read_err: None,
+                text: RefCell::new(Some(String::from(text))),
+                ..Self::empty()
             }
         }
 
         fn refusing(err: Errno) -> Self {
             Self {
-                text: None,
                 read_err: Some(err),
+                ..Self::empty()
             }
+        }
+
+        fn refusing_writes(err: Errno) -> Self {
+            Self {
+                write_err: Some(err),
+                ..Self::empty()
+            }
+        }
+
+        fn stored(&self) -> String {
+            self.text.borrow().clone().unwrap_or_default()
         }
     }
 
@@ -556,8 +845,16 @@ mod tests {
         fn read(&self) -> Result<Option<String>, Errno> {
             match self.read_err {
                 Some(err) => Err(err),
-                None => Ok(self.text.clone()),
+                None => Ok(self.text.borrow().clone()),
             }
+        }
+
+        fn write(&self, text: &str) -> Result<(), Errno> {
+            if let Some(err) = self.write_err {
+                return Err(err);
+            }
+            *self.text.borrow_mut() = Some(text.to_string());
+            Ok(())
         }
     }
 
@@ -584,6 +881,8 @@ mod tests {
     /// answers with a scripted result.
     struct MemPolicy {
         applied: RefCell<Vec<NetworkSettings>>,
+        interfaces: RefCell<Vec<NetInterfaceConfigMsg>>,
+        bonds: RefCell<Vec<NetBondConfigMsg>>,
         result: Result<(), Errno>,
     }
 
@@ -591,21 +890,42 @@ mod tests {
         fn accepting() -> Self {
             Self {
                 applied: RefCell::new(Vec::new()),
+                interfaces: RefCell::new(Vec::new()),
+                bonds: RefCell::new(Vec::new()),
                 result: Ok(()),
             }
         }
 
         fn refusing(err: Errno) -> Self {
             Self {
-                applied: RefCell::new(Vec::new()),
                 result: Err(err),
+                ..Self::accepting()
             }
+        }
+
+        /// The aliases of every interface the run pushed, in order.
+        fn pushed(&self) -> Vec<String> {
+            self.interfaces
+                .borrow()
+                .iter()
+                .map(|msg| String::from(super::alias_text(&msg.alias)))
+                .collect()
         }
     }
 
     impl NetPolicy for MemPolicy {
         fn apply(&self, settings: NetworkSettings) -> Result<(), Errno> {
             self.applied.borrow_mut().push(settings);
+            self.result
+        }
+
+        fn apply_interface(&self, config: &NetInterfaceConfigMsg) -> Result<(), Errno> {
+            self.interfaces.borrow_mut().push(*config);
+            self.result
+        }
+
+        fn apply_bond(&self, config: &NetBondConfigMsg) -> Result<(), Errno> {
+            self.bonds.borrow_mut().push(*config);
             self.result
         }
     }
@@ -1171,6 +1491,309 @@ mod tests {
             malformed,
             Err(ConfigureError::NetworkMalformed(_))
         ));
+    }
+
+    /// Run a set of `<key> <value>` pairs against the two fixtures, giving
+    /// back the run's outcome and the diagnostic stream it wrote.
+    fn set_pairs(
+        pairs: &[(&str, &str)],
+        store: &MemStore,
+        netstore: &MemNetStore,
+        policy: &MemPolicy,
+    ) -> (Result<(), ConfigureError>, String) {
+        let diagnostics = MemOutput::default();
+        let outcome = run(
+            Command::Set(pairs.to_vec()),
+            None,
+            store,
+            netstore,
+            policy,
+            &NoHelp,
+            &MemOutput::default(),
+            &diagnostics,
+        );
+        (outcome, diagnostics.text())
+    }
+
+    #[test]
+    fn setting_a_per_interface_key_writes_the_network_store_and_applies_it() {
+        let store = MemStore::new(None);
+        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let policy = MemPolicy::accepting();
+        let (outcome, notice) = set_pairs(&[("wan.mtu", "9000")], &store, &netstore, &policy);
+        outcome.expect("sets");
+        assert!(notice.is_empty(), "nothing was deferred: {notice}");
+
+        let stored = netstore.stored();
+        assert!(stored.contains("wan.mtu 9000"), "{stored}");
+        // The document is rendered whole, so what was already there stays.
+        assert!(stored.contains("wan.ipv4.address 10.0.0.7/24"), "{stored}");
+        // The machine store names nothing this invocation set, so it is not
+        // rewritten at all.
+        assert!(
+            store.text.borrow().is_none(),
+            "an untouched document was rewritten"
+        );
+        assert_eq!(policy.pushed(), alloc::vec![String::from("wan")]);
+        assert!(policy.applied.borrow().is_empty(), "no net.* policy pushed");
+    }
+
+    #[test]
+    fn the_empty_value_unsets_a_key_and_moves_an_interface_to_dhcp() {
+        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let policy = MemPolicy::accepting();
+        // Neither half of this is a consistent document on its own, in
+        // either order, which is why the whole invocation is one commit.
+        let (outcome, _) = set_pairs(
+            &[
+                ("wan.ipv4.method", "dhcp"),
+                ("wan.ipv4.address", ""),
+                ("wan.ipv4.gateway", ""),
+            ],
+            &MemStore::new(None),
+            &netstore,
+            &policy,
+        );
+        outcome.expect("sets");
+        let stored = netstore.stored();
+        assert!(stored.contains("wan.ipv4.method dhcp"), "{stored}");
+        assert!(!stored.contains("wan.ipv4.address"), "{stored}");
+        assert!(!stored.contains("wan.ipv4.gateway"), "{stored}");
+        assert_eq!(policy.pushed(), alloc::vec![String::from("wan")]);
+    }
+
+    #[test]
+    fn a_set_that_would_leave_the_network_document_inconsistent_writes_nothing() {
+        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        // Static addressing with the address taken away is exactly what the
+        // parser refuses, so it is refused here rather than written.
+        let (outcome, _) = set_pairs(
+            &[("wan.ipv4.address", "")],
+            &MemStore::new(None),
+            &netstore,
+            &MemPolicy::accepting(),
+        );
+        assert_eq!(
+            outcome,
+            Err(ConfigureError::NetworkInconsistent(
+                tairix_netconfig::ConfigError::InconsistentInterface
+            ))
+        );
+        assert_eq!(netstore.stored(), ONE_INTERFACE, "the store is untouched");
+    }
+
+    #[test]
+    fn an_invalid_per_interface_value_names_the_choices_and_changes_nothing() {
+        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let (outcome, _) = set_pairs(
+            &[("wan.ipv4.method", "sometimes")],
+            &MemStore::new(None),
+            &netstore,
+            &MemPolicy::accepting(),
+        );
+        let err = outcome.expect_err("refused");
+        let text = err.to_string();
+        for value in tairix_netconfig::Ipv4Method::VALUES {
+            assert!(text.contains(value), "{text}");
+        }
+        assert_eq!(netstore.stored(), ONE_INTERFACE, "the store is untouched");
+    }
+
+    #[test]
+    fn a_malformed_alias_states_the_engine_refusal_rather_than_a_value_one() {
+        let (outcome, _) = set_pairs(
+            &[("wan.bond.primary", "0bad")],
+            &MemStore::new(None),
+            &MemNetStore::empty(),
+            &MemPolicy::accepting(),
+        );
+        assert_eq!(
+            outcome,
+            Err(ConfigureError::InterfaceRefused(
+                IfaceKey::BondPrimary,
+                tairix_netconfig::ConfigError::InvalidInterfaceName
+            ))
+        );
+    }
+
+    #[test]
+    fn one_invocation_may_set_both_registries() {
+        let store = MemStore::new(None);
+        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let policy = MemPolicy::accepting();
+        let (outcome, _) = set_pairs(
+            &[("net.ipv6.enabled", "false"), ("wan.mtu", "1400")],
+            &store,
+            &netstore,
+            &policy,
+        );
+        outcome.expect("sets");
+        assert!(
+            store
+                .text
+                .borrow()
+                .as_deref()
+                .unwrap_or_default()
+                .contains("net.ipv6.enabled false"),
+            "the machine store was not written"
+        );
+        assert!(netstore.stored().contains("wan.mtu 1400"));
+        // Both halves reach the running stack, each over its own message.
+        assert_eq!(policy.applied.borrow().len(), 1);
+        assert_eq!(policy.pushed(), alloc::vec![String::from("wan")]);
+    }
+
+    #[test]
+    fn only_the_interfaces_the_edit_changed_are_pushed() {
+        let two = "wan.match.mac 02:00:00:00:00:01\n\
+                   wan.mtu 1500\n\
+                   lan.match.mac 02:00:00:00:00:02\n\
+                   lan.mtu 1500\n";
+        let policy = MemPolicy::accepting();
+        let (outcome, _) = set_pairs(
+            &[("wan.mtu", "9000")],
+            &MemStore::new(None),
+            &MemNetStore::holding(two),
+            &policy,
+        );
+        outcome.expect("sets");
+        assert_eq!(
+            policy.pushed(),
+            alloc::vec![String::from("wan")],
+            "an untouched interface was reconfigured"
+        );
+    }
+
+    #[test]
+    fn a_refused_interface_apply_keeps_the_saved_setting_and_says_so() {
+        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let (outcome, notice) = set_pairs(
+            &[("wan.mtu", "9000")],
+            &MemStore::new(None),
+            &netstore,
+            &MemPolicy::refusing(Errno::PermissionDenied),
+        );
+        outcome.expect("the store write succeeded");
+        assert!(netstore.stored().contains("wan.mtu 9000"), "still saved");
+        assert!(notice.contains("wan"), "{notice}");
+        assert!(notice.contains("next boot"), "{notice}");
+    }
+
+    #[test]
+    fn an_interface_the_edit_removed_is_reported_as_still_running() {
+        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let policy = MemPolicy::accepting();
+        // Clearing every key drops the interface from the document. The
+        // stack's admin surface carries no message that retires one, so the
+        // tool says so rather than implying the machine is now unaddressed.
+        let (outcome, notice) = set_pairs(
+            &[
+                ("wan.kind", ""),
+                ("wan.match.mac", ""),
+                ("wan.ipv4.method", ""),
+                ("wan.ipv4.address", ""),
+                ("wan.ipv4.gateway", ""),
+            ],
+            &MemStore::new(None),
+            &netstore,
+            &policy,
+        );
+        outcome.expect("sets");
+        assert!(!netstore.stored().contains("wan."), "{}", netstore.stored());
+        assert!(notice.contains("wan: removed"), "{notice}");
+        assert!(policy.pushed().is_empty(), "nothing to push");
+    }
+
+    #[test]
+    fn an_interface_with_no_hardware_identity_is_saved_and_the_refusal_stated() {
+        let netstore = MemNetStore::empty();
+        let (outcome, notice) = set_pairs(
+            &[("lan.mtu", "1400")],
+            &MemStore::new(None),
+            &netstore,
+            &MemPolicy::accepting(),
+        );
+        outcome.expect("sets");
+        assert!(netstore.stored().contains("lan.mtu 1400"));
+        assert!(notice.contains("match.mac"), "{notice}");
+    }
+
+    #[test]
+    fn a_refused_network_write_surfaces_and_leaves_the_stack_alone() {
+        let netstore = MemNetStore::refusing_writes(Errno::PermissionDenied);
+        let policy = MemPolicy::accepting();
+        let (outcome, _) = set_pairs(
+            &[("lan.mtu", "1400")],
+            &MemStore::new(None),
+            &netstore,
+            &policy,
+        );
+        assert_eq!(
+            outcome,
+            Err(ConfigureError::NetworkWrite(Errno::PermissionDenied))
+        );
+        assert!(
+            policy.pushed().is_empty(),
+            "a change that was not saved must not be applied"
+        );
+    }
+
+    #[test]
+    fn an_interface_already_unbindable_is_not_reported_as_this_run_s_news() {
+        // `lan` was already saved without a hardware identity. An edit to a
+        // different interface has not touched it, so calling it "saved"
+        // would claim the run had.
+        let netstore = MemNetStore::holding("lan.mtu 1400\nwan.match.mac 02:00:00:00:00:01\n");
+        let (outcome, notice) = set_pairs(
+            &[("wan.mtu", "9000")],
+            &MemStore::new(None),
+            &netstore,
+            &MemPolicy::accepting(),
+        );
+        outcome.expect("sets");
+        assert!(!notice.contains("lan"), "{notice}");
+    }
+
+    #[test]
+    fn a_half_landed_cross_store_write_says_which_half_stands() {
+        let store = MemStore::new(None);
+        let netstore = MemNetStore::refusing_writes(Errno::PermissionDenied);
+        let (outcome, notice) = set_pairs(
+            &[
+                ("net.ipv6.enabled", "false"),
+                ("wan.match.mac", "02:00:00:00:00:01"),
+            ],
+            &store,
+            &netstore,
+            &MemPolicy::accepting(),
+        );
+        assert_eq!(
+            outcome,
+            Err(ConfigureError::NetworkWrite(Errno::PermissionDenied))
+        );
+        assert!(store.text.borrow().is_some(), "the machine half landed");
+        assert!(notice.contains("machine settings were saved"), "{notice}");
+    }
+
+    #[test]
+    fn the_same_interface_key_named_twice_is_a_usage_error() {
+        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let (outcome, _) = set_pairs(
+            &[("wan.mtu", "1400"), ("wan.mtu", "9000")],
+            &MemStore::new(None),
+            &netstore,
+            &MemPolicy::accepting(),
+        );
+        assert_eq!(outcome, Err(ConfigureError::Usage));
+        assert_eq!(netstore.stored(), ONE_INTERFACE);
+        // The same key on two interfaces is two settings, not a repeat.
+        let (outcome, _) = set_pairs(
+            &[("wan.mtu", "1400"), ("lan.mtu", "9000")],
+            &MemStore::new(None),
+            &MemNetStore::holding(ONE_INTERFACE),
+            &MemPolicy::accepting(),
+        );
+        outcome.expect("two interfaces, two settings");
     }
 
     #[test]

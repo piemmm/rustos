@@ -256,6 +256,32 @@ pub const TIMED_MANIFEST: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `audiod` audio service's manifest: `CAP_AUDIO_DEVICE` (the whole
+/// authority it has over hardware, and the system's only holder — every
+/// audio driver's device-channel endpoint is bound restricted-sender on it,
+/// so no other process can command a sound device at all),
+/// `CAP_IPC_BIND_PRIVILEGED` to claim the reserved `audio-v1` rendezvous (a
+/// squatter there would receive every program's samples and learn their
+/// shared-memory grants), `CAP_SHM` for the PCM regions both hops run over —
+/// the device ring it creates and grants to a driver, and the client rings it
+/// adopts — `CAP_MEM_PIN` so an audio buffer is never paged and never reaches
+/// swap, `CAP_SCHED_REALTIME` for the mixing path whose whole job is not to
+/// have jitter, and `CAP_LOG_EMIT` for its audit records.
+///
+/// It deliberately does **not** carry `CAP_AUDIO_CAPTURE`: the service
+/// *enforces* that against its callers at stream open and never needs to hold
+/// it. It holds no filesystem, network, users-database or spawn authority
+/// either, so compromising it yields the speakers, not the machine.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const AUDIOD_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::AUDIO_DEVICE,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::SHM,
+    CapabilityId::MEM_PIN,
+    CapabilityId::SCHED_REALTIME,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `ps` tool's manifest: `CAP_CONSOLE_WRITE` for its listing on fd 1
 /// and diagnostics on fd 2, `CAP_FS_ACCESS` because its short-help
 /// switches read the bundle's own `Help/` tree through the secured VFS
@@ -684,6 +710,21 @@ mod tests {
         // bundle's request must coincide or the intersection would silently
         // strip an authority the code needs.
         assert_eq!(set(TIMED_MANIFEST), set(tairix_users::TIMED_CEILING));
+        // The audio service's account exists only to run it, so its ceiling
+        // and the bundle's request must coincide.
+        assert_eq!(set(AUDIOD_MANIFEST), set(tairix_users::AUDIOD_CEILING));
+        // It enforces the capture capability against its callers; holding it
+        // would let a compromise record the room.
+        for denied in [
+            CapabilityId::AUDIO_CAPTURE,
+            CapabilityId::FS_ACCESS,
+            CapabilityId::NET,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::SPAWN_AS_USER,
+            CapabilityId::USERS_READ,
+        ] {
+            assert!(!AUDIOD_MANIFEST.contains(&denied), "{denied:?}");
+        }
         // The clock is the whole authority. It must hold nothing that would
         // let a compromise reach further — and in particular no general spawn
         // authority, because the only child it may start is the canonical
@@ -1441,6 +1482,7 @@ mod tests {
         // directly, never a store bundle.
         let embedded: &[(&str, ProgramKind, &[CapabilityId])] = &[
             ("applib", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("audiod", ProgramKind::Service, AUDIOD_MANIFEST),
             ("basename", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("cat", ProgramKind::Command, CAT_MANIFEST),
             ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),

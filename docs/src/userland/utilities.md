@@ -840,10 +840,33 @@ interface alias can never take a machine setting's name over — a test pins
 the two name sets disjoint over both registries rather than resting on the
 accident that none collides today. That document has no defaults, so a
 listing shows only the settings it carries and showing one it does not
-carry answers with an empty line rather than inventing a value; reading it
-needs an account that may, since it names each interface's hardware
-identity and this machine's addressing. `configure` does not write that
-registry yet — the installer does.
+carry answers with an empty line rather than inventing a value; reading or
+changing it needs an account that may, since it names each interface's
+hardware identity and this machine's addressing.
+
+Both registries are settable. Every pair is resolved against one working
+copy of each document before a byte is written, and only a document the
+invocation actually names is rewritten. Because the per-interface registry
+has no defaults, a setting is *removed* rather than reset, and the **empty
+value** is that spelling (`configure wan.ipv4.address ""`): no key in that
+registry accepts an empty value, so it cannot be mistaken for setting one.
+That is what lets one invocation move an interface from a static address to
+DHCP — a change neither half of which is a document the parser would accept
+on its own — and the whole edited document is checked at the commit, so a
+change that would leave it inconsistent is refused rather than written.
+
+A saved change is then handed to the running network stack over its
+capability-gated admin surface, so it takes effect without a reboot. Only
+the interfaces the edit actually changed are delivered: `configure` compares
+the plan the document implies either side of the edit, which is the same
+`lib/netconfig` projection the device manager delivers at boot, so the two
+cannot disagree about what a setting means. A refused delivery leaves the
+setting saved for the next boot and says so on the diagnostic stream, as the
+`net.*` path already did. Two limits are reported rather than hidden: an
+interface removed from the document keeps running until the next boot
+(the stack's admin surface carries no message that retires one), and an
+interface saved with neither `match.mac` nor `match.node` can never be bound
+to a device.
 
 The pure grammar/engine core is host-tested against in-memory seams; the
 `Run` binary wires the syscall-backed store files, the shared own-bundle

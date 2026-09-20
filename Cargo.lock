@@ -690,6 +690,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-audiod"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-audio",
+ "tairix-audiochan",
+ "tairix-caps",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-seat",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-basename"
 version = "0.0.0"
 dependencies = [
@@ -798,7 +812,6 @@ dependencies = [
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
- "tairix-inline",
  "tairix-input",
  "tairix-raster",
  "tairix-rng",
@@ -875,6 +888,7 @@ dependencies = [
  "tairix-netconfig",
  "tairix-rt",
  "tairix-sysconfig",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1961,6 +1975,7 @@ dependencies = [
  "tairix-crypto",
  "tairix-devmatch",
  "tairix-devmgr",
+ "tairix-drv-audio-virtio-snd",
  "tairix-drv-bus-mmio",
  "tairix-drv-bus-virtio",
  "tairix-drv-fs-arxfs",
@@ -2528,6 +2543,7 @@ dependencies = [
 name = "tairix-raster"
 version = "0.0.0"
 dependencies = [
+ "tairix-inline",
  "tairix-parallel",
  "tairix-reclaim",
  "tairix-rng",
@@ -3075,6 +3091,54 @@ dependencies = [
  "tairix-drvhost",
  "tairix-itest-harness",
  "tairix-test-virtio-qemu-support",
+]
+
+[[package]]
+name = "tairix-test-audio-virtio-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-audio-virtio-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-audio-virtio-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-audio-wire"
+version = "0.0.0"
+
+[[package]]
+name = "tairix-test-audiotone"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-audio",
+ "tairix-rt",
+ "tairix-test-audio-wire",
 ]
 
 [[package]]
@@ -6279,6 +6343,7 @@ dependencies = [
  "tairix-devids",
  "tairix-devmatch",
  "tairix-display",
+ "tairix-drv-audio-virtio-snd",
  "tairix-drv-bus-i2c-bcm2835",
  "tairix-drv-bus-pcie-brcm",
  "tairix-drv-bus-usb",
@@ -6334,6 +6399,7 @@ dependencies = [
  "tairix-terminal",
  "tairix-test-appbar-qemu-aarch64",
  "tairix-test-arxfs-image",
+ "tairix-test-audio-wire",
  "tairix-test-autoload-input-qemu-aarch64",
  "tairix-test-datetime-elevate-qemu-aarch64",
  "tairix-test-desktop-hover-qemu-aarch64",

@@ -1,0 +1,37 @@
+[package]
+name = "tairix-test-audiotone"
+description = "plans/SOUND.md SND4 audio fixture: the `audiotone` command app the QEMU audio verticals plant on their disk and run from the scripted root shell. It opens an audio-v1 playback stream on the default sink through `lib/audio`'s client, queues the whole shared deterministic signal before starting the device (so the device cannot run dry however slow the emulated machine is), drains, and prints AUDIO PASS once the stream reports Idle with no lost frames. Never planted on a production image."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime is an optional,
+# on-by-default build feature, mirroring the `tcpecho` fixture: host tooling
+# builds only this crate's inert stub, never `tairix-rt`'s `_start`.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+[[bin]]
+name = "tairix-test-audiotone-run"
+path = "src/main.rs"
+
+[dependencies]
+# The `audio-v1` surface the fixture speaks and the `Errno` it fails closed
+# with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The client half of `audio-v1` — the part a program links. The fixture
+# invents no second client.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+# The one definition of the device geometry, the signal, and the pass marker
+# the host-side WAV assertion checks against.
+tairix-test-audio-wire = { path = "../audio_wire", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }

@@ -261,7 +261,7 @@ fn exercise_mixer(noise: &mut [u8], next: &mut impl FnMut() -> u64) {
         },
     ];
     let taken = 1 + bounded(next(), frames - 1);
-    if mixer.mix(&streams, taken, &mut out).is_ok() {
+    if mixer.mix(streams.iter().copied(), taken, &mut out).is_ok() {
         assert_deliverable(
             sink_format,
             &out[..taken * channels * sink_format.bytes_per_sample()],
@@ -307,7 +307,7 @@ fn exercise_resampler(next: &mut impl FnMut() -> u64) {
         .collect();
     let bound = resampler.max_output_frames(frames);
     let mut output = vec![0.0f32; bound * channels];
-    let Ok((consumed, produced)) = resampler.process(&input, &mut output) else {
+    let Ok((consumed, produced)) = resampler.process(&bank, &input, &mut output) else {
         return;
     };
     assert!(consumed <= frames, "consumed {consumed} of {frames}");

@@ -107,11 +107,44 @@ both substitute `lineart` for the two tiling ranges, so a border on the
 framebuffer console and one in a terminal window are the same picture. Only a
 proportional family is served tight to its ink.
 
+## Outlines
+
+`Face::glyph_outline` returns a glyph as closed `Contour`s in the face's own
+font units, y up, with its quadratics intact. It exists for the consumer that
+is not producing pixels: `lib/svg` fills, strokes, clips and transforms text
+exactly as it does a `<path>`, and an `SvgImage` is resolution-independent, so
+a glyph has to arrive as geometry. A coverage bitmap would fix a size at decode
+time and put text on a second rasterisation path.
+
+Curves are **not** flattened here. How finely a quadratic must be subdivided
+depends on the scale it is finally drawn at, which only the caller knows —
+`lib/svg` resolves its tolerance against each shape's own placement — so a
+chord count chosen in this crate would facet an asset drawn large. The
+rasteriser's own fixed eight chords are right for a bitmap cell and only for
+one.
+
+Nothing is pre-transformed either: the y-flip and the pixels-per-em scale are
+left to the caller, because the two consumers place a glyph differently (the
+rasteriser flips about a baseline row in a cell; `lib/svg` flips about the
+baseline in user units). Contours fill by non-zero winding, the TrueType rule
+— a counter is a contour wound against the one enclosing it.
+
+Both surfaces are the **same** walk over `glyf`, differing only in what each
+does with a segment, so an outline can never be decoded two ways
+(`AGENTS.md` §2.2). Sharing costs the raster path nothing measurable:
+rasterising D2Coding's 19,966 mapped glyphs takes 0.4641 s through the shared
+walk against 0.4628 s before it, and the generated console atlas is
+byte-identical.
+
 `no_std` + `alloc`, no `unsafe`. Fails closed: any malformed or unsupported
 table — including a hostile variation store — yields a `FontError` rather than
 a wrong glyph, an out-of-bounds read, or a panic, and every count taken from
-the file is bounded by the glyph's own point count. Float rounding uses the
-crate's own bounded helpers, so it needs no `std` libm.
+the file is bounded by the glyph's own point count. One glyph's decode is
+additionally bounded in outline points and in composite component records,
+both charged across the whole walk rather than per nesting level: a per-level
+cap still multiplies with depth, so 65535 components each naming another such
+composite would expand without end. Float rounding uses the crate's own
+bounded helpers, so it needs no `std` libm.
 
 ## Stability
 

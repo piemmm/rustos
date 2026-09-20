@@ -447,10 +447,11 @@ question this plan has not settled.
 
 ## 12. Open — an undrawable element is skipped, not refused
 
-`lib/svg` now decodes the drawable part of SVG 1.1 in full (`plans/SVG.md`),
-so an authored master ships as its designer drew it. What it deliberately
-does not draw — text, embedded images, filters, animation — it **skips**,
-rendering the rest of the document rather than refusing it.
+`lib/svg` decodes the shape, paint and compositing surface of SVG 1.1
+(`plans/SVG.md`), so an authored master's artwork ships as its designer drew
+it. What it does not draw **yet** — text, embedded images, filters, animation
+— it **skips**, rendering the rest of the document rather than refusing it.
+Those are staged items in that plan, not declined ones.
 
 That is deliberate: one unsupported decoration should not lose a whole asset,
 and it is the behaviour every surface has today. But it cuts against failing
@@ -462,18 +463,23 @@ fallback. Which of the two the desktop wants is a decision this plan has not
 taken; the build gate already refuses a master that draws nothing, so only
 the *partially* drawable case is at stake.
 
-The set at stake has stopped shrinking: it is now the deliberate non-goals
-and nothing else. Clipping, masking, group opacity, `<pattern>` fills,
-`<marker>` decorations and non-scaling strokes are all honoured — including a
-tile whose content spills into the neighbouring repeats, which used to take
-the reference's fallback colour and so was itself a wrong picture; a
-`clip-path` or `mask` naming something the document does not define makes the
-element **not rendered** rather than rendered unclipped, and a paint server
-that is defined but paints nothing is `none` rather than the fallback colour
-written beside the reference — which is this question already answered, for
-the cases where the decoder can tell what the author meant. What is left to
-decide is only what to do about a master carrying text, an embedded image, a
-filter, or an animation.
+The set at stake keeps shrinking as `plans/SVG.md` advances. Clipping,
+masking, group opacity, `<pattern>` fills, `<marker>` decorations and
+non-scaling strokes are all honoured — including a tile whose content spills
+into the neighbouring repeats, which used to take the reference's fallback
+colour and so was itself a wrong picture; a `clip-path` or `mask` naming
+something the document does not define makes the element **not rendered**
+rather than rendered unclipped, and a paint server that is defined but paints
+nothing is `none` rather than the fallback colour written beside the
+reference — which is this question already answered, for the cases where the
+decoder can tell what the author meant.
+
+What remains at stake is a master carrying text, an embedded image, a filter
+or an animation, and **text is the case that matters most**: a decoration
+skipped is a master drawn slightly plainer, where lettering skipped can leave
+a master meaningless while still passing the build gate's "draws something"
+check. That asymmetry is the strongest argument for answering per element
+class rather than globally, and it resolves as those items land.
 
 ## 13. What this plan deliberately does not cover
 

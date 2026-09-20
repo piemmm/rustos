@@ -38,12 +38,29 @@
 //!   at its true size and weight instead of resampled from a fixed bitmap —
 //!   crisp whether tiny or very large.
 //!
+//! # Outlines, for a consumer that is not drawing pixels
+//!
+//! [`Face::glyph_outline`] hands a glyph over as closed [`Contour`]s in font
+//! units, quadratics intact. A resolution-independent consumer — `lib/svg`,
+//! whose text is filled, stroked, clipped and transformed exactly as a
+//! `<path>` is — cannot start from a coverage bitmap: that would fix a size
+//! at decode time. It flattens the curves itself, at the accuracy the
+//! placement it finally draws under actually needs.
+//!
+//! Both surfaces are the *same* walk over `glyf`, differing only in what they
+//! do with each segment, so an outline cannot be decoded two ways. The
+//! rasteriser flattens and maps to pixels as segments arrive and pays nothing
+//! for the sharing.
+//!
 //! The engine is `no_std` + `alloc` (a rasterised glyph is a heap
 //! `Vec<u8>` of coverage) and contains no `unsafe`. It fails closed: any
 //! malformed or unsupported table — including a hostile variation store —
 //! yields a [`FontError`] rather than a wrong glyph, an out-of-bounds read, or
-//! a panic. Floating-point rounding uses the crate's own bounded `mathf`
-//! helpers so it needs no `std` libm.
+//! a panic. One glyph's decode is bounded in outline points and in composite
+//! component records, both charged across the whole walk rather than per
+//! nesting level, so a composite cannot multiply its work by recursing.
+//! Floating-point rounding uses the crate's own bounded `mathf` helpers so it
+//! needs no `std` libm.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -65,11 +82,13 @@ mod variations;
 #[cfg(test)]
 mod gridfit_tests;
 #[cfg(test)]
+mod outline_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod variations_tests;
 
-pub use engine::{CellGeometry, Face, GlyphRaster};
+pub use engine::{CellGeometry, Contour, Face, GlyphRaster, OutlineSegment};
 pub use family::FontFamily;
 pub use store::{FamilyManifest, FamilyRole, FAMILY_MANIFEST, MAX_FACES, MAX_MANIFEST_BYTES};
 pub use variations::{Axis, AxisSetting};

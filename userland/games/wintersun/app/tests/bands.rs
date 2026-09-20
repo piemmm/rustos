@@ -1,16 +1,21 @@
 //! Cutting a frame into bands does not change it.
 //!
-//! The claim needs a [`JobRunner`] that reports several threads' width,
-//! and implementing that trait is `unsafe` — the library forbids
-//! `unsafe` outright, so the runner lives here, where a test may write
-//! one, rather than the library relaxing its own rule to be testable.
+//! The claim needs a [`JobRunner`] reporting several threads' width, and
+//! `lib/parallel` owns the shared one: `Reversed` reports a width and
+//! runs the pieces backwards on the calling thread. Taking it rather
+//! than writing a runner here keeps this crate free of `unsafe` in every
+//! target it builds, and puts the `unsafe impl` in the crate the
+//! undefined-behaviour oracle interprets.
 //!
 //! Running the jobs on the calling thread is deliberate: the subject is
 //! the *decomposition*, not the threading. A band split that drops a
 //! row, overlaps two, or hands a pass the wrong first row shows up as a
-//! different picture whether or not real threads ran it.
+//! different picture whether or not real threads ran it — and running
+//! them backwards means an order dependency shows up here too. The
+//! threaded claim belongs to `lib/parallel`, which owns the hand-off,
+//! and to `tests/budget.rs`, which draws the baseline frame twice.
 
-use tairix_parallel::JobRunner;
+use tairix_parallel::{JobRunner, Reversed};
 use tairix_raster::color::Pixel;
 use tairix_reclaim::{PressureBand, ReportedPressure};
 use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
@@ -26,25 +31,6 @@ use tairix_wintersun_net::value::WorldPoint;
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
-
-/// A runner that reports `width` threads and runs the jobs itself.
-struct Wide(usize);
-
-// SAFETY: `run` invokes `job` exactly once for each index of `0..count`,
-// from the calling thread and never concurrently with itself, and the
-// loop has finished before it returns — so no index is ever live twice
-// and no invocation outlives the call.
-unsafe impl JobRunner for Wide {
-    fn width(&self) -> usize {
-        self.0
-    }
-
-    fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
-        for index in 0..count {
-            job(index);
-        }
-    }
-}
 
 /// A sink this test does not read.
 struct Quiet;
@@ -122,7 +108,7 @@ fn the_number_of_bands_does_not_change_the_picture() {
         "the one-band frame left holes"
     );
     for width in [2usize, 3, 5, 8, 17] {
-        let split = draw(&Wide(width), &view);
+        let split = draw(&Reversed::new(width), &view);
         assert_eq!(
             split, once,
             "cutting the frame for {width} threads changed the picture"
@@ -134,7 +120,7 @@ fn the_number_of_bands_does_not_change_the_picture() {
 fn a_target_one_row_tall_still_bands() {
     let view = Viewport::new(160, 1, RenderScale::ONE).expect("a real window");
     let once = draw(&tairix_parallel::SERIAL, &view);
-    let split = draw(&Wide(16), &view);
+    let split = draw(&Reversed::new(16), &view);
     assert_eq!(split, once, "a single row cut sixteen ways changed");
     assert_eq!(once.len(), 160);
 }

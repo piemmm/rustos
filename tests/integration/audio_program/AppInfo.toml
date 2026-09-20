@@ -1,0 +1,17 @@
+# Signed-AppInfo manifest source for the `audiotone` audio fixture
+# (plans/SOUND.md SND4). Composed and planted ONLY on the audio QEMU
+# verticals' disk images by tools/xtask — the crate lives outside the userland
+# discovery walk, so no production image ever ships it.
+#
+# The capability list is the bundle's request, intersected with the launching
+# user's grants: CAP_SHM to create the stream's PCM ring and grant it to the
+# audio service, and CAP_CONSOLE_WRITE for the AUDIO PASS/FAIL report on fd
+# 1/2. Playback itself needs no capability — the authorisation is that the
+# caller's session holds the sink's seat lease, which the service checks
+# against the kernel-attested caller — and binding the stream's own notify
+# port is an ordinary unreserved port bind.
+id = "os.tairix.test.audiotone"
+name = "audiotone"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_SHM", "CAP_CONSOLE_WRITE"]

@@ -193,6 +193,14 @@ tairix-drv-input-virtio-input = { path = "../../drivers/input/virtio_input", ver
 # from the sibling driver-process crate (`tairix-drv-network-virtio-net-driver`),
 # so the on-disk bundle and the driver never drift.
 tairix-drv-network-virtio-net = { path = "../../drivers/network/virtio_net", version = "=0.0.0" }
+# The virtio sound driver's canonical bind table, signed into the bundle the
+# `image_drivers` pipeline cross-compiles from the same crate, so the shipped
+# bundle and the driver cannot drift.
+tairix-drv-audio-virtio-snd = { path = "../../drivers/audio/virtio_snd", version = "=0.0.0" }
+# The one definition of the audio verticals' signal and the host-side WAV
+# reader that checks the emulated card received exactly it, shared with the
+# guest fixture so the two ends cannot drift.
+tairix-test-audio-wire = { path = "../../tests/integration/audio_wire", version = "=0.0.0" }
 # The GENET link-layer driver's canonical bind table and the BCM2711
 # register base its shipped `network.conf` default binds the interface by: the
 # `image_drivers` pipeline signs `BIND_KEYS` into the bundle it cross-compiles

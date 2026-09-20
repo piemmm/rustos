@@ -19,7 +19,7 @@ seek slider.
 | SND1 | `plans/SOUND.md`, the jump-sheet row, the corrected Settings reference, and the `plans/USB.md` scope change | done |
 | SND2 | `lib/abi`: `HwDeviceClass::Audio`, the PCM vocabulary, `audio_ring`, `audiochan-v1`, `audio-v1` | done |
 | SND3 | `lib/audio`: conversion, mixer, resampler, channel mapping, clock model, routing policy, volume model, the stream client — all host-tested, plus the ring's loom model | done |
-| SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | in progress: the device side is built — the `Audio` class trait, `lib/audiochan`, and `drivers/audio/virtio_snd`. `audiod`, the two capabilities' holder, `devmgr`'s bind, the signed bundle and the QEMU vertical remain |
+| SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | done |
 | SND5 | `lib/abi` DMA-engine class trait (`DmaEngine`/`DmaChannel`, cyclic chains, discovered request lines); `drivers/dma/bcm2711` | planned |
 | SND6 | Isochronous transfer support: the endpoint kind and service-interval scheduling in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and feedback endpoints in `drivers/bus/usb/xhci` | planned |
 | SND7 | `drivers/audio/usb_uac`: UAC1 and UAC2, clock and feature units, explicit and implicit feedback | planned |
@@ -434,22 +434,30 @@ bought for a rounding error.
 
 ### `audiod` — the service
 
-**Remaining.** This is what is left of SND4, and the two capabilities land
-with it because a capability needs its live holder and its live enforcement
-point in the same change: the enforcement point exists (a driver's endpoint is
-bound restricted-sender on the audio-device capability), and `audiod` is the
-holder.
+**Built.** The two capabilities landed with it, because a capability needs its
+live holder and its live enforcement point in the same change: the enforcement
+point is the kernel, at a driver's restricted-sender endpoint, and `audiod` is
+the holder. It is a host-testable engine plus a `Run` binary behind a
+`program` feature, written over four injected seams — the shared-region host,
+the device-channel transport, the client notifier, and the monotonic clock —
+so the whole authority is exercised without a machine.
 
-One seam the first consumer revealed and which must be settled before the
-mixer is written: `lib/audio`'s `Resampler` borrows the `FilterBank` it was
-built over, and its own filter history is per stream while the bank is per
-rate pair — which the crate's own documentation already says. A service that
-holds both in one stream record cannot express that without a self-reference,
-and constructing a resampler per period would both allocate on the per-period
-path and reset the filter memory every period (an audible discontinuity). The
-fix is to move the bank out of `Resampler` and pass it to `process`, so the
-state is per stream and the coefficients are shared — which is what the design
-already intends.
+Two seams the first consumer revealed were settled in `lib/audio` rather than
+worked around. `Resampler` no longer borrows its `FilterBank`: the filter
+history is per stream and the coefficients are per rate pair, so the bank is
+passed to `process` and a bank of the wrong ratio is refused rather than
+filtered over. And `Mixer::mix` folds an *iterator* rather than a slice, so a
+service whose live streams live in its own records needs no per-period
+collection — the one place an otherwise allocation-free period path would
+have had to allocate.
+
+Two things `audiod` does not do yet, both waiting on work staged elsewhere.
+Sinks are leased to seats by SND13; until then no sink is claimed, which is
+the router's own headless case, so the router sees `leased_to: None` and any
+principal may play on an unclaimed sink. And a stream's gain is always the
+software multiply: the device's own control belongs to the *sink*, whose
+volume surface arrives with SND15, and splitting one stream's gain into
+hardware would silence every other stream on the endpoint.
 
 `userland/system/audiod`, a `kind = "service"` bundle discovered from disk like
 any other (§16.5), declaring its readiness condition so dependants gate on it.
@@ -613,7 +621,9 @@ so it is the cheapest complete driver and the one that gives an end-to-end
 QEMU vertical on **every Tier-1 architecture**. It lands first for exactly
 that reason.
 
-**Built.** The four queues (control, event, tx, rx), the jack/PCM/chmap
+**Built**, with its signed bundle at `/System/Drivers/audio/virtio_snd/Run`
+and the `audiochan` node `devmgr` hands to `audiod`. The four queues (control,
+event, tx, rx), the jack/PCM/chmap
 information requests, `SET_PARAMS`/`PREPARE`/`START`/`STOP`/`RELEASE`, the
 transfer header/status framing with its `latency_bytes`, and the
 period-elapsed, xrun and jack-change events — which map onto `audiochan-v1`'s
@@ -1061,10 +1071,22 @@ the regression corpus with a unit test.
 guest's audio output to a file on the host, which turns an audio test from "did
 it crash" into an exact numeric assertion:
 
-- `audio_virtio_qemu_{aarch64,x86_64,riscv64}` — boot, discover the device,
-  autoload the driver, open a stream, play a known signal, and assert the
-  host-side WAV is **sample-exact**. This is invariant 2 proved on a running
-  machine.
+- `audio_virtio_qemu_{aarch64,x86_64,riscv64}` — **landed**: boot, discover
+  the device, autoload the driver into its own process, hand its channel to
+  `audiod`, run the `audiotone` fixture from the scripted root shell, and
+  assert the host-side WAV is **sample-exact**. This is invariant 2 proved on
+  a running machine. A PASS needs both halves — the guest's own witness (the
+  stack reported `Idle` with no lost frames) and the host's capture check —
+  because a mixer that silently substituted, resampled or dropped frames
+  would still print the witness.
+
+  The run is deterministic rather than a race: the client ring is sized to
+  hold the whole signal, so every frame is queued before the device is
+  clocked and the device cannot run dry however slowly the emulated machine
+  runs. The backend's own lead-in and tail are trimmed before the comparison
+  (they are the *host*'s silence, not the guest's) and the signal is built so
+  no frame it contains is silent on every channel, which is what makes that
+  trim safe.
 - `audio_hda_qemu_x86_64` — the same over `intel-hda`, so the motherboard path
   is covered by CI and not only by hope.
 - **Underrun accounting** — deliberately starve a stream and assert the

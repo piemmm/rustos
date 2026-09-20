@@ -175,6 +175,11 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         }
     }
 
+    // Attach a virtio sound device behind QEMU's `wav` backend, which writes
+    // what the emulated card received to a host file the vertical then checks
+    // sample for sample.
+    argv.extend(crate::audio_wav_args(spec, "virtio-sound-device"));
+
     // Attach a virtio-mmio crypto accelerator behind QEMU's builtin
     // cryptodev backend, for a vertical that drives a real offload engine.
     // The backend offers AES-CBC, so the guest's output can be checked
@@ -224,6 +229,7 @@ mod tests {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
+            audio_wav_path: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -285,6 +291,35 @@ mod tests {
         );
         assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));
         assert!(argv.iter().any(|a| a == "virtio-mouse-device"));
+    }
+
+    #[test]
+    fn a_sound_device_is_attached_with_its_wav_backend_and_only_on_request() {
+        let bare = render(&build_argv(&fixture_spec(1), Path::new("/tmp/k.elf")));
+        assert!(
+            !bare.iter().any(|a| a.contains("virtio-sound")),
+            "a capture-free spec must attach no sound device"
+        );
+        let spec = fixture_spec(1).with_audio_wav("/tmp/k.wav");
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let backend = argv
+            .iter()
+            .position(|a| a.starts_with("wav,id=snd0,path=/tmp/k.wav"))
+            .expect("the wav backend names the capture file");
+        assert_eq!(argv[backend - 1], "-audiodev");
+        // The backend's geometry is the vertical's own, so the capture needs
+        // no conversion to be compared sample for sample.
+        let text = &argv[backend];
+        assert!(text.contains("out.frequency=48000"), "{text}");
+        assert!(text.contains("out.channels=2"), "{text}");
+        assert!(text.contains("out.format=s16"), "{text}");
+        // The device is useless without its backend, so both or neither.
+        assert!(argv
+            .iter()
+            .any(|a| a.starts_with("virtio-sound-device,audiodev=snd0")));
+        // One stream: the `wav` backend records playback and cannot supply
+        // capture, so a second stream would advertise what the host has not.
+        assert!(argv.iter().any(|a| a.contains("streams=1")), "{argv:?}");
     }
 
     #[test]

@@ -26,6 +26,7 @@ use tairix_abi::driver::virtio_pci::{
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT_ID};
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
+use tairix_drv_audio_virtio_snd::VIRTIO_SND_DEVICE_ID;
 use tairix_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
 use tairix_kernel_virtio::MAX_SLOTS;
 use tairix_log::{Event, EventId, Field, Level, Sink};
@@ -34,8 +35,9 @@ use tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
 
 use crate::hwtree_node_ids::{
-    VIRTIO_BLOCK_PROBE_NODE_BASE_ID, VIRTIO_INPUT_PROBE_NODE_BASE_ID,
-    VIRTIO_NET_PROBE_NODE_BASE_ID, VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID,
+    VIRTIO_AUDIO_PROBE_NODE_BASE_ID, VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
+    VIRTIO_INPUT_PROBE_NODE_BASE_ID, VIRTIO_NET_PROBE_NODE_BASE_ID,
+    VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID, VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID,
     VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID, VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
 };
 
@@ -316,6 +318,40 @@ pub fn observe_virtio_mmio_network_devices(
     )
 }
 
+/// Discover every populated `virtio,mmio` slot whose `DeviceID` register
+/// equals [`VIRTIO_SND_DEVICE_ID`] and emit each as a
+/// [`HwDeviceClass::Audio`] node keyed by [`HwMatchKey::virtio`], carrying
+/// the same register-window + coherent-DMA + interrupt-line grant requests
+/// as the input and network probes — the three things the autoloaded
+/// user-space virtio sound driver process needs (`plans/SOUND.md` SND4).
+///
+/// A sound card is interrupt-driven exactly like a NIC: the driver parks its
+/// serve loop on the device's period interrupt rather than polling, so this
+/// is the *same* walk with only the probed device id and the emitted node
+/// class differing.
+///
+/// # Errors
+///
+/// As [`observe_virtio_mmio_input_devices`]: propagates the bus enumeration
+/// error and surfaces a full sink as [`DriverError::BufferTooSmall`] (fail
+/// closed).
+pub fn observe_virtio_mmio_audio_devices(
+    bus: &dyn VirtioMmioBus,
+    slot_irq: &dyn Fn(u64) -> Option<u32>,
+    sink: &mut dyn HwNodeSink,
+    log: &dyn Sink,
+) -> Result<(), DriverError> {
+    observe_virtio_mmio_interrupt_devices(
+        bus,
+        slot_irq,
+        sink,
+        log,
+        VIRTIO_SND_DEVICE_ID,
+        HwDeviceClass::Audio,
+        VIRTIO_AUDIO_PROBE_NODE_BASE_ID,
+    )
+}
+
 /// The shared core of the interrupt-driven virtio-MMIO class probes
 /// ([`observe_virtio_mmio_input_devices`],
 /// [`observe_virtio_mmio_network_devices`]): enumerate the bus, and for every
@@ -537,6 +573,33 @@ pub fn observe_virtio_pci_input_devices(
         VIRTIO_INPUT_DEVICE_ID,
         HwDeviceClass::Input,
         VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID,
+    )
+}
+
+/// Discover every modern virtio-PCI function of type
+/// [`VIRTIO_SND_DEVICE_ID`] and emit each as a [`HwDeviceClass::Audio`] node
+/// keyed by [`HwMatchKey::virtio`], carrying its four role-tagged config
+/// windows, a coherent DMA constraint, and its kernel-routed interrupt — the
+/// PCI twin of [`observe_virtio_mmio_audio_devices`], so one signed driver
+/// bundle binds on either bus (`plans/SOUND.md` SND4).
+///
+/// # Errors
+///
+/// As [`observe_virtio_pci_network_devices`].
+pub fn observe_virtio_pci_audio_devices(
+    bus: &dyn VirtioPciBus,
+    dev_irq: &dyn Fn(u64) -> Option<u32>,
+    sink: &mut dyn HwNodeSink,
+    log: &dyn Sink,
+) -> Result<(), DriverError> {
+    observe_virtio_pci_devices(
+        bus,
+        dev_irq,
+        sink,
+        log,
+        VIRTIO_SND_DEVICE_ID,
+        HwDeviceClass::Audio,
+        VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID,
     )
 }
 
@@ -925,6 +988,57 @@ mod tests {
                 HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
             ]
         );
+    }
+
+    #[test]
+    fn a_probed_virtio_sound_slot_is_discovered_with_its_grants() {
+        // Without this probe a sound card is never a hardware-tree node at
+        // all, so the signed driver bundle sits in the store as a candidate
+        // that nothing can match and the machine has no audio device.
+        let bus = FakeBus::with(&[VIRTIO_SND_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_audio_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &mut sink,
+            &DiscardLog,
+        )
+        .expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1);
+        let node = &sink.nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Audio));
+        assert_eq!(node.id(), VIRTIO_AUDIO_PROBE_NODE_BASE_ID);
+        assert_eq!(
+            node.match_keys(),
+            &[HwMatchKey::virtio(VIRTIO_SND_DEVICE_ID)],
+            "the emitted key must be the one the driver's own bind table carries"
+        );
+        assert_eq!(
+            node.resources(),
+            &[
+                HwResource::mmio(0x0A00_0000, 0x200),
+                HwResource::dma(0, 0),
+                HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_non_audio_virtio_slot_emits_no_audio_node() {
+        let bus = FakeBus::with(&[
+            VIRTIO_BLK_DEVICE_ID,
+            VIRTIO_INPUT_DEVICE_ID,
+            tairix_virtio_net::VIRTIO_NET_DEVICE_ID,
+        ]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_audio_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &mut sink,
+            &DiscardLog,
+        )
+        .expect("enumerate");
+        assert!(sink.nodes.is_empty(), "only a sound card is a sound card");
     }
 
     #[test]

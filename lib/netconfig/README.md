@@ -9,6 +9,12 @@ The network interface-configuration store engine: the one definition of the
 aggregation keys), each key's typed value set, the bounded fail-closed parser,
 and the canonical render.
 
+Writing goes through `NetworkConfig::edit()` -> `ConfigDraft`, whose
+`set`/`unset` accumulate and whose `commit` checks the document whole — a
+consistency rule spanning keys (moving an interface from a static address to
+DHCP) cannot be checked one key at a time, and a committed configuration is
+always one the parser accepts back.
+
 The `configure` command app and the installer write the store through this
 engine; the one reader — the `netstack` service, at start and on a typed
 `CAP_NET_ADMIN` reload — reads it through the same engine, so producer and

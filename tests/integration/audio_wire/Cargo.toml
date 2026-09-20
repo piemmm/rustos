@@ -1,0 +1,15 @@
+[package]
+name = "tairix-test-audio-wire"
+description = "Shared fixture for the end-to-end QEMU audio verticals: the device geometry both ends agree on, the deterministic PCM signal the guest plays, and the host-side WAV reader that checks the emulated sound card wrote exactly it. One source of truth, so the guest and the assertion cannot drift."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"

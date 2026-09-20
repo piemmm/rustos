@@ -82,6 +82,24 @@ compiled-in atlas here, and the font service when a monospace family asks for
 a cell. A border in `terminal.app` is the same picture the framebuffer console
 draws.
 
+### A glyph can leave the engine as geometry, not only as pixels
+
+Everything above turns an outline into coverage, because a console cell and a
+desktop label both want pixels. `lib/svg` does not: its text is filled,
+stroked, gradient-painted, clipped and transformed exactly as a `<path>` is,
+and the picture it decodes to has no resolution. So `tairix_fontface`'s
+`Face::glyph_outline` hands a glyph over as closed contours in font units with
+its quadratics intact, and the decoder flattens them itself at the accuracy
+whatever placement it is drawing under actually needs — a fixed chord count
+chosen here would facet an asset drawn large.
+
+It is the same walk over `glyf` either way, differing only in what each
+consumer does with a segment, so the outline `lib/svg` fills and the one the
+atlas rasterises can never disagree. Nothing is pre-transformed: the y-flip
+and the pixels-per-em scale belong to the caller, because the rasteriser flips
+about a baseline row in a cell while `lib/svg` flips about the baseline in
+user units.
+
 ## Rendering goes through the sandboxed font service
 
 With the `render` feature, `BitmapFont` is a thin, cached client of `fontd`

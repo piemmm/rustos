@@ -18,14 +18,13 @@ workspace = true
 # non-driver consumer for a `lib/*` device-support crate.
 # The `Run` entry-point binary (`src/main.rs`) is the bundle installed under
 # `/System/Drivers/` and autoloaded into user space by `devmgr` when a
-# virtio-snd node is discovered. It links the userland runtime `tairix-rt`, so
-# those bin-only deps are pulled in **only** for the bare-metal targets the
-# binary is built for; on the host the binary is an inert stub and only the
-# `lib` target (and its host tests) compiles.
-
-[[bin]]
-name = "tairix-drv-audio-virtio-snd-run"
-path = "src/main.rs"
+# virtio-snd node is discovered. It takes the package's own name by cargo's
+# target auto-discovery, as every other driver crate's does — the bundle
+# pipeline resolves a driver's binary by package name, so a bin named
+# anything else is unbuildable there. It links the userland runtime
+# `tairix-rt`, so those bin-only deps are pulled in **only** for the
+# bare-metal targets the binary is built for; on the host the binary is an
+# inert stub and only the `lib` target (and its host tests) compiles.
 
 # The device-logic dependencies the `lib` target needs on every target (host
 # tests + the freestanding build alike).

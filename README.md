@@ -93,6 +93,7 @@ for filesystems, the feature section below.
 | NIC completion-interrupt masking (no per-frame interrupt storm) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | Receive pre-filter (foreign traffic shed before the stack wakes) | ✓ | ✓ | ✓ | — |
 | Input devices | ✓ ps2 + USB | ✓ virtio + USB | ✓ virtio | ✓ host |
+| Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio | ◐ virtio | ◐ virtio | ▢ |
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |
 

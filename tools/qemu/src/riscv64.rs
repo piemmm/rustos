@@ -253,6 +253,11 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("-device".into());
         argv.push("virtio-keyboard-device".into());
     }
+    // Attach a virtio sound device behind QEMU's `wav` backend, which writes
+    // what the emulated card received to a host file the vertical then checks
+    // sample for sample.
+    argv.extend(crate::audio_wav_args(spec, "virtio-sound-device"));
+
     argv
 }
 
@@ -275,6 +280,7 @@ mod tests {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
+            audio_wav_path: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),

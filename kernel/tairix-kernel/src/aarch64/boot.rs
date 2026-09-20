@@ -1328,6 +1328,23 @@ fn audit_root_storage_binding(
             &mut sink,
             log_sink,
         );
+
+        // A sound card is discovered by the same walk as a NIC: one slot's
+        // register window, its coherent DMA constraint and its decoded
+        // interrupt line, so the autoloaded user-space driver can park on the
+        // device's own period interrupt.
+        let _ = crate::hwdiscovery::observe_virtio_mmio_audio_devices(
+            &bus,
+            &|slot_base| {
+                // SAFETY: as the probes above — `dtb` bounds the firmware
+                // blob validated at boot, identity-mapped and immutable for
+                // the kernel's life, MMU on.
+                let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.ok()?;
+                crate::aarch64::root_unlock::device_spi(&fdt, slot_base)
+            },
+            &mut sink,
+            log_sink,
+        );
     }
 
     // Publish the framebuffer boot console's scan-out surface as the boot

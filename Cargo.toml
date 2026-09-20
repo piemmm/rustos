@@ -183,6 +183,7 @@ members = [
 
     # Userland — grouped by class (system, session, shell, gui, apps),
     # mirroring the `drivers/<class>/<name>` layout documented in
+    "userland/system/audiod",
     "userland/system/confd",
     "userland/system/devmgr",
     "userland/system/drvhost",
@@ -298,6 +299,11 @@ members = [
     # own per-arch trees alongside this one. `harness` is the shared
     # build-glue crate that emits their `freestanding`/`itest_*` cfgs, keeping
     # target selection out of test source.
+    "tests/integration/audio_virtio_qemu_aarch64",
+    "tests/integration/audio_virtio_qemu_riscv64",
+    "tests/integration/audio_virtio_qemu_x86_64",
+    "tests/integration/audio_wire",
+    "tests/integration/audio_program",
     "tests/integration/harness",
     "tests/integration/finisher",
     "tests/integration/memory_isolation",

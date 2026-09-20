@@ -361,6 +361,30 @@ pub fn tcpecho_store_files(
     )
 }
 
+/// The composed store files the audio verticals' disks plant: the shared
+/// [`app_store_files`] set plus the test-only `audiotone` fixture bundle
+/// (`plans/SOUND.md` SND4), memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
+pub fn audiotone_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    fixture_store_files(
+        ctx,
+        arch,
+        profile,
+        "tests/integration/audio_program",
+        "audiotone",
+        &FILES,
+    )
+}
+
 /// A planted `/System/Settings/` configuration file, addressed by the ABI's
 /// own volume-relative path so a fixture and the pre-unlock reader that
 /// resolves it can never name different files.

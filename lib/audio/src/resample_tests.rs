@@ -123,7 +123,7 @@ fn an_equal_rate_pair_copies_rather_than_filters() {
     let input: Vec<f32> = (0..64u8).map(|n| f32::from(n) / 64.0 - 0.5).collect();
     let mut output = vec![0.0f32; 64];
     let (consumed, produced) = resampler
-        .process(&input, &mut output)
+        .process(&bank, &input, &mut output)
         .expect("whole frames");
     assert_eq!((consumed, produced), (32, 32));
     assert_eq!(output, input);
@@ -159,7 +159,9 @@ fn a_coprime_rate_pair_falls_back_to_the_interpolated_bank() {
     let mut resampler = Resampler::new(&bank, 1).expect("mono");
     let input = vec![0.25f32; 512];
     let mut output = vec![0.0f32; 1_024];
-    let (consumed, produced) = resampler.process(&input, &mut output).expect("frames");
+    let (consumed, produced) = resampler
+        .process(&bank, &input, &mut output)
+        .expect("frames");
     assert_eq!(consumed, 512);
     assert!(produced > 400, "produced {produced}");
 }
@@ -175,7 +177,9 @@ fn the_position_never_drifts_from_the_exact_rational() {
     let input = vec![0.0f32; 4_096];
     let mut output = vec![0.0f32; 4_096];
     for _ in 0..64 {
-        let (consumed, produced) = resampler.process(&input, &mut output).expect("frames");
+        let (consumed, produced) = resampler
+            .process(&bank, &input, &mut output)
+            .expect("frames");
         consumed_total += u64::try_from(consumed).expect("small");
         produced_total += u64::try_from(produced).expect("small");
     }
@@ -208,7 +212,9 @@ fn a_constant_input_comes_out_at_the_same_level() {
         let mut resampler = Resampler::new(&bank, 1).expect("mono");
         let input = vec![0.5f32; 16_384];
         let mut output = vec![0.0f32; 32_768];
-        let (_, produced) = resampler.process(&input, &mut output).expect("frames");
+        let (_, produced) = resampler
+            .process(&bank, &input, &mut output)
+            .expect("frames");
         assert!(produced > 2 * skip, "{from} into {to} produced too little");
         for sample in &output[skip..produced - skip] {
             assert!(
@@ -280,7 +286,9 @@ fn a_tone_inside_the_passband_survives_and_one_above_nyquist_does_not() {
         })
         .collect();
     let mut output = vec![0.0f32; 8_192];
-    let (_, produced) = resampler.process(&input, &mut output).expect("frames");
+    let (_, produced) = resampler
+        .process(&bank, &input, &mut output)
+        .expect("frames");
     let skip = settling(&bank);
     // Root-mean-square rather than peak: a decimated sine is rarely sampled
     // at its own crest, so a peak would measure the sampling phase as much as
@@ -300,7 +308,9 @@ fn a_tone_inside_the_passband_survives_and_one_above_nyquist_does_not() {
         })
         .collect();
     let mut folded = vec![0.0f32; 8_192];
-    let (_, produced) = resampler.process(&above, &mut folded).expect("frames");
+    let (_, produced) = resampler
+        .process(&bank, &above, &mut folded)
+        .expect("frames");
     let level = rms(&folded[skip..produced - skip]);
     assert!(
         level < 1e-4,
@@ -334,7 +344,9 @@ fn a_short_destination_stops_consumption_rather_than_dropping_input() {
     let mut resampler = Resampler::new(&bank, 1).expect("mono");
     let input = vec![0.25f32; 4_096];
     let mut output = vec![0.0f32; 64];
-    let (consumed, produced) = resampler.process(&input, &mut output).expect("frames");
+    let (consumed, produced) = resampler
+        .process(&bank, &input, &mut output)
+        .expect("frames");
     assert_eq!(produced, 64);
     assert!(
         consumed < 4_096,
@@ -348,12 +360,12 @@ fn a_partial_frame_on_either_side_is_refused() {
     let mut resampler = Resampler::new(&bank, 3).expect("three channels");
     let mut output = vec![0.0f32; 9];
     assert_eq!(
-        resampler.process(&[0.0; 4], &mut output),
+        resampler.process(&bank, &[0.0; 4], &mut output),
         Err(Errno::LengthOutOfRange)
     );
     let mut ragged = vec![0.0f32; 8];
     assert_eq!(
-        resampler.process(&[0.0; 6], &mut ragged),
+        resampler.process(&bank, &[0.0; 6], &mut ragged),
         Err(Errno::LengthOutOfRange)
     );
 }
@@ -376,7 +388,9 @@ fn channels_stay_independent_through_the_filter() {
         input[frame * 2] = 0.5;
     }
     let mut output = vec![0.0f32; 8_192];
-    let (_, produced) = resampler.process(&input, &mut output).expect("frames");
+    let (_, produced) = resampler
+        .process(&bank, &input, &mut output)
+        .expect("frames");
     let skip = settling(&bank);
     for frame in skip..produced - skip {
         assert!((output[frame * 2] - 0.5).abs() < 1e-3, "left moved");
@@ -390,10 +404,14 @@ fn a_reset_returns_the_filter_to_the_start_of_a_stream() {
     let mut resampler = Resampler::new(&bank, 1).expect("mono");
     let input: Vec<f32> = (0..256u16).map(|n| f32::from(n) / 512.0).collect();
     let mut first = vec![0.0f32; 1_024];
-    let (_, produced) = resampler.process(&input, &mut first).expect("frames");
+    let (_, produced) = resampler
+        .process(&bank, &input, &mut first)
+        .expect("frames");
     resampler.reset();
     let mut again = vec![0.0f32; 1_024];
-    let (_, repeated) = resampler.process(&input, &mut again).expect("frames");
+    let (_, repeated) = resampler
+        .process(&bank, &input, &mut again)
+        .expect("frames");
     assert_eq!(produced, repeated);
     assert_eq!(first[..produced], again[..repeated]);
 }
@@ -406,7 +424,9 @@ fn the_output_bound_is_never_exceeded() {
         let bound = resampler.max_output_frames(1_024);
         let input = vec![0.1f32; 1_024];
         let mut output = vec![0.0f32; bound];
-        let (consumed, produced) = resampler.process(&input, &mut output).expect("frames");
+        let (consumed, produced) = resampler
+            .process(&bank, &input, &mut output)
+            .expect("frames");
         assert_eq!(consumed, 1_024, "{from} into {to} left input behind");
         assert!(produced <= bound, "{from} into {to}");
     }
@@ -443,4 +463,21 @@ fn the_widest_bank_any_rate_pair_can_ask_for_stays_bounded() {
         worst < 400 * 1024,
         "a bank could reach {worst} bytes, which is no longer a bound"
     );
+}
+
+#[test]
+fn a_bank_of_another_ratio_is_refused_rather_than_filtered_over() {
+    // The history is sized and stepped for the ratio the resampler was built
+    // for, so driving it over a foreign bank would produce wrong audio with
+    // no error anywhere. Refused instead.
+    let bank = FilterBank::new(rate(24_000), rate(48_000)).expect("bank");
+    let other = FilterBank::new(rate(44_100), rate(48_000)).expect("other bank");
+    let mut resampler = Resampler::new(&bank, 1).expect("mono");
+    assert_eq!(resampler.ratio(), bank.ratio());
+    let mut output = vec![0.0f32; 64];
+    assert_eq!(
+        resampler.process(&other, &[0.0; 16], &mut output),
+        Err(Errno::NotSupported)
+    );
+    assert!(resampler.process(&bank, &[0.0; 16], &mut output).is_ok());
 }

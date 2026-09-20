@@ -393,6 +393,17 @@ enum FsDisk {
     /// live two-process network. Only this disk carries the fixtures; no
     /// production image ships them.
     StreamRootDisk,
+    /// The [`Self::EncryptedRootDisk`] layout whose read-only `/System`
+    /// volume additionally carries the signed **virtio sound** driver bundle
+    /// (only — no display/input driver, so the console stays the UART text
+    /// console the serial script drives) plus the test-only `audiotone`
+    /// fixture bundle ([`super::image_apps::audiotone_store_files`]) — the
+    /// end-to-end audio verticals' backing (`plans/SOUND.md` SND4). `devmgr`
+    /// autoloads the sound driver into its own process and hands its channel
+    /// to `audiod`, so the guest `audiotone` client's samples reach QEMU's
+    /// emulated card and its `wav` backend. Only this disk carries the
+    /// fixtures; no production image ships them.
+    AudioRootDisk,
     /// The [`Self::StreamRootDisk`] layout **plus** a planted
     /// `/System/Settings/Configuration/system.conf`
     /// ([`tairix_test_netstack_wire::ECN_SYSTEM_CONF`]) that turns
@@ -982,6 +993,13 @@ const STALLTRACE_COMMAND_LINE: &str = "stalltrace\n";
 /// report marker. Pinned to the fixture's own `tairix_test_tcpecho::PASS_MARKER`
 /// by a unit test below, so the script and the program cannot drift.
 const TCPECHO_PASS_PREFIX: &str = "TCPECHO PASS";
+
+/// Serial marker the audio verticals wait for before typing the shell `exit`
+/// that completes their PASS chain: the `audiotone` fixture's success report
+/// marker. Pinned to the fixture's own
+/// `tairix_test_audio_wire::PASS_MARKER` by a unit test below, so the script
+/// and the program cannot drift.
+const AUDIOTONE_PASS_PREFIX: &str = "AUDIO PASS";
 
 /// Serial marker the TCP-listener vertical waits for before typing the shell
 /// `exit` that completes its PASS chain: the `tcpserve` server's success
@@ -5848,6 +5866,144 @@ static TESTS: &[QemuTest] = &[
             (TCPECHO_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
     },
+    // `plans/SOUND.md` SND4: the aarch64 end-to-end audio vertical.
+    // `tairix-test-audio-virtio-qemu-aarch64` boots the production aarch64
+    // pipeline against `FsDisk::AudioRootDisk` — the encrypted root whose
+    // read-only `/System` store carries the kernel-signed virtio sound
+    // driver bundle and the test-only `audiotone` fixture, and no
+    // display/input driver, so the console stays the UART text console the
+    // serial script drives — with a virtio sound device attached behind
+    // QEMU's `wav` audio backend. `devmgr` autoloads the sound driver into
+    // its own user process (it claims a reserved `audiochan-v1` endpoint and
+    // publishes its channel node), hands that endpoint to `audiod`, and the
+    // scripted root shell runs `audiotone`, which queues a deterministic
+    // signal into a ring sized to hold all of it, starts the device, and
+    // drains.
+    //
+    // PASS needs **both** halves: the guest's `AUDIO PASS` witness (the
+    // stack reported Idle with no lost frames) and the host-side assertion
+    // that the `wav` capture holds exactly the samples the guest played. A
+    // mixer that silently substituted, resampled or dropped frames would
+    // still print the witness. A 300-second budget covers boot + unlock +
+    // autoload + service bring-up + the quarter-second signal on QEMU TCG.
+    QemuTest {
+        package: "tairix-test-audio-virtio-qemu-aarch64",
+        binary: "tairix-test-audio-virtio-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::AudioRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, "audiotone\n"),
+            (AUDIOTONE_PASS_PREFIX, Duration::ZERO, "exit\n"),
+        ],
+    },
+    // `plans/SOUND.md` SND4: the riscv64 end-to-end audio vertical.
+    // `tairix-test-audio-virtio-qemu-riscv64` boots the production riscv64
+    // pipeline against `FsDisk::AudioRootDisk` — the encrypted root whose
+    // read-only `/System` store carries the kernel-signed virtio sound
+    // driver bundle and the test-only `audiotone` fixture, and no
+    // display/input driver, so the console stays the UART text console the
+    // serial script drives — with a virtio sound device attached behind
+    // QEMU's `wav` audio backend. `devmgr` autoloads the sound driver into
+    // its own user process (it claims a reserved `audiochan-v1` endpoint and
+    // publishes its channel node), hands that endpoint to `audiod`, and the
+    // scripted root shell runs `audiotone`, which queues a deterministic
+    // signal into a ring sized to hold all of it, starts the device, and
+    // drains.
+    //
+    // PASS needs **both** halves: the guest's `AUDIO PASS` witness (the
+    // stack reported Idle with no lost frames) and the host-side assertion
+    // that the `wav` capture holds exactly the samples the guest played. A
+    // mixer that silently substituted, resampled or dropped frames would
+    // still print the witness. A 300-second budget covers boot + unlock +
+    // autoload + service bring-up + the quarter-second signal on QEMU TCG.
+    QemuTest {
+        package: "tairix-test-audio-virtio-qemu-riscv64",
+        binary: "tairix-test-audio-virtio-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::AudioRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, "audiotone\n"),
+            (AUDIOTONE_PASS_PREFIX, Duration::ZERO, "exit\n"),
+        ],
+    },
+    // `plans/SOUND.md` SND4: the x86_64 end-to-end audio vertical.
+    // `tairix-test-audio-virtio-qemu-x86-64` boots the production x86_64
+    // pipeline against `FsDisk::AudioRootDisk` — the encrypted root whose
+    // read-only `/System` store carries the kernel-signed virtio sound
+    // driver bundle and the test-only `audiotone` fixture, and no
+    // display/input driver, so the console stays the UART text console the
+    // serial script drives — with a virtio sound device attached behind
+    // QEMU's `wav` audio backend. `devmgr` autoloads the sound driver into
+    // its own user process (it claims a reserved `audiochan-v1` endpoint and
+    // publishes its channel node), hands that endpoint to `audiod`, and the
+    // scripted root shell runs `audiotone`, which queues a deterministic
+    // signal into a ring sized to hold all of it, starts the device, and
+    // drains.
+    //
+    // PASS needs **both** halves: the guest's `AUDIO PASS` witness (the
+    // stack reported Idle with no lost frames) and the host-side assertion
+    // that the `wav` capture holds exactly the samples the guest played. A
+    // mixer that silently substituted, resampled or dropped frames would
+    // still print the witness. A 300-second budget covers boot + unlock +
+    // autoload + service bring-up + the quarter-second signal on QEMU TCG.
+    QemuTest {
+        package: "tairix-test-audio-virtio-qemu-x86-64",
+        binary: "tairix-test-audio-virtio-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::AudioRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, "audiotone\n"),
+            (AUDIOTONE_PASS_PREFIX, Duration::ZERO, "exit\n"),
+        ],
+    },
     // `plans/NETWORK.md` N13: the RFC 3168 ECN vertical.
     // `tairix-test-netstack-ecn-qemu-aarch64` boots the *production* aarch64
     // pipeline with the encrypted-root disk that carries the standard signed
@@ -9111,6 +9267,13 @@ pub(crate) struct StoreSet {
     /// The application/service bundles the stream vertical plants: the shared
     /// set plus the test-only `tcpecho` fixture bundle.
     apps_with_tcpecho: &'static [AppStoreFile],
+    /// The application/service bundles the audio verticals plant: the shared
+    /// set plus the test-only `audiotone` fixture bundle.
+    apps_with_audiotone: &'static [AppStoreFile],
+    /// The signed driver bundle the audio verticals plant: the virtio sound
+    /// driver alone (no display/input driver, to keep the UART console the
+    /// serial script drives).
+    audio_drivers: &'static [AppStoreFile],
     /// The application/service bundles the ECN vertical plants: the stream
     /// vertical's `tcpecho`-augmented set plus a planted `system.conf` that
     /// turns `net.tcp.ecn` on stack-wide.
@@ -9221,27 +9384,13 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         }
         _ => EMPTY,
     };
-    let static_net_apps = match t.fs_disk {
-        // The time vertical takes the same planted static-addressing
-        // `network.conf`: its own extra document is the `system.conf` on the
-        // encrypted root, not another `/System` store file.
-        FsDisk::StaticNetRootDisk | FsDisk::TimeNetRootDisk => {
-            super::image_apps::static_net_store_files(ctx, arch, profile)?
-        }
-        _ => EMPTY,
-    };
-    let bond_net_apps = match t.fs_disk {
-        FsDisk::BondNetRootDisk => super::image_apps::bond_net_store_files(ctx, arch, profile)?,
-        _ => EMPTY,
-    };
-    let dhcp_net_apps = match t.fs_disk {
-        FsDisk::DhcpNetRootDisk => super::image_apps::dhcp_net_store_files(ctx, arch, profile)?,
-        _ => EMPTY,
-    };
-    let dhcpv6_net_apps = match t.fs_disk {
-        FsDisk::Dhcp6NetRootDisk => super::image_apps::dhcp6_net_store_files(ctx, arch, profile)?,
-        _ => EMPTY,
-    };
+    let NetConfigStores {
+        r#static: static_net_apps,
+        bond: bond_net_apps,
+        dhcpv4: dhcp_net_apps,
+        dhcpv6: dhcpv6_net_apps,
+    } = net_config_stores(ctx, t, arch, profile)?;
+    let (apps_with_audiotone, audio_drivers) = audio_stores(ctx, t, arch, profile)?;
     Ok(StoreSet {
         apps,
         apps_with_memsoak,
@@ -9249,6 +9398,8 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps_with_framestats,
         autoload_drivers,
         apps_with_tcpecho,
+        apps_with_audiotone,
+        audio_drivers,
         apps_with_tcpecho_ecn,
         apps_with_tcpserve,
         net_only_drivers,
@@ -9258,6 +9409,82 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         dhcp_net_apps,
         dhcpv6_net_apps,
     })
+}
+
+/// The application sets whose distinguishing content is a planted
+/// `network.conf`: one per addressing vertical, empty for every other disk
+/// layout.
+struct NetConfigStores {
+    /// The static-addressing set (shared with the time vertical).
+    r#static: &'static [AppStoreFile],
+    /// The active-backup bond set.
+    bond: &'static [AppStoreFile],
+    /// The DHCPv4 set.
+    dhcpv4: &'static [AppStoreFile],
+    /// The DHCPv6 set.
+    dhcpv6: &'static [AppStoreFile],
+}
+
+/// Select the [`NetConfigStores`] one disk layout plants.
+///
+/// Grouped out of [`stores_for`] because they answer one question — which
+/// planted addressing document this disk carries — and reading them as four
+/// separate arms there obscured that they are mutually exclusive.
+fn net_config_stores(
+    ctx: &Context,
+    t: &QemuTest,
+    arch: PieArch,
+    profile: tairix_mkimage::ImageProfile,
+) -> Result<NetConfigStores, String> {
+    const EMPTY: &[AppStoreFile] = &[];
+    Ok(NetConfigStores {
+        r#static: match t.fs_disk {
+            // The time vertical takes the same planted static-addressing
+            // `network.conf`: its own extra document is the `system.conf` on
+            // the encrypted root, not another `/System` store file.
+            FsDisk::StaticNetRootDisk | FsDisk::TimeNetRootDisk => {
+                super::image_apps::static_net_store_files(ctx, arch, profile)?
+            }
+            _ => EMPTY,
+        },
+        bond: match t.fs_disk {
+            FsDisk::BondNetRootDisk => super::image_apps::bond_net_store_files(ctx, arch, profile)?,
+            _ => EMPTY,
+        },
+        dhcpv4: match t.fs_disk {
+            FsDisk::DhcpNetRootDisk => super::image_apps::dhcp_net_store_files(ctx, arch, profile)?,
+            _ => EMPTY,
+        },
+        dhcpv6: match t.fs_disk {
+            FsDisk::Dhcp6NetRootDisk => {
+                super::image_apps::dhcp6_net_store_files(ctx, arch, profile)?
+            }
+            _ => EMPTY,
+        },
+    })
+}
+
+/// The audio verticals' two extra store sets: the `audiotone` fixture bundle
+/// beside the shared application set, and the signed virtio sound driver
+/// bundle alone. Empty for every other disk layout.
+///
+/// Its own function rather than two more arms inline, because
+/// [`stores_for`]'s job is to name one set per layout and a layout that
+/// needs two was making it a list rather than a table.
+fn audio_stores(
+    ctx: &Context,
+    t: &QemuTest,
+    arch: PieArch,
+    profile: tairix_mkimage::ImageProfile,
+) -> Result<(&'static [AppStoreFile], &'static [AppStoreFile]), String> {
+    const EMPTY: &[AppStoreFile] = &[];
+    if t.fs_disk != FsDisk::AudioRootDisk {
+        return Ok((EMPTY, EMPTY));
+    }
+    Ok((
+        super::image_apps::audiotone_store_files(ctx, arch, profile)?,
+        super::image_drivers::audio_driver_store_files(ctx, arch, profile)?,
+    ))
 }
 
 /// Path of a per-run sidecar file for `t` — a planted backing image, or the
@@ -12452,6 +12679,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
         | FsDisk::BondNetRootDisk
         | FsDisk::DhcpNetRootDisk
         | FsDisk::Dhcp6NetRootDisk
+        | FsDisk::AudioRootDisk
         | FsDisk::RtcRootDisk => Some(net_root_fs_disk_image(t, stores)?),
     })
 }
@@ -12468,6 +12696,8 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
         apps_with_framestats,
         autoload_drivers,
         apps_with_tcpecho,
+        apps_with_audiotone,
+        audio_drivers,
         apps_with_tcpecho_ecn,
         apps_with_tcpserve,
         net_only_drivers,
@@ -12492,6 +12722,12 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
             apps_with_tcpecho,
             "stream-root.img",
             "stream-root",
+        ),
+        FsDisk::AudioRootDisk => (
+            audio_drivers,
+            apps_with_audiotone,
+            "audio-root.img",
+            "audio-root",
         ),
         FsDisk::EcnRootDisk => (
             net_only_drivers,
@@ -12828,6 +13064,32 @@ fn memtest_takeover_gates(spec: Spec, binary: &str) -> Spec {
         .with_runtime_ceiling(MEMTEST_TAKEOVER_RUNTIME_CEILING)
 }
 
+/// Check the host-side audio capture holds exactly the signal the guest
+/// played (`plans/SOUND.md` SND4's headline assertion).
+///
+/// The guest's own `AUDIO PASS` witness says the stack reported success; this
+/// says the samples that reached the emulated hardware were the ones it was
+/// given. Neither implies the other, so a run needs both: a mixer that
+/// silently substituted, resampled, or lost frames would still print the
+/// witness.
+fn assert_audio_capture(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let wav = std::fs::read(path).map_err(|e| {
+        format!(
+            "test --qemu ({}): the audio capture {} could not be read: {e}",
+            t.package,
+            path.display()
+        )
+    })?;
+    tairix_test_audio_wire::payload_matches_signal(&wav).map_err(|mismatch| {
+        format!(
+            "test --qemu ({}): the emulated sound card did not receive the signal the guest \
+             played ({mismatch:?}); capture: {}",
+            t.package,
+            path.display()
+        )
+    })
+}
+
 /// Attach `t`'s remaining devices (network capture, display, input, the
 /// scripted serial dialogue) to `spec` and drive the guest to its outcome.
 /// `kernel` is the enrolment's binary path, which names the sibling capture
@@ -12876,6 +13138,20 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
         screendump_paths.push((path, plan.assert));
     }
 
+    // Arm the host-side audio capture for the audio verticals: QEMU's `wav`
+    // backend writes what the emulated sound card received beside the kernel
+    // binary, and the assertion after a PASS checks it holds exactly the
+    // signal the guest played. A stale capture is removed first, exactly as a
+    // stale screendump is, so the assertion can never read old bytes.
+    let audio_capture = if t.fs_disk == FsDisk::AudioRootDisk {
+        let path = sidecar_path(kernel, t, replica, "audio.wav");
+        remove_stale_sidecar(t.package, "audio capture", &path)?;
+        spec = spec.with_audio_wav(&path);
+        Some(path)
+    } else {
+        None
+    };
+
     spec = attach_pointer_script(t, spec)?;
 
     // Pipe QEMU's stdin for the interactive-session vertical and let the
@@ -12915,6 +13191,12 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
                 if let Err(e) = assert(t, path) {
                     verified = Err(format!("{e} (full serial: {})", serial_log.display()));
                     break;
+                }
+            }
+            if verified.is_ok() {
+                if let Some(path) = &audio_capture {
+                    verified = assert_audio_capture(t, path)
+                        .map_err(|e| format!("{e} (full serial: {})", serial_log.display()));
                 }
             }
             verified
@@ -13053,8 +13335,8 @@ mod tests {
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
         desktop_hover_pointer_script, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
-        qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest, BOOT_DISK_HEALTH_MARKER,
-        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest, AUDIOTONE_PASS_PREFIX,
+        BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
         DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX, STALLTRACE_COMMAND_LINE,
         STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
         SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
@@ -13701,6 +13983,14 @@ mod tests {
     #[test]
     fn tcpecho_script_marker_matches_the_fixture_marker() {
         assert_eq!(TCPECHO_PASS_PREFIX, tairix_test_tcpecho::PASS_MARKER);
+    }
+
+    /// The audio verticals' serial-script marker is exactly the `audiotone`
+    /// fixture's own success marker, so the script waits for the marker the
+    /// program actually prints and the two cannot drift.
+    #[test]
+    fn audiotone_script_marker_matches_the_fixture_marker() {
+        assert_eq!(AUDIOTONE_PASS_PREFIX, tairix_test_audio_wire::PASS_MARKER);
     }
 
     /// The listener vertical's serial-script marker is exactly the `tcpserve`

@@ -44,6 +44,7 @@
 // it never builds this module (nor pulls in `tairix-rt`).
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
+    use tairix_abi::audio::{AudioRequest, AUDIO_ENDPOINT, AUDIO_MAX_REQUEST};
     use tairix_abi::driver_store::{
         decode_config_reply, StoreRequest, SystemConfigFile, DRIVER_STORE_ENDPOINT,
         READ_CONFIG_REQUEST_LEN,
@@ -56,12 +57,13 @@ mod program {
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::OpenFlags;
     use tairix_abi::{Errno, HwNode, HwTreeHeader};
-    use tairix_devmgr::netcfg::interface_configs_from_config;
+    use tairix_devmgr::audiobind::AudiodBind;
     use tairix_devmgr::{
-        events, DriverStoreCall, HwTreeService, InterfaceConfigPlan, NetstackBind,
-        NetworkConfigSource, NetworkInterfaceConfigSource,
+        events, DriverStoreCall, HwTreeService, NetstackBind, NetworkConfigSource,
+        NetworkInterfaceConfigSource,
     };
     use tairix_log::{log, Event, Field, Level};
+    use tairix_netconfig::InterfaceConfigPlan;
     use tairix_rt::LogSink;
     use tairix_util::fmt::{format_hex_u64, format_u64, format_usize};
 
@@ -213,6 +215,27 @@ mod program {
             // `ipc_call` returns the raw `-errno` on failure; recover the
             // typed `Errno` and surface it fail-closed.
             tairix_rt::ipc_call(DRIVER_STORE_ENDPOINT, request, reply).map_err(Errno::from_syscall)
+        }
+    }
+
+    /// The production [`AudiodBind`] backing: hands a discovered sound
+    /// device's channel to the audio service with one `ipc_call` to the
+    /// reserved [`AUDIO_ENDPOINT`] carrying an
+    /// [`AudioRequest::BindDriver`]. The audio service checks the call
+    /// against this process's kernel-attested `CAP_DRV_LOAD`; this client
+    /// adds no authority, and the protocol logic (which channels to bind,
+    /// once each, fail-soft on refusal) is host-tested in
+    /// `tairix_devmgr::audiobind`.
+    struct RtAudiodBind;
+
+    impl AudiodBind for RtAudiodBind {
+        fn bind_driver(&mut self, endpoint_id: u64) -> Result<(), Errno> {
+            let mut request = [0u8; AUDIO_MAX_REQUEST];
+            let len = AudioRequest::BindDriver { endpoint_id }.encode(&mut request)?;
+            let mut reply = [0u8; STATUS_REPLY_LEN];
+            let len = tairix_rt::ipc_call(AUDIO_ENDPOINT, &request[..len], &mut reply)
+                .map_err(Errno::from_syscall)?;
+            decode_status_reply(&reply[..len])
         }
     }
 
@@ -411,8 +434,8 @@ mod program {
     /// per-interface configuration from
     /// `/System/Settings/Network/network.conf` over the read-only `/System`
     /// store endpoint ([`read_store_config`]) and maps it through the one
-    /// shared `lib/netconfig` engine
-    /// ([`interface_configs_from_config`](tairix_devmgr::netcfg::interface_configs_from_config)).
+    /// shared `lib/netconfig` projection
+    /// ([`InterfaceConfigPlan::of`](tairix_netconfig::InterfaceConfigPlan::of)).
     ///
     /// The read is over the store endpoint (not the VFS) so it works before
     /// the root unlock — the device manager binds interfaces on the same
@@ -439,7 +462,7 @@ mod program {
                 malformed_document(SystemConfigFile::Network);
                 return None;
             };
-            Some(interface_configs_from_config(&config))
+            Some(InterfaceConfigPlan::of(&config))
         }
     }
 
@@ -463,6 +486,7 @@ mod program {
             &mut RtTreeService,
             &mut RtStoreCall,
             &mut RtNetstackBind,
+            &mut RtAudiodBind,
             &mut RtNetworkConfig,
             &mut RtNetworkInterfaceConfig,
             &LogSink,

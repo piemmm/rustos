@@ -101,7 +101,7 @@ fn one_stream_at_unity_through_an_identity_map_is_bit_exact() {
         resampled: false,
         samples: &samples,
     };
-    let written = mixer.mix(&[stream], 8, &mut out).expect("mixed");
+    let written = mixer.mix([stream], 8, &mut out).expect("mixed");
     assert_eq!(written, samples.len());
     assert_eq!(out, samples, "the one path must not touch a sample");
 }
@@ -142,7 +142,7 @@ fn bit_exactness_holds_across_encodings_channel_counts_and_block_lengths() {
                     resampled: false,
                     samples: &samples,
                 };
-                mixer.mix(&[stream], frames, &mut out).expect("mixed");
+                mixer.mix([stream], frames, &mut out).expect("mixed");
                 assert_eq!(
                     out, samples,
                     "{format:?} over {channels} channels, {frames} frames"
@@ -171,7 +171,7 @@ fn a_lone_float_streams_negative_zero_survives_the_accumulator() {
         resampled: false,
         samples: &samples,
     };
-    mixer.mix(&[stream], 4, &mut out).expect("mixed");
+    mixer.mix([stream], 4, &mut out).expect("mixed");
     assert_eq!(out, samples);
 }
 
@@ -200,7 +200,9 @@ fn two_streams_sum() {
             samples: &second,
         },
     ];
-    mixer.mix(&streams, 4, &mut out).expect("mixed");
+    mixer
+        .mix(streams.iter().copied(), 4, &mut out)
+        .expect("mixed");
     assert_eq!(out, s16(&[3_000, -1_000, 0, 0]));
 }
 
@@ -228,7 +230,9 @@ fn the_sum_saturates_rather_than_wrapping() {
             samples: &loud,
         },
     ];
-    mixer.mix(&streams, 2, &mut out).expect("mixed");
+    mixer
+        .mix(streams.iter().copied(), 2, &mut out)
+        .expect("mixed");
     assert_eq!(out, s16(&[32_767, -32_768]));
 }
 
@@ -262,7 +266,9 @@ fn one_streams_non_finite_samples_do_not_poison_another() {
             samples: &honest,
         },
     ];
-    mixer.mix(&streams, 4, &mut out).expect("mixed");
+    mixer
+        .mix(streams.iter().copied(), 4, &mut out)
+        .expect("mixed");
     assert_eq!(out, honest, "the well-behaved stream was corrupted");
 }
 
@@ -274,7 +280,7 @@ fn a_period_nothing_contributed_to_is_the_devices_own_silence() {
         let map = ChannelMap::STEREO;
         let mut mixer = Mixer::new(sink(format, map), 4, 1).expect("mixer");
         let mut out = vec![0x5Au8; 4 * map.channels() as usize * format.bytes_per_sample()];
-        let written = mixer.mix(&[], 4, &mut out).expect("mixed");
+        let written = mixer.mix([], 4, &mut out).expect("mixed");
         assert_eq!(written, out.len());
         assert!(
             out.iter().all(|byte| *byte == format.silence_byte()),
@@ -293,7 +299,7 @@ fn a_stream_shorter_than_the_period_leaves_the_rest_silent() {
     let mut out = vec![0x5Au8; 16];
     mixer
         .mix(
-            &[StreamMix {
+            [StreamMix {
                 format: SampleFormat::S16,
                 matrix: &matrix,
                 gain: 1.0,
@@ -321,7 +327,7 @@ fn the_gain_is_applied_once() {
     let mut out = vec![0u8; samples.len()];
     mixer
         .mix(
-            &[StreamMix {
+            [StreamMix {
                 format: SampleFormat::S16,
                 matrix: &matrix,
                 gain: 0.5,
@@ -348,7 +354,7 @@ fn dither_is_not_applied_where_nothing_is_narrowed() {
     let mut out = vec![0u8; samples.len()];
     mixer
         .mix(
-            &[StreamMix {
+            [StreamMix {
                 format: SampleFormat::S16,
                 matrix: &matrix,
                 gain: 1.0,
@@ -380,11 +386,11 @@ fn dither_is_applied_where_the_destination_is_narrower() {
     };
     Mixer::new(sink(SampleFormat::S16, map), 64, 7)
         .expect("mixer")
-        .mix(&[stream], 64, &mut dithered)
+        .mix([stream], 64, &mut dithered)
         .expect("mixed");
     let mut plain = Mixer::new(sink(SampleFormat::S16, map), 64, 7).expect("mixer");
     plain.set_dither(Dither::None);
-    plain.mix(&[stream], 64, &mut bare).expect("mixed");
+    plain.mix([stream], 64, &mut bare).expect("mixed");
     assert_ne!(dithered, bare, "the narrowing path was not dithered");
     // And the dither moved each sample by at most one step.
     for frame in 0..64 {
@@ -411,7 +417,7 @@ fn a_sum_is_treated_as_carrying_the_pivots_resolution() {
     };
     let mut out = vec![0u8; 128];
     let mut mixer = Mixer::new(sink(SampleFormat::S16, map), 64, 3).expect("mixer");
-    mixer.mix(&[stream, stream], 64, &mut out).expect("mixed");
+    mixer.mix([stream, stream], 64, &mut out).expect("mixed");
     // Silence plus silence plus one step of dither is not exactly silence.
     assert!(
         out.iter().any(|byte| *byte != 0),
@@ -427,7 +433,7 @@ fn a_matrix_derived_against_a_different_sink_is_refused() {
     let mut out = vec![0u8; 16];
     assert_eq!(
         mixer.mix(
-            &[StreamMix {
+            [StreamMix {
                 format: SampleFormat::S16,
                 matrix: &matrix,
                 gain: 1.0,
@@ -446,9 +452,9 @@ fn a_period_past_the_configured_one_or_a_short_destination_is_refused() {
     let map = ChannelMap::STEREO;
     let mut mixer = Mixer::new(sink(SampleFormat::S16, map), 4, 1).expect("mixer");
     let mut out = vec![0u8; 16];
-    assert_eq!(mixer.mix(&[], 5, &mut out), Err(Errno::OutOfRange));
+    assert_eq!(mixer.mix([], 5, &mut out), Err(Errno::OutOfRange));
     let mut small = vec![0u8; 4];
-    assert_eq!(mixer.mix(&[], 4, &mut small), Err(Errno::BufferTooSmall));
+    assert_eq!(mixer.mix([], 4, &mut small), Err(Errno::BufferTooSmall));
 }
 
 #[test]
@@ -468,7 +474,7 @@ fn a_downmixed_stream_lands_in_the_sinks_layout() {
     let mut out = vec![0u8; 4];
     mixer
         .mix(
-            &[StreamMix {
+            [StreamMix {
                 format: SampleFormat::S16,
                 matrix: &matrix,
                 gain: 1.0,

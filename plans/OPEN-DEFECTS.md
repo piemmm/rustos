@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 31 open, 107 closed, 138 total.
+table normalises all three to **closed**. 32 open, 107 closed, 139 total.
 
-### Open (31)
+### Open (32)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -58,6 +58,8 @@ table normalises all three to **closed**. 31 open, 107 closed, 138 total.
 | D139 | `lib/rt` is not under the UB oracle, and cannot be enrolled as the registry's scopes stand | noticed while adding a granted-region mapping; the allocator's pager seam hands it fabricated addresses, which strict provenance refuses as *unsupported* — a reason `Scope::LibExcept` does not currently admit |
 | D140 | the desktop never installs the notification-icon set it can load, so a shipped chrome SVG would be ignored | latent today (no chrome kind ships an SVG); wiring it naively costs 76 speculative per-kind lookups at bring-up, so the fix is to discover the present assets from one directory listing first — see below |
 | D141 | a per-inode ACL can be authored at provisioning but never changed or read back: there is no `fs_set_acl` and no `getfacl`/`setfacl` | noticed while designing `plans/SSH.md` §1.4; not absorbed. The rest of the §5.3 model is complete — `kernel/core/src/fs/perm.rs` enforces capability gate → ACL → mode, ARXFS persists the ACL, `tairix_users::policy` authors one at home provisioning — so the gap is only the userland write and read-back path: `fs_set_mode`/`fs_set_owner` exist and their ACL counterpart does not. Three consequences: a grant lives and dies with the inode its provisioner created, so a file a user deletes and recreates silently loses it; an account provisioned before a grant is introduced has no repair path short of recreating the home; and a user cannot inspect the non-mode authority over their own files, which for a security mechanism is the sharper one. Closing it is a syscall + ABI + VFS path + ARXFS write + a tool |
+
+| D142 | the network stack's admin surface carries no message that *retires* an interface | noticed while landing `configure`'s write side; not absorbed. An interface removed from `network.conf` keeps the addressing the stack was last given until the next boot — every other edit now applies live. `configure` and the device manager both state the limit rather than implying otherwise, so nothing reports a success it did not get. Closing it means a framed remove message beside `NetInterfaceConfigMsg`, `Netstack` tearing the interface down (addresses, routes, bond membership, resolver entries) and the two pushers sending it for an alias the document dropped |
 
 ### D140 — the loaded notification-icon set is never installed
 

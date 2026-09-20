@@ -107,7 +107,10 @@ pub const DEFAULT_CONFIG: &str = "\
 # authority; `confd` (plans/APPDATA.md) owns every application's settings
 # store and is a boot-floor service because a headless machine needs it as
 # much as a desktop does — it binds its endpoint straight away and answers a
-# typed refusal until the encrypted root is unlocked. `timed`
+# typed refusal until the encrypted root is unlocked. `audiod`
+# (plans/SOUND.md) is the one mixer and the sole holder of CAP_AUDIO_DEVICE,
+# launched before `devmgr` for the reason `netstack` is: it must be ready to
+# adopt the sound-device channels `devmgr` hands it. `timed`
 # (plans/TIMESYNC.md) is last, and is the one entry the enrolment record
 # governs rather than the bootstrap floor: a machine with no RTC boots knowing
 # nothing about the time, and every audit-log hash chain, filesystem timestamp,
@@ -120,6 +123,7 @@ pub const DEFAULT_CONFIG: &str = "\
 console
 service /System/Services/sysinfod.app/Run sysinfod
 service /System/Services/netstack.app/Run netstack
+service /System/Services/audiod.app/Run audiod
 service /System/Services/devmgr.app/Run devmgr
 service /System/Services/seatmgr.app/Run seatmgr
 service /System/Services/confd.app/Run confd
@@ -555,8 +559,10 @@ mod tests {
         // `sysinfod` is launched before `netstack`/`devmgr` so the
         // introspection endpoint is published before any client queries it;
         // `netstack` is launched before `devmgr` so it is ready when `devmgr`
-        // binds discovered NIC device channels to it. `confd` needs nothing
-        // from the others and nothing needs it before an application runs.
+        // binds discovered NIC device channels to it, and `audiod` before
+        // `devmgr` for the same reason with sound devices. `confd` needs
+        // nothing from the others and nothing needs it before an application
+        // runs.
         // `timed` is not here: it is the enrolment-governed tier, asserted
         // separately below.
         assert_eq!(
@@ -569,6 +575,10 @@ mod tests {
                 Launch {
                     path: "/System/Services/netstack.app/Run",
                     uid: tairix_users::NETSTACK_UID.0,
+                },
+                Launch {
+                    path: "/System/Services/audiod.app/Run",
+                    uid: tairix_users::AUDIOD_UID.0,
                 },
                 Launch {
                     path: "/System/Services/devmgr.app/Run",
@@ -697,10 +707,10 @@ mod tests {
         // floor is never truncated by a stale magic cap.
         let floor = StartupConfig::parse(DEFAULT_CONFIG).expect("the boot floor parses");
         assert_eq!(floor.services().len(), MAX_SERVICES);
-        // The current floor is sysinfod, netstack, devmgr, seatmgr, confd;
-        // this pins the derived value so a change to the floor is a conscious
-        // one.
-        assert_eq!(MAX_SERVICES, 5);
+        // The current floor is sysinfod, netstack, audiod, devmgr, seatmgr,
+        // confd; this pins the derived value so a change to the floor is a
+        // conscious one.
+        assert_eq!(MAX_SERVICES, 6);
         // The same derivation over the `enrolled` keyword: `timed` alone.
         assert_eq!(floor.enrolled().len(), MAX_ENROLLED_SERVICES);
         assert_eq!(MAX_ENROLLED_SERVICES, 1);

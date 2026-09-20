@@ -171,7 +171,7 @@ fn through_the_engine(
     assert_eq!(decoded, frames * channels);
     let mut filtered = vec![0.0f32; frames * channels];
     let (consumed, produced) = resampler
-        .process(&pivot, &mut filtered)
+        .process(&bank, &pivot, &mut filtered)
         .expect("whole frames");
     assert_eq!((consumed, produced), (frames, frames));
     assert_eq!(filtered, pivot, "the unity ratio must not filter");
@@ -198,7 +198,7 @@ fn through_the_engine(
         resampled: false,
         samples: &staged,
     };
-    let written = mixer.mix(&[stream], frames, &mut out).expect("mixed");
+    let written = mixer.mix([stream], frames, &mut out).expect("mixed");
     assert_eq!(written, out.len());
     out
 }
@@ -324,7 +324,7 @@ fn a_gain_that_is_not_unity_changes_the_samples_as_it_should() {
     let mut out = vec![0u8; samples.len()];
     mixer
         .mix(
-            &[StreamMix {
+            [StreamMix {
                 format: SampleFormat::S16,
                 matrix: &matrix,
                 gain: 0.5,

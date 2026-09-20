@@ -40,8 +40,9 @@ dropped is a category the surface then has to lie about.
 | **DS5** | Storage — one card per mount with its capacity track and health pill, over the DS5a model | DS2, DS5a | DS5 | done |
 | **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | done |
 | **DS7** | Networking read — the stack-wide `net.*` options staged and applied live, the ungated resolver set stated, and the gated per-interface readings left where they may be taken | DS2, DS6 | DS7 | done |
-| **DS8** | Networking write — `configure` grows a *writer* for the `lib/netconfig` registry, and Ethernet and DNS stage and apply through it | DS6, DS7, DS8a | DS8 | planned |
 | **DS8a** | The elevated-read seam: an `ElevateRequest` whose reply carries the bounded output of the run, so an authenticated account can *show* a store no unprivileged caller may read — with `configure`'s per-interface **read** registry and the Ethernet pane that states it | DS6 | DS8a | done |
+| **DS8** | The network store's writer — `lib/netconfig`'s draft/commit mutation API, `configure`'s write side and its *unset* spelling, the live apply over the stack's admin surface, and the device manager's runtime re-read | DS6, DS7, DS8a | DS8 | done |
+| **DS8b** | Ethernet and DNS stage and apply through that writer — the addressing reading becomes a settable per-interface form, and Apply is the one elevated `configure` run | DS8 | DS8b | planned |
 | **DS9** | Users & Groups — the ungated `GROUP_DIRECTORY` sibling, the caller's own record, the admin-authenticated read of every other account, and the user-admin operations the syscall carries but no tool spells | DS6, DS8a | DS9 | planned |
 | **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | planned |
 | **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | planned |
@@ -304,9 +305,9 @@ owner the change goes to; the last column is what a refusal looks like.
 | Lock Screen | session's lock policy document | session apply | apply refused, stated |
 | Screensaver | session's idle policy document | session apply | apply refused, stated |
 | Power | — | — (no policy interface, §3) | pane states absence |
-| Networking → Ethernet | nothing ungated exists: the live readings need `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL` and stay the Switchboard's, and `network.conf` carries the very identity and addressing those gates protect. The configured addressing is read by the admin-authenticated run (DS8, needs DS8a) | elevated `configure` (DS8) + netstack reload | pane states where the readings live; after DS8, Authority Mark and config unchanged |
+| Networking → Ethernet | nothing ungated exists: the live readings need `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL` and stay the Switchboard's, and `network.conf` carries the very identity and addressing those gates protect. The configured addressing is read by the admin-authenticated run (DS8a) | elevated `configure`, which writes the store and hands the changed interfaces to the running stack (DS8; the pane that drives it is DS8b) | pane states where the live readings live; a refused apply keeps the working copy and states why |
 | Networking → Wi-Fi | — | — | pane states absence (§3) |
-| Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` (DS8) | reading renders unmeasured; after DS8, Authority Mark |
+| Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` (DS8; the pane that drives it is DS8b) | reading renders unmeasured; a refused apply keeps the working copy and states why |
 | Networking → TCP/IP | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which also hands the policy to the running stack | working copy stands, refusal stated; a stack that did not take it keeps the saved value for next boot and says so |
 | Bluetooth | — | — | pane states absence (§3) |
 | Sound | — | — | pane states absence (§3) |
@@ -872,8 +873,9 @@ the **text**, read fresh (a boot snapshot would report the old value after
 `configure` wrote a new one), and `lib/procinfo::system_config` parses it with
 `lib/sysconfig` — the engine `configure` writes through. Ungated on the same
 ground as `MOUNT_LIST`: a world-readable public document carrying no
-credential, with no write path anywhere near it. DS7/DS8's `network.conf` read
-is the same shape and lands with its own consumer.
+credential, with no write path anywhere near it. The `network.conf` read is
+not the same shape: that document is not world-readable, which is why the
+Ethernet pane is answered by an authenticated run instead (DS8a).
 
 **General.** *About* and *Date & Time* are read-only fact columns — one
 label-and-reading row per figure, each from its own ungated query, so one
@@ -944,7 +946,7 @@ throughout, and every surface reads it.
 
 ### DS8a — the elevated-read seam
 
-**Done.** The prerequisite DS8 and DS9 both wait on.
+**Done.** The prerequisite DS8b and DS9 both wait on.
 `ElevateReply::Completed` carried an exit code and nothing else, so no
 authenticated run could *show* a caller anything.
 
@@ -995,29 +997,93 @@ become rows — one plate per interface, labelled in a reader's words. An
 overrun states that it was too large and shows no part of it; a refusal
 states the refusal and leaves the pane saying nothing was read.
 
-### DS8 — Networking: write, and the store's missing writer
+### DS8 — the network store's writer
 
-**Unblocked; the read half landed with DS8a.** What remains is the *writer*.
-`configure` can resolve and show a `<iface>.<suffix>` key but cannot set one:
-`lib/netconfig` must grow a mutation API beside its parse and render
-(`NetworkConfig::set`, an interface created on first use and dropped when its
-last key goes, and the whole-document `validate` re-run after every change so
-a set that made the store inconsistent is refused rather than written), and
-`configure` must grow the second store's write side and a spelling for
-*unset* — a per-interface key has no default to fall back to, so switching an
-interface from static to DHCP must be able to remove `ipv4.address` and
-`ipv4.gateway` in the same invocation the method changes, or the document
-`validate` refuses is the only reachable state.
+**Done.** `configure` could resolve and show a `<iface>.<suffix>` key but
+could not set one; the store had a parser and a render and no mutation API
+at all.
 
-Settings' Ethernet and DNS panes then stage a change over the rows DS8a's
-reading already draws, and apply it by elevating
-`configure`, which writes the store **and** asks the network stack to adopt it
-over its existing `CAP_NET_ADMIN` admin surface (the `NetInterfaceConfigMsg` /
-`NetBondConfigMsg` frames `devmgr` already pushes), so a change takes effect
-without a reboot and without Settings holding `CAP_NET_ADMIN`. Devmgr's
-static-only caching of the interface plan (`netcfg.rs` reads it once and
-caches it, so a runtime edit is never seen) is retired in the same stage: the
-runtime-reload increment it defers is this one.
+**`lib/netconfig` grows a draft.** `NetworkConfig::edit()` yields a
+`ConfigDraft` whose `set`/`unset` accumulate and whose `commit` checks the
+result once. A draft rather than a mutating `set` on the configuration
+itself, because a whole-document invariant cannot be checked a key at a
+time: moving an interface from a static address to DHCP has to drop
+`ipv4.address` and change `ipv4.method` together, and there is **no ordering
+in which each half alone is a document the parser would accept**. Until the
+commit the configuration the draft came from is untouched, so a refusal
+leaves no partial change anywhere, and a committed `NetworkConfig` is always
+one the parser accepts back. `commit` also refuses a document whose render
+would outgrow `MAX_CONFIG_LEN` — `MAX_INTERFACES` fully specified interfaces
+render past it, and a store the writer had just written would then be
+refused by the next reader — and drops an interface left declaring no key,
+which would write no line and so break the round trip.
+
+**The *unset* spelling is the empty value, and it is genuinely required.**
+That registry has no defaults, so a key is removed rather than reset, and
+`validate` refuses a non-static method carrying a static address: without a
+removal an interface in `static` could never be moved to `dhcp` at all. No
+key in the registry accepts an empty value — a test pins that over the whole
+of `IfaceKey::ALL` — which is what makes the spelling unambiguous, and
+`ElevateArgv` carries an empty argument as typed.
+
+**One projection, two pushers.** `InterfaceConfigPlan` and its mapping from
+the document to the `netstack-v1` messages moved out of the device manager
+into `lib/netconfig` (`InterfaceConfigPlan::of`). `configure` pushes what a
+live edit changed and the device manager delivers the same plan at boot, so
+a second copy of "what this setting means to the running stack" cannot
+exist. `configure` compares the plan either side of the edit and pushes only
+the interfaces that actually differ, so an interface the command line did
+not name is not reconfigured — and a member whose bond took it over is,
+because its message changed even though its own keys did not.
+
+**Two limits are reported rather than hidden** (`AGENTS.md` §2.24). The
+stack's admin surface carries no message that *retires* an interface, so one
+removed from the document keeps running until the next boot and the tool
+says so. An interface saved with neither `match.mac` nor `match.node` can
+never be bound to a device, so it is saved and the refusal stated.
+
+**Devmgr's static-only caching is retired.** `deliver_interface_configs`
+read the plan once (`if state.plan.is_none()`) and cached it, so a runtime
+edit was never seen. It now re-reads on every generation bump, exactly as
+the stack-wide policy does, and forgets a delivery mark only for an
+interface whose message changed — so an edit reaches the stack while an
+untouched interface is not re-pushed. An unreadable store leaves the plan
+already held standing rather than wiping it.
+
+**`ValueShape` is now the shared configuration vocabulary**
+(`tairix_util::conf`), stated by both registries: `IfaceKey::shape()` is
+what lets a refusal name the valid choices whichever registry refused, and
+what a settings surface will build its combo rows from rather than a second
+copy of the value sets. Each closed enum's `VALUES` is derived from its own
+`ALL` and `as_str`, so the set a chooser offers and the set the parser
+admits cannot drift.
+
+### DS8b — Ethernet and DNS stage and apply
+
+**Planned.** DS8a gives the Ethernet pane a *reading* of the configured
+addressing, and DS8 gives the system a writer; what remains is the pane that
+stages a change over that reading and applies it.
+
+The reading already arrives as one plate per interface. Making it settable
+means the rows become controls rather than statements: `lib/controls`'
+`TextField` for the address, gateway and MTU rows, and combos for the two
+method rows, whose choices come from `IfaceKey::shape()` rather than a copy
+of the value sets. DNS's per-interface `dns.servers` is the same shape.
+
+Two things distinguish this from the panes `crate::form` already draws, and
+they are the design work of the stage. Its groups are **discovered at
+runtime** from the captured listing rather than declared by a static
+`GroupSpec`, so `Owner` grows a variant naming the interface by its index in
+the form's own table and the composition builds its groups from the
+document. And its pending set spans a registry whose keys are not
+`'static` strings, so `Form::pending` answers owned `<key> <value>` pairs —
+which is exactly the argv the one elevated `configure` run already takes,
+with an unset spelled as the empty value.
+
+The pane is a small state machine: it opens stating that nothing has been
+read and offering *Show Addressing…*; the capture answers; only then is
+there a document to stage against. A refused or overrun capture leaves it
+stating that, with nothing to edit.
 
 ### DS9 — Users & Groups
 
@@ -1171,19 +1237,22 @@ user-scope document and the session's apply policy, so DS4, DS10, DS11 and
 DS12 are all further keys in that one document and may land in any order once
 it has.
 
-**Shared machinery lands with its consumer.** DS6's argv extension and DS8's
-`configure` extension are each in the same increment as the pane that uses
-them, so nothing speculative is added ahead of a caller (`AGENTS.md` §2.4).
+**Shared machinery lands with its consumer.** DS6's argv extension landed in
+the same increment as the pane that uses it, so nothing speculative was added
+ahead of a caller (`AGENTS.md` §2.4). DS8's `configure` extension is the one
+that does not need a pane to have a caller: `configure` is a shipped command
+app, so its write side is reachable from a shell the moment it lands, and
+DS8b's pane is its *second* caller rather than its first.
 
 **DS8a is the edge DS7 discovered, and it gates two stages rather than one.**
-A pane may only show what its own authority can read, and neither DS8's
-interface addressing nor DS9's other-account fields can be read by an
-application holding two capabilities. Both plans answer that the same way —
+A pane may only show what its own authority can read, and neither the
+Ethernet pane's interface addressing nor DS9's other-account fields can be
+read by an application holding two capabilities. Both plans answer that the same way —
 the administrator-authenticated run shows what it may — and neither can do it
 while the broker's reply carries an exit code alone. So the seam is its own
 increment ahead of both, rather than being half-built inside whichever of
 them lands first. It is not speculative interface: it is added with the first
-of its two callers, and DS8 cannot begin without it.
+of its two callers, and DS8b cannot begin without it.
 
 **DS5a is the exception that proves that edge, and is not speculative.** It
 moves a derivation that already had a caller rather than adding one for a

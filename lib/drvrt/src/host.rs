@@ -357,6 +357,24 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         Ok(())
     }
 
+    /// The kernel-minted handle for the driver's bound interrupt line, or
+    /// [`None`] while nothing has bound it yet.
+    ///
+    /// A driver whose event loop parks on a *wait set* over several sources
+    /// (a device-channel serve loop waiting on {call endpoint, device IRQ})
+    /// needs the handle itself rather than [`Self::notify_wait`]. Reading it
+    /// from the host is what keeps the bind single: a driver that instead
+    /// called the bind trap itself would bind the same line twice — once
+    /// directly and once through this host's lazy path — and the kernel
+    /// refuses a second binding of a line.
+    #[must_use]
+    pub fn irq_handle(&self) -> Option<u64> {
+        match self.irq_handle.get() {
+            0 => None,
+            handle => Some(handle),
+        }
+    }
+
     /// Park on the driver's granted device interrupt line until it fires or
     /// `timeout_ns` elapses, binding the line lazily through
     /// [`bind_irq`](Self::bind_irq).

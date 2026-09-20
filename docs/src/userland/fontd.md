@@ -138,7 +138,10 @@ The store is reached through two injected seams (`FontStore` for the scan,
 exhaustively host-tested against an in-memory fixture built from the small
 committed faces — no on-disk `/System/Fonts`, and no multi-megabyte face in a
 test binary. The `tairix-fontface` TrueType parser additionally carries its own
-fuzz harness (`AGENTS.md` §19.6).
+fuzz harness (`AGENTS.md` §19.6), and bounds one glyph's decode in outline
+points and in composite component records — charged across the whole walk, so
+a malformed composite cannot multiply its work by recursing and stall the
+service.
 
 ## What a caller can make the service hold
 

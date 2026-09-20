@@ -1572,13 +1572,20 @@ alias).
   (`CAP_NET_ADMIN`, event `16_016`). Host-tested (mac-match+rename,
   apply-by-alias, static v4/v6, disabled, mtu, atomic-on-refusal,
   idempotency, NotFound, alias-clash).
-- **devmgr** (`netcfg`): `interface_configs_from_config` maps
-  `network.conf` → `InterfaceConfigPlan` (bonds/members/loopback omitted; a
-  managed non-bond iface without `match.mac` is rejected loud, event
-  `13_016`); `deliver_interface_configs` pushes each per interface,
-  retrying silently on `NotFound` (interface not bound yet) each hw-tree
-  generation bump and recording each success (events `13_014`/`13_015`).
-  Reuses `CAP_FS_ACCESS`; `netstack` stays filesystem-free.
+- **The document → wire projection** is `lib/netconfig`'s
+  (`InterfaceConfigPlan::of`), not the device manager's: the device manager
+  delivers it at boot and `configure` pushes it after a live edit, so one
+  mapping serves both and they cannot disagree about what a setting means.
+  A managed non-bond iface without `match.mac`/`match.node` is rejected
+  loud (event `13_016`).
+- **devmgr** (`netcfg`): `deliver_interface_configs` pushes each per
+  interface, retrying silently on `NotFound` (interface not bound yet) each
+  hw-tree generation bump and recording each success (events
+  `13_014`/`13_015`). The plan is **re-read on every bump**, and a delivery
+  mark is forgotten only for an interface whose message actually changed —
+  so an administrator's live edit reaches the running stack while an
+  untouched interface is not reconfigured for nothing. Reuses
+  `CAP_FS_ACCESS`; `netstack` stays filesystem-free.
 - **`tools/mkimage`**: the read-only `/System` volume carries the shipped
   `network.conf`, planted at the volume-relative path the ABI's closed
   `SystemConfigFile` set names — the one location the pre-unlock reader
@@ -1586,8 +1593,8 @@ alias).
   ("no managed interfaces beyond loopback") via the `lib/netconfig` default
   render.
 - **Docs**: `docs/src/userland/{netstack,networking}.md`.
-- **Deferred to N9b-3-2**: bonding, `match.node` binding, runtime reload,
-  bond `info:`/`state:`/`stats:`, and the live QEMU vertical (this
+- **Deferred to N9b-3-2**: bonding, `match.node` binding, bond
+  `info:`/`state:`/`stats:`, and the live QEMU vertical (this
   increment is host-tested; the guest path is guest-driven and exercised
   once an image carries a configured static interface).
 
@@ -1658,11 +1665,10 @@ but its QEMU verticals are β-2.
   tests (compose/up-delay/defer-until-present/facts+member-address-refusal/
   immediate-failover+announce/last-member-down/deliberate-failback/reload-
   primary+membership/alias-shadow).
-- **devmgr** (`netcfg`): the N9b-3-1 omission is removed —
-  `interface_configs_from_config` now emits an address-less member rename
-  per member, a `NetBondConfigMsg` per bond, and the bond's own
-  (alias-matched) addressing; `deliver_interface_configs` delivers bonds,
-  retrying `NotFound` until every member has bound. `NetstackBind` gains
+- **The projection** emits an address-less member rename per member, a
+  `NetBondConfigMsg` per bond, and the bond's own (alias-matched)
+  addressing; `deliver_interface_configs` delivers bonds, retrying
+  `NotFound` until every member has bound. `NetstackBind` gains
   `apply_bond_config`. Host-tested.
 - Docs: `docs/src/userland/netstack.md` (bond section), `security/network.md`
   (threat row + event registry 16_016..16_019).

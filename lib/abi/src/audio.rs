@@ -216,6 +216,7 @@ mod op {
     pub const MUTE: u8 = 10;
     pub const STATE: u8 = 11;
     pub const CLOSE: u8 = 12;
+    pub const BIND_DRIVER: u8 = 13;
 }
 
 /// Byte offsets within the [`AudioRequest::Enumerate`] body.
@@ -266,7 +267,8 @@ mod level {
     pub const LEN: usize = 16;
 }
 
-/// Wire length of a body naming nothing but its stream.
+/// Wire length of a body naming nothing but its stream, and of the one
+/// naming nothing but a driver's device-channel endpoint.
 const STREAM_BODY_LEN: usize = 8;
 
 /// Largest audio-service request frame: the header plus the widest body. A
@@ -372,6 +374,19 @@ pub enum AudioRequest {
         /// The stream to close.
         stream_id: u64,
     },
+    /// Adopt a driver's `audiochan-v1` device channel as a sound device.
+    ///
+    /// Not a client operation: the device manager issues it when a driver
+    /// publishes its channel node, and the service admits it only from a
+    /// caller the kernel attests holds `CAP_DRV_LOAD` — the authority to put
+    /// a driver on the machine, which is exactly the authority to tell the
+    /// mixer about one. No new capability is minted for it, and no ordinary
+    /// program can reach it.
+    BindDriver {
+        /// The reserved device-channel endpoint the driver claimed and
+        /// published as a hardware-tree resource.
+        endpoint_id: u64,
+    },
 }
 
 /// What a client asks for when it opens a stream.
@@ -415,6 +430,7 @@ impl AudioRequest {
             Self::Mute { .. } => op::MUTE,
             Self::State { .. } => op::STATE,
             Self::Close { .. } => op::CLOSE,
+            Self::BindDriver { .. } => op::BIND_DRIVER,
         }
     }
 
@@ -431,7 +447,8 @@ impl AudioRequest {
                 | Self::Flush { .. }
                 | Self::Clock { .. }
                 | Self::State { .. }
-                | Self::Close { .. } => STREAM_BODY_LEN,
+                | Self::Close { .. }
+                | Self::BindDriver { .. } => STREAM_BODY_LEN,
             }
     }
 
@@ -483,6 +500,7 @@ impl AudioRequest {
             | Self::Clock { stream_id }
             | Self::State { stream_id }
             | Self::Close { stream_id } => put_u64(body, 0, *stream_id),
+            Self::BindDriver { endpoint_id } => put_u64(body, 0, *endpoint_id),
         }
         Ok(len)
     }
@@ -531,6 +549,12 @@ impl AudioRequest {
             }
             op::GAIN => decode_gain(body),
             op::MUTE => decode_mute(body),
+            // An endpoint id is the driver's, not a stream token, so zero is
+            // rejected on its own terms: no endpoint is ever id zero.
+            op::BIND_DRIVER => match read_u64(body, 0) {
+                0 => Err(Errno::OutOfRange),
+                endpoint_id => Ok(Self::BindDriver { endpoint_id }),
+            },
             _ => decode_stream_only(op, body),
         }
     }
@@ -544,7 +568,9 @@ const fn body_len(op: u8) -> Result<usize, Errno> {
         op::ATTACH => Ok(attach::LEN),
         op::START | op::STOP => Ok(transport::LEN),
         op::GAIN | op::MUTE => Ok(level::LEN),
-        op::DRAIN | op::FLUSH | op::CLOCK | op::STATE | op::CLOSE => Ok(STREAM_BODY_LEN),
+        op::DRAIN | op::FLUSH | op::CLOCK | op::STATE | op::CLOSE | op::BIND_DRIVER => {
+            Ok(STREAM_BODY_LEN)
+        }
         _ => Err(Errno::OutOfRange),
     }
 }

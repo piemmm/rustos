@@ -222,6 +222,19 @@ per-channel history — a few kibibytes — because the coefficients live in the
 shared bank. A bank is bounded by its phase and tap caps together, so no rate
 pair a client asks for can demand an unbounded coefficient table.
 
+**The state is per stream and the bank is per rate pair, so they are separate
+objects.** A resampler is *driven over* a bank rather than holding one: a
+service keeping both in one stream record would otherwise need a
+self-reference, and building a resampler per period would reset the filter
+memory every period — an audible discontinuity at every boundary. A bank of
+the wrong ratio is refused rather than filtered over, because the alternative
+is wrong audio with nothing reporting it.
+
+**The mixer folds an iterator, not a slice.** Its contributions arrive as an
+iterator walked exactly once, so a service whose live streams live in its own
+records mixes them without building a per-period collection — which is the one
+place an otherwise allocation-free period path would have had to allocate.
+
 The sample-conversion kernel is resolved once through `lib/cpuops`, under that
 framework's capability gate and mandatory self-verify against the portable
 reference. There are no accelerated candidates today — the portable kernel is

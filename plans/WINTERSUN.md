@@ -486,10 +486,9 @@ know:
   gravel above sand above water, glacier above snowfield. A river bank grades
   through mud to shingle because shingle stands higher, not because anything
   special-cases a bank.
-- **`lib/raster::shape` (FG1) was not needed and is still not built.**
-  Decals are polylines stamping weights and particles are points; nothing in
-  WS4 wants an outline primitive. FG1 is WS6's prerequisite, not WS4's or
-  WS5's.
+- **`lib/raster::shape` (FG1) was not needed by WS4 or WS5.** Decals are
+  polylines stamping weights and particles are points; neither wants an
+  outline primitive. It is built now, as WS6's prerequisite.
 
 ### What WS5 settled
 

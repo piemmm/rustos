@@ -26,6 +26,7 @@ use tairix_abi::{Errno, HwNode, HwTreeHeader};
 use tairix_devmatch::DriverCandidate;
 use tairix_log::{log as log_event, Event, Level, Sink};
 
+use crate::audiobind::{self, AudioBindState, AudiodBind};
 use crate::autoload::{match_and_load, unload_vanished, AutoloadState};
 use crate::events;
 use crate::netbind::{bind_new_channels, NetBindState, NetstackBind};
@@ -157,9 +158,11 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
     netstack: &mut dyn NetstackBind,
+    audiod: &mut dyn AudiodBind,
     netcfg: &mut dyn NetworkConfigSource,
     netifcfg: &mut dyn NetworkInterfaceConfigSource,
     netbind: &mut NetBindState,
+    audiobind: &mut AudioBindState,
     netconfig: &mut NetConfigState,
     netifconfig: &mut NetIfConfigState,
     catalogue: &mut Option<Vec<CatalogueDriver>>,
@@ -218,6 +221,10 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     // just bound this cycle can be matched (by MAC) and configured in the
     // same reaction; an interface not yet bound is retried on the next bump.
     deliver_interface_configs(netifcfg, netifconfig, netstack, sink);
+    // Hand each newly-discovered sound device channel (an `audiochan` node a
+    // bound audio driver emitted) to the audio service, on the same terms:
+    // each endpoint once, and a service not yet up is retried next bump.
+    audiobind::bind_new_channels(&nodes, audiobind, audiod, sink);
     // Hot-removal reaction: a bound node missing from this snapshot means its
     // device is gone, so tear its driver down. The same generation-bump path
     // that loads a newly-appeared node's driver unloads a vanished one's
@@ -278,6 +285,7 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
     netstack: &mut dyn NetstackBind,
+    audiod: &mut dyn AudiodBind,
     netcfg: &mut dyn NetworkConfigSource,
     netifcfg: &mut dyn NetworkInterfaceConfigSource,
     sink: &dyn Sink,
@@ -296,6 +304,9 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     // network stack: each `netchan` endpoint is bound exactly once across
     // every generation bump.
     let mut netbind = NetBindState::new();
+    // The same memory for sound devices: each `audiochan` endpoint is handed
+    // to the audio service exactly once across every generation bump.
+    let mut audiobind_state = AudioBindState::new();
     // The loaded-bundle cache plus the per-node decision memory: a
     // re-evaluation of a settled tree re-emits no audit line. The device manager re-matches the whole snapshot on every
     // generation advance, and without the decision memory each pass would
@@ -312,9 +323,11 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
         tree,
         store,
         netstack,
+        audiod,
         netcfg,
         netifcfg,
         &mut netbind,
+        &mut audiobind_state,
         &mut netconfig,
         &mut netifconfig,
         &mut catalogue,
@@ -348,9 +361,11 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
             tree,
             store,
             netstack,
+            audiod,
             netcfg,
             netifcfg,
             &mut netbind,
+            &mut audiobind_state,
             &mut netconfig,
             &mut netifconfig,
             &mut catalogue,
@@ -558,6 +573,16 @@ mod tests {
         }
     }
 
+    /// A no-op [`AudiodBind`] for the loop tests, whose hardware trees carry
+    /// no `audiochan` node — so the hand-off never calls it. The policy
+    /// itself is tested directly in `crate::audiobind`.
+    struct NoAudiod;
+    impl AudiodBind for NoAudiod {
+        fn bind_driver(&mut self, _endpoint_id: u64) -> Result<(), Errno> {
+            Ok(())
+        }
+    }
+
     /// A no-op [`NetworkConfigSource`] for the loop tests: it never yields a
     /// policy, so `deliver_network_settings` is a no-op. The delivery policy
     /// itself is tested directly in `crate::netcfg`.
@@ -573,7 +598,7 @@ mod tests {
     /// policy itself is tested directly in `crate::netcfg`.
     struct NoIfConfig;
     impl NetworkInterfaceConfigSource for NoIfConfig {
-        fn load(&mut self) -> Option<crate::netcfg::InterfaceConfigPlan> {
+        fn load(&mut self) -> Option<tairix_netconfig::InterfaceConfigPlan> {
             None
         }
     }
@@ -605,6 +630,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -647,6 +673,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -691,6 +718,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -749,6 +777,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -791,6 +820,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -832,6 +862,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -880,6 +911,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -931,6 +963,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -973,6 +1006,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1003,6 +1037,7 @@ mod tests {
                 &mut tree,
                 &mut store,
                 &mut NoNetstack,
+                &mut NoAudiod,
                 &mut NoConfig,
                 &mut NoIfConfig,
                 &sink,
@@ -1031,6 +1066,7 @@ mod tests {
                 &mut tree,
                 &mut store,
                 &mut NoNetstack,
+                &mut NoAudiod,
                 &mut NoConfig,
                 &mut NoIfConfig,
                 &sink,
@@ -1162,6 +1198,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1288,6 +1325,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1338,6 +1376,7 @@ mod tests {
             &mut tree,
             &mut store,
             &mut NoNetstack,
+            &mut NoAudiod,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,

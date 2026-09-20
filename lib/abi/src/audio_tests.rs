@@ -614,3 +614,18 @@ fn the_reply_bound_covers_every_reply_shape() {
         "the device descriptor is the widest reply"
     );
 }
+
+#[test]
+fn the_driver_bind_operation_round_trips_and_refuses_a_zero_endpoint() {
+    let request = AudioRequest::BindDriver {
+        endpoint_id: 0x4143_4841_4E00_0000,
+    };
+    let mut frame = [0u8; AUDIO_MAX_REQUEST];
+    let len = request.encode(&mut frame).expect("encoded");
+    assert_eq!(AudioRequest::decode(&frame[..len]), Ok(request));
+    // No endpoint is ever id zero, so a truncated or uninitialised frame is
+    // a refusal rather than a bind of whatever happened to be first.
+    let mut zeroed = frame;
+    zeroed[8..16].fill(0);
+    assert_eq!(AudioRequest::decode(&zeroed[..len]), Err(Errno::OutOfRange));
+}

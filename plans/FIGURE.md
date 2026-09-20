@@ -36,7 +36,7 @@ controls), `lib/raster` and `lib/util::mathf` rustdoc.
 | # | Item | Status |
 |---|---|---|
 | FG0 | This plan, the jump-sheet row, the §3 map entry, the `PLAN.md` section | done |
-| FG1 | `lib/raster::shape`: the six outline primitives, the tracer, the build-time vertex bounds, and `cinder` migrated onto them with its existing tests as the acceptance gate | planned |
+| FG1 | `lib/raster::shape`: the six outline primitives, the tracer, the build-time vertex bounds, and `cinder` migrated onto them with its existing tests as the acceptance gate | done |
 | FG2 | `wintersun/figure`: the rig — skeleton, joint hierarchy with limits, named equipment sockets, draw order, and the one body frame that serves every heading | planned |
 | FG3 | Pose parameters, clips (keyframed parameter curves with easing), clip blending, and the transition state machine | planned |
 | FG4 | Procedural layers over a clip: gait phase from velocity, look-at, recoil, cloth and hair sway, breathing, contact shadow | planned |
@@ -116,18 +116,22 @@ asserted against the buffer at **build** time, so a generator given more detail
 fails the build rather than silently truncating a ring into a shape nobody
 authored. That rule is `cinder`'s and it is kept.
 
-**`cinder` migrates in the same change.** It is the existing consumer; leaving
-its private copy in place beside a second one would be the duplication this
-module exists to remove (§2.2, §2.14). Only its `shape.rs` moves — its
-skeleton, gait, roam and mind stay exactly where they are, because those are
-one creature's content, not a shared primitive. Its current `shape_tests.rs`, `paint_tests.rs`, `gait_tests.rs`
-and the desktop-companion QEMU vertical are the acceptance gate: the migration
-is correct when they pass unchanged in meaning, and its own pixels are
-unchanged where the shape is unchanged. The one deliberate difference is
-the renames to geometric terms and the arrival of `BevelledPanel`, which `cinder` does not use. **This is
-a real risk to a finished feature**, and it is taken deliberately rather than
-avoided by duplication; if the migration cannot preserve `cinder`'s pixels, that
-is a finding to surface (§15.7), not to paper over.
+**`cinder` migrated in the same change**, so no private copy survives beside
+the shared one. Only its `shape.rs` moved: its skeleton, gait, roam and mind
+stayed where they are, because those are one creature's content. Its shape
+tests moved with the code and now cover the module in `lib/raster`; its
+remaining 146 tests and the desktop-companion QEMU vertical passed unchanged,
+which is what says the pixels are unchanged. `cinder` uses five of the six —
+`BevelledPanel` has no consumer there — and `Splat` still carries no outline,
+because the soft composite that draws it is `cinder`'s `fur`, not a shared
+primitive.
+
+What the module now guarantees: outlines in shape-local pixels with `y` up,
+every one symmetric about its local vertical axis bar the leaning `Wedge`,
+traced into `lib/inline` fixed arrays whose worst case is asserted against
+`MAX_VERTICES` at build time, and filled through the one anti-aliased scan
+converter. A caller that asks for more detail than the buffer holds fails the
+build rather than drawing a truncated ring.
 
 ## 2. FG2 — the rig (game-side)
 

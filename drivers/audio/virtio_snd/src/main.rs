@@ -102,15 +102,22 @@ mod program {
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
             return exit::NO_HOST;
         };
-        let Some(irq_line) = host.irq_line() else {
+        if host.irq_line().is_none() {
             return exit::NO_RESOURCES;
-        };
-        let irq_ret = tairix_rt::irq_bind(irq_line);
-        if irq_ret <= 0 {
+        }
+        // Bound through the host, which caches the handle, rather than by
+        // calling the trap directly: the device bring-up below parks on
+        // completions through this same host, so a direct bind would bind the
+        // line a second time and the kernel refuses that. Binding before the
+        // device is live is safe here because its event sources stay masked
+        // until the mixer attaches a region, so no event can be dropped in
+        // the window.
+        if host.bind_irq().is_err() {
             return exit::BRINGUP_FAILED;
         }
-        #[allow(clippy::cast_sign_loss)] // `irq_ret > 0` is the minted IrqHandle.
-        let irq_handle = irq_ret as u64;
+        let Some(irq_handle) = host.irq_handle() else {
+            return exit::BRINGUP_FAILED;
+        };
 
         // The clock every period's `(position, sampled_at)` pair is stamped
         // from. Monotonic, because a wall clock stepped by the time service

@@ -328,6 +328,28 @@ pub const TIMED_CEILING: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `audiod` audio service account's grant ceiling: drive every audio
+/// device, serve the one client rendezvous, carve the shared PCM regions both
+/// hops run over, pin those regions so an audio buffer never reaches swap,
+/// run the mixing path at real-time priority, and emit its audit records —
+/// nothing more.
+///
+/// `CAP_AUDIO_DEVICE` is the whole authority the service has over hardware,
+/// and this is its only holder in the system: every audio driver's endpoint
+/// is bound restricted-sender on it, so no other process can command a sound
+/// device at all. It deliberately does **not** carry `CAP_AUDIO_CAPTURE` —
+/// the service *enforces* that against its callers at stream open and never
+/// needs to hold it — nor any filesystem, network, users-database or spawn
+/// authority. Compromising it yields the speakers, not the machine.
+pub const AUDIOD_CEILING: &[CapabilityId] = &[
+    CapabilityId::AUDIO_DEVICE,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::SHM,
+    CapabilityId::MEM_PIN,
+    CapabilityId::SCHED_REALTIME,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `greeter` service account's grant ceiling: draw the graphical login
 /// screen on one seat and read that seat's input — nothing that could reach
 /// an account.

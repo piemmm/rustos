@@ -3,7 +3,7 @@
 
 use super::{parts, Eyes, Pose, PART_COUNT, STANDING_HEIGHT};
 use crate::project::Ground;
-use crate::shape::{Placed, Shape};
+use tairix_raster::shape::{Placed, Shape};
 use tairix_util::mathf;
 
 fn standing() -> Pose {
@@ -19,17 +19,19 @@ fn standing() -> Pose {
 fn nose(list: &[Placed]) -> Option<usize> {
     list.iter().position(|part| {
         part.color == super::palette::INK
-            && matches!(part.shape, Shape::Mass { rx, ry, .. } if rx > ry)
+            && matches!(part.shape, Shape::Superellipse { rx, ry, .. } if rx > ry)
     })
 }
 
 /// A part's half-height, whatever shape it is drawn as.
 fn half_height(part: &Placed) -> f64 {
     match part.shape {
-        Shape::Fur { radius } => radius,
-        Shape::Mass { ry, .. } | Shape::Drape { ry, .. } => ry,
-        Shape::Limb { length, foot, .. } => length + foot,
-        Shape::Ear { height, .. } => height,
+        Shape::Splat { radius } => radius,
+        Shape::Superellipse { ry, .. }
+        | Shape::ScallopedPanel { ry, .. }
+        | Shape::BevelledPanel { ry, .. } => ry,
+        Shape::Taper { length, foot, .. } => length + foot,
+        Shape::Wedge { height, .. } => height,
     }
 }
 
@@ -72,7 +74,7 @@ fn a_lid_narrows_an_eye_without_narrowing_it_sideways() {
             .into_iter()
             .filter(|part| part.color == super::palette::EYE_AMBER)
             .map(|part| match part.shape {
-                Shape::Mass { rx, .. } => rx,
+                Shape::Superellipse { rx, .. } => rx,
                 _ => 0.0,
             })
             .fold(0.0_f64, f64::max)
@@ -110,7 +112,9 @@ fn parts_at_the_same_depth_paint_in_the_order_they_were_authored() {
     let flap: alloc::vec::Vec<(usize, tairix_raster::Color)> = list
         .iter()
         .enumerate()
-        .filter(|(_, part)| matches!(part.shape, Shape::Mass { square, .. } if square > 0.7))
+        .filter(
+            |(_, part)| matches!(part.shape, Shape::Superellipse { square, .. } if square > 0.7),
+        )
         .map(|(index, part)| (index, part.color))
         .collect();
     assert_eq!(flap.len(), 2, "the flap and its piping");
@@ -231,7 +235,7 @@ fn the_eyes_are_taller_than_they_are_wide() {
         if part.color != super::palette::EYE_AMBER {
             continue;
         }
-        let Shape::Mass { rx, ry, .. } = part.shape else {
+        let Shape::Superellipse { rx, ry, .. } = part.shape else {
             unreachable!("an iris is a rounded mass");
         };
         assert!(ry > rx, "an iris {ry} tall must be wider than {rx} across");
@@ -260,7 +264,7 @@ fn the_face_carries_a_smile_that_follows_the_mood() {
         list.iter()
             .filter(|part| {
                 part.color == super::palette::INK
-                    && matches!(part.shape, Shape::Mass { rx, .. } if rx < 1.5)
+                    && matches!(part.shape, Shape::Superellipse { rx, .. } if rx < 1.5)
             })
             .map(|part| part.y)
             .fold(f64::NEG_INFINITY, f64::max)
@@ -279,7 +283,7 @@ fn the_tail_is_banded_rather_than_one_colour() {
     let list = parts(&standing());
     let banded = |colour| {
         list.iter()
-            .filter(|part| part.color == colour && matches!(part.shape, Shape::Fur { .. }))
+            .filter(|part| part.color == colour && matches!(part.shape, Shape::Splat { .. }))
             .count()
     };
     let bright = banded(super::palette::FUR_BRIGHT);
@@ -331,7 +335,7 @@ fn the_garment_is_cloth_rather_than_a_card_taped_on() {
     let list = parts(&standing());
     let drapes = list
         .iter()
-        .filter(|part| matches!(part.shape, Shape::Drape { .. }))
+        .filter(|part| matches!(part.shape, Shape::ScallopedPanel { .. }))
         .count();
     assert!(drapes >= 3, "the cape and the cowl are draped panels");
 }
@@ -344,12 +348,12 @@ fn each_limb_grows_out_of_a_joint_that_belongs_to_the_body() {
     let list = parts(&standing());
     let shanks: alloc::vec::Vec<&Placed> = list
         .iter()
-        .filter(|part| matches!(part.shape, Shape::Limb { .. }))
+        .filter(|part| matches!(part.shape, Shape::Taper { .. }))
         .collect();
     assert_eq!(shanks.len(), 4, "four legs");
     for shank in shanks {
         let covered = list.iter().any(|part| {
-            !matches!(part.shape, Shape::Limb { .. })
+            !matches!(part.shape, Shape::Taper { .. })
                 && mathf::hypot(part.x - shank.x, part.y - shank.y) < half_height(part)
         });
         assert!(
@@ -371,7 +375,7 @@ fn a_walking_limb_pivots_in_its_joint_instead_of_sliding() {
     let shanks = |pose: &Pose| {
         parts(pose)
             .into_iter()
-            .filter(|part| matches!(part.shape, Shape::Limb { .. }))
+            .filter(|part| matches!(part.shape, Shape::Taper { .. }))
             .map(|part| (part.x, part.y, part.turn))
             .collect::<alloc::vec::Vec<_>>()
     };
@@ -394,7 +398,7 @@ fn a_limb_stops_turning_on_screen_when_he_walks_towards_the_camera() {
         ..standing()
     };
     for part in parts(&towards) {
-        if matches!(part.shape, Shape::Limb { .. }) {
+        if matches!(part.shape, Shape::Taper { .. }) {
             assert!(
                 part.turn.abs() < 1.0e-9,
                 "a limb swinging in depth must not turn on screen"
@@ -409,7 +413,7 @@ fn the_ears_lean_apart_rather_than_both_the_same_way() {
     let leans: alloc::vec::Vec<f64> = list
         .iter()
         .filter_map(|part| match part.shape {
-            Shape::Ear { lean, .. } => Some(lean),
+            Shape::Wedge { lean, .. } => Some(lean),
             _ => None,
         })
         .collect();

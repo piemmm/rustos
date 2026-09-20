@@ -12,6 +12,25 @@
 //! enforce that, which is what makes cutting at the first `#`
 //! unambiguous.
 
+/// What a configuration key accepts.
+///
+/// Shared because both closed registries state it and both a command-line
+/// tool and a settings surface read it: a tool refusing a value names the
+/// choices, and a surface offering the choices builds its list from the same
+/// definition rather than a second copy that would drift.
+///
+/// Most keys carry a closed set of canonical spellings; a key whose value is
+/// inherently open — an address, a list of host names — describes its
+/// accepted form instead, and its own parser is what admits or refuses a
+/// spelling.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ValueShape {
+    /// One of these canonical spellings, and nothing else.
+    Closed(&'static [&'static str]),
+    /// Free-form text of this described form.
+    Free(&'static str),
+}
+
 /// The portion of `line` before its first `#`, dropping an inline or
 /// whole-line comment.
 ///

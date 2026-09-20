@@ -1,0 +1,25 @@
+# Signed-AppInfo manifest source for the `audiod` audio service (a service is
+# an app; plans/SOUND.md SND4). Discovered by the build's app-bundle composer
+# and planted under /System/Services/.
+#
+# The capability list is the bundle's request and is deliberately minimal:
+# CAP_AUDIO_DEVICE (this service is the system's only holder — every audio
+# driver's device-channel endpoint is bound restricted-sender on it, so no
+# other process can command a sound device), CAP_IPC_BIND_PRIVILEGED (claim
+# the reserved audio-v1 rendezvous; a squatter there would receive every
+# program's samples and learn their shared-memory grants), CAP_SHM (the PCM
+# regions both hops run over — the device ring it creates and grants to a
+# driver, and the client rings it adopts), CAP_MEM_PIN (an audio buffer is
+# never paged and never reaches swap), CAP_SCHED_REALTIME (the mixing path,
+# whose whole job is not to have jitter), and CAP_LOG_EMIT (its audit
+# records).
+#
+# It does NOT hold CAP_AUDIO_CAPTURE: it enforces that against its callers at
+# stream open. It holds no filesystem, network, users-database or spawn
+# authority. Compromising it yields the speakers, not the machine.
+id = "os.tairix.audiod"
+name = "audiod"
+title = "Audiod"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_AUDIO_DEVICE", "CAP_IPC_BIND_PRIVILEGED", "CAP_SHM", "CAP_MEM_PIN", "CAP_SCHED_REALTIME", "CAP_LOG_EMIT"]

@@ -21,7 +21,7 @@
 //!   audit output. Its ceiling is empty — powers come from capabilities,
 //!   and the boot floor holds none.
 //! * One account per system service (`devmgr`, `sysinfod`, `seatmgr`, `login`,
-//!   `netstack`, `fontd`, `greeter`, `confd`, `timed`), each with its own uid in the
+//!   `netstack`, `fontd`, `greeter`, `confd`, `timed`, `audiod`), each with its own uid in the
 //!   system range and primary group [`SERVICES_GROUP`] — never a shared service
 //!   user, so per-service log partitioning, IPC peer attestation, and
 //!   blast-radius containment all key off a real per-service principal. Each
@@ -45,8 +45,8 @@ use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
 
 use crate::grants::{
-    capability_set, CONFD_CEILING, DEVMGR_CEILING, FONTD_CEILING, GREETER_CEILING, LOGIN_CEILING,
-    NETSTACK_CEILING, SEATMGR_CEILING, SYSINFOD_CEILING, TIMED_CEILING,
+    capability_set, AUDIOD_CEILING, CONFD_CEILING, DEVMGR_CEILING, FONTD_CEILING, GREETER_CEILING,
+    LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING, SYSINFOD_CEILING, TIMED_CEILING,
 };
 use crate::groups::GroupRecord;
 use crate::password::StoredPassword;
@@ -131,6 +131,13 @@ pub const TIMED_USERNAME: &str = "timed";
 /// The [`Uid`] of [`TIMED_USERNAME`].
 pub const TIMED_UID: Uid = Uid(18);
 
+/// Name of the audio service account — the only holder of
+/// `CAP_AUDIO_DEVICE`, and the one process that speaks `audiochan-v1`.
+pub const AUDIOD_USERNAME: &str = "audiod";
+
+/// The [`Uid`] of [`AUDIOD_USERNAME`].
+pub const AUDIOD_UID: Uid = Uid(19);
+
 /// One compiled-in account's specification: the single row both
 /// [`system_accounts`] and [`system_account_uid`] read, so the record
 /// set and the name→uid lookup can never diverge.
@@ -214,6 +221,13 @@ const SYSTEM_ACCOUNTS: &[SystemAccountSpec] = &[
         primary_gid: SERVICES_GID,
         display_name: "Time Service",
         ceiling: TIMED_CEILING,
+    },
+    SystemAccountSpec {
+        username: AUDIOD_USERNAME,
+        uid: AUDIOD_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Audio Service",
+        ceiling: AUDIOD_CEILING,
     },
 ];
 
@@ -360,6 +374,7 @@ mod tests {
                 ("greeter", 16, 101),
                 ("confd", 17, 101),
                 ("timed", 18, 101),
+                ("audiod", 19, 101),
             ]
         );
         for record in &records {
@@ -413,6 +428,10 @@ mod tests {
         assert_eq!(
             by_name("timed").capabilities(),
             capability_set(TIMED_CEILING)
+        );
+        assert_eq!(
+            by_name("audiod").capabilities(),
+            capability_set(AUDIOD_CEILING)
         );
     }
 
