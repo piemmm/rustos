@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 30 open, 107 closed, 137 total.
+table normalises all three to **closed**. 31 open, 107 closed, 138 total.
 
-### Open (30)
+### Open (31)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -57,6 +57,7 @@ table normalises all three to **closed**. 30 open, 107 closed, 137 total.
 | D133 | a task can grow another task's kernel-side pending-`fd_grant` table without bound | noticed while re-pointing the hand-over vertical; not absorbed. Fail-closed refusal, not a capacity |
 | D139 | `lib/rt` is not under the UB oracle, and cannot be enrolled as the registry's scopes stand | noticed while adding a granted-region mapping; the allocator's pager seam hands it fabricated addresses, which strict provenance refuses as *unsupported* — a reason `Scope::LibExcept` does not currently admit |
 | D140 | the desktop never installs the notification-icon set it can load, so a shipped chrome SVG would be ignored | latent today (no chrome kind ships an SVG); wiring it naively costs 76 speculative per-kind lookups at bring-up, so the fix is to discover the present assets from one directory listing first — see below |
+| D141 | a per-inode ACL can be authored at provisioning but never changed or read back: there is no `fs_set_acl` and no `getfacl`/`setfacl` | noticed while designing `plans/SSH.md` §1.4; not absorbed. The rest of the §5.3 model is complete — `kernel/core/src/fs/perm.rs` enforces capability gate → ACL → mode, ARXFS persists the ACL, `tairix_users::policy` authors one at home provisioning — so the gap is only the userland write and read-back path: `fs_set_mode`/`fs_set_owner` exist and their ACL counterpart does not. Three consequences: a grant lives and dies with the inode its provisioner created, so a file a user deletes and recreates silently loses it; an account provisioned before a grant is introduced has no repair path short of recreating the home; and a user cannot inspect the non-mode authority over their own files, which for a security mechanism is the sharper one. Closing it is a syscall + ABI + VFS path + ARXFS write + a tool |
 
 ### D140 — the loaded notification-icon set is never installed
 

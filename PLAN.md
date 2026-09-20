@@ -9317,3 +9317,98 @@ desktop integration.
 **The `README.md` feature-matrix row lands with SND4's first working sink.**
 SND2 and SND3 add no runnable feature on any target: there is nothing yet a
 matrix could mark per architecture.
+
+---
+
+## SSH — remote access, client and server (`plans/SSH.md`)  **[PLANNED, NOT STARTED]**
+
+**Dependencies:** `plans/NETWORK.md` N5c (the stream socket surface), N6b-2
+(listeners and SYN-flood defence — `sshd` is the tree's first real `listen`/
+`accept` consumer) and N15 (half-close); `plans/PTY.md` PTY0–PTY7 for the
+session channel's terminal; `plans/SPAWN.md` SP10 for
+`SpawnAttach`/`target_uid`; and `plans/USERS.md` for the service account. All
+are landed; S0a–S0d depend on nothing outside the tree.
+
+**Why it is not a port.** TAIRiX has no remote access today: every network
+consumer is a client, and nothing has called `listen`/`accept` in anger.
+Exposing a shell to a hostile network is defensible here because three
+primitives already exist that OpenSSH does not have, and the plan is built on
+them rather than on OpenSSH's shape.
+
+- **The protocol engine holds no capability at all.** Each connection's engine
+  is a `SPAWN_FLAG_SANDBOX` process — kernel-branded capability-empty, nine
+  permitted syscalls, none of which opens a file, socket, endpoint, process or
+  clock. It is a state machine over two pipes. OpenSSH's pre-auth child keeps a
+  socket, a filesystem and the whole syscall surface.
+- **There is no signing oracle.** The `sshd` monitor chooses the server's
+  ephemeral share, computes the shared secret, *recomputes the exchange hash
+  itself*, and signs only its own reconstruction — so a compromised engine
+  cannot obtain a host-key signature over anything not already containing that
+  connection's fresh, monitor-chosen ephemeral. The same rule governs
+  public-key, hostbased and certificate verification: the monitor **re-encodes
+  a parse and requires byte equality** before trusting it, and verifies
+  signatures over its own encoding.
+- **Nothing holds "read every user's files".** `sshd` reaches a user's
+  `authorized_keys` through a per-inode ACL grant naming its own uid —
+  **search** on the home and the SSH directory, **read** on that one file, and
+  **nothing at all** on the private keys — reusing the enforced ACL model and
+  the `appdata_transit_security` provisioning precedent. Homes stay `0700`, and
+  `sshd` cannot even *list* the SSH directory, so it can neither open a private
+  key nor learn that one exists. The file is still user-writable, so it is
+  still parsed in the capability-empty sandbox. OpenSSH-as-root is exactly the
+  authority TAIRiX does not have and does not need.
+
+**Scope.** Broad algorithm interoperability (Ed25519/ECDSA/RSA, ChaCha20-Poly1305
+/AES-GCM/AES-CTR, curve25519/ECDH/finite-field DH, plus `mlkem768x25519-sha256`
+for post-quantum), every tool (`ssh`, `sshd`, `ssh-keygen`, `ssh-agent`,
+`ssh-add`, `ssh-keyscan`, `ssh-copy-id`, `sftp`, `scp`, `sftp-server`),
+forwarding, agent forwarding, certificates, and the OpenSSH on-disk private-key
+format with bcrypt-pbkdf. `ssh-rsa`/SHA-1 KEX/CBC/DSA are **refused**, not
+accepted-and-weak.
+
+**No new syscall and no new capability.** The monitor composes `CAP_NET`,
+`CAP_NET_BIND_PRIVILEGED`, `CAP_PROC_SPAWN`, `CAP_SPAWN_AS_USER`,
+`CAP_SANDBOX_SPAWN`, `CAP_USERS_READ`, `CAP_FS_ACCESS`, `CAP_IPC_ENDPOINT` and
+`CAP_LOG_EMIT`. `abi-check` and `c-header` see no syscall change;
+`SystemConfigFile` gains one variant so `configure` and `sshd` cannot name
+different files. `sshd` ships installed but **not enrolled** — remote access is
+never on by default — and mints its host keys on the machine at first start,
+never from the installer and never baked into an image, because an image-baked
+host key is identical on every machine flashed from it.
+
+**Three defects it fixes on the way (§2.18).**
+
+- `netstack`'s `MAX_SOCKETS_PER_PRINCIPAL = 64` / `MAX_SOCKETS_TOTAL = 1024`
+  are hand-picked constants whose rustdoc argues they are fixed security
+  bounds. The total is a §24.1 capacity (it bounds `netstack`'s own heap) and
+  the per-principal figure is a fairness share of it; both become derived, with
+  a `CAP_NET_ADMIN` override in the existing `net.*` store and the fail-closed
+  refusal untouched. The rustdoc is corrected in the same change.
+- `lib/sandbox` has only a one-shot request→reply worker; an SSH connection is
+  a duplex session either side may originate on. A `session` seam lands beside
+  `host`/`worker` (§27), reusable by any future long-lived protocol service.
+- `lib/compress` has DEFLATE/zlib **decode** only, deliberately, because
+  nothing produced such a stream. `zlib@openssh.com` does, so the encode
+  direction lands and the module's "no compressor exists" documentation is
+  corrected rather than left to mislead.
+
+**Audit range.** `lib/ssh::events` claims `24_000..25_000`, verified against
+every `*_RANGE_START` in the tree; `22_000..23_000` stays retired.
+
+**Surfaced, not fixed there (§15.7): a per-inode ACL can be authored but never
+changed.** The §5.3 model is otherwise complete — the VFS enforces capability
+gate, then ACL, then mode; ARXFS persists the ACL; `tairix_users::policy`
+authors one at home provisioning. What is missing is the userland write path:
+`fs_set_mode` and `fs_set_owner` exist and their ACL counterpart does not, so a
+grant lives and dies with the inode the provisioner created, an account
+provisioned before a grant is introduced has no repair path, and a user cannot
+inspect the non-mode authority over their own files. This predates SSH and
+nothing in the plan is blocked on it (§1.4 needs no write path); it is recorded
+as `plans/OPEN-DEFECTS.md` **D141**.
+
+**S14 (FIDO/U2F `sk-*` keys) is blocked**, not omitted: it needs a
+CTAP2-over-USB-HID path, and `lib/hid` is boot-protocol decode with no
+generic HID-raw channel a userland program can reach (`plans/USB.md`).
+
+**The `README.md` feature-matrix row lands with S5's first working `sshd`.**
+S0a–S4 add no runnable feature on any target.

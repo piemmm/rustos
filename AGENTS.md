@@ -1591,6 +1591,7 @@ You are not exempt from any rule above. In addition:
     | Dynamic address configuration: the DHCPv4 client (RFC 2131/2132) engine and its stack integration | `plans/DHCP.md` |
     | The interactive network terminal client: the `telnet` command, its Network Virtual Terminal option negotiation, and the terminal relay | `plans/TELNET.md` |
     | Name resolution: the DNS stub resolver (RFC 1035/RFC 5452) engine and its socket integration | `plans/DNS.md` |
+    | Remote access: the SSH engine, the `sshd` monitor and its capability-empty per-connection worker, the no-signing-oracle key exchange, host keys, the `authorized_keys` ACL grant, the `ssh` client and key tooling, the agent, forwarding, and SFTP/SCP | `plans/SSH.md` |
     | Device inventory commands (`lspci`/`lsusb`), USB mass storage, hotplug automount | `plans/DEVICES.md` |
     | Storage/media I/O fault isolation: per-request deadlines, the per-device health state machine, the recovery **grace window** (blip ride-through before failing closed), fault-domain (hub/controller) quiesce/resume, RAID/ARXFS composition | `plans/FIX-IO.md` |
     | TPM / measured boot | `plans/TPM.md` |
