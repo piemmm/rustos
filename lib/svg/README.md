@@ -63,7 +63,7 @@ closed to its built-in fallback artwork rather than crashing the compositor
 
 ## What it understands
 
-The drawable part of SVG 1.1, in full:
+So far — the staged remainder is the ledger in `plans/SVG.md`:
 
 - the document tree — `<g>`, `<defs>`, `<symbol>`, `<use>`, `<switch>`, and
   nested `<svg>` viewports;
@@ -99,12 +99,20 @@ The drawable part of SVG 1.1, in full:
 - `paint-order` as a full permutation of fill, stroke, and markers, and a
   `<switch>`'s conditional-processing attributes.
 
-It is a renderer for artwork, not a browser. Text, embedded images, filters,
-animation, and the three `vector-effect` values no renderer implements
-(`non-scaling-size`, `non-rotation`, `fixed-position`) are **not drawn**; an
-element it cannot draw is skipped rather than refusing the document, so one
-unsupported decoration does not lose a whole asset. The staged design and the
-open question about that choice are in `plans/SVG.md`.
+**Not yet drawn**, and staged rather than declined: text (`<text>`,
+`<tspan>`, `<textPath>`), embedded images (`<image>`), filters, SMIL
+animation, the CSS surface the cascade still drops, external references, and
+the three remaining `vector-effect` values, and scripting. Each is a numbered
+item in `plans/SVG.md`, which carries the design and the prerequisites —
+notably that text needs a public glyph-outline API out of `lib/fontface`,
+since a glyph has to reach this crate as contours rather than pixels, and
+that a script runs only where a consumer asks for one, in its own sandbox,
+under a budget. `<foreignObject>` is deliberately undrawable, so a `<switch>`
+takes its fallback sibling.
+
+An element it cannot yet draw is skipped rather than refusing the document,
+so one unsupported decoration does not lose a whole asset; the open question
+about that choice is in `plans/SVG.md`.
 
 ## Layout
 

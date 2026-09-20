@@ -32,7 +32,8 @@
 //!
 //! # What it understands
 //!
-//! The drawable part of SVG 1.1, in full: the document tree (`<g>`, `<defs>`,
+//! So far — `plans/SVG.md` carries the staged remainder: the document tree
+//! (`<g>`, `<defs>`,
 //! `<symbol>`, `<use>`, `<switch>`, nested `<svg>` viewports), every basic
 //! shape (`<path>`, `<rect>` with rounded corners, `<circle>`, `<ellipse>`,
 //! `<line>`, `<polyline>`, `<polygon>`), the whole path grammar including
@@ -45,10 +46,12 @@
 //! `<path>`, `<line>`, `<polyline>`, or `<polygon>` states, and
 //! `vector-effect="non-scaling-stroke"`.
 //!
-//! It is a *renderer* for artwork, not a browser: text, embedded images,
-//! filters, animation, scripting, and the three `vector-effect` values no
-//! renderer implements (`non-scaling-size`, `non-rotation`,
-//! `fixed-position`) are not drawn. An element it cannot draw is skipped
+//! Not yet drawn, and staged rather than declined: text, embedded images,
+//! filters, SMIL animation, the CSS surface the cascade drops, external
+//! references, the three remaining `vector-effect` values, and scripting;
+//! `<foreignObject>` is deliberately undrawable so a `<switch>` takes its
+//! fallback. `plans/SVG.md` carries each as a numbered item. An element it
+//! cannot yet draw is skipped
 //! rather than refused, so one unsupported decoration does not lose the
 //! whole asset; the open question of whether such an element should instead
 //! fail the document closed is recorded in `plans/ICONS.md`.

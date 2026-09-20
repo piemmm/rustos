@@ -260,8 +260,9 @@ minimum-capability parser sandbox (`AGENTS.md` §19.5):
 
 ## What an author may draw
 
-The drawable part of SVG 1.1, in full — a designer's own file is shipped as
-authored rather than traced into a simpler form:
+The shape, paint and compositing surface of SVG 1.1 — a designer's own file
+is shipped as authored rather than traced into a simpler form. What is not
+on this list yet is staged in `plans/SVG.md`, not declined:
 
 - **Document**: one `<svg>` root with a `viewBox` (or a `width`/`height`
   pair), and inside it `<g>`, `<defs>`, `<symbol>`, `<use>`, `<switch>`, and
@@ -344,12 +345,18 @@ colour written beside it, which is what a fallback is for; a paint server
 that is defined but paints nothing — a gradient with no stops, a pattern with
 no tile — is `none`, and takes no fallback.
 
-What it does **not** draw, because an artwork decoder is not a browser: text,
-embedded images, filters, animation, and the three `vector-effect` values no
-renderer implements (`non-scaling-size`, `non-rotation`, `fixed-position`),
-which parse as the valid CSS they are and ask for nothing. An element it
-cannot draw is skipped rather than refusing the document, so one unsupported
-decoration does not lose a whole asset; the open question about that choice is
-recorded in `plans/ICONS.md`. There is still exactly one rasterisation path
-(`AGENTS.md` §2.2), and pre-rasterised bitmap assets may exist as a cache or
-fallback but are never the only path. The staged design is in `plans/SVG.md`.
+What it does **not yet** draw — staged as numbered items in `plans/SVG.md`,
+not declined: text (`<text>`, `<tspan>`, `<textPath>`), embedded images
+(`<image>`), filters, SMIL animation, the CSS surface the cascade still drops,
+external references, the three remaining `vector-effect` values, and
+scripting — which runs only where a consumer asks for one, in its own
+sandbox, under a fixed budget, and which the desktop's own chrome and icon
+paths never enable. `<foreignObject>` is deliberately undrawable, so a
+`<switch>` takes its fallback sibling. An element it cannot yet draw is
+skipped rather than refusing
+the document, so one unsupported decoration does not lose a whole asset — but
+while text is outstanding that also means an asset whose meaning is its
+lettering renders wrong with no signal, which is what keeps the open question
+about that choice (recorded in `plans/ICONS.md`) live. There is still exactly
+one rasterisation path (`AGENTS.md` §2.2), and pre-rasterised bitmap assets
+may exist as a cache or fallback but are never the only path.
