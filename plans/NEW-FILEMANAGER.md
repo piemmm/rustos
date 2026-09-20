@@ -2013,3 +2013,11 @@ ribbon or customisable-toolbar framework, per-file-type plug-in surfaces,
 or a second theming/rendering path. Anything that belongs to another
 subsystem (viewers, the shell, the storage resolver) is *reached*, not
 reimplemented here.
+
+The **Network view** is that rule, not an exception to it: the manager reaches
+`lib/discovery` exactly as it reaches the mount table, renders the answer
+through the existing list/grid, and hands a chosen share to the storage
+resolver to mount — it holds no discovery protocol, no second renderer, and no
+synthetic network path. It is filtered to storage-class service types, so it
+is also not a general service browser. The design and its stages are
+`plans/ZEROCONF.md` §6 (Z8, Z9), which owns their status.
