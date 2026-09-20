@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use tairix_icon::IconKind;
 
-use crate::facts::{ABOUT_FACTS, CLOCK_FACTS, RESOLVER_FACTS};
+use crate::facts::{ABOUT_FACTS, ADDRESSING_FACTS, CLOCK_FACTS, RESOLVER_FACTS};
 use crate::form::{Composition, Posture, Setting};
 use crate::machine::MachineSetting;
 use crate::volumes::VOLUME_FACTS;
@@ -189,6 +189,10 @@ pub enum PaneContent {
     /// runtime and read-only: one row per server rather than a fixed table
     /// of slots.
     Dns,
+    /// How each configured interface is addressed, read-only: one plate
+    /// per interface, answered by an account that may read the store this
+    /// application never can.
+    Ethernet,
 }
 
 /// One pane's registry row.
@@ -244,6 +248,7 @@ impl PaneRow {
                 }
             }
             Some(PaneContent::Clock) => Some("Set Date & Time…"),
+            Some(PaneContent::Ethernet) => Some("Show Addressing…"),
             Some(PaneContent::About | PaneContent::Volumes | PaneContent::Dns) | None => None,
         }
     }
@@ -684,18 +689,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::Ethernet,
                 name: "ethernet",
                 title: "Ethernet",
-                backing: PaneBacking::Elsewhere {
-                    shows: "How each wired interface is addressed: its method, static address, \
-                            gateway and MTU.",
-                    elsewhere: "Link state, addresses and throughput are reported by the \
-                                Switchboard, which is the surface that may read them: an \
-                                interface's hardware identity and this machine's address book \
-                                are privileged readings, and Settings deliberately holds no \
-                                authority of any kind. Addressing is written with the \
-                                `configure` command, by an account that may write the system \
-                                configuration.",
-                },
-                settings: &[],
+                backing: PaneBacking::Composed(PaneContent::Ethernet),
+                settings: ADDRESSING_FACTS,
             },
             PaneRow {
                 pane: Pane::WiFi,

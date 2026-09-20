@@ -57,9 +57,7 @@
 extern crate alloc;
 
 use tairix_abi::cpufreq::{CpuFreqLimits, CpuFreqTarget};
-use tairix_abi::elevate::{
-    elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
-};
+use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 pub use tairix_abi::seat::ReleaseSurface;
@@ -3768,9 +3766,7 @@ pub fn self_origin() -> Result<Origin, i64> {
 ///
 /// # Security
 ///
-/// An [`ElevateRequest`] carries a plaintext password —
-/// [`Run`](ElevateRequest::Run), [`Verify`](ElevateRequest::Verify), and
-/// [`Launch`](ElevateRequest::Launch) all do.
+/// An [`ElevateRequest`] carries a plaintext password — every form does.
 /// The encoded request therefore lives in a [`Wiped`] buffer, which erases
 /// itself when the scope ends: the value returned, the `?` that returned
 /// early, and an unwind all erase it alike, so no future edit can grow an
@@ -3784,29 +3780,39 @@ pub fn self_origin() -> Result<Origin, i64> {
 /// Returns the [`Errno`] naming the failure: no console to elevate on, an
 /// encoding error, a transport failure, a protocol mismatch, or the broker's
 /// own refusal (for example `PermissionDenied` on a wrong password).
-pub fn elevate(request: &ElevateRequest<'_>) -> Result<ElevateReply, Errno> {
+///
+/// # Panics
+///
+/// Never: `reply` is only indexed by the length the transport reported, and
+/// an over-long one is refused at the decode.
+pub fn elevate<'a>(
+    request: &ElevateRequest<'_>,
+    reply: &'a mut [u8],
+) -> Result<ElevateReply<'a>, Errno> {
     let console = self_origin().map_err(Errno::from_syscall)?.console();
     let endpoint = elevate_endpoint(console)?;
     let mut buf = Wiped::<ELEVATE_MAX_REQUEST>::new();
-    elevate_exchange(endpoint, request, &mut buf[..])
+    elevate_exchange(endpoint, request, &mut buf[..], reply)
 }
 
-/// Encode `request` into `buf`, post it to `endpoint`, and decode the reply.
+/// Encode `request` into `buf`, post it to `endpoint`, and decode the reply
+/// out of `reply`.
 ///
 /// Split out from [`elevate`] so the exchange can be driven against a
 /// caller-owned buffer whose contents a test can inspect once the call has
 /// returned. Erasing that buffer is the caller's guard, never this function's
 /// business: keeping the two apart is what lets the test prove the erase
 /// happens on the failing paths too.
-fn elevate_exchange(
+fn elevate_exchange<'a>(
     endpoint: u64,
     request: &ElevateRequest<'_>,
     buf: &mut [u8],
-) -> Result<ElevateReply, Errno> {
+    reply: &'a mut [u8],
+) -> Result<ElevateReply<'a>, Errno> {
     let len = request.encode(buf)?;
-    let mut reply = [0u8; ELEVATE_REPLY_LEN];
-    let reply_len = ipc_call(endpoint, &buf[..len], &mut reply).map_err(Errno::from_syscall)?;
-    ElevateReply::decode(&reply[..reply_len])
+    let reply_len = ipc_call(endpoint, &buf[..len], reply).map_err(Errno::from_syscall)?;
+    let answered = reply.get(..reply_len).ok_or(Errno::OutOfRange)?;
+    ElevateReply::decode(answered)
 }
 
 /// Read the **unfiltered, global** kernel introspection view
@@ -5718,6 +5724,7 @@ mod tests {
     use super::*;
     // The trap seam lives in `tairix-abi-trap` (the single trap home) and is reached here through the `host-seam`
     // dev-dependency feature; production builds never compile it.
+    use tairix_abi::elevate::ELEVATE_MAX_REPLY;
     use tairix_abi::SYSCALL_MAX_ARGS;
     use tairix_abi_trap::seam;
 
@@ -5975,10 +5982,11 @@ mod tests {
 
         // The broker answered. The exchange really did put the plaintext on
         // the stack, and the guard the caller wraps it in takes it away.
-        seam::arm(u64::try_from(ELEVATE_REPLY_LEN).expect("reply length fits"));
+        let mut reply = [0u8; ELEVATE_MAX_REPLY];
+        seam::arm(u64::try_from(head_reply_len()).expect("reply length fits"));
         let mut buf = Wiped::<ELEVATE_MAX_REQUEST>::new();
         assert!(
-            elevate_exchange(0x1234, &request, &mut buf[..]).is_ok(),
+            elevate_exchange(0x1234, &request, &mut buf[..], &mut reply).is_ok(),
             "the armed seam answers the call"
         );
         assert!(
@@ -5995,12 +6003,20 @@ mod tests {
         seam::arm(u64::from_ne_bytes(refused.to_ne_bytes()));
         let mut buf = Wiped::<ELEVATE_MAX_REQUEST>::new();
         assert_eq!(
-            elevate_exchange(0x1234, &request, &mut buf[..]),
+            elevate_exchange(0x1234, &request, &mut buf[..], &mut reply),
             Err(Errno::PermissionDenied)
         );
         assert!(contains(&buf[..], PASSWORD.as_bytes()));
         buf.wipe();
         assert_eq!(buf[..], [0u8; ELEVATE_MAX_REQUEST][..]);
+    }
+
+    /// The encoded length of a reply that carries no captured output —
+    /// what the broker answers every form but a capture with.
+    fn head_reply_len() -> usize {
+        ElevateReply::Verified
+            .encode(&mut [0u8; ELEVATE_MAX_REPLY])
+            .expect("the head always encodes")
     }
 
     /// Whether `haystack` contains `needle` anywhere.

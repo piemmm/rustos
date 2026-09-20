@@ -608,6 +608,14 @@ opt-level = 3
 [profile.dev.package.tairix-display]
 opt-level = 3
 
+# The game client's own drawing passes are the same case as the raster crates
+# above: terrain and lighting are per-pixel loops over a 1280x720 frame, which
+# at `opt-level = 1` is slow enough to make the client unusable to develop
+# against and to make its frame-budget measurement report the profile rather
+# than the renderer.
+[profile.dev.package.tairix-wintersun-app]
+opt-level = 3
+
 # The statistical RNG battery is the same case one layer out: a per-PR pass
 # runs nine SP 800-22 tests over tens of megabytes of generator output, which
 # is millions of bit reads, GF(2) eliminations and table updates and nothing a

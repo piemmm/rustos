@@ -249,19 +249,30 @@ names, the second says the reading is not measured. The walk is an IPC round
 trip, so it runs on a worker like the mount walk, and returning to the pane
 asks afresh because leases come and go.
 
-**Ethernet states where its readings live, and does not take them.** An
-interface's link state, bound addresses and throughput need
-`CAP_SYSINFO_GLOBAL`, and its hardware identity needs `CAP_SYSINFO_HW` — the
-MAC is stable hardware identity and the address book is system-wide,
-cross-principal state. Settings holds neither and never will, so those
-readings stay the [Switchboard](switchboard.md)'s, exactly as the per-device
-I/O counters do for Storage. The pane says so, names where the readings are
-reported and which tool writes the addressing, and draws no row: a row refused
-on every machine for ever is a dead row, not a denied action. `network.conf`
-cannot be served ungated for the same reason — it carries the `match.mac`
-identity and the static addressing the two gated queries exist to protect, so
-serving the document would be a way round the gate rather than an answer to
-it.
+**Ethernet's live readings stay the Switchboard's; its *configured*
+addressing is answered by an authenticated run.** An interface's link state,
+bound addresses and throughput need `CAP_SYSINFO_GLOBAL`, and its hardware
+identity needs `CAP_SYSINFO_HW` — the MAC is stable hardware identity and the
+address book is system-wide, cross-principal state. Settings holds neither and
+never will, so those readings stay the [Switchboard](switchboard.md)'s,
+exactly as the per-device I/O counters do for Storage. `network.conf` cannot
+be served ungated either: it carries the `match.mac` identity and the static
+addressing those two gates exist to protect, so serving the document would be
+a way round them rather than an answer to them.
+
+What the pane *can* state is the configuration itself, read the way an
+administrator would read it — by being one. The pane opens saying nothing has
+been read and offering **Show Addressing…**; the reader offers an account, and
+the supervisor runs `configure` as it and relays what it printed back through
+the elevated-**read** seam (`ElevateRequest::Capture`, see
+[login](../userland/login.md)). Each line of that listing is read back through
+the `lib/netconfig` registry, so the machine settings in the same listing are
+dropped and only `<interface>.<setting>` lines become rows — one plate per
+interface, labelled in a reader's words rather than in store keys. A run that
+printed more than the reply carries states that it was too large and shows no
+part of it; a refused run states the refusal and leaves the pane saying
+nothing was read. Nothing is cached across the ask: a reader who wants the
+current configuration asks again.
 
 **Wi-Fi** states the absence of the subsystem: no 802.11 driver, no
 supplicant, and no vocabulary for a scan or an association.
@@ -277,7 +288,7 @@ backs it, and the three answers are different facts to a reader:
 | nothing in this system can serve it | what is missing, and what would have to exist |
 | the readings and writes exist, and this surface does not yet compose them | what the pane will show, and where the setting is read or set today |
 
-The two stated absences draw through one renderer, quiet and on the surface
+The stated absences draw through one renderer, quiet and on the surface
 behind them with no plate — the same shape every other stated absence in the
 desktop takes, because a plate would read as something to interact with.
 

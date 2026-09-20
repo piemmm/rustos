@@ -26,6 +26,7 @@ use tairix_abi::sysinfo::{CpuInfoRecord, SystemIdentity, Uptime};
 use tairix_abi::time::{WallClockReading, WallTimeState};
 use tairix_controls::{FieldControl, FieldGroup, FieldLayout, FieldRow};
 use tairix_geometry::{Rect, Scale};
+use tairix_netconfig::IfaceKey;
 use tairix_procinfo::{format_uptime, render_server};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -47,6 +48,13 @@ pub(crate) const ABOUT_FACTS: &[&str] = &[
 /// The label of every Date & Time reading.
 pub(crate) const CLOCK_FACTS: &[&str] = &["Clock", "Set from"];
 
+/// What the Ethernet pane contributes to the search index.
+///
+/// One term rather than one per interface: the plates are discovered at
+/// runtime from a store this application may not read for itself, and a
+/// reader searches for the subject.
+pub(crate) const ADDRESSING_FACTS: &[&str] = &["Addressing"];
+
 /// What the DNS pane contributes to the search index.
 ///
 /// One term rather than one per server: the rows are discovered at runtime
@@ -66,6 +74,27 @@ const NO_SERVERS: &str = "none — this machine resolves no names";
 
 /// What a reading states when the caller could not take it.
 const UNMEASURED: &str = "not measured";
+
+/// The caption of the one Ethernet plate that states something other than
+/// an interface.
+const ADDRESSING_CAPTION: &str = "CONFIGURED ADDRESSING";
+
+/// What the Ethernet pane states before anyone has asked.
+const NOT_ASKED: &str =
+    "not read — this machine's addressing is not public, so reading it needs an account that may";
+
+/// What it states when the store declares no interface at all.
+const NO_INTERFACES: &str = "none — no interface is configured on this machine";
+
+/// What it states when the configuration is larger than the reply carries.
+///
+/// The seam bounds what a program may print back to an unprivileged
+/// caller, so a very large document is not shown here at all rather than
+/// shown in part.
+const TOO_LARGE: &str = "too large to show here — run `configure` from a shell to read it in full";
+
+/// What it states when the run answered something that is not a listing.
+const UNREADABLE_LISTING: &str = "the command answered something this window could not read";
 
 /// What the identity states where the installer has not minted one.
 const UNPROVISIONED: &str = "not set";
@@ -89,7 +118,8 @@ pub struct MachineFacts {
     pub clock: Option<WallClockReading>,
 }
 
-/// The network readings the DNS pane draws, as the caller answered them.
+/// The network readings the DNS and Ethernet panes draw, as the caller
+/// answered them.
 ///
 /// An [`Option`] for the same reason every machine reading is one: a query
 /// that was refused or has not landed is not an empty answer, and the pane
@@ -100,6 +130,42 @@ pub struct NetworkFacts {
     /// configured and the DHCP-learned servers, aggregated and
     /// deduplicated by the stack into the one answer every client reads.
     pub resolvers: Option<Vec<NetServerAddr>>,
+    /// What this application has been told of the machine's configured
+    /// addressing, which is nothing until a reader asks for it under an
+    /// account that may read it.
+    pub addressing: Addressing,
+}
+
+/// What the Ethernet pane knows of the machine's configured addressing.
+///
+/// The store that holds it carries each interface's hardware identity and
+/// this machine's static address book — the readings the System
+/// Information API gates behind `CAP_SYSINFO_HW` and `CAP_SYSINFO_GLOBAL`
+/// — so this application, which holds no authority at all, cannot read it
+/// and must not be given a way round those gates. It is answered instead
+/// by an account that may, running the tool that owns the store, with the
+/// run's output relayed back through the supervisor's elevated-read seam.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Addressing {
+    /// Nobody has asked yet. The pane states what it would take.
+    #[default]
+    Unasked,
+    /// The store's per-interface settings, grouped by interface alias in
+    /// the order the document declares them.
+    Listed(Vec<InterfaceReading>),
+    /// The run happened, but printed more than the seam carries.
+    Overran,
+    /// Nothing was read, and this is why.
+    Refused(String),
+}
+
+/// One interface's settings as the store holds them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterfaceReading {
+    /// The interface's alias, which is the plate's caption.
+    pub alias: String,
+    /// Its set keys, as the registry's suffix and the stored value.
+    pub settings: Vec<(IfaceKey, String)>,
 }
 
 /// Where a fact column's readings were taken from.
@@ -111,26 +177,34 @@ pub struct NetworkFacts {
 pub(crate) enum Subject {
     /// Readings of the machine itself, which the machine desk takes.
     Machine,
-    /// Readings of the network stack, which the network desk takes.
-    Network,
+    /// The live resolver set, which the network desk takes.
+    Resolvers,
+    /// The configured addressing, which no desk takes on its own: it is
+    /// answered only when a reader asks for it under an account that may
+    /// read the store.
+    Addressing,
 }
 
 /// A read-only column of facts: one captioned plate, scrolled like every
 /// other plate column.
 pub(crate) struct Facts {
-    group: FieldGroup,
+    /// One captioned plate each, in listing order.
+    groups: Vec<FieldGroup>,
     /// What the column states, which decides whose reading it wants.
     subject: Subject,
-    /// The first plate drawn. One today, and the column still scrolls by
-    /// plates so it behaves as every other does when a second lands.
+    /// The first plate drawn.
     first: usize,
 }
 
 impl Facts {
-    /// The plate's rows, for a test that asks what the pane states.
+    /// Every plate's rows in order, for a test that asks what the pane
+    /// states.
     #[cfg(test)]
-    pub(crate) fn rows(&self) -> &[tairix_controls::FieldRow] {
-        self.group.rows()
+    pub(crate) fn rows(&self) -> Vec<tairix_controls::FieldRow> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.rows().iter().cloned())
+            .collect()
     }
 
     /// What this column states.
@@ -150,7 +224,17 @@ impl Facts {
 
     /// The DNS column for `facts`.
     pub(crate) fn resolvers(facts: &NetworkFacts) -> Self {
-        Self::of("NAME SERVERS", Subject::Network, resolver_rows(facts))
+        Self::of("NAME SERVERS", Subject::Resolvers, resolver_rows(facts))
+    }
+
+    /// The Ethernet column for `facts`: one plate per configured
+    /// interface, or the one plate that says why there is nothing to show.
+    pub(crate) fn addressing(facts: &NetworkFacts) -> Self {
+        Self {
+            groups: addressing_groups(&facts.addressing),
+            subject: Subject::Addressing,
+            first: 0,
+        }
     }
 
     /// One captioned plate carrying `rows`.
@@ -161,30 +245,30 @@ impl Facts {
     /// all either needs.
     fn of(caption: &'static str, subject: Subject, rows: Vec<FieldRow>) -> Self {
         Self {
-            group: FieldGroup::new(caption, rows),
+            groups: alloc::vec![FieldGroup::new(caption, rows)],
             subject,
             first: 0,
         }
     }
 
     /// How many plates the column has.
-    ///
-    /// One today, and stated as a count rather than assumed so the column
-    /// stacks and scrolls exactly as every other plate column does.
-    pub(crate) const fn len() -> usize {
-        1
+    pub(crate) fn len(&self) -> usize {
+        self.groups.len()
     }
 
     /// Draw from plate `index`.
     pub(crate) fn set_first(&mut self, index: usize) {
-        self.first = index.min(Self::len().saturating_sub(1));
+        self.first = index.min(self.len().saturating_sub(1));
     }
 
     /// The height the column needs.
     pub(crate) fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
-        self.group
-            .measured_height(scale, theme)
-            .saturating_add(stack::gap(scale, theme).saturating_mul(2))
+        let gap = stack::gap(scale, theme);
+        self.groups
+            .iter()
+            .fold(gap.saturating_mul(2), |total, group| {
+                total.saturating_add(group.measured_height(scale, theme))
+            })
     }
 
     /// How many plates the column seats from the one it draws from.
@@ -194,16 +278,19 @@ impl Facts {
 
     /// Where each drawn plate sits.
     fn placed(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<(usize, Rect)> {
-        stack::place(bounds, self.first, Self::len(), scale, theme, |_| {
-            self.group.measured_height(scale, theme)
+        stack::place(bounds, self.first, self.len(), scale, theme, |index| {
+            self.groups
+                .get(index)
+                .map_or(0, |group| group.measured_height(scale, theme))
         })
     }
 
     /// Paint the column.
     pub(crate) fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
-        for (_, rect) in self.placed(bounds, scale, theme) {
-            self.group
-                .render(surface, FieldLayout::new(rect, 0), scale, theme);
+        for (index, rect) in self.placed(bounds, scale, theme) {
+            if let Some(group) = self.groups.get(index) {
+                group.render(surface, FieldLayout::new(rect, 0), scale, theme);
+            }
         }
     }
 }
@@ -287,6 +374,107 @@ fn resolver_rows(facts: &NetworkFacts) -> Vec<FieldRow> {
         .iter()
         .map(|server| reading(SERVER_LABEL, render_server(server)))
         .collect()
+}
+
+impl Addressing {
+    /// The addressing a `configure` listing states.
+    ///
+    /// The listing carries both registries, so each line is read against
+    /// the per-interface one and anything it does not name — every machine
+    /// setting, and any line this build does not understand — is dropped
+    /// rather than guessed at. The registry is the shared engine's, so this
+    /// surface and the tool that printed the lines cannot disagree on what
+    /// a key means. Non-UTF-8 output is no listing at all and is refused.
+    #[must_use]
+    pub fn from_listing(output: &[u8]) -> Self {
+        let Ok(text) = core::str::from_utf8(output) else {
+            return Self::Refused(String::from(UNREADABLE_LISTING));
+        };
+        let mut interfaces: Vec<InterfaceReading> = Vec::new();
+        for line in text.lines() {
+            let Some((name, value)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some((alias, suffix)) = name.split_once('.') else {
+                continue;
+            };
+            if !tairix_netconfig::valid_iface_name(alias) {
+                continue;
+            }
+            let Some(key) = IfaceKey::from_name(suffix) else {
+                continue;
+            };
+            if !interfaces.iter().any(|iface| iface.alias == alias) {
+                interfaces.push(InterfaceReading {
+                    alias: String::from(alias),
+                    settings: Vec::new(),
+                });
+            }
+            if let Some(entry) = interfaces.iter_mut().find(|iface| iface.alias == alias) {
+                entry.settings.push((key, String::from(value)));
+            }
+        }
+        Self::Listed(interfaces)
+    }
+}
+
+/// The Ethernet plates: one per configured interface, or the single plate
+/// that states why there is nothing to show.
+fn addressing_groups(addressing: &Addressing) -> Vec<FieldGroup> {
+    match addressing {
+        Addressing::Unasked => alloc::vec![FieldGroup::new(
+            ADDRESSING_CAPTION,
+            alloc::vec![reading(ADDRESSING_FACTS[0], String::from(NOT_ASKED))],
+        )],
+        Addressing::Refused(reason) => alloc::vec![FieldGroup::new(
+            ADDRESSING_CAPTION,
+            alloc::vec![reading(ADDRESSING_FACTS[0], reason.clone())],
+        )],
+        Addressing::Overran => alloc::vec![FieldGroup::new(
+            ADDRESSING_CAPTION,
+            alloc::vec![reading(ADDRESSING_FACTS[0], String::from(TOO_LARGE))],
+        )],
+        Addressing::Listed(interfaces) if interfaces.is_empty() => {
+            alloc::vec![FieldGroup::new(
+                ADDRESSING_CAPTION,
+                alloc::vec![reading(ADDRESSING_FACTS[0], String::from(NO_INTERFACES))],
+            )]
+        }
+        Addressing::Listed(interfaces) => interfaces
+            .iter()
+            .map(|iface| {
+                FieldGroup::new(
+                    iface.alias.clone(),
+                    iface
+                        .settings
+                        .iter()
+                        .map(|(key, value)| reading(setting_label(*key), value.clone()))
+                        .collect(),
+                )
+            })
+            .collect(),
+    }
+}
+
+/// The reader's name for one per-interface store key.
+const fn setting_label(key: IfaceKey) -> &'static str {
+    match key {
+        IfaceKey::Kind => "Kind",
+        IfaceKey::MatchMac => "Bound to hardware address",
+        IfaceKey::MatchNode => "Bound to hardware location",
+        IfaceKey::Ipv4Method => "IPv4",
+        IfaceKey::Ipv4Address => "IPv4 address",
+        IfaceKey::Ipv4Gateway => "IPv4 gateway",
+        IfaceKey::Ipv6Method => "IPv6",
+        IfaceKey::Ipv6Address => "IPv6 address",
+        IfaceKey::Ipv6Gateway => "IPv6 gateway",
+        IfaceKey::DnsServers => "Name servers",
+        IfaceKey::Mtu => "MTU",
+        IfaceKey::BondMembers => "Bond members",
+        IfaceKey::BondMode => "Bond mode",
+        IfaceKey::BondMonitorInterval => "Bond monitor interval",
+        IfaceKey::BondPrimary => "Bond primary member",
+    }
 }
 
 /// Where a wall-clock reading came from, in a reader's words.

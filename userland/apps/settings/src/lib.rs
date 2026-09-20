@@ -34,7 +34,7 @@ mod stack;
 mod statement;
 mod volumes;
 
-pub use facts::{MachineFacts, NetworkFacts};
+pub use facts::{Addressing, InterfaceReading, MachineFacts, NetworkFacts};
 pub use form::{Composition, Form, FormOutcome, FormPlace, Offered, Setting};
 pub use frame::{resolve_frame, Actions, Overflow, ShellFrame, CONTENT_FLOOR, SIDEBAR_WIDTH};
 pub use gallery::{Gallery, GalleryOutcome, PictureWanted, NONE_LABEL};
@@ -42,7 +42,7 @@ pub use registry::{
     strip_rows, Category, CategoryRow, Location, Pane, PaneBacking, PaneContent, PaneRow, StripRow,
     CATEGORIES,
 };
-pub use shell::{ElevateRefusal, Elevation, Shell, ShellOutcome};
+pub use shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
 pub use volumes::{Readings, VolumeReading};
 
 #[cfg(test)]

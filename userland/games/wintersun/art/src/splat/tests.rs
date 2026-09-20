@@ -4,7 +4,10 @@ use tairix_raster::color::Pixel;
 use tairix_wintersun_net::value::WorldPoint;
 use tairix_wintersun_world::biome::{Material, BLEND_SLOTS};
 
-use super::{splat, Geometry, SpanPlan, SpanTiles, Warp};
+use super::{
+    cutoff_below, mean, splat, Geometry, SpanPlan, SpanTiles, Warp, BLEND_DEPTH, HEIGHT_SHIFT,
+    MAX_BLEND_TOTAL, MAX_HEIGHT_SCORE,
+};
 use crate::material::{self, MaterialTile, Mip, Quality};
 use crate::weight::{WeightField, TOTAL};
 
@@ -374,4 +377,88 @@ fn an_end_never_gains_a_material_its_own_field_lacks() {
     let near: u16 = plan.slots[..plan.used].iter().map(|s| s.near).sum();
     let far: u16 = plan.slots[..plan.used].iter().map(|s| s.far).sum();
     assert_eq!((near, far), (TOTAL, TOTAL));
+}
+
+/// The reciprocal table floors exactly as the division it replaced, over
+/// every divisor a blend can produce and every channel sum that divisor
+/// admits.
+///
+/// Exhaustive rather than sampled: the domain is small, and the whole
+/// value of replacing a division with a multiply is that the two agree
+/// everywhere — a table that is right for most inputs is a wrong pixel
+/// nobody would find by looking.
+#[test]
+fn reciprocals_are_exact() {
+    for total in 1..=u32::try_from(MAX_BLEND_TOTAL).expect("the bound fits") {
+        // A channel sum is a sum of `u8` texels weighted by the shares
+        // that make up `total`, so it cannot exceed `255 * total`.
+        for sum in 0..=255 * total {
+            assert_eq!(
+                mean(sum, total),
+                u8::try_from(sum / total).unwrap_or(u8::MAX)
+            );
+        }
+    }
+}
+
+/// A divisor outside the table's domain is clamped into it rather than
+/// read past the end, so a later change to the blend's depth or slot
+/// count cannot turn into an out-of-bounds read.
+#[test]
+fn a_divisor_past_the_domain_is_clamped() {
+    let last = u32::try_from(MAX_BLEND_TOTAL).expect("the bound fits");
+    assert_eq!(mean(255, 0), mean(255, 1), "zero takes the unit divisor");
+    assert_eq!(mean(255, last + 1), mean(255, last));
+}
+
+/// The bound the table rests on: no slot can contribute more than the
+/// blend depth, so the divisor stays inside the domain.
+#[test]
+fn the_blend_cannot_produce_a_divisor_past_the_domain() {
+    assert_eq!(MAX_BLEND_TOTAL, BLEND_SLOTS * usize::from(BLEND_DEPTH));
+}
+
+/// A slot the blend skips could never have contributed anything.
+///
+/// The skip is the one place the kernel decides *not* to read a texel, so
+/// it is checked against the definition it claims to follow rather than
+/// against a rendered picture: over every weight pair and every relief a
+/// texel can carry, a skipped slot's share must be zero.
+#[test]
+fn a_skipped_slot_could_not_have_reached_the_floor() {
+    for heaviest in 0..=TOTAL {
+        let cutoff = cutoff_below(heaviest);
+        for weight in 0..cutoff {
+            for height in 0..=u8::MAX {
+                // The winning score is at least the heaviest weight, so
+                // the floor is at least this.
+                let floor = heaviest.saturating_sub(BLEND_DEPTH);
+                let score = weight.saturating_add(u16::from(height) >> HEIGHT_SHIFT);
+                assert_eq!(
+                    score.saturating_sub(floor),
+                    0,
+                    "weight {weight} with relief {height} was skipped under {heaviest}"
+                );
+            }
+        }
+    }
+}
+
+/// The relief bound the skip rests on is the whole height range, so no
+/// texel can lift a slot further than the cutoff assumed.
+#[test]
+fn relief_cannot_exceed_its_bound() {
+    assert_eq!(MAX_HEIGHT_SCORE, u16::from(u8::MAX) >> HEIGHT_SHIFT);
+    for height in 0..=u8::MAX {
+        assert!(u16::from(height) >> HEIGHT_SHIFT <= MAX_HEIGHT_SCORE);
+    }
+}
+
+/// Nothing is skipped when no slot is far enough ahead, so a genuinely
+/// blended pixel still reads every texel.
+#[test]
+fn a_blended_pixel_skips_nothing() {
+    assert_eq!(cutoff_below(0), 0);
+    assert_eq!(cutoff_below(BLEND_DEPTH + MAX_HEIGHT_SCORE), 0);
+    assert!(cutoff_below(TOTAL) > 0, "a dominant material does skip");
 }

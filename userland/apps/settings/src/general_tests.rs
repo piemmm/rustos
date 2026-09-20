@@ -18,7 +18,7 @@ use tairix_theme::Theme;
 use tairix_wallpaper::DesktopSettings;
 
 use crate::facts::MachineFacts;
-use crate::shell::{ElevateRefusal, Elevation, Shell, ShellOutcome};
+use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
 use tairix_font::install_test_transport;
 
 /// A window wide enough to seat the strip and a full content column.
@@ -165,7 +165,7 @@ fn applying_asks_for_an_account_and_runs_the_tool_that_owns_the_store() {
     assert_eq!(asked.account, "root");
     assert_eq!(asked.password, b"hunter2");
     assert_eq!(asked.program, "/System/Commands/configure.app/Run");
-    assert!(asked.wait, "a store write is waited for");
+    assert_eq!(asked.mode, RunMode::Wait, "a store write is waited for");
     // One invocation carrying every changed key, so the document is
     // rendered once and cannot be left half written.
     assert_eq!(
@@ -189,7 +189,7 @@ fn a_refused_account_keeps_the_question_and_the_working_copy() {
     type_into(&mut shell, "wrong");
     press(&mut shell, NamedKey::Enter);
 
-    shell.adopt_elevation(Err(ElevateRefusal::Credentials));
+    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::Credentials));
     assert!(
         shell.asking(),
         "a refusal leaves the question up to correct"
@@ -209,7 +209,7 @@ fn an_accepted_run_takes_the_question_down_and_re_reads_the_store() {
     type_into(&mut shell, "hunter2");
     press(&mut shell, NamedKey::Enter);
 
-    shell.adopt_elevation(Ok(0));
+    shell.adopt_elevation(Elevated::Finished(0));
     assert!(!shell.asking());
     // Persist-then-adopt: what is durable is whatever the store now says,
     // so the window asks for it again rather than declaring its own
@@ -235,7 +235,7 @@ fn a_run_that_did_not_take_the_change_is_not_reported_as_applied() {
     type_into(&mut shell, "hunter2");
     press(&mut shell, NamedKey::Enter);
 
-    shell.adopt_elevation(Ok(2));
+    shell.adopt_elevation(Elevated::Finished(2));
     assert!(shell.asking(), "the question stays up to try again");
     assert_eq!(shell.form_for_test().expect("a form").pending().len(), 1);
     assert!(!shell.config_wanted(), "nothing was written to re-read");
@@ -255,7 +255,7 @@ fn the_date_and_time_pane_launches_the_application_that_owns_the_clock() {
     assert_eq!(asked.program, "/System/Applications/datetime.app/Run");
     // Started and left running: the reader then works in it, and a window
     // that waited for its exit would stop drawing for the whole session.
-    assert!(!asked.wait);
+    assert_eq!(asked.mode, RunMode::Leave);
     assert!(
         asked.argv.is_empty(),
         "an interactive program takes no argv"
@@ -336,7 +336,7 @@ fn erasing_a_request_zeroes_the_offered_secret() {
         password: b"hunter2".to_vec(),
         program: "/x",
         argv: Vec::new(),
-        wait: true,
+        mode: RunMode::Wait,
     };
     asked.erase();
     assert!(

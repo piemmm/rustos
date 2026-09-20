@@ -6,7 +6,8 @@ per-interface network configuration store: the document at
 It owns the per-interface line grammar, the **closed** key registry, each
 key's typed value set, the bounded fail-closed parser, and the canonical
 render. The image builder and the installer write the store through this
-engine; the one reader — the device manager, which maps it into the
+engine, and the `configure` command app reads it through the same one as
+its second key registry; the one runtime reader — the device manager, which maps it into the
 per-interface admin messages `netstack` applies — reads it through the same
 engine, so producer and consumer can never diverge.
 

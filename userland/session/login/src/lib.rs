@@ -107,7 +107,9 @@ pub mod view;
 pub use auth::{DenyAll, UsersAuthenticator};
 pub use broker::{handle_session_request, DbAccounts, SessionDirectory, SessionReply};
 pub use budget::AttemptBudget;
-pub use elevate::{audit_launch_ended_abnormally, handle_elevate_request, ElevateLauncher};
+pub use elevate::{
+    audit_launch_ended_abnormally, drain_bounded, handle_elevate_request, Captured, ElevateLauncher,
+};
 pub use error::LoginError;
 pub use login::{Login, LoginConfig};
 pub use session::{

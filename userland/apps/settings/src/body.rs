@@ -98,6 +98,7 @@ impl Body {
             Some(PaneContent::About) => Self::Facts(Facts::about(answered.machine)),
             Some(PaneContent::Clock) => Self::Facts(Facts::clock(answered.machine)),
             Some(PaneContent::Dns) => Self::Facts(Facts::resolvers(answered.network)),
+            Some(PaneContent::Ethernet) => Self::Facts(Facts::addressing(answered.network)),
         }
     }
 
@@ -229,7 +230,7 @@ impl Body {
                 crate::stack::as_extent(readings.seated(place.bounds, place.scale, place.theme)),
             ),
             Self::Facts(facts) => (
-                crate::stack::as_extent(Facts::len()),
+                crate::stack::as_extent(facts.len()),
                 crate::stack::as_extent(facts.seated(place.bounds, place.scale, place.theme)),
             ),
         }

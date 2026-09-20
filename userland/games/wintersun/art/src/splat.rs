@@ -51,6 +51,13 @@ use crate::weight::{WeightField, TOTAL};
 /// where two materials genuinely meet and nothing else.
 const HEIGHT_SHIFT: u32 = 2;
 
+/// The most a material's relief can add to its score.
+///
+/// A height is a `u8`, so this is the whole range shifted down by
+/// [`HEIGHT_SHIFT`]. It bounds how far relief alone can lift a slot,
+/// which is what makes a slot's irrelevance decidable from its weight.
+const MAX_HEIGHT_SCORE: u16 = (u8::MAX as u16) >> HEIGHT_SHIFT;
+
 /// The band below the winning score within which materials still blend.
 ///
 /// Zero would be a hard argmax — one material per pixel, and a boundary
@@ -62,6 +69,47 @@ const BLEND_DEPTH: u16 = 24;
 
 /// Fixed-point fraction bits for the per-pixel accumulators.
 const STEP_BITS: u32 = 16;
+
+/// The largest divisor a pixel's blend can produce.
+///
+/// Every slot's share is its score above the blend floor, which is at
+/// most [`BLEND_DEPTH`], and there are [`BLEND_SLOTS`] of them. The
+/// divisor is therefore small and bounded, which is what lets the three
+/// channel means below be taken without dividing.
+const MAX_BLEND_TOTAL: usize = BLEND_SLOTS * BLEND_DEPTH as usize;
+
+/// Fixed-point fraction bits of [`RECIPROCAL`].
+const RECIPROCAL_BITS: u32 = 32;
+
+/// `ceil(2^RECIPROCAL_BITS / d)` for every divisor `d` a blend can
+/// produce, so a channel mean is a multiply and a shift.
+///
+/// Exact, not approximate: a channel sum is at most `255 * d`, and
+/// `255 * d * d` stays far below `2^RECIPROCAL_BITS` for every divisor in
+/// range, which is the condition under which the rounded-up reciprocal
+/// floors exactly as the division does. `reciprocals_are_exact` checks
+/// that over the whole domain rather than leaving it to the argument.
+const RECIPROCAL: [u64; MAX_BLEND_TOTAL + 1] = {
+    let mut table = [0u64; MAX_BLEND_TOTAL + 1];
+    let mut divisor = 1usize;
+    while divisor <= MAX_BLEND_TOTAL {
+        let d = divisor as u64;
+        table[divisor] = (1u64 << RECIPROCAL_BITS).div_ceil(d);
+        divisor += 1;
+    }
+    table
+};
+
+/// One channel's weighted mean, `sum / total`, without a division.
+///
+/// `total` is clamped into the table's domain; a blend never produces a
+/// divisor outside it, and clamping rather than indexing blind keeps a
+/// future change to the blend from reading past the table.
+fn mean(sum: u32, total: u32) -> u8 {
+    let total = (total.max(1) as usize).min(MAX_BLEND_TOTAL);
+    let scaled = (u64::from(sum) * RECIPROCAL[total]) >> RECIPROCAL_BITS;
+    u8::try_from(scaled.min(u64::from(u8::MAX))).unwrap_or(u8::MAX)
+}
 
 /// A smooth, low-frequency displacement of the material lookup.
 ///
@@ -376,12 +424,20 @@ fn shade(
 ) -> Pixel {
     let mut texels = [Texel::VOID; BLEND_SLOTS];
     let mut scores = [0u16; BLEND_SLOTS];
+    // A slot this far under the heaviest one cannot reach the blend floor
+    // however tall its relief turns out to be, so its texel is never read.
+    // Most ground is one material with a trace of others, which is exactly
+    // the case this skips: `cutoff_below` proves the arithmetic.
+    let heaviest = weights.iter().map(WeightStep::value).max().unwrap_or(0);
+    let cutoff = cutoff_below(heaviest);
     let mut top = 0u16;
     for (index, source) in sources.iter().enumerate() {
+        let weight = weights[index].value();
+        if weight < cutoff {
+            continue;
+        }
         let texel = source.texel(sample_x, sample_y, shifts[index]);
-        let score = weights[index]
-            .value()
-            .saturating_add(u16::from(texel.height) >> HEIGHT_SHIFT);
+        let score = weight.saturating_add(u16::from(texel.height) >> HEIGHT_SHIFT);
         texels[index] = texel;
         scores[index] = score;
         top = top.max(score);
@@ -401,19 +457,26 @@ fn shade(
     }
     // The winning slot's share is `BLEND_DEPTH`, so the divisor is never
     // zero for a non-empty span.
-    let total = total.max(1);
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "each channel is a weighted mean of u8 values"
-    )]
     Pixel {
-        r: (red / total) as u8,
-        g: (green / total) as u8,
-        b: (blue / total) as u8,
+        r: mean(red, total),
+        g: mean(green, total),
+        b: mean(blue, total),
         // Ground is opaque, and a premultiply by a full alpha is the
         // identity, so the channels above are already premultiplied.
         a: u8::MAX,
     }
+}
+
+/// The weight below which a slot cannot reach the blend floor, given the
+/// `heaviest` weight in the span at this pixel.
+///
+/// The floor is the winning *score* less [`BLEND_DEPTH`], and the winning
+/// score is at least `heaviest`, so a slot whose weight plus the most
+/// relief could add still falls short of `heaviest - BLEND_DEPTH` would
+/// contribute a zero share. Saturating, so a span whose weights are all
+/// small skips nothing.
+fn cutoff_below(heaviest: u16) -> u16 {
+    heaviest.saturating_sub(BLEND_DEPTH.saturating_add(MAX_HEIGHT_SCORE))
 }
 
 /// A two-axis fixed-point walk from one value to another over a span.

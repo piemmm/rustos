@@ -92,6 +92,28 @@ never changes a result.
   release that it meant as one click. Set it to `0` for a mouse whose
   rapid-fire mode sends deliberate click pairs.
 
+A key that is not in the list above is read against a second registry:
+the per-interface settings of the network store at
+`/System/Settings/Network/network.conf`. Its keys are spelled
+`<interface>.<setting>`, where `<interface>` is the alias an
+administrator gave a network interface (`wan`, `lan0`) and `<setting>`
+is one of `kind`, `match.mac`, `match.node`, `ipv4.method`,
+`ipv4.address`, `ipv4.gateway`, `ipv6.method`, `ipv6.address`,
+`ipv6.gateway`, `dns.servers`, `mtu`, `bond.members`, `bond.mode`,
+`bond.monitor-interval`, and `bond.primary`.
+
+The machine registry above is always searched first, so an interface
+alias can never take a machine setting's name over.
+
+That document holds only what an administrator wrote — it has no
+defaults — so listing shows just the settings it carries, and showing
+one it does not carry answers with an empty line rather than inventing
+a value. Reading it needs an account that may: it carries each
+interface's hardware identity and this machine's static addressing,
+which are not world-readable.
+
+`configure` does not yet write that registry; the installer does.
+
 Changing a `net.*` setting saves it and delivers it to the running network
 stack, so it takes effect at once. If the running stack does not accept it
 — none is running, or your account may not administer the network — the
@@ -112,13 +134,15 @@ boot.
 - `configure net.ipv6.enabled false` — turn IPv6 off stack-wide.
 - `configure time.servers 0.example.test,1.example.test` — set the
   network time servers the clock is synchronised from.
+- `configure wan.ipv4.address` — show the static IPv4 address
+  configured for the interface called `wan`.
 
 ## EXIT STATUS
 
 - `0` — the listing, value, short help, or change was completed.
-- `1` — the store could not be read or written (for example the
-  caller may not change system settings), or the output could not be
-  delivered.
+- `1` — a store could not be read or written (for example the caller
+  may not change system settings, or may not read the network store),
+  or the output could not be delivered.
 - `2` — the command line was not understood, the key is unknown, or
   the value is outside the key's set.
 

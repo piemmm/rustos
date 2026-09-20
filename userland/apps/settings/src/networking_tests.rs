@@ -10,14 +10,14 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{NetAddrFamily, NetServerAddr};
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_input::{InputEvent, Key as InputKey, Modifiers, NamedKey, PointerButton};
 use tairix_sysconfig::{Key, NetToggle, SynCookies, SystemConfig};
 use tairix_theme::Theme;
 use tairix_wallpaper::DesktopSettings;
 
-use crate::facts::NetworkFacts;
 use crate::registry::{strip_rows, Category, Pane, PaneBacking, PaneContent, StripRow, CATEGORIES};
-use crate::shell::Shell;
+use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
 use tairix_font::install_test_transport;
 
 /// A window wide enough to seat the strip and a full content column.
@@ -70,6 +70,17 @@ fn stated(shell: &Shell) -> Vec<String> {
             _ => String::new(),
         })
         .collect()
+}
+
+/// Every label the pane on show states, in listing order.
+fn labels(shell: &Shell) -> Vec<String> {
+    shell.facts_for_test().map_or_else(Vec::new, |facts| {
+        facts
+            .rows()
+            .iter()
+            .map(|row| String::from(row.label()))
+            .collect()
+    })
 }
 
 /// A V4 resolver at `octets`.
@@ -289,12 +300,10 @@ fn the_syncookie_choice_says_what_always_costs() {
 #[test]
 fn dns_states_every_server_the_stack_answered() {
     let mut shell = showing("dns");
-    shell.adopt_network(NetworkFacts {
-        resolvers: Some(alloc::vec![
-            v4([10, 0, 0, 53]),
-            v6([0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888]),
-        ]),
-    });
+    shell.adopt_resolvers(Some(alloc::vec![
+        v4([10, 0, 0, 53]),
+        v6([0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888]),
+    ]));
     assert_eq!(
         stated(&shell),
         alloc::vec!["10.0.0.53".to_string(), "2001:4860:4860::8888".to_string()],
@@ -309,14 +318,12 @@ fn dns_tells_an_empty_set_apart_from_a_reading_it_could_not_take() {
     assert_eq!(stated(&shell), alloc::vec!["not measured".to_string()]);
 
     // A refused or undecodable walk: still not measured, never "none".
-    shell.adopt_network(NetworkFacts { resolvers: None });
+    shell.adopt_resolvers(None);
     assert_eq!(stated(&shell), alloc::vec!["not measured".to_string()]);
 
     // The query answered, and what it answered was an empty set. That is a
     // machine that resolves nothing, which is a different fact.
-    shell.adopt_network(NetworkFacts {
-        resolvers: Some(Vec::new()),
-    });
+    shell.adopt_resolvers(Some(Vec::new()));
     assert_eq!(
         stated(&shell),
         alloc::vec!["none — this machine resolves no names".to_string()]
@@ -338,9 +345,7 @@ fn the_dns_pane_asks_for_its_reading_when_it_comes_on_show() {
     // Answering it clears the want, and adopting does not re-arm it — a
     // rebuild that asked again would spend a round trip on the reading it
     // was just handed.
-    shell.adopt_network(NetworkFacts {
-        resolvers: Some(alloc::vec![v4([10, 0, 0, 53])]),
-    });
+    shell.adopt_resolvers(Some(alloc::vec![v4([10, 0, 0, 53])]));
     assert!(
         !shell.network_wanted(),
         "an answered reading is not re-asked"
@@ -362,22 +367,175 @@ fn the_dns_pane_offers_no_command_of_its_own() {
     assert_eq!(row_for(Pane::Dns).action(), None);
 }
 
-// --- What Settings deliberately does not read ---------------------------
+// --- Ethernet: the reading an authenticated run answers -----------------
+
+/// Press the pane's one band command, offer an account, and hand back the
+/// elevation the shell asked for.
+fn ask_for_addressing(shell: &mut Shell) -> Elevation {
+    let theme = theme();
+    let rects = shell.action_rects(WIDE, Scale::ONE, &theme);
+    let rect = *rects.last().expect("the band drew its command");
+    let at = Point::new(
+        rect.left() + to_i32(rect.width / 2),
+        rect.top() + to_i32(rect.height / 2),
+    );
+    let mut sink = damage();
+    for event in [
+        InputEvent::PointerMoved { to: at },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        shell.on_pointer(&event, WIDE, Scale::ONE, &theme, &mut sink);
+    }
+    assert!(shell.asking(), "the pane asks for an account");
+    for ch in "root".chars() {
+        shell.on_key(
+            InputKey::Char(ch),
+            Modifiers::default(),
+            WIDE,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+    }
+    shell.on_key(
+        InputKey::Named(NamedKey::Tab),
+        Modifiers::default(),
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    for ch in "hunter2".chars() {
+        shell.on_key(
+            InputKey::Char(ch),
+            Modifiers::default(),
+            WIDE,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+    }
+    let ShellOutcome::Elevate(asked) = shell.on_key(
+        InputKey::Named(NamedKey::Enter),
+        Modifiers::default(),
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    ) else {
+        panic!("offering an account asks for the run");
+    };
+    asked
+}
 
 #[test]
-fn ethernet_states_where_its_privileged_readings_live() {
+fn ethernet_states_that_its_reading_is_not_public_until_it_is_asked_for() {
     // An interface's hardware identity and this machine's address book are
-    // gated readings, and Settings holds no capability at all. The pane
-    // says where they are read and who writes the addressing, rather than
-    // drawing rows that would be refused on every machine for ever.
+    // gated readings and Settings holds no capability at all, so the pane
+    // states that nothing has been read rather than drawing a row it
+    // cannot back — and offers the one command that can answer it.
     let row = row_for(Pane::Ethernet);
-    let PaneBacking::Elsewhere { shows, elsewhere } = row.backing else {
-        panic!("Ethernet states where its readings live");
-    };
-    assert!(shows.contains("addressed"), "{shows}");
-    assert!(elsewhere.contains("Switchboard"), "{elsewhere}");
-    assert!(elsewhere.contains("configure"), "{elsewhere}");
-    assert_eq!(row.action(), None, "a stated absence commands nothing");
+    assert_eq!(row.backing, PaneBacking::Composed(PaneContent::Ethernet));
+    assert_eq!(row.action(), Some("Show Addressing…"));
+
+    let mut shell = showing("ethernet");
+    let stated = stated(&shell).join(" | ");
+    assert!(stated.contains("not read"), "{stated}");
+    assert!(stated.contains("account that may"), "{stated}");
+    // Nothing is asked of a desk for it: the resolver set is a live
+    // reading, this is a store read an account has to authorise.
+    assert!(!shell.network_wanted(), "no desk answers the addressing");
+    let _ = &mut shell;
+}
+
+#[test]
+fn the_pane_asks_for_a_capture_of_the_tool_that_owns_the_store() {
+    let mut shell = showing("ethernet");
+    let asked = ask_for_addressing(&mut shell);
+    assert_eq!(asked.program, "/System/Commands/configure.app/Run");
+    assert!(asked.argv.is_empty(), "the listing takes no operand");
+    // A read, so the caller waits for what it printed rather than for an
+    // exit code alone.
+    assert_eq!(asked.mode, RunMode::Capture);
+}
+
+#[test]
+fn a_captured_listing_states_one_plate_per_configured_interface() {
+    let mut shell = showing("ethernet");
+    let _ = ask_for_addressing(&mut shell);
+    shell.adopt_elevation(Elevated::Printed(
+        0,
+        b"os.loginType graphical\n\
+          net.ipv4.enabled true\n\
+          time.servers none\n\
+          wan.kind ethernet\n\
+          wan.ipv4.method static\n\
+          wan.ipv4.address 10.0.0.7/24\n\
+          lan0.ipv4.method dhcp\n"
+            .to_vec(),
+    ));
+    let stated = stated(&shell).join(" | ");
+    // The per-interface registry only: every machine setting in the same
+    // listing is another registry's and is not an interface's addressing.
+    assert!(stated.contains("10.0.0.7/24"), "{stated}");
+    assert!(stated.contains("dhcp"), "{stated}");
+    assert!(!stated.contains("graphical"), "{stated}");
+    assert!(!stated.contains("none"), "{stated}");
+    // And the reading is labelled in a reader's words, not in store keys.
+    let labelled = labels(&shell).join(" | ");
+    assert!(labelled.contains("IPv4 address"), "{labelled}");
+    assert!(!labelled.contains("ipv4.address"), "{labelled}");
+}
+
+#[test]
+fn a_listing_that_names_no_interface_says_so_rather_than_drawing_nothing() {
+    let mut shell = showing("ethernet");
+    let _ = ask_for_addressing(&mut shell);
+    shell.adopt_elevation(Elevated::Printed(0, b"os.loginType text\n".to_vec()));
+    let stated = stated(&shell).join(" | ");
+    assert!(stated.contains("no interface is configured"), "{stated}");
+}
+
+#[test]
+fn a_run_that_printed_past_the_bound_states_that_and_shows_no_part_of_it() {
+    let mut shell = showing("ethernet");
+    let _ = ask_for_addressing(&mut shell);
+    shell.adopt_elevation(Elevated::Overran);
+    let stated = stated(&shell).join(" | ");
+    assert!(stated.contains("too large"), "{stated}");
+    assert!(
+        !shell.asking(),
+        "the question is answered, not left standing"
+    );
+}
+
+#[test]
+fn a_refused_read_states_the_refusal_and_shows_nothing() {
+    let mut shell = showing("ethernet");
+    let _ = ask_for_addressing(&mut shell);
+    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::NotRun(String::from(
+        "The account was accepted, but nothing ran.",
+    ))));
+    // The question stays up with the reason on it, and the pane still
+    // states that nothing has been read — never a half answer.
+    assert!(shell.asking(), "the reader can correct and try again");
+    let stated = stated(&shell).join(" | ");
+    assert!(stated.contains("not read"), "{stated}");
+}
+
+#[test]
+fn a_run_that_failed_is_not_read_as_an_empty_configuration() {
+    let mut shell = showing("ethernet");
+    let _ = ask_for_addressing(&mut shell);
+    shell.adopt_elevation(Elevated::Printed(2, Vec::new()));
+    let stated = stated(&shell).join(" | ");
+    assert!(!stated.contains("no interface is configured"), "{stated}");
+    assert!(shell.asking(), "a failed run is a refusal, not an answer");
 }
 
 #[test]

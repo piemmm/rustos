@@ -56,7 +56,7 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest};
+    use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
     use tairix_abi::fs::{DirEntry, FS_IO_MAX};
     use tairix_abi::origin::{CapabilitySummary, Origin};
     use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
@@ -978,15 +978,18 @@ mod program {
                 // secret is ever put on the wire.
                 argv: ElevateArgv::new(args)?,
             };
-            match tairix_rt::elevate(&request)? {
+            let mut reply = [0u8; ELEVATE_MAX_REPLY];
+            match tairix_rt::elevate(&request, &mut reply)? {
                 ElevateReply::Completed { exit_code } => Ok(exit_code),
                 ElevateReply::Refused(err) => Err(err),
-                // The builtin only ever posts a `Run` request, so the
-                // broker answers neither `Verified` (a `Verify` request's
-                // reply) nor `Launched` (a `Launch` request's). Reachable
-                // only through a protocol mismatch, so both fail closed
-                // rather than being treated as success.
-                ElevateReply::Verified | ElevateReply::Launched { .. } => Err(Errno::OutOfRange),
+                // The builtin only ever posts a `Run` request, so every
+                // other reply answers a request it did not send. Reachable
+                // only through a protocol mismatch, so all of them fail
+                // closed rather than being treated as success.
+                ElevateReply::Verified
+                | ElevateReply::Launched { .. }
+                | ElevateReply::Captured { .. }
+                | ElevateReply::Overran { .. } => Err(Errno::OutOfRange),
             }
         }
     }

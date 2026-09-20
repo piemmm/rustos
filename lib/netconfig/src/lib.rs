@@ -722,8 +722,13 @@ impl InterfaceConfig {
 
     /// The canonical rendered value of `key` on this interface, or `None`
     /// when the key is unset (and so is not written).
+    ///
+    /// The one spelling of a stored value: the canonical render
+    /// [`NetworkConfig::render`] writes and [`NetworkConfig::parse`] reads
+    /// back unchanged, so a tool listing the store shows exactly what the
+    /// document holds rather than a second rendering of its own.
     #[must_use]
-    fn render_value(&self, key: IfaceKey) -> Option<String> {
+    pub fn render_value(&self, key: IfaceKey) -> Option<String> {
         Some(match key {
             IfaceKey::Kind => String::from(self.kind?.as_str()),
             IfaceKey::MatchMac => self.match_mac?.render(),
@@ -822,25 +827,33 @@ fn render_display(value: &dyn fmt::Display) -> String {
     out
 }
 
-/// Validate an interface alias name: 1..=[`MAX_IFACE_NAME_LEN`] bytes, a
-/// leading ASCII letter, then ASCII letters, digits, `-`, or `_`. The name
-/// may not contain `.` (the key separator) — that is what makes the
-/// `<iface>.<suffix>` split unambiguous.
-fn validate_iface_name(name: &str) -> Result<(), ConfigError> {
+/// Whether `name` is a well-formed interface alias: 1..=
+/// [`MAX_IFACE_NAME_LEN`] bytes, a leading ASCII letter, then ASCII
+/// letters, digits, `-`, or `_`. The name may not contain `.` (the key
+/// separator) — that is what makes the `<iface>.<suffix>` split
+/// unambiguous.
+///
+/// The one definition of the alias grammar, so a tool resolving a
+/// `<iface>.<suffix>` key name off a command line applies exactly the rule
+/// the parser does rather than a second copy of it.
+#[must_use]
+pub fn valid_iface_name(name: &str) -> bool {
     let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes.len() > MAX_IFACE_NAME_LEN {
-        return Err(ConfigError::InvalidInterfaceName);
+    !bytes.is_empty()
+        && bytes.len() <= MAX_IFACE_NAME_LEN
+        && bytes[0].is_ascii_alphabetic()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+}
+
+/// [`valid_iface_name`] as the parser's fail-closed refusal.
+fn validate_iface_name(name: &str) -> Result<(), ConfigError> {
+    if valid_iface_name(name) {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidInterfaceName)
     }
-    if !bytes[0].is_ascii_alphabetic() {
-        return Err(ConfigError::InvalidInterfaceName);
-    }
-    if !bytes
-        .iter()
-        .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
-    {
-        return Err(ConfigError::InvalidInterfaceName);
-    }
-    Ok(())
 }
 
 /// Parse a decimal integer in `min..=max`, rejecting a non-digit run, an

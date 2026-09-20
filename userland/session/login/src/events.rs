@@ -120,20 +120,32 @@ pub const LAUNCH_REFUSED: EventId = EventId(10_025);
 /// `stderr` reaches nobody; the reaper states it here instead. A clean exit
 /// records nothing.
 pub const LAUNCH_ENDED_ABNORMALLY: EventId = EventId(10_026);
+/// A [`tairix_abi::elevate::ElevateRequest::Capture`] request
+/// re-authenticated and its program ran as the target account with its
+/// standard output relayed to the caller. Recorded apart from
+/// [`ELEVATE_GRANTED`] because returning a run's output to an unprivileged
+/// caller is a distinct information flow: the record states how many bytes
+/// were relayed and never what they were, for the same reason the granted
+/// run records the argument count and never the arguments.
+pub const CAPTURE_GRANTED: EventId = EventId(10_027);
+/// A [`tairix_abi::elevate::ElevateRequest::Capture`] request was refused —
+/// a failed re-authentication (cause never disclosed to the caller, only
+/// audited) or a run the supervisor could not start or collect.
+pub const CAPTURE_REFUSED: EventId = EventId(10_028);
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_FAILED, CONSOLE_ERROR, ELEVATE_GRANTED, ELEVATE_REFUSED, ELEVATE_UNAVAILABLE,
-        FONTD_STARTED, FONTD_UNAVAILABLE, GREETER_DEGRADED, GREETER_FAILED,
-        LAUNCH_ENDED_ABNORMALLY, LAUNCH_GRANTED, LAUNCH_REFUSED, LOCKED_OUT, LOGIN_RANGE_END,
-        LOGIN_RANGE_START, SESSION_ACCOUNTS_SENT, SESSION_AUTH_GRANTED, SESSION_AUTH_REFUSED,
-        SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT, SESSION_ENDPOINT_UNAVAILABLE,
-        SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED, SESSION_RESUMED, SESSION_STARTED,
-        VERIFY_GRANTED, VERIFY_REFUSED,
+        AUTH_FAILED, CAPTURE_GRANTED, CAPTURE_REFUSED, CONSOLE_ERROR, ELEVATE_GRANTED,
+        ELEVATE_REFUSED, ELEVATE_UNAVAILABLE, FONTD_STARTED, FONTD_UNAVAILABLE, GREETER_DEGRADED,
+        GREETER_FAILED, LAUNCH_ENDED_ABNORMALLY, LAUNCH_GRANTED, LAUNCH_REFUSED, LOCKED_OUT,
+        LOGIN_RANGE_END, LOGIN_RANGE_START, SESSION_ACCOUNTS_SENT, SESSION_AUTH_GRANTED,
+        SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT,
+        SESSION_ENDPOINT_UNAVAILABLE, SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED,
+        SESSION_RESUMED, SESSION_STARTED, VERIFY_GRANTED, VERIFY_REFUSED,
     };
 
-    const ALL: [u32; 26] = [
+    const ALL: [u32; 28] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -160,6 +172,8 @@ mod tests {
         LAUNCH_GRANTED.0,
         LAUNCH_REFUSED.0,
         LAUNCH_ENDED_ABNORMALLY.0,
+        CAPTURE_GRANTED.0,
+        CAPTURE_REFUSED.0,
     ];
 
     #[test]

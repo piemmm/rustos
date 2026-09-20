@@ -81,7 +81,7 @@ mod program {
     use core::sync::atomic::{AtomicBool, Ordering};
     use tairix_abi::display_ipc::{DisplayRequest, DISPLAY_ENDPOINT, DISPLAY_MODE_REPLY_LEN};
     use tairix_abi::elevate::{
-        elevate_endpoint, ElevateArgv, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
+        elevate_endpoint, ElevateArgv, ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST,
     };
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::session_ipc::{
@@ -90,7 +90,7 @@ mod program {
     use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use tairix_abi::time::Duration64;
     use tairix_abi::{
-        Errno, InputMode, OpenFlags, Origin, Time64, WaitSetOp, WaitSourceKind, WaitStatus,
+        Errno, FdWire, InputMode, OpenFlags, Origin, Time64, WaitSetOp, WaitSourceKind, WaitStatus,
         CONSOLE_INHERIT, ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
     };
     use tairix_caps::CapabilitySet;
@@ -99,13 +99,13 @@ mod program {
 
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_login::{
-        audit_launch_ended_abnormally, configured_session_kind, effective_session_kind,
-        end_live_sessions, events, handle_elevate_request, handle_session_request,
-        session_environment, session_program, supervise, AttemptBudget, AuthenticatedUser,
-        Authenticator, ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad,
-        LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView, SessionDirectory,
-        SessionKind, SessionLauncher, SessionOutcome, SessionWaker, StatusSource,
-        DESKTOP_SESSION_PATH, FONTD_SERVICE_PATH, GREETER_SERVICE_PATH,
+        audit_launch_ended_abnormally, configured_session_kind, drain_bounded,
+        effective_session_kind, end_live_sessions, events, handle_elevate_request,
+        handle_session_request, session_environment, session_program, supervise, AttemptBudget,
+        AuthenticatedUser, Authenticator, Captured, ConfigStore, ConsoleMode, Credentials,
+        CursesView, DbAccounts, DbLoad, LiveSessions, Login, LoginConfig, LoginError, LoginStatus,
+        LoginView, SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker,
+        StatusSource, DESKTOP_SESSION_PATH, FONTD_SERVICE_PATH, GREETER_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -393,7 +393,7 @@ mod program {
                 server.bind_endpoint(
                     *endpoint,
                     ELEVATE_MAX_REQUEST,
-                    ELEVATE_REPLY_LEN,
+                    ELEVATE_MAX_REPLY,
                     TOKEN_ELEVATE,
                 )
             });
@@ -451,6 +451,9 @@ mod program {
                 return;
             };
             let (peer_console, peer_uid) = attest(endpoint, ticket);
+            // The scratch a captured run's output is drained into; every
+            // other request form leaves it untouched.
+            let mut output = [0u8; ELEVATE_MAX_OUTPUT];
             let reply = handle_elevate_request(
                 &request[..len],
                 peer_console,
@@ -459,9 +462,10 @@ mod program {
                 authenticator,
                 &RtElevateLauncher { server: self },
                 &sink,
+                &mut output,
             );
             wipe(&mut request);
-            let mut reply_buf = [0u8; ELEVATE_REPLY_LEN];
+            let mut reply_buf = [0u8; ELEVATE_MAX_REPLY];
             if let Ok(total) = reply.encode(&mut reply_buf) {
                 let _ = tairix_rt::call_reply(endpoint, ticket, &reply_buf[..total]);
             }
@@ -840,6 +844,82 @@ mod program {
             self.server.track_launched(pid);
             Ok(pid)
         }
+
+        fn capture_as(
+            &self,
+            program: &str,
+            argv: ElevateArgv<'_>,
+            uid: u32,
+            out: &mut [u8],
+        ) -> Result<Captured, Errno> {
+            let (read_fd, write_fd) = tairix_rt::pipe_create().map_err(Errno::from_syscall)?;
+            let spawned = spawn_captured(program, argv, uid, write_fd);
+            // The child holds its own clone of the write end from here, so
+            // login's must go before the drain: a pipe reports end of
+            // stream only once *every* write end is closed, and a broker
+            // still holding one would read for ever.
+            let _ = tairix_rt::fs_close(write_fd);
+            let pid = match spawned {
+                Ok(pid) => pid,
+                Err(err) => {
+                    let _ = tairix_rt::fs_close(read_fd);
+                    return Err(err);
+                }
+            };
+            let drained = drain_bounded(out, |buf| {
+                tairix_rt::fs_read(read_fd, 0, buf).map_err(Errno::from_syscall)
+            });
+            let _ = tairix_rt::fs_close(read_fd);
+            // Only now: a child that fills the pipe blocks until it is
+            // emptied, so reaping before the drain would wait on a program
+            // that is itself waiting on this end.
+            let mut status = 0i32;
+            let wret = tairix_rt::wait_exit(pid, &mut status);
+            if wret < 0 {
+                return Err(Errno::from_syscall(wret));
+            }
+            match drained? {
+                Some(len) => Ok(Captured::Output {
+                    exit_code: status,
+                    len,
+                }),
+                None => Ok(Captured::Overran { exit_code: status }),
+            }
+        }
+    }
+
+    /// Spawn one elevated `program` as `uid` with its standard output wired
+    /// to `write_fd` and its standard input closed, returning its PID.
+    ///
+    /// Not [`spawn_elevated`]: a captured run is one nobody is watching, so
+    /// its input is closed rather than left on the caller's console, where
+    /// a program that prompted would silently steal the keyboard. Its
+    /// `stderr` stays login's console, which is where a program states why
+    /// it failed.
+    fn spawn_captured(
+        program: &str,
+        argv: ElevateArgv<'_>,
+        uid: u32,
+        write_fd: u32,
+    ) -> Result<i64, Errno> {
+        let attach = tairix_abi::SpawnAttach {
+            target_uid: uid,
+            wires: [
+                FdWire::Closed,
+                FdWire::Handle(write_fd),
+                FdWire::Inherit,
+                FdWire::Closed,
+            ],
+            ..tairix_abi::SpawnAttach::INHERIT
+        };
+        let mut vector: Vec<&[u8]> = Vec::with_capacity(argv.len() + 1);
+        vector.push(program.as_bytes());
+        vector.extend(argv.iter().map(str::as_bytes));
+        let ret = tairix_rt::spawn_attached(program.as_bytes(), &attach, &vector, &[]);
+        if ret < 0 {
+            return Err(Errno::from_syscall(ret));
+        }
+        Ok(ret)
     }
 
     /// Spawn one elevated `program` as `uid` on login's own console with the

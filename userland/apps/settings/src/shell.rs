@@ -14,6 +14,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::net_ipc::NetServerAddr;
 use tairix_controls::{
     plate_rect, Breadcrumb, BreadcrumbAction, CredentialAction, CredentialSheet, Crumb, Menu,
     MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel,
@@ -29,7 +30,7 @@ use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::body::{self, Body, Drawn};
-use crate::facts::{MachineFacts, NetworkFacts, Subject};
+use crate::facts::{Addressing, MachineFacts, NetworkFacts, Subject};
 use crate::footer::{Footer, FooterAction, Standing};
 use crate::form::{FormOutcome, FormPlace};
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
@@ -70,14 +71,47 @@ enum Focus {
     Footer,
 }
 
+/// What the caller does with the program an offered credential runs.
+///
+/// Three, because three things are wanted of an elevated run and each is a
+/// different exchange with the supervisor: a store write is over in
+/// moments and its exit code is the whole answer, an application the user
+/// then works in is started and left running, and a store *read* is waited
+/// for and answered with what it printed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RunMode {
+    /// Wait for it; the exit code is the answer.
+    Wait,
+    /// Start it and leave it running.
+    Leave,
+    /// Wait for it; what it printed is the answer.
+    Capture,
+}
+
+/// What an elevated run came to.
+///
+/// The caller reports this back verbatim; the shell decides what it means
+/// for the pane that asked.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Elevated {
+    /// The run finished with this exit code.
+    Finished(i32),
+    /// The run finished with this exit code, having printed these bytes.
+    Printed(i32, Vec<u8>),
+    /// The run happened, but printed more than the supervisor's reply
+    /// carries, so nothing came back. Not a refusal: whatever it did, it
+    /// did.
+    Overran,
+    /// Nothing ran, and why.
+    Refused(ElevateRefusal),
+}
+
 /// The program an offered credential will run, and the arguments to hand
 /// it.
 ///
 /// Built by the shell and carried out by the caller: this application holds
-/// no authority and starts nothing. Whether the run is waited for is the
-/// caller's to know from `wait` — a store write is over in moments and its
-/// exit code is the answer, while an application the user then works in is
-/// started and left running.
+/// no authority and starts nothing. What the caller does with the run is
+/// the shell's to say, in `mode`.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Elevation {
     /// The account the reader named.
@@ -95,9 +129,8 @@ pub struct Elevation {
     /// The arguments to hand it, already in the order the program's own
     /// command line takes them.
     pub argv: Vec<String>,
-    /// Whether the caller waits for the program to finish and reports its
-    /// exit code back, or starts it and leaves it running.
-    pub wait: bool,
+    /// What the caller does with the run.
+    pub mode: RunMode,
 }
 
 impl Elevation {
@@ -133,7 +166,7 @@ impl core::fmt::Debug for Elevation {
             .field("password", &"<redacted>")
             .field("program", &self.program)
             .field("argv", &self.argv)
-            .field("wait", &self.wait)
+            .field("mode", &self.mode)
             .finish()
     }
 }
@@ -143,7 +176,7 @@ struct Asking {
     sheet: CredentialSheet,
     program: &'static str,
     argv: Vec<String>,
-    wait: bool,
+    mode: RunMode,
 }
 
 /// What one routed event concluded, for a caller that must act outside the
@@ -399,18 +432,22 @@ impl Shell {
     ///
     /// Requested, never awaited: the pane opens on whatever has arrived —
     /// nothing at all, at first — and rebuilds when it lands.
-    pub fn adopt_network(&mut self, network: NetworkFacts) {
-        self.network = network;
+    ///
+    /// Only the resolver set, because that is the only network reading a
+    /// desk takes: the configured addressing is answered by an
+    /// authenticated run and would be thrown away by a reading that
+    /// replaced the whole record.
+    pub fn adopt_resolvers(&mut self, resolvers: Option<Vec<NetServerAddr>>) {
+        self.network.resolvers = resolvers;
         self.network_wanted = false;
-        if self.states_network() {
+        if self.states_resolvers() {
             self.restate_body();
         }
     }
 
-    /// Whether the body on show states a reading taken from the network
-    /// stack.
-    fn states_network(&self) -> bool {
-        matches!(&self.body, Body::Facts(facts) if facts.subject() == Subject::Network)
+    /// Whether the body on show states the live resolver set.
+    fn states_resolvers(&self) -> bool {
+        matches!(&self.body, Body::Facts(facts) if facts.subject() == Subject::Resolvers)
     }
 
     /// The next picture the caller should ask the desktop to render for the
@@ -523,7 +560,7 @@ impl Shell {
     /// Build what the pane on show draws.
     fn restate_body(&mut self) {
         let listed = matches!(self.body, Body::Volumes(_));
-        let resolved = self.states_network();
+        let resolved = self.states_resolvers();
         let answered = body::Answered {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
@@ -548,7 +585,7 @@ impl Shell {
         // it is re-read when its pane *comes* on show for the same reason
         // the mount table is, and not on the rebuild that adopting one
         // causes.
-        if !resolved && self.states_network() {
+        if !resolved && self.states_resolvers() {
             self.network_wanted = true;
         }
         // Rebuilt rather than kept: a band belongs to the pane that offers
@@ -1193,7 +1230,7 @@ impl Shell {
                 password: asking.sheet.secret().as_bytes().to_vec(),
                 program: asking.program,
                 argv: asking.argv.clone(),
-                wait: asking.wait,
+                mode: asking.mode,
             }),
             None => ShellOutcome::Changed,
         }
@@ -1206,9 +1243,9 @@ impl Shell {
     /// caller takes as soon as a run succeeds. A refusal leaves the working
     /// copy exactly as it was so the reader can correct it rather than
     /// retype it, and states why.
-    pub fn adopt_elevation(&mut self, outcome: Result<i32, ElevateRefusal>) {
+    pub fn adopt_elevation(&mut self, outcome: Elevated) {
         match outcome {
-            Ok(0) => {
+            Elevated::Finished(0) => {
                 self.asking = None;
                 // The store has moved, so what is in effect is no longer
                 // what this window read: ask for it again rather than
@@ -1218,13 +1255,29 @@ impl Shell {
                     band.state(Standing::Applied);
                 }
             }
-            Ok(_) => self.refuse(String::from(
+            Elevated::Finished(_) => self.refuse(String::from(
                 "The command ran but did not accept the change.",
             )),
-            Err(ElevateRefusal::Credentials) => {
+            Elevated::Printed(0, output) => {
+                self.asking = None;
+                self.network.addressing = Addressing::from_listing(&output);
+                self.restate_body();
+            }
+            Elevated::Printed(..) => self.refuse(String::from(
+                "The command ran but could not read the configuration.",
+            )),
+            // The run happened; the reply could not carry what it printed.
+            // Stated in the pane rather than as a refusal of the question,
+            // because asking again would answer the same.
+            Elevated::Overran => {
+                self.asking = None;
+                self.network.addressing = Addressing::Overran;
+                self.restate_body();
+            }
+            Elevated::Refused(ElevateRefusal::Credentials) => {
                 self.refuse(String::from(CREDENTIAL_REFUSED_REASON));
             }
-            Err(ElevateRefusal::NotRun(reason)) => self.refuse(reason),
+            Elevated::Refused(ElevateRefusal::NotRun(reason)) => self.refuse(reason),
         }
     }
 
@@ -1284,23 +1337,34 @@ impl Shell {
         let Some(pane) = self.pane_row() else {
             return;
         };
-        let asking = if pane.content() == Some(PaneContent::Clock) {
-            Asking {
+        let asking = match pane.content() {
+            Some(PaneContent::Clock) => Asking {
                 sheet: CredentialSheet::new(ASK_TITLE, SET_CLOCK_PURPOSE),
                 program: DATETIME_RUN_PATH,
                 argv: Vec::new(),
-                wait: false,
-            }
-        } else {
-            let argv = self.body.form().map(configure_argv).unwrap_or_default();
-            if argv.is_empty() {
-                return;
-            }
-            Asking {
-                sheet: CredentialSheet::new(ASK_TITLE, SET_MACHINE_PURPOSE),
+                mode: RunMode::Leave,
+            },
+            // A read, not a write: the same tool, run with no operand, and
+            // what it prints is the answer. This application may not read
+            // that store itself and never will, so the authenticated run
+            // is the only way the pane can state it.
+            Some(PaneContent::Ethernet) => Asking {
+                sheet: CredentialSheet::new(ASK_TITLE, SHOW_ADDRESSING_PURPOSE),
                 program: CONFIGURE_RUN_PATH,
-                argv,
-                wait: true,
+                argv: Vec::new(),
+                mode: RunMode::Capture,
+            },
+            _ => {
+                let argv = self.body.form().map(configure_argv).unwrap_or_default();
+                if argv.is_empty() {
+                    return;
+                }
+                Asking {
+                    sheet: CredentialSheet::new(ASK_TITLE, SET_MACHINE_PURPOSE),
+                    program: CONFIGURE_RUN_PATH,
+                    argv,
+                    mode: RunMode::Wait,
+                }
             }
         };
         self.asking = Some(asking);
@@ -1874,6 +1938,12 @@ const SET_MACHINE_PURPOSE: &str =
 
 /// What the question says the clock needs an account for.
 const SET_CLOCK_PURPOSE: &str = "Setting the date and time needs an account that may.";
+
+/// What the question says reading the machine's addressing needs an
+/// account for.
+const SHOW_ADDRESSING_PURPOSE: &str =
+    "This machine's network addressing names its hardware and its addresses, so reading it needs \
+     an account that may.";
 
 /// The tool that owns the machine's boot-time configuration store, which is
 /// the only thing that writes it.

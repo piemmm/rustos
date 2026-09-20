@@ -291,7 +291,7 @@ impl LightBuffer {
     fn prepare(&self, scratch: &mut [Lit], row: u32) {
         let step = pixel_span(self.shift);
         let near = (row / step).min(self.height.saturating_sub(2));
-        let t = fraction(row % step, step);
+        let t = fraction(row % step, self.shift);
         let width = self.width as usize;
         let near_base = (near as usize) * width;
         for (x, slot) in scratch.iter_mut().enumerate().take(width) {
@@ -312,18 +312,24 @@ impl LightBuffer {
             return;
         }
         self.prepare(scratch, row);
-        let step = pixel_span(self.shift);
+        let step = pixel_span(self.shift) as usize;
         let last = self.scratch_len() - 1;
-        for (x, pixel) in dst.iter_mut().enumerate() {
-            let x = u32::try_from(x).unwrap_or(u32::MAX);
-            let near = usize::try_from(x / step).unwrap_or(last).min(last);
+        // Walked in texel-wide runs rather than by pixel index: a run
+        // boundary is exactly where the index division and modulo used to
+        // fall, so neither survives into a loop the whole frame goes
+        // through, and the two texels a run interpolates are read once.
+        for (near, run) in dst.chunks_mut(step).enumerate() {
+            let near = near.min(last);
             let far = (near + 1).min(last);
-            let t = fraction(x % step, step);
-            let lit = Lit {
-                gain: palette::lerp(scratch[near].gain, scratch[far].gain, t),
-                mist: lerp_u8(scratch[near].mist, scratch[far].mist, t),
-            };
-            *pixel = apply(*pixel, lit, sky);
+            let (near, far) = (scratch[near], scratch[far]);
+            for (within, pixel) in run.iter_mut().enumerate() {
+                let t = fraction(u32::try_from(within).unwrap_or(u32::MAX), self.shift);
+                let lit = Lit {
+                    gain: palette::lerp(near.gain, far.gain, t),
+                    mist: lerp_u8(near.mist, far.mist, t),
+                };
+                *pixel = apply(*pixel, lit, sky);
+            }
         }
     }
 }
@@ -449,9 +455,15 @@ fn pixel_span(shift: u32) -> u32 {
     1u32 << shift.min(16)
 }
 
-/// Where within a texel a pixel sits, out of 255.
-fn fraction(within: u32, span: u32) -> u8 {
-    u8::try_from(within.saturating_mul(255) / span.max(1)).unwrap_or(u8::MAX)
+/// Where within a texel a pixel sits, out of 255, for a texel span of
+/// `1 << shift` ([`pixel_span`]).
+///
+/// Scaled by a shift rather than a division because the span is a power
+/// of two by construction and this runs once per pixel of the frame — a
+/// divisor the compiler cannot see is constant costs more here than the
+/// interpolation it feeds.
+fn fraction(within: u32, shift: u32) -> u8 {
+    u8::try_from(within.saturating_mul(255) >> shift.min(16)).unwrap_or(u8::MAX)
 }
 
 /// A texel or pixel index as the signed offset the projection multiplies.

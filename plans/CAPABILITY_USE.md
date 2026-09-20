@@ -591,19 +591,51 @@ exist from CU3).
   table — joined to the wait-set it already parks in, under its own
   token — and reaps it non-blockingly on the wake its exit produces; the
   requester never can, and no launch leaves a zombie.
+- The same rendezvous also serves an **elevated-read** request: the
+  identical re-authentication, signed load gate, run-as-uid and audit as
+  the run form, but the child's standard output is bound to a pipe the
+  broker owns rather than the caller's console, and the reply carries the
+  drained bytes beside the exit code. It exists because a caller may need
+  to *show* a store no unprivileged principal may read — the desktop
+  Settings application's Ethernet pane is the first, stating the machine's
+  configured addressing that `CAP_SYSINFO_HW` and `CAP_SYSINFO_GLOBAL`
+  otherwise keep from it. It is a separate request form rather than a flag
+  on the run form because relaying a program's output to an unprivileged
+  caller is a new information flow and is meant to be visible as one at the
+  call site. What it relays is attacker-influenced by construction — the
+  caller chooses the program and the argv — but it widens no authority: the
+  caller must still offer the target account's password, and an account
+  that can be re-authenticated could already be given a shell through the
+  launch form, so the bound is on the *volume* of relayed bytes, not on
+  their secrecy. The child's standard input is closed (a run nobody can see
+  is not prompting) and its `stderr` stays login's console. The relay is
+  capped at `ELEVATE_MAX_OUTPUT` (4 KiB — a fixed containment bound, sized
+  from the widest listing the consumer asks for, not a capacity), and a run
+  that prints more is answered `Overran` with **no** bytes rather than a
+  prefix that could be read as the whole. The broker drains the pipe to end
+  of stream *before* it reaps, because a child that fills the pipe blocks
+  until it is emptied. The audit records that output was returned and how
+  much, never what it was — the same reasoning as the argument count.
 - Wire contract: `lib/abi/src/elevate.rs` — `ElevateRequest` is a
-  three-variant enum (`Run { username, password, program }` /
-  `Verify { password }` / `Launch { username, password, program }`, an
-  opcode byte after the version word; `Run` and `Launch` share one
-  encode/decode arm so their shape cannot drift) and `ElevateReply` is a
-  four-variant enum (`Completed { exit_code }` / `Verified` /
-  `Launched { pid }` / `Refused(Errno)`, encoded as a result-discriminant
-  word — `0` completed, `1` verified, `2` launched, negative `-errno`
-  refused — plus a second word carrying the exit code, the pid, or zero,
-  so the reply length is unchanged); both decode fail-closed (wrong
-  version, unknown opcode/status, a negative pid,
-  over-long buffer, a field past the end, non-UTF-8, an empty field,
-  trailing bytes). The per-console rendezvous
+  four-variant enum (`Run { username, password, program, argv }` /
+  `Verify { password }` / `Launch { username, password, program }` /
+  `Capture { username, password, program, argv }`, an opcode byte after the
+  version word; `Run`, `Capture` and `Launch` share one encode/decode arm so
+  their shape cannot drift) and `ElevateReply<'_>` is a six-variant enum
+  (`Completed { exit_code }` / `Verified` / `Launched { pid }` /
+  `Captured { exit_code, output }` / `Overran { exit_code }` /
+  `Refused(Errno)`, encoded as a result-discriminant word — `0` completed,
+  `1` verified, `2` launched, `3` captured, `4` overran, negative `-errno`
+  refused — plus a second word carrying the exit code, the pid, or zero).
+  Every reply but the captured one is exactly that fixed head; a captured
+  one appends a `u32` length and that many bytes, so a reply that relays
+  nothing costs nothing to copy and `ELEVATE_MAX_REPLY` is the endpoint's
+  ceiling rather than every frame's size. The reply borrows the buffer it
+  was decoded from, because `lib/abi` has no allocator to own the output
+  with. Both decode fail-closed (wrong version, unknown opcode/status, a
+  negative pid, an output region longer than the bound or disagreeing with
+  its length word, over-long buffer, a field past the end, non-UTF-8, an
+  empty field, trailing bytes). The per-console rendezvous
   `elevate_endpoint(console) = ELEVATE_ENDPOINT_BASE + console` refuses the
   "no console" sentinel. Both ends derive the endpoint from their **own**
   kernel-attested `Origin::console` (never a claim), and the supervisor

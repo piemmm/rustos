@@ -45,10 +45,10 @@ mod program {
     use core::cell::Cell;
 
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
-    use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest};
+    use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
-    use tairix_abi::net_ipc::MAX_RESOLVER_SERVERS;
+    use tairix_abi::net_ipc::{NetServerAddr, MAX_RESOLVER_SERVERS};
     use tairix_abi::pinboard_ipc::PinboardDocument;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowSizing};
@@ -60,7 +60,7 @@ mod program {
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{
-        ElevateRefusal, Elevation, MachineFacts, NetworkFacts, Pane, Shell, ShellOutcome,
+        ElevateRefusal, Elevated, Elevation, MachineFacts, Pane, RunMode, Shell, ShellOutcome,
         VolumeReading,
     };
     use tairix_sysconfig::SystemConfig;
@@ -212,14 +212,14 @@ mod program {
     /// Carried out on a worker thread because it is a paged IPC round trip
     /// like the mount walk, and a window that waited on it would stop
     /// answering for as long as the service took.
-    type Network = tairix_rt::work::Worker<(), (), NetworkFacts>;
+    type Network = tairix_rt::work::Worker<(), (), Option<Vec<NetServerAddr>>>;
 
     /// The network readings' body.
     ///
     /// A refused or undecodable walk leaves the set absent rather than
     /// empty: "no server answered the question" and "the stack holds no
     /// server" are different facts, and the pane states which it has.
-    fn read_network(_: &mut (), (): &mut ()) -> NetworkFacts {
+    fn read_network(_: &mut (), (): &mut ()) -> Option<Vec<NetServerAddr>> {
         let mut resolvers = Vec::with_capacity(MAX_RESOLVER_SERVERS);
         match tairix_procinfo::for_each_resolver_server(&IpcTransport, |record| {
             resolvers.push(*record);
@@ -231,15 +231,13 @@ mod program {
             }
             Ok(tairix_procinfo::WalkStep::Continue)
         }) {
-            Ok(()) => NetworkFacts {
-                resolvers: Some(resolvers),
-            },
+            Ok(()) => Some(resolvers),
             Err(err) => {
                 let _ = writeln!(
                     Stderr,
                     "settings: the name servers could not be read ({err:?}); the pane says so"
                 );
-                NetworkFacts { resolvers: None }
+                None
             }
         }
     }
@@ -276,7 +274,7 @@ mod program {
     /// as long as an authentication and a store write take. The loop
     /// submits and collects the answer on the wake it nudges, so the window
     /// keeps drawing throughout.
-    type Elevator = tairix_rt::work::Worker<(), Elevation, Result<i32, ElevateRefusal>>;
+    type Elevator = tairix_rt::work::Worker<(), Elevation, Elevated>;
 
     /// The elevated run's body: one posted request, one verdict.
     ///
@@ -284,7 +282,7 @@ mod program {
     /// whichever way it went: the request it was encoded into is erased by
     /// the runtime's own wiped buffer, and the copy this desk was handed is
     /// erased here.
-    fn send_elevate(_: &mut (), asked: &mut Elevation) -> Result<i32, ElevateRefusal> {
+    fn send_elevate(_: &mut (), asked: &mut Elevation) -> Elevated {
         let argv: Vec<&str> = asked.argv.iter().map(String::as_str).collect();
         let verdict = elevate_once(asked, &argv);
         // Before the desk's own drop, because it keeps the job it was
@@ -294,47 +292,57 @@ mod program {
     }
 
     /// Post one elevation request and turn the reply into a verdict.
-    fn elevate_once(asked: &Elevation, argv: &[&str]) -> Result<i32, ElevateRefusal> {
+    fn elevate_once(asked: &Elevation, argv: &[&str]) -> Elevated {
         // A secret that is not text was never one the broker could check,
         // so it is refused here rather than put on the wire.
         let Ok(password) = core::str::from_utf8(&asked.password) else {
-            return Err(ElevateRefusal::Credentials);
+            return Elevated::Refused(ElevateRefusal::Credentials);
         };
-        let request = if asked.wait {
-            ElevateRequest::Run {
+        let Ok(carried) = ElevateArgv::new(argv) else {
+            return Elevated::Refused(ElevateRefusal::NotRun(String::from(
+                "That is more than one command can carry.",
+            )));
+        };
+        let request = match asked.mode {
+            RunMode::Wait => ElevateRequest::Run {
                 username: &asked.account,
                 password,
                 program: asked.program,
-                argv: match ElevateArgv::new(argv) {
-                    Ok(argv) => argv,
-                    Err(_) => {
-                        return Err(ElevateRefusal::NotRun(String::from(
-                            "That is more than one command can carry.",
-                        )))
-                    }
-                },
-            }
-        } else {
-            ElevateRequest::Launch {
+                argv: carried,
+            },
+            RunMode::Capture => ElevateRequest::Capture {
                 username: &asked.account,
                 password,
                 program: asked.program,
-            }
+                argv: carried,
+            },
+            RunMode::Leave => ElevateRequest::Launch {
+                username: &asked.account,
+                password,
+                program: asked.program,
+            },
         };
-        match tairix_rt::elevate(&request) {
-            Ok(ElevateReply::Completed { exit_code }) => Ok(exit_code),
+        let mut reply = [0u8; ELEVATE_MAX_REPLY];
+        match tairix_rt::elevate(&request, &mut reply) {
+            Ok(ElevateReply::Completed { exit_code }) => Elevated::Finished(exit_code),
+            Ok(ElevateReply::Captured { exit_code, output }) => {
+                Elevated::Printed(exit_code, output.to_vec())
+            }
+            Ok(ElevateReply::Overran { .. }) => Elevated::Overran,
             // A launch is started and left running; there is no exit code
             // to wait for and none is invented.
-            Ok(ElevateReply::Launched { .. }) => Ok(0),
-            Ok(ElevateReply::Refused(Errno::PermissionDenied)) => Err(ElevateRefusal::Credentials),
-            Ok(ElevateReply::Refused(err)) => Err(ElevateRefusal::NotRun(alloc::format!(
-                "The account was accepted, but nothing ran ({err})."
-            ))),
+            Ok(ElevateReply::Launched { .. }) => Elevated::Finished(0),
+            Ok(ElevateReply::Refused(Errno::PermissionDenied)) => {
+                Elevated::Refused(ElevateRefusal::Credentials)
+            }
+            Ok(ElevateReply::Refused(err)) => Elevated::Refused(ElevateRefusal::NotRun(
+                alloc::format!("The account was accepted, but nothing ran ({err})."),
+            )),
             // A reply to a request this program did not send: nothing ran
             // on an answer it does not understand.
-            Ok(ElevateReply::Verified) | Err(_) => Err(ElevateRefusal::NotRun(String::from(
-                "This console has no way to ask for an account.",
-            ))),
+            Ok(ElevateReply::Verified) | Err(_) => Elevated::Refused(ElevateRefusal::NotRun(
+                String::from("This console has no way to ask for an account."),
+            )),
         }
     }
 
@@ -459,7 +467,7 @@ mod program {
                 return false;
             };
             self.pending = false;
-            shell.adopt_network(facts);
+            shell.adopt_resolvers(facts);
             true
         }
     }
@@ -483,10 +491,7 @@ mod program {
 
     /// Ask the console's broker to run what an offered account authorises,
     /// off the event loop.
-    fn submit_elevate(
-        elevator: &Elevator,
-        asked: Elevation,
-    ) -> Option<Result<i32, ElevateRefusal>> {
+    fn submit_elevate(elevator: &Elevator, asked: Elevation) -> Option<Elevated> {
         // With no worker the call was made on this thread and its answer is
         // already on the desk.
         if elevator.submit(asked) {

@@ -64,7 +64,13 @@ impl FastHash {
     }
 
     /// Hash one slice under `seed`.
+    ///
+    /// Inlined because the callers that matter hash a small fixed-size key
+    /// — a lattice coordinate, a table probe — where folding the length at
+    /// the call site turns the chunk walk into a couple of rounds and
+    /// removes the slice iteration entirely.
     #[must_use]
+    #[inline]
     pub fn hash_bytes(seed: u64, bytes: &[u8]) -> u64 {
         let (stripes, tail) = bytes.as_chunks::<STRIPE>();
         let mut acc = lanes(seed);

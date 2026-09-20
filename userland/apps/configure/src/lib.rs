@@ -10,6 +10,16 @@
 //! engine — the same engine every boot-time consumer reads through, so this
 //! writer and those readers can never diverge.
 //!
+//! # Two registries, one command line
+//!
+//! A key name resolves against the flat `lib/sysconfig` registry first and,
+//! failing that, against the per-interface `<iface>.<suffix>` registry of
+//! the network store at `/System/Settings/Network/network.conf`
+//! (`tairix_netconfig::CONFIG_PATH`). The flat registry always wins, so no
+//! interface alias can ever shadow a machine setting — and the two name
+//! sets are pinned disjoint by a test over both registries rather than left
+//! to the accident that none collides today.
+//!
 //! # What this crate is
 //!
 //! The pure, host-testable core of the tool: the [`parse`]r that maps a
@@ -57,6 +67,7 @@ use core::fmt;
 use tairix_abi::net_ipc::NetworkSettings;
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_netconfig::{IfaceKey, NetworkConfig};
 use tairix_sysconfig::{Key, SystemConfig, ValueShape};
 
 /// The usage banner a usage error is reported with, and the fallback the
@@ -108,6 +119,12 @@ pub enum ConfigureError {
     Malformed(tairix_sysconfig::ConfigError),
     /// The store could not be read.
     Read(Errno),
+    /// The network store could not be read.
+    NetworkRead(Errno),
+    /// The network store document could not be fully parsed by the shared
+    /// engine; a listing reports the malformation rather than showing a
+    /// document it did not understand.
+    NetworkMalformed(tairix_netconfig::ParseError),
     /// The store could not be written (e.g. the caller may not change
     /// system settings).
     Write(Errno),
@@ -134,6 +151,10 @@ impl fmt::Display for ConfigureError {
             },
             Self::Malformed(err) => write!(f, "store not understood: {err}"),
             Self::Read(err) => write!(f, "cannot read the store: {err}"),
+            Self::NetworkRead(err) => write!(f, "cannot read the network store: {err}"),
+            Self::NetworkMalformed(err) => {
+                write!(f, "network store not understood: {err}")
+            }
             Self::Write(err) => write!(f, "cannot write the store: {err}"),
             Self::Output(err) => write!(f, "cannot write output: {err}"),
         }
@@ -164,6 +185,25 @@ pub trait Store {
     /// [`Errno::PermissionDenied`] when the caller may not change system
     /// settings.
     fn write(&self, text: &str) -> Result<(), Errno>;
+}
+
+/// Reads the per-interface network-configuration document.
+///
+/// Separate from [`Store`] because it is a different document with a
+/// different engine (`lib/netconfig`), not a second view of the same one.
+/// The `Run` binary wires the syscall-backed file at
+/// `tairix_netconfig::CONFIG_PATH`; tests wire an in-memory fixture.
+pub trait NetworkStore {
+    /// Read the whole network document, or `None` when none exists yet (no
+    /// managed interfaces — the engine's own default).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises other than absence — notably
+    /// [`Errno::PermissionDenied`], since the document carries each
+    /// interface's hardware identity and this machine's static addressing
+    /// and is not world-readable.
+    fn read(&self) -> Result<Option<String>, Errno>;
 }
 
 /// Applies the stack-wide `net.*` policy to the running network stack.
@@ -245,10 +285,12 @@ pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, ConfigureError> {
 ///
 /// The [`ConfigureError`] naming the refusal; nothing was changed and
 /// nothing partial was written.
+#[allow(clippy::too_many_arguments)] // Each seam is injected separately so every branch stays host-testable.
 pub fn run(
     command: Command<'_>,
     locale: Option<&str>,
     store: &dyn Store,
+    network: &dyn NetworkStore,
     policy: &dyn NetPolicy,
     help: &dyn HelpSource,
     output: &dyn Output,
@@ -272,14 +314,40 @@ pub fn run(
                 text.push_str(&config.render_value(*key));
                 text.push('\n');
             }
+            // Then every per-interface key the network store actually
+            // holds. Only the set ones: that document has no defaults to
+            // print, and a wall of unset keys would say nothing.
+            for iface in load_network(network)?.interfaces() {
+                for key in IfaceKey::ALL {
+                    if let Some(value) = iface.render_value(*key) {
+                        text.push_str(&iface.name);
+                        text.push('.');
+                        text.push_str(key.name());
+                        text.push(' ');
+                        text.push_str(&value);
+                        text.push('\n');
+                    }
+                }
+            }
             output
                 .write_all(text.as_bytes())
                 .map_err(ConfigureError::Output)
         }
         Command::Show(name) => {
-            let key = Key::from_name(name).ok_or(ConfigureError::UnknownKey)?;
-            let config = load(store)?;
-            let text = format!("{}\n", config.render_value(key));
+            let text = match resolve(name)? {
+                Named::System(key) => format!("{}\n", load(store)?.render_value(key)),
+                // An unset per-interface key has no value to show: the
+                // document holds only what was written, so the answer is
+                // the empty one rather than a default this registry does
+                // not have.
+                Named::Interface(iface, key) => format!(
+                    "{}\n",
+                    load_network(network)?
+                        .interface(iface)
+                        .and_then(|found| found.render_value(key))
+                        .unwrap_or_default()
+                ),
+            };
             output
                 .write_all(text.as_bytes())
                 .map_err(ConfigureError::Output)
@@ -345,6 +413,50 @@ fn deferred_notice(keys: &[Key], err: Errno) -> String {
     )
 }
 
+/// Which registry a key name on the command line belongs to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Named<'a> {
+    /// A key of the flat machine-configuration registry.
+    System(Key),
+    /// An interface alias and a key of the per-interface registry.
+    Interface(&'a str, IfaceKey),
+}
+
+/// Resolve a key name against the two registries, flat one first.
+///
+/// The order is what makes a machine setting unshadowable: an interface
+/// alias is operator-chosen text, so a store that named one `net` must
+/// still never take `net.ipv4.enabled` away from the machine registry.
+///
+/// # Errors
+///
+/// [`ConfigureError::UnknownKey`] when the name is in neither registry.
+fn resolve(name: &str) -> Result<Named<'_>, ConfigureError> {
+    if let Some(key) = Key::from_name(name) {
+        return Ok(Named::System(key));
+    }
+    let (iface, suffix) = name.split_once('.').ok_or(ConfigureError::UnknownKey)?;
+    // The alias grammar is the engine's, not a second copy of it here.
+    if !tairix_netconfig::valid_iface_name(iface) {
+        return Err(ConfigureError::UnknownKey);
+    }
+    let key = IfaceKey::from_name(suffix).ok_or(ConfigureError::UnknownKey)?;
+    Ok(Named::Interface(iface, key))
+}
+
+/// Read and parse the current network store, or the empty configuration
+/// when none exists.
+///
+/// A document the shared engine cannot fully parse is a
+/// [`ConfigureError::NetworkMalformed`] refusal, for the same reason the
+/// machine store's is: this tool never guesses at a partial intent.
+fn load_network(store: &dyn NetworkStore) -> Result<NetworkConfig, ConfigureError> {
+    match store.read().map_err(ConfigureError::NetworkRead)? {
+        Some(text) => NetworkConfig::parse(&text).map_err(ConfigureError::NetworkMalformed),
+        None => Ok(NetworkConfig::default()),
+    }
+}
+
 /// Read and parse the current store, or the defaults when none exists.
 ///
 /// A document the shared engine cannot fully parse is a
@@ -372,7 +484,9 @@ mod tests {
     use tairix_help::HelpSource;
     use tairix_sysconfig::{Key, SystemConfig};
 
-    use super::{parse, run, Command, ConfigureError, NetPolicy, Output, Store, USAGE};
+    use super::{
+        parse, run, Command, ConfigureError, NetPolicy, NetworkStore, Output, Store, USAGE,
+    };
 
     /// An in-memory store fixture: `None` models the fresh installation.
     struct MemStore {
@@ -405,6 +519,45 @@ mod tests {
             }
             *self.text.borrow_mut() = Some(text.to_string());
             Ok(())
+        }
+    }
+
+    /// An in-memory network store fixture: `None` models "no managed
+    /// interfaces", which is what an absent document means.
+    struct MemNetStore {
+        text: Option<String>,
+        read_err: Option<Errno>,
+    }
+
+    impl MemNetStore {
+        fn empty() -> Self {
+            Self {
+                text: None,
+                read_err: None,
+            }
+        }
+
+        fn holding(text: &str) -> Self {
+            Self {
+                text: Some(String::from(text)),
+                read_err: None,
+            }
+        }
+
+        fn refusing(err: Errno) -> Self {
+            Self {
+                text: None,
+                read_err: Some(err),
+            }
+        }
+    }
+
+    impl NetworkStore for MemNetStore {
+        fn read(&self) -> Result<Option<String>, Errno> {
+            match self.read_err {
+                Some(err) => Err(err),
+                None => Ok(self.text.clone()),
+            }
         }
     }
 
@@ -504,6 +657,7 @@ mod tests {
             Command::List,
             None,
             &store,
+            &MemNetStore::empty(),
             &MemPolicy::accepting(),
             &NoHelp,
             &output,
@@ -539,6 +693,7 @@ mod tests {
             Command::Show("os.loginType"),
             None,
             &store,
+            &MemNetStore::empty(),
             &MemPolicy::accepting(),
             &NoHelp,
             &output,
@@ -557,6 +712,7 @@ mod tests {
             Command::Set(alloc::vec![("os.loginType", "graphical")]),
             None,
             &store,
+            &MemNetStore::empty(),
             &MemPolicy::accepting(),
             &NoHelp,
             &output,
@@ -581,6 +737,7 @@ mod tests {
             Command::Set(alloc::vec![("net.tcp.ecn", "true")]),
             None,
             &store,
+            &MemNetStore::empty(),
             &policy,
             &NoHelp,
             &output,
@@ -609,6 +766,7 @@ mod tests {
             Command::Set(alloc::vec![("os.loginType", "text")]),
             None,
             &store,
+            &MemNetStore::empty(),
             &policy,
             &NoHelp,
             &output,
@@ -633,6 +791,7 @@ mod tests {
             Command::Set(alloc::vec![("net.ipv6.privacy", "true")]),
             None,
             &store,
+            &MemNetStore::empty(),
             &policy,
             &NoHelp,
             &output,
@@ -666,6 +825,7 @@ mod tests {
                 Command::Set(alloc::vec![("os.frob", "on")]),
                 None,
                 &store,
+                &MemNetStore::empty(),
                 &MemPolicy::accepting(),
                 &NoHelp,
                 &output,
@@ -689,6 +849,7 @@ mod tests {
             Command::Set(alloc::vec![("os.loginType", "desktop")]),
             None,
             &store,
+            &MemNetStore::empty(),
             &MemPolicy::accepting(),
             &NoHelp,
             &output,
@@ -712,6 +873,7 @@ mod tests {
             Command::Set(alloc::vec![("os.loginType", "text")]),
             None,
             &store,
+            &MemNetStore::empty(),
             &MemPolicy::accepting(),
             &NoHelp,
             &output,
@@ -737,6 +899,7 @@ mod tests {
                 Command::List,
                 None,
                 &store,
+                &MemNetStore::empty(),
                 &MemPolicy::accepting(),
                 &NoHelp,
                 &output,
@@ -752,6 +915,7 @@ mod tests {
                 Command::Set(alloc::vec![("os.loginType", "graphical")]),
                 None,
                 &store,
+                &MemNetStore::empty(),
                 &MemPolicy::accepting(),
                 &NoHelp,
                 &output,
@@ -770,6 +934,7 @@ mod tests {
             Command::Help,
             None,
             &store,
+            &MemNetStore::empty(),
             &MemPolicy::accepting(),
             &NoHelp,
             &output,
@@ -823,6 +988,7 @@ mod tests {
             ]),
             None,
             &store,
+            &MemNetStore::empty(),
             &MemPolicy::accepting(),
             &NoHelp,
             &out,
@@ -849,6 +1015,7 @@ mod tests {
                 command,
                 None,
                 &store,
+                &MemNetStore::empty(),
                 &MemPolicy::accepting(),
                 &NoHelp,
                 &MemOutput::default(),
@@ -860,6 +1027,150 @@ mod tests {
                 Some("os.loginType graphical\n")
             );
         }
+    }
+
+    /// One managed interface, spelled the way the store holds it.
+    const ONE_INTERFACE: &str = "wan.kind ethernet\n\
+         wan.match.mac 02:00:00:00:00:01\n\
+         wan.ipv4.method static\n\
+         wan.ipv4.address 10.0.0.7/24\n\
+         wan.ipv4.gateway 10.0.0.1\n";
+
+    #[test]
+    fn list_states_both_registries_flat_first() {
+        let output = MemOutput::default();
+        run(
+            Command::List,
+            None,
+            &MemStore::new(None),
+            &MemNetStore::holding(ONE_INTERFACE),
+            &MemPolicy::accepting(),
+            &NoHelp,
+            &output,
+            &MemOutput::default(),
+        )
+        .expect("lists");
+        let text = output.text();
+        let (flat, interfaces) = text
+            .split_once("wan.kind")
+            .expect("the per-interface lines follow the flat registry");
+        // Every flat key, defaults included, and no interface line among
+        // them.
+        for key in Key::ALL {
+            assert!(flat.contains(key.name()), "{} missing: {flat}", key.name());
+        }
+        assert!(!flat.contains("wan."), "an interface line came first");
+        // Then only the keys the document actually holds — that registry
+        // has no defaults to print.
+        assert!(
+            interfaces.contains("wan.ipv4.address 10.0.0.7/24"),
+            "{interfaces}"
+        );
+        assert!(!interfaces.contains("wan.mtu"), "an unset key was printed");
+    }
+
+    #[test]
+    fn show_reads_a_per_interface_key_and_answers_nothing_for_an_unset_one() {
+        for (key, want) in [
+            ("wan.ipv4.address", "10.0.0.7/24\n"),
+            ("wan.kind", "ethernet\n"),
+            // Unset, and on a declared interface: the document holds only
+            // what was written, so there is no value and none is invented.
+            ("wan.mtu", "\n"),
+            // An interface the document never declared, likewise.
+            ("lan0.ipv4.address", "\n"),
+        ] {
+            let output = MemOutput::default();
+            run(
+                Command::Show(key),
+                None,
+                &MemStore::new(None),
+                &MemNetStore::holding(ONE_INTERFACE),
+                &MemPolicy::accepting(),
+                &NoHelp,
+                &output,
+                &MemOutput::default(),
+            )
+            .expect("shows");
+            assert_eq!(output.text(), want, "{key}");
+        }
+    }
+
+    #[test]
+    fn a_name_in_neither_registry_is_refused() {
+        for key in ["wan.nonsense", "nonsense", "wan..kind", ".kind"] {
+            assert_eq!(
+                run(
+                    Command::Show(key),
+                    None,
+                    &MemStore::new(None),
+                    &MemNetStore::holding(ONE_INTERFACE),
+                    &MemPolicy::accepting(),
+                    &NoHelp,
+                    &MemOutput::default(),
+                    &MemOutput::default(),
+                ),
+                Err(ConfigureError::UnknownKey),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_registries_name_nothing_in_common() {
+        // An interface alias is operator-chosen text, so `net` is a legal
+        // one and `net.<suffix>` could in principle collide with a machine
+        // key. Pinned here rather than left to the accident that none does
+        // today: a new key on either side that collided would be resolved
+        // by the flat registry and the interface key made unreachable.
+        for key in Key::ALL {
+            let Some((iface, suffix)) = key.name().split_once('.') else {
+                continue;
+            };
+            assert!(
+                tairix_netconfig::IfaceKey::from_name(suffix).is_none()
+                    || !tairix_netconfig::valid_iface_name(iface),
+                "{} reads as an interface key too",
+                key.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_or_malformed_network_store_fails_closed_and_says_which() {
+        let refused = run(
+            Command::List,
+            None,
+            &MemStore::new(None),
+            &MemNetStore::refusing(Errno::PermissionDenied),
+            &MemPolicy::accepting(),
+            &NoHelp,
+            &MemOutput::default(),
+            &MemOutput::default(),
+        );
+        assert_eq!(
+            refused,
+            Err(ConfigureError::NetworkRead(Errno::PermissionDenied))
+        );
+        assert_eq!(
+            format!("{}", refused.expect_err("refused")),
+            "cannot read the network store: permission denied"
+        );
+
+        let malformed = run(
+            Command::Show("wan.mtu"),
+            None,
+            &MemStore::new(None),
+            &MemNetStore::holding("wan.nonsense 1\n"),
+            &MemPolicy::accepting(),
+            &NoHelp,
+            &MemOutput::default(),
+            &MemOutput::default(),
+        );
+        assert!(matches!(
+            malformed,
+            Err(ConfigureError::NetworkMalformed(_))
+        ));
     }
 
     #[test]
@@ -882,6 +1193,7 @@ mod tests {
                 command,
                 None,
                 &MemStore::new(None),
+                &MemNetStore::empty(),
                 &MemPolicy::accepting(),
                 &NoHelp,
                 &MemOutput::default(),

@@ -499,14 +499,45 @@ the tiled frame, the pacing, the input drain, the size-state model, the budget
 governor and the frame digest; the `[[bin]]` is the bundle's `Run` and only
 composes them. What a later item needs to know:
 
-- **The frame budget was measured, and it holds.** At 1280×720 on four
-  threads: terrain **4.1 ms** against its 5.0 ms allocation (81%), light
-  **1.7 ms** against 2.0 ms (87%), 5.8 ms of drawing in a 16.6 ms frame, a
-  3.49× speedup over one thread. The number this plan called "the single most
-  likely to be wrong" is right. `tests/budget.rs` is the measurement and
-  prints it; it asserts the *frame*-level claim rather than each pass's own
-  allocation, because the host is not the reference machine and a per-pass
-  assertion there would be measuring the machine.
+- **The frame budget was measured, and it holds on the reference machine.**
+  At 1280×720 on four threads: terrain **4.1 ms** against its 5.0 ms
+  allocation (81%), light **1.7 ms** against 2.0 ms (87%), 5.8 ms of drawing
+  in a 16.6 ms frame, a 3.49× speedup over one thread. The number this plan
+  called "the single most likely to be wrong" is right. `tests/budget.rs` is
+  the measurement and prints it; it asserts the *frame*-level claim rather
+  than each pass's own allocation, because the host is not the reference
+  machine and a per-pass assertion there would be measuring the machine.
+  - **Open: the frame assertion cannot hold under a parallel workspace run,
+    whatever the renderer costs.** It takes a wall-clock reading over a
+    four-thread runner while `cargo test --workspace` has ~20 other test
+    binaries on the same cores, so the figure it asserts against is a
+    property of what else is running. On a development host about 2.5×
+    slower per core (and reaching a 2.5× thread speedup, not 3.49×) it
+    measures terrain ~9.7 ms and light ~5.1 ms — roughly 2× and 2.5× their
+    allocations — for ~15 ms of drawing in the 16.6 ms frame: it passes run
+    alone, with ~20% variance, and fails in the suite. That is the
+    load-dependent wall-clock assertion the charter names, so it is a
+    defect in the *instrument* as well as a renderer that is over budget on
+    a slower machine, and re-running until it passes settles neither.
+    Settling it means one of: normalising against a reference the
+    measurement takes itself, asserting the shape the module doc already
+    describes while tracking the absolute figure outside the gate, or
+    holding the budget on the slower host with the suite loading it.
+  - **Three output-identical optimisations have already been taken**, so
+    they are not re-derived: `FastHash::hash_bytes` is `#[inline]` (the
+    noise lattice hashes a fixed 16-byte key, and folding the length at the
+    call site removes the slice walk — the hash was ~18% of the whole
+    profile); the blend's three per-pixel channel divisions are an exact
+    reciprocal table over the bounded divisor, proven exhaustively by
+    `reciprocals_are_exact`; and `shade` skips the texel fetch for any slot
+    whose weight is too far under the heaviest to reach the blend floor
+    however tall its relief, proven by
+    `a_skipped_slot_could_not_have_reached_the_floor`. The light pass's
+    composite walks texel-wide runs instead of dividing per pixel. What
+    remains is the noise: the warp's four lattice corners are re-hashed per
+    span, and adjacent spans in a row share a warp cell, so memoising the
+    corners is the next real gain and the one that needs a design — the
+    field is read through `&Warp` from every worker.
   - The light pass was **53% over budget** on its first measurement, entirely
     because its buffer was shaded on the calling thread while only the
     composite was distributed. Shading its texel rows through the same runner

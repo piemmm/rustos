@@ -39,8 +39,9 @@ mod program {
     use tairix_abi::net_ipc::{NetstackRequest, NetworkSettings, NETSTACK_ENDPOINT};
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::Errno;
-    use tairix_configure::{parse, run, ConfigureError, NetPolicy, Store, USAGE};
+    use tairix_configure::{parse, run, ConfigureError, NetPolicy, NetworkStore, Store, USAGE};
     use tairix_help::BundleHelp;
+    use tairix_netconfig::{CONFIG_PATH as NET_CONFIG_PATH, MAX_CONFIG_LEN as NET_MAX_CONFIG_LEN};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_sysconfig::{CONFIG_DIR, CONFIG_PATH, MAX_CONFIG_LEN};
 
@@ -50,26 +51,24 @@ mod program {
     /// under the caller's attested identity; the seam adds no authority.
     struct FileStore;
 
-    impl FileStore {
-        /// Read the whole store into memory, bounded by the shared
-        /// engine's own document ceiling — a larger file is refused here
-        /// exactly as the parser would refuse it, never half-read.
-        fn read_all(fd: u32) -> Result<String, Errno> {
-            let mut bytes = Vec::new();
-            let mut chunk = [0u8; 512];
-            while bytes.len() <= MAX_CONFIG_LEN {
-                let read = tairix_rt::fs_read(fd, bytes.len() as u64, &mut chunk)
-                    .map_err(Errno::from_syscall)?;
-                if read == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk[..read]);
+    /// Read the whole of `fd` into memory, bounded by `ceiling` — its
+    /// engine's own document bound, so a larger file is refused here
+    /// exactly as that parser would refuse it, never half-read.
+    fn read_all(fd: u32, ceiling: usize) -> Result<String, Errno> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 512];
+        while bytes.len() <= ceiling {
+            let read = tairix_rt::fs_read(fd, bytes.len() as u64, &mut chunk)
+                .map_err(Errno::from_syscall)?;
+            if read == 0 {
+                break;
             }
-            if bytes.len() > MAX_CONFIG_LEN {
-                return Err(Errno::LengthOutOfRange);
-            }
-            String::from_utf8(bytes).map_err(|_| Errno::OutOfRange)
+            bytes.extend_from_slice(&chunk[..read]);
         }
+        if bytes.len() > ceiling {
+            return Err(Errno::LengthOutOfRange);
+        }
+        String::from_utf8(bytes).map_err(|_| Errno::OutOfRange)
     }
 
     impl Store for FileStore {
@@ -88,7 +87,7 @@ mod program {
             // `ret >= 0` is a descriptor by the syscall contract.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let fd = ret as u32;
-            let outcome = Self::read_all(fd);
+            let outcome = read_all(fd, MAX_CONFIG_LEN);
             let _ = tairix_rt::fs_close(fd);
             outcome.map(Some)
         }
@@ -114,6 +113,37 @@ mod program {
             let outcome = write_all(fd, text.as_bytes());
             let _ = tairix_rt::fs_close(fd);
             outcome
+        }
+    }
+
+    /// The production [`NetworkStore`] over the syscall-backed network
+    /// document at [`tairix_netconfig::CONFIG_PATH`], read whole.
+    ///
+    /// Read-only here: nothing in this tool writes that document yet, and a
+    /// writer that exists before its caller is surface with no caller.
+    /// Every path resolution and per-inode permission is the kernel's under
+    /// the caller's attested identity, so the seam adds no authority — an
+    /// account that may not read the machine's addressing is refused here
+    /// exactly as it is at the shell.
+    struct NetworkFileStore;
+
+    impl NetworkStore for NetworkFileStore {
+        fn read(&self) -> Result<Option<String>, Errno> {
+            let ret = tairix_rt::fs_open(NET_CONFIG_PATH.as_bytes(), OpenFlags::READ);
+            if ret < 0 {
+                let err = Errno::from_syscall(ret);
+                return if err == Errno::NotFound {
+                    Ok(None)
+                } else {
+                    Err(err)
+                };
+            }
+            // `ret >= 0` is a descriptor by the syscall contract.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let fd = ret as u32;
+            let outcome = read_all(fd, NET_MAX_CONFIG_LEN);
+            let _ = tairix_rt::fs_close(fd);
+            outcome.map(Some)
         }
     }
 
@@ -198,6 +228,7 @@ mod program {
             command,
             locale,
             &FileStore,
+            &NetworkFileStore,
             &StackPolicy,
             &BundleHelp::new("configure"),
             &RtOutput,

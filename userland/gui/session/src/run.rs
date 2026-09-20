@@ -81,7 +81,7 @@ mod program {
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::display::DisplayMode;
-    use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest};
+    use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
     use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
@@ -713,16 +713,21 @@ mod program {
         /// password against that uid, so naming an account here could only
         /// ever ask for one this process is not.
         fn verify(&mut self, _account: &str, password: &str) -> Verdict {
-            match tairix_rt::elevate(&ElevateRequest::Verify { password }) {
+            let mut reply = [0u8; ELEVATE_MAX_REPLY];
+            match tairix_rt::elevate(&ElevateRequest::Verify { password }, &mut reply) {
                 Ok(ElevateReply::Verified) => Verdict::Verified,
                 Ok(ElevateReply::Refused(_)) => Verdict::Refused,
-                // `Completed` answers a `Run` request and `Launched` a
-                // `Launch` one, never a `Verify`. A broker that sent either
-                // is not speaking this protocol, and a lock does not open
-                // on a reply it did not understand.
-                Ok(ElevateReply::Completed { .. } | ElevateReply::Launched { .. }) | Err(_) => {
-                    Verdict::Unreachable
-                }
+                // Every other reply answers a request this surface did not
+                // send. A broker that sent one is not speaking this
+                // protocol, and a lock does not open on a reply it did not
+                // understand.
+                Ok(
+                    ElevateReply::Completed { .. }
+                    | ElevateReply::Launched { .. }
+                    | ElevateReply::Captured { .. }
+                    | ElevateReply::Overran { .. },
+                )
+                | Err(_) => Verdict::Unreachable,
             }
         }
     }
@@ -5648,18 +5653,25 @@ mod program {
 
     impl Elevator for RtElevator {
         fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i64, Errno> {
-            match tairix_rt::elevate(&ElevateRequest::Launch {
-                username,
-                password,
-                program,
-            })? {
+            let mut reply = [0u8; ELEVATE_MAX_REPLY];
+            match tairix_rt::elevate(
+                &ElevateRequest::Launch {
+                    username,
+                    password,
+                    program,
+                },
+                &mut reply,
+            )? {
                 ElevateReply::Launched { pid } => Ok(pid),
                 ElevateReply::Refused(err) => Err(err),
-                // `Completed` answers a `Run` request and `Verified` a
-                // `Verify` one, never a `Launch`. A broker that sent either
-                // is not speaking this protocol, and nothing was started on
-                // a reply the session did not understand.
-                ElevateReply::Completed { .. } | ElevateReply::Verified => Err(Errno::OutOfRange),
+                // Every other reply answers a request this session did not
+                // send. A broker that sent one is not speaking this
+                // protocol, and nothing was started on a reply the session
+                // did not understand.
+                ElevateReply::Completed { .. }
+                | ElevateReply::Verified
+                | ElevateReply::Captured { .. }
+                | ElevateReply::Overran { .. } => Err(Errno::OutOfRange),
             }
         }
     }

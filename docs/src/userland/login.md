@@ -352,10 +352,13 @@ The operations that touch the outside world are injected, mirroring
 - `SessionLauncher::launch(&AuthenticatedUser, SessionKind) -> Result<SessionOutcome, Errno>`
   — starts the chosen session under the user's identity and blocks until
   it ends.
-- `ElevateLauncher::run_as(program, uid) -> Result<i32, Errno>` — runs one
-  re-authenticated elevated command as the target account and returns its
+- `ElevateLauncher::run_as(program, argv, uid) -> Result<i32, Errno>` — runs
+  one re-authenticated elevated command as the target account and returns its
   exit code; `handle_elevate_request` drives it from the elevation broker
-  (`plans/CAPABILITY_USE.md` CU5).
+  (`plans/CAPABILITY_USE.md` CU5). Its siblings are `launch_as`, which starts
+  the program and answers its pid without waiting, and `capture_as`, which
+  runs it with its standard output bound to a pipe the launcher owns and
+  answers what it printed.
 
 On a running kernel these are syscall- and `kernel/sec`-backed; in tests
 they are in-memory fixtures. Splitting the seams from the state machine
@@ -511,6 +514,24 @@ program PID 1 `init`'s `session` directive launches and supervises
   instead, so the started program is login's child to reap on its own
   loop; its `stderr` is login's console, invisible behind the desktop, so
   an abnormal exit is audited (`LAUNCH_ENDED_ABNORMALLY`) rather than lost.
+  A caller that must **show** what an elevated run printed posts the
+  `Capture` form: the same re-authentication, the same signed load gate,
+  the same run-as-uid and the same audit, but the child's standard output
+  is bound to a pipe the broker owns rather than the caller's console, its
+  standard input is closed, and the reply carries the drained bytes beside
+  the exit code. The relay is bounded by `ELEVATE_MAX_OUTPUT` and a run
+  that prints more is answered `Overran` with *no* bytes, so a prefix can
+  never be read as the whole; the audit records how many bytes were
+  relayed and never what they were. It is a separate request form rather
+  than a flag on `Run` because relaying a program's output to an
+  unprivileged caller is a new information flow and is meant to be visible
+  as one at the call site. It widens no authority: the caller must still
+  offer the target account's password, and an account that can be
+  re-authenticated could already be given a shell through `Launch` — what
+  the ceiling bounds is the volume of relayed bytes, not their secrecy.
+  The broker drains the pipe to end of stream *before* it reaps, because a
+  child that fills the pipe blocks until it is emptied and a reaper that
+  waited first would never empty it.
   Elevation serialises per console (endpoint capacity 1) and a
   login that cannot bind a rendezvous audits `ELEVATE_UNAVAILABLE` and
   runs broker-less sessions — requests then fail closed at the missing
@@ -558,6 +579,8 @@ because external audit-log consumers key off them.
 | 10024 | `LAUNCH_GRANTED`        | Info  | a `Launch` request re-authenticated and its program was started; no exit code is known yet |
 | 10025 | `LAUNCH_REFUSED`        | Warn  | a `Launch` request was refused (cause audited, never disclosed) |
 | 10026 | `LAUNCH_ENDED_ABNORMALLY` | Warn | a program started for a `Launch` request exited non-zero; a reserved load-failure status is named in words, any other code stated as the number |
+| 10027 | `CAPTURE_GRANTED`       | Info  | a `Capture` request re-authenticated and its run's output was relayed; the record states how many bytes, never what they were |
+| 10028 | `CAPTURE_REFUSED`       | Warn  | a `Capture` request was refused (cause audited, never disclosed) |
 
 A refusal record names the account offered and the attested uid, never the
 offered secret, and never *which* credential fault it was: refusals stay

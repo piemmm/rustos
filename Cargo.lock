@@ -872,6 +872,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-help",
+ "tairix-netconfig",
  "tairix-rt",
  "tairix-sysconfig",
 ]
@@ -2717,6 +2718,7 @@ dependencies = [
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
+ "tairix-netconfig",
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",

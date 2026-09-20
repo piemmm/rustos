@@ -40,8 +40,8 @@ dropped is a category the surface then has to lie about.
 | **DS5** | Storage — one card per mount with its capacity track and health pill, over the DS5a model | DS2, DS5a | DS5 | done |
 | **DS6** | The elevated-apply seam: `ElevateRequest::Run` gains a bounded argv, and General (About, Login & startup, Caching, Date & Time) is its first consumer | DS2 | DS6 | done |
 | **DS7** | Networking read — the stack-wide `net.*` options staged and applied live, the ungated resolver set stated, and the gated per-interface readings left where they may be taken | DS2, DS6 | DS7 | done |
-| **DS8** | Networking write — the elevated-**read** seam, then `configure` grows the `lib/netconfig` registry and Ethernet and DNS stage and apply through it | DS6, DS7, DS8a | DS8 | blocked — needs DS8a, the broker reply that carries a run's output |
-| **DS8a** | The elevated-read seam: an `ElevateRequest` whose reply carries the bounded output of the run, so an authenticated account can *show* a store no unprivileged caller may read | DS6 | DS8a | planned |
+| **DS8** | Networking write — `configure` grows a *writer* for the `lib/netconfig` registry, and Ethernet and DNS stage and apply through it | DS6, DS7, DS8a | DS8 | planned |
+| **DS8a** | The elevated-read seam: an `ElevateRequest` whose reply carries the bounded output of the run, so an authenticated account can *show* a store no unprivileged caller may read — with `configure`'s per-interface **read** registry and the Ethernet pane that states it | DS6 | DS8a | done |
 | **DS9** | Users & Groups — the ungated `GROUP_DIRECTORY` sibling, the caller's own record, the admin-authenticated read of every other account, and the user-admin operations the syscall carries but no tool spells | DS6, DS8a | DS9 | planned |
 | **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | planned |
 | **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | planned |
@@ -923,17 +923,17 @@ declared, re-read when the pane comes on show because leases move. An empty
 set ("this machine resolves no names") and an unavailable reading ("not
 measured") stay distinct facts.
 
-**Ethernet takes no reading, and that is the finding of this stage.** The plan
-originally had it read `NET_INTERFACE_FACTS`/`_STATE`/`_RATES`; those need
-`CAP_SYSINFO_HW` and `CAP_SYSINFO_GLOBAL`, which §0 says this application
-never holds, so every row would have been refused on every machine for ever —
-a dead row, not a denied action. Nor can `network.conf` be the ungated way
-round: it carries the `match.mac` hardware identity and the static addressing
-those two gates exist to protect, so serving it ungated would defeat them.
-The pane therefore does what the Storage row already does for
-`VOLUME_IO_HEALTH` — states that the live readings are the Switchboard's,
-names the tool that writes the addressing, and draws nothing it cannot back.
-Wi-Fi keeps its §3 absence.
+**Ethernet takes no *ungated* reading, and that is the finding of this
+stage.** The plan originally had it read
+`NET_INTERFACE_FACTS`/`_STATE`/`_RATES`; those need `CAP_SYSINFO_HW` and
+`CAP_SYSINFO_GLOBAL`, which §0 says this application never holds, so every
+row would have been refused on every machine for ever — a dead row, not a
+denied action. Nor can `network.conf` be the ungated way round: it carries
+the `match.mac` hardware identity and the static addressing those two gates
+exist to protect, so serving it ungated would defeat them. The live readings
+stay the Switchboard's, exactly as `VOLUME_IO_HEALTH` does for Storage; DS8a
+gives the pane the *configured* addressing instead, answered by an
+administrator-authenticated run. Wi-Fi keeps its §3 absence.
 
 **One shared address spelling.** Rendering an address was duplicated three
 ways and two of them disagreed — `lib/procinfo` printed RFC 5952 canonical
@@ -944,38 +944,73 @@ throughout, and every surface reads it.
 
 ### DS8a — the elevated-read seam
 
-**The prerequisite DS8 and DS9 both wait on, and neither can be built
-without.** `ElevateReply::Completed` carries an exit code and nothing else, so
-there is today no way for an authenticated run to *show* a caller anything.
-Both remaining stages need exactly that: DS8's Ethernet pane must show the
-addressing it is about to change, and DS9's plan already says every other
-account's fields "are answered by the administrator-authenticated run the
-write path already performs".
+**Done.** The prerequisite DS8 and DS9 both wait on.
+`ElevateReply::Completed` carried an exit code and nothing else, so no
+authenticated run could *show* a caller anything.
 
-The seam is an `ElevateRequest` form whose reply carries the run's **bounded**
-output: the broker binds the child's `stdout` to a pipe it owns
-(`pipe_create`), reads it under a fixed byte ceiling, and answers the bytes
-beside the exit code. It keeps every check `Run` has — the same
-re-authentication, the same signed load gate, the same audit — and it is
-deliberately a *separate* request form rather than a flag on `Run`, because
+`ElevateRequest::Capture` is that form: the identical re-authentication,
+signed load gate, run-as-uid and audit as `Run`, but the `Run` binary binds
+the child's `stdout` to a pipe it owns (`pipe_create` + a `SpawnAttach`
+handle wire), drains it to end of stream **before** reaping — a child that
+fills the pipe blocks until it is emptied, so the other order hangs — and
+answers `ElevateReply::Captured { exit_code, output }`. The child's `stdin`
+and `stdinfo` are closed (a run nobody can see is not prompting) and its
+`stderr` stays login's console. A separate form rather than a flag on `Run`:
 relaying a program's output to an unprivileged caller is a new information
-flow and should be visible as one at the call site. The design owes an
-explicit answer on what a caller can induce a named program to print, and the
-audit record says that output was returned and how much, never what it was.
+flow and is visible as one at the call site.
+
+**What a caller can induce a named program to print, answered.** The caller
+chooses both the program and the argv, so the relayed bytes are
+attacker-influenced by construction — but the form widens no authority. The
+caller must still offer the target account's password, and an account that
+re-authenticates could already be given a *shell* as that account through
+`Launch`. What the seam changes is only that the bytes come back as data
+instead of onto a console the caller shares; behind a desktop that console is
+invisible, which is the whole point. The bound is therefore on the **volume**
+of relayed bytes, not on their secrecy: `ELEVATE_MAX_OUTPUT` (4 KiB) is a
+fixed containment bound, sized from the widest listing the consumer asks for
+(a `configure` listing of both registries, whose per-interface lines run to
+roughly a kilobyte for a fully specified interface). A run that prints more
+is answered `Overran` with **no** bytes at all — never a prefix a caller
+could mistake for the whole — and the audit records that output was returned
+and how much, never what it was.
+
+**Its first consumer, and the read half of the network registry.**
+`configure` resolves a key name against the flat `lib/sysconfig` registry
+first and then against the per-interface `<iface>.<suffix>` registry of
+`lib/netconfig`, so a listing states both and a `Show` reads either. The flat
+registry wins, so an interface alias can never take a machine setting's name
+over, and a test pins the two name sets disjoint over both `ALL` arrays
+rather than resting on today's accident that none collides. The alias grammar
+is `lib/netconfig`'s one `valid_iface_name`, not a second copy. That registry
+has no defaults, so a listing shows only what the document holds and a `Show`
+of an unset key answers an empty line rather than inventing a value.
+
+Settings' Ethernet pane is then a composed reading: it opens stating that
+nothing has been read and offering *Show Addressing…*, the reader offers an
+account, and the supervisor runs `configure` as it and relays the listing.
+Each line is read back through the same `IfaceKey` registry, so the machine
+settings in the same listing are dropped and only `<iface>.<suffix>` lines
+become rows — one plate per interface, labelled in a reader's words. An
+overrun states that it was too large and shows no part of it; a refusal
+states the refusal and leaves the pane saying nothing was read.
 
 ### DS8 — Networking: write, and the store's missing writer
 
-**Blocked on DS8a.** `configure` grows the `lib/netconfig` registry, which
-that engine's own contract already names it the writer of and which nothing
-but the installer writes today: per-interface kind, match, IPv4/IPv6 method,
-static addresses, gateway, DNS servers, MTU, and bond members, over the same
-closed-key, fail-closed engine. That needs `lib/netconfig` to grow a mutation
-API beside its parse and render, and `configure` to resolve two key
-namespaces — the flat `lib/sysconfig` registry first, then `<iface>.<suffix>`
-— with a test pinning the two sets disjoint, since an interface alias is
-`[a-z0-9]+` and could otherwise be spelled to collide with a `net.*` key.
+**Unblocked; the read half landed with DS8a.** What remains is the *writer*.
+`configure` can resolve and show a `<iface>.<suffix>` key but cannot set one:
+`lib/netconfig` must grow a mutation API beside its parse and render
+(`NetworkConfig::set`, an interface created on first use and dropped when its
+last key goes, and the whole-document `validate` re-run after every change so
+a set that made the store inconsistent is refused rather than written), and
+`configure` must grow the second store's write side and a spelling for
+*unset* — a per-interface key has no default to fall back to, so switching an
+interface from static to DHCP must be able to remove `ipv4.address` and
+`ipv4.gateway` in the same invocation the method changes, or the document
+`validate` refuses is the only reachable state.
 
-Settings' Ethernet and DNS panes then stage a change and apply it by elevating
+Settings' Ethernet and DNS panes then stage a change over the rows DS8a's
+reading already draws, and apply it by elevating
 `configure`, which writes the store **and** asks the network stack to adopt it
 over its existing `CAP_NET_ADMIN` admin surface (the `NetInterfaceConfigMsg` /
 `NetBondConfigMsg` frames `devmgr` already pushes), so a change takes effect

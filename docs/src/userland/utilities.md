@@ -812,6 +812,7 @@ configure os.loginType             # show one setting
 configure os.loginType graphical   # set it (boot to the graphical login)
 configure cache.all off            # disable every memory cache system-wide
 configure cache.filesystem off     # disable only the filesystem cache
+configure wan.ipv4.address         # show an interface's configured address
 ```
 
 The store's grammar, closed key registry, fail-closed parse, and canonical
@@ -830,8 +831,22 @@ ceiling over the per-class `cache.filesystem` / `cache.block` /
 `cache.transform` / `cache.semantic` (`auto`/`off`) switches — see
 `docs/src/lib/sysconfig.md`.
 
+A key that is not in that registry is read against a second one: the
+per-interface `<interface>.<setting>` keys of the network store at
+`/System/Settings/Network/network.conf`, whose grammar and closed key
+registry are the shared `lib/netconfig` engine
+(`docs/src/lib/netconfig.md`). The machine registry is searched first, so an
+interface alias can never take a machine setting's name over — a test pins
+the two name sets disjoint over both registries rather than resting on the
+accident that none collides today. That document has no defaults, so a
+listing shows only the settings it carries and showing one it does not
+carry answers with an empty line rather than inventing a value; reading it
+needs an account that may, since it names each interface's hardware
+identity and this machine's addressing. `configure` does not write that
+registry yet — the installer does.
+
 The pure grammar/engine core is host-tested against in-memory seams; the
-`Run` binary wires the syscall-backed store file, the shared own-bundle
+`Run` binary wires the syscall-backed store files, the shared own-bundle
 help source, and the inherited standard output. Manifest:
 `CAP_CONSOLE_WRITE` (the listing and short help) and `CAP_FS_ACCESS` (the
 store and the bundle's own `Help/` tree) — write authority is the

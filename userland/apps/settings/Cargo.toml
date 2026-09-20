@@ -70,6 +70,10 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # registry and value sets, so the rows a reader sees and the `configure` run
 # that writes them cannot disagree about what the store admits.
 tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
+# The one network interface-configuration engine: the `<iface>.<suffix>`
+# registry this surface reads a `configure` listing back through, so the
+# key vocabulary is that engine's and not a copy of it.
+tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0" }
 # The shared size ladder a capacity is spelled through, which the
 # Switchboard's storage page reads too.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }

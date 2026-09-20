@@ -40,7 +40,7 @@ use tairix_abi::driver::net_channel::{
 };
 use tairix_abi::elevate::{
     ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES,
-    ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
+    ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST,
 };
 use tairix_abi::font_ipc::{
     decode_families_reply, decode_glyphs_reply, decode_metrics_reply, encode_families_reply,
@@ -123,7 +123,7 @@ fn exercise_elevate(bytes: &[u8]) {
         assert_eq!(request, redecoded);
     }
     if let Ok(reply) = ElevateReply::decode(bytes) {
-        let mut buf = [0u8; ELEVATE_REPLY_LEN];
+        let mut buf = [0u8; ELEVATE_MAX_REPLY];
         let len = reply
             .encode(&mut buf)
             .expect("round-trip encode of an accepted reply must succeed");
@@ -1371,6 +1371,18 @@ fn structured_elevate_requests_with_corrupted_fields_never_panic() {
             program: "/System/Commands/configure.app/Run",
             argv: ElevateArgv::new(&widest).expect("within bounds"),
         },
+        ElevateRequest::Capture {
+            username: "root",
+            password: "hunter2",
+            program: "/System/Commands/configure.app/Run",
+            argv: ElevateArgv::NONE,
+        },
+        ElevateRequest::Capture {
+            username: "root",
+            password: "hunter2",
+            program: "/System/Commands/configure.app/Run",
+            argv: ElevateArgv::new(&widest).expect("within bounds"),
+        },
         ElevateRequest::Launch {
             username: "root",
             password: "hunter2",
@@ -1389,6 +1401,49 @@ fn structured_elevate_requests_with_corrupted_fields_never_panic() {
                 exercise(&base[..len]);
                 exercise(&base[..len - 1]);
                 exercise(&base[..=len]);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
+/// Every elevation reply, seeded and bit-flipped a byte at a time.
+///
+/// The captured form is the only variable-length reply, and a random input
+/// would have to land the status word *and* a length word agreeing with the
+/// frame to reach its region decoder at all — so the seed is what covers
+/// the length/region agreement the caller's safety rests on.
+#[test]
+fn structured_elevate_replies_with_corrupted_fields_never_panic() {
+    let widest = [b'z'; ELEVATE_MAX_OUTPUT];
+    let mut base = std::vec![0u8; ELEVATE_MAX_REPLY];
+    for seed in [
+        ElevateReply::Completed { exit_code: 0 },
+        ElevateReply::Verified,
+        ElevateReply::Launched { pid: 4210 },
+        ElevateReply::Overran { exit_code: 1 },
+        ElevateReply::Refused(tairix_abi::Errno::PermissionDenied),
+        ElevateReply::Captured {
+            exit_code: 0,
+            output: b"",
+        },
+        ElevateReply::Captured {
+            exit_code: 0,
+            output: b"os.loginType graphical\nwan.ipv4.method dhcp\n",
+        },
+        ElevateReply::Captured {
+            exit_code: 0,
+            output: &widest,
+        },
+    ] {
+        let len = seed
+            .encode(&mut base)
+            .expect("the max frame holds any reply");
+        for byte in 0..len {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base[..len]);
+                exercise(&base[..len - 1]);
                 base[byte] ^= 1 << bit;
             }
         }
