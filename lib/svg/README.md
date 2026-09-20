@@ -73,6 +73,9 @@ The drawable part of SVG 1.1, in full:
   arcs, flattened to a bounded error rather than a fixed segment count;
 - the whole `transform` grammar, and `viewBox` with `preserveAspectRatio`;
 - strokes — width, caps, joins, miter limit, and dashes;
+- `vector-effect="non-scaling-stroke"`, outlined in the document's own root
+  user space so neither the width, the dashes, nor a marker measured in
+  stroke widths scales with the element's transform;
 - the property cascade — presentation attributes, the document's own
   `<style>` sheets (type, class, id, universal and compound selectors, the
   descendant and child combinators, specificity and `!important`), the
@@ -97,10 +100,11 @@ The drawable part of SVG 1.1, in full:
   `<switch>`'s conditional-processing attributes.
 
 It is a renderer for artwork, not a browser. Text, embedded images, filters,
-and animation are **not drawn**; an element it cannot draw is skipped rather
-than refusing the document, so one unsupported decoration does not lose a
-whole asset. The staged design, what is left, and the open question about
-that choice are in `plans/SVG.md`.
+animation, and the three `vector-effect` values no renderer implements
+(`non-scaling-size`, `non-rotation`, `fixed-position`) are **not drawn**; an
+element it cannot draw is skipped rather than refusing the document, so one
+unsupported decoration does not lose a whole asset. The staged design and the
+open question about that choice are in `plans/SVG.md`.
 
 ## Layout
 
@@ -112,13 +116,16 @@ that choice are in `plans/SVG.md`.
   specificity, `!important`, and the one declaration splitter the `style`
   attribute shares.
 - `number` — SVG's number, length, and coordinate-list grammar.
-- `geom` — `SubPath`, `StrokeStyle`, the object bounding box, and the
-  marker-vertex currency: the one geometry every stage hands on.
+- `geom` — `SubPath`, `StrokeStyle`, the object bounding box, the
+  marker-vertex currency, and carrying either between coordinate spaces: the
+  one geometry every stage hands on.
 - `pathdata` — the `d` grammar and curve/arc flattening.
 - `shape` — the basic shapes.
 - `marker` — `<marker>` placement: the reference point, the viewport and its
   units, `orient`, and the one matrix per instance.
-- `stroke` — stroke outline: segment quads, joins, caps, dashes.
+- `stroke` — stroke outline: segment quads, joins, caps, dashes. Pure
+  geometry in whichever space it is handed, which is what lets a non-scaling
+  stroke be outlined in the host space instead of the element's.
 - `transform` — the `transform` grammar and viewport fitting.
 - `style` — the property cascade.
 - `paint` — gradients, pattern placement, and what a `url(#id)` reference

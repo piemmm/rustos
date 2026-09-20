@@ -148,6 +148,17 @@ impl Marker {
         })
     }
 
+    /// Whether this marker is measured in the referencing element's stroke
+    /// widths.
+    ///
+    /// SVG sizes such a marker by the stroke width *after* the transforms
+    /// that affect the width, so a non-scaling stroke carries its markers
+    /// with it. One measured in user units states its own space and keeps it.
+    #[must_use]
+    pub const fn scales_with_stroke(&self) -> bool {
+        self.stroke_units
+    }
+
     /// The unit direction this instance's positive x axis takes.
     fn direction(&self, vertex: &Vertex, position: Position) -> Point {
         match self.orient {

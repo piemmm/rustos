@@ -11,6 +11,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_raster::Affine;
 use tairix_util::mathf::hypot;
 
 use crate::error::SvgError;
@@ -57,6 +58,22 @@ impl SubPath {
     pub fn is_degenerate(&self) -> bool {
         self.points.len() < 3
     }
+
+    /// This contour with every point mapped through `transform`.
+    ///
+    /// Closure is a property of the contour rather than of the space it sits
+    /// in, so it comes across untouched.
+    #[must_use]
+    pub fn mapped(&self, transform: Affine) -> Self {
+        Self {
+            points: self
+                .points
+                .iter()
+                .map(|point| transform.apply(*point))
+                .collect(),
+            closed: self.closed,
+        }
+    }
 }
 
 /// One marker position on a shape, and which way the path runs through it.
@@ -72,6 +89,32 @@ pub struct Vertex {
     pub incoming: Option<Point>,
     /// The direction the path leaves in.
     pub outgoing: Option<Point>,
+}
+
+impl Vertex {
+    /// This vertex as another space sees it: the point mapped through
+    /// `transform`, each direction through its linear part and re-normalised.
+    ///
+    /// A direction is carried by the linear part alone — a translation moves
+    /// the vertex, never the way the path runs through it — and needs
+    /// re-normalising because a scale or shear changes its length. One the
+    /// map collapses is dropped, which is the same "no direction here" a
+    /// zero-length segment already states.
+    #[must_use]
+    pub fn mapped(&self, transform: Affine) -> Self {
+        let direct = |vector: Option<Point>| {
+            let (x, y) = vector?;
+            normalise((
+                transform.a * x + transform.c * y,
+                transform.b * x + transform.d * y,
+            ))
+        };
+        Self {
+            at: transform.apply(self.at),
+            incoming: direct(self.incoming),
+            outgoing: direct(self.outgoing),
+        }
+    }
 }
 
 /// The sub-path being accumulated, so closing it can join its two ends.
@@ -302,3 +345,7 @@ pub fn bounds(subpaths: &[SubPath]) -> Option<(Point, Point)> {
     }
     seen.then_some((min, max))
 }
+
+#[cfg(test)]
+#[path = "geom_tests.rs"]
+mod tests;

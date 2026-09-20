@@ -318,6 +318,18 @@ authored rather than traced into a simpler form:
   collapse into one placement per instance. A marker takes its style from its
   own place in the document rather than from the shape that placed it, and a
   reference to a marker the document does not define simply draws nothing.
+- **Non-scaling strokes**: `vector-effect="non-scaling-stroke"`, which
+  spends the element's transform on the path and not on the pen. SVG
+  calculates such a stroke in the *host* coordinate space, which the
+  specification equates to the screen's; a decoded asset has no screen, so
+  the document's own root user space stands in for it — the space its
+  lengths are written in, and the one whose map to the device is a single
+  uniform scale however the drawing is fitted. So the width, the dash
+  lengths, and a marker measured in stroke widths all stop scaling together,
+  a pen stays round under an anisotropic transform instead of drawing as an
+  ellipse, and a nested `<svg>` or `<symbol>` slot's own scale is cancelled
+  along with every other. What the effect does *not* cancel is the scale the
+  asset itself is rasterised at, which is not knowable when it is decoded.
 - **Paint order**: `paint-order`, a permutation of a shape's fill, stroke,
   and markers — so a stroke may go under its fill, or the markers under
   both.
@@ -333,10 +345,11 @@ that is defined but paints nothing — a gradient with no stops, a pattern with
 no tile — is `none`, and takes no fallback.
 
 What it does **not** draw, because an artwork decoder is not a browser: text,
-embedded images, filters, and animation. An element it cannot draw
-is skipped rather than refusing the document, so one unsupported decoration
-does not lose a whole asset; the open question about that choice is recorded
-in `plans/ICONS.md`. There is still exactly one rasterisation path
+embedded images, filters, animation, and the three `vector-effect` values no
+renderer implements (`non-scaling-size`, `non-rotation`, `fixed-position`),
+which parse as the valid CSS they are and ask for nothing. An element it
+cannot draw is skipped rather than refusing the document, so one unsupported
+decoration does not lose a whole asset; the open question about that choice is
+recorded in `plans/ICONS.md`. There is still exactly one rasterisation path
 (`AGENTS.md` §2.2), and pre-rasterised bitmap assets may exist as a cache or
-fallback but are never the only path. The staged design, and what is left, are
-in `plans/SVG.md`.
+fallback but are never the only path. The staged design is in `plans/SVG.md`.

@@ -178,14 +178,11 @@ impl Affine {
     /// The largest factor by which this transform can stretch a length: the
     /// larger singular value of its linear part.
     ///
-    /// This is the exact value, not a bound. It is what a curve flattener
-    /// divides its device-space tolerance by, and what decides whether a
-    /// stroke stays uniform (the two singular values agree) or has to be
-    /// outlined in user space: a cheap over-estimate such as the larger row
-    /// norm would subdivide a rotated curve about 40% more finely than the
-    /// geometry needs, and no over-estimate can answer the uniformity
-    /// question at all. Both singular values come from the same closed form,
-    /// so the cost is two square roots rather than an iteration.
+    /// This is the exact value, not a bound: a curve flattener divides its
+    /// device-space tolerance by it, and a cheap over-estimate such as the
+    /// larger row norm would subdivide a rotated curve about 40% more finely
+    /// than the geometry needs. The closed form costs two square roots
+    /// rather than an iteration.
     ///
     /// The answer is always finite and non-negative. A matrix carrying a
     /// non-finite coefficient has no measurable scale and answers `0.0` — the

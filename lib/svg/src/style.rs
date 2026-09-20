@@ -139,6 +139,11 @@ pub struct Style {
     pub clip_rule: FillRule,
     /// Which of a shape's fill, stroke, and markers is painted first.
     pub paint_order: PaintOrder,
+    /// Whether the stroke is outlined in the host space, so neither its width
+    /// nor its dash lengths scale with the element's transform.
+    ///
+    /// Non-inheriting, as SVG defines it.
+    pub non_scaling_stroke: bool,
     /// The group opacity, `0..=1`, applied to this element and its subtree.
     ///
     /// Unlike the fill and stroke opacities this one does *not* inherit: it
@@ -189,6 +194,7 @@ impl Default for Style {
             color: Color::rgb(0, 0, 0),
             clip_rule: FillRule::NonZero,
             paint_order: PaintOrder::default(),
+            non_scaling_stroke: false,
             opacity: 1.0,
             clip_path: None,
             mask: None,
@@ -214,6 +220,7 @@ impl Style {
             mask: None,
             overflow: Overflow::default(),
             mask_kind: MaskKind::Luminance,
+            non_scaling_stroke: false,
             display: true,
             ..self.clone()
         }
@@ -289,6 +296,14 @@ impl Style {
             "paint-order" => {
                 if let Some(order) = parse_paint_order(value) {
                     self.paint_order = order;
+                }
+            }
+            // Dropped when invalid, as CSS drops a value it cannot use: the
+            // initial `none` it leaves is an ordinary stroke, which hides
+            // nothing.
+            "vector-effect" => {
+                if let Some(non_scaling) = parse_vector_effect(value) {
+                    self.non_scaling_stroke = non_scaling;
                 }
             }
             "clip-path" => self.clip_path = parse_funciri(value)?,
@@ -382,6 +397,43 @@ fn parse_funciri(value: &str) -> Result<Option<String>, SvgError> {
     let name = reference.trim().trim_matches(['"', '\'']);
     let id = name.strip_prefix('#').ok_or(SvgError::InvalidReference)?;
     Ok(Some(id.to_string()))
+}
+
+/// Parse a `vector-effect`, answering whether it asks for a non-scaling
+/// stroke, or `None` for a value CSS calls invalid.
+///
+/// The value is `none`, or one or more effect keywords optionally followed by
+/// the host space to measure them in. Only `non-scaling-stroke` is drawn, so
+/// a value naming it alongside others still asks for one and a value naming
+/// only others asks for nothing — but both parse, because an effect this
+/// decoder does not apply is still a value CSS accepts.
+fn parse_vector_effect(value: &str) -> Option<bool> {
+    let mut words = value.split_ascii_whitespace().peekable();
+    if words.peek() == Some(&"none") {
+        words.next();
+        return words.next().is_none().then_some(false);
+    }
+    let mut non_scaling = false;
+    let mut effects = 0;
+    while let Some(word) = words.peek() {
+        match *word {
+            "non-scaling-stroke" => non_scaling = true,
+            "non-scaling-size" | "non-rotation" | "fixed-position" => {}
+            _ => break,
+        }
+        effects += 1;
+        words.next();
+    }
+    if effects == 0 {
+        return None;
+    }
+    // The trailing keyword names which space the effects are measured in.
+    // This decoder has one, so it selects nothing; a value is still refused
+    // for spelling it anywhere but last.
+    if matches!(words.peek(), Some(&"viewport" | &"screen")) {
+        words.next();
+    }
+    words.next().is_none().then_some(non_scaling)
 }
 
 /// Parse a `paint-order`, or `None` for a value CSS calls invalid.

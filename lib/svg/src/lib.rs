@@ -41,15 +41,17 @@
 //! joins, miter limit, dashes), the property cascade with the document's own
 //! `<style>` sheets, the `style` attribute and inheritance, CSS colour syntax
 //! with named colours, linear and radial gradients, `<pattern>` fills,
-//! `clip-path`, `mask`, group opacity, and `<marker>` at the vertices a
-//! `<path>`, `<line>`, `<polyline>`, or `<polygon>` states.
+//! `clip-path`, `mask`, group opacity, `<marker>` at the vertices a
+//! `<path>`, `<line>`, `<polyline>`, or `<polygon>` states, and
+//! `vector-effect="non-scaling-stroke"`.
 //!
 //! It is a *renderer* for artwork, not a browser: text, embedded images,
-//! filters, animation, and scripting are not drawn. An element it
-//! cannot draw is skipped rather than refused, so one unsupported decoration
-//! does not lose the whole asset; the open question of whether such an
-//! element should instead fail the document closed is recorded in
-//! `plans/ICONS.md`.
+//! filters, animation, scripting, and the three `vector-effect` values no
+//! renderer implements (`non-scaling-size`, `non-rotation`,
+//! `fixed-position`) are not drawn. An element it cannot draw is skipped
+//! rather than refused, so one unsupported decoration does not lose the
+//! whole asset; the open question of whether such an element should instead
+//! fail the document closed is recorded in `plans/ICONS.md`.
 //!
 //! ```
 //! let svg = br##"<svg viewBox="0 0 10 10">

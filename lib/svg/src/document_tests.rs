@@ -1955,3 +1955,412 @@ fn a_definition_resolves_its_percentages_per_referencing_viewport() {
     assert_eq!(height(&decoded[0]), 4 * UNIT);
     assert_eq!(height(&decoded[1]), 2 * UNIT);
 }
+
+// --- vector-effect: the non-scaling stroke --------------------------------
+
+/// The axis-aligned box a layer's ink occupies, as `(x, y, width, height)` in
+/// design units.
+#[track_caller]
+fn ink_box(layer: &Layer) -> (i32, i32, i32, i32) {
+    let mut min = (i32::MAX, i32::MAX);
+    let mut max = (i32::MIN, i32::MIN);
+    for point in layer.contours.iter().flatten() {
+        min = (min.0.min(point.0), min.1.min(point.1));
+        max = (max.0.max(point.0), max.1.max(point.1));
+    }
+    assert!(min.0 <= max.0, "an empty layer has no box");
+    (min.0, min.1, max.0 - min.0, max.1 - min.1)
+}
+
+/// The box of the last layer a document draws, which is the stroke wherever
+/// one is painted over a fill.
+#[track_caller]
+fn stroke_box(body: &str) -> (i32, i32, i32, i32) {
+    let drawn = layers(&document(body));
+    ink_box(drawn.last().expect("a stroked document draws a layer"))
+}
+
+/// Every pixel of the rendered document at `side` square, channel by
+/// channel — colour as well as coverage, so a paint that lands in the wrong
+/// place is caught as well as a shape that does.
+#[track_caller]
+fn coverage(body: &str, side: u32) -> Vec<u8> {
+    let image = decode_square(document(body).as_bytes()).expect("a decodable document");
+    let mut surface = Surface::new(side, side).expect("a small surface");
+    assert!(
+        surface.draw_artwork(image.nodes(), image.design()),
+        "the renderer refused artwork the decoder accepted"
+    );
+    (0..side)
+        .flat_map(|y| (0..side).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let pixel = surface
+                .get(x, y)
+                .unwrap_or(tairix_raster::Pixel::TRANSPARENT);
+            [pixel.r, pixel.g, pixel.b, pixel.a]
+        })
+        .collect()
+}
+
+/// Assert two documents cover the same pixels, to within `slack` of alpha.
+///
+/// A round cap or join is a polygon, and building one before a rotation puts
+/// its vertices at different angles of the same circle than building it
+/// after — so two renderings agree as areas while barely a vertex coincides.
+/// Comparing contours would measure that phase; comparing coverage measures
+/// the picture.
+#[track_caller]
+fn assert_same_picture(left: &str, right: &str, slack: u8) {
+    for side in [32, 64] {
+        let (a, b) = (coverage(left, side), coverage(right, side));
+        let worst = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| u8::abs_diff(*x, *y))
+            .max()
+            .unwrap_or(0);
+        assert!(a.iter().any(|channel| *channel > 0), "nothing was drawn");
+        assert!(
+            worst <= slack,
+            "at {side} square the pictures differ by {worst}"
+        );
+    }
+}
+
+/// How far two renderings of one region may differ per pixel, out of 255.
+const COVERAGE_SLACK: u8 = 8;
+
+/// A horizontal hairline under `scale(4)`, with and without the effect.
+const SCALED_PLAIN: &str = r##"<g transform="scale(4)"><path d="M0.25 1 H1.75"
+    stroke="#000" stroke-width="1" fill="none"/></g>"##;
+const SCALED_NON_SCALING: &str = r##"<g transform="scale(4)"><path d="M0.25 1 H1.75"
+    stroke="#000" stroke-width="1" fill="none" vector-effect="non-scaling-stroke"/></g>"##;
+
+/// The width is spent in the host space, so the element's own scale reaches
+/// the path and not the pen: the line grows and stays one unit thick.
+#[test]
+fn a_non_scaling_stroke_keeps_its_width_under_a_uniform_scale() {
+    let (plain_x, _, plain_width, plain_thickness) = stroke_box(SCALED_PLAIN);
+    let (kept_x, _, kept_width, kept_thickness) = stroke_box(SCALED_NON_SCALING);
+
+    assert_eq!(plain_thickness, 4 * UNIT, "an ordinary pen scales with it");
+    assert_eq!(kept_thickness, UNIT, "a non-scaling pen keeps its width");
+    // The geometry is untouched either way: only the pen moved spaces.
+    assert_eq!((plain_x, plain_width), (kept_x, kept_width));
+}
+
+/// A translation changes no length, so there is nothing for the effect to
+/// cancel and the two orders agree exactly, pixel for pixel.
+#[test]
+fn a_non_scaling_stroke_under_a_translation_is_an_ordinary_one() {
+    let plain = r##"<g transform="translate(1 1)"><path d="M1 3 H6" stroke="#000"
+        stroke-width="1" fill="none"/></g>"##;
+    let kept = r##"<g transform="translate(1 1)"><path d="M1 3 H6" stroke="#000"
+        stroke-width="1" fill="none" vector-effect="non-scaling-stroke"/></g>"##;
+    assert_eq!(stroke_box(plain), stroke_box(kept));
+    assert_same_picture(plain, kept, 0);
+}
+
+/// A rotation changes no length either, so the picture is the ordinary one —
+/// the outline is merely built the other way round.
+#[test]
+fn a_non_scaling_stroke_under_a_rotation_draws_the_ordinary_picture() {
+    let plain = r##"<g transform="rotate(30 4 4)"><path d="M1 4 C2 1 6 7 7 4" stroke="#000"
+        stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>"##;
+    let kept = r##"<g transform="rotate(30 4 4)"><path d="M1 4 C2 1 6 7 7 4" stroke="#000"
+        stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"
+        vector-effect="non-scaling-stroke"/></g>"##;
+    assert_same_picture(plain, kept, COVERAGE_SLACK);
+}
+
+/// What the effect means, stated as an equation: a non-scaling stroke of one
+/// width under a uniform scale is the ordinary stroke of the divided width.
+#[test]
+fn a_non_scaling_stroke_is_the_ordinary_stroke_of_the_divided_width() {
+    let divided = r##"<g transform="rotate(20 4 4) scale(2)"><path d="M0.5 2 H3.5"
+        stroke="#000" stroke-width="0.5" fill="none" stroke-linecap="round"/></g>"##;
+    let kept = r##"<g transform="rotate(20 4 4) scale(2)"><path d="M0.5 2 H3.5"
+        stroke="#000" stroke-width="1" fill="none" stroke-linecap="round"
+        vector-effect="non-scaling-stroke"/></g>"##;
+    assert_same_picture(divided, kept, COVERAGE_SLACK);
+}
+
+/// The anisotropy of the element's transform is exactly what the effect
+/// cancels, so the pen is round by construction: an ordinary pen under
+/// `scale(3 1)` is an ellipse and draws a vertical line three times as thick
+/// as a horizontal one, where a non-scaling pen draws both alike.
+#[test]
+fn a_non_scaling_pen_is_round_under_an_anisotropic_scale() {
+    let across = |effect: &str| {
+        format!(
+            r##"<g transform="scale(3 1)"><path d="M0.5 4 H2.5" stroke="#000"
+                stroke-width="1" fill="none" {effect}/></g>"##
+        )
+    };
+    let down = |effect: &str| {
+        format!(
+            r##"<g transform="scale(3 1)"><path d="M1 1 V7" stroke="#000"
+                stroke-width="1" fill="none" {effect}/></g>"##
+        )
+    };
+    let effect = r#"vector-effect="non-scaling-stroke""#;
+
+    assert_eq!(stroke_box(&across("")).3, UNIT, "y is unscaled either way");
+    assert_eq!(
+        stroke_box(&down("")).2,
+        3 * UNIT,
+        "an ordinary pen stretches"
+    );
+    assert_eq!(stroke_box(&across(effect)).3, UNIT);
+    assert_eq!(
+        stroke_box(&down(effect)).2,
+        UNIT,
+        "a non-scaling pen is round"
+    );
+}
+
+/// The same thing read off a round cap: the half-disc keeps its radius on
+/// both axes rather than being stretched into half an ellipse.
+#[test]
+fn a_non_scaling_round_cap_stays_circular_under_an_anisotropic_scale() {
+    let cap = |effect: &str| {
+        format!(
+            r##"<g transform="scale(3 1)"><path d="M1 4 H2" stroke="#000" stroke-width="1"
+                fill="none" stroke-linecap="round" {effect}/></g>"##
+        )
+    };
+    // The segment itself spans three user units either way.
+    let segment = 3 * UNIT;
+    let (_, _, plain_width, plain_thickness) = stroke_box(&cap(""));
+    let (_, _, round_width, round_thickness) =
+        stroke_box(&cap(r#"vector-effect="non-scaling-stroke""#));
+
+    assert_eq!(plain_thickness, UNIT);
+    assert_eq!(round_thickness, UNIT);
+    // An ordinary cap overhangs by half a width *scaled*, so three times as
+    // far across as it reaches down; a non-scaling one overhangs by half its
+    // own width, which is what makes it a circle.
+    assert_eq!(
+        plain_width - segment,
+        3 * UNIT,
+        "an ordinary cap is an ellipse"
+    );
+    assert_eq!(round_width - segment, UNIT, "a non-scaling cap is a circle");
+}
+
+/// Every transform between the element and the root is cancelled, not just
+/// the nearest one.
+#[test]
+fn nested_transforms_compose_before_a_non_scaling_stroke_cancels_them() {
+    let body = r##"<g transform="scale(2)"><g transform="scale(3)"><path d="M0.2 0.5 H1.2"
+        stroke="#000" stroke-width="1" fill="none" EFFECT/></g></g>"##;
+    assert_eq!(stroke_box(&body.replace("EFFECT", "")).3, 6 * UNIT);
+    assert_eq!(
+        stroke_box(&body.replace("EFFECT", r#"vector-effect="non-scaling-stroke""#)).3,
+        UNIT,
+    );
+}
+
+/// A viewport on the way down is a scale like any other, so it is cancelled
+/// too — the host space is the document's own, not the nearest viewport's.
+/// A nested `<svg>` and a `<symbol>` slot are where those two answers differ.
+#[test]
+fn a_nested_viewport_scale_is_cancelled_by_a_non_scaling_stroke() {
+    let nested = r##"<svg x="0" y="0" width="8" height="8" viewBox="0 0 4 4"><path d="M0.5 2 H3.5"
+        stroke="#000" stroke-width="1" fill="none" EFFECT/></svg>"##;
+    let slotted = r##"<defs><symbol id="s" viewBox="0 0 4 4"><path d="M0.5 2 H3.5" stroke="#000"
+        stroke-width="1" fill="none" EFFECT/></symbol></defs><use href="#s" width="8" height="8"/>"##;
+    for body in [nested, slotted] {
+        assert_eq!(
+            stroke_box(&body.replace("EFFECT", "")).3,
+            2 * UNIT,
+            "the viewport doubles an ordinary stroke",
+        );
+        assert_eq!(
+            stroke_box(&body.replace("EFFECT", r#"vector-effect="non-scaling-stroke""#)).3,
+            UNIT,
+            "and is cancelled for a non-scaling one",
+        );
+    }
+}
+
+/// The stroker reads its width, dashes and offset as lengths in whichever
+/// space it is handed, so moving it to the host space moves all of them —
+/// a pattern that kept scaling while the width did not would be the bug.
+#[test]
+fn a_non_scaling_stroke_keeps_its_dash_lengths_with_its_width() {
+    let ordinary = r##"<path d="M0 4 H8" stroke="#000" stroke-width="1" fill="none"
+        stroke-dasharray="1 1"/>"##;
+    let scaled = r##"<g transform="scale(4)"><path d="M0 1 H2" stroke="#000" stroke-width="1"
+        fill="none" stroke-dasharray="1 1" vector-effect="non-scaling-stroke"/></g>"##;
+    // The same line, reached one way directly and the other through a scale
+    // the effect cancels: the dashes land in the same places, at the same
+    // thickness, and there are the same number of them.
+    let drawn = layers(&document(scaled));
+    let plain = layers(&document(ordinary));
+    assert_eq!(drawn[0].contours, plain[0].contours);
+
+    // Which is only worth asserting because the scale does move an ordinary
+    // dash: four times as long, so the half-length path holds one piece.
+    let stretched = r##"<g transform="scale(4)"><path d="M0 1 H2" stroke="#000" stroke-width="1"
+        fill="none" stroke-dasharray="1 1"/></g>"##;
+    assert_eq!(layers(&document(stretched))[0].contours.len(), 1);
+    assert_eq!(drawn[0].contours.len(), 4);
+}
+
+/// `none` is the initial value, an effect this decoder does not draw asks for
+/// nothing, and a value CSS cannot use is dropped — none of the three refuses
+/// the asset, and all three leave an ordinary stroke.
+#[test]
+fn a_vector_effect_that_is_not_a_non_scaling_stroke_strokes_ordinarily() {
+    for value in [
+        "none",
+        "non-rotation",
+        "fixed-position screen",
+        "wobble",
+        "",
+    ] {
+        let body = SCALED_PLAIN.replace(
+            r#"fill="none""#,
+            &format!(r#"fill="none" vector-effect="{value}""#),
+        );
+        assert_eq!(stroke_box(&body).3, 4 * UNIT, "{value}");
+    }
+}
+
+/// SVG does not inherit `vector-effect`, so a group carrying it strokes its
+/// children ordinarily.
+#[test]
+fn vector_effect_does_not_reach_a_child_shape() {
+    let body = r##"<g transform="scale(4)" vector-effect="non-scaling-stroke"><path d="M0.25 1 H1.75"
+        stroke="#000" stroke-width="1" fill="none"/></g>"##;
+    assert_eq!(stroke_box(body).3, 4 * UNIT);
+}
+
+/// A marker measured in stroke widths is sized by the width *after* the
+/// transforms affecting it, so a non-scaling stroke stops its markers
+/// scaling too — which is what SVG says outright of `markerUnits`.
+#[test]
+fn a_stroke_width_marker_stops_scaling_with_its_non_scaling_stroke() {
+    let body = |units: &str, effect: &str| {
+        format!(
+            r##"<marker id="m" markerWidth="2" markerHeight="2" refX="1" refY="1" {units}>
+                  <rect width="2" height="2" fill="#0a0"/></marker>
+                <g transform="scale(4)"><path d="M0.5 1 H1.5" stroke="#000" stroke-width="1"
+                  fill="none" marker-start="url(#m)" {effect}/></g>"##
+        )
+    };
+    let marker_box = |svg: &str| {
+        let drawn = layers(&document(svg));
+        let marker = drawn
+            .iter()
+            .find(|layer| solid(layer) == Color::rgb(0, 170, 0))
+            .expect("the marker draws a layer");
+        ink_box(marker)
+    };
+    let effect = r#"vector-effect="non-scaling-stroke""#;
+
+    // Two marker units across, at a stroke width of one, under scale(4).
+    assert_eq!(marker_box(&body("", "")).2, 8 * UNIT);
+    assert_eq!(
+        marker_box(&body("", effect)).2,
+        2 * UNIT,
+        "the marker follows"
+    );
+
+    // One stated in user units names its own space and keeps it: nothing
+    // about it is measured in stroke widths, so the effect does not reach it.
+    let user_space = r#"markerUnits="userSpaceOnUse""#;
+    assert_eq!(marker_box(&body(user_space, "")).2, 8 * UNIT);
+    assert_eq!(marker_box(&body(user_space, effect)).2, 8 * UNIT);
+}
+
+/// The host space is the document's own, whose map to the device is a
+/// uniform scale under either fit — so the pen is round *there*, and the
+/// grid's own shape is what differs.
+///
+/// Under `Square` a 2:1 drawing is letter-boxed by a single scale, so one
+/// host unit is the same number of design units on both axes. Under
+/// `Natural` the grid is stretched to the drawing's shape and un-stretched
+/// again when it is rasterised, so the same round pen lands on the grid as
+/// an ellipse of exactly that anisotropy.
+#[test]
+fn the_grids_shape_does_not_change_a_non_scaling_pens_roundness() {
+    let thickness = |viewport, data: &str, axis: fn((i32, i32, i32, i32)) -> i32| {
+        let svg = format!(
+            r##"<svg viewBox="0 0 16 8"><path d="{data}" stroke="#000" stroke-width="1"
+                fill="none" vector-effect="non-scaling-stroke"/></svg>"##
+        );
+        let image = decode(svg.as_bytes(), viewport).expect("a decodable document");
+        axis(ink_box(&flatten(image.nodes())[0]))
+    };
+    let (across, down) = ("M1 4 H15", "M8 1 V7");
+    let (height, width) = (|b: (i32, i32, i32, i32)| b.3, |b: (i32, i32, i32, i32)| b.2);
+
+    // Sixteen user units across the 2048 grid is 128 design units each, and
+    // the square fit uses that one scale on both axes.
+    assert_eq!(thickness(Viewport::Square, across, height), 128);
+    assert_eq!(thickness(Viewport::Square, down, width), 128);
+
+    // The natural fit stretches the short axis to the full grid, so a pen
+    // that is round in host units is twice as tall as it is wide on it.
+    assert_eq!(thickness(Viewport::Natural, across, height), 256);
+    assert_eq!(thickness(Viewport::Natural, down, width), 128);
+}
+
+/// The outline moves spaces; the paint does not. A gradient or a pattern is
+/// mapped from the *design grid* into its own space, and the path reaches
+/// the same design coordinates whichever order the pen was applied in — so
+/// a non-scaling stroke of one width draws the same picture, colour
+/// included, as the ordinary stroke of the divided width.
+#[test]
+fn a_paint_server_stays_aligned_under_a_non_scaling_stroke() {
+    let painted = |width: &str, effect: &str, server: &str| {
+        format!(
+            r##"<linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/>
+                </linearGradient>
+                <pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse">
+                  <circle cx="1" cy="1" r="0.8" fill="#0c0"/></pattern>
+                <g transform="scale(2)"><path d="M0.5 2 H3.5" fill="none"
+                  stroke="url(#{server})" stroke-width="{width}" {effect}/></g>"##
+        )
+    };
+    let effect = r#"vector-effect="non-scaling-stroke""#;
+    for server in ["g", "p"] {
+        assert_same_picture(
+            &painted("0.5", "", server),
+            &painted("1", effect, server),
+            COVERAGE_SLACK,
+        );
+    }
+}
+
+/// A transform large enough to overflow the host map still decodes to
+/// artwork the renderer draws: no coordinate escapes to infinity, and
+/// nothing is half-applied.
+#[test]
+fn an_overflowing_transform_under_a_non_scaling_stroke_still_fails_closed() {
+    for scale in ["1e300", "1e-300", "-1e300", "0"] {
+        let body = format!(
+            r##"<g transform="scale({scale})"><path d="M1 4 C2 1 6 7 7 4" fill="none"
+                stroke="#000" stroke-width="2" stroke-linecap="round"
+                stroke-dasharray="1 0.5" vector-effect="non-scaling-stroke"/></g>"##
+        );
+        let decoded = decode_square(document(&body).as_bytes());
+        let Ok(image) = decoded else {
+            continue;
+        };
+        for contour in flatten(image.nodes())
+            .iter()
+            .flat_map(|l| l.contours.iter())
+        {
+            assert!(!contour.is_empty(), "a contour with no points at {scale}");
+        }
+        let mut surface = Surface::new(16, 16).expect("a small surface");
+        assert!(
+            surface.draw_artwork(image.nodes(), image.design()),
+            "the renderer refused artwork the decoder accepted at {scale}",
+        );
+    }
+}

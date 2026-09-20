@@ -110,6 +110,24 @@ const TEMPLATES: &[&[u8]] = &[
             <line x1="1" y1="20" x2="6" y2="20" marker-start="url(#a)"
               markerUnits="strokeWidth"/></svg>"##,
     br##"<svg viewBox="0 0 24 24">
+            <marker id="a" markerWidth="3" markerHeight="3" refX="1" refY="1" orient="auto">
+              <path d="M0 0 L3 1.5 L0 3 Z" fill="#c33"/></marker>
+            <marker id="u" markerWidth="2" markerHeight="2" markerUnits="userSpaceOnUse"
+              orient="auto-start-reverse"><circle cx="1" cy="1" r="1" fill="#39c"/></marker>
+            <style>.n { vector-effect: non-scaling-stroke }</style>
+            <g transform="rotate(20 12 12) scale(3 1.5)">
+              <path class="n" d="M1 4 C3 1 9 9 11 4" fill="none" stroke="#345"
+                stroke-width="1.5" stroke-dasharray="2 1 0.5" stroke-dashoffset="-1"
+                stroke-linecap="round" stroke-linejoin="round"
+                marker-start="url(#a)" marker-mid="url(#u)" marker-end="url(#a)"/>
+              <polyline points="1,9 5,7 9,9" fill="none" stroke="#987" stroke-width="2"
+                vector-effect="non-scaling-stroke non-rotation screen" marker-mid="url(#a)"/>
+              <line x1="1" y1="1" x2="7" y2="1" stroke="#000" vector-effect="wobble"/></g>
+            <svg x="2" y="14" width="18" height="8" viewBox="0 0 6 6">
+              <rect x="1" y="1" width="4" height="4" fill="none" stroke="#0a0"
+                stroke-width="0.5" vector-effect="non-scaling-stroke"/></svg>
+          </svg>"##,
+    br##"<svg viewBox="0 0 24 24">
             <mask id="m" maskContentUnits="objectBoundingBox" style="mask-type:alpha">
               <rect width=".5" height="1" fill="#fff"/></mask>
             <mask id="n" maskUnits="userSpaceOnUse" x="1" y="1" width="8" height="8" mask="url(#m)">
@@ -158,6 +176,7 @@ const PROPERTIES: &[&str] = &[
     "clip-path",
     "mask",
     "paint-order",
+    "vector-effect",
     "clip-rule",
     "overflow",
     "marker",
@@ -328,11 +347,20 @@ fn decode_never_panics_for_any_input() {
             }
         }
         let orient = ["auto", "auto-start-reverse", "30", "-1.5rad", "2turn"][bounded(next(), 4)];
+        let effect = [
+            "none",
+            "non-scaling-stroke",
+            "non-rotation non-scaling-stroke viewport",
+            "non-scaling-size",
+            "wobble",
+        ][bounded(next(), 4)];
         let generated = alloc_document(&format!(
             r##"<marker id="k" markerWidth="2" markerHeight="2" refX="1" orient="{orient}"
                   overflow="visible"><rect width="3" height="3" fill="#0a0"/></marker>
-                <path d="{data}" fill="#345" stroke="#987" stroke-width="0.4"
-                  marker-start="url(#k)" marker-mid="url(#k)" marker-end="url(#k)"/>"##
+                <g transform="scale(2.5 0.75) rotate(15)">
+                  <path d="{data}" fill="#345" stroke="#987" stroke-width="0.4"
+                    vector-effect="{effect}" stroke-dasharray="1 0.5"
+                    marker-start="url(#k)" marker-mid="url(#k)" marker-end="url(#k)"/></g>"##
         ));
         decode_never_panics(generated.as_bytes());
 

@@ -244,6 +244,13 @@ pub fn decode(bytes: &[u8], viewport: Viewport) -> Result<SvgImage, SvgError> {
         path: Vec::new(),
         extents: Vec::new(),
         viewport: view_box.size,
+        // A root map with no inverse has flattened the drawing onto a line,
+        // where every placement collapses and nothing is drawn at all.
+        host: to_design.invert().map(|from_design| Host {
+            from_design,
+            to_design,
+            tolerance: flatten_tolerance(to_design),
+        }),
         vertices_left: MAX_TOTAL_VERTICES,
         layers_left: MAX_LAYERS,
         visits_left: MAX_ELEMENT_VISITS,
@@ -341,10 +348,37 @@ struct Decoder<'a> {
     path: Vec<&'a Element<'a>>,
     extents: Vec<Extent>,
     viewport: (f64, f64),
+    host: Option<Host>,
     vertices_left: usize,
     layers_left: usize,
     visits_left: usize,
     nesting: usize,
+}
+
+/// The document's own root user space: where a non-scaling stroke is
+/// outlined, and how that outline reaches the design grid.
+///
+/// SVG calculates such a stroke in the *host* space, which the specification
+/// equates to the screen's. A decoded asset has no screen, so the root user
+/// space stands in: it is where the document's own lengths are written, and
+/// its map to the device is a uniform scale under either [`Viewport`], so a
+/// round pen stays round. The effect therefore cancels the element's
+/// transform chain, not the scale the asset is rasterised at.
+#[derive(Copy, Clone)]
+struct Host {
+    /// The design grid back onto the host space.
+    from_design: Affine,
+    /// The host space onto the design grid.
+    to_design: Affine,
+    /// What a round join or cap is flattened to, in host units.
+    tolerance: f64,
+}
+
+impl Host {
+    /// The map from the space `transform` places onto the host space.
+    fn to_host(self, transform: Affine) -> Affine {
+        transform.then(self.from_design)
+    }
 }
 
 /// What every instance of one shape's markers shares.
@@ -355,6 +389,12 @@ struct Instancing {
     stroke_width: f64,
     /// The shape's own placement onto the design grid.
     transform: Affine,
+    /// Where the shape's stroke is outlined, when it is a non-scaling one.
+    ///
+    /// A marker measured in stroke widths is sized by the width *after* the
+    /// transforms affecting it, so it follows the stroke into that space and
+    /// stops scaling too. One measured in user units does not.
+    host: Option<Host>,
     /// How deep in `<use>` expansions the shape sits.
     depth: usize,
 }
@@ -875,6 +915,7 @@ impl<'a> Decoder<'a> {
         }
         let box_of = bounds(&subpaths);
         let stroked = style.stroke_style.width > 0.0 && !matches!(style.stroke, PaintSpec::None);
+        let host = style.non_scaling_stroke.then_some(self.host).flatten();
 
         // Two layers of one element overlap, so folding the element's opacity
         // into each would show the fill through its own stroke. Those are
@@ -927,19 +968,31 @@ impl<'a> Decoder<'a> {
             painted.map(|paint| Layer::filled(paint, style.fill_rule, place(&subpaths, transform)));
         let stroke = match outlined {
             Some(paint) => {
-                let outline = stroke_outline(
-                    &subpaths,
-                    &style.stroke_style,
-                    tolerance,
-                    self.vertices_left,
-                )?;
+                // A non-scaling stroke inverts the usual order: the geometry
+                // is carried into the host space and the pen applied there,
+                // so the transform is spent on the path and not on the width.
+                // Every length the stroker reads follows it across; only the
+                // tolerance is restated, being resolved against the placement
+                // rather than authored.
+                let moved = host.map(|host| {
+                    let to_host = host.to_host(transform);
+                    let carried: Vec<SubPath> =
+                        subpaths.iter().map(|sub| sub.mapped(to_host)).collect();
+                    (carried, host)
+                });
+                let (geometry, tolerance, onto) = match &moved {
+                    Some((geometry, host)) => (geometry.as_slice(), host.tolerance, host.to_design),
+                    None => (subpaths.as_slice(), tolerance, transform),
+                };
+                let outline =
+                    stroke_outline(geometry, &style.stroke_style, tolerance, self.vertices_left)?;
                 // A stroke outline is a union of overlapping pieces, so only
                 // the non-zero rule merges them; even-odd would punch holes
                 // where two pieces meet.
                 Some(Layer::filled(
                     paint,
                     FillRule::NonZero,
-                    place(&outline, transform),
+                    place(&outline, onto),
                 ))
             }
             None => None,
@@ -952,6 +1005,7 @@ impl<'a> Decoder<'a> {
                 Instancing {
                     stroke_width: style.stroke_style.width,
                     transform,
+                    host,
                     depth,
                 },
             )?,
@@ -1092,11 +1146,20 @@ impl<'a> Decoder<'a> {
         // bounds an empty marker placed at every vertex of a long path — and
         // what makes a marker whose content places the same marker terminate.
         self.visit()?;
-        let Some(placement) = marker.place(vertex, position, shared.stroke_width) else {
+        // Placed at the vertex as the host space sees it, and turned by the
+        // direction the path runs there.
+        let (base, at) = match shared.host.filter(|_| marker.scales_with_stroke()) {
+            Some(host) => (
+                host.to_design,
+                vertex.mapped(host.to_host(shared.transform)),
+            ),
+            None => (shared.transform, *vertex),
+        };
+        let Some(placement) = marker.place(&at, position, shared.stroke_width) else {
             return Ok(());
         };
-        let viewport = placement.viewport.then(shared.transform);
-        let content = placement.content.then(shared.transform);
+        let viewport = placement.viewport.then(base);
+        let content = placement.content.then(base);
 
         let outer_path = core::mem::take(&mut self.path);
         let built = self.enter_definition(node).and_then(|own| {

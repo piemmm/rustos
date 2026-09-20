@@ -36,11 +36,11 @@ opens a drawing as a document.
 | S18 | `paint-order` | done |
 | S19 | `<pattern>` as a paint server, including the `overflow: visible` fold | done |
 | S20 | `<marker>`: `marker-start` / `-mid` / `-end`, and the element-visit bound their instancing needs | done |
-| S21 | `vector-effect="non-scaling-stroke"` | planned |
+| S21 | `vector-effect="non-scaling-stroke"`: the outline built in the host space, and what stands in for that space here | done |
 
-The one `planned` item is not started, and no `done` one is half-built. It
-needs something this crate does not yet have, stated under
-[What is left](#what-is-left).
+Every item is `done` and none is half-built: the decoder draws the whole of
+the subset this plan set out to draw. What it does not draw is the
+[deliberate non-goals](#deliberate-non-goals), and nothing else.
 
 ---
 
@@ -104,7 +104,7 @@ Four decisions shape everything else:
 | `number` | SVG's number grammar: separator-free runs, arc flags, CSS absolute units, percentages, opacity |
 | `color` | CSS colour syntax: hex (3/4/6/8), `rgb()`/`rgba()`/`hsl()`/`hsla()` in both spellings, the named-colour table, `currentColor`, `none` |
 | `css` | The document's own `<style>` sheets: the selector subset, specificity, `!important`, and the declarations one element matches |
-| `geom` | `SubPath`, `StrokeStyle`, caps/joins, the object bounding box, and the marker-vertex currency (`Vertex`, `Vertices`) |
+| `geom` | `SubPath`, `StrokeStyle`, caps/joins, the object bounding box, the marker-vertex currency (`Vertex`, `Vertices`), and carrying either into another coordinate space |
 | `pathdata` | The whole `d` grammar and curve/arc flattening to a tolerance |
 | `shape` | The basic shapes, including `rect`'s rounded-corner rules |
 | `marker` | `<marker>` placement: `refX`/`refY`, the viewport and its units, `orient`, and the one matrix per instance |
@@ -394,16 +394,61 @@ The rest follows from mechanisms the crate already has.
   marker is a subtree that may overlap the shape and the next instance of
   itself, so there is no single layer to fold the opacity into.
 
-## What is left
+## Non-scaling strokes
 
-It needs a capability the crate does not have, and is not a thinner version
-of something already done.
+`vector-effect="non-scaling-stroke"` spends the element's transform on the
+path and not on the pen. It is the one thing here whose outline cannot be
+built where every other outline is: `stroke` is written against
+pre-transform geometry and the result is mapped onto the grid afterwards, so
+this inverts that order and needs both spaces at once.
 
-- **S21 `vector-effect="non-scaling-stroke"`.** The width is in the root
-  viewport's units rather than the element's, so the outline must be built
-  after the element's transform instead of before it. `stroke` is written
-  against the pre-transform geometry, and both spaces must stay available to
-  it.
+- **The host space is the document's own root user space.** SVG calculates
+  such a stroke in the *host* coordinate space, which the specification
+  equates to the screen's. A decoded asset has no screen — an `SvgImage` is
+  resolution-independent and rasterised per (asset, pixel side) — so a width
+  fixed in device pixels would bake in a resolution the decoder does not
+  know, which is the same objection that keeps a pattern's tile from being
+  baked to pixels. The root user space stands in for it, and is the right
+  stand-in twice over: it is the space the document's own lengths are
+  written in, and its map to the device is a *uniform* scale under both
+  viewports, so a round pen stays round. `Square` letter-boxes the drawing
+  by one scale; `Natural` stretches the grid to the drawing's shape and
+  un-stretches it again at rasterisation, so that anisotropy cancels. The
+  design grid is therefore **not** the host space — outlining there would
+  draw an elliptical pen under `Natural`.
+- **It is the root, not the nearest viewport.** A nested `<svg>` and a
+  `<use>`/`<symbol>` slot each establish a viewport on the way down, and
+  both scales are part of the chain the effect cancels. That is what the
+  specification's "screen" means, and it is the only case where the two
+  readings draw differently.
+- **Anisotropy stops being a question rather than being answered.** An
+  ordinary pen under `scale(3 1)` is an ellipse, and a single-number scale
+  cannot describe it — so the obvious design asks whether a transform is
+  uniform before trusting one. It never has to: the anisotropic part of the
+  chain is exactly what the effect cancels, so the pen is round by
+  construction. No uniformity test is needed, and `Affine` needs no
+  `min_scale` to answer one.
+- **The width, the dashes and the offset move together, because the stroker
+  has no opinion about which space it is in.** It reads all three as lengths
+  in whatever coordinates it is handed, so carrying the geometry across
+  carries them too, and the miter limit is a ratio and is space-free. Only
+  the flattening tolerance is restated, being the one length resolved
+  against the placement rather than authored; converting the dash lengths
+  as well would have produced the obvious bug, a pattern that went on
+  scaling while the width did not.
+- **A marker measured in stroke widths follows the stroke across.** SVG
+  sizes one by the stroke width *after* the transforms that affect the
+  width, and says outright that a non-scaling stroke therefore makes its
+  markers non-scaling. So a `strokeWidth` marker is placed in the host space
+  — at the vertex as that space sees it, turned by the direction the path
+  runs there — while a `userSpaceOnUse` marker names its own space, depends
+  on no stroke width, and goes on scaling.
+- **Nothing new is bounded, because nothing here multiplies.** The same
+  elements are visited and the same instances placed; one outline is built
+  per stroked shape as before, and the additional cost is one matrix
+  compose and a transient copy of geometry the vertex budget has already
+  paid for. The host tolerance cannot buy more output either: the stroker
+  still floors it and still caps the segments of an arc.
 
 ## Deliberate non-goals
 
@@ -418,6 +463,14 @@ adding one would be a new plan of its own:
 - Animation (SMIL), scripting, and external references of any kind. A
   stylesheet is read only from the document's own `<style>` elements; an
   `@import` is not fetched.
+- The `vector-effect` values beside `non-scaling-stroke` —
+  `non-scaling-size`, `non-rotation`, `fixed-position`. SVG 2 records them
+  as at risk of being dropped for want of implementations, and
+  `non-scaling-size` in particular suppresses scaling of the whole user
+  coordinate system, of which a non-scaling stroke is one consequence:
+  drawing half of it would be a wrong picture where drawing none of it is a
+  missing decoration. They parse as the valid CSS they are and ask for
+  nothing.
 
 ## Open question
 
@@ -428,11 +481,14 @@ to the tier below. Skipping is what lets one
 unsupported decoration not lose a whole asset, and it is the behaviour the
 desktop has today. Whether the drawable-element case should instead fail the
 document closed is recorded as an open item in `plans/ICONS.md`; it is a
-deliberate decision to make, not an oversight. The set at stake is now
-smaller than it was — clipping, masking, group opacity, patterns (spilling
-tiles included) and markers are honoured rather than ignored, so the cases
-that render a *wrong* picture are the one `planned` item above and the
-non-goals.
+deliberate decision to make, not an oversight. The set at stake has stopped
+shrinking, there being nothing left to shrink it by: clipping, masking, group
+opacity, patterns (spilling tiles included), markers and non-scaling strokes
+are all honoured, so the only cases that still render a *wrong* picture are
+the deliberate non-goals. That makes it a materially different question from
+the one it started as. It is no longer worth waiting for the decoder to catch
+up; it is a decision about text, embedded images, filters and animation,
+which are not going to be drawn.
 Patterns also drew the distinction that answers part of the question: a reference naming a server
 the document does not define takes its fallback colour, while a server that
 is defined and paints nothing is `none` and takes none — so an *empty*

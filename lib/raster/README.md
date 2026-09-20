@@ -137,10 +137,9 @@ This crate owns:
   (the receiver applies first), `apply`, an `invert` that answers `None` for a
   transform that collapses area or would invert to infinities, and `max_scale`
   — the exact larger singular value, which is what a curve flattener divides
-  its tolerance by and what decides whether a stroke stays uniform. Its
-  trigonometry comes from `tairix_util::mathf`, so no external libm enters the
-  trusted computing base and this crate rotates identically to the glyph
-  rasteriser and the SVG decoder.
+  its tolerance by. Its trigonometry comes from `tairix_util::mathf`, so no
+  external libm enters the trusted computing base and this crate rotates
+  identically to the glyph rasteriser and the SVG decoder.
 - `Surface::stroke_polyline` — the one stroked-line path the desktop shares: a
   window-furniture diagonal and a history graph's trace are the same primitive
   at different scales. Each segment is offset along *its own* perpendicular, so

@@ -376,3 +376,19 @@ fn the_placement_is_one_matrix_in_the_specified_order() {
         assert_near(placed.content.apply(probe), expected.apply(probe));
     }
 }
+
+/// Which space a marker is measured in decides whether a non-scaling stroke
+/// carries it: SVG sizes a `strokeWidth` marker by the width after the
+/// transforms affecting it, and leaves a `userSpaceOnUse` one alone.
+#[test]
+fn a_marker_is_measured_in_stroke_widths_unless_it_says_otherwise() {
+    assert!(marker(r#"<marker markerWidth="2" markerHeight="2"/>"#).scales_with_stroke());
+    assert!(
+        marker(r#"<marker markerWidth="2" markerHeight="2" markerUnits="strokeWidth"/>"#)
+            .scales_with_stroke()
+    );
+    assert!(
+        !marker(r#"<marker markerWidth="2" markerHeight="2" markerUnits="userSpaceOnUse"/>"#)
+            .scales_with_stroke()
+    );
+}

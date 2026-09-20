@@ -364,3 +364,99 @@ fn a_malformed_marker_reference_is_refused() {
         Err(SvgError::InvalidReference)
     );
 }
+
+// --- vector-effect --------------------------------------------------------
+
+#[test]
+fn a_stroke_scales_with_its_element_unless_the_document_says_otherwise() {
+    assert!(!styled("<path/>").non_scaling_stroke);
+    assert!(!styled(r#"<path vector-effect="none"/>"#).non_scaling_stroke);
+    assert!(styled(r#"<path vector-effect="non-scaling-stroke"/>"#).non_scaling_stroke);
+}
+
+#[test]
+fn vector_effect_reaches_the_property_from_either_source() {
+    assert!(styled(r#"<path vector-effect="non-scaling-stroke"/>"#).non_scaling_stroke);
+    assert!(styled(r#"<path style="vector-effect:non-scaling-stroke"/>"#).non_scaling_stroke);
+}
+
+/// The value is a list, and may name the space the effects are measured in.
+/// This decoder has one host space, so the keyword selects nothing — but a
+/// value spelling it has to parse, or an asset is lost over a word that
+/// changed no picture.
+#[test]
+fn vector_effect_accepts_a_list_and_a_trailing_host_space() {
+    for value in [
+        "non-scaling-stroke",
+        "non-rotation non-scaling-stroke",
+        "non-scaling-stroke viewport",
+        "non-scaling-stroke non-scaling-size screen",
+        "  non-scaling-stroke   screen  ",
+    ] {
+        let style = styled(&format!(r#"<path vector-effect="{value}"/>"#));
+        assert!(style.non_scaling_stroke, "{value}");
+    }
+}
+
+/// Only `non-scaling-stroke` is drawn. The other three effects parse — they
+/// are values CSS accepts — and ask for nothing this decoder does.
+#[test]
+fn an_effect_this_decoder_does_not_draw_still_parses() {
+    for value in [
+        "non-scaling-size",
+        "non-rotation",
+        "fixed-position",
+        "non-rotation fixed-position screen",
+    ] {
+        let style = styled(&format!(r#"<path vector-effect="{value}"/>"#));
+        assert!(!style.non_scaling_stroke, "{value}");
+    }
+}
+
+/// CSS drops a declaration whose value it cannot use, and the initial `none`
+/// that leaves is an ordinary stroke — which hides nothing, so there is
+/// nothing to fail closed over. A malformed colour still refuses the
+/// document; this is the `paint-order` case, not the colour one.
+#[test]
+fn an_invalid_vector_effect_is_dropped_rather_than_refused() {
+    for value in [
+        "",
+        "wobble",
+        "none none",
+        "none non-scaling-stroke",
+        "screen",
+        "viewport non-scaling-stroke",
+        "non-scaling-stroke screen viewport",
+        "non-scaling-stroke wobble",
+    ] {
+        let style = resolve(
+            &Style::default(),
+            &format!(r#"<path vector-effect="{value}"/>"#),
+        )
+        .unwrap_or_else(|error| panic!("{value} should not refuse the document: {error:?}"));
+        assert!(!style.non_scaling_stroke, "{value}");
+    }
+}
+
+/// A dropped declaration leaves what an earlier valid one set, exactly as
+/// CSS does — it does not reset the property.
+#[test]
+fn an_invalid_vector_effect_leaves_an_earlier_valid_one_standing() {
+    let style =
+        styled(r#"<path vector-effect="non-scaling-stroke" style="vector-effect:wobble"/>"#);
+    assert!(style.non_scaling_stroke);
+}
+
+#[test]
+fn vector_effect_does_not_inherit() {
+    let parent = Style {
+        non_scaling_stroke: true,
+        ..Style::default()
+    };
+    assert!(!parent.inherit().non_scaling_stroke);
+    assert!(
+        !resolve(&parent.inherit(), "<path/>")
+            .expect("a style")
+            .non_scaling_stroke
+    );
+}
