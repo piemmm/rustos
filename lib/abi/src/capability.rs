@@ -717,6 +717,46 @@ impl CapabilityId {
     /// administers seats rather than drawing on one.
     pub const DESKTOP_LAYER: Self = Self(47);
 
+    /// Drive an audio device's rings and registers through the
+    /// `audiochan-v1` device channel (`plans/SOUND.md`).
+    ///
+    /// The `CAP_NET_RAW` of audio: it guards a *group* of resources — every
+    /// audio device on the machine — rather than one jack or one method, and
+    /// its holder is the one process that may speak to any audio driver. An
+    /// audio driver binds its reserved device-channel endpoint
+    /// restricted-sender on this capability, so the kernel refuses at
+    /// dispatch every caller but the mixer and the driver never re-checks.
+    ///
+    /// Exactly one principal holds it: the mixer service `audiod`. That is
+    /// what makes "one path, no bypass" structural — a second process cannot
+    /// reach a device at all, so there is no exclusive mode to reach for and
+    /// no raw device node to open.
+    ///
+    /// Not covered by an existing capability: `CAP_MMIO_MAP` / `CAP_IRQ_BIND`
+    /// / `CAP_MEM_DMA` are what a *driver* holds to reach its own hardware,
+    /// and this is the authority to command a driver that already has them.
+    pub const AUDIO_DEVICE: Self = Self(48);
+
+    /// Open a capture stream on any audio source (`plans/SOUND.md`).
+    ///
+    /// A privacy boundary no existing capability covers: it guards every
+    /// microphone and line input as a group, and `audiod` checks it at stream
+    /// open against the kernel-attested caller, refusing rather than
+    /// downgrading a capture request from a principal without it.
+    ///
+    /// Playback deliberately needs no capability — a program plays sound the
+    /// way it draws a window, authorised by its session holding the sink's
+    /// seat lease — and *monitoring* a sink's own mix is authorised by that
+    /// same lease, because the lease already expresses exactly the right
+    /// boundary. Capture from a physical input is the one case neither
+    /// covers.
+    ///
+    /// It is bounded structurally as well as by the check: every live capture
+    /// stream is machine state published through the System Information API
+    /// and raised as a system notice, so the session draws a recording
+    /// indicator the recording application cannot suppress.
+    pub const AUDIO_CAPTURE: Self = Self(49);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -774,6 +814,8 @@ impl CapabilityId {
         (Self::SERVICE_CONTROL, "CAP_SERVICE_CONTROL"),
         (Self::CPUFREQ, "CAP_CPUFREQ"),
         (Self::DESKTOP_LAYER, "CAP_DESKTOP_LAYER"),
+        (Self::AUDIO_DEVICE, "CAP_AUDIO_DEVICE"),
+        (Self::AUDIO_CAPTURE, "CAP_AUDIO_CAPTURE"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -915,6 +957,8 @@ mod tests {
         assert_eq!(CapabilityId::SERVICE_CONTROL.as_u16(), 45);
         assert_eq!(CapabilityId::CPUFREQ.as_u16(), 46);
         assert_eq!(CapabilityId::DESKTOP_LAYER.as_u16(), 47);
+        assert_eq!(CapabilityId::AUDIO_DEVICE.as_u16(), 48);
+        assert_eq!(CapabilityId::AUDIO_CAPTURE.as_u16(), 49);
     }
 
     #[test]
@@ -953,6 +997,11 @@ mod tests {
             CapabilityId::DESKTOP_LAYER.name(),
             Some("CAP_DESKTOP_LAYER")
         );
+        assert_eq!(CapabilityId::AUDIO_DEVICE.name(), Some("CAP_AUDIO_DEVICE"));
+        assert_eq!(
+            CapabilityId::AUDIO_CAPTURE.name(),
+            Some("CAP_AUDIO_CAPTURE")
+        );
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -963,15 +1012,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=47 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=49 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=47 {
+        for raw in 1..=49 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(48).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(50).expect("in range").name(), None);
     }
 
     #[test]

@@ -67,5 +67,7 @@
 #define TAIRIX_CAP_SERVICE_CONTROL ((uint16_t)45u)
 #define TAIRIX_CAP_CPUFREQ ((uint16_t)46u)
 #define TAIRIX_CAP_DESKTOP_LAYER ((uint16_t)47u)
+#define TAIRIX_CAP_AUDIO_DEVICE ((uint16_t)48u)
+#define TAIRIX_CAP_AUDIO_CAPTURE ((uint16_t)49u)
 
 #endif /* TAIRIX_CAPABILITY_H */

@@ -1,0 +1,38 @@
+[package]
+name = "tairix-audiochan"
+description = "TAIRiX `audiochan-v1` audio device-channel driver side (plans/SOUND.md SND4): the pure per-endpoint `AudioChannelServer` request handler plus the freestanding driver-process serve loop (claim the reserved endpoint, publish the `audiochan` node, park on {call endpoint, device IRQ}) every audio driver process shares over any `Audio` device. no_std, allocation-free, fail-closed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The pure half — the `AudioChannelServer` request handler — builds on every
+# target so its host tests run under `cargo test`; the process half (`serve`)
+# is freestanding-only and pulls its runtime deps in below.
+[dependencies]
+# The `audiochan-v1` wire contract this crate is the driver side of: the
+# request/reply/notify codecs, the `Audio` device trait and PCM vocabulary,
+# the `PcmRing` in-region transport, the reserved endpoint block, the
+# hardware-tree node/resource vocabulary, and the `Errno`/`DriverError` types
+# it fails closed with — one ABI definition.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
+# The serve loop is a freestanding user-space program path, so its runtime is
+# linked only for the bare-metal targets a driver binary is built for; on the
+# host only the pure handler (and its tests) compiles.
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability set the restricted-sender endpoint bind is scoped by
+# (`CAP_AUDIO_DEVICE`) — the one capability-primitive definition.
+tairix-caps = { path = "../caps", version = "=0.0.0" }
+# The pure-Rust userland runtime whose `call_create`/`call_recv`/`call_reply`
+# / `ipc_send` / `shm_map` / `waitset_*` / `hw_emit_node` wrappers the serve
+# loop issues (one syscall trap).
+tairix-rt = { path = "../rt", version = "=0.0.0" }
+# Structured audit logging over the `log_emit` syscall: the one-shot
+# "device channel published, serving" readiness beacon.
+tairix-log = { path = "../log", version = "=0.0.0" }

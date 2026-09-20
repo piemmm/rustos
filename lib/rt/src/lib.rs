@@ -1243,6 +1243,13 @@ pub fn park_ns(duration_ns: u64) {
 /// rather than yielding in a loop. It carries no authority — `clock_get`
 /// and the wait-set need no capability — and holds no state, so it is
 /// `Copy` and trivially shareable.
+///
+/// It is also the userland
+/// [`MonotonicClock`](tairix_abi::time::MonotonicClock): both seams read the
+/// same `clock_get`, so a program that measures elapsed time and one that
+/// waits for it cannot disagree about what "now" is. The nanosecond reading
+/// is the unrounded one, because a caller that wanted microseconds asked for
+/// them.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClockDelay;
 
@@ -1251,6 +1258,12 @@ impl ClockDelay {
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+}
+
+impl tairix_abi::time::MonotonicClock for ClockDelay {
+    fn now_ns(&self) -> u64 {
+        clock_get()
     }
 }
 

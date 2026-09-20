@@ -586,3 +586,26 @@ fn endpoint_facts_decode_fails_closed() {
         Err(Errno::OutOfRange)
     );
 }
+
+#[test]
+fn an_interrupt_bitmap_names_only_the_endpoints_it_set() {
+    let raised = AudioInterrupt {
+        period_elapsed: 0b0000_0101,
+        xrun: 1 << 31,
+        jack_changed: 0,
+    };
+    assert!(!raised.is_empty());
+    assert!(AudioInterrupt::names(raised.period_elapsed, 0));
+    assert!(!AudioInterrupt::names(raised.period_elapsed, 1));
+    assert!(AudioInterrupt::names(raised.period_elapsed, 2));
+    assert!(AudioInterrupt::names(raised.xrun, 31));
+    assert!(!AudioInterrupt::names(raised.jack_changed, 0));
+
+    // An index past the bitmap's width cannot be named, so the shift that
+    // would be undefined never happens.
+    assert!(!AudioInterrupt::names(u32::MAX, 32));
+    assert!(!AudioInterrupt::names(u32::MAX, u16::MAX));
+
+    assert!(AudioInterrupt::NONE.is_empty());
+    assert_eq!(AudioInterrupt::default(), AudioInterrupt::NONE);
+}

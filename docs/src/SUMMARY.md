@@ -52,6 +52,7 @@
   - [`tairix-appload`](./lib/appload.md)
   - [`tairix-appstore`](./lib/appstore.md)
   - [`tairix-audio`](./lib/audio.md)
+  - [`tairix-audiochan`](./lib/audiochan.md)
   - [`tairix-binfmt`](./lib/binfmt.md)
   - [`tairix-blkclient`](./lib/blkclient.md)
   - [`tairix-bootload`](./lib/bootload.md)

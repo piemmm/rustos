@@ -321,6 +321,40 @@ pub struct ConfigureGrant {
 }
 
 impl ConfigureGrant {
+    /// Check the grant is one a ring can actually be built from.
+    ///
+    /// The single definition both sides apply: the driver's serve loop
+    /// validates its own device's answer before recording it, and
+    /// [`decode_configure_reply`] validates the wire image, so a grant that
+    /// reached the mixer is one the mixer can size a region from.
+    ///
+    /// The last clause is the one worth stating: a ring's frame count must be
+    /// a power of two (the slot index is then a mask rather than a division),
+    /// so a grant whose period rounds up past its own ring ceiling admits no
+    /// ring at all and is refused here rather than at every later attach.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a zero period, a ring ceiling outside the
+    /// ring bounds or below one period, or a period no power-of-two ring
+    /// within that ceiling could hold.
+    pub const fn validate(&self) -> Result<(), Errno> {
+        if self.period_frames == 0
+            || self.max_ring_frames > ring_bounds::MAX_FRAMES
+            || self.max_ring_frames < self.period_frames
+            || self.max_ring_frames < ring_bounds::MIN_FRAMES
+        {
+            return Err(Errno::OutOfRange);
+        }
+        let Some(smallest_ring) = self.period_frames.checked_next_power_of_two() else {
+            return Err(Errno::OutOfRange);
+        };
+        if smallest_ring > self.max_ring_frames {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(())
+    }
+
     /// The ring shape for `ring_frames` frames of this configuration.
     ///
     /// The one definition both sides size the shared region from: the mixer
@@ -629,6 +663,10 @@ mod service {
 /// The `(position, sampled_at)` pair is the clock the whole stack is built on:
 /// the mixer maintains a linear fit of it per device, so a client writing at a
 /// frame position is doing exact arithmetic rather than guessing at latency.
+///
+/// `sampled_at` is read from the **monotonic** clock, not the wall clock: the
+/// fit is a rate estimate over differences, and a wall clock stepped by the
+/// time-synchronisation service would corrupt every fit built across the step.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AudioServiceReport {
     /// Frames moved between the shared ring and the device this call.
@@ -798,22 +836,15 @@ pub fn decode_configure_reply(bytes: &[u8]) -> Result<ConfigureGrant, Errno> {
     {
         return Err(Errno::BadMagic);
     }
-    let period_frames = read_u32(body, grant::PERIOD);
-    let max_ring_frames = read_u32(body, grant::MAX_RING);
-    if period_frames == 0
-        || max_ring_frames > ring_bounds::MAX_FRAMES
-        || max_ring_frames < period_frames
-        || max_ring_frames < ring_bounds::MIN_FRAMES
-    {
-        return Err(Errno::OutOfRange);
-    }
-    Ok(ConfigureGrant {
+    let grant = ConfigureGrant {
         rate: Rate::new(read_u32(body, grant::RATE))?,
         format: SampleFormat::from_u8(body[grant::FORMAT])?,
         channel_map: ChannelMap::from_wire(&body[grant::CHANNEL_MAP..])?,
-        period_frames,
-        max_ring_frames,
-    })
+        period_frames: read_u32(body, grant::PERIOD),
+        max_ring_frames: read_u32(body, grant::MAX_RING),
+    };
+    grant.validate()?;
+    Ok(grant)
 }
 
 /// Encode the driver's reply to [`AudioChannelRequest::Service`].

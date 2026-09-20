@@ -39,6 +39,7 @@ members = [
     "lib/appload",
     "lib/appstore",
     "lib/audio",
+    "lib/audiochan",
     "lib/binfmt",
     "lib/blkclient",
     "lib/bootload",
@@ -173,6 +174,7 @@ members = [
 
     # Drivers — accelerator
     "drivers/accelerator/virtio_crypto",
+    "drivers/audio/virtio_snd",
 
     # Drivers — network
     "drivers/network/genet",

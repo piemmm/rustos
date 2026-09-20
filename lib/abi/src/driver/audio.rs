@@ -24,10 +24,12 @@
 //! rate outside the range any real converter runs at, or a gain range whose
 //! bounds are inverted is a typed [`Errno`], never a guess.
 
+use super::audio_channel::{ConfigureGrant, ConfigureParams};
+use super::audio_ring::PcmRing;
 use crate::bounded_text::BoundedText;
 use crate::le::{put_i32, put_u16, put_u32, read_i32, read_u16, read_u32};
-use crate::time::Duration64;
-use crate::Errno;
+use crate::time::{Duration64, Time64};
+use crate::{DriverError, Errno};
 
 /// Channels one stream or device endpoint may carry.
 ///
@@ -1109,6 +1111,252 @@ impl AudioEndpointFacts {
         facts.validate()?;
         Ok(facts)
     }
+}
+
+/// What one [`Audio::service`] doorbell moved, and where the device's clock
+/// stands.
+///
+/// The driver-facing twin of the wire
+/// [`AudioServiceReport`](super::audio_channel::AudioServiceReport): the serve
+/// loop encodes this straight into the reply, so the device engine and the
+/// mixer describe a period in the same words.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AudioServiced {
+    /// Frames moved between the shared ring and the device this call.
+    pub transferred: u32,
+    /// Whether the device is clocking.
+    pub running: bool,
+    /// The device's frame position when it was sampled.
+    pub position: Frames,
+    /// Frames lost to under- or over-run since the endpoint was configured.
+    /// Cumulative, so a consumer keeps the latest value it saw.
+    pub xrun_frames: u64,
+    /// When [`Self::position`] was sampled.
+    pub sampled_at: Time64,
+}
+
+/// What an endpoint's interrupt had to say.
+///
+/// A device raises one line for every reason it has, so the driver reads its
+/// event source once and reports each thing that happened. The serve loop
+/// turns these into [`AudioChannelNotify`](super::audio_channel::AudioChannelNotify)
+/// frames; nothing here is a wire type, so a device with no jack detection
+/// simply never reports one.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct AudioInterrupt {
+    /// Endpoints whose period boundary passed, as a bitmap over endpoint
+    /// index. A bitmap rather than a list because a device with several
+    /// streams running signals them together and the serve loop wants no
+    /// allocation on the interrupt path.
+    pub period_elapsed: u32,
+    /// Endpoints that lost frames.
+    pub xrun: u32,
+    /// Endpoints whose connector changed.
+    pub jack_changed: u32,
+}
+
+impl AudioInterrupt {
+    /// Nothing happened — the line was not ours, or the cause was already
+    /// consumed.
+    pub const NONE: Self = Self {
+        period_elapsed: 0,
+        xrun: 0,
+        jack_changed: 0,
+    };
+
+    /// Whether any endpoint reported anything.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.period_elapsed == 0 && self.xrun == 0 && self.jack_changed == 0
+    }
+
+    /// Whether `endpoint` is named in `bitmap`.
+    ///
+    /// An index at or past the bitmap's width answers `false`: a device
+    /// presenting more endpoints than a word has bits cannot signal the ones
+    /// past it, which is why [`MAX_SIGNALLED_ENDPOINTS`] bounds what a driver
+    /// may report.
+    #[must_use]
+    pub const fn names(bitmap: u32, endpoint: u16) -> bool {
+        (endpoint as u32) < MAX_SIGNALLED_ENDPOINTS && (bitmap >> endpoint) & 1 == 1
+    }
+}
+
+/// Endpoints one interrupt may name, bounding [`AudioInterrupt`]'s bitmaps.
+///
+/// A fixed validation bound rather than a capacity: it is the width of the
+/// word the bitmaps are, and a device presenting more endpoints than this
+/// signals the remainder on its own later interrupts rather than silently
+/// losing them.
+pub const MAX_SIGNALLED_ENDPOINTS: u32 = u32::BITS;
+
+/// One audio device: what it presents, how it is programmed, and how one
+/// period of samples moves.
+///
+/// The class trait every `drivers/audio/*` engine implements and
+/// `lib/audiochan`'s serve loop is written once over, so the whole
+/// `audiochan-v1` control plane exists in one place rather than per device.
+/// It is deliberately the device's *own* vocabulary and nothing above it:
+/// there is no mixing, no conversion and no routing here, because those
+/// belong to the one engine in `lib/audio` and a driver that did any of them
+/// would be a second one.
+///
+/// # The shape
+///
+/// A freshly-opened device answers [`device_facts`](Self::device_facts) and
+/// [`endpoint_facts`](Self::endpoint_facts) and nothing else moves.
+/// [`configure`](Self::configure) programs one endpoint and answers what the
+/// hardware could actually meet; [`start`](Self::start) begins clocking it;
+/// [`service`](Self::service) moves one period between the caller's ring view
+/// and the device's own buffer and reports the clock pair; [`stop`](Self::stop)
+/// and [`release`](Self::release) unwind it.
+///
+/// # Capabilities
+///
+/// A driver process reaches its hardware through the resource grants its
+/// matched node requested, and its device channel is bound restricted-sender
+/// on [`CapabilityId::AUDIO_DEVICE`](crate::CapabilityId::AUDIO_DEVICE), so
+/// the kernel refuses every caller but the mixer at dispatch and no method
+/// here re-checks.
+pub trait Audio {
+    /// Report what the device is and how many endpoints it presents.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the hardware could not be queried.
+    fn device_facts(&self) -> Result<AudioDeviceFacts, DriverError>;
+
+    /// Report what one sink or source can do.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] for an index at or past the reported
+    ///   endpoint count.
+    /// * [`DriverError::DeviceFault`] if the hardware could not be queried.
+    fn endpoint_facts(&self, endpoint: u16) -> Result<AudioEndpointFacts, DriverError>;
+
+    /// Program `endpoint`'s rate, format, channel layout and period, and
+    /// answer what the hardware will actually run at.
+    ///
+    /// A device that cannot do the asked-for rate answers the rate it will
+    /// run at rather than refusing, so the mixer adapts and owns the
+    /// conversion the difference implies. What it may not do is answer
+    /// something the request never mentioned.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] for an unknown endpoint.
+    /// * [`DriverError::Unsupported`] for a request no substitution can
+    ///   satisfy — a channel layout the endpoint has no reading for.
+    /// * [`DriverError::OutOfRange`] for a period the driver's own buffering
+    ///   cannot carry.
+    /// * [`DriverError::Busy`] if the endpoint is clocking — a
+    ///   reconfiguration happens at a period boundary, on a stopped endpoint.
+    /// * [`DriverError::DeviceFault`] if the hardware refused its own
+    ///   programming.
+    fn configure(
+        &mut self,
+        endpoint: u16,
+        params: &ConfigureParams,
+    ) -> Result<ConfigureGrant, DriverError>;
+
+    /// Begin clocking `endpoint`, with its first frame at stream position
+    /// `at`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] for an unknown endpoint.
+    /// * [`DriverError::DeviceFault`] if the hardware refused, or if the
+    ///   endpoint is not configured — the channel server admits a transport
+    ///   call only on a configured, attached endpoint, so reaching that here
+    ///   means the driver's own bookkeeping diverged from the device's.
+    fn start(&mut self, endpoint: u16, at: Frames) -> Result<(), DriverError>;
+
+    /// Stop clocking `endpoint` at position `at`, keeping the position so a
+    /// resume is exact.
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start).
+    fn stop(&mut self, endpoint: u16, at: Frames) -> Result<(), DriverError>;
+
+    /// Stop accepting new frames on `endpoint` and clock out what is already
+    /// queued, then stop.
+    ///
+    /// Completion is observed rather than returned: the endpoint reports
+    /// `running: false` from its next [`service`](Self::service) once the
+    /// queue has played out, at the exact position it fell silent. A capture
+    /// endpoint has nothing to play out and simply stops.
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start).
+    fn drain(&mut self, endpoint: u16) -> Result<(), DriverError>;
+
+    /// Move one period between `ring` — the caller's view of the shared PCM
+    /// region — and the device, and report the clock pair.
+    ///
+    /// A playback endpoint reads frames out of the ring into its own buffer;
+    /// a capture endpoint writes frames into it. Either way the copy is the
+    /// driver's, because the alternative is publishing the driver's DMA
+    /// window to another process.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] for an unknown endpoint.
+    /// * [`DriverError::BadMagic`] if the ring's counters fail validation.
+    /// * [`DriverError::DeviceFault`] if the hardware failed, or if the
+    ///   endpoint is not configured (see [`start`](Self::start)).
+    fn service(
+        &mut self,
+        endpoint: u16,
+        ring: &mut PcmRing<'_>,
+    ) -> Result<AudioServiced, DriverError>;
+
+    /// Set `endpoint`'s hardware gain and mute.
+    ///
+    /// The device quantises `millibel` into its own reported range, rounding
+    /// to the step **above** so software gain never has to amplify to make up
+    /// the difference. A device with no gain control refuses, which is how
+    /// the mixer learns to apply the gain itself.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] for an unknown endpoint.
+    /// * [`DriverError::NotImplemented`] if the endpoint reported no
+    ///   [`GainRange`].
+    /// * [`DriverError::DeviceFault`] if the hardware refused.
+    fn set_gain(&mut self, endpoint: u16, millibel: i32, mute: bool) -> Result<(), DriverError>;
+
+    /// Release `endpoint`'s device-side resources: stop it if it is clocking
+    /// and forget its configuration, so a later `configure` starts clean.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] for an unknown endpoint.
+    /// * [`DriverError::DeviceFault`] if the hardware refused.
+    fn release(&mut self, endpoint: u16) -> Result<(), DriverError>;
+
+    /// Read and clear the device's interrupt causes.
+    ///
+    /// Called from the driver process's interrupt path after the line fires.
+    /// A shared line the device did not raise answers
+    /// [`AudioInterrupt::NONE`], which the serve loop reports to nobody.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the hardware could not be read.
+    fn take_interrupt(&mut self) -> Result<AudioInterrupt, DriverError>;
+
+    /// Mask or unmask the device's period/event interrupt sources.
+    ///
+    /// The serve loop masks them while no region is attached, so a device
+    /// left clocking cannot storm a driver with nowhere to put frames.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the hardware refused.
+    fn set_event_interrupts(&mut self, enabled: bool) -> Result<(), DriverError>;
 }
 
 #[cfg(test)]

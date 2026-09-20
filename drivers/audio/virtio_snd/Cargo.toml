@@ -1,0 +1,61 @@
+[package]
+name = "tairix-drv-audio-virtio-snd"
+description = "TAIRiX virtio sound driver (plans/SOUND.md SND4): the host-testable virtio-snd device engine implementing the `Audio` class trait over the bus-agnostic split-virtqueue transport, its `BIND_KEYS` discovery identity, and the autoloaded user-space `Run` process that serves `audiochan-v1` to the mixer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# This driver crate has two targets. The host-testable device engine
+# (`VirtioSnd`), the `BIND_KEYS` match table and the `register` entry live in
+# the `lib` target (`src/lib.rs`), co-located *in the driver* because a sound
+# card sits well above the bootstrap floor and so has no charter-legal
+# non-driver consumer for a `lib/*` device-support crate.
+# The `Run` entry-point binary (`src/main.rs`) is the bundle installed under
+# `/System/Drivers/` and autoloaded into user space by `devmgr` when a
+# virtio-snd node is discovered. It links the userland runtime `tairix-rt`, so
+# those bin-only deps are pulled in **only** for the bare-metal targets the
+# binary is built for; on the host the binary is an inert stub and only the
+# `lib` target (and its host tests) compiles.
+
+[[bin]]
+name = "tairix-drv-audio-virtio-snd-run"
+path = "src/main.rs"
+
+# The device-logic dependencies the `lib` target needs on every target (host
+# tests + the freestanding build alike).
+[dependencies]
+# The `abi-v1` surface: the `Audio` class trait and PCM vocabulary, the
+# `audiochan-v1` configure grant the device answers with, the `PcmRing`
+# in-region transport, the `HwMatchKey` / `DriverBindKey` discovery identity,
+# and the `CapabilityId` / `DriverError` types it fails closed with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The bus-agnostic virtio split-virtqueue protocol (Transport, SplitQueue, DMA
+# slabs, and the MockHost/MockTransport doubles the host tests drive). A
+# `lib/*` crate, so the layering holds: a driver depends on `lib/*`, never on
+# another driver.
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+
+# Everything the freestanding `Run` program links is pulled in only for the
+# bare-metal targets the binary is actually built for; on the host the binary
+# is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability-set type the rt-backed `DriverHost` is built over.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The device-agnostic driver side of the `audiochan-v1` device channel: the
+# pure `AudioChannelServer` handler plus the serve loop (claim the reserved
+# endpoint, publish the `audiochan` node, park on {call endpoint, device IRQ})
+# every audio driver process shares — one definition.
+tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
+# The user-space driver runtime: turns the kernel-issued device-resource
+# grants into the `MmioMapper` + `VirtioHost` the bring-up consumes
+# (`mmio_map` / `dma_alloc` / `resource_grants` over the syscall surface).
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the stack canary, the panic
+# handler, the allocator, and the `irq_bind` / `entry!` surface.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

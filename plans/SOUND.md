@@ -19,7 +19,7 @@ seek slider.
 | SND1 | `plans/SOUND.md`, the jump-sheet row, the corrected Settings reference, and the `plans/USB.md` scope change | done |
 | SND2 | `lib/abi`: `HwDeviceClass::Audio`, the PCM vocabulary, `audio_ring`, `audiochan-v1`, `audio-v1` | done |
 | SND3 | `lib/audio`: conversion, mixer, resampler, channel mapping, clock model, routing policy, volume model, the stream client — all host-tested, plus the ring's loom model | done |
-| SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | planned |
+| SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | in progress: the device side is built — the `Audio` class trait, `lib/audiochan`, and `drivers/audio/virtio_snd`. `audiod`, the two capabilities' holder, `devmgr`'s bind, the signed bundle and the QEMU vertical remain |
 | SND5 | `lib/abi` DMA-engine class trait (`DmaEngine`/`DmaChannel`, cyclic chains, discovered request lines); `drivers/dma/bcm2711` | planned |
 | SND6 | Isochronous transfer support: the endpoint kind and service-interval scheduling in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and feedback endpoints in `drivers/bus/usb/xhci` | planned |
 | SND7 | `drivers/audio/usb_uac`: UAC1 and UAC2, clock and feature units, explicit and implicit feedback | planned |
@@ -388,7 +388,22 @@ protocol, so it carries a `loom` model**; that is not optional.
 ### `audiochan-v1` — the device channel
 
 `lib/abi/src/driver/audio_channel.rs`, the `net_channel.rs` shape applied to
-audio, with `lib/audiochan` the serve loop every audio driver process runs:
+audio, with `lib/audiochan` the serve loop every audio driver process runs.
+
+**Built.** `lib/abi::driver::audio::Audio` is the class trait every audio
+engine implements and the serve loop is written once over;
+`AudioChannelServer` is its pure per-endpoint handler and `serve` the process
+loop. State is per endpoint rather than per channel, because a device presents
+several sinks and sources and each is driven independently.
+`ConfigureGrant::validate` is the one definition both sides apply to a grant,
+so a grant the mixer would refuse to decode is never recorded by the driver —
+including one whose period rounds up past its own ring ceiling, which admits
+no power-of-two ring at all. The interrupt path *services* rather than merely
+notifying: the region is already mapped in the driver, so the period is moved
+there and one notify carries the clock pair, instead of two extra process
+switches per period on the path whose whole job is not to have jitter.
+
+The surface:
 
 - A reserved endpoint block (`AUDIO_CHANNEL_ENDPOINT_BASE`, `"ACHAN\0\0\0"`),
   claimed by first-free binding so two audio drivers never collide without a
@@ -418,6 +433,23 @@ period is 1920 bytes, so the copy runs at 375 KiB/s. The security boundary is
 bought for a rounding error.
 
 ### `audiod` — the service
+
+**Remaining.** This is what is left of SND4, and the two capabilities land
+with it because a capability needs its live holder and its live enforcement
+point in the same change: the enforcement point exists (a driver's endpoint is
+bound restricted-sender on the audio-device capability), and `audiod` is the
+holder.
+
+One seam the first consumer revealed and which must be settled before the
+mixer is written: `lib/audio`'s `Resampler` borrows the `FilterBank` it was
+built over, and its own filter history is per stream while the bank is per
+rate pair — which the crate's own documentation already says. A service that
+holds both in one stream record cannot express that without a self-reference,
+and constructing a resampler per period would both allocate on the per-period
+path and reset the filter memory every period (an audible discontinuity). The
+fix is to move the bank out of `Resampler` and pass it to `process`, so the
+state is per stream and the coefficients are shared — which is what the design
+already intends.
 
 `userland/system/audiod`, a `kind = "service"` bundle discovered from disk like
 any other (§16.5), declaring its readiness condition so dependants gate on it.
@@ -576,17 +608,32 @@ because the work is the port's host shim and not a device.
 
 ### `drivers/audio/virtio_snd` — the first one
 
-virtio sound (device id 25), over the `lib/virtio` split-virtqueue transport
-and `drivers/bus/virtio` the tree already has, so it is the cheapest complete
-driver and the one that gives an end-to-end QEMU vertical on **every Tier-1
-architecture**. It lands first for exactly that reason.
+virtio sound (device id 25), over the `lib/virtio` split-virtqueue transport,
+so it is the cheapest complete driver and the one that gives an end-to-end
+QEMU vertical on **every Tier-1 architecture**. It lands first for exactly
+that reason.
 
-The four queues (control, event, tx, rx), the jack/PCM/chmap information
-requests, `SET_PARAMS`/`PREPARE`/`START`/`STOP`/`RELEASE`, the transfer
-header/status framing with its `latency_bytes`, and the period-elapsed, xrun
-and jack-change events — which map onto `audiochan-v1`'s notifications with no
-translation layer, because the device channel was shaped from the same
-hardware reality.
+**Built.** The four queues (control, event, tx, rx), the jack/PCM/chmap
+information requests, `SET_PARAMS`/`PREPARE`/`START`/`STOP`/`RELEASE`, the
+transfer header/status framing with its `latency_bytes`, and the
+period-elapsed, xrun and jack-change events — which map onto `audiochan-v1`'s
+notifications with no translation layer, because the device channel was shaped
+from the same hardware reality. Both buses from one signed bundle: a
+single-aperture virtio-MMIO aperture or the four role-tagged virtio-PCI
+windows, shape-keyed from the grant set.
+
+Three things it reports honestly rather than inventing, because the device
+QEMU presents publishes none of them: no jacks means `JackState::Unknown`, no
+channel maps means the conventional layout for the reported channel count (and
+a refusal for a count with no conventional reading), and no negotiated control
+elements means no `GainRange`, so the mixer applies the gain itself.
+
+What keeps the position exact is that silence is substituted **only** where
+the device would otherwise run dry — a short ring with nothing left in flight
+— and counted as lost. Padding a period the device has not yet asked for would
+manufacture a glitch out of frames that were merely going to arrive in time; a
+drain's tail is a short transfer, not a padded one. A capture period the
+mixer's ring could not hold is over-run and is counted too.
 
 ### `drivers/audio/hda` — the answer to "AC'97 or whatever motherboards use"
 
