@@ -37,7 +37,7 @@ opens a drawing as a document.
 | S19 | `<pattern>` as a paint server, including the `overflow: visible` fold | done |
 | S20 | `<marker>`: `marker-start` / `-mid` / `-end`, and the element-visit bound their instancing needs | done |
 | S21 | `vector-effect="non-scaling-stroke"`: the outline built in the host space, and what stands in for that space here | done |
-| S22 | Glyph outlines out of `lib/fontface`: a public contour API, so text reaches this crate as geometry and never as pixels | planned |
+| S22 | Glyph outlines out of `lib/fontface`: a public contour API, so text reaches this crate as geometry and never as pixels | done |
 | S23 | The font seam: resolving `font-family`/`font-weight`/`font-style`/`font-stretch` to a face at decode time, injected and capability-scoped | planned |
 | S24 | `<text>` and `<tspan>`: the `x`/`y`/`dx`/`dy`/`rotate` lists, `text-anchor`, white-space and `xml:space`, `letter-spacing`/`word-spacing`, `textLength`/`lengthAdjust` | planned |
 | S25 | The text property cascade: the `font-*` family, the baselines (`dominant-baseline`, `alignment-baseline`, `baseline-shift`), `text-decoration` | planned |
@@ -66,7 +66,7 @@ opens a drawing as a document.
 | S48 | The SVG DOM binding: the document/element/attribute/style interfaces, and the mutation path back into the artwork tree | planned |
 | S49 | Events and timers: `load`/pointer/keyboard events with the hit testing they need, `setTimeout`/`setInterval`/`requestAnimationFrame` | planned |
 
-S1–S21 are `done` and none is half-built. S22–S44 are the rest of SVG, which
+S1–S22 are `done` and none is half-built. S23–S44 are the rest of SVG, which
 this crate must draw and does not yet: text, embedded images, filters,
 animation, the CSS surface the cascade still drops, and the reference
 resolution that reaches outside the document. S45–S49 follow from the
@@ -497,13 +497,44 @@ outside this crate before any of it can be written.
   flattening step — not as a rasterised cell. Anything else would fix a
   resolution at decode time and put text on a second rasterisation path, both
   of which this crate exists to avoid.
-- **`lib/fontface` does not expose that yet, and must (S22).** Its
-  `OutlineSink` is private: the public surface rasterises (`rasterise_glyph`,
-  `rasterise_proportional` → `GlyphRaster`) and answers metrics
-  (`units_per_em`, `ascent`, `descent`, `advance`, `glyph_for`). A public
-  outline API returning a glyph's contours in font units is a prerequisite for
-  S24, not an optional extra. It is one definition serving both consumers: the
-  rasteriser keeps consuming it internally.
+- **`lib/fontface` exposes that (S22, done):
+  `Face::glyph_outline(glyph) -> Vec<Contour>`.** A `Contour` is a start point
+  and an ordered run of `OutlineSegment::{Line, Quadratic}` closing back on
+  it. What it settled, because S24 builds directly on each:
+  - **Quadratics come through whole, and there is no tolerance parameter.**
+    A caller-supplied tolerance would put a second flattening step in the
+    crate; a fixed chord count would facet a glyph as the asset is drawn
+    larger, the defect already rejected for marker tangents and for the
+    design-grid tolerance. `lib/svg` instead flattens through its own
+    `flatten_quadratic`, at the tolerance the *placement* resolves — the same
+    single step every other curve in the document takes, so a glyph is
+    subdivided exactly as a `<path>` of the same shape would be. TrueType
+    outlines are quadratic throughout, so nothing else is needed.
+  - **Font units, y up, nothing pre-applied.** The y-flip and the
+    `font-size / units_per_em` scale stay with the caller, because the two
+    consumers place a glyph differently: the rasteriser flips about a baseline
+    row in a pixel cell, S24 flips about the baseline in user units as part of
+    the text transform it is building anyway. `Face::units_per_em` was already
+    public.
+  - **Contours are closed, and winding is the fill.** TrueType fills non-zero,
+    so a counter is a contour wound against the one enclosing it, not a
+    separate shape — S24 emits one `Layer` per glyph run with
+    `FillRule::NonZero` and all contours together, exactly as a multi-contour
+    `<path>` does. `lib/fontface` names no `FillRule`; it states the
+    convention and `lib/svg` names its own type.
+  - **One walk, genuinely shared.** The decode is a single traversal of `glyf`
+    over a private sink trait, with the rasteriser and the outline API as its
+    two implementations — not a second decoder beside the old one. Measured:
+    the generated console atlas is byte-identical, and rasterising D2Coding's
+    19,966 mapped glyphs costs 0.4641 s through the shared walk against
+    0.4628 s before it, so the sharing is free and adds no per-glyph
+    allocation to the atlas path.
+  - **The bounds are charged across the whole walk.** Outline points and
+    composite component records are each held to a total per glyph, not a cap
+    per nesting level — a per-level cap multiplies with depth, and the walk
+    could previously expand a malformed composite without end. The existing
+    composite-depth bound stays. These are validation bounds on a hostile
+    face, not capacities.
 - **The font is resolved through an injected seam (S23), never ambient.** This
   crate is `no_std` and has no file access; the faces live in `/System/Fonts`
   behind the font service (`plans/FONT-SERVICE.md`). `decode` therefore takes a
@@ -523,9 +554,9 @@ outside this crate before any of it can be written.
 - **New bounds.** Glyph count per document, total outline points (against the
   existing vertex budget), `<tspan>` nesting, and the resolved text length —
   all fixed containment bounds, sized like the rest.
-- **The order is S22, then S23–S26, then S27.** The outline API comes first
-  because nothing else can start without it; Latin, Greek and Cyrillic text
-  then works correctly through S26, and S27 adds the scripts that need
+- **The order is S22 (done), then S23–S26, then S27.** The outline API came
+  first because nothing else could start without it; Latin, Greek and Cyrillic
+  text then works correctly through S26, and S27 adds the scripts that need
   reordering and shaping. Each stage is complete in itself rather than a
   thinner version of the next — a script that needs shaping is not
   half-drawn before S27, it is skipped like any other element this decoder
@@ -646,7 +677,7 @@ it is the behaviour the desktop has today. Whether the drawable-element case
 should instead fail the document closed is recorded as an open item in
 `plans/ICONS.md`; it is a deliberate decision to make, not an oversight.
 
-While S22–S44 are outstanding the question is live rather than theoretical:
+While S23–S44 are outstanding the question is live rather than theoretical:
 skipping currently means a document with text draws no lettering, and an
 asset whose meaning *is* its lettering then renders as a wrong picture with
 no signal. That argues for distinguishing the two cases rather than choosing

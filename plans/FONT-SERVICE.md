@@ -498,6 +498,32 @@ other vector asset in the tree fills through. Two consequences, both open:
 The work is its own change: the fitted-outline path needs a design and test
 pass of its own, and must keep grid fitting's whole-pixel stems intact.
 
+## 3.3 Open — the SVG text seam wants outlines, and the protocol serves coverage
+
+`lib/fontface` now exposes `Face::glyph_outline`: a glyph as closed contours
+in font units with its quadratics intact, decoded by the same `glyf` walk the
+rasteriser uses (`plans/SVG.md` S22). `lib/svg` needs that rather than
+coverage, because its text is filled, stroked, clipped and transformed like a
+`<path>` and the picture it produces has no resolution.
+
+`FONT_ENDPOINT` serves coverage bitmaps only, so the seam `plans/SVG.md` S23
+designs has a decision this plan should record rather than let S23 re-derive:
+
+- **A contour reply kind on `FONT_ENDPOINT`** keeps the parser in the one
+  sandbox, which is the whole point of the service — but an outline is far
+  larger than a cell of coverage and varies per glyph, so the byte budget and
+  the batch shape (§2) both need restating for it, and a decoder asking per
+  glyph pays a round trip where the coverage path pays one per *run*.
+- **Handing the caller the face bytes** to outline in its own process would
+  put an untrusted TrueType parser back into every consumer — exactly the
+  §19.5 defect this plan exists to remove. It is not an option for a document
+  a user opened; it is arguable only for the system's own committed assets,
+  and even then it re-duplicates the parse.
+
+Whichever is chosen, the bounds `glyph_outline` charges (outline points and
+composite component records, both across the whole walk) are the service's
+existing fail-closed behaviour and need no protocol support.
+
 ## 4. Cross-references
 
 - `AGENTS.md` §2.2, §2.3, §2.14, §5.2, §5.4, §16.2, §16.4, §16.5, §18.3,
@@ -510,6 +536,8 @@ pass of its own, and must keep grid fitting's whole-pixel stems intact.
   readiness-condition on-demand activation, deleting the `login` start path.
 - `plans/DISPLAY.md`, `plans/COMPOSITOR-WORK.md`, `plans/GUI-CONTROLS-DESIGN.md`
   — the text-drawing consumers of the font client.
+- `plans/SVG.md` — S22 (the glyph-outline API, done) and S23 (the font seam
+  SVG text resolves a face through), the open interaction being §3.3.
 - `lib/abi/src/{window,display,net}_ipc.rs` — the reserved-endpoint service
   protocol pattern `font_ipc.rs` follows.
 - `lib/font`, `lib/fontface`, `lib/fbcon`, `tools/xtask` `font-atlas` — the

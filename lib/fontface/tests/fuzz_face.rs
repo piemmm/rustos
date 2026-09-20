@@ -25,6 +25,11 @@
 //! * **The rasteriser, over the whole glyph and size space.** Random glyphs
 //!   are rasterised at random (bounded) cell heights, asserting the output is
 //!   exactly the sized bitmap of 4-bit coverage.
+//! * **The outline API, which hands geometry to a caller.** `glyph_outline`
+//!   is the surface `lib/svg` draws text through, so a hostile face reaches
+//!   a consumer that will transform and fill whatever it is given. Every
+//!   contour it returns must be closed and finite, or the bound it broke must
+//!   have refused it.
 //!
 //! No external fuzz runner: a per-run-seeded LCG (seed drawn and logged by
 //! `tairix_fuzzseed`) drives the loop. A plain `cargo test` runs the fixed
@@ -33,7 +38,7 @@
 
 use std::path::PathBuf;
 
-use tairix_fontface::{AxisSetting, CellGeometry, Face, ATLAS_EM_PX};
+use tairix_fontface::{AxisSetting, CellGeometry, Face, OutlineSegment, ATLAS_EM_PX};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 /// Rasterising an outline is heavier than a wire decode, so the smoke count
@@ -115,6 +120,40 @@ fn exercise_proportional(face: &Face<'_>, glyph: u16, height: u32) {
     }
 }
 
+/// Exercise the public outline API, asserting the contract a caller relies
+/// on: closed contours of finite font-unit coordinates, or a typed refusal.
+///
+/// A coordinate that is NaN or infinite would propagate straight into a
+/// consumer's transform and fill, so it must never leave the decoder.
+fn exercise_outline(face: &Face<'_>, glyph: u16) {
+    let Ok(contours) = face.glyph_outline(glyph) else {
+        return;
+    };
+    for contour in &contours {
+        assert!(
+            !contour.segments.is_empty(),
+            "an emitted contour carries no segments"
+        );
+        let finite = |(x, y): (f64, f64)| x.is_finite() && y.is_finite();
+        assert!(finite(contour.start), "contour start is not finite");
+        let mut last = contour.start;
+        for segment in &contour.segments {
+            match *segment {
+                OutlineSegment::Line { to } => {
+                    assert!(finite(to), "line endpoint is not finite");
+                    last = to;
+                }
+                OutlineSegment::Quadratic { control, to } => {
+                    assert!(finite(control), "quadratic control is not finite");
+                    assert!(finite(to), "quadratic endpoint is not finite");
+                    last = to;
+                }
+            }
+        }
+        assert_eq!(last, contour.start, "an emitted contour is not closed");
+    }
+}
+
 /// A `wght`/`wdth`/`opsz` axis setting from a fuzz word, spanning well past
 /// the usual ranges so clamping and normalisation are exercised.
 fn fuzz_setting(tag: [u8; 4], word: u64) -> AxisSetting {
@@ -159,6 +198,7 @@ fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
         let (_, glyph) = mono_mapped[index(next(), mono_mapped.len())];
         let height = 8 + bounded(next(), MAX_FUZZ_HEIGHT - 8);
         exercise_rasterise(&good, glyph, height);
+        exercise_outline(&good, glyph);
 
         // (1b) Instance the known-good variable face at random axis settings
         // and exercise its metrics + proportional draw — a hostile *value* on
@@ -173,6 +213,7 @@ fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
             let _ = instanced.axes();
             let (_, vglyph) = var_mapped[index(next(), var_mapped.len().max(1))];
             exercise_proportional(&instanced, vglyph, 8 + bounded(next(), MAX_FUZZ_HEIGHT - 8));
+            exercise_outline(&instanced, vglyph);
         }
 
         // (2) Fuzz the parser. On odd iterations a handful of bit flips into a
@@ -212,6 +253,7 @@ fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
                     let height = 8 + bounded(next(), 24);
                     exercise_rasterise(&face, glyph, height);
                     exercise_proportional(&face, glyph, height);
+                    exercise_outline(&face, glyph);
                 }
             }
         }
