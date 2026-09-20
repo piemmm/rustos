@@ -18,7 +18,12 @@ and panic-free throughout.
   that one definition, so a change to how a comment is recognised can
   never apply to some stores and not others. No store's keys or values
   may contain `#` — each store's own validators enforce that, which is
-  what makes cutting at the first `#` unambiguous.
+  what makes cutting at the first `#` unambiguous. `ValueShape` is the
+  other half of that shared vocabulary: what a configuration key accepts,
+  either a closed set of canonical spellings or a description of the free
+  form its own parser admits. Both registries state it, and a tool
+  refusing a value and a settings surface offering the choices read the
+  same definition rather than each keeping a copy that would drift.
 * `cfloat` — C-locale `printf(3)` floating-point rendering shared by the
   `seq` and `printf` command apps (`plans/APPS.md`): one `FloatDirective`
   (the five printf flags, width, precision, `efga`/`EFGA` conversions)

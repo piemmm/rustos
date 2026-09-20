@@ -56,12 +56,12 @@ mod program {
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::OpenFlags;
     use tairix_abi::{Errno, HwNode, HwTreeHeader};
-    use tairix_devmgr::netcfg::interface_configs_from_config;
     use tairix_devmgr::{
-        events, DriverStoreCall, HwTreeService, InterfaceConfigPlan, NetstackBind,
-        NetworkConfigSource, NetworkInterfaceConfigSource,
+        events, DriverStoreCall, HwTreeService, NetstackBind, NetworkConfigSource,
+        NetworkInterfaceConfigSource,
     };
     use tairix_log::{log, Event, Field, Level};
+    use tairix_netconfig::InterfaceConfigPlan;
     use tairix_rt::LogSink;
     use tairix_util::fmt::{format_hex_u64, format_u64, format_usize};
 
@@ -411,8 +411,8 @@ mod program {
     /// per-interface configuration from
     /// `/System/Settings/Network/network.conf` over the read-only `/System`
     /// store endpoint ([`read_store_config`]) and maps it through the one
-    /// shared `lib/netconfig` engine
-    /// ([`interface_configs_from_config`](tairix_devmgr::netcfg::interface_configs_from_config)).
+    /// shared `lib/netconfig` projection
+    /// ([`InterfaceConfigPlan::of`](tairix_netconfig::InterfaceConfigPlan::of)).
     ///
     /// The read is over the store endpoint (not the VFS) so it works before
     /// the root unlock — the device manager binds interfaces on the same
@@ -439,7 +439,7 @@ mod program {
                 malformed_document(SystemConfigFile::Network);
                 return None;
             };
-            Some(interface_configs_from_config(&config))
+            Some(InterfaceConfigPlan::of(&config))
         }
     }
 

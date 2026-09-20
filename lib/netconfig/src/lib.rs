@@ -49,13 +49,17 @@
 
 extern crate alloc;
 
+mod plan;
+
+pub use plan::InterfaceConfigPlan;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tairix_abi::driver_store::SystemConfigFile;
-use tairix_util::conf::strip_comment;
+use tairix_util::conf::{strip_comment, ValueShape};
 
 /// The directory that holds the network-configuration store.
 pub const CONFIG_DIR: &str = "/System/Settings/Network";
@@ -116,6 +120,23 @@ pub enum IfaceKind {
 }
 
 impl IfaceKind {
+    /// Every kind, in the order a chooser offers them.
+    pub const ALL: &'static [Self] = &[Self::Ethernet, Self::Bond, Self::Loopback];
+
+    /// Every canonical spelling, in [`Self::ALL`] order.
+    ///
+    /// Derived from [`Self::as_str`] rather than written out again, so the
+    /// set a chooser offers and the set the parser admits cannot drift.
+    pub const VALUES: &'static [&'static str] = &{
+        let mut out = [""; IfaceKind::ALL.len()];
+        let mut index = 0;
+        while index < out.len() {
+            out[index] = IfaceKind::ALL[index].as_str();
+            index += 1;
+        }
+        out
+    };
+
     /// The canonical value spelling (`ethernet` / `bond` / `loopback`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -156,6 +177,23 @@ pub enum Ipv4Method {
 }
 
 impl Ipv4Method {
+    /// Every method, in the order a chooser offers them.
+    pub const ALL: &'static [Self] = &[Self::Disabled, Self::Dhcp, Self::Static];
+
+    /// Every canonical spelling, in [`Self::ALL`] order.
+    ///
+    /// Derived from [`Self::as_str`] rather than written out again, so the
+    /// set a chooser offers and the set the parser admits cannot drift.
+    pub const VALUES: &'static [&'static str] = &{
+        let mut out = [""; Ipv4Method::ALL.len()];
+        let mut index = 0;
+        while index < out.len() {
+            out[index] = Ipv4Method::ALL[index].as_str();
+            index += 1;
+        }
+        out
+    };
+
     /// The canonical value spelling (`disabled` / `static` / `dhcp`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -200,6 +238,23 @@ pub enum Ipv6Method {
 }
 
 impl Ipv6Method {
+    /// Every method, in the order a chooser offers them.
+    pub const ALL: &'static [Self] = &[Self::Slaac, Self::Dhcp, Self::Static, Self::Disabled];
+
+    /// Every canonical spelling, in [`Self::ALL`] order.
+    ///
+    /// Derived from [`Self::as_str`] rather than written out again, so the
+    /// set a chooser offers and the set the parser admits cannot drift.
+    pub const VALUES: &'static [&'static str] = &{
+        let mut out = [""; Ipv6Method::ALL.len()];
+        let mut index = 0;
+        while index < out.len() {
+            out[index] = Ipv6Method::ALL[index].as_str();
+            index += 1;
+        }
+        out
+    };
+
     /// The canonical value spelling (`slaac` / `static` / `dhcp` /
     /// `disabled`).
     #[must_use]
@@ -242,6 +297,23 @@ pub enum BondMode {
 }
 
 impl BondMode {
+    /// Every mode, in the order a chooser offers them.
+    pub const ALL: &'static [Self] = &[Self::ActiveBackup, Self::Balance];
+
+    /// Every canonical spelling, in [`Self::ALL`] order.
+    ///
+    /// Derived from [`Self::as_str`] rather than written out again, so the
+    /// set a chooser offers and the set the parser admits cannot drift.
+    pub const VALUES: &'static [&'static str] = &{
+        let mut out = [""; BondMode::ALL.len()];
+        let mut index = 0;
+        while index < out.len() {
+            out[index] = BondMode::ALL[index].as_str();
+            index += 1;
+        }
+        out
+    };
+
     /// The canonical value spelling (`active-backup` / `balance`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -504,6 +576,37 @@ impl IfaceKey {
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|key| key.name() == name)
+    }
+
+    /// What this key accepts, in the shared configuration vocabulary.
+    ///
+    /// The one statement of a key's value space, so a tool refusing a value
+    /// and a surface offering the choices read the same definition. A
+    /// closed key's spellings come from its own value enum rather than a
+    /// list repeated here.
+    #[must_use]
+    pub const fn shape(self) -> ValueShape {
+        match self {
+            Self::Kind => ValueShape::Closed(IfaceKind::VALUES),
+            Self::MatchMac => ValueShape::Free("a MAC address, `aa:bb:cc:dd:ee:ff`"),
+            Self::MatchNode => {
+                ValueShape::Free("a hardware-location base in hex, `0x` and up to 16 digits")
+            }
+            Self::Ipv4Method => ValueShape::Closed(Ipv4Method::VALUES),
+            Self::Ipv4Address => ValueShape::Free("an IPv4 address and prefix, `a.b.c.d/len`"),
+            Self::Ipv4Gateway => ValueShape::Free("an IPv4 address"),
+            Self::Ipv6Method => ValueShape::Closed(Ipv6Method::VALUES),
+            Self::Ipv6Address => ValueShape::Free("an IPv6 address and prefix, `addr/len`"),
+            Self::Ipv6Gateway => ValueShape::Free("an IPv6 address"),
+            Self::DnsServers => {
+                ValueShape::Free("a comma-separated list of unicast resolver addresses")
+            }
+            Self::Mtu => ValueShape::Free("whole bytes, 1280 to 65535"),
+            Self::BondMembers => ValueShape::Free("a comma-separated list of member aliases"),
+            Self::BondMode => ValueShape::Closed(BondMode::VALUES),
+            Self::BondMonitorInterval => ValueShape::Free("whole milliseconds, 100 to 60000"),
+            Self::BondPrimary => ValueShape::Free("a member alias"),
+        }
     }
 
     /// A stable index into a fixed `[_; IfaceKey::ALL.len()]` array, used to
@@ -816,6 +919,35 @@ impl InterfaceConfig {
         }
         Ok(())
     }
+
+    /// Clear `key`, so the interface no longer declares it and the key's
+    /// documented default applies again.
+    fn clear_key(&mut self, key: IfaceKey) {
+        match key {
+            IfaceKey::Kind => self.kind = None,
+            IfaceKey::MatchMac => self.match_mac = None,
+            IfaceKey::MatchNode => self.match_node = None,
+            IfaceKey::Ipv4Method => self.ipv4_method = None,
+            IfaceKey::Ipv4Address => self.ipv4_address = None,
+            IfaceKey::Ipv4Gateway => self.ipv4_gateway = None,
+            IfaceKey::Ipv6Method => self.ipv6_method = None,
+            IfaceKey::Ipv6Address => self.ipv6_address = None,
+            IfaceKey::Ipv6Gateway => self.ipv6_gateway = None,
+            IfaceKey::DnsServers => self.dns_servers = None,
+            IfaceKey::Mtu => self.mtu = None,
+            IfaceKey::BondMembers => self.bond_members = None,
+            IfaceKey::BondMode => self.bond_mode = None,
+            IfaceKey::BondMonitorInterval => self.bond_monitor_interval_ms = None,
+            IfaceKey::BondPrimary => self.bond_primary = None,
+        }
+    }
+
+    /// Whether the interface declares no key at all, and so writes no line.
+    fn declares_nothing(&self) -> bool {
+        IfaceKey::ALL
+            .iter()
+            .all(|key| self.render_value(*key).is_none())
+    }
 }
 
 /// Render any [`fmt::Display`] value to an owned `String` (infallible into a
@@ -1054,13 +1186,19 @@ impl NetworkConfig {
                 .ok_or(ParseError::at(lineno, ConfigError::UnknownKey))?;
             let value = value.ok_or(ParseError::at(lineno, ConfigError::MissingValue))?;
 
-            let index = config.interface_index_or_insert(iface_name, &mut seen)?;
-            if seen[index][key.index()] {
+            let index = config
+                .index_or_declare(iface_name)
+                .map_err(|kind| ParseError::at(lineno, kind))?;
+            seen.resize(config.interfaces.len(), [false; IfaceKey::ALL.len()]);
+            let (Some(row), Some(entry)) = (seen.get_mut(index), config.interfaces.get_mut(index))
+            else {
+                return Err(ParseError::at(lineno, ConfigError::InvalidInterfaceName));
+            };
+            if row[key.index()] {
                 return Err(ParseError::at(lineno, ConfigError::DuplicateKey));
             }
-            seen[index][key.index()] = true;
-
-            config.interfaces[index]
+            row[key.index()] = true;
+            entry
                 .set_key(key, value)
                 .map_err(|kind| ParseError::at(lineno, kind))?;
         }
@@ -1069,27 +1207,28 @@ impl NetworkConfig {
         Ok(config)
     }
 
-    /// Find the index of the interface named `name`, inserting a fresh one
-    /// (and its `seen` row) if it is new.
+    /// The index of the interface named `name`, declaring a fresh one at the
+    /// end when the name is new.
+    ///
+    /// The one place an interface comes into existence, so the parser and a
+    /// [`ConfigDraft`] admit exactly the same names and honour the same
+    /// bound.
     ///
     /// # Errors
     ///
-    /// [`ConfigError::TooManyInterfaces`] (as a whole-document
-    /// [`ParseError`]) when a new interface would exceed [`MAX_INTERFACES`].
-    fn interface_index_or_insert(
-        &mut self,
-        name: &str,
-        seen: &mut Vec<[bool; IfaceKey::ALL.len()]>,
-    ) -> Result<usize, ParseError> {
+    /// [`ConfigError::InvalidInterfaceName`] for a name outside the alias
+    /// grammar, and [`ConfigError::TooManyInterfaces`] when a new interface
+    /// would exceed [`MAX_INTERFACES`].
+    fn index_or_declare(&mut self, name: &str) -> Result<usize, ConfigError> {
+        validate_iface_name(name)?;
         if let Some(index) = self.interfaces.iter().position(|iface| iface.name == name) {
             return Ok(index);
         }
         if self.interfaces.len() == MAX_INTERFACES {
-            return Err(ParseError::whole(ConfigError::TooManyInterfaces));
+            return Err(ConfigError::TooManyInterfaces);
         }
         self.interfaces
             .push(InterfaceConfig::new(String::from(name)));
-        seen.push([false; IfaceKey::ALL.len()]);
         Ok(self.interfaces.len() - 1)
     }
 
@@ -1198,6 +1337,18 @@ impl NetworkConfig {
         Ok(())
     }
 
+    /// Begin a change to this configuration.
+    ///
+    /// Edits accumulate on the returned draft and take effect only when it
+    /// [`commit`](ConfigDraft::commit)s, so a refused change leaves this
+    /// configuration exactly as it was.
+    #[must_use]
+    pub fn edit(&self) -> ConfigDraft {
+        ConfigDraft {
+            config: self.clone(),
+        }
+    }
+
     /// Render the canonical store text: the explanatory header comment and,
     /// for each interface in declaration order, one `<iface>.<suffix> value`
     /// line per key that is set, in [`IfaceKey::ALL`] order.
@@ -1226,6 +1377,84 @@ impl NetworkConfig {
             }
         }
         out
+    }
+}
+
+/// A pending change to a [`NetworkConfig`], applied as one document.
+///
+/// A whole-document invariant cannot be checked a key at a time: moving an
+/// interface from static addressing to DHCP has to drop `ipv4.address` and
+/// change `ipv4.method` together, and each half on its own leaves a document
+/// [`NetworkConfig::parse`] would refuse. So edits accumulate here and
+/// [`commit`](Self::commit) checks the result once — until it does, the
+/// configuration the draft came from is untouched, so a refusal can never
+/// leave a partly-applied change anywhere.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigDraft {
+    config: NetworkConfig,
+}
+
+impl ConfigDraft {
+    /// Set `iface`'s `key` to its store `value`, declaring the interface
+    /// when this is the first key it carries.
+    ///
+    /// `value` is the spelling the document holds, checked against the key's
+    /// typed set exactly as the parser checks a line. There is no empty
+    /// value: every key refuses one, so clearing a key is
+    /// [`unset`](Self::unset) and can never be confused with setting it.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::InvalidInterfaceName`] for an alias outside the
+    /// grammar, [`ConfigError::TooManyInterfaces`] when declaring one would
+    /// exceed [`MAX_INTERFACES`], and [`ConfigError::InvalidValue`] (or the
+    /// list bounds [`ConfigError::TooManyMembers`] /
+    /// [`ConfigError::TooManyDnsServers`]) for a value the key's own grammar
+    /// refuses. The draft is unchanged on error.
+    pub fn set(&mut self, iface: &str, key: IfaceKey, value: &str) -> Result<(), ConfigError> {
+        let index = self.config.index_or_declare(iface)?;
+        let Some(entry) = self.config.interfaces.get_mut(index) else {
+            return Err(ConfigError::InvalidInterfaceName);
+        };
+        entry.set_key(key, value)
+    }
+
+    /// Clear `iface`'s `key`, so the document no longer declares it.
+    ///
+    /// An undeclared interface or an unset key is already in the requested
+    /// state, so this cannot fail. An interface left declaring nothing is
+    /// dropped at [`commit`](Self::commit).
+    pub fn unset(&mut self, iface: &str, key: IfaceKey) {
+        if let Some(entry) = self
+            .config
+            .interfaces
+            .iter_mut()
+            .find(|found| found.name == iface)
+        {
+            entry.clear_key(key);
+        }
+    }
+
+    /// Check the edited document whole and yield it.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::InconsistentInterface`] for a document whose interface
+    /// set does not hold together (see [`NetworkConfig::parse`]), or
+    /// [`ConfigError::TooLong`] when the rendered text would exceed
+    /// [`MAX_CONFIG_LEN`] — the parser would refuse such a store on the next
+    /// read, so it is refused here rather than written.
+    pub fn commit(mut self) -> Result<NetworkConfig, ConfigError> {
+        // An interface with every key cleared writes no line, so keeping it
+        // would make a render/parse round trip inexact.
+        self.config
+            .interfaces
+            .retain(|iface| !iface.declares_nothing());
+        self.config.validate()?;
+        if self.config.render().len() > MAX_CONFIG_LEN {
+            return Err(ConfigError::TooLong);
+        }
+        Ok(self.config)
     }
 }
 
@@ -1801,6 +2030,31 @@ bond0.bond.primary eth0
     }
 
     #[test]
+    fn every_closed_key_offers_exactly_what_the_parser_admits() {
+        for key in IfaceKey::ALL {
+            let ValueShape::Closed(values) = key.shape() else {
+                continue;
+            };
+            assert!(!values.is_empty(), "{} offers nothing", key.name());
+            let mut draft = NetworkConfig::default().edit();
+            for value in values {
+                draft
+                    .set("wan", *key, value)
+                    .unwrap_or_else(|_| panic!("{} refused its own {value}", key.name()));
+            }
+        }
+    }
+
+    #[test]
+    fn every_free_key_describes_the_form_it_wants() {
+        for key in IfaceKey::ALL {
+            if let ValueShape::Free(form) = key.shape() {
+                assert!(!form.is_empty(), "{} describes nothing", key.name());
+            }
+        }
+    }
+
+    #[test]
     fn key_registry_round_trips_names() {
         for key in IfaceKey::ALL {
             assert_eq!(IfaceKey::from_name(key.name()), Some(*key));
@@ -1852,5 +2106,218 @@ bond0.bond.primary eth0
     fn path_constants_are_inside_the_settings_subtree() {
         assert!(CONFIG_PATH.starts_with(CONFIG_DIR));
         assert!(CONFIG_PATH.starts_with("/System/Settings/"));
+    }
+
+    /// A store with one statically addressed interface, the starting point
+    /// of the transition every draft test turns on.
+    const STATIC_WAN: &str = "\
+wan.match.mac 52:54:00:12:34:56
+wan.ipv4.method static
+wan.ipv4.address 192.168.1.10/24
+wan.ipv4.gateway 192.168.1.1
+";
+
+    #[test]
+    fn a_draft_declares_an_interface_on_its_first_key() {
+        let mut draft = NetworkConfig::default().edit();
+        draft
+            .set("lan", IfaceKey::Mtu, "9000")
+            .expect("a bare MTU is a complete interface");
+        let config = draft.commit().expect("consistent");
+        assert_eq!(config.interface("lan").expect("lan").mtu, Some(9000));
+    }
+
+    #[test]
+    fn a_draft_leaves_the_configuration_it_came_from_untouched() {
+        let config = NetworkConfig::parse(STATIC_WAN).expect("parses");
+        let mut draft = config.edit();
+        draft
+            .set("wan", IfaceKey::Mtu, "9000")
+            .expect("a valid MTU");
+        draft.unset("wan", IfaceKey::Ipv4Gateway);
+        assert_eq!(config.interface("wan").expect("wan").mtu, None);
+        assert_eq!(
+            config.interface("wan").expect("wan").ipv4_gateway,
+            Some(Ipv4Addr::new(192, 168, 1, 1))
+        );
+    }
+
+    #[test]
+    fn moving_an_interface_to_dhcp_drops_its_static_address_in_one_commit() {
+        let config = NetworkConfig::parse(STATIC_WAN).expect("parses");
+        let mut draft = config.edit();
+        // The order the two halves are made in must not matter: neither is a
+        // consistent document on its own, and only the commit is checked.
+        draft.unset("wan", IfaceKey::Ipv4Address);
+        draft
+            .set("wan", IfaceKey::Ipv4Method, "dhcp")
+            .expect("a valid method");
+        draft.unset("wan", IfaceKey::Ipv4Gateway);
+        let config = draft.commit().expect("consistent once both halves land");
+        let wan = config.interface("wan").expect("wan");
+        assert_eq!(wan.ipv4_method(), Ipv4Method::Dhcp);
+        assert_eq!(wan.ipv4_address, None);
+        assert_eq!(wan.ipv4_gateway, None);
+    }
+
+    #[test]
+    fn a_commit_whose_document_is_inconsistent_is_refused() {
+        let mut draft = NetworkConfig::parse(STATIC_WAN).expect("parses").edit();
+        // Only the address goes: a static method with nothing to address is
+        // exactly what the parser refuses.
+        draft.unset("wan", IfaceKey::Ipv4Address);
+        assert_eq!(
+            draft.commit().expect_err("must fail"),
+            ConfigError::InconsistentInterface
+        );
+    }
+
+    #[test]
+    fn an_interface_whose_last_key_is_unset_is_dropped() {
+        let mut draft = NetworkConfig::parse("lan.mtu 1500\n")
+            .expect("parses")
+            .edit();
+        draft.unset("lan", IfaceKey::Mtu);
+        let config = draft.commit().expect("an empty document is consistent");
+        assert!(config.interfaces().is_empty());
+        // An interface that declared nothing would write no line, so keeping
+        // it would make this round trip inexact.
+        assert_eq!(
+            NetworkConfig::parse(&config.render()).expect("re-parses"),
+            config
+        );
+    }
+
+    #[test]
+    fn a_value_outside_its_key_set_is_refused_and_changes_nothing() {
+        let mut draft = NetworkConfig::parse(STATIC_WAN).expect("parses").edit();
+        assert_eq!(
+            draft
+                .set("wan", IfaceKey::Ipv4Method, "sometimes")
+                .expect_err("must fail"),
+            ConfigError::InvalidValue
+        );
+        let config = draft.commit().expect("the refused set changed nothing");
+        assert_eq!(
+            config.interface("wan").expect("wan").ipv4_method(),
+            Ipv4Method::Static
+        );
+    }
+
+    #[test]
+    fn the_empty_value_is_never_a_value_for_any_key() {
+        // What makes the empty command-line value an unambiguous spelling for
+        // *unset*: no key in the registry accepts it as a value. Which
+        // refusal each raises is its own value grammar's business.
+        for key in IfaceKey::ALL {
+            let mut draft = NetworkConfig::default().edit();
+            assert!(
+                draft.set("wan", *key, "").is_err(),
+                "{} accepted an empty value",
+                key.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_draft_refuses_a_malformed_alias_and_an_interface_past_the_bound() {
+        let mut draft = NetworkConfig::default().edit();
+        assert_eq!(
+            draft
+                .set("0eth", IfaceKey::Mtu, "1500")
+                .expect_err("must fail"),
+            ConfigError::InvalidInterfaceName
+        );
+        for index in 0..MAX_INTERFACES {
+            draft
+                .set(&format!("eth{index}"), IfaceKey::Mtu, "1500")
+                .expect("within the bound");
+        }
+        assert_eq!(
+            draft
+                .set("onemore", IfaceKey::Mtu, "1500")
+                .expect_err("must fail"),
+            ConfigError::TooManyInterfaces
+        );
+    }
+
+    #[test]
+    fn unsetting_an_undeclared_interface_or_key_changes_nothing() {
+        let config = NetworkConfig::parse("lan.mtu 1500\n").expect("parses");
+        let mut draft = config.edit();
+        draft.unset("absent", IfaceKey::Mtu);
+        draft.unset("lan", IfaceKey::Ipv4Gateway);
+        assert_eq!(draft.commit().expect("consistent"), config);
+    }
+
+    #[test]
+    fn a_committed_document_round_trips_through_the_parser() {
+        let mut draft = NetworkConfig::default().edit();
+        for (key, value) in [
+            (IfaceKey::Kind, "ethernet"),
+            (IfaceKey::MatchNode, "0xa003000"),
+            (IfaceKey::Ipv6Method, "static"),
+            (IfaceKey::Ipv6Address, "2001:db8::10/64"),
+            (IfaceKey::Ipv6Gateway, "2001:db8::1"),
+            (IfaceKey::DnsServers, "2001:db8::53,9.9.9.9"),
+            (IfaceKey::Mtu, "1500"),
+        ] {
+            draft.set("lan", key, value).expect("a valid value");
+        }
+        let config = draft.commit().expect("consistent");
+        assert_eq!(
+            NetworkConfig::parse(&config.render()).expect("re-parses"),
+            config
+        );
+    }
+
+    /// Fill `count` fully specified interfaces into a fresh draft, each
+    /// carrying the widest values the registry admits.
+    fn wide_draft(count: usize) -> ConfigDraft {
+        let mut draft = NetworkConfig::default().edit();
+        for index in 0..count {
+            let name = format!("eth{index:012}");
+            for (key, value) in [
+                (IfaceKey::Kind, "ethernet".to_string()),
+                (IfaceKey::MatchMac, format!("52:54:00:12:34:{index:02x}")),
+                (IfaceKey::Ipv4Method, "static".to_string()),
+                (IfaceKey::Ipv4Address, "10.0.0.1/24".to_string()),
+                (IfaceKey::Ipv4Gateway, "10.0.0.254".to_string()),
+                (IfaceKey::Ipv6Method, "static".to_string()),
+                (
+                    IfaceKey::Ipv6Address,
+                    "2001:db8:1111:2222:3333:4444:5555:6666/64".to_string(),
+                ),
+                (
+                    IfaceKey::Ipv6Gateway,
+                    "2001:db8:1111:2222:3333:4444:5555:6667".to_string(),
+                ),
+                (
+                    IfaceKey::DnsServers,
+                    "2001:db8:1111:2222:3333:4444:5555:1001,2001:db8:1111:2222:3333:4444:5555:\
+                     1002,2001:db8:1111:2222:3333:4444:5555:1003,2001:db8:1111:2222:3333:4444:\
+                     5555:1004"
+                        .to_string(),
+                ),
+                (IfaceKey::Mtu, "9000".to_string()),
+            ] {
+                draft.set(&name, key, &value).expect("a valid value");
+            }
+        }
+        draft
+    }
+
+    #[test]
+    fn a_commit_whose_render_would_outgrow_the_document_bound_is_refused() {
+        // The interface bound alone does not hold the document under the
+        // length bound: a full set of fully specified interfaces renders
+        // past it, and the parser would then refuse the store the writer had
+        // just written.
+        assert_eq!(
+            wide_draft(MAX_INTERFACES).commit().expect_err("must fail"),
+            ConfigError::TooLong
+        );
+        let config = wide_draft(8).commit().expect("well inside the bound");
+        assert!(config.render().len() <= MAX_CONFIG_LEN);
     }
 }

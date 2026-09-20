@@ -11,10 +11,12 @@
 //! `main` collects the inherited argument vector, reads the `LANG` locale
 //! preference from the inherited environment (plans/APPS.md §5), parses the
 //! arguments with the pure [`tairix_configure`] grammar, and runs the
-//! resulting command against the production seams: the syscall-backed store
-//! file at `tairix_sysconfig::CONFIG_PATH` (read and replaced whole through
-//! the secured VFS, which authorises every access per-inode under the
-//! caller's attested identity — the tool adds no authority), the shared
+//! resulting command against the production seams: the two syscall-backed
+//! store files at `tairix_sysconfig::CONFIG_PATH` and
+//! `tairix_netconfig::CONFIG_PATH` (each read and replaced whole through the
+//! secured VFS, which authorises every access per-inode under the caller's
+//! attested identity — the tool adds no authority), the network stack's
+//! capability-gated admin endpoint a live change is pushed over, the shared
 //! `tairix_help::BundleHelp` for the short-help switches, and the inherited
 //! standard output (fd 1). The tool binds only to its inherited
 //! descriptors, never a console device.
@@ -36,12 +38,18 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::fs::OpenFlags;
-    use tairix_abi::net_ipc::{NetstackRequest, NetworkSettings, NETSTACK_ENDPOINT};
+    use tairix_abi::net_ipc::{
+        NetBondConfigMsg, NetInterfaceConfigMsg, NetstackRequest, NetworkSettings,
+        NETSTACK_ENDPOINT,
+    };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::Errno;
     use tairix_configure::{parse, run, ConfigureError, NetPolicy, NetworkStore, Store, USAGE};
     use tairix_help::BundleHelp;
-    use tairix_netconfig::{CONFIG_PATH as NET_CONFIG_PATH, MAX_CONFIG_LEN as NET_MAX_CONFIG_LEN};
+    use tairix_netconfig::{
+        CONFIG_DIR as NET_CONFIG_DIR, CONFIG_PATH as NET_CONFIG_PATH,
+        MAX_CONFIG_LEN as NET_MAX_CONFIG_LEN,
+    };
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_sysconfig::{CONFIG_DIR, CONFIG_PATH, MAX_CONFIG_LEN};
 
@@ -93,34 +101,40 @@ mod program {
         }
 
         fn write(&self, text: &str) -> Result<(), Errno> {
-            // The Configuration directory may not exist yet on a fresh
-            // installation; create it first. `AlreadyExists` is the normal
-            // steady state, not a failure.
-            let ret = tairix_rt::fs_mkdir(CONFIG_DIR.as_bytes());
-            if ret != 0 && Errno::from_syscall(ret) != Errno::AlreadyExists {
-                return Err(Errno::from_syscall(ret));
-            }
-            let flags = OpenFlags::WRITE
-                .union(OpenFlags::CREATE)
-                .union(OpenFlags::TRUNCATE);
-            let ret = tairix_rt::fs_open(CONFIG_PATH.as_bytes(), flags);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            // `ret >= 0` is a descriptor by the syscall contract.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let fd = ret as u32;
-            let outcome = write_all(fd, text.as_bytes());
-            let _ = tairix_rt::fs_close(fd);
-            outcome
+            replace_document(CONFIG_DIR, CONFIG_PATH, text)
         }
     }
 
-    /// The production [`NetworkStore`] over the syscall-backed network
-    /// document at [`tairix_netconfig::CONFIG_PATH`], read whole.
+    /// Replace the whole document at `path` with `text`, creating `dir`
+    /// first — on a fresh installation neither exists yet, and
+    /// `AlreadyExists` is the normal steady state rather than a failure.
     ///
-    /// Read-only here: nothing in this tool writes that document yet, and a
-    /// writer that exists before its caller is surface with no caller.
+    /// Shared by both stores: they are different documents under different
+    /// engines, but "render it and replace the file" is one operation.
+    fn replace_document(dir: &str, path: &str, text: &str) -> Result<(), Errno> {
+        let ret = tairix_rt::fs_mkdir(dir.as_bytes());
+        if ret != 0 && Errno::from_syscall(ret) != Errno::AlreadyExists {
+            return Err(Errno::from_syscall(ret));
+        }
+        let flags = OpenFlags::WRITE
+            .union(OpenFlags::CREATE)
+            .union(OpenFlags::TRUNCATE);
+        let ret = tairix_rt::fs_open(path.as_bytes(), flags);
+        if ret < 0 {
+            return Err(Errno::from_syscall(ret));
+        }
+        // `ret >= 0` is a descriptor by the syscall contract.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let fd = ret as u32;
+        let outcome = write_all(fd, text.as_bytes());
+        let _ = tairix_rt::fs_close(fd);
+        outcome
+    }
+
+    /// The production [`NetworkStore`] over the syscall-backed network
+    /// document at [`tairix_netconfig::CONFIG_PATH`], read and replaced
+    /// whole.
+    ///
     /// Every path resolution and per-inode permission is the kernel's under
     /// the caller's attested identity, so the seam adds no authority — an
     /// account that may not read the machine's addressing is refused here
@@ -145,6 +159,10 @@ mod program {
             let _ = tairix_rt::fs_close(fd);
             outcome.map(Some)
         }
+
+        fn write(&self, text: &str) -> Result<(), Errno> {
+            replace_document(NET_CONFIG_DIR, NET_CONFIG_PATH, text)
+        }
     }
 
     /// The production [`NetPolicy`]: one `ipc_call` to the network stack's
@@ -156,12 +174,26 @@ mod program {
 
     impl NetPolicy for StackPolicy {
         fn apply(&self, settings: NetworkSettings) -> Result<(), Errno> {
-            let request = NetstackRequest::ApplyNetworkSettings(settings).to_le_bytes();
-            let mut reply = [0u8; STATUS_REPLY_LEN];
-            let len = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply)
-                .map_err(Errno::from_syscall)?;
-            decode_status_reply(&reply[..len])
+            admin_call(&NetstackRequest::ApplyNetworkSettings(settings).to_le_bytes())
         }
+
+        fn apply_interface(&self, config: &NetInterfaceConfigMsg) -> Result<(), Errno> {
+            admin_call(&config.to_le_bytes())
+        }
+
+        fn apply_bond(&self, config: &NetBondConfigMsg) -> Result<(), Errno> {
+            admin_call(&config.to_le_bytes())
+        }
+    }
+
+    /// One framed admin request to the network stack, decoding its status
+    /// reply. Each admin message is self-identifying on the wire, so the
+    /// three deliveries differ only in what they frame.
+    fn admin_call(request: &[u8]) -> Result<(), Errno> {
+        let mut reply = [0u8; STATUS_REPLY_LEN];
+        let len = tairix_rt::ipc_call(NETSTACK_ENDPOINT, request, &mut reply)
+            .map_err(Errno::from_syscall)?;
+        decode_status_reply(&reply[..len])
     }
 
     /// Write every byte of `bytes` to `fd` from offset 0, looping over
@@ -209,7 +241,8 @@ mod program {
     /// set, or the short help), `1` on a store or output failure — notably
     /// a permission denial, whose reason is stated on the diagnostic
     /// stream — `2` on a usage error (a malformed argument vector, an
-    /// unknown option, an unknown key, or a value outside its key's set).
+    /// unknown option, an unknown key, a value outside its key's set, or an
+    /// edit that would leave the network document inconsistent).
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
@@ -240,7 +273,14 @@ mod program {
                 write_stderr_line(USAGE);
                 2
             }
-            Err(err @ ConfigureError::InvalidValue(_)) => {
+            // A value or a document the registries refuse is the command
+            // line asking for something impossible, not a store failure, so
+            // it exits as a usage error like every other refused request.
+            Err(
+                err @ (ConfigureError::InvalidValue(_)
+                | ConfigureError::InterfaceRefused(..)
+                | ConfigureError::NetworkInconsistent(_)),
+            ) => {
                 write_stderr_line(&format!("configure: {err}"));
                 2
             }

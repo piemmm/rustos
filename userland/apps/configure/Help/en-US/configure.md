@@ -108,17 +108,38 @@ alias can never take a machine setting's name over.
 That document holds only what an administrator wrote — it has no
 defaults — so listing shows just the settings it carries, and showing
 one it does not carry answers with an empty line rather than inventing
-a value. Reading it needs an account that may: it carries each
-interface's hardware identity and this machine's static addressing,
-which are not world-readable.
+a value. Reading or changing it needs an account that may: it carries
+each interface's hardware identity and this machine's static
+addressing, which are not world-readable.
 
-`configure` does not yet write that registry; the installer does.
+Because that registry has no defaults, a setting is removed rather than
+reset, and an **empty value** is how you remove one:
+`configure wan.ipv4.address ""`. No per-interface setting accepts an
+empty value, so the spelling can never be mistaken for setting one. This
+is what lets one command move an interface from a static address to
+DHCP — `configure wan.ipv4.method dhcp wan.ipv4.address "" wan.ipv4.gateway ""`
+— a change neither half of which describes a configuration that holds
+together on its own. An interface whose last setting is removed is no
+longer declared at all.
 
-Changing a `net.*` setting saves it and delivers it to the running network
-stack, so it takes effect at once. If the running stack does not accept it
-— none is running, or your account may not administer the network — the
-setting is still saved and `configure` says so; it then applies at the next
-boot.
+The whole edited document is checked before anything is written: a
+change that would leave it inconsistent (a static method with no
+address, a bond with fewer than two members) is refused and nothing is
+written.
+
+Changing a `net.*` setting, or a per-interface one, saves it and delivers
+it to the running network stack, so it takes effect at once. Only the
+interfaces the change actually affected are delivered. If the running
+stack does not accept a delivery — none is running, or your account may
+not administer the network — the setting is still saved and `configure`
+says so; it then applies at the next boot.
+
+Two limits are reported rather than hidden. An interface you removed
+from the document keeps running with the configuration the stack was
+last given until the next boot, because the stack has no message that
+retires one. An interface saved with neither `match.mac` nor
+`match.node` can never be bound to a device, so it is saved and the
+refusal stated.
 
 ## OPTIONS
 
@@ -136,6 +157,12 @@ boot.
   network time servers the clock is synchronised from.
 - `configure wan.ipv4.address` — show the static IPv4 address
   configured for the interface called `wan`.
+- `configure wan.ipv4.address 10.0.0.7/24 wan.ipv4.gateway 10.0.0.1` —
+  give `wan` a static IPv4 address and default gateway.
+- `configure wan.ipv4.method dhcp wan.ipv4.address "" wan.ipv4.gateway ""`
+  — move `wan` from static addressing to DHCP.
+- `configure wan.dns.servers 9.9.9.9,2001:db8::53` — set the recursive
+  name servers to use on `wan`.
 
 ## EXIT STATUS
 
@@ -143,8 +170,9 @@ boot.
 - `1` — a store could not be read or written (for example the caller
   may not change system settings, or may not read the network store),
   or the output could not be delivered.
-- `2` — the command line was not understood, the key is unknown, or
-  the value is outside the key's set.
+- `2` — the command line was not understood, the key is unknown, the
+  value is outside the key's set, or the change would leave the network
+  configuration inconsistent.
 
 ## ENVIRONMENT
 

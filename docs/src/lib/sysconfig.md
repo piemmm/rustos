@@ -124,8 +124,11 @@ closed), never a silent drop.
   the file a user opens always shows the whole registry).
 - `SystemConfig::get/set(Key, …)` — the typed per-key access `configure`
   lists and edits through.
-- `Key::{ALL, name, from_name, values}` — the closed registry, for
-  listings and stated-choice diagnostics.
+- `Key::{ALL, name, from_name, shape}` — the closed registry, for listings
+  and stated-choice diagnostics. `shape` answers in the shared
+  `tairix_util::conf::ValueShape` vocabulary the per-interface registry
+  states too, so a tool naming the valid choices reads one definition
+  whichever registry refused a value.
 - `SystemConfig::effective_cache(CacheClass) -> CacheMode` — the master
   `cache.all` ceiling folded over a class's own switch, the one
   interpretation the kernel cache-admission control applies.

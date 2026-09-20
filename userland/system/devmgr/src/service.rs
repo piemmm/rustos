@@ -573,7 +573,7 @@ mod tests {
     /// policy itself is tested directly in `crate::netcfg`.
     struct NoIfConfig;
     impl NetworkInterfaceConfigSource for NoIfConfig {
-        fn load(&mut self) -> Option<crate::netcfg::InterfaceConfigPlan> {
+        fn load(&mut self) -> Option<tairix_netconfig::InterfaceConfigPlan> {
             None
         }
     }

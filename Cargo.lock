@@ -874,6 +874,7 @@ dependencies = [
  "tairix-netconfig",
  "tairix-rt",
  "tairix-sysconfig",
+ "tairix-util",
 ]
 
 [[package]]

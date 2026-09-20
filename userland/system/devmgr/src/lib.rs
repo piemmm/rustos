@@ -49,8 +49,16 @@ pub mod autoload;
 pub mod events;
 pub mod manager;
 pub mod netbind;
+// The reactive service loop and the network-policy delivery it drives are
+// the *service program's* policy, and they are what read the two
+// configuration-store engines. The kernel links this crate only for the
+// interim in-kernel driver candidate catalogue (`DeviceManager` /
+// `DriverLoader`), so gating them here keeps a `network.conf` parser out of
+// the ring-0 image.
+#[cfg(feature = "program")]
 pub mod netcfg;
 pub mod observe;
+#[cfg(feature = "program")]
 pub mod service;
 pub mod store;
 
@@ -60,10 +68,12 @@ pub use autoload::{
 };
 pub use manager::{AutoloadReport, DeviceManager, DriverLoader, NodeBinding};
 pub use netbind::{bind_new_channels, netchan_endpoint, NetBindState, NetstackBind};
+#[cfg(feature = "program")]
 pub use netcfg::{
-    deliver_interface_configs, deliver_network_settings, InterfaceConfigPlan, NetConfigState,
-    NetIfConfigState, NetworkConfigSource, NetworkInterfaceConfigSource,
+    deliver_interface_configs, deliver_network_settings, NetConfigState, NetIfConfigState,
+    NetworkConfigSource, NetworkInterfaceConfigSource,
 };
+#[cfg(feature = "program")]
 pub use service::{run, HwTreeService};
 pub use store::{fetch_catalogue, load_driver, unload_driver, CatalogueDriver, DriverStoreCall};
 // The deterministic match policy is the shared `lib/devmatch` definition: re-exported here so existing consumers and the
