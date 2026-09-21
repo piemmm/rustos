@@ -1,0 +1,316 @@
+//! The figure digest: the cross-target claim, made over everything this
+//! crate computes before a pixel is touched.
+//!
+//! The world generator and the simulation each carry a four-target vertical
+//! because each does arithmetic whose identity across targets is a property
+//! of the code rather than of the language. This crate is the same case and
+//! more so: it is `f64` throughout — clip sampling and easing, overlay
+//! summing, the orthonormal resolve, the projection and its foreshortening,
+//! the two-bone planting solve, the root transform, and the shadow's
+//! singular-value decomposition.
+//!
+//! All of it is IEEE-754 basic operations over `lib/util::mathf`, whose
+//! transcendentals are first-party polynomial kernels rather than a
+//! platform libm, so bit-identity *follows* from the language — which is
+//! exactly why the fold below is over raw [`f64::to_bits`] with no
+//! quantisation and no tolerance. A tolerance would hide the one hazard
+//! that is real: a backend fusing a multiply and an add into a single
+//! rounded operation. Rust does not enable that, and these verticals are
+//! what says so rather than assuming it.
+//!
+//! # What is folded, and what is not
+//!
+//! The complete placed-shape stream — every shape's surface position, screen
+//! turn, dimensions, colour and identity, in the depth order the painter
+//! walks — plus the planting root and miss, and the quality numbers the art
+//! is gated on.
+//!
+//! Not the pixels. Those are `lib/raster`'s shared scan converter, which is
+//! separately tested and is the client frame digest's subject
+//! (`tairix_wintersun_app::digest`). This is the fourth digest rather than
+//! an extension of that one because a figure has to agree across targets
+//! whether or not anything draws it.
+
+use core::hash::Hasher;
+
+use tairix_hash::FastHash;
+use tairix_raster::shape::{Placed, Shape};
+use tairix_wintersun_net::value::Facing;
+
+use crate::clip::Clip;
+use crate::error::FigureError;
+use crate::frame::project;
+use crate::gait::Gait;
+use crate::humanoid::{self, Bone};
+use crate::mesh::Hoop;
+use crate::motion::Kind;
+use crate::plant::{Legs, Planted};
+use crate::quality;
+use crate::reference::{Cell, Reference};
+use crate::rig::{Frames, Placement, Resolved, Strip};
+use crate::rigging::Rigging;
+use crate::socket::Side;
+
+/// The digest of the reference grid, on every Tier-1 target.
+///
+/// Changing the rig, a clip, a joint limit, the projection, the planting
+/// solve or the shadow changes this. That is the point: it is not a number
+/// to be re-derived when a test fails, it is the record of what a figure
+/// does. A change that moves it changes every figure anybody will ever see,
+/// and the new value is written down deliberately rather than pasted out of
+/// a failure.
+pub const REFERENCE_DIGEST: u64 = 0x58D4_A86B_B486_D2F9;
+
+/// The stream the reference grid is folded into.
+pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4647;
+
+/// Figure-local units to surface pixels for the reference placements.
+///
+/// Not one: a scale of one would multiply the projection away rather than
+/// fold it, and a sign or an axis lost in the conversion would not show.
+const SCALE: f64 = 1.25;
+
+/// Where the reference figures' ground contact sits on the surface.
+///
+/// Off both axes and off any round number, so a column and a row swapped for
+/// one another show up.
+const AT: (f64, f64) = (37.5, 92.25);
+
+/// The slopes the planting solve is probed at, beyond the level ground the
+/// grid stands on.
+///
+/// One inside the legs' own reach, one past it so the figure leans, and one
+/// no leg could ever meet so the miss is reported rather than fudged.
+const SLOPES: [[f64; 2]; 3] = [[2.5, -2.5], [18.0, -18.0], [400.0, 400.0]];
+
+/// How high above its ground point the shadow is cast from, for the probe
+/// that covers the fade and the slide a rising figure's shadow shows.
+const LIFTS: [f64; 3] = [0.0, 6.0, 41.0];
+
+/// The distances the gait probe advances by.
+///
+/// Not a whole number of strides between them, and one longer than a cycle,
+/// so the wrap and the lap count are both folded rather than only the easy
+/// case.
+const GAIT_STEPS: [f64; 4] = [7.5, 23.25, 140.0, -11.75];
+
+/// Draw the reference grid and return its digest.
+///
+/// # Errors
+///
+/// Whatever the rig, the motions, the planting solve or the placement
+/// refuse — none of which is reachable for the shipped set, which is what
+/// the crate's own tests say.
+pub fn reference() -> Result<u64, FigureError> {
+    let figure = Reference::new()?;
+    let rigging = humanoid::rigging(figure.rig())?;
+    let mut placement = Placement::new();
+    let mut frames = Frames::new();
+    let mut hasher = FastHash::with_seed(REFERENCE_SEED);
+
+    for kind in Kind::ALL {
+        let clip = figure.clip(kind)?;
+        fold_quality(&mut hasher, &rigging, clip, kind)?;
+        fold_gait(&mut hasher, &rigging, clip, kind)?;
+    }
+
+    for index in 0..Cell::COUNT {
+        let cell = Cell::at(index).ok_or(FigureError::PhaseOutsideClip)?;
+        let planted = figure.place(cell, SCALE, AT, &mut placement)?;
+        fold_planted(&mut hasher, &planted);
+        // The surfaces themselves, before they are rounded onto the
+        // converter's grid: a strip is stored at the resolution it is
+        // drawn, and the cross-target claim is about the arithmetic behind
+        // it rather than about the pixel it lands on.
+        rigging
+            .posture(&planted.pose())?
+            .resolve(planted.root(), &mut frames);
+        for part in figure.rig().parts() {
+            for hoop in figure.surfaces(part, &frames)? {
+                fold_hoop(&mut hasher, cell.facing, hoop);
+            }
+        }
+        fold_usize(&mut hasher, placement.len());
+        for strip in placement.strips() {
+            fold_strip(&mut hasher, &strip);
+        }
+    }
+
+    for kind in Kind::ALL {
+        fold_slopes(&mut hasher, &rigging, figure.legs(), figure.clip(kind)?)?;
+    }
+    fold_shadow(&mut hasher)?;
+    Ok(hasher.finish())
+}
+
+/// A gait driven by the ground it covers, which is how a figure is animated
+/// rather than by a clock.
+///
+/// Folded as its own probe rather than through the grid, because the grid's
+/// pose must depend on the phase alone — a sheet's four headings are one
+/// figure seen four ways.
+fn fold_gait(
+    hasher: &mut FastHash,
+    rigging: &Rigging<'_>,
+    clip: Clip<'_>,
+    kind: Kind,
+) -> Result<(), FigureError> {
+    if kind.stride().is_none() {
+        return Ok(());
+    }
+    let mut gait = Gait::fitted(rigging, clip, Bone::Ankle(Side::Left).joint())?;
+    fold_real(hasher, gait.stride());
+    for onward in GAIT_STEPS {
+        let stepped = gait.travel(onward)?;
+        fold_real(hasher, stepped.from);
+        fold_real(hasher, stepped.to);
+        hasher.write(&stepped.cycles.to_le_bytes());
+    }
+    Ok(())
+}
+
+/// The numbers the art is gated on, so a clip re-authored to a different
+/// quality moves the digest as well as the ledger.
+fn fold_quality(
+    hasher: &mut FastHash,
+    rigging: &Rigging<'_>,
+    clip: Clip<'_>,
+    kind: Kind,
+) -> Result<(), FigureError> {
+    hasher.write(kind.name().as_bytes());
+    fold_real(hasher, clip.seconds());
+    fold_real(hasher, quality::limits(rigging, clip)?);
+    fold_real(hasher, quality::continuity(clip));
+    fold_real(hasher, quality::closure(clip));
+    if let Some(authored) = kind.stride() {
+        fold_real(hasher, authored);
+        fold_real(
+            hasher,
+            quality::skate(rigging, clip, Bone::Ankle(Side::Left).joint())?,
+        );
+    }
+    Ok(())
+}
+
+/// The planting solve at each probe slope: where the root ended up, and what
+/// each foot missed its ground by.
+fn fold_slopes(
+    hasher: &mut FastHash,
+    rigging: &Rigging<'_>,
+    legs: Legs,
+    clip: Clip<'_>,
+) -> Result<(), FigureError> {
+    // Mid-cycle rather than at the head of it, so the probe runs against a
+    // figure with one leg swinging rather than one standing to attention.
+    let posed = clip.sample(0.5)?;
+    let mut frames = Frames::new();
+    rigging
+        .posture(&posed)?
+        .resolve(Resolved::REST, &mut frames);
+    for ground in SLOPES {
+        fold_planted(hasher, &legs.plant(rigging, &posed, &frames, ground)?);
+    }
+    Ok(())
+}
+
+/// The shadow solve: the ellipse a raking light throws under a figure at
+/// each probe height.
+fn fold_shadow(hasher: &mut FastHash) -> Result<(), FigureError> {
+    for lift in LIFTS {
+        fold_placed(hasher, Reference::shadow(lift, SCALE, AT)?);
+    }
+    Ok(())
+}
+
+fn fold_planted(hasher: &mut FastHash, planted: &Planted) {
+    let root = planted.root();
+    fold_real(hasher, root.at.forward);
+    fold_real(hasher, root.at.side);
+    fold_real(hasher, root.at.up);
+    for axis in [root.basis.forward, root.basis.side, root.basis.up] {
+        fold_real(hasher, axis.forward);
+        fold_real(hasher, axis.side);
+        fold_real(hasher, axis.up);
+    }
+    for side in Side::BOTH {
+        fold_real(hasher, planted.miss(side));
+    }
+}
+
+/// One carried ring, and where it projects to, at full precision.
+fn fold_hoop(hasher: &mut FastHash, facing: Facing, hoop: Hoop) {
+    for axis in [hoop.at, hoop.wide, hoop.deep] {
+        fold_real(hasher, axis.forward);
+        fold_real(hasher, axis.side);
+        fold_real(hasher, axis.up);
+    }
+    let placed = project(facing, hoop.at);
+    fold_real(hasher, placed.dx);
+    fold_real(hasher, placed.dy);
+    fold_real(hasher, placed.depth);
+}
+
+/// One shaded strip: every point of both its boundaries, and its tone.
+fn fold_strip(hasher: &mut FastHash, strip: &Strip<'_>) {
+    hasher.write(&strip.surface.to_le_bytes());
+    fold_usize(hasher, strip.near.len());
+    for side in [strip.near, strip.far] {
+        for (x, y) in side {
+            hasher.write(&x.to_le_bytes());
+            hasher.write(&y.to_le_bytes());
+        }
+    }
+    hasher.write(&[strip.color.r, strip.color.g, strip.color.b, strip.color.a]);
+}
+
+fn fold_placed(hasher: &mut FastHash, placed: Placed) {
+    fold_real(hasher, placed.x);
+    fold_real(hasher, placed.y);
+    fold_real(hasher, placed.turn);
+    fold_shape(hasher, placed.shape);
+    hasher.write(&[
+        placed.color.r,
+        placed.color.g,
+        placed.color.b,
+        placed.color.a,
+    ]);
+    hasher.write(&placed.seed.to_le_bytes());
+}
+
+fn fold_shape(hasher: &mut FastHash, shape: Shape) {
+    let (tag, a, b, c) = match shape {
+        Shape::Splat { radius } => (0u8, radius, 0.0, 0.0),
+        Shape::Superellipse { rx, ry, square } => (1, rx, ry, square),
+        Shape::Taper { length, top, foot } => (2, length, top, foot),
+        Shape::Wedge {
+            half_width,
+            height,
+            lean,
+        } => (3, half_width, height, lean),
+        Shape::ScallopedPanel { rx, ry, folds } => (4, rx, ry, f64::from(folds)),
+        Shape::BevelledPanel { rx, ry, bevel } => (5, rx, ry, bevel),
+    };
+    hasher.write(&[tag]);
+    fold_real(hasher, a);
+    fold_real(hasher, b);
+    fold_real(hasher, c);
+}
+
+/// Fold a real by its bits, so a value that differs anywhere it can differ
+/// moves the digest — no quantisation, and nothing rounded away.
+fn fold_real(hasher: &mut FastHash, value: f64) {
+    hasher.write_u64(value.to_bits());
+}
+
+/// Fold a count, widened first.
+///
+/// `usize` is four bytes on `wasm32` and eight everywhere else, so folding
+/// one raw would make the digest depend on the target it is meant to prove
+/// nothing depends on.
+fn fold_usize(hasher: &mut FastHash, count: usize) {
+    hasher.write_u64(u64::try_from(count).unwrap_or(u64::MAX));
+}
+
+#[cfg(test)]
+#[path = "digest/tests.rs"]
+mod tests;

@@ -1,0 +1,122 @@
+//! The shipped motions measured against the bounds beside the measurements.
+
+use tairix_util::mathf;
+
+use super::{
+    closure, continuity, limits, skate, MAX_CLOSURE, MAX_CONTINUITY, MAX_LIMIT_USE, MAX_SKATE,
+};
+use crate::clip::{Clip, Curve, Easing, Key, Loop};
+use crate::humanoid::{self, Bone, DRIVES};
+use crate::motion::{Kind, Motion};
+use crate::pose::Param;
+use crate::rig::Rig;
+use crate::rigging::Rigging;
+use crate::socket::Side;
+
+fn rig() -> Rig {
+    humanoid::rig().expect("the humanoid rig")
+}
+
+/// The whole point of the item: the art's quality is these numbers, and they
+/// are held here rather than looked at.
+#[test]
+fn every_shipped_motion_clears_every_bound() {
+    let rig = rig();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let ankle = Bone::Ankle(Side::Left).joint();
+
+    for kind in Kind::ALL {
+        let motion = Motion::new(kind).expect("a shipped motion");
+        let clip = motion.clip().expect("its clip");
+        let name = kind.name();
+
+        let used = limits(&rigging, clip).expect("every pose is posturable");
+        assert!(used <= MAX_LIMIT_USE, "{name} uses {used} of a joint");
+
+        let bend = continuity(clip);
+        assert!(bend <= MAX_CONTINUITY, "{name} bends by {bend}");
+
+        let gap = closure(clip);
+        assert!(gap <= MAX_CLOSURE, "{name} closes {gap} short");
+
+        if kind.stride().is_some() {
+            let slide = skate(&rigging, clip, ankle).expect("a fitted gait");
+            assert!(slide <= MAX_SKATE, "{name} skates {slide} of its stride");
+        }
+    }
+}
+
+/// A clip pinned at a joint's limit measures one, and one is past the bound
+/// — so the bound is a statement about headroom rather than a restatement of
+/// what the drive table already guarantees.
+#[test]
+fn a_clip_at_a_joints_limit_measures_its_whole_travel() {
+    const FOLDED: [Key; 1] = [Key::new(0.0, 1.0)];
+    let rig = rig();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let curves = [Curve::new(Param::ElbowBend(Side::Left), &FOLDED).expect("a real curve")];
+    let clip = Clip::new(1.0, Loop::Wrap, &curves, &[]).expect("a real clip");
+
+    let used = limits(&rigging, clip).expect("a folded elbow is still posturable");
+    assert!(mathf::fabs(used - 1.0) < 1e-12, "measured {used}");
+    assert!(used > MAX_LIMIT_USE, "the bound must reject a pinned joint");
+}
+
+/// A step in a curve is a pop, and a pop is what the continuity bound is
+/// for: the measurement must see it at the size it is, not a fraction of it.
+#[test]
+fn a_step_in_a_curve_reads_as_the_pop_it_is() {
+    const STEPPED: [Key; 4] = [
+        Key::new(0.0, 0.0),
+        Key::new(0.5, 0.0).eased(Easing::Hold),
+        Key::new(0.5625, 0.5),
+        Key::new(1.0, 0.0),
+    ];
+    let curves = [Curve::new(Param::SpineBend, &STEPPED).expect("a real curve")];
+    let clip = Clip::new(1.0, Loop::Wrap, &curves, &[]).expect("a real clip");
+    let bend = continuity(clip);
+    assert!(
+        bend > MAX_CONTINUITY,
+        "a half-range step measured only {bend}"
+    );
+}
+
+/// A cycle whose ends do not meet hitches once a lap, and the closure
+/// measurement is what sees it.
+#[test]
+fn a_cycle_that_does_not_join_is_reported() {
+    const OPEN: [Key; 2] = [Key::new(0.0, -0.4), Key::new(1.0, 0.4)];
+    let curves = [Curve::new(Param::SpineTwist, &OPEN).expect("a real curve")];
+    let clip = Clip::new(1.0, Loop::Wrap, &curves, &[]).expect("a real clip");
+    let gap = closure(clip);
+    assert!(
+        mathf::fabs(gap - 0.4) < 1e-12,
+        "an eight-tenths gap over a two-wide range measured {gap}"
+    );
+    assert!(gap > MAX_CLOSURE);
+}
+
+/// A clip whose foot keeps its own cadence while the body moves at another
+/// skates, and the measurement is what turns that into a number.
+#[test]
+fn a_foot_out_of_step_with_the_body_skates() {
+    let rig = rig();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let ankle = Bone::Ankle(Side::Left).joint();
+    let motion = Motion::new(Kind::Walk).expect("the shipped walk");
+    let clip = motion.clip().expect("its clip");
+    let honest = skate(&rigging, clip, ankle).expect("a fitted gait");
+
+    let gait = crate::gait::Gait::new(clip_stride(&rigging, clip, ankle) * 0.6).expect("a gait");
+    let forced = gait.slide(&rigging, clip, ankle).expect("a slide") / gait.stride();
+    assert!(
+        forced > honest * 10.0,
+        "a stride four tenths short skated {forced} against {honest}"
+    );
+}
+
+fn clip_stride(rigging: &Rigging<'_>, clip: Clip<'_>, ankle: crate::joint::JointId) -> f64 {
+    crate::gait::Gait::fitted(rigging, clip, ankle)
+        .expect("a fitted gait")
+        .stride()
+}
