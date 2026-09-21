@@ -78,8 +78,8 @@ pub use provision::{
     SYSTEM_UID, SYSTEM_USERNAME, TIMED_UID, TIMED_USERNAME,
 };
 pub use record::{
-    AccountState, Gid, Identity, Uid, UserRecord, MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN,
-    MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN, NO_PATH_MARKER,
+    valid_display_name, valid_path, AccountState, Gid, Identity, Uid, UserRecord,
+    MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN, NO_PATH_MARKER,
 };
 
 use core::fmt;

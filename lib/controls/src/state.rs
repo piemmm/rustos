@@ -236,6 +236,21 @@ pub enum ValidationState {
     Pending,
 }
 
+impl ValidationState {
+    /// The verdict for a value a store does or does not admit.
+    ///
+    /// Every surface that offers a store's own value has this decision to
+    /// make, so it is spelled once here rather than in each of them.
+    #[must_use]
+    pub const fn of(admits: bool) -> Self {
+        if admits {
+            Self::Valid
+        } else {
+            Self::Invalid
+        }
+    }
+}
+
 /// Whether the caller may perform a control's action, and if not, why.
 ///
 /// A denial is rendered distinctly from a plain disabled control
@@ -770,5 +785,16 @@ impl<T> Deref for RenderInvariant<T> {
 impl<T> DerefMut for RenderInvariant<T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ValidationState;
+
+    #[test]
+    fn a_verdict_is_the_stores_own_answer_and_nothing_between() {
+        assert_eq!(ValidationState::of(true), ValidationState::Valid);
+        assert_eq!(ValidationState::of(false), ValidationState::Invalid);
     }
 }

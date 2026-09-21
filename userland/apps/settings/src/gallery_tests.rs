@@ -8,19 +8,15 @@
 
 use alloc::vec;
 
-use tairix_font::install_test_transport;
 use tairix_geometry::Point;
 use tairix_wallpaper::{Backdrop, Rgb, WallpaperFit};
 
 use super::*;
 
+use crate::test_support::{damage, theme};
+
 /// The band a gallery is laid out in for these tests.
 const BAND: Rect = Rect::new(0, 0, 400, 300);
-
-fn theme() -> Theme {
-    install_test_transport();
-    Theme::dark()
-}
 
 fn catalog(files: &[&str]) -> Vec<CatalogItem> {
     files
@@ -30,10 +26,6 @@ fn catalog(files: &[&str]) -> Vec<CatalogItem> {
             file: String::from(*file),
         })
         .collect()
-}
-
-fn damage() -> Region {
-    tairix_controls::damage::sink()
 }
 
 /// Settings with no picture in effect, so the candidate list is exactly

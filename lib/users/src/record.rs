@@ -386,33 +386,50 @@ pub(crate) fn parse_canonical_u32(text: &str) -> Option<u32> {
     parse_u32(text)
 }
 
-/// Validate a display name: at most [`MAX_DISPLAY_NAME_LEN`] bytes of
-/// printable ASCII (space allowed), excluding the `:` field separator.
+/// Whether `name` is a storable display name: at most
+/// [`MAX_DISPLAY_NAME_LEN`] bytes of printable ASCII (space allowed),
+/// excluding the `:` field separator. The empty string is a display name
+/// an account may legitimately hold.
+///
+/// Public because a surface that offers this field has to say what the
+/// database will take *before* it asks anyone to authenticate a write, and
+/// the answer must be this same rule rather than a second copy of it.
+#[must_use]
+pub fn valid_display_name(name: &str) -> bool {
+    name.len() <= MAX_DISPLAY_NAME_LEN
+        && name
+            .bytes()
+            .all(|b| (0x20..=0x7e).contains(&b) && b != b':')
+}
+
+/// Validate a display name against [`valid_display_name`].
 fn check_display_name(name: &str) -> Result<(), ParseError> {
-    if name.len() > MAX_DISPLAY_NAME_LEN {
-        return Err(ParseError::DisplayName);
-    }
-    if name
-        .bytes()
-        .all(|b| (0x20..=0x7e).contains(&b) && b != b':')
-    {
+    if valid_display_name(name) {
         Ok(())
     } else {
         Err(ParseError::DisplayName)
     }
 }
 
-/// Validate a home/shell path: absolute, 2..=[`MAX_PATH_LEN`] bytes of
-/// printable non-space ASCII, excluding the `:` field separator.
-fn check_path(path: &str) -> Result<(), ParseError> {
+/// Whether `path` is a storable home or shell path: absolute,
+/// 2..=[`MAX_PATH_LEN`] bytes of printable non-space ASCII, excluding the
+/// `:` field separator.
+///
+/// Public for the same reason [`valid_display_name`] is.
+#[must_use]
+pub fn valid_path(path: &str) -> bool {
     let bytes = path.as_bytes();
-    if bytes.len() < 2 || bytes.len() > MAX_PATH_LEN || bytes[0] != b'/' {
-        return Err(ParseError::Path);
-    }
-    if bytes
-        .iter()
-        .all(|b| (0x21..=0x7e).contains(b) && *b != b':')
-    {
+    bytes.len() >= 2
+        && bytes.len() <= MAX_PATH_LEN
+        && bytes[0] == b'/'
+        && bytes
+            .iter()
+            .all(|b| (0x21..=0x7e).contains(b) && *b != b':')
+}
+
+/// Validate a home/shell path against [`valid_path`].
+fn check_path(path: &str) -> Result<(), ParseError> {
+    if valid_path(path) {
         Ok(())
     } else {
         Err(ParseError::Path)
@@ -494,7 +511,10 @@ fn push_field(out: &mut String, field: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountState, Gid, Identity, Uid, UserRecord, MAX_SUPPLEMENTARY_GIDS};
+    use super::{
+        valid_display_name, valid_path, AccountState, Gid, Identity, Uid, UserRecord,
+        MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS,
+    };
     use crate::password::{PasswordRecord, StoredPassword, MIN_ITERATIONS};
     use crate::ParseError;
 
@@ -748,5 +768,41 @@ mod tests {
             UserRecord::decode_line(&truncated),
             Err(ParseError::FieldCount)
         );
+    }
+
+    /// The two field predicates a surface states the store's own limits
+    /// through, tested directly rather than only through a whole record:
+    /// a caller that offers the field has to know the answer before it has
+    /// a record to build.
+    #[test]
+    fn a_display_name_is_printable_ascii_without_the_field_separator() {
+        assert!(valid_display_name(""), "an account may declare none");
+        assert!(valid_display_name("Ada Lovelace"));
+        assert!(
+            !valid_display_name("Ada:Lovelace"),
+            "the database's own field separator"
+        );
+        assert!(!valid_display_name("Ada\tLovelace"));
+        assert!(!valid_display_name("Adá"), "non-ASCII is not storable");
+        assert!(valid_display_name(&"a".repeat(MAX_DISPLAY_NAME_LEN)));
+        assert!(!valid_display_name(&"a".repeat(MAX_DISPLAY_NAME_LEN + 1)));
+    }
+
+    #[test]
+    fn a_home_or_shell_path_is_absolute_printable_and_separator_free() {
+        assert!(valid_path("/Users/ada"));
+        assert!(!valid_path(""), "a path is never empty");
+        assert!(!valid_path("/"), "nor the root alone");
+        assert!(!valid_path("Users/ada"), "a relative path is not storable");
+        assert!(!valid_path("/Users/a da"), "nor one holding a space");
+        assert!(!valid_path("/Users:ada"));
+        assert!(valid_path(&alloc::format!(
+            "/{}",
+            "a".repeat(MAX_PATH_LEN - 1)
+        )));
+        assert!(!valid_path(&alloc::format!(
+            "/{}",
+            "a".repeat(MAX_PATH_LEN)
+        )));
     }
 }

@@ -44,14 +44,14 @@ dropped is a category the surface then has to lie about.
 | **DS8** | The network store's writer — `lib/netconfig`'s draft/commit mutation API, `configure`'s write side and its *unset* spelling, the live apply over the stack's admin surface, and the device manager's runtime re-read | DS6, DS7, DS8a | DS8 | done |
 | **DS8b** | Ethernet and DNS stage and apply through that writer — the addressing reading becomes a settable per-interface form, and Apply is the one elevated `configure` run | DS8 | DS8b | done |
 | **DS9a** | The three reads' plumbing and the command family they and the write side are driven through: the ungated `GROUP_DIRECTORY` and `SELF_ACCOUNT` queries end to end, the shared `lib/useradmin` client, `users --list`, and the `usermod`/`userdel`/`passwd`/`groupdel` bundles | DS6, DS8a | DS9 | done |
-| **DS9** | Users & Groups — the pane itself: the three reads composed, the per-account staged edits, and the one elevated run that applies them | DS9a | DS9 | in progress — the plumbing landed with DS9a; the pane is not composed yet and its row stays `Elsewhere` |
+| **DS9** | Users & Groups — the pane itself: the three reads composed, the per-account staged edits, and the one elevated run that applies them | DS9a | DS9 | done |
 | **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | planned |
 | **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | planned |
 | **DS12** | Lock Screen and Screensaver — the session's single idle deadline and the one timer armed only while a policy has one pending | DS3 | DS12 | planned |
 | **DS13** | The `settings_qemu_aarch64` vertical and the docs pages the surface owes | DS2–DS12 | DS13 | planned |
 | **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | in progress — `datetime.app` landed with DS1 (its grid deleted, its extent now measured through `Dialog::height_for_content`); `PermGrid` remains |
 
-**DS9a, and what the pane still owes.** DS9's read half needs three
+**DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
 elevated run can actually drive; neither existed, and both are
 independent of how the pane draws them. They landed first, as DS9a:
@@ -74,6 +74,25 @@ independent of how the pane draws them. They landed first, as DS9a:
   command bundles, completing the shadow-utils family beside `useradd`
   and `groupadd`.
 
+**DS9, the pane.** Three plates from those three reads: the caller's own
+record, the accounts the authenticated listing answered (or the public
+roster and a footnote naming what authenticating adds), and the group
+directory. The listing is the band's *capture* — one `users --list` run,
+read back through `lib/useradmin`'s one listing form — and is dropped
+when the reader leaves the pane; a capture that lands for a pane the
+window has since left is dropped rather than installed, because the
+desktop can send the window elsewhere while a run is in flight. Apply is
+**one** elevated run, and a change spanning two accounts or a password
+beside other fields is refused with its reason before a password is
+typed. A run that exits cleanly moves the listing on to hold what was
+applied rather than dropping it, so a second change costs a second
+authentication and not a second reading. A service identity's home,
+shell, login and password are readings, because the database refuses a
+record shaped otherwise. The plaintext of a new password lives only in
+its masked entry — carried across a rebuild by *moving* the control, so
+no second buffer ever holds it — and is read by borrow at the moment it
+is hashed.
+
 Two decisions the pane inherits, recorded here so they are not
 re-derived:
 
@@ -87,7 +106,10 @@ re-derived:
 - **`passwd` takes a ready record.** The pane hashes with the shared
   `lib/users` builder and passes `--record`, so no plaintext leaves the
   Settings process and none rides an argv. The password row is a masked
-  `TextField` (`lib/controls`' secret mode), never a visible one.
+  `TextField` (`lib/controls`' secret mode), never a visible one. The
+  salt is drawn by the caller from the kernel CSPRNG and held one deep:
+  an apply spends it and the caller draws another, and an apply with none
+  held is refused rather than salted predictably.
 
 **The honest shape of the deliverable.** Seven of the categories the desktop
 should offer have no subsystem beneath them today: there is no audio stack, no
@@ -1181,6 +1203,10 @@ nothing until it has something to report and stays usable after it has been
 used.
 
 ### DS9 — Users & Groups
+
+**Done.** The pane composes its three reads, stages a per-account change, and
+applies it as one elevated run; the ledger above records what that now
+guarantees.
 
 **The read.** The whole `users_admin` syscall is gated on `CAP_USER_ADMIN`, and
 the only other account read — `users_db_read` under `CAP_USERS_READ` — answers

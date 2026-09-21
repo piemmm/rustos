@@ -3160,6 +3160,8 @@ dependencies = [
  "tairix-rt",
  "tairix-sysconfig",
  "tairix-theme",
+ "tairix-useradmin",
+ "tairix-users",
  "tairix-util",
  "tairix-wallpaper",
  "tairix-window",

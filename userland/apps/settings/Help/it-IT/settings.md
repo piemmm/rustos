@@ -20,10 +20,8 @@ un'esecuzione riautenticata del comando che già scrive quell'archivio: nulla
 qui può elevare un privilegio.
 
 Una categoria che questo sistema non può servire lo dice chiaramente e nomina
-ciò che dovrebbe esistere perché possa farlo. Una categoria che può servire, i
-cui controlli questa versione non disegna ancora, indica invece dove
-l'impostazione viene letta o definita. Un controllo che non cambierebbe nulla
-non viene mai mostrato.
+ciò che dovrebbe esistere perché possa farlo. Un controllo che non cambierebbe
+nulla non viene mai mostrato.
 
 Digitare nel campo di ricerca sopra la barra laterale per filtrarla alle
 categorie e alle impostazioni che una parola raggiunge. `Tab` e `Shift+Tab`

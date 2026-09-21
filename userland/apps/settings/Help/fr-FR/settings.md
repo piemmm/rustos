@@ -19,10 +19,8 @@ une exécution ré-authentifiée de la commande qui écrit déjà ce magasin : r
 ici ne peut élever un privilège.
 
 Une catégorie que ce système ne peut pas servir le dit clairement et nomme ce
-qui devrait exister pour qu'elle le puisse. Une catégorie qu'il peut servir,
-dont cette version ne dessine pas encore les contrôles, indique où le réglage
-est lu ou défini à la place. Un contrôle qui ne changerait rien n'est jamais
-montré.
+qui devrait exister pour qu'elle le puisse. Un contrôle qui ne changerait rien
+n'est jamais montré.
 
 Saisissez du texte dans le champ de recherche au-dessus de la barre latérale
 pour la filtrer sur les catégories et les réglages qu'un mot atteint. `Tab` et

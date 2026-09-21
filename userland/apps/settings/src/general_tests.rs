@@ -11,30 +11,17 @@ use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{SystemIdentity, Uptime};
 use tairix_abi::time::{Duration64, Time64, WallClockReading, WallTimeState};
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_sysconfig::{CacheMode, CacheSwitch, LoginType, SystemConfig};
-use tairix_theme::Theme;
 use tairix_wallpaper::DesktopSettings;
 
 use crate::facts::MachineFacts;
 use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
-use tairix_font::install_test_transport;
-
-/// A window wide enough to seat the strip and a full content column.
-const WIDE: Rect = Rect::new(0, 0, 900, 640);
-
-fn theme() -> Theme {
-    install_test_transport();
-    Theme::dark()
-}
-
-fn damage() -> tairix_geometry::Region {
-    tairix_controls::damage::sink()
-}
+use crate::test_support::{damage, stated, theme, WIDE};
 
 /// A shell showing `pane`, with the machine's store already read.
-fn showing(pane: &str, config: SystemConfig) -> Shell {
+fn showing_with(pane: &str, config: SystemConfig) -> Shell {
     let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
     shell.adopt_config(Some(config));
     let mut sink = damage();
@@ -130,7 +117,7 @@ fn press(shell: &mut Shell, key: NamedKey) -> ShellOutcome {
 fn a_staged_row_edits_a_working_copy_and_asks_for_nothing() {
     // The whole point of a staged pane: a choice is not a write, so no
     // password is asked for and no store is touched until Apply.
-    let mut shell = showing("login-startup", SystemConfig::default());
+    let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
     assert!(!shell.asking(), "a choice asks for no account");
     let form = shell.form_for_test().expect("a composed pane");
@@ -145,7 +132,7 @@ fn a_staged_row_edits_a_working_copy_and_asks_for_nothing() {
 
 #[test]
 fn reverting_puts_the_working_copy_back() {
-    let mut shell = showing("login-startup", SystemConfig::default());
+    let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
     assert_eq!(shell.form_for_test().expect("a form").pending().len(), 1);
 
@@ -156,7 +143,7 @@ fn reverting_puts_the_working_copy_back() {
 
 #[test]
 fn applying_asks_for_an_account_and_runs_the_tool_that_owns_the_store() {
-    let mut shell = showing("caching", SystemConfig::default());
+    let mut shell = showing_with("caching", SystemConfig::default());
     // Two rows, so the one run carries both changes together.
     choose_next(&mut shell, 0, 0);
     choose_next(&mut shell, 1, 0);
@@ -190,7 +177,7 @@ fn applying_asks_for_an_account_and_runs_the_tool_that_owns_the_store() {
 
 #[test]
 fn a_refused_account_keeps_the_question_and_the_working_copy() {
-    let mut shell = showing("login-startup", SystemConfig::default());
+    let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
     press_action(&mut shell);
     type_into(&mut shell, "root");
@@ -210,7 +197,7 @@ fn a_refused_account_keeps_the_question_and_the_working_copy() {
 
 #[test]
 fn an_accepted_run_takes_the_question_down_and_re_reads_the_store() {
-    let mut shell = showing("login-startup", SystemConfig::default());
+    let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
     press_action(&mut shell);
     type_into(&mut shell, "root");
@@ -236,7 +223,7 @@ fn an_accepted_run_takes_the_question_down_and_re_reads_the_store() {
 fn a_run_that_did_not_take_the_change_is_not_reported_as_applied() {
     // A non-zero exit is the tool refusing, which is not a success however
     // cleanly the account authenticated.
-    let mut shell = showing("login-startup", SystemConfig::default());
+    let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
     press_action(&mut shell);
     type_into(&mut shell, "root");
@@ -252,7 +239,7 @@ fn a_run_that_did_not_take_the_change_is_not_reported_as_applied() {
 
 #[test]
 fn the_date_and_time_pane_launches_the_application_that_owns_the_clock() {
-    let mut shell = showing("date-time", SystemConfig::default());
+    let mut shell = showing_with("date-time", SystemConfig::default());
     press_action(&mut shell);
     assert!(shell.asking());
     type_into(&mut shell, "root");
@@ -273,7 +260,7 @@ fn the_date_and_time_pane_launches_the_application_that_owns_the_clock() {
 
 #[test]
 fn cancelling_the_question_changes_nothing_anywhere() {
-    let mut shell = showing("login-startup", SystemConfig::default());
+    let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
     press_action(&mut shell);
     type_into(&mut shell, "root");
@@ -287,7 +274,7 @@ fn cancelling_the_question_changes_nothing_anywhere() {
 fn the_question_is_modal_while_it_is_up() {
     // A press behind the question must not change a pane the reader is
     // about to authenticate for.
-    let mut shell = showing("caching", SystemConfig::default());
+    let mut shell = showing_with("caching", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
     press_action(&mut shell);
     assert!(shell.asking());
@@ -318,7 +305,7 @@ fn the_question_is_modal_while_it_is_up() {
 fn an_offered_secret_is_never_rendered() {
     // A derived `Debug` would print the password into whatever rendered
     // the request — a diagnostic, a log line, a test failure.
-    let mut shell = showing("login-startup", SystemConfig::default());
+    let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
     press_action(&mut shell);
     type_into(&mut shell, "root");
@@ -379,7 +366,7 @@ fn the_master_switch_restates_the_rows_it_is_a_ceiling_over() {
     // Turning caching off for the machine leaves each class's own value
     // standing — that is what the store says — but a row that only said
     // `Automatic` would read as a cache that is running.
-    let mut shell = showing("caching", SystemConfig::default());
+    let mut shell = showing_with("caching", SystemConfig::default());
     let before = pane_text(&shell);
     choose_next(&mut shell, 0, 0);
     let after = pane_text(&shell);
@@ -455,21 +442,6 @@ fn the_about_pane_states_every_reading_it_could_not_take() {
     assert_eq!(measured[5], "not measured");
 }
 
-/// Every value the pane on show states, in listing order.
-fn stated(shell: &Shell) -> Vec<String> {
-    let Some(facts) = shell.facts_for_test() else {
-        return Vec::new();
-    };
-    facts
-        .rows()
-        .iter()
-        .map(|row| match row.control() {
-            tairix_controls::FieldControl::Reading(value) => value.clone(),
-            _ => String::new(),
-        })
-        .collect()
-}
-
 #[test]
 fn a_clock_that_was_never_set_says_so_rather_than_showing_the_epoch() {
     let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
@@ -499,7 +471,7 @@ fn a_clock_that_was_never_set_says_so_rather_than_showing_the_epoch() {
 
 #[test]
 fn a_store_whose_master_switch_is_off_still_reports_each_class_value() {
-    let shell = showing(
+    let shell = showing_with(
         "caching",
         SystemConfig {
             cache_all: CacheSwitch::Off,

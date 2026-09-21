@@ -77,6 +77,15 @@ tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0" }
 # The shared size ladder a capacity is spelled through, which the
 # Switchboard's storage page reads too.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The one `users_admin` client: the `:`-delimited relayed-listing form the
+# Users pane reads an authenticated `users --list` capture back through, and
+# the shared spellings for a grant ceiling and a lock state, so the tool
+# that printed the lines and this surface cannot disagree about a field.
+tairix-useradmin = { path = "../../../lib/useradmin", version = "=0.0.0" }
+# The account database's own field grammar and password record: the Users
+# pane states what the store will take before anyone authenticates, and
+# hashes a new password here so no plaintext leaves this process.
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 
 # Everything only the freestanding `Run` binary links is pulled in for the
 # bare-metal targets it is actually built for; on the host the binary is an

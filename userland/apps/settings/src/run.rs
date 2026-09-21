@@ -60,11 +60,12 @@ mod program {
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{
-        ElevateRefusal, Elevated, Elevation, MachineFacts, Pane, RunMode, Shell, ShellOutcome,
-        VolumeReading,
+        AccountFacts, ElevateRefusal, Elevated, Elevation, MachineFacts, OwnAccount, Pane, Roster,
+        RunMode, Shell, ShellOutcome, VolumeReading,
     };
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
+    use tairix_users::{Salt, SALT_LEN};
     use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
@@ -107,6 +108,15 @@ mod program {
     /// different panes, and folding them together would spend a network
     /// round trip every time the About pane came on show.
     const NETWORK_TOKEN: u64 = app::FIRST_APP_TOKEN + 4;
+
+    /// The wait-set token of the account-reading desk's wake: readable
+    /// exactly when a fresh reading of the caller's own record, the two
+    /// public directories and a salt has landed.
+    ///
+    /// Its own desk for the same reason the network one is: it is wanted by
+    /// one pane, and folding it into another's would spend three round
+    /// trips every time that other pane came on show.
+    const ACCOUNTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 5;
 
     /// The window's logical width at the reference density: the strip plus a
     /// content column wide enough for a pane's widest row.
@@ -236,6 +246,113 @@ mod program {
                 let _ = writeln!(
                     Stderr,
                     "settings: the name servers could not be read ({err:?}); the pane says so"
+                );
+                None
+            }
+        }
+    }
+
+    /// The account readings: the caller's own record, the two ungated
+    /// directories, and a fresh salt for hashing a password with.
+    ///
+    /// One worker job rather than four round trips from the loop, for the
+    /// same reason the machine desk bundles its readings: the pane wants
+    /// them together and a window that waited on any of them would stop
+    /// answering.
+    type Accounts = tairix_rt::work::Worker<(), (), (AccountFacts, Option<Salt>)>;
+
+    /// The account readings' body.
+    ///
+    /// Each directory is absent rather than empty when its walk failed:
+    /// "the directory could not be read" and "the machine holds no
+    /// account" are different facts, and the pane states which it has. The
+    /// listing half is left `Unasked` — only an authenticated run answers
+    /// it, and this desk holds no authority at all.
+    fn read_accounts(_: &mut (), (): &mut ()) -> (AccountFacts, Option<Salt>) {
+        let facts = AccountFacts {
+            own: own_account(),
+            users: directory(|sink| {
+                tairix_procinfo::for_each_user(&IpcTransport, |record| {
+                    sink((
+                        record.uid,
+                        tairix_procinfo::field_lossy(record.name_bytes()),
+                    ));
+                    Ok(tairix_procinfo::WalkStep::Continue)
+                })
+            }),
+            groups: directory(|sink| {
+                tairix_procinfo::for_each_group(&IpcTransport, |record| {
+                    sink((
+                        record.gid,
+                        tairix_procinfo::field_lossy(record.name_bytes()),
+                    ));
+                    Ok(tairix_procinfo::WalkStep::Continue)
+                })
+            }),
+            roster: Roster::Unasked,
+        };
+        (facts, draw_salt())
+    }
+
+    /// The caller's own account record, read ungated against the uid the
+    /// kernel attested.
+    ///
+    /// Three answers, told apart: a record, a uid no database holds, and a
+    /// read that could not be taken. A display that collapsed the last two
+    /// would report the machine's state for its own failure.
+    fn own_account() -> OwnAccount {
+        match tairix_procinfo::self_account(&IpcTransport) {
+            Ok(Some(record)) => OwnAccount::Known(alloc::boxed::Box::new(record)),
+            Ok(None) => OwnAccount::Unknown,
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: this session's own account could not be read ({err:?}); the pane                      says so"
+                );
+                OwnAccount::Unmeasured
+            }
+        }
+    }
+
+    /// Collect one id-and-name directory, or `None` where the walk failed.
+    fn directory(
+        walk: impl FnOnce(&mut dyn FnMut((u32, String))) -> Result<(), tairix_procinfo::ListError>,
+    ) -> Option<Vec<(u32, String)>> {
+        let mut listed = Vec::new();
+        let outcome = walk(&mut |entry| listed.push(entry));
+        match outcome {
+            Ok(()) => Some(listed),
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: a directory could not be read ({err:?}); the pane says so"
+                );
+                None
+            }
+        }
+    }
+
+    /// One fresh salt from the kernel CSPRNG through the unprivileged
+    /// `sys:random` resource.
+    ///
+    /// Refuses, never guesses: a failed draw leaves the pane with no salt,
+    /// which refuses a password apply rather than hashing under something
+    /// predictable.
+    fn draw_salt() -> Option<Salt> {
+        let fd = u32::try_from(tairix_rt::resource_open(
+            b"sys:random",
+            tairix_abi::OpenFlags::READ,
+        ))
+        .ok()?;
+        let mut salt = [0u8; SALT_LEN];
+        let outcome = tairix_rt::fs_read(fd, 0, &mut salt);
+        let _ = tairix_rt::fs_close(fd);
+        match outcome {
+            Ok(read) if read == SALT_LEN => Some(salt),
+            _ => {
+                let _ = writeln!(
+                    Stderr,
+                    "settings: no randomness was available; a new password cannot be hashed here"
                 );
                 None
             }
@@ -468,6 +585,41 @@ mod program {
             };
             self.pending = false;
             shell.adopt_resolvers(facts);
+            true
+        }
+    }
+
+    /// The account-reading desk's client half.
+    ///
+    /// One reading at a time, for the same reason every other desk holds
+    /// one: the pane only ever wants the latest.
+    struct AccountRead<'a> {
+        worker: &'a Accounts,
+        pending: bool,
+    }
+
+    impl AccountRead<'_> {
+        /// Ask for a fresh reading if the pane wants one, or wants a salt
+        /// it has spent, and none is outstanding.
+        fn request(&mut self, shell: &mut Shell) -> bool {
+            if self.pending || !(shell.accounts_wanted() || shell.salt_wanted()) {
+                return false;
+            }
+            if self.worker.submit(()) {
+                return self.settle(shell);
+            }
+            self.pending = true;
+            false
+        }
+
+        /// Adopt a landed reading, answering whether anything changed.
+        fn settle(&mut self, shell: &mut Shell) -> bool {
+            let Some((facts, salt)) = self.worker.collect() else {
+                return false;
+            };
+            self.pending = false;
+            shell.adopt_accounts(facts);
+            shell.adopt_salt(salt);
             true
         }
     }
@@ -758,6 +910,9 @@ mod program {
         machine: &'a Machine,
         /// The network readings' wake, drained on a [`NETWORK_TOKEN`] wake.
         network: &'a Network,
+        /// The account readings' wake, drained on an [`ACCOUNTS_TOKEN`]
+        /// wake.
+        accounts: &'a Accounts,
         /// The elevated run's wake, drained on an [`ELEVATE_TOKEN`] wake.
         elevator: &'a Elevator,
         /// Set when the park woke for a desktop change, cleared when the loop
@@ -795,6 +950,11 @@ mod program {
                 // The network readings landed.
                 Wake::App(NETWORK_TOKEN) => {
                     self.network.wake().drain();
+                    Ok(Parked::Interrupted)
+                }
+                // The account readings landed.
+                Wake::App(ACCOUNTS_TOKEN) => {
+                    self.accounts.wake().drain();
                     Ok(Parked::Interrupted)
                 }
                 // The broker answered an offered account.
@@ -1203,6 +1363,9 @@ mod program {
         machine: MachineRead<'a>,
         /// The network readings the DNS pane states.
         network: NetworkRead<'a>,
+        /// The account readings the Users pane states, and the salt a new
+        /// password is hashed under.
+        accounts: AccountRead<'a>,
         /// The broker round trip an offered account costs.
         elevator: &'a Elevator,
     }
@@ -1228,6 +1391,7 @@ mod program {
         landed |= desks.mounts.settle(shell);
         landed |= desks.machine.settle(shell);
         landed |= desks.network.settle(shell);
+        landed |= desks.accounts.settle(shell);
         if let Some(verdict) = desks.elevator.collect() {
             shell.adopt_elevation(verdict);
             landed = true;
@@ -1361,7 +1525,10 @@ mod program {
             // And for the stack's resolver set, if this round put the pane
             // that states it on show.
             let network_landed = desks.network.request(shell);
-            if volumes_landed || machine_landed || network_landed {
+            // And for the account readings, if this round put the pane that
+            // states them on show or spent the salt it held.
+            let accounts_landed = desks.accounts.request(shell);
+            if volumes_landed || machine_landed || network_landed || accounts_landed {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
             }
             if matches!(event, WindowEvent::ContentReleased { .. }) {
@@ -1374,6 +1541,7 @@ mod program {
             let whole = redraw
                 || machine_landed
                 || volumes_landed
+                || accounts_landed
                 || matches!(
                     acted,
                     Acted::Whole | Acted::Apply(_) | Acted::Opened | Acted::Rendered { .. }
@@ -1444,7 +1612,7 @@ mod program {
     /// Put `worker` on a desk of its own and start it.
     /// Every worker desk this window runs, started and owned together.
     ///
-    /// One desk per kind of work rather than one shared desk: the five
+    /// One desk per kind of work rather than one shared desk: the six
     /// carry different jobs and a latest-wins desk would let any of them
     /// evict another's answer. Each would otherwise stall the window for a
     /// round trip.
@@ -1453,6 +1621,7 @@ mod program {
         mounts: Arc<Mounts>,
         machine: Arc<Machine>,
         network: Arc<Network>,
+        accounts: Arc<Accounts>,
         elevator: Arc<Elevator>,
     }
 
@@ -1476,6 +1645,10 @@ mod program {
                 network: started(
                     Network::new(read_network, (), tairix_rt::sync::WorkerWake::create()),
                     "network-readings",
+                ),
+                accounts: started(
+                    Accounts::new(read_accounts, (), tairix_rt::sync::WorkerWake::create()),
+                    "account-readings",
                 ),
                 elevator: started(
                     Elevator::new(send_elevate, (), tairix_rt::sync::WorkerWake::create()),
@@ -1503,6 +1676,11 @@ mod program {
                         "network-readings wake refused",
                     ),
                     (
+                        self.accounts.wake(),
+                        ACCOUNTS_TOKEN,
+                        "account-readings wake refused",
+                    ),
+                    (
                         self.elevator.wake(),
                         ELEVATE_TOKEN,
                         "elevated-run wake refused",
@@ -1520,6 +1698,7 @@ mod program {
             self.mounts.stop();
             self.machine.stop();
             self.network.stop();
+            self.accounts.stop();
             self.elevator.stop();
         }
     }
@@ -1616,6 +1795,7 @@ mod program {
             mounts,
             machine,
             network,
+            accounts,
             elevator,
         } = &workers;
 
@@ -1634,6 +1814,7 @@ mod program {
             mounts,
             machine,
             network,
+            accounts,
             elevator,
             desktop_moved: &desktop_moved,
         });
@@ -1657,6 +1838,10 @@ mod program {
                     },
                     network: NetworkRead {
                         worker: network,
+                        pending: false,
+                    },
+                    accounts: AccountRead {
+                        worker: accounts,
                         pending: false,
                     },
                     elevator,

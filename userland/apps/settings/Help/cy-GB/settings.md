@@ -20,9 +20,7 @@ ail-ddilysedig o'r gorchymyn sydd eisoes yn ysgrifennu'r storfa honno; ni all
 dim yma godi braint.
 
 Mae categori na all y system hon ei wasanaethu yn dweud hynny'n blaen ac yn
-enwi'r hyn fyddai'n rhaid bodoli. Mae categori y gall ei wasanaethu, nad yw'r
-rhyddhad hwn yn tynnu ei reolyddion eto, yn enwi lle mae'r gosodiad yn cael ei
-ddarllen neu ei osod yn lle hynny. Ni ddangosir rheolydd na fyddai'n newid dim
+enwi'r hyn fyddai'n rhaid bodoli. Ni ddangosir rheolydd na fyddai'n newid dim
 erioed.
 
 Teipiwch yn y maes chwilio uwchben y bar ochr i'w hidlo i'r categorïau a'r

@@ -11,7 +11,7 @@ use tairix_controls::{
 };
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconKind;
-use tairix_theme::{SignalRole, Theme};
+use tairix_theme::SignalRole;
 
 use crate::volumes::{Readings, VolumeReading, VOLUME_FACTS};
 
@@ -63,14 +63,11 @@ fn system() -> MountRecord {
     )
 }
 
+use crate::test_support::theme;
+
 fn readings(records: &[MountRecord]) -> Readings {
     let volumes: Vec<VolumeReading> = records.iter().map(VolumeReading::of).collect();
     Readings::new(&volumes)
-}
-
-fn theme() -> Theme {
-    tairix_font::install_test_transport();
-    Theme::dark()
 }
 
 /// What one row of a card says, as `(label, reading)` — with the reading

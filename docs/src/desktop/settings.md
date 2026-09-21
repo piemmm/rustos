@@ -321,6 +321,91 @@ is, composed into two panes, rather than two surfaces that could disagree.
 **Wi-Fi** states the absence of the subsystem: no 802.11 driver, no
 supplicant, and no vocabulary for a scan or an association.
 
+## Users & Groups
+
+The one pane built from three readings of **different authority**, because no
+single query is a Users pane and widening one until it was would be a real
+loss.
+
+The caller's **own account** — its name, full name, user id, primary group,
+memberships, home and shell — is the ungated `SELF_ACCOUNT` query, resolved by
+the service against the uid the kernel attested rather than one the request
+names, so there is no parameter for whose account to read and no path to
+another principal's. It carries no capability ceiling, no lock state and no
+password material: a principal reading its own details crosses no boundary,
+and none of the rest is needed to render them. A uid no database holds is
+stated as exactly that, apart from a reading that could not be taken.
+
+The **roster** is the ungated `USER_DIRECTORY`, walked paged: every account's
+name and user id, the `/etc/passwd`-class public pairing, and nothing else.
+The plate says so in its own footnote rather than fabricating the rest —
+because an ungated lock state is an enumeration of which accounts are live and
+so worth attacking, and an ungated shell and home path are reconnaissance any
+unprivileged process, a compromised parser sandbox included, learns nothing of
+today.
+
+The **groups** plate is the sibling ungated `GROUP_DIRECTORY`: rendering a gid
+is the same display need as rendering a uid, and it is what every membership
+row above it reads a group's name through. A gid the directory does not carry
+renders as its number, which is the honest answer rather than a fabricated
+name.
+
+Everything else — another account's fields, any account's lock state, its
+capability ceiling — is `CAP_USER_ADMIN`'s, and Settings holds no capability at
+all. So the band's command is a **capture**: an authenticated run of
+`users --list`, whose relayed output the pane reads back through the one
+`:`-delimited listing form `lib/useradmin` defines for both the tool that
+prints it and the surface that reads it. A reply larger than the supervisor
+carries answers *overran*, so the pane either holds a listing it can draw or
+says plainly that it holds none; output that is no listing at all is refused,
+while a single line the grammar does not admit is skipped, so one unreadable
+record never hides the rest. The listing is dropped the moment the reader
+leaves the pane, and a capture that lands for a pane the window has since left
+is dropped rather than installed — the desktop can send the window elsewhere
+while a run is in flight, and a privileged reading is never adopted by a
+surface that did not ask for it.
+
+Once it lands there is one plate per account, captioned by its name and uid,
+whose full name, primary group, other groups, home, shell, login state,
+capability ceiling and a new password are all settable. A **service identity**
+gets readings rather than controls for its home, shell, login and password,
+with a footnote saying why: the database refuses a record shaped otherwise, so
+offering those rows would be offering a change that can only ever be refused.
+The login row offers exactly the two states `usermod` can set, plus the
+account's own where it is neither. Group rows are read by name and applied by
+number, and a name the machine does not hold is refused on the row.
+
+Apply is **one** elevated run, and the pane refuses anything that is not:
+
+- a change spanning more than one account, because one command changes one
+  account and a change split over two runs can leave half of it durable;
+- a password together with the fields beside it, because the password is set
+  by its own command.
+
+Both are stated before anyone is asked for a password rather than discovered
+after. A **password never leaves this window as a password**: the row is a
+masked field whose bounded buffer zeroises what it discards, the record is
+built here from `lib/users`' own PBKDF2 builder under a salt the caller drew
+from the kernel CSPRNG, and `passwd --record` receives the record. A draw that
+produced no salt refuses the apply rather than reaching for a predictable one,
+and a salt is spent once. The plaintext is read from its field by borrow at the
+moment it is hashed and is copied nowhere — a plaintext in a second buffer is
+one no erasure can reach.
+
+Every write elevates a **named** account and the kernel decides. `users_admin`
+is gated whole, so a principal editing its own record still needs that grant;
+an unprivileged self-service password change would be a new authority path
+rather than a wider gate, and this surface offers none. The pane offers the
+action, the kernel refuses it where it must, and the pane states the refusal.
+The never-widen grant rule and the last-administrator guard remain the only
+arbiters; nothing here pre-approves an escalation.
+
+A run that exits cleanly moves the listing on to hold what was applied rather
+than dropping it: `usermod` applied every field it was given or refused the
+run, so re-reading would cost a second password for an answer already known,
+and the reader is left in place for the next change. The public directories
+are free, so they are read again at once.
+
 ## Absence is stated, never mimed
 
 A control that would change nothing is never drawn. Each pane declares what
@@ -335,6 +420,11 @@ backs it, and the three answers are different facts to a reader:
 The stated absences draw through one renderer, quiet and on the surface
 behind them with no plate — the same shape every other stated absence in the
 desktop takes, because a plate would read as something to interact with.
+
+No pane takes the third answer today: every category this system can serve
+composes its own controls, and the rest state what is missing. It stays in the
+vocabulary because it is the honest thing for a category whose readings exist
+before its controls do.
 
 Seven of the categories a desktop should offer have no subsystem beneath them
 on this tree at all: there is no audio stack, no Bluetooth stack, no
@@ -386,7 +476,11 @@ the staged source of truth; the shape of it is:
   that owns the syscall, never acquiring the capability here. Date & Time's
   action band starts `datetime.app` as an authenticated account and leaves it
   running — a window that waited for a program the reader then works in would
-  stop drawing for the whole session.
+  stop drawing for the whole session. Users & Groups elevates the account
+  tools instead and *waits*: a capture of `users --list` to read what no
+  unprivileged caller may, and one `usermod` or `passwd` run to write it. It
+  reimplements none of them and holds no path to any of them without a
+  password.
 
 The credential question every elevated run is offered through is the shared
 `lib/controls` credential sheet, the same surface the desktop session puts up

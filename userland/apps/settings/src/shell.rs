@@ -28,8 +28,10 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_sysconfig::SystemConfig;
 use tairix_theme::{CursorSetId, Theme};
+use tairix_users::Salt;
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
+use crate::accounts::{AccountFacts, Roster};
 use crate::body::{self, Body, Drawn};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
@@ -53,6 +55,55 @@ const ROOT_CRUMB: &str = "Settings";
 /// at three type roles, so no one line height is the column's, and a reader
 /// turning a wheel wants a consistent step.
 const LINE_STEP: u64 = 24;
+
+/// A reading the caller takes for this window.
+///
+/// Each is wanted from the moment the pane that states it comes on show
+/// until its answer lands, and none is ever awaited: the pane draws
+/// whatever has arrived and rebuilds when the rest does.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Reading {
+    /// The machine's boot-time configuration store.
+    Config,
+    /// The mount table.
+    Volumes,
+    /// The stack's resolver set.
+    Resolvers,
+    /// The caller's own account, the two public directories, and a salt.
+    Accounts,
+}
+
+impl Reading {
+    /// This reading's bit in a [`Wanted`] set.
+    const fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+}
+
+/// Which readings the caller should take for this window.
+///
+/// One set rather than a field per reading: every one obeys the same
+/// rule — armed when its pane comes on show, cleared when its answer
+/// lands — so a field apiece would be four copies of it to keep in step.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct Wanted(u8);
+
+impl Wanted {
+    /// Ask for `reading`.
+    fn arm(&mut self, reading: Reading) {
+        self.0 |= reading.bit();
+    }
+
+    /// Record that `reading`'s answer has landed.
+    fn landed(&mut self, reading: Reading) {
+        self.0 &= !reading.bit();
+    }
+
+    /// Whether `reading` is still wanted.
+    const fn holds(self, reading: Reading) -> bool {
+        self.0 & reading.bit() != 0
+    }
+}
 
 /// Which region of the shell holds the keyboard cursor.
 ///
@@ -173,12 +224,40 @@ impl core::fmt::Debug for Elevation {
     }
 }
 
+/// What a captured run answers, and therefore which pane it is for.
+///
+/// Carried explicitly rather than inferred from the pane on show: the
+/// desktop can send the window to another pane while a run is in flight,
+/// and a privileged listing routed to whichever pane happens to be showing
+/// when it lands would be a reading installed for a surface that never
+/// asked for it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Captures {
+    /// The machine's configured addressing, for the networking panes.
+    Addressing,
+    /// The account and group listing, for the Users pane.
+    Roster,
+}
+
+impl Captures {
+    /// Whether `composition` is the pane this capture was asked for.
+    const fn asked_by(self, composition: Composition) -> bool {
+        match self {
+            Self::Addressing => composition.reads_addressing(),
+            Self::Roster => composition.reads_roster(),
+        }
+    }
+}
+
 /// A credential question standing over the window, and what it is for.
 struct Asking {
     sheet: CredentialSheet,
     program: &'static str,
     argv: Vec<String>,
     mode: RunMode,
+    /// What a captured run answers, and `None` for a run whose exit code
+    /// is the whole answer.
+    captures: Option<Captures>,
 }
 
 /// What one routed event concluded, for a caller that must act outside the
@@ -269,23 +348,22 @@ pub struct Shell {
     machine: MachineFacts,
     /// The network readings the DNS pane states.
     network: NetworkFacts,
-    /// Set while a pane that reads the machine's store is on show and the
-    /// caller has not yet answered a fresh read for it.
-    config_wanted: bool,
+    /// The account readings the Users pane states.
+    accounts: AccountFacts,
+    /// A fresh salt the caller drew, held so a password can be hashed
+    /// without the event loop waiting on a read.
+    ///
+    /// Consumed on use and never reused: an apply takes it and the caller
+    /// draws another. With none held a password apply is refused rather
+    /// than salted with something predictable.
+    salt: Option<Salt>,
+    /// Which readings the caller should take for this window.
+    wanted: Wanted,
     /// The action band beneath the pane on show, for a pane that has one.
     footer: Option<Footer>,
     /// The credential question standing over the window, and what it will
     /// ask the broker to run once an account is offered.
     asking: Option<Asking>,
-    /// Set while the Storage pane is on show and the caller has not yet
-    /// answered a fresh mount walk for it.
-    ///
-    /// The walk is an IPC round trip, so the pane never makes it: it says
-    /// it wants one and draws what has already arrived.
-    volumes_wanted: bool,
-    /// Set while a pane that states a network reading is on show and the
-    /// caller has not yet answered a fresh read for it.
-    network_wanted: bool,
 }
 
 impl Shell {
@@ -316,12 +394,12 @@ impl Shell {
             catalog: Vec::new(),
             cursor_sets: Vec::new(),
             volumes: Vec::new(),
-            volumes_wanted: false,
+            wanted: Wanted::default(),
             config: None,
             machine: MachineFacts::default(),
             network: NetworkFacts::default(),
-            network_wanted: false,
-            config_wanted: false,
+            accounts: AccountFacts::default(),
+            salt: None,
             footer: None,
             asking: None,
         };
@@ -362,7 +440,7 @@ impl Shell {
     /// trip.
     #[must_use]
     pub const fn config_wanted(&self) -> bool {
-        self.config_wanted
+        self.wanted.holds(Reading::Config)
     }
 
     /// Adopt the machine's boot-time configuration the caller read.
@@ -373,7 +451,7 @@ impl Shell {
     /// documented defaults and is a perfectly good reading.
     pub fn adopt_config(&mut self, config: Option<SystemConfig>) {
         self.config = config;
-        self.config_wanted = false;
+        self.wanted.landed(Reading::Config);
         if let Some(form) = self.body.form_mut() {
             form.adopt_config(self.config.as_ref());
         }
@@ -439,7 +517,7 @@ impl Shell {
     /// looked at them without the pane ever waiting on a round trip.
     #[must_use]
     pub const fn volumes_wanted(&self) -> bool {
-        self.volumes_wanted
+        self.wanted.holds(Reading::Volumes)
     }
 
     /// Adopt the mounted volumes the caller walked the mount table for.
@@ -448,7 +526,7 @@ impl Shell {
     /// arrived — nothing at all, at first — and rebuilds when it lands.
     pub fn adopt_volumes(&mut self, volumes: Vec<VolumeReading>) {
         self.volumes = volumes;
-        self.volumes_wanted = false;
+        self.wanted.landed(Reading::Volumes);
         if matches!(self.body, Body::Volumes(_)) {
             self.restate_body();
         }
@@ -463,7 +541,7 @@ impl Shell {
     /// what the stack holds now rather than what it held last time.
     #[must_use]
     pub const fn network_wanted(&self) -> bool {
-        self.network_wanted
+        self.wanted.holds(Reading::Resolvers)
     }
 
     /// Adopt the network readings the caller took.
@@ -477,7 +555,7 @@ impl Shell {
     /// replaced the whole record.
     pub fn adopt_resolvers(&mut self, resolvers: Option<Vec<NetServerAddr>>) {
         self.network.resolvers = resolvers;
-        self.network_wanted = false;
+        self.wanted.landed(Reading::Resolvers);
         // Into the pane that states it, and only its rows: rebuilding the
         // pane would discard a change the reader has staged because an
         // unrelated reading happened to land.
@@ -488,6 +566,75 @@ impl Shell {
         if let Some(form) = self.body.form_mut() {
             form.adopt_resolvers(resolvers);
         }
+    }
+
+    /// Whether the caller should read the ungated account readings for
+    /// this window.
+    ///
+    /// Set when the Users pane comes on show and cleared when a read is
+    /// answered, exactly as the mount walk and the resolver set are: the
+    /// directories move as accounts and groups come and go, so a pane the
+    /// reader returns to shows what the machine holds now.
+    #[must_use]
+    pub const fn accounts_wanted(&self) -> bool {
+        self.wanted.holds(Reading::Accounts)
+    }
+
+    /// Whether the caller should draw a fresh salt for this window.
+    ///
+    /// One at a time: a password apply consumes the one held, so the
+    /// reserve is refilled rather than drawn at the instant it is wanted —
+    /// the loop owes the reader a frame and must not wait on a read.
+    #[must_use]
+    pub fn salt_wanted(&self) -> bool {
+        self.salt.is_none() && self.shows_accounts()
+    }
+
+    /// Adopt the ungated account readings the caller took.
+    ///
+    /// Requested, never awaited: the pane opens on whatever has arrived —
+    /// nothing at all, at first — and rebuilds when it lands. The
+    /// authenticated listing is *not* replaced: it cost a password, and a
+    /// public reading landing must not throw it away.
+    pub fn adopt_accounts(&mut self, accounts: AccountFacts) {
+        self.accounts.adopt_public(accounts);
+        self.wanted.landed(Reading::Accounts);
+        if let Some(form) = self
+            .body
+            .form_mut()
+            .filter(|form| form.composition().reads_roster())
+        {
+            form.adopt_accounts(&self.accounts);
+        }
+        self.restate_footer();
+    }
+
+    /// Adopt a fresh salt the caller drew, or record that the draw failed.
+    ///
+    /// `None` leaves the reserve empty, which refuses a password apply
+    /// rather than reaching for a predictable salt.
+    pub fn adopt_salt(&mut self, salt: Option<Salt>) {
+        self.salt = salt;
+    }
+
+    /// Whether the pane the shell is *on* is discovered from the account
+    /// listing.
+    ///
+    /// The location rather than the body on show, for the same reason the
+    /// addressing capture asks it of the location: this decides whether the
+    /// listing survives long enough to build the next body.
+    fn shows_accounts(&self) -> bool {
+        matches!(
+            self.pane_row().and_then(PaneRow::content),
+            Some(PaneContent::Form(composition)) if composition.reads_roster()
+        )
+    }
+
+    /// Whether the body on show is discovered from the account listing.
+    fn states_accounts(&self) -> bool {
+        self.body
+            .composition()
+            .is_some_and(Composition::reads_roster)
     }
 
     /// Whether the body on show states the live resolver set.
@@ -629,7 +776,16 @@ impl Shell {
         if !self.shows_addressing() {
             self.network.addressing = Addressing::Unasked;
         }
+        // And the account listing, for exactly the same reason: it names
+        // every account's home, shell, lock state and capability ceiling,
+        // which is a privileged reading this application had no business
+        // keeping while the reader browses elsewhere.
+        if !self.shows_accounts() {
+            self.accounts.roster = Roster::Unasked;
+        }
+        let rostered = self.states_accounts();
         let staged = self.body.staged().to_vec();
+        let staged_accounts = self.body.staged_accounts().to_vec();
         let answered = body::Answered {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
@@ -639,6 +795,8 @@ impl Shell {
             machine: &self.machine,
             network: &self.network,
             staged: &staged,
+            accounts: &self.accounts,
+            staged_accounts: &staged_accounts,
         };
         self.body = match self.location.rows() {
             Some((_, pane)) => Body::of(pane, &answered),
@@ -649,14 +807,21 @@ impl Shell {
         // adopting an answered walk rebuilds too, and re-arming there would
         // ask again for the table just handed over.
         if !listed && matches!(self.body, Body::Volumes(_)) {
-            self.volumes_wanted = true;
+            self.wanted.arm(Reading::Volumes);
         }
         // The resolver set is live state the stack changes on its own, so
         // it is re-read when its pane *comes* on show for the same reason
         // the mount table is, and not on the rebuild that adopting one
         // causes.
         if !resolved && self.states_resolvers() {
-            self.network_wanted = true;
+            self.wanted.arm(Reading::Resolvers);
+        }
+        // The directories move on their own too, so they are re-read when
+        // the pane that lists them *comes* on show — not on the rebuild
+        // that adopting one causes, which would ask again for the readings
+        // just handed over.
+        if !rostered && self.states_accounts() {
+            self.wanted.arm(Reading::Accounts);
         }
         // Rebuilt rather than kept: a band belongs to the pane that offers
         // it, and one carried across a navigation would state the last
@@ -665,7 +830,7 @@ impl Shell {
         // show, for the same reason the mount table is: the store moves,
         // and a stale reading is a value the reader cannot account for.
         if self.body.stages_machine_settings() && self.config.is_none() {
-            self.config_wanted = true;
+            self.wanted.arm(Reading::Config);
         }
         self.footer = self.band();
     }
@@ -704,7 +869,11 @@ impl Shell {
         if form.posture() != Posture::Staged {
             return false;
         }
-        !form.composition().reads_addressing() || form.addressing().document().is_some()
+        let composition = form.composition();
+        if composition.reads_roster() {
+            return !form.roster().accounts().is_empty();
+        }
+        !composition.reads_addressing() || form.addressing().document().is_some()
     }
 
     /// What the pane on show has to say about the change it is holding.
@@ -715,7 +884,7 @@ impl Shell {
         let Some(form) = self.body.form().filter(|_| self.stageable()) else {
             return Standing::Offered;
         };
-        match (form.refused(), form.pending().len()) {
+        match (form.refused(), form.changes()) {
             (0, 0) => Standing::Unchanged,
             (0, count) => Standing::Changed(count),
             (refused, _) => Standing::Refusing(refused),
@@ -1352,8 +1521,17 @@ impl Shell {
                 "The command ran but did not accept the change.",
             )),
             Elevated::Printed(0, output) => {
+                let captures = self.asking.as_ref().and_then(|asking| asking.captures);
                 self.asking = None;
-                self.read_addressing(Addressing::from_listing(&output));
+                match captures {
+                    Some(Captures::Addressing) => {
+                        self.read_addressing(Addressing::from_listing(&output));
+                    }
+                    Some(Captures::Roster) => {
+                        self.read_roster(Roster::from_capture(&output));
+                    }
+                    None => {}
+                }
             }
             Elevated::Printed(..) => self.refuse(String::from(
                 "The command ran but could not read the configuration.",
@@ -1362,8 +1540,13 @@ impl Shell {
             // Stated in the pane rather than as a refusal of the question,
             // because asking again would answer the same.
             Elevated::Overran => {
+                let captures = self.asking.as_ref().and_then(|asking| asking.captures);
                 self.asking = None;
-                self.read_addressing(Addressing::Overran);
+                match captures {
+                    Some(Captures::Addressing) => self.read_addressing(Addressing::Overran),
+                    Some(Captures::Roster) => self.read_roster(Roster::Overran),
+                    None => {}
+                }
             }
             Elevated::Refused(ElevateRefusal::Credentials) => {
                 self.refuse(String::from(CREDENTIAL_REFUSED_REASON));
@@ -1381,7 +1564,27 @@ impl Shell {
     /// writes every named pair or none, and both sides render through the
     /// same engine, so a clean exit wrote exactly what was staged.
     fn settled(&mut self) {
-        self.config_wanted = self.body.stages_machine_settings();
+        if self.body.stages_machine_settings() {
+            self.wanted.arm(Reading::Config);
+        }
+        // An account change went in whole or was refused whole, so the
+        // listing moves on to hold it rather than being dropped and
+        // re-read — re-reading costs another password, and the reader is
+        // left where they were for the next change. The public directories
+        // are free, so they are re-read at once.
+        if self
+            .body
+            .composition()
+            .is_some_and(Composition::reads_roster)
+        {
+            self.wanted.arm(Reading::Accounts);
+            if let Some(form) = self.body.form_mut() {
+                form.adopt_applied();
+            }
+            if let Some(moved) = self.body.form().map(|form| form.roster().clone()) {
+                self.accounts.roster = moved;
+            }
+        }
         let written = self
             .body
             .form()
@@ -1400,7 +1603,16 @@ impl Shell {
     }
 
     /// Adopt what a capture of the machine's addressing came to.
+    ///
+    /// A capture that lands for a pane the window has since left is
+    /// **dropped**: the desktop can send the window elsewhere while a run
+    /// is in flight, and a privileged reading installed for a surface that
+    /// is no longer showing is one this application has no business
+    /// holding.
     fn read_addressing(&mut self, addressing: Addressing) {
+        if !self.captured_for(Captures::Addressing) {
+            return;
+        }
         self.network.addressing = addressing;
         if let Some(form) = self.body.form_mut() {
             form.adopt_addressing(&self.network.addressing);
@@ -1408,6 +1620,26 @@ impl Shell {
         // The pane has a working copy where it had none, so its band is a
         // different band: Revert and Apply rather than the reading.
         self.footer = self.band();
+    }
+
+    /// Adopt what a capture of the account listing came to, on exactly the
+    /// terms the addressing capture is adopted on.
+    fn read_roster(&mut self, roster: Roster) {
+        if !self.captured_for(Captures::Roster) {
+            return;
+        }
+        self.accounts.roster = roster;
+        if let Some(form) = self.body.form_mut() {
+            form.adopt_roster(self.accounts.roster.clone());
+        }
+        self.footer = self.band();
+    }
+
+    /// Whether the pane on show is the one `captures` was asked for.
+    fn captured_for(&self, captures: Captures) -> bool {
+        self.body
+            .composition()
+            .is_some_and(|composition| captures.asked_by(composition))
     }
 
     /// State a refusal on the question that is up, or in the band when the
@@ -1480,10 +1712,11 @@ impl Shell {
     /// and saying so here names what is wrong rather than leaving the
     /// reader with a run that failed.
     fn staging(&mut self) -> Option<Asking> {
-        let reads_addressing = self
-            .body
-            .form()
-            .is_some_and(|form| form.composition().reads_addressing());
+        let composition = self.body.composition()?;
+        if composition.reads_roster() {
+            return self.staging_account();
+        }
+        let reads_addressing = composition.reads_addressing();
         if reads_addressing {
             if let Some(Err(err)) = self.body.form().and_then(Form::proposal) {
                 self.refuse(alloc::format!("{err}"));
@@ -1494,28 +1727,56 @@ impl Shell {
         if argv.is_empty() {
             return None;
         }
-        // Against the seam's own bound, not a second copy of it: a change
-        // too large for one request is refused here rather than after the
-        // reader has typed a password, and the document is never split
-        // across two runs — half of it written is exactly the state the
-        // one-invocation rule exists to prevent.
+        let purpose = if reads_addressing {
+            SET_ADDRESSING_PURPOSE
+        } else {
+            SET_MACHINE_PURPOSE
+        };
+        self.carried(CONFIGURE_RUN_PATH, argv, purpose)
+    }
+
+    /// The run that applies what the Users pane has staged.
+    ///
+    /// One account and one tool, or nothing: a change spanning two
+    /// accounts, or a password together with the fields beside it, needs
+    /// two runs — and half of a change made durable is exactly the state
+    /// the one-invocation rule exists to prevent. The salt is *consumed*
+    /// here, so the next password is hashed under a fresh one.
+    fn staging_account(&mut self) -> Option<Asking> {
+        let run = match self.body.form()?.account_run(self.salt)? {
+            Ok(run) => run,
+            Err(err) => {
+                self.refuse(String::from(err.reason()));
+                return None;
+            }
+        };
+        self.salt = None;
+        self.carried(run.program, run.argv, SET_ACCOUNT_PURPOSE)
+    }
+
+    /// The credential question for a run of `program` with `argv`, or a
+    /// stated refusal where the seam could not carry it.
+    ///
+    /// Checked against the seam's own bound rather than a second copy of
+    /// it, and before the reader has typed a password: a change too large
+    /// for one request is never split across two runs.
+    fn carried(
+        &mut self,
+        program: &'static str,
+        argv: Vec<String>,
+        purpose: &'static str,
+    ) -> Option<Asking> {
         let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
         if ElevateArgv::new(&borrowed).is_err() {
             self.refuse(String::from(TOO_MANY_CHANGES));
             return None;
         }
         Some(Asking {
-            sheet: CredentialSheet::new(
-                ASK_TITLE,
-                if reads_addressing {
-                    SET_ADDRESSING_PURPOSE
-                } else {
-                    SET_MACHINE_PURPOSE
-                },
-            ),
-            program: CONFIGURE_RUN_PATH,
+            sheet: CredentialSheet::new(ASK_TITLE, purpose),
+            program,
             argv,
             mode: RunMode::Wait,
+            captures: None,
         })
     }
 
@@ -1527,6 +1788,7 @@ impl Shell {
                 program: DATETIME_RUN_PATH,
                 argv: Vec::new(),
                 mode: RunMode::Leave,
+                captures: None,
             }),
             // A read, not a write: the same tool, run with no operand, and
             // what it prints is the answer. This application may not read
@@ -1537,6 +1799,20 @@ impl Shell {
                 program: CONFIGURE_RUN_PATH,
                 argv: Vec::new(),
                 mode: RunMode::Capture,
+                captures: Some(Captures::Addressing),
+            }),
+            // A read on the same terms: the whole account registry is
+            // gated, so what an authenticated listing printed is the only
+            // way this pane can state another account's fields at all. The
+            // interactive session cannot serve it — a captured run has its
+            // standard input closed — so the non-interactive listing is
+            // what is asked for.
+            PaneContent::Form(composition) if composition.reads_roster() => Some(Asking {
+                sheet: CredentialSheet::new(ASK_TITLE, SHOW_ACCOUNTS_PURPOSE),
+                program: USERS_RUN_PATH,
+                argv: alloc::vec![String::from("-l")],
+                mode: RunMode::Capture,
+                captures: Some(Captures::Roster),
             }),
             PaneContent::Form(_)
             | PaneContent::Pictures(_)
@@ -2078,6 +2354,20 @@ impl Shell {
         &self.network.addressing
     }
 
+    /// What the window is holding of the account listing, for a test that
+    /// asks whether a privileged reading outlived its pane.
+    #[cfg(test)]
+    pub(crate) const fn roster_for_test(&self) -> &Roster {
+        &self.accounts.roster
+    }
+
+    /// Whether the window holds a salt to hash a password under, for a
+    /// test that asks what an apply does without one.
+    #[cfg(test)]
+    pub(crate) const fn has_salt_for_test(&self) -> bool {
+        self.salt.is_some()
+    }
+
     /// What the pane's action band is saying, for a test that asks what a
     /// reader would read there.
     #[cfg(test)]
@@ -2166,6 +2456,18 @@ const SHOW_ADDRESSING_PURPOSE: &str =
 const TOO_MANY_CHANGES: &str =
     "More changes than one command can carry. Apply one interface at a time.";
 
+/// What the question says reading the accounts needs an account for.
+const SHOW_ACCOUNTS_PURPOSE: &str =
+    "An account's own fields, whether it may log in, and what it is allowed to do are not public, \
+     so reading them needs an account that may administer users.";
+
+/// What the question says changing an account needs an account for.
+///
+/// The whole registry is gated, so this is asked even of a reader editing
+/// their own record: an unprivileged self-service change would be a new
+/// authority path rather than a wider gate, and this surface offers none.
+const SET_ACCOUNT_PURPOSE: &str = "Changing an account needs an account that may administer users.";
+
 /// What the question says the machine's addressing needs an account for.
 const SET_ADDRESSING_PURPOSE: &str =
     "Changing how this machine's interfaces are addressed needs an account that may write it.";
@@ -2176,6 +2478,9 @@ const CONFIGURE_RUN_PATH: &str = "/System/Commands/configure.app/Run";
 
 /// The application that owns the wall clock.
 const DATETIME_RUN_PATH: &str = "/System/Applications/datetime.app/Run";
+
+/// The tool that answers the account and group listing.
+const USERS_RUN_PATH: &str = "/System/Commands/users.app/Run";
 
 /// The command line that applies everything `form` has staged: one
 /// `<key> <value>` pair per row that differs, in registry order.

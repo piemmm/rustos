@@ -20,10 +20,8 @@ ein erneut authentifizierter Aufruf des Befehls, der diesen Speicher bereits
 schreibt; nichts hier kann Rechte ausweiten.
 
 Eine Kategorie, die dieses System nicht bedienen kann, sagt das deutlich und
-nennt, was dafür vorhanden sein müsste. Eine Kategorie, die es bedienen kann,
-deren Bedienelemente diese Ausgabe noch nicht zeichnet, nennt stattdessen, wo
-die Einstellung gelesen oder gesetzt wird. Ein Bedienelement, das nichts
-ändern würde, wird niemals gezeigt.
+nennt, was dafür vorhanden sein müsste. Ein Bedienelement, das nichts ändern
+würde, wird niemals gezeigt.
 
 Tippen Sie in das Suchfeld über der Seitenleiste, um sie auf die Kategorien und
 Einstellungen zu filtern, die ein Wort erreicht. `Tab` und `Shift+Tab` wechseln

@@ -329,15 +329,6 @@ pub(crate) fn admits(key: IfaceKey, value: &str) -> bool {
     value.is_empty() || key.admits(value)
 }
 
-/// The verdict a row wears for a value its key does or does not admit.
-pub(crate) const fn verdict(admits: bool) -> ValidationState {
-    if admits {
-        ValidationState::Valid
-    } else {
-        ValidationState::Invalid
-    }
-}
-
 /// Whether this surface offers `key` as a control rather than a reading.
 ///
 /// Addressing is a settings pane's job. An interface's hardware identity
@@ -477,7 +468,7 @@ fn row(key: IfaceKey, value: Option<String>) -> FieldRow {
     FieldRow::new(label(key), control)
         .with_description(stated(key))
         .with_state(ControlState {
-            validation: verdict(!refused),
+            validation: ValidationState::of(!refused),
             ..ControlState::idle()
         })
 }

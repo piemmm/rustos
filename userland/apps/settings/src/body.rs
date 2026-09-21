@@ -20,6 +20,7 @@ use tairix_sysconfig::SystemConfig;
 use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
+use crate::accounts::{AccountFacts, AccountSetting};
 use crate::facts::{Facts, MachineFacts};
 use crate::form::{Documents, Form, FormPlace};
 use crate::gallery::Gallery;
@@ -53,6 +54,11 @@ pub(crate) struct Answered<'a> {
     /// The per-interface edits a returning networking pane carries, which
     /// is none for every other pane.
     pub(crate) staged: &'a [(IfaceSetting, String)],
+    /// The account readings the caller took for the pane that states them.
+    pub(crate) accounts: &'a AccountFacts,
+    /// The per-account edits a returning Users pane carries, which is none
+    /// for every other pane.
+    pub(crate) staged_accounts: &'a [(AccountSetting, String)],
 }
 
 impl<'a> Answered<'a> {
@@ -65,6 +71,8 @@ impl<'a> Answered<'a> {
             addressing: &self.network.addressing,
             staged: self.staged,
             resolvers: self.network.resolvers_slice(),
+            accounts: self.accounts,
+            staged_accounts: self.staged_accounts,
         }
     }
 }
@@ -180,6 +188,11 @@ impl Body {
     /// keeps a change the reader has staged but not yet applied.
     pub(crate) fn staged(&self) -> &[(IfaceSetting, String)] {
         self.form().map_or(&[], Form::staged)
+    }
+
+    /// The per-account edits the body is holding, on the same terms.
+    pub(crate) fn staged_accounts(&self) -> &[(AccountSetting, String)] {
+        self.form().map_or(&[], Form::staged_accounts)
     }
 
     /// Whether a choice list is open, which is modal: the list keeps the

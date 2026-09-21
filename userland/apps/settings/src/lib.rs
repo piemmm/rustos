@@ -21,6 +21,7 @@
 
 extern crate alloc;
 
+mod accounts;
 mod body;
 mod facts;
 mod footer;
@@ -35,6 +36,7 @@ mod stack;
 mod statement;
 mod volumes;
 
+pub use accounts::{AccountFacts, OwnAccount, Roster};
 pub use facts::MachineFacts;
 pub use form::{Composition, Form, FormOutcome, FormPlace, Offered, Setting};
 pub use frame::{resolve_frame, Actions, Overflow, ShellFrame, CONTENT_FLOOR, SIDEBAR_WIDTH};
@@ -47,6 +49,11 @@ pub use registry::{
 pub use shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
 pub use volumes::{Readings, VolumeReading};
 
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+mod accounts_tests;
 #[cfg(test)]
 mod general_tests;
 #[cfg(test)]

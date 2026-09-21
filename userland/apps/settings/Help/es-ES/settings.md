@@ -19,10 +19,8 @@ reautenticada del comando que ya escribe ese almacén; nada de aquí puede
 elevar un privilegio.
 
 Una categoría que este sistema no puede atender lo dice con claridad y nombra
-lo que tendría que existir para poder hacerlo. Una categoría que sí puede
-atender, cuyos controles esta versión aún no dibuja, indica en su lugar dónde
-se lee o se define el ajuste. Nunca se muestra un control que no cambiaría
-nada.
+lo que tendría que existir para poder hacerlo. Nunca se muestra un control que
+no cambiaría nada.
 
 Escriba en el campo de búsqueda sobre la barra lateral para filtrarla a las
 categorías y ajustes que alcanza una palabra. `Tab` y `Shift+Tab` mueven el

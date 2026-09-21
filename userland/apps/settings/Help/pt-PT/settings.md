@@ -19,9 +19,8 @@ reautenticada do comando que já escreve esse armazém; nada aqui pode elevar um
 privilégio.
 
 Uma categoria que este sistema não consegue servir di-lo claramente e nomeia o
-que teria de existir para o conseguir. Uma categoria que consegue servir, cujos
-controlos esta versão ainda não desenha, indica em vez disso onde a definição é
-lida ou definida. Um controlo que nada alteraria nunca é mostrado.
+que teria de existir para o conseguir. Um controlo que nada alteraria nunca é
+mostrado.
 
 Escreva no campo de pesquisa acima da barra lateral para a filtrar às
 categorias e definições que uma palavra alcança. `Tab` e `Shift+Tab` movem o

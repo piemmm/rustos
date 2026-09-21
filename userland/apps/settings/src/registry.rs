@@ -13,12 +13,15 @@
 //! three different facts to a reader: the pane composes real controls,
 //! nothing in this system can serve it at all, or the readings and writes
 //! exist and this surface does not yet compose them — in which case the row
-//! says where the setting is reached.
+//! says where the setting is reached. No row takes that third answer today;
+//! every category this system can serve composes its own controls, and the
+//! rest state what is missing.
 
 use alloc::vec::Vec;
 
 use tairix_icon::IconKind;
 
+use crate::accounts::ACCOUNT_FACTS;
 use crate::facts::{ABOUT_FACTS, CLOCK_FACTS};
 use crate::form::{Composition, Setting};
 use crate::machine::MachineSetting;
@@ -239,6 +242,7 @@ impl PaneRow {
             Some(PaneContent::Form(Composition::Ethernet | Composition::Dns)) => {
                 Some("Show Addressing…")
             }
+            Some(PaneContent::Form(Composition::Users)) => Some("Show Accounts…"),
             Some(
                 PaneContent::Form(_)
                 | PaneContent::Pictures(_)
@@ -901,12 +905,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             pane: Pane::Users,
             name: "users",
             title: "Users & Groups",
-            backing: PaneBacking::Elsewhere {
-                shows: "Every account on this system, its groups, and what it is allowed to do.",
-                elsewhere: "Listed by the `users` command; an account is created with `useradd` \
-                            by an account that may administer users.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Users)),
+            settings: ACCOUNT_FACTS,
         }],
     },
     CategoryRow {

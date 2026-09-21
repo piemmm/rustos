@@ -32,11 +32,23 @@ report, not a control — mounting and unmounting are the file manager's and
 the `mount` command's — and a volume whose format keeps no fixed capacity
 says so rather than showing a bar. `df` reports the same figures at a shell.
 
+**Users & Groups** shows your own account, every account's name and user id,
+and the machine's groups without asking for anything: a principal may read its
+own record and the public name-to-number directories. Everything else — another
+account's details, whether an account may log in, and what it is allowed to do
+— is not public, so *Show Accounts…* asks for an account that may administer
+users and reads the listing under it. That listing is forgotten as soon as you
+leave the pane. Editing an account then applies as one command, so a change
+spanning two accounts, or a password alongside other fields, is refused with
+the reason before any password is typed. A new password is hashed in the window
+and never leaves it as a password; setting one still needs an account that may
+administer users, and the system refuses anything it must — the pane says so
+rather than pretending otherwise.
+
 A category this system cannot serve says so plainly and names what would have
-to exist before it could. A category it can serve, whose controls this release
-does not yet draw, names where the setting is read or set instead. A control
-that would change nothing is never shown — which is why Accessibility states
-that this desktop keeps no separate pointer size rather than offering one.
+to exist before it could. A control that would change nothing is never shown —
+which is why Accessibility states that this desktop keeps no separate pointer
+size rather than offering one.
 
 Type in the search field above the sidebar to filter it to the categories and
 settings a word reaches. `Tab` and `Shift+Tab` move between the search field,

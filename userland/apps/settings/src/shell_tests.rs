@@ -22,17 +22,11 @@ use crate::form::{Composition, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
 use crate::registry::{Category, Location, Pane, StripRow, CATEGORIES};
 use crate::shell::{Shell, ShellOutcome};
+use crate::test_support::{damage, theme, WIDE};
 use crate::volumes::VolumeReading;
 
-/// A window wide enough to seat the strip and a full content column.
-const WIDE: Rect = Rect::new(0, 0, 900, 640);
 /// A window too narrow to seat the strip at all.
 const NARROW: Rect = Rect::new(0, 0, 360, 640);
-
-fn theme() -> Theme {
-    install_test_transport();
-    Theme::dark()
-}
 
 fn shell() -> Shell {
     Shell::new(DesktopSettings::default()).expect("the registry holds a category")
@@ -48,10 +42,6 @@ fn stating() -> Shell {
         "the registry carries the pane that states the absent audio stack"
     );
     shell
-}
-
-fn damage() -> tairix_geometry::Region {
-    tairix_controls::damage::sink()
 }
 
 /// Press and release the primary button at `at`.

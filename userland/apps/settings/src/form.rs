@@ -48,11 +48,13 @@ use tairix_netconfig::{ConfigError, IfaceKey, NetworkConfig};
 use tairix_raster::Surface;
 use tairix_sysconfig::SystemConfig;
 use tairix_theme::{CursorSetId, SignalRole, Theme};
+use tairix_users::Salt;
 use tairix_util::conf::ValueShape;
 use tairix_wallpaper::{
     Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, Rgb, SettingsKey, WallpaperFit,
 };
 
+use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
 use crate::machine::MachineSetting;
 use crate::network::{self, Addressing, Choice, IfaceSetting};
 use crate::stack;
@@ -466,19 +468,39 @@ pub(crate) enum Owner {
     /// One interface's entry in the network store, which `configure` owns
     /// too but which this application may not read for itself.
     Interface(IfaceSetting),
+    /// One field of one account, which the user-administration tools own
+    /// and which this application may read no more of than its own record.
+    Account(AccountSetting),
 }
 
-impl Owner {
+/// A settable a composition **declares** in a static table, as opposed to
+/// one discovered from a document at runtime.
+///
+/// Only these two can be named ahead of time: which interfaces and which
+/// accounts exist is what an authenticated run answers, so those rows are
+/// built by their own discovery path and reach the owner table already
+/// placed. Keeping the declared kinds in their own type is what lets a
+/// declared row be built from its settable alone, with no arm standing for
+/// a row that is never built this way.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Declared {
+    /// The desktop's own settings document.
+    Desktop(Setting),
+    /// The machine's boot-time configuration store.
+    Machine(MachineSetting),
+}
+
+impl Declared {
     /// The row's leading label, which is also its search term.
     const fn label(self) -> &'static str {
         match self {
             Self::Desktop(setting) => setting.label(),
             Self::Machine(setting) => setting.label(),
-            Self::Interface(setting) => network::label(setting.key),
         }
     }
 
-    /// The row this owner draws from what its own store currently holds.
+    /// The row this settable draws from what its own store currently
+    /// holds.
     fn row(self, documents: Documents<'_>) -> FieldRow {
         match self {
             Self::Desktop(setting) => setting.row(
@@ -488,9 +510,14 @@ impl Owner {
                 },
             ),
             Self::Machine(setting) => setting.row(documents.config),
-            Self::Interface(setting) => {
-                network::row_of(setting, documents.addressing.document(), documents.staged)
-            }
+        }
+    }
+
+    /// Which store this settable writes.
+    const fn owner(self) -> Owner {
+        match self {
+            Self::Desktop(setting) => Owner::Desktop(setting),
+            Self::Machine(setting) => Owner::Machine(setting),
         }
     }
 }
@@ -499,13 +526,13 @@ impl Owner {
 /// holds, in order.
 struct GroupSpec {
     caption: &'static str,
-    settings: &'static [Owner],
+    settings: &'static [Declared],
 }
 
 /// The Login & startup pane's one group.
 const LOGIN_GROUPS: [GroupSpec; 1] = [GroupSpec {
     caption: "STARTUP",
-    settings: &[Owner::Machine(MachineSetting::LoginType)],
+    settings: &[Declared::Machine(MachineSetting::LoginType)],
 }];
 
 /// The Caching pane's groups: the master switch, then the classes it is a
@@ -513,15 +540,15 @@ const LOGIN_GROUPS: [GroupSpec; 1] = [GroupSpec {
 const CACHING_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "CACHING",
-        settings: &[Owner::Machine(MachineSetting::CacheAll)],
+        settings: &[Declared::Machine(MachineSetting::CacheAll)],
     },
     GroupSpec {
         caption: "WHAT IS CACHED",
         settings: &[
-            Owner::Machine(MachineSetting::CacheFilesystem),
-            Owner::Machine(MachineSetting::CacheBlock),
-            Owner::Machine(MachineSetting::CacheTransform),
-            Owner::Machine(MachineSetting::CacheSemantic),
+            Declared::Machine(MachineSetting::CacheFilesystem),
+            Declared::Machine(MachineSetting::CacheBlock),
+            Declared::Machine(MachineSetting::CacheTransform),
+            Declared::Machine(MachineSetting::CacheSemantic),
         ],
     },
 ];
@@ -532,17 +559,17 @@ const TCP_IP_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "ADDRESS FAMILIES",
         settings: &[
-            Owner::Machine(MachineSetting::NetIpv4Enabled),
-            Owner::Machine(MachineSetting::NetIpv6Enabled),
-            Owner::Machine(MachineSetting::NetIpv6Privacy),
+            Declared::Machine(MachineSetting::NetIpv4Enabled),
+            Declared::Machine(MachineSetting::NetIpv6Enabled),
+            Declared::Machine(MachineSetting::NetIpv6Privacy),
         ],
     },
     GroupSpec {
         caption: "CONNECTIONS",
         settings: &[
-            Owner::Machine(MachineSetting::NetTcpSynCookies),
-            Owner::Machine(MachineSetting::NetTcpKeepalive),
-            Owner::Machine(MachineSetting::NetTcpEcn),
+            Declared::Machine(MachineSetting::NetTcpSynCookies),
+            Declared::Machine(MachineSetting::NetTcpKeepalive),
+            Declared::Machine(MachineSetting::NetTcpEcn),
         ],
     },
 ];
@@ -551,15 +578,15 @@ const TCP_IP_GROUPS: [GroupSpec; 2] = [
 const APPEARANCE_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "APPEARANCE",
-        settings: &[Owner::Desktop(Setting::Appearance)],
+        settings: &[Declared::Desktop(Setting::Appearance)],
     },
     GroupSpec {
         caption: "INTERFACE",
         settings: &[
-            Owner::Desktop(Setting::Contrast),
-            Owner::Desktop(Setting::Density),
-            Owner::Desktop(Setting::Motion),
-            Owner::Desktop(Setting::Scale),
+            Declared::Desktop(Setting::Contrast),
+            Declared::Desktop(Setting::Density),
+            Declared::Desktop(Setting::Motion),
+            Declared::Desktop(Setting::Scale),
         ],
     },
 ];
@@ -570,20 +597,20 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
     GroupSpec {
         caption: "DISPLAY",
         settings: &[
-            Owner::Desktop(Setting::Contrast),
-            Owner::Desktop(Setting::Density),
-            Owner::Desktop(Setting::Scale),
+            Declared::Desktop(Setting::Contrast),
+            Declared::Desktop(Setting::Density),
+            Declared::Desktop(Setting::Scale),
         ],
     },
     GroupSpec {
         caption: "MOTION",
-        settings: &[Owner::Desktop(Setting::Motion)],
+        settings: &[Declared::Desktop(Setting::Motion)],
     },
     GroupSpec {
         caption: "POINTER",
         settings: &[
-            Owner::Desktop(Setting::CursorSet),
-            Owner::Desktop(Setting::CursorSize),
+            Declared::Desktop(Setting::CursorSet),
+            Declared::Desktop(Setting::CursorSize),
         ],
     },
 ];
@@ -593,10 +620,10 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
 const WALLPAPER_GROUPS: [GroupSpec; 1] = [GroupSpec {
     caption: "DESKTOP",
     settings: &[
-        Owner::Desktop(Setting::Fit),
-        Owner::Desktop(Setting::Backdrop),
-        Owner::Desktop(Setting::Icons),
-        Owner::Desktop(Setting::Sort),
+        Declared::Desktop(Setting::Fit),
+        Declared::Desktop(Setting::Backdrop),
+        Declared::Desktop(Setting::Icons),
+        Declared::Desktop(Setting::Sort),
     ],
 }];
 
@@ -645,6 +672,10 @@ pub enum Composition {
     /// The Networking → DNS pane: the live resolver set the stack answered,
     /// then each interface's own resolver list.
     Dns,
+    /// The Users & Groups pane: the caller's own record, one plate per
+    /// account once an administrator has answered the listing, and the
+    /// group directory.
+    Users,
 }
 
 impl Composition {
@@ -658,7 +689,7 @@ impl Composition {
             Self::LoginStartup => &LOGIN_GROUPS,
             Self::Caching => &CACHING_GROUPS,
             Self::TcpIp => &TCP_IP_GROUPS,
-            Self::Ethernet | Self::Dns => &[],
+            Self::Ethernet | Self::Dns | Self::Users => &[],
         }
     }
 
@@ -670,10 +701,29 @@ impl Composition {
             // Writing either of the machine's stores is a re-authenticated
             // run of the tool that owns them, which is not something to ask
             // for per pointer sample.
-            Self::LoginStartup | Self::Caching | Self::TcpIp | Self::Ethernet | Self::Dns => {
-                Posture::Staged
-            }
+            Self::LoginStartup
+            | Self::Caching
+            | Self::TcpIp
+            | Self::Ethernet
+            | Self::Dns
+            | Self::Users => Posture::Staged,
         }
+    }
+
+    /// Whether this composition's rows read the desktop's own settings
+    /// document.
+    ///
+    /// What decides whether a desktop answer rebuilds them. A pane that
+    /// reads none of it must not be re-derived when the session answers an
+    /// apply: the rebuild would cost the whole surface for a change none
+    /// of its rows names, and would discard what a reader has typed into
+    /// one.
+    #[must_use]
+    pub(crate) const fn reads_desktop(self) -> bool {
+        matches!(
+            self,
+            Self::Appearance | Self::Accessibility | Self::Wallpaper
+        )
     }
 
     /// Whether this composition's rows read the machine's boot-time store.
@@ -696,6 +746,14 @@ impl Composition {
         matches!(self, Self::Dns)
     }
 
+    /// Whether this composition's account plates are discovered from the
+    /// administrator-authenticated listing, and so exist only once an
+    /// account has answered one.
+    #[must_use]
+    pub(crate) const fn reads_roster(self) -> bool {
+        matches!(self, Self::Users)
+    }
+
     /// The registry keys an apply from this composition renders.
     ///
     /// Only its own, because the session merges an apply over what the
@@ -706,7 +764,12 @@ impl Composition {
         match self {
             Self::Appearance | Self::Accessibility => &SettingsKey::APPEARANCE,
             Self::Wallpaper => &SettingsKey::PINBOARD,
-            Self::LoginStartup | Self::Caching | Self::TcpIp | Self::Ethernet | Self::Dns => &[],
+            Self::LoginStartup
+            | Self::Caching
+            | Self::TcpIp
+            | Self::Ethernet
+            | Self::Dns
+            | Self::Users => &[],
         }
     }
 
@@ -722,10 +785,11 @@ impl Composition {
         match self {
             Self::Ethernet => network::ADDRESSING_FACTS.to_vec(),
             Self::Dns => network::RESOLVER_FACTS.to_vec(),
+            Self::Users => accounts::ACCOUNT_FACTS.to_vec(),
             _ => self
                 .groups()
                 .iter()
-                .flat_map(|group| group.settings.iter().map(|owner| owner.label()))
+                .flat_map(|group| group.settings.iter().map(|declared| declared.label()))
                 .collect(),
         }
     }
@@ -742,6 +806,7 @@ impl Composition {
                 owners.insert(0, Vec::new());
                 (groups, owners)
             }
+            Self::Users => users(documents),
             _ => self.declared(documents),
         }
     }
@@ -755,13 +820,42 @@ impl Composition {
                 spec.caption,
                 spec.settings
                     .iter()
-                    .map(|owner| owner.row(documents))
+                    .map(|declared| declared.row(documents))
                     .collect(),
             ));
-            owners.push(spec.settings.to_vec());
+            owners.push(
+                spec.settings
+                    .iter()
+                    .map(|declared| declared.owner())
+                    .collect(),
+            );
         }
         (groups, owners)
     }
+}
+
+/// The Users pane's plates: the caller's own record, the accounts the
+/// listing answered (or why there are none), and the group directory.
+///
+/// The own-account and group plates carry no owner, because neither is
+/// settable here: a principal reads its own record without holding
+/// anything, and a group is created and deleted by its own tools.
+fn users(documents: Documents<'_>) -> (Vec<FieldGroup>, Vec<Vec<Owner>>) {
+    let facts = documents.accounts;
+    let (plates, settings) = accounts::roster_groups(facts, documents.staged_accounts);
+    let mut groups = Vec::with_capacity(plates.len().saturating_add(2));
+    let mut owners = Vec::with_capacity(plates.len().saturating_add(2));
+    groups.push(accounts::own_group(&facts.own, facts.groups_slice()));
+    owners.push(Vec::new());
+    groups.extend(plates);
+    owners.extend(
+        settings
+            .into_iter()
+            .map(|rows| rows.into_iter().map(Owner::Account).collect()),
+    );
+    groups.push(accounts::groups_group(facts.groups_slice()));
+    owners.push(Vec::new());
+    (groups, owners)
 }
 
 /// The per-interface plates `documents` implies, with each row's owner.
@@ -802,6 +896,21 @@ pub(crate) struct Documents<'a> {
     /// The live resolver set the stack answered with, or `None` while the
     /// reading has not landed.
     pub(crate) resolvers: Option<&'a [NetServerAddr]>,
+    /// The account readings: the caller's own record, the two ungated
+    /// directories, and whatever an authenticated listing answered.
+    pub(crate) accounts: &'a AccountFacts,
+    /// What the reader has changed on the account rows since the listing,
+    /// which is what each of them now says.
+    pub(crate) staged_accounts: &'a [(AccountSetting, String)],
+}
+
+/// Whether `owner`'s row holds a secret, and so is carried across a
+/// rebuild rather than re-derived.
+const fn secret_owner(owner: Owner) -> bool {
+    match owner {
+        Owner::Account(setting) => setting.field.is_secret(),
+        Owner::Desktop(_) | Owner::Machine(_) | Owner::Interface(_) => false,
+    }
 }
 
 /// Which end of the group the cursor lands on when it steps into it.
@@ -890,6 +999,16 @@ pub struct Form {
     /// The live resolver set the stack answered with, kept so a rebuild
     /// restates it rather than dropping back to unmeasured.
     resolvers: Option<Vec<NetServerAddr>>,
+    /// The account readings the plates are discovered from and a staged
+    /// change is measured against.
+    accounts: AccountFacts,
+    /// What the reader has changed on the account rows and what each now
+    /// says.
+    ///
+    /// Never a password: a secret's only home is the masked entry's own
+    /// bounded, self-erasing buffer, and a copy here would be a plaintext
+    /// in a string that grows as it is typed.
+    staged_accounts: Vec<(AccountSetting, String)>,
     /// The cursor sets the desktop answered with, kept so a rebuild offers
     /// the same choice space rather than collapsing to the built-in one.
     cursor_sets: Vec<CursorSetId>,
@@ -919,6 +1038,8 @@ impl Form {
             addressing: documents.addressing.clone(),
             staged: documents.staged.to_vec(),
             resolvers: documents.resolvers.map(<[_]>::to_vec),
+            accounts: documents.accounts.clone(),
+            staged_accounts: documents.staged_accounts.to_vec(),
             cursor_sets: documents.cursor_sets.to_vec(),
             focus: 0,
             first: 0,
@@ -927,14 +1048,18 @@ impl Form {
         form
     }
 
-    /// Rebuild every row from `settings`.
+    /// Adopt the desktop settings the session now holds.
     ///
-    /// What the window does when the desktop answers: the values on screen
-    /// become the ones the store actually holds, so an apply the session
-    /// refused reverts rather than standing.
+    /// A pane that reads the document is rebuilt from it, so an apply the
+    /// session refused reverts rather than standing. A pane that reads
+    /// none of it is *not*: re-deriving every row for a change no row of
+    /// it names would cost the whole surface and discard what a reader has
+    /// typed into one — a change must never reach state it does not name.
     pub fn adopt(&mut self, settings: &DesktopSettings) {
         self.settings = settings.clone();
-        self.rebuild();
+        if self.composition.reads_desktop() {
+            self.rebuild();
+        }
     }
 
     /// Adopt what the machine's store now holds.
@@ -965,11 +1090,61 @@ impl Form {
         self.rebuild();
     }
 
+    /// Adopt the ungated account readings: the caller's own record and the
+    /// two directories.
+    ///
+    /// The listing the plates were discovered from is left exactly as it
+    /// is, and so are the staged edits over it: these are the *public*
+    /// readings, and one landing must not throw away a change the reader
+    /// has made to a privileged one they had to authenticate for.
+    pub(crate) fn adopt_accounts(&mut self, facts: &AccountFacts) {
+        self.accounts.adopt_public(facts.clone());
+        self.rebuild();
+    }
+
+    /// Adopt the listing an administrator-authenticated run answered.
+    ///
+    /// The staged edits go with it for the same reason the network store's
+    /// working copy does: a change staged against a listing that has since
+    /// been re-read is a change to a value that has moved.
+    pub(crate) fn adopt_roster(&mut self, roster: accounts::Roster) {
+        self.accounts.roster = roster;
+        self.staged_accounts.clear();
+        self.drop_secrets();
+        self.rebuild();
+    }
+
+    /// The listing a returning reader would be shown, which an apply moves
+    /// on.
+    pub(crate) const fn roster(&self) -> &accounts::Roster {
+        &self.accounts.roster
+    }
+
     /// Put the working copies back to what the stores hold.
     pub fn revert(&mut self) {
         self.config.clone_from(&self.config_in_effect);
         self.staged.clear();
+        self.staged_accounts.clear();
+        self.drop_secrets();
         self.rebuild();
+    }
+
+    /// Erase every masked entry, so reverting a pane leaves no password
+    /// behind in the control that held it.
+    ///
+    /// The entry zeroes its own buffer when it is emptied, so clearing the
+    /// text *is* the erasure; dropping the control on the following
+    /// rebuild erases it again, which costs one pass and is never wrong.
+    fn drop_secrets(&mut self) {
+        for group in &mut self.groups {
+            for row in group.rows_mut() {
+                if let FieldControl::Text(entry) = row.control_mut() {
+                    if entry.is_secret() {
+                        entry.set_text("");
+                    }
+                }
+            }
+        }
     }
 
     /// The document the staged edits make of the capture.
@@ -1030,6 +1205,17 @@ impl Form {
         &self.staged
     }
 
+    /// The per-account edits the reader has staged, so a pane rebuilt
+    /// around this form keeps them.
+    ///
+    /// A password is not among them, and cannot be: it lives only in the
+    /// masked entry that holds it, which a rebuild carries across rather
+    /// than re-deriving.
+    #[must_use]
+    pub(crate) fn staged_accounts(&self) -> &[(AccountSetting, String)] {
+        &self.staged_accounts
+    }
+
     /// The store settings this form's working copy differs from what is in
     /// effect on, each with the value it would be set to.
     ///
@@ -1048,9 +1234,13 @@ impl Form {
 
     /// What row `owner` would have written, or `None` where it matches
     /// what is in effect.
+    ///
+    /// Only the two stores `configure` writes as `<key> <value>` pairs
+    /// answer one: the desktop's document is posted whole and an account
+    /// is changed by a command line of its own, so neither is a pair.
     fn pending_for(&self, owner: Owner) -> Option<(String, String)> {
         match owner {
-            Owner::Desktop(_) => None,
+            Owner::Desktop(_) | Owner::Account(_) => None,
             Owner::Machine(setting) => {
                 let (working, effect) = (self.config.as_ref()?, self.config_in_effect.as_ref()?);
                 let value = setting.value(working);
@@ -1081,9 +1271,141 @@ impl Form {
     fn changed_in(&self, group: usize) -> usize {
         self.owners.get(group).map_or(0, |rows| {
             rows.iter()
-                .filter(|owner| self.pending_for(**owner).is_some())
+                .enumerate()
+                .filter(|(row, owner)| self.differs(group, *row, **owner))
                 .count()
         })
+    }
+
+    /// How many rows across the whole pane differ from what is in effect.
+    ///
+    /// The one count the band states, so a pane whose changes are not
+    /// `<key> <value>` pairs is counted by the same rule as one whose are.
+    #[must_use]
+    pub fn changes(&self) -> usize {
+        (0..self.groups.len())
+            .map(|group| self.changed_in(group))
+            .sum()
+    }
+
+    /// Whether the row at `group`/`row` differs from what its store holds.
+    ///
+    /// A secret is read off the row rather than from a staged copy,
+    /// because the row is the only place it is: something typed into it is
+    /// a change, and an empty one is the password left alone.
+    fn differs(&self, group: usize, row: usize, owner: Owner) -> bool {
+        let Owner::Account(setting) = owner else {
+            return self.pending_for(owner).is_some();
+        };
+        let Some(account) = self.accounts.roster.account(setting.account) else {
+            return false;
+        };
+        if setting.field.is_secret() {
+            return self
+                .secret_at(group, row)
+                .is_some_and(|typed| !typed.is_empty());
+        }
+        let Some(value) = self.staged_value(setting) else {
+            return false;
+        };
+        accounts::differs(setting, value, account, self.accounts.groups_slice())
+    }
+
+    /// The text of the masked entry at `group`/`row`.
+    ///
+    /// Borrowed, never copied: a plaintext password in a second buffer is
+    /// one no erasure can reach, and this is read on every keystroke.
+    fn secret_at(&self, group: usize, row: usize) -> Option<&str> {
+        let FieldControl::Text(entry) = self
+            .groups
+            .get(group)?
+            .rows()
+            .get(row)
+            .map(FieldRow::control)?
+        else {
+            return None;
+        };
+        entry.is_secret().then(|| entry.text())
+    }
+
+    /// What the reader has made `setting` say, or `None` where they have
+    /// not touched it.
+    fn staged_value(&self, setting: AccountSetting) -> Option<&str> {
+        self.staged_accounts
+            .iter()
+            .find(|(held, _)| *held == setting)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The one elevated run the staged account change becomes, or `None`
+    /// where nothing is staged.
+    ///
+    /// A change spanning more than one account, or one account's password
+    /// together with its other fields, is **refused**: the seam carries
+    /// one program and one argv, and a change split over two runs can
+    /// leave half of it durable. `salt` is the randomness a password is
+    /// hashed under, drawn by the caller and consumed here.
+    pub(crate) fn account_run(
+        &self,
+        salt: Option<Salt>,
+    ) -> Option<Result<AccountRun, Unappliable>> {
+        let mut named: Option<usize> = None;
+        let mut changes: Vec<(AccountField, String)> = Vec::new();
+        // Borrowed from the entry that holds it, so the plaintext is never
+        // copied into a buffer no erasure can reach.
+        let mut secret: Option<&str> = None;
+        for (group, rows) in self.owners.iter().enumerate() {
+            for (row, owner) in rows.iter().enumerate() {
+                let Owner::Account(setting) = *owner else {
+                    continue;
+                };
+                if !self.differs(group, row, *owner) {
+                    continue;
+                }
+                if named
+                    .replace(setting.account)
+                    .is_some_and(|held| held != setting.account)
+                {
+                    return Some(Err(Unappliable::ManyAccounts));
+                }
+                if setting.field.is_secret() {
+                    secret = self.secret_at(group, row);
+                } else {
+                    changes.push((setting.field, self.spelled(setting)?));
+                }
+            }
+        }
+        let account = self.accounts.roster.account(named?)?;
+        Some(accounts::run_of(account, &changes, secret, salt))
+    }
+
+    /// The staged value for `setting` as the tool that applies it spells
+    /// it.
+    ///
+    /// The group fields are shown by name and applied by id, so the one
+    /// resolution happens here — on the way to the command line, against
+    /// the same directory the row was rendered from.
+    fn spelled(&self, setting: AccountSetting) -> Option<String> {
+        let value = self.staged_value(setting)?;
+        Some(
+            accounts::spelled_for(setting.field, value, self.accounts.groups_slice())
+                .unwrap_or_else(|| String::from(value)),
+        )
+    }
+
+    /// Take the staged account change as the listing now holding it, after
+    /// a run that exited cleanly.
+    ///
+    /// The listing stays rather than being dropped: re-reading it costs
+    /// another password, and the tool applied every field it was given or
+    /// refused the run. The masked entries are erased with the rest,
+    /// because a password that is now in effect is one this window has no
+    /// reason to hold.
+    pub(crate) fn adopt_applied(&mut self) {
+        self.accounts.adopt_applied(&self.staged_accounts);
+        self.staged_accounts.clear();
+        self.drop_secrets();
+        self.rebuild();
     }
 
     /// How many rows hold a value their store would refuse.
@@ -1101,7 +1423,14 @@ impl Form {
     }
 
     /// Rebuild every row from the stores the form currently holds.
+    ///
+    /// A masked entry is **moved** across rather than rebuilt: it owns the
+    /// only copy of what the reader has typed, so re-deriving the row
+    /// would discard a password half entered, and copying the text out to
+    /// restore it afterwards would put a plaintext in a second buffer.
+    /// Moving the control keeps one buffer and its own erasure intact.
     fn rebuild(&mut self) {
+        let carried = self.take_secrets();
         let (groups, owners) = self.composition.build(Documents {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
@@ -1109,13 +1438,77 @@ impl Form {
             addressing: &self.addressing,
             staged: &self.staged,
             resolvers: self.resolvers.as_deref(),
+            accounts: &self.accounts,
+            staged_accounts: &self.staged_accounts,
         });
         self.groups = groups;
         self.owners = owners;
+        self.restore_secrets(carried);
         self.restate_badges();
         let last = self.groups.len().saturating_sub(1);
         self.focus = self.focus.min(last);
         self.first = self.first.min(last);
+    }
+
+    /// Take every masked entry out of the rows it is in, leaving the row
+    /// to be discarded by the rebuild that follows.
+    ///
+    /// Keyed by the settable rather than by position, because a rebuild
+    /// may place the same field on a different row.
+    fn take_secrets(&mut self) -> Vec<(Owner, FieldControl)> {
+        let mut taken = Vec::new();
+        for (group, rows) in self.owners.iter().enumerate() {
+            for (row, owner) in rows.iter().enumerate() {
+                // Only one the reader has typed into: an empty entry is
+                // rebuilt identically, so carrying it would be a scan of
+                // the whole pane for nothing.
+                if !secret_owner(*owner) || self.secret_at(group, row).is_none_or(str::is_empty) {
+                    continue;
+                }
+                let Some(held) = self
+                    .groups
+                    .get_mut(group)
+                    .and_then(|plate| plate.rows_mut().get_mut(row))
+                else {
+                    continue;
+                };
+                taken.push((
+                    *owner,
+                    core::mem::replace(held.control_mut(), FieldControl::Reading(String::new())),
+                ));
+            }
+        }
+        taken
+    }
+
+    /// Put each taken masked entry back on the row its settable now
+    /// occupies.
+    ///
+    /// An entry whose settable the rebuild no longer draws is dropped
+    /// here, which erases it: a secret for an account that has left the
+    /// listing is one this window has no reason to hold.
+    fn restore_secrets(&mut self, carried: Vec<(Owner, FieldControl)>) {
+        for (owner, control) in carried {
+            let Some((group, row)) = self.locate(owner) else {
+                continue;
+            };
+            if let Some(held) = self
+                .groups
+                .get_mut(group)
+                .and_then(|plate| plate.rows_mut().get_mut(row))
+            {
+                *held.control_mut() = control;
+            }
+        }
+    }
+
+    /// Which group and row `owner` occupies.
+    fn locate(&self, owner: Owner) -> Option<(usize, usize)> {
+        self.owners.iter().enumerate().find_map(|(group, rows)| {
+            rows.iter()
+                .position(|held| *held == owner)
+                .map(|row| (group, row))
+        })
     }
 
     /// Say on each plate's own caption how many of its rows are staged, so
@@ -1377,6 +1770,16 @@ impl Form {
                 );
                 FormOutcome::Staged
             }
+            Owner::Account(setting) => {
+                // The lock state is the pane's one closed account field;
+                // an index outside the list this surface built stages
+                // nothing.
+                let Some(word) = accounts::lock_choice(index) else {
+                    return FormOutcome::Changed;
+                };
+                self.record_account(setting, word);
+                FormOutcome::Staged
+            }
         }
     }
 
@@ -1387,9 +1790,6 @@ impl Form {
     /// staged and marked refused rather than dropped, so the band can say
     /// there is something to correct instead of quietly applying the rest.
     fn typed(&mut self, owner: Owner, group: usize, row: usize) -> FormOutcome {
-        let Owner::Interface(setting) = owner else {
-            return FormOutcome::Changed;
-        };
         let Some(FieldControl::Text(entry)) = self
             .groups
             .get(group)
@@ -1398,16 +1798,36 @@ impl Form {
         else {
             return FormOutcome::Changed;
         };
-        let typed = String::from(entry.text());
-        let admits = network::admits(setting.key, &typed);
-        self.record(setting, typed);
+        let admits = match owner {
+            Owner::Interface(setting) => {
+                let typed = String::from(entry.text());
+                let admits = network::admits(setting.key, &typed);
+                self.record(setting, typed);
+                admits
+            }
+            Owner::Account(setting) => {
+                let admits = setting
+                    .field
+                    .admits(entry.text(), self.accounts.groups_slice());
+                // A secret is left where it was typed and staged nowhere:
+                // the entry is its only home, and a copy in the staged set
+                // would be a plaintext password in a string that grows as
+                // it is typed.
+                if !setting.field.is_secret() {
+                    let typed = String::from(entry.text());
+                    self.record_account(setting, typed);
+                }
+                admits
+            }
+            Owner::Desktop(_) | Owner::Machine(_) => return FormOutcome::Changed,
+        };
         if let Some(held) = self
             .groups
             .get_mut(group)
             .and_then(|plate| plate.rows_mut().get_mut(row))
         {
             held.set_state(ControlState {
-                validation: network::verdict(admits),
+                validation: ValidationState::of(admits),
                 ..held.state()
             });
         }
@@ -1420,6 +1840,21 @@ impl Form {
         match self.staged.iter_mut().find(|(held, _)| *held == setting) {
             Some((_, held)) => *held = value,
             None => self.staged.push((setting, value)),
+        }
+    }
+
+    /// The account form of [`record`](Self::record).
+    ///
+    /// A secret never reaches here: [`typed`](Self::typed) leaves it in
+    /// the entry that holds it.
+    fn record_account(&mut self, setting: AccountSetting, value: String) {
+        match self
+            .staged_accounts
+            .iter_mut()
+            .find(|(held, _)| *held == setting)
+        {
+            Some((_, held)) => *held = value,
+            None => self.staged_accounts.push((setting, value)),
         }
     }
 

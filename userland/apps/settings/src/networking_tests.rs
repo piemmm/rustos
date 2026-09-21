@@ -12,41 +12,18 @@ use core::fmt::Write as _;
 
 use tairix_abi::net_ipc::{NetAddrFamily, NetServerAddr};
 use tairix_controls::StatusPill;
-use tairix_geometry::{to_i32, Point, Rect, Scale};
-use tairix_input::{InputEvent, Key as InputKey, Modifiers, NamedKey, PointerButton};
+use tairix_geometry::Scale;
 use tairix_netconfig::Ipv4Method;
 use tairix_sysconfig::{Key, NetToggle, SynCookies, SystemConfig};
-use tairix_theme::Theme;
 use tairix_wallpaper::DesktopSettings;
 
 use crate::form::Composition;
-use crate::registry::{strip_rows, Category, Pane, PaneBacking, PaneContent, StripRow, CATEGORIES};
-use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
-use tairix_font::install_test_transport;
-
-/// A window wide enough to seat the strip and a full content column.
-const WIDE: Rect = Rect::new(0, 0, 900, 640);
-
-fn theme() -> Theme {
-    install_test_transport();
-    Theme::dark()
-}
-
-fn damage() -> tairix_geometry::Region {
-    tairix_controls::damage::sink()
-}
-
-/// A shell showing `pane`.
-fn showing(pane: &str) -> Shell {
-    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
-    let mut sink = damage();
-    assert!(
-        shell.go_to_pane(pane, WIDE, Scale::ONE, &theme(), &mut sink),
-        "the registry carries the pane"
-    );
-    shell.lay_out(WIDE, Scale::ONE, &theme());
-    shell
-}
+use crate::registry::{strip_rows, Category, Pane, PaneBacking, PaneContent, StripRow};
+use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell};
+use crate::test_support::{
+    band_line, captions, damage, labels, offer_account, press_band, row_at, row_for, showing,
+    stated, theme, WIDE,
+};
 
 /// A shell showing `pane` with the machine's store already read.
 fn showing_with(pane: &str, config: SystemConfig) -> Shell {
@@ -59,54 +36,6 @@ fn showing_with(pane: &str, config: SystemConfig) -> Shell {
     );
     shell.lay_out(WIDE, Scale::ONE, &theme());
     shell
-}
-
-/// Every row the pane on show draws, whichever shape of body it is.
-fn rows(shell: &Shell) -> Vec<tairix_controls::FieldRow> {
-    if let Some(facts) = shell.facts_for_test() {
-        return facts.rows();
-    }
-    shell.form_for_test().map_or_else(Vec::new, |form| {
-        form.groups()
-            .iter()
-            .flat_map(|group| group.rows().iter().cloned())
-            .collect()
-    })
-}
-
-/// Every value the pane on show states, in listing order: what a reading
-/// says, what an entry holds, and what a list has chosen.
-fn stated(shell: &Shell) -> Vec<String> {
-    rows(shell)
-        .iter()
-        .map(|row| match row.control() {
-            tairix_controls::FieldControl::Reading(value)
-            | tairix_controls::FieldControl::Unmeasured(value) => value.clone(),
-            tairix_controls::FieldControl::Text(entry) => String::from(entry.text()),
-            tairix_controls::FieldControl::Combo(combo) => {
-                combo.selected_text().map(String::from).unwrap_or_default()
-            }
-            _ => String::new(),
-        })
-        .collect()
-}
-
-/// Every label the pane on show states, in listing order.
-fn labels(shell: &Shell) -> Vec<String> {
-    rows(shell)
-        .iter()
-        .map(|row| String::from(row.label()))
-        .collect()
-}
-
-/// Each plate's caption, in listing order.
-fn captions(shell: &Shell) -> Vec<String> {
-    shell.form_for_test().map_or_else(Vec::new, |form| {
-        form.groups()
-            .iter()
-            .map(|group| String::from(group.caption()))
-            .collect()
-    })
 }
 
 /// A listing of both registries, as `configure` prints one.
@@ -128,22 +57,6 @@ fn showing_addressing(pane: &str) -> Shell {
     shell.adopt_elevation(Elevated::Printed(0, LISTING.to_vec()));
     shell.lay_out(WIDE, Scale::ONE, &theme());
     shell
-}
-
-/// Which row of which plate carries `label`.
-fn row_at(shell: &Shell, caption: &str, label: &str) -> (usize, usize) {
-    let form = shell.form_for_test().expect("a composed pane");
-    for (group, plate) in form.groups().iter().enumerate() {
-        if plate.caption() != caption {
-            continue;
-        }
-        for (row, held) in plate.rows().iter().enumerate() {
-            if held.label() == label {
-                return (group, row);
-            }
-        }
-    }
-    panic!("no `{label}` row on the `{caption}` plate");
 }
 
 /// A V4 resolver at `octets`.
@@ -172,14 +85,6 @@ fn v6(groups: [u16; 8]) -> NetServerAddr {
 /// One `<key> <value>` pair as [`Form::pending`] answers it.
 fn staged(key: Key, value: &str) -> (String, String) {
     (key.name().to_string(), value.to_string())
-}
-
-fn row_for(pane: Pane) -> &'static crate::registry::PaneRow {
-    CATEGORIES
-        .iter()
-        .flat_map(|category| category.panes)
-        .find(|row| row.pane == pane)
-        .expect("every pane has a row")
 }
 
 // --- TCP/IP: the stack-wide options -------------------------------------
@@ -436,58 +341,6 @@ fn the_dns_pane_offers_the_same_reading_the_ethernet_pane_does() {
 
 // --- Ethernet: the reading an authenticated run answers -----------------
 
-/// Press the band's command at `index`.
-fn press_band(shell: &mut Shell, index: usize) {
-    let theme = theme();
-    let rects = shell.action_rects(WIDE, Scale::ONE, &theme);
-    let rect = rects[index];
-    let at = Point::new(
-        rect.left() + to_i32(rect.width / 2),
-        rect.top() + to_i32(rect.height / 2),
-    );
-    let mut sink = damage();
-    for event in [
-        InputEvent::PointerMoved { to: at },
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        },
-    ] {
-        shell.on_pointer(&event, WIDE, Scale::ONE, &theme, &mut sink);
-    }
-}
-
-/// Offer an account to the question standing over the window, and hand
-/// back the elevation the shell asked for.
-fn offer_account(shell: &mut Shell) -> Elevation {
-    let theme = theme();
-    let mut sink = damage();
-    assert!(shell.asking(), "the pane asks for an account");
-    let mut key = |key: InputKey| {
-        shell.on_key(
-            key,
-            Modifiers::default(),
-            WIDE,
-            Scale::ONE,
-            &theme,
-            &mut sink,
-        )
-    };
-    for ch in "root".chars() {
-        key(InputKey::Char(ch));
-    }
-    key(InputKey::Named(NamedKey::Tab));
-    for ch in "hunter2".chars() {
-        key(InputKey::Char(ch));
-    }
-    let ShellOutcome::Elevate(asked) = key(InputKey::Named(NamedKey::Enter)) else {
-        panic!("offering an account asks for the run");
-    };
-    asked
-}
-
 /// Press the reading band's one command and offer an account for it.
 fn ask_for_addressing(shell: &mut Shell) -> Elevation {
     press_band(shell, 0);
@@ -498,11 +351,6 @@ fn ask_for_addressing(shell: &mut Shell) -> Elevation {
 fn apply_addressing(shell: &mut Shell) -> Elevation {
     press_band(shell, 1);
     offer_account(shell)
-}
-
-/// What the pane's action band is saying.
-fn band_line(shell: &Shell) -> String {
-    shell.band_line_for_test().unwrap_or_default()
 }
 
 #[test]
