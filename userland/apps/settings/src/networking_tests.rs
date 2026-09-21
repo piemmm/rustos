@@ -1,6 +1,6 @@
 //! Tests for Networking: the stack-wide options the TCP/IP pane stages, the
-//! resolver set the DNS pane states, and the two readings Settings
-//! deliberately does not take.
+//! resolver set the DNS pane states, the per-interface addressing an
+//! authenticated run answers, and the change the two panes stage over it.
 //!
 //! No transport and no broker anywhere: the shell is told what a reading
 //! answered and what an elevated run came to, exactly as the General tests
@@ -8,14 +8,18 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use tairix_abi::net_ipc::{NetAddrFamily, NetServerAddr};
+use tairix_controls::StatusPill;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key as InputKey, Modifiers, NamedKey, PointerButton};
+use tairix_netconfig::Ipv4Method;
 use tairix_sysconfig::{Key, NetToggle, SynCookies, SystemConfig};
 use tairix_theme::Theme;
 use tairix_wallpaper::DesktopSettings;
 
+use crate::form::Composition;
 use crate::registry::{strip_rows, Category, Pane, PaneBacking, PaneContent, StripRow, CATEGORIES};
 use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
 use tairix_font::install_test_transport;
@@ -57,16 +61,31 @@ fn showing_with(pane: &str, config: SystemConfig) -> Shell {
     shell
 }
 
-/// Every value the pane on show states, in listing order.
+/// Every row the pane on show draws, whichever shape of body it is.
+fn rows(shell: &Shell) -> Vec<tairix_controls::FieldRow> {
+    if let Some(facts) = shell.facts_for_test() {
+        return facts.rows();
+    }
+    shell.form_for_test().map_or_else(Vec::new, |form| {
+        form.groups()
+            .iter()
+            .flat_map(|group| group.rows().iter().cloned())
+            .collect()
+    })
+}
+
+/// Every value the pane on show states, in listing order: what a reading
+/// says, what an entry holds, and what a list has chosen.
 fn stated(shell: &Shell) -> Vec<String> {
-    let Some(facts) = shell.facts_for_test() else {
-        return Vec::new();
-    };
-    facts
-        .rows()
+    rows(shell)
         .iter()
         .map(|row| match row.control() {
-            tairix_controls::FieldControl::Reading(value) => value.clone(),
+            tairix_controls::FieldControl::Reading(value)
+            | tairix_controls::FieldControl::Unmeasured(value) => value.clone(),
+            tairix_controls::FieldControl::Text(entry) => String::from(entry.text()),
+            tairix_controls::FieldControl::Combo(combo) => {
+                combo.selected_text().map(String::from).unwrap_or_default()
+            }
             _ => String::new(),
         })
         .collect()
@@ -74,13 +93,57 @@ fn stated(shell: &Shell) -> Vec<String> {
 
 /// Every label the pane on show states, in listing order.
 fn labels(shell: &Shell) -> Vec<String> {
-    shell.facts_for_test().map_or_else(Vec::new, |facts| {
-        facts
-            .rows()
+    rows(shell)
+        .iter()
+        .map(|row| String::from(row.label()))
+        .collect()
+}
+
+/// Each plate's caption, in listing order.
+fn captions(shell: &Shell) -> Vec<String> {
+    shell.form_for_test().map_or_else(Vec::new, |form| {
+        form.groups()
             .iter()
-            .map(|row| String::from(row.label()))
+            .map(|group| String::from(group.caption()))
             .collect()
     })
+}
+
+/// A listing of both registries, as `configure` prints one.
+const LISTING: &[u8] = b"os.loginType graphical\n\
+    net.ipv4.enabled true\n\
+    wan.kind ethernet\n\
+    wan.match.mac 52:54:00:12:34:56\n\
+    wan.ipv4.method static\n\
+    wan.ipv4.address 10.0.0.7/24\n\
+    wan.ipv4.gateway 10.0.0.1\n\
+    wan.dns.servers 10.0.0.53\n\
+    lan0.match.node 0x3f201000\n\
+    lan0.ipv4.method dhcp\n";
+
+/// A shell showing `pane` with the addressing capture already answered.
+fn showing_addressing(pane: &str) -> Shell {
+    let mut shell = showing(pane);
+    let _ = ask_for_addressing(&mut shell);
+    shell.adopt_elevation(Elevated::Printed(0, LISTING.to_vec()));
+    shell.lay_out(WIDE, Scale::ONE, &theme());
+    shell
+}
+
+/// Which row of which plate carries `label`.
+fn row_at(shell: &Shell, caption: &str, label: &str) -> (usize, usize) {
+    let form = shell.form_for_test().expect("a composed pane");
+    for (group, plate) in form.groups().iter().enumerate() {
+        if plate.caption() != caption {
+            continue;
+        }
+        for (row, held) in plate.rows().iter().enumerate() {
+            if held.label() == label {
+                return (group, row);
+            }
+        }
+    }
+    panic!("no `{label}` row on the `{caption}` plate");
 }
 
 /// A V4 resolver at `octets`.
@@ -106,6 +169,11 @@ fn v6(groups: [u16; 8]) -> NetServerAddr {
 }
 
 /// The registry row for `pane`.
+/// One `<key> <value>` pair as [`Form::pending`] answers it.
+fn staged(key: Key, value: &str) -> (String, String) {
+    (key.name().to_string(), value.to_string())
+}
+
 fn row_for(pane: Pane) -> &'static crate::registry::PaneRow {
     CATEGORIES
         .iter()
@@ -135,7 +203,7 @@ fn tcp_ip_states_what_the_store_holds_and_stages_a_change() {
     assert!(!shell.asking(), "a choice is not a write");
     assert_eq!(
         shell.form_for_test().expect("a form").pending(),
-        alloc::vec![(Key::NetIpv4Enabled, "false")]
+        alloc::vec![staged(Key::NetIpv4Enabled, "false")]
     );
 }
 
@@ -168,7 +236,7 @@ fn every_stack_wide_option_is_reachable_and_writes_its_own_key() {
         );
         assert_eq!(
             shell.form_for_test().expect("a form").pending(),
-            alloc::vec![(key, value)],
+            alloc::vec![staged(key, value)],
             "group {group} row {row} writes only its own key"
         );
     }
@@ -185,7 +253,7 @@ fn applying_runs_the_one_tool_that_owns_the_store_with_every_changed_key() {
         .expect("a form")
         .pending()
         .into_iter()
-        .flat_map(|(key, value)| [key.name().to_string(), value.to_string()])
+        .flat_map(|(key, value)| [key, value])
         .collect();
     // One invocation carrying both, in registry order, so the document is
     // rendered once and cannot be left holding half the change.
@@ -304,9 +372,11 @@ fn dns_states_every_server_the_stack_answered() {
         v4([10, 0, 0, 53]),
         v6([0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888]),
     ]));
+    // The live set is ungated and states itself; beneath it the pane says
+    // that the per-interface lists have not been read.
     assert_eq!(
-        stated(&shell),
-        alloc::vec!["10.0.0.53".to_string(), "2001:4860:4860::8888".to_string()],
+        &stated(&shell)[..2],
+        ["10.0.0.53".to_string(), "2001:4860:4860::8888".to_string()],
         "one row per server, in the order the stack aggregated them"
     );
 }
@@ -315,19 +385,16 @@ fn dns_states_every_server_the_stack_answered() {
 fn dns_tells_an_empty_set_apart_from_a_reading_it_could_not_take() {
     // Before anything lands.
     let mut shell = showing("dns");
-    assert_eq!(stated(&shell), alloc::vec!["not measured".to_string()]);
+    assert_eq!(stated(&shell)[0], "not measured");
 
     // A refused or undecodable walk: still not measured, never "none".
     shell.adopt_resolvers(None);
-    assert_eq!(stated(&shell), alloc::vec!["not measured".to_string()]);
+    assert_eq!(stated(&shell)[0], "not measured");
 
     // The query answered, and what it answered was an empty set. That is a
     // machine that resolves nothing, which is a different fact.
     shell.adopt_resolvers(Some(Vec::new()));
-    assert_eq!(
-        stated(&shell),
-        alloc::vec!["none — this machine resolves no names".to_string()]
-    );
+    assert_eq!(stated(&shell)[0], "none — this machine resolves no names");
 }
 
 #[test]
@@ -360,21 +427,20 @@ fn the_dns_pane_asks_for_its_reading_when_it_comes_on_show() {
 }
 
 #[test]
-fn the_dns_pane_offers_no_command_of_its_own() {
-    // It is a reading in this stage; the write is the stage that grows the
-    // per-interface registry. A band offering Apply here would offer a
-    // change the pane cannot make.
-    assert_eq!(row_for(Pane::Dns).action(), None);
+fn the_dns_pane_offers_the_same_reading_the_ethernet_pane_does() {
+    // Its per-interface rows are discovered from the same capture, so it
+    // offers the same command to get one rather than a second way of
+    // asking.
+    assert_eq!(row_for(Pane::Dns).action(), Some("Show Addressing…"));
 }
 
 // --- Ethernet: the reading an authenticated run answers -----------------
 
-/// Press the pane's one band command, offer an account, and hand back the
-/// elevation the shell asked for.
-fn ask_for_addressing(shell: &mut Shell) -> Elevation {
+/// Press the band's command at `index`.
+fn press_band(shell: &mut Shell, index: usize) {
     let theme = theme();
     let rects = shell.action_rects(WIDE, Scale::ONE, &theme);
-    let rect = *rects.last().expect("the band drew its command");
+    let rect = rects[index];
     let at = Point::new(
         rect.left() + to_i32(rect.width / 2),
         rect.top() + to_i32(rect.height / 2),
@@ -391,46 +457,52 @@ fn ask_for_addressing(shell: &mut Shell) -> Elevation {
     ] {
         shell.on_pointer(&event, WIDE, Scale::ONE, &theme, &mut sink);
     }
+}
+
+/// Offer an account to the question standing over the window, and hand
+/// back the elevation the shell asked for.
+fn offer_account(shell: &mut Shell) -> Elevation {
+    let theme = theme();
+    let mut sink = damage();
     assert!(shell.asking(), "the pane asks for an account");
+    let mut key = |key: InputKey| {
+        shell.on_key(
+            key,
+            Modifiers::default(),
+            WIDE,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        )
+    };
     for ch in "root".chars() {
-        shell.on_key(
-            InputKey::Char(ch),
-            Modifiers::default(),
-            WIDE,
-            Scale::ONE,
-            &theme,
-            &mut sink,
-        );
+        key(InputKey::Char(ch));
     }
-    shell.on_key(
-        InputKey::Named(NamedKey::Tab),
-        Modifiers::default(),
-        WIDE,
-        Scale::ONE,
-        &theme,
-        &mut sink,
-    );
+    key(InputKey::Named(NamedKey::Tab));
     for ch in "hunter2".chars() {
-        shell.on_key(
-            InputKey::Char(ch),
-            Modifiers::default(),
-            WIDE,
-            Scale::ONE,
-            &theme,
-            &mut sink,
-        );
+        key(InputKey::Char(ch));
     }
-    let ShellOutcome::Elevate(asked) = shell.on_key(
-        InputKey::Named(NamedKey::Enter),
-        Modifiers::default(),
-        WIDE,
-        Scale::ONE,
-        &theme,
-        &mut sink,
-    ) else {
+    let ShellOutcome::Elevate(asked) = key(InputKey::Named(NamedKey::Enter)) else {
         panic!("offering an account asks for the run");
     };
     asked
+}
+
+/// Press the reading band's one command and offer an account for it.
+fn ask_for_addressing(shell: &mut Shell) -> Elevation {
+    press_band(shell, 0);
+    offer_account(shell)
+}
+
+/// Press the staged band's Apply and offer an account for it.
+fn apply_addressing(shell: &mut Shell) -> Elevation {
+    press_band(shell, 1);
+    offer_account(shell)
+}
+
+/// What the pane's action band is saying.
+fn band_line(shell: &Shell) -> String {
+    shell.band_line_for_test().unwrap_or_default()
 }
 
 #[test]
@@ -440,13 +512,18 @@ fn ethernet_states_that_its_reading_is_not_public_until_it_is_asked_for() {
     // states that nothing has been read rather than drawing a row it
     // cannot back — and offers the one command that can answer it.
     let row = row_for(Pane::Ethernet);
-    assert_eq!(row.backing, PaneBacking::Composed(PaneContent::Ethernet));
+    assert_eq!(
+        row.backing,
+        PaneBacking::Composed(PaneContent::Form(Composition::Ethernet))
+    );
     assert_eq!(row.action(), Some("Show Addressing…"));
 
     let mut shell = showing("ethernet");
     let stated = stated(&shell).join(" | ");
     assert!(stated.contains("not read"), "{stated}");
     assert!(stated.contains("account that may"), "{stated}");
+    // One command, and no Revert: there is no working copy to revert to.
+    assert_eq!(shell.action_rects(WIDE, Scale::ONE, &theme()).len(), 1);
     // Nothing is asked of a desk for it: the resolver set is a live
     // reading, this is a store read an account has to authorise.
     assert!(!shell.network_wanted(), "no desk answers the addressing");
@@ -466,30 +543,318 @@ fn the_pane_asks_for_a_capture_of_the_tool_that_owns_the_store() {
 
 #[test]
 fn a_captured_listing_states_one_plate_per_configured_interface() {
-    let mut shell = showing("ethernet");
-    let _ = ask_for_addressing(&mut shell);
-    shell.adopt_elevation(Elevated::Printed(
-        0,
-        b"os.loginType graphical\n\
-          net.ipv4.enabled true\n\
-          time.servers none\n\
-          wan.kind ethernet\n\
-          wan.ipv4.method static\n\
-          wan.ipv4.address 10.0.0.7/24\n\
-          lan0.ipv4.method dhcp\n"
-            .to_vec(),
-    ));
+    let shell = showing_addressing("ethernet");
+    assert_eq!(
+        captions(&shell),
+        alloc::vec!["wan".to_string(), "lan0".to_string()],
+        "one plate per interface, in the order the document declares them"
+    );
     let stated = stated(&shell).join(" | ");
     // The per-interface registry only: every machine setting in the same
     // listing is another registry's and is not an interface's addressing.
     assert!(stated.contains("10.0.0.7/24"), "{stated}");
     assert!(stated.contains("dhcp"), "{stated}");
     assert!(!stated.contains("graphical"), "{stated}");
-    assert!(!stated.contains("none"), "{stated}");
     // And the reading is labelled in a reader's words, not in store keys.
     let labelled = labels(&shell).join(" | ");
     assert!(labelled.contains("IPv4 address"), "{labelled}");
     assert!(!labelled.contains("ipv4.address"), "{labelled}");
+}
+
+#[test]
+fn the_addressing_rows_are_settable_and_the_hardware_rows_are_not() {
+    // Which device an alias stands for, and how a bond is composed, are
+    // not a settings pane's to change; how the interface is addressed is.
+    let shell = showing_addressing("ethernet");
+    let form = shell.form_for_test().expect("a composed pane");
+    let settable = |label: &str| {
+        let (group, row) = row_at(&shell, "wan", label);
+        !matches!(
+            form.groups()[group].rows()[row].control(),
+            tairix_controls::FieldControl::Reading(_)
+        )
+    };
+    for label in [
+        "IPv4",
+        "IPv4 address",
+        "IPv4 gateway",
+        "MTU",
+        "Name servers",
+    ] {
+        assert!(settable(label), "`{label}` is settable");
+    }
+    for label in ["Kind", "Bound to hardware address"] {
+        assert!(!settable(label), "`{label}` is a reading");
+    }
+    // An unset settable is still offered — an interface on DHCP has to be
+    // reachable to give a static address to.
+    let (group, row) = row_at(&shell, "lan0", "IPv4 address");
+    assert!(matches!(
+        form.groups()[group].rows()[row].control(),
+        tairix_controls::FieldControl::Text(_)
+    ));
+    // An unset *reading* is not: there is nothing to read.
+    assert!(
+        !labels(&shell).iter().any(|label| label == "Bond mode"),
+        "no interface declares a bond"
+    );
+}
+
+#[test]
+fn a_method_row_offers_the_spellings_the_engine_itself_admits() {
+    // The choices come from the key's own shape, so the set a reader is
+    // offered and the set the parser takes cannot drift — plus the one
+    // choice only the document can express, that the key is not declared.
+    let shell = showing_addressing("ethernet");
+    let (group, row) = row_at(&shell, "wan", "IPv4");
+    let form = shell.form_for_test().expect("a composed pane");
+    let tairix_controls::FieldControl::Combo(combo) = form.groups()[group].rows()[row].control()
+    else {
+        panic!("a closed key is a choice list");
+    };
+    let offered: Vec<&str> = combo.choices().iter().map(String::as_str).collect();
+    assert_eq!(offered[0], "not set");
+    assert_eq!(&offered[1..], Ipv4Method::VALUES);
+    assert_eq!(combo.selected_text(), Some("static"));
+}
+
+#[test]
+fn typing_an_address_stages_one_key_of_one_interface() {
+    let mut shell = showing_addressing("ethernet");
+    let (group, row) = row_at(&shell, "wan", "IPv4 address");
+    assert!(shell.type_for_test(group, row, "10.0.0.9/24"));
+    assert_eq!(
+        shell.form_for_test().expect("a form").pending(),
+        alloc::vec![("wan.ipv4.address".to_string(), "10.0.0.9/24".to_string())],
+        "one interface's one key, named as the tool takes it"
+    );
+    // And the plate holding it says so, so the band's count names a part
+    // of the pane rather than the whole.
+    let form = shell.form_for_test().expect("a form");
+    assert_eq!(
+        form.groups()[group].badge().map(StatusPill::label),
+        Some("1 change")
+    );
+    assert!(
+        form.groups()
+            .iter()
+            .filter(|plate| plate.caption() == "lan0")
+            .all(|plate| plate.badge().is_none()),
+        "an untouched interface is not marked"
+    );
+}
+
+#[test]
+fn clearing_an_entry_stages_the_removal_the_registry_spells_as_empty() {
+    // That registry has no defaults, so a key is removed rather than reset
+    // — and the empty value is the removal, which is what makes an
+    // interface movable off a static address at all.
+    let mut shell = showing_addressing("ethernet");
+    let (group, row) = row_at(&shell, "wan", "IPv4 gateway");
+    assert!(shell.type_for_test(group, row, ""));
+    assert_eq!(
+        shell.form_for_test().expect("a form").pending(),
+        alloc::vec![("wan.ipv4.gateway".to_string(), String::new())]
+    );
+}
+
+#[test]
+fn a_value_the_store_would_refuse_is_marked_and_blocks_the_apply() {
+    let mut shell = showing_addressing("ethernet");
+    let (group, row) = row_at(&shell, "wan", "IPv4 address");
+    shell.type_for_test(group, row, "10.0.0");
+    let form = shell.form_for_test().expect("a form");
+    assert_eq!(form.refused(), 1, "the row wears the refusal");
+    assert_eq!(
+        form.groups()[group].rows()[row].state().validation,
+        tairix_controls::ValidationState::Invalid
+    );
+    // The text is left exactly as it was typed: the reader corrects it,
+    // and nothing silently replaces what they wrote.
+    assert!(stated(&shell).iter().any(|value| value == "10.0.0"));
+    // And the change does not go part-way: Apply is not offered at all
+    // while a row holds a value the store would not take.
+    assert!(!shell.asking());
+    press_band(&mut shell, 1);
+    assert!(!shell.asking(), "no account is asked for a refused change");
+
+    // Correcting it clears both.
+    shell.type_for_test(group, row, "10.0.0.9/24");
+    assert_eq!(shell.form_for_test().expect("a form").refused(), 0);
+}
+
+#[test]
+fn moving_an_interface_off_a_static_address_takes_both_halves_together() {
+    // Neither half is a document the parser accepts on its own, so a
+    // working copy checked per key could never make the change. The staged
+    // set holds both and the whole is checked once, when it is applied.
+    let mut shell = showing_addressing("ethernet");
+    let (group, row) = row_at(&shell, "wan", "IPv4 address");
+    shell.type_for_test(group, row, "");
+    let (group, row) = row_at(&shell, "wan", "IPv4 gateway");
+    shell.type_for_test(group, row, "");
+    let (group, row) = row_at(&shell, "wan", "IPv4");
+    // Choice 0 is *not set*; the spellings follow in the engine's order.
+    let dhcp = 1 + Ipv4Method::VALUES
+        .iter()
+        .position(|value| *value == "dhcp")
+        .expect("the engine offers dhcp");
+    assert!(shell.choose_for_test(group, row, dhcp));
+
+    let asked = apply_addressing(&mut shell);
+    assert_eq!(asked.program, "/System/Commands/configure.app/Run");
+    assert_eq!(asked.mode, RunMode::Wait, "a write, not a read");
+    assert_eq!(
+        asked.argv,
+        alloc::vec![
+            "wan.ipv4.method".to_string(),
+            "dhcp".to_string(),
+            "wan.ipv4.address".to_string(),
+            String::new(),
+            "wan.ipv4.gateway".to_string(),
+            String::new(),
+        ],
+        "one invocation carrying every key, in registry order"
+    );
+}
+
+#[test]
+fn a_half_made_change_is_refused_here_rather_than_by_the_run() {
+    // Dropping the address without moving the method leaves a document
+    // the store would not take. The pane checks the whole before asking
+    // for a password, so the reader is told what is wrong.
+    let mut shell = showing_addressing("ethernet");
+    let (group, row) = row_at(&shell, "wan", "IPv4 address");
+    shell.type_for_test(group, row, "");
+    press_band(&mut shell, 1);
+    assert!(
+        !shell.asking(),
+        "no account is asked for a refused document"
+    );
+    assert!(
+        band_line(&shell).to_lowercase().contains("interface"),
+        "the band names what is inconsistent: {}",
+        band_line(&shell)
+    );
+}
+
+#[test]
+fn a_change_larger_than_one_request_is_refused_before_a_password_is_typed() {
+    // The seam bounds what an unprivileged caller may hand a privileged
+    // run, and the change goes in one invocation or not at all — so the
+    // pane says so where it costs nothing rather than after the reader
+    // has authenticated.
+    let mut shell = showing("ethernet");
+    let _ = ask_for_addressing(&mut shell);
+    let mut listing = String::new();
+    for index in 0..9 {
+        let _ = write!(
+            listing,
+            "if{index}.match.node 0x3f20{index}000\nif{index}.ipv4.method dhcp\n"
+        );
+    }
+    shell.adopt_elevation(Elevated::Printed(0, listing.into_bytes()));
+    shell.lay_out(WIDE, Scale::ONE, &theme());
+    for index in 0..9 {
+        let (group, row) = row_at(&shell, &alloc::format!("if{index}"), "MTU");
+        assert!(shell.type_for_test(group, row, "9000"));
+    }
+    assert!(
+        shell.form_for_test().expect("a form").pending().len() > 8,
+        "more pairs than one request carries"
+    );
+    press_band(&mut shell, 1);
+    assert!(
+        !shell.asking(),
+        "no account is asked for a change that cannot go"
+    );
+    assert!(
+        band_line(&shell).contains("one interface at a time"),
+        "{}",
+        band_line(&shell)
+    );
+}
+
+#[test]
+fn an_applied_change_is_recorded_rather_than_re_read_or_forgotten() {
+    let mut shell = showing_addressing("ethernet");
+    let (group, row) = row_at(&shell, "wan", "IPv4 address");
+    shell.type_for_test(group, row, "10.0.0.9/24");
+    let _ = apply_addressing(&mut shell);
+
+    shell.adopt_elevation(Elevated::Finished(0));
+    assert!(!shell.asking(), "the question is answered");
+    let form = shell.form_for_test().expect("a form");
+    assert!(
+        form.pending().is_empty(),
+        "what the run accepted is no longer a pending change"
+    );
+    assert!(
+        stated(&shell).iter().any(|value| value == "10.0.0.9/24"),
+        "the row keeps the value the run wrote"
+    );
+    assert!(
+        shell
+            .form_for_test()
+            .expect("a form")
+            .groups()
+            .iter()
+            .all(|plate| plate.badge().is_none()),
+        "no plate still claims a staged change"
+    );
+}
+
+#[test]
+fn a_refused_apply_keeps_the_working_copy_and_says_why() {
+    let mut shell = showing_addressing("ethernet");
+    let (group, row) = row_at(&shell, "wan", "IPv4 address");
+    shell.type_for_test(group, row, "10.0.0.9/24");
+    let _ = apply_addressing(&mut shell);
+
+    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::NotRun(String::from(
+        "The account was accepted, but nothing ran.",
+    ))));
+    assert!(shell.asking(), "the reader can correct and try again");
+    assert_eq!(
+        shell.form_for_test().expect("a form").pending(),
+        alloc::vec![("wan.ipv4.address".to_string(), "10.0.0.9/24".to_string())],
+        "the staged change is still there to retry"
+    );
+}
+
+#[test]
+fn reverting_puts_every_row_back_to_what_the_capture_stated() {
+    let mut shell = showing_addressing("ethernet");
+    let (group, row) = row_at(&shell, "wan", "IPv4 address");
+    shell.type_for_test(group, row, "10.0.0.9/24");
+    press_band(&mut shell, 0);
+    let form = shell.form_for_test().expect("a form");
+    assert!(form.pending().is_empty());
+    assert!(stated(&shell).iter().any(|value| value == "10.0.0.7/24"));
+}
+
+#[test]
+fn leaving_the_networking_panes_drops_the_capture_but_moving_between_them_does_not() {
+    let mut shell = showing_addressing("ethernet");
+    let mut sink = damage();
+    // DNS is discovered from the same capture, so one authentication
+    // serves both panes.
+    shell.go_to_pane("dns", WIDE, Scale::ONE, &theme(), &mut sink);
+    assert!(
+        captions(&shell).iter().any(|caption| caption == "wan"),
+        "the capture is still held"
+    );
+    // Anywhere else and it is dropped as the pane is left, not once the
+    // next one after that is: the machine's address book is a privileged
+    // reading with no business sitting here while the reader is elsewhere.
+    shell.go_to_pane("about", WIDE, Scale::ONE, &theme(), &mut sink);
+    assert!(
+        shell.addressing_for_test().document().is_none(),
+        "the capture is dropped on leaving, not on arriving somewhere else"
+    );
+    shell.go_to_pane("ethernet", WIDE, Scale::ONE, &theme(), &mut sink);
+    let stated = stated(&shell).join(" | ");
+    assert!(stated.contains("not read"), "{stated}");
 }
 
 #[test]
@@ -499,6 +864,31 @@ fn a_listing_that_names_no_interface_says_so_rather_than_drawing_nothing() {
     shell.adopt_elevation(Elevated::Printed(0, b"os.loginType text\n".to_vec()));
     let stated = stated(&shell).join(" | ");
     assert!(stated.contains("no interface is configured"), "{stated}");
+}
+
+#[test]
+fn an_interface_no_device_can_bind_to_says_so_on_its_own_plate() {
+    // `configure` states the same limit when such an interface is
+    // written, onto a console a desktop reader never sees. The pane can
+    // see it in the document it is editing, so it says so first.
+    let mut shell = showing("ethernet");
+    let _ = ask_for_addressing(&mut shell);
+    shell.adopt_elevation(Elevated::Printed(
+        0,
+        b"free.ipv4.method dhcp\nwan.match.mac 52:54:00:12:34:56\n".to_vec(),
+    ));
+    let form = shell.form_for_test().expect("a form");
+    let footnote = |caption: &str| {
+        form.groups()
+            .iter()
+            .find(|plate| plate.caption() == caption)
+            .and_then(|plate| plate.footnote().map(String::from))
+    };
+    assert!(
+        footnote("free").is_some_and(|said| said.contains("no device is ever bound")),
+        "an interface with no hardware match says so"
+    );
+    assert!(footnote("wan").is_none(), "a bound interface says nothing");
 }
 
 #[test]
@@ -539,6 +929,77 @@ fn a_run_that_failed_is_not_read_as_an_empty_configuration() {
 }
 
 #[test]
+fn a_listing_shaped_like_anything_at_all_is_read_or_refused_and_never_believed() {
+    // The caller chooses the program and the argv, so the relayed bytes
+    // are attacker-influenced by construction: every shape has to answer
+    // either a document or a refusal, and nothing in between.
+    for output in [
+        &b"\xff\xfe not utf-8"[..],
+        b"",
+        b"\n\n\n",
+        b"nospace",
+        b"noalias value",
+        b".leadingdot value",
+        b"wan. value",
+        b"0bad.mtu 1500",
+        b"wan.nosuch 1",
+        b"wan.mtu",
+        b"wan.mtu 1500 extra",
+    ] {
+        let mut shell = showing("ethernet");
+        let _ = ask_for_addressing(&mut shell);
+        shell.adopt_elevation(Elevated::Printed(0, output.to_vec()));
+        let stated = stated(&shell).join(" | ");
+        assert!(
+            stated.contains("no interface is configured") || stated.contains("could not read"),
+            "{output:?} answered `{stated}`"
+        );
+    }
+}
+
+#[test]
+fn a_listing_the_engine_will_not_take_whole_is_no_document_at_all() {
+    // Fail closed: a line whose value the shared engine refuses means the
+    // window and the tool disagree about the store, so nothing is shown
+    // rather than the part that happened to parse.
+    let mut shell = showing("ethernet");
+    let _ = ask_for_addressing(&mut shell);
+    shell.adopt_elevation(Elevated::Printed(0, b"wan.mtu 3\n".to_vec()));
+    let stated = stated(&shell).join(" | ");
+    assert!(stated.contains("could not read"), "{stated}");
+}
+
+// --- DNS: the live reading, and the per-interface resolvers -------------
+
+#[test]
+fn dns_states_the_live_set_above_each_interfaces_own() {
+    let mut shell = showing_addressing("dns");
+    shell.adopt_resolvers(Some(alloc::vec![v4([10, 0, 0, 53])]));
+    assert_eq!(
+        captions(&shell),
+        alloc::vec![
+            "NAME SERVERS IN USE".to_string(),
+            "wan".to_string(),
+            "lan0".to_string()
+        ],
+        "the aggregated set the stack answered, then what each interface asks for"
+    );
+    // The interface plates carry their resolver list and nothing else of
+    // the addressing, which is the Ethernet pane's.
+    let labelled = labels(&shell);
+    assert!(!labelled.iter().any(|label| label == "IPv4 address"));
+    let (group, row) = row_at(&shell, "wan", "Name servers");
+    assert!(shell.type_for_test(group, row, "10.0.0.53,10.0.0.54"));
+    assert_eq!(
+        shell.form_for_test().expect("a form").pending(),
+        alloc::vec![(
+            "wan.dns.servers".to_string(),
+            "10.0.0.53,10.0.0.54".to_string()
+        )]
+    );
+}
+
+#[test]
 fn wifi_still_states_the_absence_of_a_driver() {
     let PaneBacking::None { missing, needs } = row_for(Pane::WiFi).backing else {
         panic!("Wi-Fi states an absent subsystem");
@@ -548,12 +1009,19 @@ fn wifi_still_states_the_absence_of_a_driver() {
 }
 
 #[test]
-fn the_two_composed_networking_panes_declare_what_they_draw() {
+fn the_three_composed_networking_panes_declare_what_they_draw() {
     assert_eq!(
         row_for(Pane::TcpIp).content(),
-        Some(PaneContent::Form(crate::form::Composition::TcpIp))
+        Some(PaneContent::Form(Composition::TcpIp))
     );
-    assert_eq!(row_for(Pane::Dns).content(), Some(PaneContent::Dns));
+    assert_eq!(
+        row_for(Pane::Dns).content(),
+        Some(PaneContent::Form(Composition::Dns))
+    );
+    assert_eq!(
+        row_for(Pane::Ethernet).content(),
+        Some(PaneContent::Form(Composition::Ethernet))
+    );
 }
 
 #[test]

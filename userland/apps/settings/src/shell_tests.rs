@@ -871,6 +871,12 @@ fn a_composed_panes_settings_are_the_labels_its_rows_actually_draw() {
     for (pane, composition) in [
         (Pane::Appearance, Composition::Appearance),
         (Pane::Accessibility, Composition::Accessibility),
+        // A composition whose plates are discovered from a document only
+        // an authenticated run answers contributes the subject a reader
+        // searches for: no static index can name interfaces that do not
+        // exist until someone asks.
+        (Pane::Ethernet, Composition::Ethernet),
+        (Pane::Dns, Composition::Dns),
     ] {
         let row = pane.locate().expect("a located pane").1;
         assert_eq!(row.settings, composition.labels().as_slice(), "{pane:?}");

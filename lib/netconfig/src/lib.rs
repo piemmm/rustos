@@ -609,6 +609,21 @@ impl IfaceKey {
         }
     }
 
+    /// Whether `value` is a spelling this key admits, checked exactly as
+    /// the parser checks a line.
+    ///
+    /// One key at a time, which is all a surface editing one field can
+    /// ask: whether the *document* holds together is
+    /// [`ConfigDraft::commit`]'s question, and it cannot be answered until
+    /// every field of a change is in — moving an interface off a static
+    /// address takes two keys, and neither half alone is consistent.
+    #[must_use]
+    pub fn admits(self, value: &str) -> bool {
+        InterfaceConfig::new(String::new())
+            .set_key(self, value)
+            .is_ok()
+    }
+
     /// A stable index into a fixed `[_; IfaceKey::ALL.len()]` array, used to
     /// detect a repeated key on one interface.
     #[must_use]
@@ -2217,6 +2232,38 @@ wan.ipv4.gateway 192.168.1.1
                 key.name()
             );
         }
+    }
+
+    #[test]
+    fn a_key_admits_exactly_what_a_draft_would_take_for_it() {
+        // The one-key check a surface editing one field asks, answering as
+        // the parser does — and answering it *without* the document, which
+        // is the point: a field being typed into is not a document yet.
+        for key in IfaceKey::ALL {
+            assert!(!key.admits(""), "{} admitted an empty value", key.name());
+            if let ValueShape::Closed(values) = key.shape() {
+                for value in values {
+                    assert!(key.admits(value), "{} refused `{value}`", key.name());
+                }
+                assert!(!key.admits("nonsuch"), "{} admitted anything", key.name());
+            }
+        }
+        assert!(IfaceKey::Ipv4Address.admits("10.0.0.7/24"));
+        assert!(!IfaceKey::Ipv4Address.admits("10.0.0.7"));
+        assert!(IfaceKey::Mtu.admits("1500"));
+        assert!(!IfaceKey::Mtu.admits("3"));
+        // Whole-document consistency is not its question: a static method
+        // with no address is a key each side admits and a document the
+        // engine still refuses.
+        assert!(IfaceKey::Ipv4Method.admits("static"));
+        let mut draft = NetworkConfig::default().edit();
+        draft
+            .set("wan", IfaceKey::Ipv4Method, "static")
+            .expect("the key admits it");
+        assert_eq!(
+            draft.commit().expect_err("must fail"),
+            ConfigError::InconsistentInterface
+        );
     }
 
     #[test]

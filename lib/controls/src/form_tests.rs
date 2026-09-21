@@ -1088,6 +1088,49 @@ fn a_badged_caption_band_seats_the_capsule_above_the_first_row() {
     );
 }
 
+/// Putting a badge on in place draws the same plate the builder does, and
+/// taking it off again leaves the group exactly as it began — which is what
+/// lets an owner restate a moving state without rebuilding a row that holds
+/// a caret.
+#[test]
+fn a_badge_set_in_place_matches_the_one_the_builder_puts_on() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let badge = StatusPill::new("1 change").with_tone(SignalRole::Warning);
+    let rows = vec![toggle_row("One", false)];
+    let bare = FieldGroup::new("VOLUME", rows.clone());
+    let built = FieldGroup::new("VOLUME", rows).with_badge(badge.clone());
+
+    let mut set = bare.clone();
+    set.set_badge(Some(badge));
+    assert_eq!(set.badge(), built.badge());
+    assert_eq!(
+        set.measured_height(scale, &theme),
+        built.measured_height(scale, &theme),
+        "a badge put on in place has to be re-measured like any other"
+    );
+
+    let height = built.measured_height(scale, &theme);
+    let draw = |group: &FieldGroup| {
+        let mut surface = Surface::new(W, height).expect("a surface");
+        group.render(
+            &mut surface,
+            FieldLayout::new(Rect::new(0, 0, W, height), 0),
+            scale,
+            &theme,
+        );
+        surface
+    };
+    assert_eq!(draw(&set).pixels(), draw(&built).pixels());
+
+    set.set_badge(None);
+    assert!(set.badge().is_none());
+    assert_eq!(
+        set.measured_height(scale, &theme),
+        bare.measured_height(scale, &theme)
+    );
+}
+
 /// The caption is cut to what the badge leaves, never drawn under it: the
 /// badge's own pixels are the same whatever the caption's length.
 #[test]

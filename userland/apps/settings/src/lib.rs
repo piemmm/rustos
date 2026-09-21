@@ -28,16 +28,18 @@ mod form;
 mod frame;
 mod gallery;
 mod machine;
+mod network;
 mod registry;
 mod shell;
 mod stack;
 mod statement;
 mod volumes;
 
-pub use facts::{Addressing, InterfaceReading, MachineFacts, NetworkFacts};
+pub use facts::MachineFacts;
 pub use form::{Composition, Form, FormOutcome, FormPlace, Offered, Setting};
 pub use frame::{resolve_frame, Actions, Overflow, ShellFrame, CONTENT_FLOOR, SIDEBAR_WIDTH};
 pub use gallery::{Gallery, GalleryOutcome, PictureWanted, NONE_LABEL};
+pub use network::{Addressing, NetworkFacts};
 pub use registry::{
     strip_rows, Category, CategoryRow, Location, Pane, PaneBacking, PaneContent, PaneRow, StripRow,
     CATEGORIES,

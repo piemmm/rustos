@@ -445,16 +445,20 @@ fn a_launch_names_its_pane_as_the_first_operand() {
     assert_eq!(Pane::launched(&["../../etc/passwd"]), None);
 }
 
-/// A pane offers an action band exactly where it has something durable to
-/// do: a staged composition, or a reading whose subject another application
-/// owns. An immediate pane has none, because its effect is its feedback and
-/// a stale Apply is a trap.
+/// The registry names the one command a pane offers *instead of* a working
+/// copy: a reading whose subject another application owns, or the
+/// authenticated read a pane's rows cannot exist without. A staged pane's
+/// Revert and Apply are the band's own, so the registry names nothing for
+/// it; an immediate pane has no band at all, because its effect is its
+/// feedback and a stale Apply is a trap.
 #[test]
-fn only_a_staged_pane_or_a_reading_with_an_owner_offers_a_command() {
+fn the_registry_names_only_the_command_a_pane_has_instead_of_a_working_copy() {
     let action = |pane: Pane| pane.locate().and_then(|(_, row)| row.action());
-    assert_eq!(action(Pane::LoginStartup), Some("Apply"));
-    assert_eq!(action(Pane::Caching), Some("Apply"));
     assert_eq!(action(Pane::DateTime), Some("Set Date & Time…"));
+    assert_eq!(action(Pane::Ethernet), Some("Show Addressing…"));
+    assert_eq!(action(Pane::Dns), Some("Show Addressing…"));
+    assert_eq!(action(Pane::LoginStartup), None);
+    assert_eq!(action(Pane::Caching), None);
     assert_eq!(action(Pane::Appearance), None);
     assert_eq!(action(Pane::Wallpaper), None);
     assert_eq!(action(Pane::About), None);

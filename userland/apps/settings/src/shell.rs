@@ -14,6 +14,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::elevate::ElevateArgv;
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_controls::{
     plate_rect, Breadcrumb, BreadcrumbAction, CredentialAction, CredentialSheet, Crumb, Menu,
@@ -30,11 +31,12 @@ use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::body::{self, Body, Drawn};
-use crate::facts::{Addressing, MachineFacts, NetworkFacts, Subject};
+use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
-use crate::form::{FormOutcome, FormPlace};
+use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture};
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
 use crate::gallery::{GalleryOutcome, PictureWanted};
+use crate::network::{Addressing, NetworkFacts};
 use crate::registry::{
     strip_rows, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow, CATEGORIES,
 };
@@ -386,6 +388,42 @@ impl Shell {
         }
     }
 
+    /// Adopt a staged edit: what each plate and the band now say about it,
+    /// and the column's extent where a plate learning it has changed moved
+    /// one.
+    ///
+    /// Only where it moved: a badge appears once per plate, while an entry
+    /// reports every keystroke, and repainting the whole column for each of
+    /// them would hand the frame rate to the keyboard.
+    fn restate_staged(
+        &mut self,
+        frame: &ShellFrame,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let before = self
+            .body
+            .form()
+            .map_or(0, |form| form.measured_height(scale, theme));
+        if let Some(form) = self.body.form_mut() {
+            form.restate_badges();
+        }
+        self.restate_footer();
+        if let Some(rect) = frame.footer {
+            damage.add(rect);
+        }
+        let after = self
+            .body
+            .form()
+            .map_or(0, |form| form.measured_height(scale, theme));
+        if before != after {
+            self.lay_out(viewport, scale, theme);
+            damage.add(pane_band(frame, viewport));
+        }
+    }
+
     /// Bring the action band up to date with what the pane now holds.
     fn restate_footer(&mut self) {
         let standing = self.standing();
@@ -440,14 +478,35 @@ impl Shell {
     pub fn adopt_resolvers(&mut self, resolvers: Option<Vec<NetServerAddr>>) {
         self.network.resolvers = resolvers;
         self.network_wanted = false;
-        if self.states_resolvers() {
-            self.restate_body();
+        // Into the pane that states it, and only its rows: rebuilding the
+        // pane would discard a change the reader has staged because an
+        // unrelated reading happened to land.
+        if !self.states_resolvers() {
+            return;
+        }
+        let resolvers = self.network.resolvers_slice();
+        if let Some(form) = self.body.form_mut() {
+            form.adopt_resolvers(resolvers);
         }
     }
 
     /// Whether the body on show states the live resolver set.
     fn states_resolvers(&self) -> bool {
-        matches!(&self.body, Body::Facts(facts) if facts.subject() == Subject::Resolvers)
+        self.body
+            .composition()
+            .is_some_and(Composition::reads_resolvers)
+    }
+
+    /// Whether the pane the shell is *on* is discovered from the
+    /// addressing capture.
+    ///
+    /// The location rather than the body on show, because this decides
+    /// whether the capture survives long enough to build the next body.
+    fn shows_addressing(&self) -> bool {
+        matches!(
+            self.pane_row().and_then(PaneRow::content),
+            Some(PaneContent::Form(composition)) if composition.reads_addressing()
+        )
     }
 
     /// The next picture the caller should ask the desktop to render for the
@@ -561,6 +620,16 @@ impl Shell {
     fn restate_body(&mut self) {
         let listed = matches!(self.body, Body::Volumes(_));
         let resolved = self.states_resolvers();
+        // A pane that is not discovered from the capture drops it before
+        // it is built: the machine's address book is a privileged reading,
+        // and one held while the reader browses elsewhere is one this
+        // application had no business keeping. Both networking panes are
+        // discovered from it, so moving between them costs no second
+        // authentication.
+        if !self.shows_addressing() {
+            self.network.addressing = Addressing::Unasked;
+        }
+        let staged = self.body.staged().to_vec();
         let answered = body::Answered {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
@@ -569,6 +638,7 @@ impl Shell {
             config: self.config.as_ref(),
             machine: &self.machine,
             network: &self.network,
+            staged: &staged,
         };
         self.body = match self.location.rows() {
             Some((_, pane)) => Body::of(pane, &answered),
@@ -597,23 +667,58 @@ impl Shell {
         if self.body.stages_machine_settings() && self.config.is_none() {
             self.config_wanted = true;
         }
-        self.footer = self.pane_row().and_then(PaneRow::action).map(|label| {
-            let mut band = Footer::new(label);
+        self.footer = self.band();
+    }
+
+    /// The action band the pane on show offers, or `None` for a pane that
+    /// offers none.
+    ///
+    /// A pane with a working copy offers Revert and Apply over it. One
+    /// without offers the single command the registry names for it — the
+    /// application that owns its subject, or the authenticated reading its
+    /// rows cannot exist without.
+    fn band(&self) -> Option<Footer> {
+        if self.stageable() {
+            let mut band = Footer::staged();
             band.state(self.standing());
-            band
-        });
+            return Some(band);
+        }
+        self.pane_row()
+            .and_then(PaneRow::action)
+            .map(Footer::command)
+    }
+
+    /// Whether the pane on show has a working copy to stage a change
+    /// against.
+    ///
+    /// A machine composition always has one: an unread store leaves its
+    /// rows unmeasured, but the pane is still that store's editor and the
+    /// reading arrives without the reader doing anything. A networking
+    /// composition has one only once a capture has landed, because until
+    /// then there is no document — and getting one is what its band's
+    /// command is for.
+    fn stageable(&self) -> bool {
+        let Some(form) = self.body.form() else {
+            return false;
+        };
+        if form.posture() != Posture::Staged {
+            return false;
+        }
+        !form.composition().reads_addressing() || form.addressing().document().is_some()
     }
 
     /// What the pane on show has to say about the change it is holding.
+    ///
+    /// A pane with no working copy holds no change: its band offers one
+    /// named command and has nothing to count.
     fn standing(&self) -> Standing {
-        match self.body.form() {
-            Some(form) => match form.pending().len() {
-                0 => Standing::Unchanged,
-                count => Standing::Changed(count),
-            },
-            // A reading's band offers the application that changes its
-            // subject, which is always there to offer.
-            None => Standing::Changed(0),
+        let Some(form) = self.body.form().filter(|_| self.stageable()) else {
+            return Standing::Offered;
+        };
+        match (form.refused(), form.pending().len()) {
+            (0, 0) => Standing::Unchanged,
+            (0, count) => Standing::Changed(count),
+            (refused, _) => Standing::Refusing(refused),
         }
     }
 
@@ -1004,10 +1109,7 @@ impl Shell {
                 if !matches!(acted, FormOutcome::Idle) {
                     self.focus_on(Focus::Content, viewport, scale, theme, damage);
                     if matches!(acted, FormOutcome::Staged) {
-                        self.restate_footer();
-                        if let Some(rect) = frame.footer {
-                            damage.add(rect);
-                        }
+                        self.restate_staged(frame, viewport, scale, theme, damage);
                     }
                     return outcome_of(acted);
                 }
@@ -1160,10 +1262,7 @@ impl Shell {
                     if !matches!(acted, FormOutcome::Idle) {
                         self.reveal_focused_group(&frame, viewport, scale, theme, damage);
                         if matches!(acted, FormOutcome::Staged) {
-                            self.restate_footer();
-                            if let Some(rect) = frame.footer {
-                                damage.add(rect);
-                            }
+                            self.restate_staged(&frame, viewport, scale, theme, damage);
                         }
                         return outcome_of(acted);
                     }
@@ -1247,21 +1346,14 @@ impl Shell {
         match outcome {
             Elevated::Finished(0) => {
                 self.asking = None;
-                // The store has moved, so what is in effect is no longer
-                // what this window read: ask for it again rather than
-                // declare the working copy durable.
-                self.config_wanted = true;
-                if let Some(band) = self.footer.as_mut() {
-                    band.state(Standing::Applied);
-                }
+                self.settled();
             }
             Elevated::Finished(_) => self.refuse(String::from(
                 "The command ran but did not accept the change.",
             )),
             Elevated::Printed(0, output) => {
                 self.asking = None;
-                self.network.addressing = Addressing::from_listing(&output);
-                self.restate_body();
+                self.read_addressing(Addressing::from_listing(&output));
             }
             Elevated::Printed(..) => self.refuse(String::from(
                 "The command ran but could not read the configuration.",
@@ -1271,14 +1363,51 @@ impl Shell {
             // because asking again would answer the same.
             Elevated::Overran => {
                 self.asking = None;
-                self.network.addressing = Addressing::Overran;
-                self.restate_body();
+                self.read_addressing(Addressing::Overran);
             }
             Elevated::Refused(ElevateRefusal::Credentials) => {
                 self.refuse(String::from(CREDENTIAL_REFUSED_REASON));
             }
             Elevated::Refused(ElevateRefusal::NotRun(reason)) => self.refuse(reason),
         }
+    }
+
+    /// Adopt what a run that wrote a store came to.
+    ///
+    /// The machine's store is re-read, because that reading is free and a
+    /// working copy declared durable without one would be a guess. The
+    /// network store cannot be re-read without another password, so the
+    /// pane records the document it asked for and says so: `configure`
+    /// writes every named pair or none, and both sides render through the
+    /// same engine, so a clean exit wrote exactly what was staged.
+    fn settled(&mut self) {
+        self.config_wanted = self.body.stages_machine_settings();
+        let written = self
+            .body
+            .form()
+            .filter(|form| form.composition().reads_addressing())
+            .and_then(Form::proposal)
+            .and_then(Result::ok);
+        if let Some(written) = written {
+            self.network.addressing = Addressing::Listed(written.clone());
+            if let Some(form) = self.body.form_mut() {
+                form.adopt_written(written);
+            }
+        }
+        if let Some(band) = self.footer.as_mut() {
+            band.settled();
+        }
+    }
+
+    /// Adopt what a capture of the machine's addressing came to.
+    fn read_addressing(&mut self, addressing: Addressing) {
+        self.network.addressing = addressing;
+        if let Some(form) = self.body.form_mut() {
+            form.adopt_addressing(&self.network.addressing);
+        }
+        // The pane has a working copy where it had none, so its band is a
+        // different band: Revert and Apply rather than the reading.
+        self.footer = self.band();
     }
 
     /// State a refusal on the question that is up, or in the band when the
@@ -1334,40 +1463,86 @@ impl Shell {
     /// partly-applied store is not a state this can reach. A reading's is
     /// the application that owns its subject, started and left running.
     fn ask_to_apply(&mut self) {
-        let Some(pane) = self.pane_row() else {
-            return;
+        let asking = if self.stageable() {
+            self.staging()
+        } else {
+            self.reading()
         };
-        let asking = match pane.content() {
-            Some(PaneContent::Clock) => Asking {
+        if let Some(asking) = asking {
+            self.asking = Some(asking);
+        }
+    }
+
+    /// The run that applies what the pane on show has staged.
+    ///
+    /// A networking pane's document is checked whole first: an interface
+    /// half-moved off a static address is a change the store would refuse,
+    /// and saying so here names what is wrong rather than leaving the
+    /// reader with a run that failed.
+    fn staging(&mut self) -> Option<Asking> {
+        let reads_addressing = self
+            .body
+            .form()
+            .is_some_and(|form| form.composition().reads_addressing());
+        if reads_addressing {
+            if let Some(Err(err)) = self.body.form().and_then(Form::proposal) {
+                self.refuse(alloc::format!("{err}"));
+                return None;
+            }
+        }
+        let argv = self.body.form().map(configure_argv).unwrap_or_default();
+        if argv.is_empty() {
+            return None;
+        }
+        // Against the seam's own bound, not a second copy of it: a change
+        // too large for one request is refused here rather than after the
+        // reader has typed a password, and the document is never split
+        // across two runs — half of it written is exactly the state the
+        // one-invocation rule exists to prevent.
+        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+        if ElevateArgv::new(&borrowed).is_err() {
+            self.refuse(String::from(TOO_MANY_CHANGES));
+            return None;
+        }
+        Some(Asking {
+            sheet: CredentialSheet::new(
+                ASK_TITLE,
+                if reads_addressing {
+                    SET_ADDRESSING_PURPOSE
+                } else {
+                    SET_MACHINE_PURPOSE
+                },
+            ),
+            program: CONFIGURE_RUN_PATH,
+            argv,
+            mode: RunMode::Wait,
+        })
+    }
+
+    /// The run behind the one command a pane with no working copy offers.
+    fn reading(&self) -> Option<Asking> {
+        match self.pane_row()?.content()? {
+            PaneContent::Clock => Some(Asking {
                 sheet: CredentialSheet::new(ASK_TITLE, SET_CLOCK_PURPOSE),
                 program: DATETIME_RUN_PATH,
                 argv: Vec::new(),
                 mode: RunMode::Leave,
-            },
+            }),
             // A read, not a write: the same tool, run with no operand, and
             // what it prints is the answer. This application may not read
             // that store itself and never will, so the authenticated run
             // is the only way the pane can state it.
-            Some(PaneContent::Ethernet) => Asking {
+            PaneContent::Form(composition) if composition.reads_addressing() => Some(Asking {
                 sheet: CredentialSheet::new(ASK_TITLE, SHOW_ADDRESSING_PURPOSE),
                 program: CONFIGURE_RUN_PATH,
                 argv: Vec::new(),
                 mode: RunMode::Capture,
-            },
-            _ => {
-                let argv = self.body.form().map(configure_argv).unwrap_or_default();
-                if argv.is_empty() {
-                    return;
-                }
-                Asking {
-                    sheet: CredentialSheet::new(ASK_TITLE, SET_MACHINE_PURPOSE),
-                    program: CONFIGURE_RUN_PATH,
-                    argv,
-                    mode: RunMode::Wait,
-                }
-            }
-        };
-        self.asking = Some(asking);
+            }),
+            PaneContent::Form(_)
+            | PaneContent::Pictures(_)
+            | PaneContent::About
+            | PaneContent::Volumes => None,
+        }
     }
 
     /// Adopt a scroll request, answering whether the `column` moved.
@@ -1889,8 +2064,45 @@ impl Shell {
             .body
             .form_mut()
             .map(|form| form.choose_for_test(group, row, index));
+        if let Some(form) = self.body.form_mut() {
+            form.restate_badges();
+        }
         self.restate_footer();
         matches!(staged, Some(FormOutcome::Staged))
+    }
+
+    /// What the window is holding of the machine's addressing, for a test
+    /// that asks whether a privileged reading outlived its pane.
+    #[cfg(test)]
+    pub(crate) const fn addressing_for_test(&self) -> &Addressing {
+        &self.network.addressing
+    }
+
+    /// What the pane's action band is saying, for a test that asks what a
+    /// reader would read there.
+    #[cfg(test)]
+    pub(crate) fn band_line_for_test(&self) -> Option<String> {
+        self.footer.as_ref().map(crate::footer::Footer::line)
+    }
+
+    /// Type `text` into the pane's group `group` row `row`, and bring the
+    /// plates and the band up to date with it exactly as a keystroke does.
+    ///
+    /// A test seam over the *routing* only: what it exercises is the
+    /// staged set, the row's verdict and the band, none of which an
+    /// entry's own editing mechanics (which `lib/controls` tests) has any
+    /// part in.
+    #[cfg(test)]
+    pub(crate) fn type_for_test(&mut self, group: usize, row: usize, text: &str) -> bool {
+        let typed = self
+            .body
+            .form_mut()
+            .map(|form| form.type_for_test(group, row, text));
+        if let Some(form) = self.body.form_mut() {
+            form.restate_badges();
+        }
+        self.restate_footer();
+        matches!(typed, Some(FormOutcome::Staged))
     }
 
     /// Put the keyboard cursor on the pane column.
@@ -1945,6 +2157,19 @@ const SHOW_ADDRESSING_PURPOSE: &str =
     "This machine's network addressing names its hardware and its addresses, so reading it needs \
      an account that may.";
 
+/// What the band says when a change is larger than one request carries.
+///
+/// The seam bounds what an unprivileged caller may hand a privileged run,
+/// and the change goes in one invocation or not at all, so the answer is to
+/// make it in smaller pieces — one interface's addressing is always small
+/// enough.
+const TOO_MANY_CHANGES: &str =
+    "More changes than one command can carry. Apply one interface at a time.";
+
+/// What the question says the machine's addressing needs an account for.
+const SET_ADDRESSING_PURPOSE: &str =
+    "Changing how this machine's interfaces are addressed needs an account that may write it.";
+
 /// The tool that owns the machine's boot-time configuration store, which is
 /// the only thing that writes it.
 const CONFIGURE_RUN_PATH: &str = "/System/Commands/configure.app/Run";
@@ -1958,10 +2183,10 @@ const DATETIME_RUN_PATH: &str = "/System/Applications/datetime.app/Run";
 /// One invocation rather than one per row, because the tool renders the
 /// document once: a run per key could leave the store holding half a
 /// change if the second were refused.
-fn configure_argv(form: &crate::form::Form) -> Vec<String> {
+fn configure_argv(form: &Form) -> Vec<String> {
     form.pending()
         .into_iter()
-        .flat_map(|(key, value)| [String::from(key.name()), String::from(value)])
+        .flat_map(|(key, value)| [key, value])
         .collect()
 }
 

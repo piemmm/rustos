@@ -19,9 +19,10 @@ use alloc::vec::Vec;
 
 use tairix_icon::IconKind;
 
-use crate::facts::{ABOUT_FACTS, ADDRESSING_FACTS, CLOCK_FACTS, RESOLVER_FACTS};
-use crate::form::{Composition, Posture, Setting};
+use crate::facts::{ABOUT_FACTS, CLOCK_FACTS};
+use crate::form::{Composition, Setting};
 use crate::machine::MachineSetting;
+use crate::network::{ADDRESSING_FACTS, RESOLVER_FACTS};
 use crate::volumes::VOLUME_FACTS;
 
 /// One top-level entry of the sidebar: a group of related settings.
@@ -185,14 +186,6 @@ pub enum PaneContent {
     /// The wall clock and where its reading came from, read-only, with the
     /// one command that changes it beneath.
     Clock,
-    /// The recursive name servers the stack resolves through, discovered at
-    /// runtime and read-only: one row per server rather than a fixed table
-    /// of slots.
-    Dns,
-    /// How each configured interface is addressed, read-only: one plate
-    /// per interface, answered by an account that may read the store this
-    /// application never can.
-    Ethernet,
 }
 
 /// One pane's registry row.
@@ -230,26 +223,29 @@ impl PaneRow {
         }
     }
 
-    /// The label of the command this pane's action band offers, or `None`
-    /// for a pane that has no band.
+    /// The label of the one command this pane offers while it has nothing
+    /// staged, or `None` for a pane that offers none.
     ///
-    /// A band exists for exactly two reasons: a staged composition, whose
-    /// change is made durable by one re-authenticated run, and a reading
-    /// whose *subject* is changed by starting the application that owns it.
-    /// An immediate pane has none — its effect is its feedback, and a stale
-    /// Apply is a trap.
+    /// Two kinds of pane have one: a reading whose *subject* is changed by
+    /// starting the application that owns it, and a pane whose rows cannot
+    /// exist until an authenticated run has answered what they are about.
+    /// A pane with a working copy offers Apply and Revert instead, which
+    /// the band resolves for itself; an immediate pane offers nothing,
+    /// because its effect is its feedback and a stale Apply is a trap.
     #[must_use]
     pub const fn action(&self) -> Option<&'static str> {
         match self.content() {
-            Some(PaneContent::Form(composition) | PaneContent::Pictures(composition)) => {
-                match composition.posture() {
-                    Posture::Staged => Some("Apply"),
-                    Posture::Immediate => None,
-                }
-            }
             Some(PaneContent::Clock) => Some("Set Date & Time…"),
-            Some(PaneContent::Ethernet) => Some("Show Addressing…"),
-            Some(PaneContent::About | PaneContent::Volumes | PaneContent::Dns) | None => None,
+            Some(PaneContent::Form(Composition::Ethernet | Composition::Dns)) => {
+                Some("Show Addressing…")
+            }
+            Some(
+                PaneContent::Form(_)
+                | PaneContent::Pictures(_)
+                | PaneContent::About
+                | PaneContent::Volumes,
+            )
+            | None => None,
         }
     }
 }
@@ -689,7 +685,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::Ethernet,
                 name: "ethernet",
                 title: "Ethernet",
-                backing: PaneBacking::Composed(PaneContent::Ethernet),
+                backing: PaneBacking::Composed(PaneContent::Form(Composition::Ethernet)),
                 settings: ADDRESSING_FACTS,
             },
             PaneRow {
@@ -707,7 +703,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::Dns,
                 name: "dns",
                 title: "DNS",
-                backing: PaneBacking::Composed(PaneContent::Dns),
+                backing: PaneBacking::Composed(PaneContent::Form(Composition::Dns)),
                 settings: RESOLVER_FACTS,
             },
             PaneRow {

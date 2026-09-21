@@ -238,6 +238,72 @@ a machine with neither family makes no connections at all. The value is still
 what the store holds — that is what would apply if the switch above came back
 on — but a reader who saw `On` alone would believe it was running.
 
+**Ethernet's live readings stay the Switchboard's; its *configured*
+addressing is read, and changed, by an authenticated run.** An interface's
+link state, bound addresses and throughput need `CAP_SYSINFO_GLOBAL`, and its
+hardware identity needs `CAP_SYSINFO_HW` — the MAC is stable hardware identity
+and the address book is system-wide, cross-principal state. Settings holds
+neither and never will, so those readings stay the
+[Switchboard](switchboard.md)'s, exactly as the per-device I/O counters do for
+Storage. `network.conf` cannot be served ungated either: it carries the
+`match.mac` identity and the static addressing those two gates exist to
+protect, so serving the document would be a way round them rather than an
+answer to them.
+
+What the pane *can* do is read the configuration the way an administrator
+would — by being one — and then change it the same way. It is a small state
+machine. It opens saying nothing has been read and offering **Show
+Addressing…**; the reader offers an account, and the supervisor runs
+`configure` as it and relays what it printed back through the
+elevated-**read** seam (`ElevateRequest::Capture`, see
+[login](../userland/login.md)). Every `<interface>.<setting>` line of that
+listing is parsed back through the shared `lib/netconfig` engine as the
+document it came from — the machine settings in the same listing are dropped,
+and a listing the engine will not take whole is no document at all rather than
+the part that happened to parse. One plate per interface then, discovered from
+that document and labelled in a reader's words. A run that printed more than
+the reply carries states that it was too large and shows no part of it; a
+refused run states the refusal and leaves the pane saying nothing was read.
+
+With a document in hand the plates are **settable**: the addressing rows
+(both method rows, both addresses, both gateways, the MTU and the interface's
+own name servers) are controls, while `kind`, the two `match.*` keys and the
+`bond.*` keys stay readings — which device an alias stands for and how a bond
+is composed are not a settings pane's to change. A method row's choices come
+from the key's own `ValueShape`, so the set a reader is offered and the set the
+parser admits are one definition; its leading entry is the one thing only the
+document can say, that the key is not declared at all. An entry's empty value
+is that same removal, which is what lets an interface be moved off a static
+address at all.
+
+**The working copy is the reader's edits, not an edited document.** A
+document is only ever checked whole, because neither half of "drop the static
+address" and "switch the method to DHCP" is a document the parser accepts on
+its own. So the pane holds the changed keys, checks each value against its own
+key as it is typed — a refused value wears the refusal, keeps exactly what was
+typed, and stops Apply rather than being quietly dropped from the change — and
+checks the whole document once, before it asks for a password. A document that
+would not hold together is refused in the band, naming what is inconsistent,
+rather than by a run the reader has just authenticated. Each plate says on its
+own caption how many of its rows are staged, so the band's count names a part
+of the pane.
+
+Apply is one elevated `configure` run carrying every changed key as a
+`<key> <value>` pair, so the document is rendered once and cannot be left
+holding half a change. A clean exit is recorded rather than re-read: the tool
+applies every named pair or none, and both sides render through the same
+engine, so what the pane shows afterwards is what it asked for — for the keys
+it named, which are the only ones it claims to know. Leaving the pane drops
+the capture, so a reader who wants the document as it now stands asks for it
+again, and a privileged reading never sits in this application while the
+reader is elsewhere. Moving between Ethernet and DNS keeps it, because both
+are discovered from the same document.
+
+A plate whose interface declares neither `match.mac` nor `match.node` says so
+beneath its rows: no device can ever be bound to it. `configure` states the
+same limit when such an interface is written, onto a console a desktop reader
+never sees, so the pane says it first.
+
 **DNS** states the recursive name servers the stack is actually resolving
 through: the statically configured and the DHCP-learned servers, aggregated
 and deduplicated by the stack into the one answer a userland resolver client
@@ -247,32 +313,10 @@ analogue of a world-readable `resolv.conf`. An empty set and a reading that
 could not be taken are kept apart: the first says the machine resolves no
 names, the second says the reading is not measured. The walk is an IPC round
 trip, so it runs on a worker like the mount walk, and returning to the pane
-asks afresh because leases come and go.
-
-**Ethernet's live readings stay the Switchboard's; its *configured*
-addressing is answered by an authenticated run.** An interface's link state,
-bound addresses and throughput need `CAP_SYSINFO_GLOBAL`, and its hardware
-identity needs `CAP_SYSINFO_HW` — the MAC is stable hardware identity and the
-address book is system-wide, cross-principal state. Settings holds neither and
-never will, so those readings stay the [Switchboard](switchboard.md)'s,
-exactly as the per-device I/O counters do for Storage. `network.conf` cannot
-be served ungated either: it carries the `match.mac` identity and the static
-addressing those two gates exist to protect, so serving the document would be
-a way round them rather than an answer to them.
-
-What the pane *can* state is the configuration itself, read the way an
-administrator would read it — by being one. The pane opens saying nothing has
-been read and offering **Show Addressing…**; the reader offers an account, and
-the supervisor runs `configure` as it and relays what it printed back through
-the elevated-**read** seam (`ElevateRequest::Capture`, see
-[login](../userland/login.md)). Each line of that listing is read back through
-the `lib/netconfig` registry, so the machine settings in the same listing are
-dropped and only `<interface>.<setting>` lines become rows — one plate per
-interface, labelled in a reader's words rather than in store keys. A run that
-printed more than the reply carries states that it was too large and shows no
-part of it; a refused run states the refusal and leaves the pane saying
-nothing was read. Nothing is cached across the ask: a reader who wants the
-current configuration asks again.
+asks afresh because leases come and go. Beneath that live plate the pane
+offers each interface's own `dns.servers` over the same capture and the same
+one `configure` run the Ethernet pane uses — one definition of what the key
+is, composed into two panes, rather than two surfaces that could disagree.
 
 **Wi-Fi** states the absence of the subsystem: no 802.11 driver, no
 supplicant, and no vocabulary for a scan or an association.
@@ -323,18 +367,21 @@ the staged source of truth; the shape of it is:
   desktop session, which validates it, applies it and persists it to its own
   published app-data scope; the desktop adopts a change only after the write
   succeeded, so memory and disk cannot diverge;
-- **machine-scope panes** (Login & startup, Caching, TCP/IP,
+- **machine-scope panes** (Login & startup, Caching, TCP/IP, Ethernet, DNS,
   Language & Region) ask the console's elevation broker to re-authenticate an
   account that may, and run the same `configure` program the command line
-  uses, so the CLI and the GUI are literally the same writer. They read the
-  store through the ungated `SYSTEM_CONFIG` query and parse it with
-  `lib/sysconfig`, the engine `configure` writes through, so what a row shows
-  and what the tool would set cannot disagree. They are **staged**: a choice
-  edits a working copy, the pane's action band says how many rows differ, and
-  **Apply** asks for an account once and runs `configure` once, carrying every
-  changed key — so the document is rendered a single time and a group of
-  settings can never be left half written. A refusal leaves the working copy
-  intact and states why; nothing is reported applied that was not;
+  uses, so the CLI and the GUI are literally the same writer. They are
+  **staged**: a choice edits a working copy, the pane's action band says how
+  many rows differ, and **Apply** asks for an account once and runs
+  `configure` once, carrying every changed key — so the document is rendered
+  a single time and a group of settings can never be left half written. A
+  refusal leaves the working copy intact and states why; nothing is reported
+  applied that was not. The two stores differ only in how they are *read*:
+  the boot-time one is read through the ungated `SYSTEM_CONFIG` query and
+  parsed with `lib/sysconfig`, while the network one is not public at all and
+  is answered by an authenticated run of the same tool (above). Either way
+  the row and the writer read one engine, so what a row shows and what the
+  tool would set cannot disagree;
 - **kernel-scope panes** (Date & Time, Users & Groups) elevate the application
   that owns the syscall, never acquiring the capability here. Date & Time's
   action band starts `datetime.app` as an authenticated account and leaves it

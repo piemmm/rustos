@@ -160,7 +160,12 @@ group is about — a volume's health beside its name. The group places it rather
 than the owner, because it is the only thing that can also take the room out
 of the caption and out of the band's height; a badge an owner drew over the
 band would sit on top of a long caption and overhang the first row instead of
-sitting beside them.
+sitting beside them. `FieldGroup::set_badge` puts one on or takes it off in
+place, for a state that moves while the reader works — which rows of a
+settings plate now differ from what is in effect — because rebuilding the
+group to restate it would rebuild rows that hold a caret and a selection. The
+capsule rides a band of its own either way, so an owner that sets one
+re-measures.
 
 A group resolves the one slot column its controls line up in
 (`FieldGroup::slot_column`): the widest width any of its rows wants, or the
