@@ -961,12 +961,15 @@ mod tests {
             HW_VIRTUAL_BUS_COMPATIBLE,
         };
 
+        // Seeding and publishing mutate the shared inventory, which a sibling
+        // reading it would see mid-flight.
+        let _serial = crate::hwtree_store::lock_hw_tree_tests();
+
         // `record_boot` stashes the binding + DTB and seeds the authoritative
         // inventory with the discovered tree `FdtDiscovery` built — here a
         // root plus a discovered bus (the `brcm,bcm2711-pcie` root complex
         // stands in), against which `devmgr` autoloads the user-space bus
-        // chain. (The single test touching the `HW_TREE` / `UNLOCK_BOOT`
-        // globals, so it never races a sibling.)
+        // chain.
         let seed = [
             HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root),
             HwNode::new(2, HW_NODE_ROOT_ID, HwDeviceClass::Bus),

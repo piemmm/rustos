@@ -14,9 +14,10 @@
 //!
 //! The loop never busy-spins: [`HwTreeService::wait_for_change`] parks until
 //! the store's generation advances, indefinitely once nothing is
-//! outstanding. The one exception is an unfetched catalogue, whose milestone
-//! has no generation bump behind it and so waits under a bounded retry
-//! deadline (`CATALOGUE_RETRY_NS`). A failure in a tree-seam
+//! outstanding. The exceptions are the milestones with no generation bump
+//! behind them — an unfetched catalogue, and a device channel a service was
+//! not yet up to accept — which wait under a bounded retry deadline
+//! (`DEFERRED_RETRY_NS`). A failure in a tree-seam
 //! operation ends the loop fail-closed with the reported [`Errno`]; a catalogue that cannot be fetched is fail-soft —
 //! the service loads nothing but keeps observing.
 
@@ -65,24 +66,27 @@ pub trait HwTreeService {
     fn on_node(&mut self, node: &HwNode);
 }
 
-/// Deadline [`run`] waits under while the driver-store catalogue is still
-/// outstanding.
+/// Deadline [`run`] waits under while any deferred milestone is outstanding.
 ///
-/// The catalogue is a one-time read of the read-only `/System` store, which
-/// becomes reachable when the boot floor has the system volume up. No
-/// hardware-tree generation bump accompanies that, so waiting indefinitely
-/// for one parks the service for the rest of the boot on a platform whose
-/// tree never changes again (a device tree enumerated once at boot, no
-/// hotplug) and nothing is ever autoloaded. The bounded deadline makes the
-/// retry this loop's own guarantee instead of a hope that some unrelated
-/// node mutation happens to arrive.
+/// Every such milestone becomes reachable without a hardware-tree generation
+/// bump: the driver-store catalogue when the boot floor has the system volume
+/// up, and a device channel's hand-off when the network or audio service
+/// claims its endpoint. Waiting indefinitely for a bump parks the service for
+/// the rest of the boot on a platform whose tree never changes again (a device
+/// tree enumerated once at boot, no hotplug), leaving the catalogue unfetched
+/// or a discovered NIC or sound card attached to nothing. The bounded deadline
+/// makes the retry this loop's own guarantee instead of a hope that some
+/// unrelated node mutation happens to arrive.
 ///
-/// It applies only while the fetch is outstanding: the steady-state wait is
-/// indefinite, so this is a bounded wait for a milestone that has no wake
-/// source, not a poll. The value trades autoload latency after the store
-/// appears against wakes while it has not — the whole desktop and network
-/// bring-up queues behind this fetch, so it is short.
-const CATALOGUE_RETRY_NS: u64 = 250_000_000;
+/// It applies only while something is outstanding, and outstanding means
+/// concrete work in hand — a discovered channel that did not bind, a loaded
+/// policy the stack refused — never "nothing has appeared yet". So a machine
+/// with no NIC, no sound card and no policy defers nothing and waits
+/// indefinitely: this is a bounded wait for a milestone with no wake source,
+/// not a poll. The value trades bring-up latency after a service appears
+/// against wakes while it has not — the whole desktop and network bring-up
+/// queues behind these milestones, so it is short.
+const DEFERRED_RETRY_NS: u64 = 250_000_000;
 
 /// Initial size of the growable hardware-tree snapshot buffer.
 ///
@@ -142,7 +146,7 @@ fn read_tree_growing<T: HwTreeService>(tree: &mut T, buf: &mut Vec<u8>) -> Resul
 /// fetch issued before then fails with the endpoint unbound. Nothing bumps
 /// the hardware-tree generation when that endpoint appears, so the retry is
 /// driven by [`run`]'s own bounded deadline
-/// ([`CATALOGUE_RETRY_NS`]) rather than by a tree change. Until the
+/// ([`DEFERRED_RETRY_NS`]) rather than by a tree change. Until the
 /// catalogue is obtained, matching runs against an empty candidate set, so
 /// every node is observed and left unbound, then loaded on the
 /// re-evaluation once the store is reachable.
@@ -341,19 +345,25 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
         if budget.is_some_and(|max| reactions >= max) {
             return Ok(());
         }
-        // Indefinite only when nothing is outstanding. An unfetched
-        // catalogue has no generation bump behind it, so it waits under a
-        // deadline and retries; everything else the reaction defers is
-        // woken by the node mutation it is waiting on, and would poll for
-        // the life of a machine whose NIC or network stack never appears.
-        let timeout_ns = if catalogue.is_none() {
-            CATALOGUE_RETRY_NS
+        // Indefinite only when nothing is outstanding. A service claiming its
+        // endpoint bumps no generation, so a channel the last pass could not
+        // hand over is woken by nothing and would leave its device attached to
+        // nothing for the life of the boot. Each deferral reports concrete
+        // work in hand, so a machine with no such device still waits
+        // indefinitely rather than polling.
+        let outstanding = catalogue.is_none()
+            || netbind.has_deferred_work()
+            || audiobind_state.has_deferred_work()
+            || netconfig.has_deferred_work()
+            || netifconfig.has_deferred_work();
+        let timeout_ns = if outstanding {
+            DEFERRED_RETRY_NS
         } else {
             u64::MAX
         };
         match tree.wait_for_change(last_generation, timeout_ns) {
-            // Changed, or the deadline elapsed with the catalogue still
-            // outstanding: either way re-react so the fetch is retried.
+            // Changed, or the deadline elapsed with work still outstanding:
+            // either way re-react so the deferred milestone is retried.
             Ok(()) | Err(Errno::TimedOut) => {}
             Err(err) => return Err(err),
         }
@@ -1367,8 +1377,97 @@ mod tests {
 
         assert_eq!(
             tree.waited_under.as_slice(),
-            &[CATALOGUE_RETRY_NS, u64::MAX],
+            &[DEFERRED_RETRY_NS, u64::MAX],
             "bounded while the fetch was outstanding, indefinite afterwards"
+        );
+    }
+
+    /// A network stack that refuses the first hand-off and accepts the rest,
+    /// standing in for a stack whose endpoint is not claimed yet.
+    struct RefusesFirstBind {
+        refusals: u32,
+    }
+
+    impl NetstackBind for RefusesFirstBind {
+        fn bind_driver(
+            &mut self,
+            _endpoint_id: u64,
+            _iface: &[u8; tairix_abi::net_ipc::IF_NAME_LEN],
+            _node_location: u64,
+        ) -> Result<(), Errno> {
+            if self.refusals > 0 {
+                self.refusals -= 1;
+                return Err(Errno::NotFound);
+            }
+            Ok(())
+        }
+
+        fn apply_settings(
+            &mut self,
+            _settings: tairix_abi::net_ipc::NetworkSettings,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn apply_interface_config(
+            &mut self,
+            _config: &tairix_abi::net_ipc::NetInterfaceConfigMsg,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn apply_bond_config(
+            &mut self,
+            _config: &tairix_abi::net_ipc::NetBondConfigMsg,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
+    }
+
+    /// A channel the stack was not up to accept keeps the deadline bounded so
+    /// the hand-off is retried, and the loop parks indefinitely once it binds.
+    ///
+    /// The regression: the stack claiming its endpoint bumps no generation, so
+    /// a loop that bounded its wait only for the catalogue parked forever with
+    /// the channel still unbound, leaving a discovered NIC attached to nothing
+    /// for the life of the boot.
+    #[test]
+    fn an_unbound_device_channel_keeps_the_wait_bounded_until_it_binds() {
+        let root = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root);
+        let chan = crate::netbind::netchan_node(2, 0xABCD);
+        let mut tree = ScriptedTree::new(vec![
+            encode(1, &[root, chan]),
+            encode(2, &[root, chan]),
+            encode(3, &[root, chan]),
+        ]);
+        // The catalogue is in hand from the first fetch, so it is never the
+        // reason the wait is bounded.
+        let mut store = DeferredCatalogue {
+            refusals: 0,
+            catalogue: Vec::new(),
+            loads: RefCell::new(Vec::new()),
+        };
+        let mut netstack = RefusesFirstBind { refusals: 1 };
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &mut netstack,
+            &mut NoAudiod,
+            &mut NoConfig,
+            &mut NoIfConfig,
+            &sink,
+            &mut reply_buf,
+            Some(2),
+        )
+        .expect("both cycles run");
+
+        assert_eq!(
+            tree.waited_under.as_slice(),
+            &[DEFERRED_RETRY_NS, u64::MAX],
+            "bounded while the channel was unbound, indefinite once it bound"
         );
     }
 }
