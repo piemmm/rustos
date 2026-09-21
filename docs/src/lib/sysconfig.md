@@ -45,7 +45,7 @@ account can read the settings but not change them.
 | `net.tcp.syncookies` | `auto` \| `always` | the network stack (`netstack`): the TCP SYN-flood defence policy |
 | `net.tcp.keepalive` | `true` \| `false`   | the network stack (`netstack`): RFC 9293 §3.8.4 TCP keepalive probing on idle connections |
 | `net.tcp.ecn`     | `true` \| `false`     | the network stack (`netstack`): RFC 3168 Explicit Congestion Notification negotiation |
-| `net.sockets.max` | `auto` \| a count      | the network stack (`netstack`): the socket-table capacity — `auto` derives it from the machine's RAM |
+| `net.sockets.mem` | `auto` \| a byte size   | the network stack (`netstack`): the socket-memory budget — `auto` derives it from the machine's RAM |
 
 Adding a key is adding a `Key` variant (plus its `SystemConfig` field and
 match arms) **and** its consumer in the same change — the compiler then

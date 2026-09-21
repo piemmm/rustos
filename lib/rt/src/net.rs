@@ -42,7 +42,7 @@ const REQUEST_HEADER_MAX: usize = 64;
 /// # Errors
 ///
 /// The typed [`Errno`] the stack returned — [`Errno::PermissionDenied`]
-/// without `CAP_NET`, [`Errno::LimitExceeded`] at the socket quota, or a
+/// without `CAP_NET`, [`Errno::LimitExceeded`] at the socket-memory budget, or a
 /// transport error.
 pub fn socket(family: NetAddrFamily, deliver_port: u64) -> Result<SocketId, Errno> {
     let request = SocketRequest::Socket {
@@ -70,7 +70,7 @@ pub fn socket(family: NetAddrFamily, deliver_port: u64) -> Result<SocketId, Errn
 /// # Errors
 ///
 /// The typed [`Errno`] the stack returned — [`Errno::PermissionDenied`]
-/// without `CAP_NET`, [`Errno::LimitExceeded`] at the socket quota, or a
+/// without `CAP_NET`, [`Errno::LimitExceeded`] at the socket-memory budget, or a
 /// transport error.
 pub fn stream_socket(family: NetAddrFamily, deliver_port: u64) -> Result<SocketId, Errno> {
     let request = SocketRequest::Socket {
@@ -162,7 +162,7 @@ pub fn listen(socket: SocketId) -> Result<(), Errno> {
 ///
 /// The typed [`Errno`] the stack returned — [`Errno::WouldBlock`] when no
 /// connection is ready, [`Errno::OutOfRange`] if `socket` is not a
-/// listener, [`Errno::LimitExceeded`] at the socket quota, or a transport
+/// listener, [`Errno::LimitExceeded`] at the socket-memory budget, or a transport
 /// error.
 pub fn accept(socket: SocketId, deliver_port: u64) -> Result<SocketId, Errno> {
     let request = SocketRequest::Accept {

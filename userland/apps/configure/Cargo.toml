@@ -63,5 +63,10 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The freestanding `Run` binary also enables the help engine's syscall-backed
-# own-bundle `HelpSource` (`BundleHelp`), shared by every command app.
+# own-bundle `HelpSource` (`BundleHelp`), shared by every command app, and the
+# sysinfo client's `IpcTransport` — the only way the live delivery path can
+# read the machine's RAM total, which a derived `net.*` capacity is sized from.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
+    "program",
+] }

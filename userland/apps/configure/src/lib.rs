@@ -1017,7 +1017,7 @@ mod tests {
              net.tcp.syncookies auto\n\
              net.tcp.keepalive false\n\
              net.tcp.ecn false\n\
-             net.sockets.max auto\n\
+             net.sockets.mem auto\n\
              time.servers none\n\
              time.refresh 1d\n\
              input.mouse.debounce 25\n",

@@ -317,7 +317,7 @@ pub enum Errno {
     ///
     /// Emitted when a caller's share of a bounded resource is exhausted —
     /// the socket service refusing to open another socket once the
-    /// principal's socket quota is full. Distinct from
+    /// principal's share of the socket-memory budget is spent. Distinct from
     /// [`OutOfMemory`](Self::OutOfMemory) (a genuine allocation failure): the
     /// system is healthy, this principal has simply reached its accounted
     /// ceiling and must release before it may allocate more (fail closed).

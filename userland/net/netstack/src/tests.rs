@@ -21,7 +21,8 @@ use tairix_abi::net_ipc::{
     NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetServerAddr,
     NetSockProto, NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings, IF_NAME_LEN,
-    NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
+    MAX_CONNECTION_BUFFER_BYTES, MIN_CONNECTION_BUFFER_BYTES, NETSTACK_LIST_LIMIT_MAX,
+    NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
 };
 use tairix_abi::reply::{decode_page_reply, decode_status_reply};
 use tairix_abi::{
@@ -32,7 +33,7 @@ use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 
 use crate::channel::{FrameService, LocalFrameService};
-use crate::socket::{Delivery, SocketService};
+use crate::socket::{Delivery, SocketService, PER_SOCKET_OVERHEAD};
 use crate::{serve, Caller, Netstack};
 
 const MAC_A: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
@@ -108,10 +109,11 @@ fn socket_service() -> SocketService {
 }
 
 /// The stack-wide policy a deliverer pushes once it has resolved the
-/// machine's RAM against `net.sockets.max`, carrying `sockets_max`.
-fn settings_with_sockets(sockets_max: u32) -> NetworkSettings {
+/// machine's RAM against `net.sockets.mem`, carrying the socket-memory
+/// budget in bytes.
+fn settings_with_budget(socket_budget_bytes: u64) -> NetworkSettings {
     NetworkSettings {
-        sockets_max,
+        socket_budget_bytes,
         ..NetworkSettings::default()
     }
 }
@@ -1179,21 +1181,35 @@ fn a_handle_is_scoped_to_its_creating_principal() {
     );
 }
 
+/// A budget whose per-principal share is exactly `sockets` idle sockets'
+/// worth.
+///
+/// The share is a sixteenth of the budget, and an unconnected stream socket
+/// is committed to nothing beyond its own structure — so this is the
+/// arithmetic under test rather than a figure copied into the test.
+fn budget_for_idle_sockets(sockets: u64) -> u64 {
+    16 * sockets * PER_SOCKET_OVERHEAD
+}
+
+/// An open request for a socket committed to nothing but its own structure.
+fn idle_socket_request() -> alloc::vec::Vec<u8> {
+    encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Stream,
+        deliver_port: 0x5000,
+    })
+}
+
 #[test]
-fn the_socket_capacity_is_a_share_of_the_delivered_total() {
-    // A machine the deliverer sized at 1024 gives each principal a
-    // sixteenth of it; the figure is the delivered one, not a constant.
+fn a_principals_share_is_bounded_in_bytes_not_in_sockets() {
+    // Sized so one principal's share holds exactly eight idle sockets.
     let mut svc = socket_service();
     let mut stack = managed_stack();
-    stack.apply_settings(settings_with_sockets(1024), t(1));
+    stack.apply_settings(settings_with_budget(budget_for_idle_sockets(8)), t(1));
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
     let mut reply = [0u8; 64];
-    let request = encode_request(&SocketRequest::Socket {
-        family: NetAddrFamily::V4,
-        sock_type: SocketType::Datagram,
-        deliver_port: 0x5000,
-    });
+    let request = idle_socket_request();
     let mut open = |svc: &mut SocketService, stack: &mut Netstack, who: u8| {
         svc.serve(
             stack,
@@ -1205,7 +1221,7 @@ fn the_socket_capacity_is_a_share_of_the_delivered_total() {
             t(2),
         )
     };
-    for _ in 0..64 {
+    for _ in 0..8 {
         open(&mut svc, &mut stack, 1).expect("open within the principal's share");
     }
     // The refusal at the bound is unchanged: a typed `LimitExceeded`.
@@ -1215,82 +1231,208 @@ fn the_socket_capacity_is_a_share_of_the_delivered_total() {
 }
 
 #[test]
-fn a_smaller_machine_derives_a_smaller_share_and_a_larger_one_a_larger() {
+fn the_same_budget_carries_many_idle_sockets_or_few_busy_ones() {
+    // The claim the byte budget is built on, and the one a socket count
+    // cannot make: what a principal may hold depends on what its sockets are
+    // committed to, not on how many there are. One budget, two workloads.
     let sink = RecordingSink::new();
-    let request = encode_request(&SocketRequest::Socket {
-        family: NetAddrFamily::V4,
-        sock_type: SocketType::Datagram,
-        deliver_port: 0x5000,
-    });
-    // The share tracks the total it is a sixteenth of, so the same code
-    // serves a small board and a large server without an edit.
-    for (sockets_max, share) in [(256u32, 64usize), (4096, 1024)] {
-        let mut svc = socket_service();
-        let mut stack = managed_stack();
-        stack.apply_settings(settings_with_sockets(sockets_max), t(1));
-        let mut ent = counter_entropy();
-        let mut reply = [0u8; 64];
-        let allowed = sockets_max as usize / 16;
-        assert_eq!(allowed * 16, share * 4, "share arithmetic");
-        for _ in 0..allowed {
-            svc.serve(
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 256];
+    let share = 16 * u64::try_from(MIN_CONNECTION_BUFFER_BYTES).expect("fits");
+    let budget = 16 * share;
+    let open = idle_socket_request();
+
+    let mut idle = socket_service();
+    let mut stack = managed_stack();
+    stack.apply_settings(settings_with_budget(budget), t(1));
+    let mut idle_count = 0u32;
+    while idle
+        .serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &open,
+            &mut reply,
+            t(2),
+        )
+        .is_ok()
+    {
+        idle_count += 1;
+    }
+    assert_eq!(
+        u64::from(idle_count),
+        share / PER_SOCKET_OVERHEAD,
+        "an idle socket costs its structure and nothing else"
+    );
+
+    // The same budget spent on connections, each committed to a send and two
+    // receive buffers' worth: far fewer fit, and the stack says so rather
+    // than admitting sockets whose buffers it could not afford.
+    let mut busy = socket_service();
+    let mut stack = routed_stack();
+    stack.apply_settings(settings_with_budget(budget), t(1));
+    let mut busy_count = 0u32;
+    for i in 0..idle_count {
+        let Ok(out) = busy.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &open,
+            &mut reply,
+            t(2),
+        ) else {
+            break;
+        };
+        let id = decode_socket_reply(&reply[..out.len]).expect("socket id");
+        let connect = encode_request(&SocketRequest::Connect {
+            socket: id,
+            peer: v4_addr(10, 0, 2, 9, 9000 + u16::try_from(i % 5000).expect("fits")),
+        });
+        if busy
+            .serve(
                 &mut stack,
                 &net_caller(1),
+                &sink,
+                &mut ent,
+                &connect,
+                &mut reply,
+                t(2),
+            )
+            .is_err()
+        {
+            break;
+        }
+        busy_count += 1;
+    }
+    assert!(busy_count >= 1, "at least one connection is affordable");
+    assert!(
+        idle_count > 100 * busy_count,
+        "{idle_count} idle against {busy_count} connected"
+    );
+}
+
+#[test]
+fn a_connections_windows_are_sized_from_what_the_share_has_left() {
+    // The ceilings handed out cannot sum past the share, which is what makes
+    // the budget hold without clawing a buffer back: each connection is
+    // given a quarter of what remains, capped at the speculation ceiling,
+    // and refused outright once too little is left to work over.
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    stack.apply_settings(settings_with_budget(16 * 4 * 1024 * 1024), t(1));
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 256];
+    let open = idle_socket_request();
+    let share = stack.settings().socket_bytes_per_principal();
+    let who = net_caller(1).origin().proc_id();
+    let mut windows = alloc::vec::Vec::new();
+    for i in 0..512u16 {
+        let Ok(out) = svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &open,
+            &mut reply,
+            t(2),
+        ) else {
+            break;
+        };
+        let id = decode_socket_reply(&reply[..out.len]).expect("socket id");
+        let connect = encode_request(&SocketRequest::Connect {
+            socket: id,
+            peer: v4_addr(10, 0, 2, 9, 9000 + i),
+        });
+        if svc
+            .serve(
+                &mut stack,
+                &net_caller(1),
+                &sink,
+                &mut ent,
+                &connect,
+                &mut reply,
+                t(2),
+            )
+            .is_err()
+        {
+            break;
+        }
+        windows.push(svc.send_window_of(id).expect("a connected stream"));
+        // The invariant the whole design rests on, checked at every step.
+        assert!(
+            svc.charged_to(who) <= share,
+            "charged {} against a share of {share}",
+            svc.charged_to(who)
+        );
+    }
+    assert!(windows.len() > 2, "several connections were admitted");
+    assert_eq!(
+        windows[0], MAX_CONNECTION_BUFFER_BYTES,
+        "the first is capped by the speculation ceiling, not by the share"
+    );
+    for pair in windows.windows(2) {
+        assert!(
+            pair[1] <= pair[0],
+            "each later connection gets no more than the one before: {pair:?}"
+        );
+    }
+    assert!(
+        *windows.last().expect("non-empty") >= MIN_CONNECTION_BUFFER_BYTES,
+        "no connection is admitted below the workable floor"
+    );
+}
+
+#[test]
+fn the_budget_bounds_the_whole_stack_across_principals() {
+    // A budget with room for one idle socket per principal share: the
+    // seventeenth principal meets the stack-wide budget rather than its own
+    // share, which no per-principal check would have caught.
+    let mut svc = socket_service();
+    let mut stack = managed_stack();
+    stack.apply_settings(settings_with_budget(budget_for_idle_sockets(1)), t(1));
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = idle_socket_request();
+    let mut admitted = 0u8;
+    for who in 1..=17u8 {
+        if svc
+            .serve(
+                &mut stack,
+                &net_caller(who),
                 &sink,
                 &mut ent,
                 &request,
                 &mut reply,
                 t(2),
             )
-            .expect("open within the derived share");
+            .is_ok()
+        {
+            admitted += 1;
         }
-        assert_eq!(
-            svc.serve(
-                &mut stack,
-                &net_caller(1),
-                &sink,
-                &mut ent,
-                &request,
-                &mut reply,
-                t(2)
-            ),
-            Err(Errno::LimitExceeded)
-        );
-        assert_eq!(svc.len(), allowed);
     }
-}
-
-#[test]
-fn an_administrative_override_bounds_the_whole_table_across_principals() {
-    // `net.sockets.max 4` delivered: the share floors at one, so four
-    // distinct principals fill the table and the fifth meets the total.
-    let mut svc = socket_service();
-    let mut stack = managed_stack();
-    stack.apply_settings(settings_with_sockets(4), t(1));
-    let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
-    let mut reply = [0u8; 64];
-    let request = encode_request(&SocketRequest::Socket {
-        family: NetAddrFamily::V4,
-        sock_type: SocketType::Datagram,
-        deliver_port: 0x5000,
-    });
-    for who in 1..=4u8 {
-        svc.serve(
-            &mut stack,
-            &net_caller(who),
-            &sink,
-            &mut ent,
-            &request,
-            &mut reply,
-            t(2),
-        )
-        .expect("open within the overridden total");
-    }
+    assert!(admitted >= 1, "the stack serves somebody");
+    assert_eq!(
+        usize::from(admitted),
+        svc.len(),
+        "every one is in the table"
+    );
+    // Fewer than the sockets' own charges alone would allow: the table and
+    // index containers hold spare slots and growth headroom that no socket
+    // asked for, and the budget is the stack's real memory, so that is
+    // charged too.
+    let naive = budget_for_idle_sockets(1) / PER_SOCKET_OVERHEAD;
+    assert!(
+        u64::from(admitted) < naive,
+        "{admitted} admitted where the charges alone would allow {naive}"
+    );
     assert_eq!(
         svc.serve(
             &mut stack,
-            &net_caller(5),
+            &net_caller(200),
             &sink,
             &mut ent,
             &request,
@@ -1299,20 +1441,139 @@ fn an_administrative_override_bounds_the_whole_table_across_principals() {
         ),
         Err(Errno::LimitExceeded)
     );
-    assert_eq!(svc.len(), 4);
-    // Raising the ceiling admits more at once: the bound is the live
+
+    // Raising the budget admits more at once: the bound is the live
     // delivered policy, never a figure frozen when the table was built.
-    stack.apply_settings(settings_with_sockets(64), t(3));
+    stack.apply_settings(settings_with_budget(budget_for_idle_sockets(64)), t(3));
     svc.serve(
         &mut stack,
-        &net_caller(5),
+        &net_caller(200),
         &sink,
         &mut ent,
         &request,
         &mut reply,
         t(4),
     )
-    .expect("a raised ceiling takes effect at once");
+    .expect("a raised budget takes effect at once");
+}
+
+#[test]
+fn enough_principals_cannot_jointly_outgrow_the_stack_budget() {
+    // A share bounds one principal and sixteen shares come to the budget,
+    // but a share does not shrink as others fill — so without bounding every
+    // ceiling by what the *stack* has left too, enough principals each
+    // taking their own share would together pass it.
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    stack.apply_settings(settings_with_budget(16 * 1024 * 1024), t(1));
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 256];
+    let open = idle_socket_request();
+    let budget = stack.settings().socket_budget_bytes;
+
+    // Sixty-four distinct principals, far more than the sixteen the share
+    // divides the budget among, each opening and connecting one stream.
+    for who in 1..=64u8 {
+        let Ok(out) = svc.serve(
+            &mut stack,
+            &net_caller(who),
+            &sink,
+            &mut ent,
+            &open,
+            &mut reply,
+            t(2),
+        ) else {
+            continue;
+        };
+        let id = decode_socket_reply(&reply[..out.len]).expect("socket id");
+        let connect = encode_request(&SocketRequest::Connect {
+            socket: id,
+            peer: v4_addr(10, 0, 2, 9, 9000 + u16::from(who)),
+        });
+        let _ = svc.serve(
+            &mut stack,
+            &net_caller(who),
+            &sink,
+            &mut ent,
+            &connect,
+            &mut reply,
+            t(2),
+        );
+        assert!(
+            svc.committed_bytes() <= budget,
+            "committed {} against a budget of {budget} after principal {who}",
+            svc.committed_bytes()
+        );
+    }
+    assert!(svc.len() > 1, "the stack served more than one principal");
+}
+
+#[test]
+fn closing_a_socket_returns_its_bytes_to_the_share() {
+    // Accounting that only ever grew would turn a busy-then-idle principal
+    // into a permanently exhausted one.
+    let mut svc = socket_service();
+    let mut stack = managed_stack();
+    stack.apply_settings(settings_with_budget(budget_for_idle_sockets(4)), t(1));
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 256];
+    let open = idle_socket_request();
+    let who = net_caller(1).origin().proc_id();
+    let mut ids = alloc::vec::Vec::new();
+    for _ in 0..4 {
+        let out = svc
+            .serve(
+                &mut stack,
+                &net_caller(1),
+                &sink,
+                &mut ent,
+                &open,
+                &mut reply,
+                t(2),
+            )
+            .expect("within the share");
+        ids.push(decode_socket_reply(&reply[..out.len]).expect("socket id"));
+    }
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &open,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::LimitExceeded)
+    );
+    for id in &ids {
+        let close = encode_request(&SocketRequest::Close { socket: *id });
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &close,
+            &mut reply,
+            t(3),
+        )
+        .expect("close");
+    }
+    assert_eq!(svc.charged_to(who), 0, "nothing is still charged");
+    for _ in 0..4 {
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &open,
+            &mut reply,
+            t(4),
+        )
+        .expect("the closed sockets' bytes came back");
+    }
 }
 
 #[test]
@@ -2596,6 +2857,14 @@ impl PeerTcpNet {
         }
     }
 
+    /// The same peer, but actively opening toward `port` — so the service
+    /// under test is the *listener* and the accept path is exercised.
+    fn connecting(now: Duration64, port: u16) -> Self {
+        let mut peer = Self::new(now);
+        peer.tcb = Tcb::connect(TcpConfig::default(), PEER_PORT, port, 0x5000, now);
+        peer
+    }
+
     /// Close the server's side of the connection, so its FIN follows the
     /// client's and the teardown can actually complete. The echo server
     /// never closes on its own, so a test that needs a finished teardown
@@ -2676,8 +2945,14 @@ impl Net for PeerTcpNet {
                                     source: *s,
                                     destination: *d,
                                 };
+                                // Demultiplex as a real peer would: this
+                                // fixture holds one connection, and feeding
+                                // it a segment for another port would
+                                // confuse the state machine under test.
                                 if let Some(seg) = TcpSegment::parse(pseudo, segment) {
-                                    self.tcb.on_segment(&seg, *ecn, self.now);
+                                    if seg.destination_port == PEER_PORT {
+                                        self.tcb.on_segment(&seg, *ecn, self.now);
+                                    }
                                 }
                             }
                         }
@@ -2824,6 +3099,19 @@ impl<'r> StreamFixture<'r> {
             ns: routed_stack(),
             svc: socket_service(),
             fs: local_service_tcp(PeerTcpNet::new(now), region),
+            who: caller(&[CapabilityId::NET]),
+            now,
+        }
+    }
+
+    /// The same fixture with the peer actively opening toward `port`, so
+    /// the service under test serves the listening side.
+    fn listening(region: &'r mut [u8], port: u16) -> Self {
+        let now = t(2);
+        Self {
+            ns: routed_stack(),
+            svc: socket_service(),
+            fs: local_service_tcp(PeerTcpNet::connecting(now, port), region),
             who: caller(&[CapabilityId::NET]),
             now,
         }
@@ -3460,7 +3748,7 @@ fn apply_network_settings_requires_cap_net_admin() {
         ipv6_privacy: false,
         tcp_keepalive: false,
         tcp_ecn: false,
-        sockets_max: 1024,
+        socket_budget_bytes: 128 * 1024 * 1024,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     // A broker capability (introspect) is not admin authority.
@@ -3493,7 +3781,7 @@ fn apply_network_settings_is_applied_and_audited() {
         ipv6_privacy: false,
         tcp_keepalive: true,
         tcp_ecn: true,
-        sockets_max: 1024,
+        socket_budget_bytes: 128 * 1024 * 1024,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     let len = serve(
@@ -3527,7 +3815,7 @@ fn disabling_a_family_refuses_a_socket_open_for_it() {
             ipv6_privacy: false,
             tcp_keepalive: false,
             tcp_ecn: false,
-            sockets_max: 1024,
+            socket_budget_bytes: 128 * 1024 * 1024,
         },
         t(2),
     );
@@ -3596,7 +3884,7 @@ fn applying_settings_reconfigures_an_existing_interface() {
             ipv6_privacy: false,
             tcp_keepalive: false,
             tcp_ecn: false,
-            sockets_max: 1024,
+            socket_budget_bytes: 128 * 1024 * 1024,
         },
         t(2),
     );
@@ -4110,15 +4398,19 @@ fn listen_config_maps_the_syncookie_keepalive_and_ecn_policy() {
     use tairix_net::tcp::listen::ListenConfig;
     // `always` holds no half-open state (every SYN → stateless cookie); with
     // keepalive and ECN on, accepted connections carry both in their template.
-    let always = listen_config(NetworkSettings {
-        ipv4_enabled: true,
-        ipv6_enabled: true,
-        syncookies_always: true,
-        ipv6_privacy: false,
-        tcp_keepalive: true,
-        tcp_ecn: true,
-        sockets_max: 1024,
-    });
+    let always = listen_config(
+        NetworkSettings {
+            ipv4_enabled: true,
+            ipv6_enabled: true,
+            syncookies_always: true,
+            ipv6_privacy: false,
+            tcp_keepalive: true,
+            tcp_ecn: true,
+            socket_budget_bytes: 128 * 1024 * 1024,
+        },
+        u64::from(u32::MAX),
+    )
+    .expect("a generous allowance affords a listener");
     assert_eq!(always.max_half_open, 0);
     assert!(
         always.template.enable_keepalive,
@@ -4131,15 +4423,19 @@ fn listen_config_maps_the_syncookie_keepalive_and_ecn_policy() {
     // `auto` keeps the bounded default backlog; keepalive and ECN off leave
     // the template's keepalive disabled (RFC 1122 §4.2.3.6 default) and the
     // connection Not-ECT.
-    let auto = listen_config(NetworkSettings {
-        ipv4_enabled: true,
-        ipv6_enabled: true,
-        syncookies_always: false,
-        ipv6_privacy: false,
-        tcp_keepalive: false,
-        tcp_ecn: false,
-        sockets_max: 1024,
-    });
+    let auto = listen_config(
+        NetworkSettings {
+            ipv4_enabled: true,
+            ipv6_enabled: true,
+            syncookies_always: false,
+            ipv6_privacy: false,
+            tcp_keepalive: false,
+            tcp_ecn: false,
+            socket_budget_bytes: 128 * 1024 * 1024,
+        },
+        u64::from(u32::MAX),
+    )
+    .expect("a generous allowance affords a listener");
     assert_eq!(auto.max_half_open, ListenConfig::default().max_half_open);
     assert!(
         !auto.template.enable_keepalive,
@@ -5014,4 +5310,162 @@ fn a_device_that_refuses_the_group_set_is_reported_not_hidden() {
         .service_interface(name("wan"), &mut fs, t(2), ServiceHint::default())
         .expect("pump");
     assert!(again.multicast_refused.is_some());
+}
+
+/// Open and connect streams of `owner`'s own until a further connection
+/// would no longer be given a *full* window, so the next admission is sized
+/// against a share with less than that left.
+///
+/// Deliberately never pumps: the peer only sends its SYN when the link runs,
+/// and a handshake landing before the share tightens would be admitted at
+/// the full window this exists to move past.
+fn spend_share_to_a_partial_window(fx: &mut StreamFixture<'_>, owner: ProcId, share: u64) {
+    let mut response = [0u8; 64];
+    let mut spent = 0u16;
+    while NetworkSettings::connection_buffer_bytes(share.saturating_sub(fx.svc.charged_to(owner)))
+        .is_some_and(|window| window >= MAX_CONNECTION_BUFFER_BYTES)
+    {
+        let reply = fx
+            .serve(
+                SocketRequest::Socket {
+                    family: NetAddrFamily::V4,
+                    sock_type: SocketType::Stream,
+                    deliver_port: DELIVER_PORT,
+                },
+                &mut response,
+            )
+            .expect("open");
+        let id = decode_socket_reply(&response[..reply.len]).expect("socket id");
+        // An explicit local port each: the fixture's entropy is a constant,
+        // so every ephemeral draw would land on the same candidate.
+        fx.serve(
+            SocketRequest::Bind {
+                socket: id,
+                local: v4_addr(0, 0, 0, 0, 20000 + spent),
+            },
+            &mut response,
+        )
+        .expect("bind");
+        fx.serve(
+            SocketRequest::Connect {
+                socket: id,
+                peer: sockaddr_v4(V4_B, 9000 + spent),
+            },
+            &mut response,
+        )
+        .expect("connect");
+        spent += 1;
+        assert!(spent < 64, "the share tightened before the loop bound");
+    }
+    assert!(spent > 0, "the share started with room for a full window");
+}
+
+#[test]
+fn a_listener_and_its_children_are_priced_against_the_owners_share() {
+    const PORT: u16 = 8099;
+    let mut region = rings_region();
+    let mut fx = StreamFixture::listening(&mut region, PORT);
+    // Generous enough to afford a listener: its SYN-flood backlog is a fixed
+    // defence and is charged, not scaled.
+    fx.ns
+        .apply_settings(settings_with_budget(16 * 2 * 1024 * 1024), t(1));
+    let owner = fx.who.origin().proc_id();
+    let share = fx.ns.settings().socket_bytes_per_principal();
+
+    let mut response = [0u8; 64];
+    let reply = fx
+        .serve(
+            SocketRequest::Socket {
+                family: NetAddrFamily::V4,
+                sock_type: SocketType::Stream,
+                deliver_port: DELIVER_PORT,
+            },
+            &mut response,
+        )
+        .expect("open");
+    let listener = decode_socket_reply(&response[..reply.len]).expect("socket id");
+    let bare = fx.svc.charged_to(owner);
+    fx.serve(
+        SocketRequest::Bind {
+            socket: listener,
+            local: v4_addr(0, 0, 0, 0, PORT),
+        },
+        &mut response,
+    )
+    .expect("bind");
+    fx.serve(SocketRequest::Listen { socket: listener }, &mut response)
+        .expect("listen");
+    let listening = fx.svc.charged_to(owner);
+    assert!(
+        listening > bare,
+        "a listener's backlog and queue are charged up front"
+    );
+    assert!(listening <= share, "and fit the share");
+
+    spend_share_to_a_partial_window(&mut fx, owner, share);
+
+    // The peer connects over the real link; the completed handshake becomes a
+    // child socket, charged its own window out of what the share has left.
+    fx.pump();
+    let reply = fx
+        .serve(
+            SocketRequest::Accept {
+                socket: listener,
+                deliver_port: 0x6000,
+            },
+            &mut response,
+        )
+        .expect("a connection was ready");
+    let child = decode_socket_reply(&response[..reply.len]).expect("child id");
+    let window = fx
+        .svc
+        .send_window_of(child)
+        .expect("the child is connected");
+    assert!(
+        (MIN_CONNECTION_BUFFER_BYTES..MAX_CONNECTION_BUFFER_BYTES).contains(&window),
+        "the child's window came from the share as it now stands: {window}"
+    );
+    assert!(
+        window < fx.svc.send_window_of(listener).unwrap_or(usize::MAX),
+        "and not from the template the listener began with"
+    );
+    assert!(
+        fx.svc.charged_to(owner) > listening,
+        "the child is charged on top of its listener"
+    );
+    assert!(
+        fx.svc.charged_to(owner) <= share,
+        "and the share still holds"
+    );
+}
+
+#[test]
+fn a_share_that_cannot_afford_a_listener_refuses_to_listen() {
+    // The SYN-flood backlog is a fixed defence: a share too small to hold it
+    // means a stack that can connect but not serve, said plainly rather than
+    // by handing back a listener with no brake.
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    stack.apply_settings(settings_with_budget(budget_for_idle_sockets(8)), t(1));
+    let who = net_caller(1);
+    let st = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Bind {
+            socket: st,
+            local: v4_addr(0, 0, 0, 0, 8098),
+        },
+    )
+    .expect("bind");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Listen { socket: st }
+        ),
+        Err(Errno::LimitExceeded)
+    );
 }

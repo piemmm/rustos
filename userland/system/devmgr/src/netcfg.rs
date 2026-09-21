@@ -511,9 +511,9 @@ mod tests {
             ipv6_privacy: privacy,
             tcp_keepalive: keepalive,
             tcp_ecn: ecn,
-            // The capacity a 1 GiB machine derives, so a delivered policy
+            // The budget a 1 GiB machine derives, so a delivered policy
             // is a fixed figure rather than the host's own RAM.
-            sockets_max: 1024,
+            socket_budget_bytes: 128 * 1024 * 1024,
         }
     }
 
@@ -539,8 +539,11 @@ mod tests {
             settings(true, false, true, true, true, true)
         );
         // A capacity follows the machine the deliverer read, so the same
-        // document yields a different table on a larger one.
-        assert_eq!(config.network_settings(512 * GIB).sockets_max, 524_288);
+        // document yields a larger budget on a larger one.
+        assert_eq!(
+            config.network_settings(512 * GIB).socket_budget_bytes,
+            64 * GIB
+        );
     }
 
     #[test]

@@ -42,7 +42,7 @@ tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # kernel→userland dependency edge.
 tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
 # The ungated System Information API client: the machine's total RAM, which
-# the socket-table capacity in the delivered `net.*` policy is derived from.
+# the socket-memory budget in the delivered `net.*` policy is derived from.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
@@ -72,3 +72,9 @@ tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0", option
 # with `default-features = false`, so it never enters the kernel image.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The sysinfo client's `IpcTransport`, which the boot delivery path reads the
+# machine's RAM total through; it needs that same runtime, so the feature is
+# enabled only where the runtime is linked.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
+    "program",
+] }

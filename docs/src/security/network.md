@@ -12,7 +12,8 @@ model, the defences, and the audit event-id registry for network events.
 | Threat | Defence |
 |---|---|
 | Hostile frame parsing (malformed Ethernet/IP/ICMP/TCP/UDP, truncation, option abuse) | `lib/net` decoders are total and bounded; `netstack` is the §19.5 minimum-capability parser sandbox — it holds no filesystem or spawn authority. Every decoder has a fuzz harness (`fuzz_net_*`). |
-| Fragment/reassembly resource exhaustion | Reassembly sets are capacity-bounded; the oldest incomplete reassembly is evicted (fail closed), and the eviction is counted (`stats:net/stack/reassembly-evicted`). |
+| Fragment/reassembly resource exhaustion | Reassembly sets are capacity-bounded; the oldest incomplete reassembly is evicted (fail closed), and the eviction is counted (`stats:net/stack/reassembly-evicted`). TCP out-of-order reassembly is bounded in bytes as well as segments: a segment need only overlap the receive window to be acceptable, so its payload beyond one receive buffer's span is dropped rather than held, and the peer retransmits it once the gap closes. |
+| Socket memory exhaustion (many sockets, or few fully-buffered ones) | The socket table is bounded by the delivered `net.sockets.mem` **byte** budget, an eighth of RAM by default, with a sixteenth per principal. Each socket is charged its *commitment* — what it may grow to — so admission reserves rather than discovering the overrun later, and a new connection's windows are sized from what its owner's share *and* the stack's budget have left. Both bounds fail closed with an audited `LimitExceeded`. A listener is priced at `listen` time, including the queue depth only remote peers decide; its SYN-flood backlog is charged but never scaled down, so the brake cannot be weakened by memory pressure. |
 | SYN flood (half-open exhaustion) | The listener keeps a bounded half-open backlog; on overflow it answers with stateless RFC 4987 SYN cookies (a keyed MAC over the 4-tuple), holding no per-connection state. The brake engaging is audited once per listener (`SYN_COOKIES_ENGAGED`) and counted (`stats:net/stack/syn-cookies`, and the accepted/rejected split), so a flood in progress is visible rather than merely survived; the whole path is proven live by the `netstack_synflood_qemu_aarch64` vertical. |
 | ICMP error storms / amplification | ICMP/ICMPv6 error emission is rate-limited; suppressed errors are counted (`stats:net/stack/icmp-suppressed`) so the throttling is visible. |
 | Unprivileged origination of raw/spoofed traffic | Sockets are capabilities, not ambient authority: a socket is a kernel-brokered IPC channel obtained through the versioned socket ABI and gated per operation — outbound transport under `CAP_NET`, binding a privileged (well-known) port under `CAP_NET_BIND_PRIVILEGED`, raw access under `CAP_NET_RAW`. |
@@ -75,7 +76,7 @@ one range test. The assigned identifiers:
 
 The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
 `net.ipv6.privacy`, `net.tcp.syncookies`, `net.tcp.keepalive`,
-`net.tcp.ecn`, `net.sockets.max`) is read from
+`net.tcp.ecn`, `net.sockets.mem`) is read from
 `system.conf` and delivered to
 `netstack` by the FS-capable device manager, which records the delivery
 in its own `devmgr` range: `13_012` `NETWORK_SETTINGS_DELIVERED` (Info,

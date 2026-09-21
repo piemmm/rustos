@@ -73,12 +73,16 @@ dan sylw yn arafach — nid yw byth yn newid canlyniad.
   cysylltiadau'n Not-ECT; mae `true` yn cynnig ECN yn yr ysgwyd llaw ac
   yna'n trin marc tagfa fel arwydd i arafu yn hytrach na gorfodi colli
   pecyn.
-- `net.sockets.max` — `auto` neu nifer o socedi: y nenfwd ar y socedi
-  y mae'r pentwr rhwydwaith yn eu dal ar draws pob prifathro. Mae `auto`
-  (y diofyn) yn ei faintioli yn ôl RAM y peiriant, fel nad yw gweinydd mawr
-  wedi'i rwymo i ffigwr a ddewiswyd ar un bach; mae nifer yn disodli hynny
-  ar gyfer llwyth rydych chi'n ei adnabod yn well. Caiff pob prifathro ddal
-  un rhan o un deg chwech o'r cyfanswm effeithiol.
+- `net.sockets.mem` — `auto` neu faint mewn beitiau fel `64M`: y cof y
+  caiff y pentwr rhwydwaith ei ddal mewn cyflwr socedi ar draws pob
+  prifathro. Mae `auto` (y diofyn) yn ei faintioli yn ôl RAM y peiriant,
+  fel nad yw gweinydd mawr wedi'i rwymo i ffigwr a ddewiswyd ar un bach;
+  mae maint yn disodli hynny ar gyfer llwyth rydych chi'n ei adnabod yn
+  well. Caiff pob prifathro ddal un rhan o un deg chwech o'r gyllideb
+  effeithiol. Beitiau yn hytrach na nifer o socedi, am fod yr un nifer o
+  socedi yn ychydig gilobeitiau pan fyddant yn segur ac yn fegabeitiau
+  pan fyddant yn llawn: mae'r gyllideb yn cario llawer o gysylltiadau
+  tawel neu lai o rai prysur, fel y mae'r llwyth mewn gwirionedd.
 - `time.servers` — `none` neu restr o weinyddion amser rhwydwaith wedi
   eu gwahanu â choma, pob un yn enw gwesteiwr neu'n gyfeiriad. Mae `none`
   (y diofyn) yn golygu na chaiff y cloc ei osod o'r rhwydwaith erioed:

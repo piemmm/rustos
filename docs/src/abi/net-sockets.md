@@ -259,4 +259,5 @@ fuzz harness (`tests/fuzz_decode.rs`).
 Socket refusals use the shared `Errno` table, including the network codes
 `AddressInUse`, `AddressUnavailable`, `NetworkUnreachable`, `NotConnected`,
 and `LimitExceeded` (the last is the fail-closed result of a principal
-reaching its accounted socket quota).
+reaching its share of the socket-memory budget, or the stack reaching the
+whole of it).

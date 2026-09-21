@@ -2699,22 +2699,44 @@ tree, exactly like `os.*`:
   the handshake and, once negotiated, mark eligible segments ECT(0) and
   react to a CE mark as a congestion signal instead of forcing a drop
   (N13).
-- `net.sockets.max` (`auto`|a socket count) — the socket table's
-  capacity. A *capacity*, so it is derived and not written down: `auto`
-  (the default) sizes the total from the machine's usable physical RAM —
-  an eighth of it at the configured worst case of one socket's TCP send
-  and receive buffers — and each principal may hold a sixteenth of that
-  total. A 1 GiB machine comes to 1024 and 64, which is what the
-  superseded hand-picked constants were, so the derivation agrees with
-  the considered figure where it applied and scales where it did not. An
-  explicit count is the administrator overriding it; there is
-  deliberately no `unlimited`, because the table bounds the stack's own
-  heap. The fail-closed `LimitExceeded` refusal at the bound is
-  unchanged. Because the stack reads neither the machine nor
-  `system.conf`, both deliverers resolve the document against the
-  ungated System Information API total and send the one effective
-  figure — which is why `SystemConfig::network_settings` takes the RAM
-  total as an argument.
+- `net.sockets.mem` (`auto`|a byte size such as `64M`) — the memory the
+  socket table may hold. A *capacity*, so it is derived and not written
+  down: `auto` (the default) takes an eighth of the machine's usable
+  physical RAM, and each principal may hold a sixteenth of that, so there
+  is always room for sixteen principals at their full share. A 1 GiB
+  machine comes to 128 MiB and 8 MiB. An explicit size is the
+  administrator overriding it; there is deliberately no `unlimited`,
+  because the budget bounds the stack's own heap. The fail-closed
+  `LimitExceeded` refusal at the bound is unchanged. Because the stack
+  reads neither the machine nor `system.conf`, both deliverers resolve the
+  document against the ungated System Information API total and send the
+  one effective figure — which is why `SystemConfig::network_settings`
+  takes the RAM total as an argument.
+  - **Bytes, not a socket count, and the commitment rather than the
+    occupancy.** A count cannot bound the resource at stake: the same
+    number of sockets is a few kilobytes idle and tens of megabytes fully
+    buffered. And charging what a socket *holds* cannot bound it either,
+    because the window ceilings are handed out long before the data that
+    fills them arrives — a principal could open any number of quiet
+    connections, each already entitled to a quarter of its share, and the
+    stack would have nothing left to refuse when they all filled. So
+    admission reserves: `TcpConfig::committed_bytes` and
+    `ListenConfig::committed_bytes` price a configuration up front, and
+    each new connection's ceilings are sized from what is left of its
+    owner's share **and** of the whole budget, whichever binds. Both,
+    because a share does not shrink as *other* principals fill, so enough
+    of them each taking their own share would together pass the budget.
+  - **A listener is priced at `listen` time**, because only remote peers
+    decide how much it comes to hold: its bounded half-open backlog plus
+    its queue of completed connections at the window its template grants
+    each. The queue depth is what the budget sets
+    (`ListenConfig::fit_within`, in `lib/net` where the sizes are known),
+    out of a quarter of the remaining share. The backlog is the SYN-flood
+    brake and is charged but never scaled — a defence does not shrink
+    because memory is tight — so a share too small to hold it refuses
+    `listen` outright rather than serving without a brake;
+    `net.tcp.syncookies always` sets it to zero and so costs nothing,
+    which is how a very small budget still serves.
 - Per-interface settings live in `network.conf` (6.1), never in
   `system.conf`; `configure net.<key> <value>` edits the stack-wide
   registry, and `configure` grows no interface sub-grammar — interface

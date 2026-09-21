@@ -73,12 +73,16 @@ afetado — nunca altera um resultado.
   deixa as ligações Not-ECT; `true` oferece ECN no aperto de mão e, a
   seguir, trata uma marca de congestão como um sinal para abrandar em
   vez de forçar a perda de um pacote.
-- `net.sockets.max` — `auto` ou um número de sockets: o limite de
-  sockets que a pilha de rede mantém entre todos os principais. `auto` (a
-  predefinição) dimensiona-o pela RAM da máquina, para que um servidor
-  grande não fique preso a um número escolhido num pequeno; um número
-  substitui-o para uma carga que conhece melhor. Cada principal pode ter um
-  dezasseis avos do total efetivo.
+- `net.sockets.mem` — `auto` ou um tamanho em bytes como `64M`: a
+  memória que a pilha de rede pode manter em estado de sockets entre todos
+  os principais. `auto` (a predefinição) dimensiona-a pela RAM da máquina,
+  para que um servidor grande não fique preso a um número escolhido num
+  pequeno; um tamanho substitui-o para uma carga que conhece melhor. Cada
+  principal pode ter um dezasseis avos do orçamento efetivo. Bytes e não
+  um número de sockets, porque o mesmo número de sockets são alguns
+  kilobytes em repouso e megabytes com os buffers cheios: o orçamento
+  leva muitas ligações tranquilas ou menos ligações ativas, conforme a
+  carga realmente é.
 - `time.servers` — `none` ou uma lista de servidores de hora de rede
   separada por vírgulas, cada um um nome de anfitrião ou um endereço.
   `none` (a predefinição) significa que o relógio nunca é acertado a

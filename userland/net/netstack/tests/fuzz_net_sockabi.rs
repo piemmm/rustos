@@ -187,9 +187,16 @@ fn serve_never_panics_and_gates_on_cap_net() {
                 assert!(result.is_err(), "a capless caller is always refused");
                 assert_eq!(svc.len(), before, "no socket created without CAP_NET");
             }
-            // The delivered capacity is never exceeded, whatever the
-            // request stream asked for.
-            assert!(svc.len() <= stack.settings().sockets_max as usize);
+            // The delivered budget is never exceeded, whatever the request
+            // stream asked for. Bytes, not sockets: the same table is a few
+            // kilobytes idle and megabytes fully buffered, and it is the
+            // memory the stack must not overrun.
+            assert!(
+                svc.committed_bytes() <= stack.settings().socket_budget_bytes,
+                "committed {} against a budget of {}",
+                svc.committed_bytes(),
+                stack.settings().socket_budget_bytes
+            );
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

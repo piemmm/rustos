@@ -9395,12 +9395,22 @@ host key is identical on every machine flashed from it.
 
 - `netstack`'s `MAX_SOCKETS_PER_PRINCIPAL = 64` / `MAX_SOCKETS_TOTAL = 1024`
   were hand-picked constants whose rustdoc argued they were fixed security
-  bounds. **Done (S0b).** The total is a §24.1 capacity (it bounds
-  `netstack`'s own heap) and is derived from discovered RAM; the per-principal
-  figure is a sixteenth share of it; `net.sockets.max` overrides the
-  derivation under the existing `CAP_NET_ADMIN`, and the fail-closed refusal
-  is untouched. Letting the capacity scale first required the socket table to
-  be indexed rather than scanned per received packet, so that landed with it.
+  bounds. **Done (S0b).** What replaced them is a §24.1 capacity in *bytes*,
+  not a larger count: a count cannot bound the resource at stake, since the
+  same number of sockets is a few kilobytes idle and tens of megabytes fully
+  buffered. The budget is an eighth of discovered RAM with a sixteenth per
+  principal, `net.sockets.mem` overrides it under the existing
+  `CAP_NET_ADMIN`, and the fail-closed refusal is untouched. Each socket is
+  charged its **commitment** rather than its occupancy, because the window
+  ceilings are handed out before the data that fills them arrives, so
+  admission has to reserve; a new connection's ceilings are sized from what
+  its owner's share *and* the whole budget have left. Letting the bound scale
+  first required the socket table to be indexed rather than scanned per
+  received packet, so that landed with it, and three `lib/net` defects fell
+  out: a listener holding two connections for one peer after an ACK replay, a
+  reassembly set bounded in segments but not bytes, and `bind` silently
+  moving a bound socket's port. The one path still scanning the table is
+  `accept` (`plans/OPEN-DEFECTS.md` D145).
 - `lib/sandbox` has only a one-shot request→reply worker; an SSH connection is
   a duplex session either side may originate on. A `session` seam lands beside
   `host`/`worker` (§27), reusable by any future long-lived protocol service.

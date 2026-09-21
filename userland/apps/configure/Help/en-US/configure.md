@@ -76,12 +76,16 @@ never changes a result.
   connections Not-ECT; `true` offers ECN in the handshake and, once
   negotiated, treats a congestion mark as a signal to slow down instead
   of forcing a packet drop.
-- `net.sockets.max` — `auto` or a socket count: the ceiling on the
-  sockets the network stack holds across every principal. `auto` (the
-  default) sizes it from the machine's own RAM, so a large server is not
-  held to a figure chosen on a small one; a count overrides that for a
-  workload you know better. Each principal may hold a sixteenth of the
-  effective total, so a full table always has room for sixteen.
+- `net.sockets.mem` — `auto` or a byte size such as `64M`: the memory
+  the network stack may hold in socket state across every principal.
+  `auto` (the default) sizes it from the machine's own RAM, so a large
+  server is not held to a figure chosen on a small one; a size overrides
+  that for a workload you know better. Each principal may hold a
+  sixteenth of the effective budget, so there is always room for sixteen.
+  Bytes rather than a socket count, because the same number of sockets is
+  a few kilobytes when idle and megabytes when fully buffered: the budget
+  carries many quiet connections or fewer busy ones, as the workload
+  really is.
 - `time.servers` — `none` or a comma-separated list of network time
   servers, each a host name or an address literal. `none` (the default)
   means the clock is never set from the network: TAIRiX has no time-server

@@ -465,3 +465,128 @@ fn ipv6_handshake_completes() {
     let conn = listener.accept().expect("v6 cookie handshake accepted");
     assert!(conn.tcb.is_established());
 }
+
+#[test]
+fn a_replayed_handshake_ack_never_queues_a_second_connection_for_one_peer() {
+    let now = ms(0);
+    let secret = secret();
+    let mut listener = Listener::new(LOCAL_PORT, listen_config(64, 8));
+    let p = peer(203, 0, 113, 91, 40900);
+
+    // The full-state path derives its initial sequence from the same keyed MAC
+    // a cookie carries, so this peer's own segments stay cookie-valid. A replay
+    // of one must not reconstruct a rival connection for the four-tuple the
+    // queued one still holds.
+    let mut client = Tcb::connect(TcpConfig::default(), p.port, LOCAL_PORT, 0xC000, now);
+    let syn = drain(&mut client, p, now).remove(0);
+    for reply in to_listener(&mut listener, p, &syn, now, &secret) {
+        feed_client(&mut client, p, &reply, now);
+    }
+    let ack = drain(&mut client, p, now).remove(0);
+    let _ = to_listener(&mut listener, p, &ack, now, &secret);
+    assert_eq!(listener.pending(), 1);
+    assert_eq!(listener.stats().accepted, 1);
+
+    for _ in 0..8 {
+        let replies = to_listener(&mut listener, p, &ack, now, &secret);
+        assert!(replies.is_empty(), "a replay is dropped, never answered");
+    }
+    assert_eq!(listener.pending(), 1, "still exactly one connection");
+    assert_eq!(listener.stats().accepted, 1);
+    assert_eq!(listener.stats().cookies_accepted, 0);
+
+    // A retransmitted SYN for the same peer is dropped too: the peer already
+    // has its SYN-ACK and a completed connection waiting.
+    for _ in 0..4 {
+        let _ = to_listener(&mut listener, p, &syn, now, &secret);
+    }
+    assert_eq!(listener.pending(), 1);
+    assert_eq!(listener.half_open_len(), 0, "no rival half-open opened");
+    assert_eq!(listener.stats().half_open_started, 1);
+
+    // Once taken, the listener holds nothing for the peer and a genuinely new
+    // incarnation is admitted as usual.
+    let _ = listener.accept().expect("the one connection");
+    let _ = to_listener(&mut listener, p, &syn, now, &secret);
+    assert_eq!(listener.half_open_len(), 1, "a new incarnation is admitted");
+}
+
+#[test]
+fn the_committed_cost_is_the_configuration_not_what_is_held() {
+    // A listener's memory is decided by remote peers, so a budget has to be
+    // able to price one before it is created and cannot learn the price by
+    // watching. The figure is therefore the configuration's, and it does not
+    // move as connections arrive, complete, and are taken.
+    let now = ms(0);
+    let secret = secret();
+    let cfg = listen_config(64, 8);
+    let mut listener = Listener::new(LOCAL_PORT, cfg);
+    let priced = cfg.committed_bytes();
+    assert_eq!(listener.committed_bytes(), priced);
+    assert!(
+        priced >= 8 * TcpConfig::default().committed_bytes(),
+        "the queue's own connections are priced into it"
+    );
+
+    let p = peer(203, 0, 113, 120, 41200);
+    let conn = establish(&mut listener, p, now, &secret);
+    assert_eq!(
+        listener.committed_bytes(),
+        priced,
+        "arrival changes nothing"
+    );
+    drop(conn);
+
+    let ghost = peer(203, 0, 113, 121, 41201);
+    let mut client = Tcb::connect(TcpConfig::default(), ghost.port, LOCAL_PORT, 0xD000, now);
+    let syn = drain(&mut client, ghost, now).remove(0);
+    let _ = to_listener(&mut listener, ghost, &syn, now, &secret);
+    assert_eq!(
+        listener.committed_bytes(),
+        priced,
+        "a backlog slot is priced in"
+    );
+    listener.advance(Duration64::from_secs(30), |_, _| true);
+    assert_eq!(listener.committed_bytes(), priced, "so is its expiry");
+}
+
+#[test]
+fn a_listener_configuration_is_fitted_to_its_allowance() {
+    // Only remote peers decide how many completed connections wait at once,
+    // so the queue depth is what an allowance sets. The SYN-flood backlog is
+    // never lowered to make room for it.
+    let base = ListenConfig::default();
+    let backlog = ListenConfig {
+        max_accept: 0,
+        ..base
+    }
+    .committed_bytes();
+    let per_one = (base.committed_bytes() - backlog) / base.max_accept;
+    assert!(per_one > 0);
+
+    // Room for three queued connections: the depth becomes three, and the
+    // fitted configuration's own price is within the allowance it was given.
+    let allowance = backlog + 3 * per_one;
+    let mut three = base;
+    assert!(three.fit_within(allowance));
+    assert_eq!(three.max_accept, 3);
+    assert!(three.committed_bytes() <= allowance);
+    assert_eq!(three.max_half_open, base.max_half_open, "the brake stands");
+
+    // A generous allowance never *raises* the depth past the default.
+    let mut generous = base;
+    assert!(generous.fit_within(usize::MAX));
+    assert_eq!(generous.max_accept, base.max_accept);
+
+    // Too little even for the backlog, or for one connection beyond it: no
+    // depth fits and the caller is told so rather than handed a listener it
+    // cannot afford.
+    let mut cramped = base;
+    assert!(!cramped.fit_within(backlog));
+    assert_eq!(
+        cramped.max_accept, base.max_accept,
+        "a refusal changes nothing"
+    );
+    let mut starved = base;
+    assert!(!starved.fit_within(backlog / 2));
+}

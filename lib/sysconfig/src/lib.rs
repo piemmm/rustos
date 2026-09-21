@@ -120,8 +120,7 @@ use core::fmt;
 
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::net_ipc::{
-    socket_budget_for_ram, NetworkSettings, SOCKET_BUDGET_MAX_SETTABLE,
-    SOCKET_BUDGET_MIN_SETTABLE,
+    socket_budget_for_ram, NetworkSettings, SOCKET_BUDGET_MAX_SETTABLE, SOCKET_BUDGET_MIN_SETTABLE,
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::MAX_TIME_SERVERS;
@@ -685,9 +684,7 @@ impl Key {
             Self::NetTcpSynCookies => &["auto", "always"],
             Self::NetTcpKeepalive | Self::NetTcpEcn => &["true", "false"],
             Self::TimeRefresh => &["6h", "12h", "1d", "2d", "7d"],
-            Self::NetSocketsMem => {
-                return ValueShape::Free("`auto`, or a byte size such as `64M`")
-            }
+            Self::NetSocketsMem => return ValueShape::Free("`auto`, or a byte size such as `64M`"),
             Self::TimeServers => {
                 return ValueShape::Free("`none`, or a comma-separated list of host names")
             }
@@ -703,12 +700,8 @@ impl Key {
 /// operator would have written it.
 fn render_byte_size(bytes: u64) -> String {
     let mut buf = [0u8; 20];
-    for (scale, suffix) in [
-        (1024 * 1024 * 1024, "G"),
-        (1024 * 1024, "M"),
-        (1024, "K"),
-    ] {
-        if bytes % scale == 0 {
+    for (scale, suffix) in [(1024 * 1024 * 1024, "G"), (1024 * 1024, "M"), (1024, "K")] {
+        if bytes.is_multiple_of(scale) {
             let mut out = String::from(tairix_util::fmt::format_u64(bytes / scale, &mut buf));
             out.push_str(suffix);
             return out;
@@ -869,7 +862,7 @@ impl SystemConfig {
     /// key — hands the stack the same policy for the same document.
     ///
     /// RAM is an argument because the document alone cannot decide a
-    /// *capacity*: `net.sockets.max auto` means "size it for this machine",
+    /// *capacity*: `net.sockets.mem auto` means "size it for this machine",
     /// and the network stack is the parsing sandbox, so it can read neither
     /// the document nor the machine. Both deliverers read the same ungated
     /// System Information API total and so reach the same answer; a
@@ -1318,7 +1311,9 @@ mod tests {
                 for cache_filesystem in [CacheMode::Auto, CacheMode::Off] {
                     for net_ipv4_enabled in [NetToggle::Enabled, NetToggle::Disabled] {
                         for syncookies in [SynCookies::Auto, SynCookies::Always] {
-                            for net_sockets_mem in [SocketBudget::Auto, SocketBudget::Bytes(64 * 1024 * 1024)] {
+                            for net_sockets_mem in
+                                [SocketBudget::Auto, SocketBudget::Bytes(64 * 1024 * 1024)]
+                            {
                                 let keepalive = NetToggle::Enabled;
                                 let config = SystemConfig {
                                     login_type,
@@ -1695,9 +1690,15 @@ mod tests {
 
         // `auto` tracks the machine: a small board and a large server get
         // different budgets from the same document.
-        assert_eq!(config.network_settings(256 * MIB).socket_budget_bytes, 32 * MIB);
+        assert_eq!(
+            config.network_settings(256 * MIB).socket_budget_bytes,
+            32 * MIB
+        );
         assert_eq!(config.network_settings(GIB).socket_budget_bytes, 128 * MIB);
-        assert_eq!(config.network_settings(512 * GIB).socket_budget_bytes, 64 * GIB);
+        assert_eq!(
+            config.network_settings(512 * GIB).socket_budget_bytes,
+            64 * GIB
+        );
         // An unread figure is the smallest machine, never nothing.
         assert_eq!(config.network_settings(0).socket_budget_bytes, 32 * MIB);
 
@@ -1707,15 +1708,22 @@ mod tests {
             8 * MIB
         );
         assert_eq!(
-            config.network_settings(512 * GIB).socket_bytes_per_principal(),
+            config
+                .network_settings(512 * GIB)
+                .socket_bytes_per_principal(),
             4 * GIB
         );
 
         // An override outranks the machine, in both directions.
         config.net_sockets_mem = SocketBudget::Bytes(16 * MIB);
-        assert_eq!(config.network_settings(512 * GIB).socket_budget_bytes, 16 * MIB);
         assert_eq!(
-            config.network_settings(512 * GIB).socket_bytes_per_principal(),
+            config.network_settings(512 * GIB).socket_budget_bytes,
+            16 * MIB
+        );
+        assert_eq!(
+            config
+                .network_settings(512 * GIB)
+                .socket_bytes_per_principal(),
             MIB
         );
     }

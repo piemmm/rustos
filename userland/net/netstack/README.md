@@ -25,11 +25,14 @@ engine API evolve in place while `abi-v1` is unfrozen.
   touched. CSPRNG ephemeral ports (injected entropy), globally-unique
   port binding, per-principal + global bounded accounting failing
   closed with `LimitExceeded`, and inbound `UdpDatagram` demux to each
-  socket's delivery port. The bounds are the delivered `net.sockets.max`
-  capacity — derived from the machine's RAM, a sixteenth of it per
-  principal — not compile-time constants, so the table is looked up
-  through keyed hash indices rather than scanned: lookup cost must not
-  follow a capacity that scales with the machine.
+  socket's delivery port. The bound is the delivered `net.sockets.mem`
+  budget — measured bytes derived from the machine's RAM, a sixteenth of
+  it per principal — not a compile-time constant, so the table is looked
+  up through keyed hash indices rather than scanned: lookup cost must not
+  follow a capacity that scales with the machine. Each socket is charged
+  what it is *committed* to rather than what it holds, so admission
+  reserves and a connection's window can be sized from what the share has
+  left instead of being clawed back later.
 * `src/run.rs` — the freestanding `Run` binary: binds the reserved
   admin `NETSTACK_ENDPOINT` **and** socket `NETSTACK_SOCKET_ENDPOINT`
   (both need `CAP_IPC_BIND_PRIVILEGED`), parks on a wait set with the

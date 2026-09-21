@@ -252,6 +252,33 @@ impl Default for TcpConfig {
     }
 }
 
+impl TcpConfig {
+    /// Heap bytes a connection under this configuration may come to hold,
+    /// excluding the fixed [`Tcb`] struct itself.
+    ///
+    /// The **commitment**, not the occupancy: what the connection is
+    /// permitted to grow to, whether or not it has yet. A memory budget
+    /// that charged occupancy would admit any number of quiet connections
+    /// and then be unable to refuse the data that filled them, so
+    /// admission reserves instead — which also means a caller can price a
+    /// connection before opening one.
+    ///
+    /// Two receive buffers' worth: the in-order buffer, and the
+    /// out-of-order reassembly set, which is bounded separately — charging
+    /// the two against one allowance would let a full set leave no room
+    /// for the very segment that closes the gap.
+    #[must_use]
+    pub fn committed_bytes(&self) -> usize {
+        self.send_buffer
+            .saturating_add(self.receive_buffer.saturating_mul(2))
+            .saturating_add(
+                self.max_reassembly_segments
+                    .saturating_mul(core::mem::size_of::<(SeqNumber, Vec<u8>)>()),
+            )
+            .saturating_add(MAX_SACK_RANGES * core::mem::size_of::<(SeqNumber, SeqNumber)>())
+    }
+}
+
 /// The RFC 6298 retransmission-timeout estimator (SRTT / RTTVAR / RTO),
 /// kept in nanoseconds so the arithmetic avoids [`Duration64`] ordering.
 #[derive(Clone, Copy, Debug)]
@@ -315,6 +342,23 @@ impl RtoEstimator {
 /// the set is capped so a peer cannot force unbounded state (fail closed —
 /// the oldest hole is dropped, not merged, matching the fragment engine's
 /// overlap-is-drop posture).
+///
+/// The cap is on **bytes as well as segments**. A segment is acceptable
+/// when any part of it falls inside the receive window, so its payload may
+/// run far past the window's right edge: holding such a payload whole
+/// would let a peer park a full datagram per slot — orders of magnitude
+/// past the window it was granted — while acknowledging none of it. The
+/// tail beyond one receive buffer's span above `rcv_nxt` is therefore
+/// dropped on insert, exactly as the part below `rcv_nxt` is, and the peer
+/// retransmits it once the gap before it closes. Since the held segments
+/// never overlap and all lie inside that one span, the set holds at most
+/// one receive buffer — which is what lets a memory budget state a
+/// connection's cost up front.
+///
+/// The bound is deliberately independent of how full the in-order buffer
+/// is. Charging the two against one allowance would bound their sum, but a
+/// set that had filled it would then leave no room for the very segment
+/// that closes the gap, and the connection would deadlock.
 struct Reassembly {
     /// `(start, bytes)` segments, kept sorted by `start` and non-adjacent.
     segments: Vec<(SeqNumber, Vec<u8>)>,
@@ -337,22 +381,25 @@ impl Reassembly {
         self.segments.is_empty()
     }
 
-    /// Heap bytes the held segments occupy: the segment list and each
-    /// segment's payload, by allocated capacity rather than length.
-    fn footprint_bytes(&self) -> usize {
-        self.segments.capacity() * core::mem::size_of::<(SeqNumber, Vec<u8>)>()
-            + self
-                .segments
-                .iter()
-                .map(|(_, data)| data.capacity())
-                .sum::<usize>()
+    /// Payload bytes currently held — the figure the byte bound is stated
+    /// in, so a test can assert the bound rather than infer it.
+    #[cfg(test)]
+    fn held_bytes(&self) -> usize {
+        self.segments.iter().map(|(_, data)| data.len()).sum()
     }
 
     /// Insert `data` starting at `start`, trimming any part at or below
-    /// `rcv_nxt` (already delivered) and coalescing with neighbours.
-    /// Returns `false` (dropping the insert) when the set is full and the
-    /// segment does not merge — bounded, fail closed.
-    fn insert(&mut self, mut start: SeqNumber, mut data: Vec<u8>, rcv_nxt: SeqNumber) {
+    /// `rcv_nxt` (already delivered) or beyond `allowance` bytes of window
+    /// from it, and coalescing with neighbours. The insert is dropped when
+    /// the set is full and the segment does not merge — bounded, fail
+    /// closed.
+    fn insert(
+        &mut self,
+        mut start: SeqNumber,
+        mut data: Vec<u8>,
+        rcv_nxt: SeqNumber,
+        allowance: usize,
+    ) {
         // Drop the portion already in order.
         if start.lt(rcv_nxt) {
             let drop = rcv_nxt.distance_from(start) as usize;
@@ -362,6 +409,12 @@ impl Reassembly {
             data.drain(..drop);
             start = rcv_nxt;
         }
+        // Drop the portion past the window's right edge.
+        let offset = start.distance_from(rcv_nxt) as usize;
+        if offset >= allowance {
+            return;
+        }
+        data.truncate(allowance - offset);
         if data.is_empty() {
             return;
         }
@@ -952,21 +1005,14 @@ impl Tcb {
         self.config.tso_max_payload = max_payload;
     }
 
-    /// Heap bytes this connection's buffers and bookkeeping hold right
-    /// now, excluding the fixed [`Tcb`] itself (its owner made that
-    /// allocation and knows its size).
+    /// Heap bytes this connection may come to hold, excluding the fixed
+    /// [`Tcb`] itself (its owner made that allocation and knows its size).
     ///
-    /// Allocated capacity rather than occupied length: capacity is what
-    /// the allocator has actually given out and what nothing else can
-    /// use, and a buffer that drained still holds it. A memory budget
-    /// reasoning over lengths would under-count and over-admit.
+    /// A property of the configuration, so a caller can price a connection
+    /// before opening one: see [`TcpConfig::committed_bytes`].
     #[must_use]
-    pub fn footprint_bytes(&self) -> usize {
-        self.tx.capacity()
-            + self.rx.capacity()
-            + self.ooo.footprint_bytes()
-            + self.scoreboard.ranges.capacity()
-                * core::mem::size_of::<(SeqNumber, SeqNumber)>()
+    pub fn committed_bytes(&self) -> usize {
+        self.config.committed_bytes()
     }
 
     /// Re-ceiling this connection's send and receive buffers.
@@ -981,6 +1027,19 @@ impl Tcb {
     pub fn set_buffer_limits(&mut self, send: usize, receive: usize) {
         self.config.send_buffer = send;
         self.config.receive_buffer = receive;
+    }
+
+    /// The send-buffer ceiling this connection is currently held to, so a
+    /// memory budget can read back what it handed out.
+    #[must_use]
+    pub fn send_buffer_limit(&self) -> usize {
+        self.config.send_buffer
+    }
+
+    /// Out-of-order payload bytes held for reassembly.
+    #[cfg(test)]
+    pub(crate) fn reassembly_bytes(&self) -> usize {
+        self.ooo.held_bytes()
     }
 
     /// The current connection state.
@@ -1894,7 +1953,12 @@ impl Tcb {
                 self.rcv_nxt = self.rcv_nxt.add(as_u32(take));
                 self.drain_ooo();
             } else if seg.seq.gt(self.rcv_nxt) {
-                self.ooo.insert(seg.seq, seg.payload.to_vec(), self.rcv_nxt);
+                self.ooo.insert(
+                    seg.seq,
+                    seg.payload.to_vec(),
+                    self.rcv_nxt,
+                    self.config.receive_buffer,
+                );
                 immediate = true;
             } else {
                 // Wholly below rcv_nxt: an old duplicate. Acknowledge at once.
@@ -1927,8 +1991,12 @@ impl Tcb {
             self.rx.extend(&chunk[..take]);
             self.rcv_nxt = self.rcv_nxt.add(as_u32(take));
             if take < chunk.len() {
-                self.ooo
-                    .insert(self.rcv_nxt, chunk[take..].to_vec(), self.rcv_nxt);
+                self.ooo.insert(
+                    self.rcv_nxt,
+                    chunk[take..].to_vec(),
+                    self.rcv_nxt,
+                    self.config.receive_buffer,
+                );
                 break;
             }
         }

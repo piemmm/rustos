@@ -398,7 +398,7 @@ the admin surface carries no message that retires one, and `configure` says
 so rather than implying otherwise. The stack-wide switches
 (`net.ipv4.enabled`,
 `net.ipv6.enabled`, `net.ipv6.privacy`, `net.tcp.syncookies`,
-`net.tcp.keepalive`, `net.tcp.ecn`, `net.sockets.max`) live separately in
+`net.tcp.keepalive`, `net.tcp.ecn`, `net.sockets.mem`) live separately in
 `system.conf` and
 are set with `configure` (§6.2). See
 [Network-stack service](./netstack.md) for how the configuration is

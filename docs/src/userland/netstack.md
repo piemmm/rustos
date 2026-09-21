@@ -101,18 +101,42 @@ The policy is enforced, not advisory:
   `net.ipv4.enabled false` is the symmetric IPv4 case. Applying the
   policy reconfigures every interface already managed as well as those
   bound later, so delivery order does not matter (idempotent).
-- **`net.sockets.max`** is the socket table's capacity, and it is
-  *derived* rather than written down: `auto` (the default) sizes the
-  total from the machine's usable physical RAM — an eighth of it at the
-  configured worst case of one socket's TCP send and receive buffers —
-  and each principal may hold a sixteenth of that total, so a full table
-  always has room for sixteen principals. A 1 GiB machine comes to 1024
-  and 64, a 256 MiB board to 256 and 16, and a 512 GiB server to 524 288
-  and 32 768. An explicit count overrides the derivation. The *refusal*
-  at the bound is unchanged and fixed: `Errno::LimitExceeded`, audited,
-  never a partial grant. The stack reads neither the machine nor
-  `system.conf` — it is the network-parsing sandbox — so the deliverer
-  resolves both and hands it the one effective figure.
+- **`net.sockets.mem`** is the socket-memory budget, and it is *derived*
+  rather than written down: `auto` (the default) takes an eighth of the
+  machine's usable physical RAM, and each principal may hold a sixteenth
+  of that, so there is always room for sixteen principals at their full
+  share. A 1 GiB machine comes to 128 MiB and 8 MiB, a 256 MiB board to
+  32 MiB and 2 MiB, and a 512 GiB server to 64 GiB and 4 GiB. A byte size
+  such as `64M` overrides the derivation. The *refusal* at the bound is
+  unchanged and fixed: `Errno::LimitExceeded`, audited, never a partial
+  grant. The stack reads neither the machine nor `system.conf` — it is
+  the network-parsing sandbox — so the deliverer resolves both and hands
+  it the one effective figure.
+
+  **Bytes, not a socket count.** A count cannot bound the resource at
+  stake: the same number of sockets is a few kilobytes when idle and tens
+  of megabytes when fully buffered, so any count is either a refusal
+  while the memory is free or an overrun while it is not. What each
+  socket is charged is its **commitment** — what it may grow to, not what
+  it holds — because the ceilings were handed out long before the data
+  that fills them arrives, so admission has to reserve. A new
+  connection's send and receive ceilings are sized from what is left of
+  its owner's share *and* of the stack's budget, whichever binds; their
+  sum therefore cannot pass either, and no buffer is ever clawed back.
+  A principal opening many connections gets smaller windows on each
+  rather than the first few taking everything.
+
+  A listener is priced at `listen` time, because only remote peers decide
+  how much it comes to hold: its bounded half-open backlog plus its
+  queue of completed connections at the window its template grants each.
+  How deep that queue may be is what the budget sets; the backlog is the
+  SYN-flood brake and is charged, never scaled — a defence does not
+  shrink because memory is tight. A share too small to hold the backlog
+  therefore refuses `listen` outright (`Errno::LimitExceeded`): such a
+  machine can connect but not serve, which is said plainly rather than by
+  handing back a listener with no brake. `net.tcp.syncookies always` sets
+  the backlog to zero and so costs nothing, which is how a very small
+  budget still serves.
 - **`net.tcp.syncookies always`** sets each new listener's
   `max_half_open = 0`, so it holds no half-open state and answers every
   SYN with a stateless RFC 4987 cookie; `auto` keeps the bounded default

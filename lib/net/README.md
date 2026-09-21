@@ -252,6 +252,14 @@ exercise.
   CWR on the next fresh data). The initial sequence number is a caller-supplied CSPRNG
   draw (§22) so the engine stays deterministic and replayable; every buffer
   and the reassembly set are bounded (fail closed, never attacker-sized).
+  The reassembly set is bounded in **bytes** as well as segments: a segment
+  is acceptable when any part of it falls inside the receive window, so its
+  payload may run far past that window's right edge, and holding one whole
+  per slot would let a peer park a full datagram per slot while
+  acknowledging none of it. The tail beyond one receive buffer's span is
+  dropped and retransmitted once the gap before it closes, so held plus
+  delivered-but-unread bytes stay inside one buffer — which is what lets a
+  consumer price a connection up front (`TcpConfig::committed_bytes`).
   The send path is bounded by both the peer's advertised window and the
   congestion window from `tcp::cc`.
 - `tcp::cc` — pluggable congestion control, the scheduler-policy precedent
@@ -281,7 +289,15 @@ exercise.
   `CookieSecret` seam (the engine hand-rolls no crypto; `netstack` backs it
   with `lib/crypto`). Both queues are fixed capacity and fail closed: an
   exhausted accept queue refuses (RST) rather than growing, and a hostile
-  ACK bearing an unminted cookie is refused with a RST. Pure and
+  ACK bearing an unminted cookie is refused with a RST. A listener holds at
+  most **one** connection per peer: the full-state path derives its ISN
+  from the same keyed MAC a cookie carries, so a peer's own segments stay
+  cookie-valid for the counter's life, and without that rule a replay of
+  one observed ACK would reconstruct a rival connection for a four-tuple
+  the first still holds — mintable until the accept queue was full.
+  `ListenConfig::committed_bytes` prices a configuration and `fit_within`
+  lowers the queue depth to an allowance, so a memory budget can afford a
+  listener before creating one; the backlog is never lowered to make room. Pure and
   event-driven like the rest of the crate (`advance`/`next_deadline` drive
   half-open retransmit + expiry).
 

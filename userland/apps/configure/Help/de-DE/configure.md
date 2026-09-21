@@ -76,12 +76,16 @@ Arbeit daher nur langsamer — es ändert niemals ein Ergebnis.
   Verbindungen Not-ECT; `true` bietet ECN im Handshake an und behandelt
   danach eine Überlastmarkierung als Signal zum Drosseln, statt einen
   Paketverlust zu erzwingen.
-- `net.sockets.max` — `auto` oder eine Socket-Anzahl: die Obergrenze
-  der Sockets, die der Netzwerkstapel über alle Prinzipale hält. `auto`
-  (die Vorgabe) bemisst sie am RAM der Maschine, damit ein großer Server
-  nicht an eine auf einer kleinen gewählte Zahl gebunden ist; eine Anzahl
-  überschreibt das für eine Last, die Sie besser kennen. Jedes Prinzipal
-  darf ein Sechzehntel der wirksamen Gesamtzahl halten.
+- `net.sockets.mem` — `auto` oder eine Bytegröße wie `64M`: der
+  Speicher, den der Netzwerkstapel über alle Prinzipale hinweg in
+  Socket-Zustand halten darf. `auto` (die Vorgabe) bemisst ihn am RAM der
+  Maschine, damit ein großer Server nicht an eine auf einer kleinen
+  gewählte Zahl gebunden ist; eine Größe überschreibt das für eine Last,
+  die Sie besser kennen. Jedes Prinzipal darf ein Sechzehntel des
+  wirksamen Budgets halten. Bytes statt einer Socket-Anzahl, denn
+  dieselbe Anzahl Sockets sind im Ruhezustand einige Kilobyte und
+  vollständig gepuffert Megabyte: das Budget trägt viele stille
+  Verbindungen oder weniger beschäftigte, je nach tatsächlicher Last.
 - `time.servers` — `none` oder eine kommagetrennte Liste von
   Netzwerkzeitservern, jeder ein Hostname oder eine Adresse. `none` (die
   Vorgabe) bedeutet, dass die Uhr nie aus dem Netz gestellt wird: TAIRiX

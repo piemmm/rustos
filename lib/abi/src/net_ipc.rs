@@ -284,12 +284,25 @@ pub const SOCKET_BUDGET_MAX_SETTABLE: u64 = 1 << 40;
 /// Smallest socket budget `net.sockets.mem` may name, in bytes.
 ///
 /// One principal's share of this must still admit a connection that can
-/// carry data, so the floor is the per-principal divisor times the
-/// smallest useful connection. Below it the stack would be configured
-/// into uselessness, which is an outage an operator should be told about
-/// rather than given.
-pub const SOCKET_BUDGET_MIN_SETTABLE: u64 =
-    SOCKET_PRINCIPAL_SHARE_DIVISOR * MIN_CONNECTION_BUFFER_BYTES as u64 * 2;
+/// carry data, so the floor is the per-principal divisor times what
+/// [`NetworkSettings::connection_buffer_bytes`] needs to answer at all —
+/// four times the smallest useful connection, since both directions come
+/// out of the share and a connection is never handed all that is left.
+/// Below it the stack would be configured into uselessness, which is an
+/// outage an operator should be told about rather than given.
+pub const SOCKET_BUDGET_MIN_SETTABLE: u64 = SOCKET_PRINCIPAL_SHARE_DIVISOR
+    * MIN_CONNECTION_BUFFER_BYTES as u64
+    * CONNECTION_BUFFER_SHARE_DIVISOR;
+
+/// How much of a principal's remaining share one thing that buffers
+/// connections may take: a quarter.
+///
+/// For a single connection, two of that is its two directions and the
+/// other two leave room for a second, so the first cannot make the next
+/// impossible. A listener's queue of completed connections takes the same
+/// slice for the same reason — reserving all that is left for connections
+/// nobody has accepted yet would leave nothing for the ones that are.
+pub const CONNECTION_BUFFER_SHARE_DIVISOR: u64 = 4;
 
 /// The smallest receive (or send) buffer a TCP connection is given.
 ///
@@ -357,10 +370,7 @@ impl NetworkSettings {
     /// rather than admitting a connection it would cripple.
     #[must_use]
     pub fn connection_buffer_bytes(remaining: u64) -> Option<usize> {
-        // Both directions come out of the share, and a connection is not
-        // handed everything that is left: leaving room for a second keeps
-        // one connection from making the next impossible.
-        let per_direction = remaining / 4;
+        let per_direction = remaining / CONNECTION_BUFFER_SHARE_DIVISOR;
         if per_direction < MIN_CONNECTION_BUFFER_BYTES as u64 {
             return None;
         }
@@ -2717,7 +2727,7 @@ mod tests {
     }
 
     #[test]
-    fn requests_round_trip() {
+    fn address_and_route_requests_round_trip() {
         for request in [
             NetstackRequest::InterfaceList,
             NetstackRequest::AddrAdd {
@@ -2746,6 +2756,20 @@ mod tests {
                 dest: [0x21; 16],
                 next_hop: None,
             },
+        ] {
+            assert_round_trip(request);
+        }
+    }
+
+    /// Encode `request`, decode the bytes, and require the same value back.
+    fn assert_round_trip(request: NetstackRequest) {
+        let bytes = request.to_le_bytes();
+        assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
+    }
+
+    #[test]
+    fn query_and_configuration_requests_round_trip() {
+        for request in [
             NetstackRequest::InterfaceCounters {
                 offset: 5,
                 limit: 12,
@@ -2819,8 +2843,7 @@ mod tests {
             NetstackRequest::TimeServers,
             NetstackRequest::StackDefence,
         ] {
-            let bytes = request.to_le_bytes();
-            assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
+            assert_round_trip(request);
         }
     }
 
@@ -3590,9 +3613,7 @@ mod tests {
         );
         // Too little to carry data: refused rather than crippled.
         assert_eq!(
-            NetworkSettings::connection_buffer_bytes(
-                4 * MIN_CONNECTION_BUFFER_BYTES as u64 - 4
-            ),
+            NetworkSettings::connection_buffer_bytes(4 * MIN_CONNECTION_BUFFER_BYTES as u64 - 4),
             None
         );
         assert_eq!(NetworkSettings::connection_buffer_bytes(0), None);
@@ -3600,6 +3621,31 @@ mod tests {
         assert_eq!(
             NetworkSettings::connection_buffer_bytes(4 * MIN_CONNECTION_BUFFER_BYTES as u64),
             Some(MIN_CONNECTION_BUFFER_BYTES)
+        );
+    }
+
+    #[test]
+    fn the_smallest_settable_budget_still_admits_a_connection() {
+        // What `SOCKET_BUDGET_MIN_SETTABLE` claims is that one principal's
+        // share of it can carry data. Pin the claim to the function that
+        // decides, so the constant cannot drift away from the arithmetic.
+        let floor = NetworkSettings {
+            socket_budget_bytes: SOCKET_BUDGET_MIN_SETTABLE,
+            ..NetworkSettings::default()
+        };
+        assert_eq!(
+            NetworkSettings::connection_buffer_bytes(floor.socket_bytes_per_principal()),
+            Some(MIN_CONNECTION_BUFFER_BYTES)
+        );
+        // And that it is the *smallest* such budget: a byte under, and a
+        // share no longer admits one.
+        let under = NetworkSettings {
+            socket_budget_bytes: SOCKET_BUDGET_MIN_SETTABLE - 1,
+            ..NetworkSettings::default()
+        };
+        assert_eq!(
+            NetworkSettings::connection_buffer_bytes(under.socket_bytes_per_principal()),
+            None
         );
     }
 

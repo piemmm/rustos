@@ -111,6 +111,54 @@ impl Default for ListenConfig {
     }
 }
 
+impl ListenConfig {
+    /// Heap bytes a [`Listener`] with this configuration may come to hold.
+    ///
+    /// The backlog at full stretch, plus the accept queue with the buffers
+    /// the template grants each connection waiting in it. A caller
+    /// budgeting memory can therefore price a listener before creating one.
+    #[must_use]
+    pub fn committed_bytes(&self) -> usize {
+        self.backlog_bytes()
+            .saturating_add(self.max_accept.saturating_mul(self.per_queued_bytes()))
+    }
+
+    /// Bytes the half-open backlog may hold. A half-open connection buffers
+    /// no application data — the state machine accepts none before
+    /// ESTABLISHED — so this is the table's own storage.
+    fn backlog_bytes(&self) -> usize {
+        self.max_half_open
+            .saturating_mul(core::mem::size_of::<HalfOpen>())
+    }
+
+    /// Bytes one connection waiting to be accepted may hold.
+    fn per_queued_bytes(&self) -> usize {
+        core::mem::size_of::<Connection>().saturating_add(self.template.committed_bytes())
+    }
+
+    /// Lower [`max_accept`](Self::max_accept) until
+    /// [`committed_bytes`](Self::committed_bytes) fits `allowance`,
+    /// returning `false` — and changing nothing — when no depth does.
+    ///
+    /// Only remote peers decide how many completed connections wait at
+    /// once, so the depth is what a memory budget has to be able to set. A
+    /// shallower queue refuses a completed handshake with a RST, which is
+    /// the same fail-closed answer a full one already gives; the backlog is
+    /// the SYN-flood brake and is never lowered to make room.
+    pub fn fit_within(&mut self, allowance: usize) -> bool {
+        let per_queued = self.per_queued_bytes().max(1);
+        let Some(for_queue) = allowance.checked_sub(self.backlog_bytes()) else {
+            return false;
+        };
+        let depth = for_queue / per_queued;
+        if depth == 0 {
+            return false;
+        }
+        self.max_accept = self.max_accept.min(depth);
+        true
+    }
+}
+
 /// Observability counters for a [`Listener`], exposed for the System
 /// Information API and asserted by the adversarial tests.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -169,27 +217,19 @@ impl Listener {
         self.local_port
     }
 
-    /// Heap bytes this listener's defence state holds: the half-open
-    /// table and the completed-connection queue, each including the
-    /// connections' own buffers.
+    /// Heap bytes this listener may come to hold: its bounded half-open
+    /// backlog, and its bounded queue of completed connections with the
+    /// buffers its template grants each.
     ///
-    /// A listener under flood is the one socket whose footprint is driven
-    /// entirely by remote peers, so a memory budget has to be able to see
-    /// it.
+    /// The **commitment**, not the occupancy. A listener is the one socket
+    /// whose memory only remote peers decide the growth of, so a budget
+    /// that charged what it holds today could never refuse what it will
+    /// hold tomorrow. Charging the configuration instead makes the cost
+    /// knowable at `listen` time — and constant to read, which matters
+    /// because the budget is read on the same path a flood arrives on.
     #[must_use]
-    pub fn footprint_bytes(&self) -> usize {
-        self.half_open.capacity() * core::mem::size_of::<HalfOpen>()
-            + self
-                .half_open
-                .iter()
-                .map(|h| h.tcb.footprint_bytes())
-                .sum::<usize>()
-            + self.accept_queue.capacity() * core::mem::size_of::<Connection>()
-            + self
-                .accept_queue
-                .iter()
-                .map(|c| c.tcb.footprint_bytes())
-                .sum::<usize>()
+    pub fn committed_bytes(&self) -> usize {
+        self.cfg.committed_bytes()
     }
 
     /// The listener's running counters.
@@ -240,6 +280,14 @@ impl Listener {
         // A segment matching a full-state half-open connection drives it.
         if let Some(index) = self.find_half_open(peer) {
             self.drive_half_open(index, peer, seg, now, &mut emit);
+            return;
+        }
+
+        // This peer's connection is already complete and waiting to be taken:
+        // it is the caller's to drive, not ours to duplicate. Dropping is the
+        // safe answer — the peer retransmits whatever this segment carried,
+        // and the accepted connection answers it.
+        if self.queued(peer) {
             return;
         }
 
@@ -303,6 +351,22 @@ impl Listener {
 
     fn find_half_open(&self, peer: Peer) -> Option<usize> {
         self.half_open.iter().position(|ho| ho.peer == peer)
+    }
+
+    /// Whether a completed connection with `peer` is already queued for
+    /// [`accept`](Self::accept).
+    ///
+    /// A listener holds **at most one** connection per peer. The full-state
+    /// path derives its initial sequence from the same keyed MAC a cookie
+    /// carries, so a peer's returning ACK — and every later segment, whose
+    /// acknowledgement field still names it — stays cookie-valid for the
+    /// counter's life. Without this check, a replay of one observed ACK
+    /// reconstructs a second connection for a four-tuple the first still
+    /// holds: the caller then owns two connections it cannot tell apart,
+    /// and a peer can mint them until the accept queue is full, denying it
+    /// to everyone else. Bounded by `max_accept`, like the half-open scan.
+    fn queued(&self, peer: Peer) -> bool {
+        self.accept_queue.iter().any(|conn| conn.peer == peer)
     }
 
     /// Drive a matched half-open connection with `seg`, promoting it to the

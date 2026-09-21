@@ -1162,3 +1162,98 @@ fn non_ecn_connection_ignores_a_ce_mark() {
         "a connection that never negotiated ECN never echoes ECE"
     );
 }
+
+#[test]
+fn the_committed_cost_is_the_ceiling_not_the_occupancy() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake(now);
+    let cfg = config();
+    // Priced from the configuration, so a budget can reserve before a byte
+    // moves, and unmoved by traffic.
+    let priced = cfg.committed_bytes();
+    assert_eq!(client.committed_bytes(), priced);
+    assert!(
+        priced >= cfg.send_buffer + cfg.receive_buffer,
+        "both directions are reserved"
+    );
+
+    client.send(&[0x5Au8; 4096]).expect("buffered");
+    settle(&mut client, &mut server, now);
+    assert_eq!(client.committed_bytes(), priced, "traffic changes nothing");
+    assert_eq!(server.committed_bytes(), priced);
+
+    let mut sink = [0u8; 4096];
+    while server.recv(&mut sink) > 0 {}
+    settle(&mut client, &mut server, now);
+    assert_eq!(server.committed_bytes(), priced, "nor does draining it");
+
+    // Lowering the ceilings lowers the price: that is what makes a share
+    // divisible among connections rather than spent by the first few.
+    client.set_buffer_limits(cfg.send_buffer / 4, cfg.receive_buffer / 4);
+    assert!(client.committed_bytes() < priced);
+}
+
+#[test]
+fn out_of_order_data_beyond_the_receive_buffer_is_not_held() {
+    // A segment is acceptable if *any* part of it is in the window, so a peer
+    // can offer a payload running far past the buffer it was granted. Holding
+    // one whole per reassembly slot would be a memory amplification a budget
+    // could not have priced, so the tail is dropped and retransmitted.
+    let now = ms(0);
+    let small = TcpConfig {
+        send_buffer: 8 * 1024,
+        receive_buffer: 8 * 1024,
+        ..config()
+    };
+    let mut client = Tcb::connect(small, 40000, 80, 1000, now);
+    let mut server = Tcb::listen(small, 80, 0, 5000);
+    settle(&mut client, &mut server, now);
+    assert!(server.is_established());
+    // The fixed ISNs put the server's `rcv_nxt` at 1001 and the client's
+    // acknowledgement at 5001, as the sibling reassembly tests rely on.
+    let (rcv_nxt, peer_ack) = (1001u32, 5001u32);
+
+    // Leave a one-byte gap at `rcv_nxt`, then offer a payload far longer
+    // than the whole receive buffer starting just above it.
+    // The largest a single segment can carry: a 16-bit length bounds the
+    // wire form, which is the only thing that bounds the offer.
+    let huge = vec![0x7Eu8; 60 * 1024];
+    feed(&mut server, &client_data(rcv_nxt + 1, peer_ack, &huge), now);
+    assert!(
+        server.reassembly_bytes() <= small.receive_buffer,
+        "held {} bytes against an {}-byte buffer",
+        server.reassembly_bytes(),
+        small.receive_buffer
+    );
+    assert_eq!(server.recv_len(), 0, "still held out of order");
+
+    // Filling the gap delivers what was kept, and the connection is unharmed:
+    // the peer retransmits the rest as the window opens.
+    feed(&mut server, &client_data(rcv_nxt, peer_ack, &[0x7E]), now);
+    assert!(server.recv_len() > 0, "the gap closed and data flowed");
+}
+
+#[test]
+fn reduced_buffer_limits_bound_what_may_still_be_added() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake(now);
+    let generous = client.send_available();
+
+    // A memory budget lowering the ceilings closes the advertised window and
+    // shrinks what the next write may enqueue; it never discards what is
+    // already buffered or owed.
+    client.send(&[0x11u8; 1024]).expect("buffered");
+    client.set_buffer_limits(2048, 2048);
+    assert!(client.send_available() < generous, "the ceiling now binds");
+    assert_eq!(client.send_queued(), 1024, "buffered data is untouched");
+    let taken = client.send(&[0x22u8; 8192]).expect("a short write");
+    assert_eq!(taken, 1024, "only up to the lowered ceiling");
+    assert_eq!(client.send_queued(), 2048);
+
+    server.set_buffer_limits(2048, 2048);
+    settle(&mut client, &mut server, now);
+    assert!(
+        server.recv_len() <= 2048,
+        "the lowered receive ceiling bounds what is buffered"
+    );
+}

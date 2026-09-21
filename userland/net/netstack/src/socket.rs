@@ -21,23 +21,58 @@
 //! principal's unforgeable [`ProcId`]: a handle is meaningless — and
 //! unusable — to any other principal even if observed. Ports bind
 //! globally uniquely (no silent reuse), ephemeral ports are drawn from
-//! the kernel CSPRNG, and both the per-principal and global socket tables
-//! are bounded, failing closed with [`Errno::LimitExceeded`] at capacity.
-//! A stream's per-connection send/receive/reassembly buffers are the
-//! bounded [`TcpConfig`] capacities, so a hostile peer cannot grow memory.
+//! the kernel CSPRNG, and both the per-principal share and the stack-wide
+//! budget are bounded, failing closed with [`Errno::LimitExceeded`] when
+//! exhausted. A stream's per-connection send/receive/reassembly buffers
+//! are the bounded [`TcpConfig`] capacities, so a hostile peer cannot grow
+//! memory.
 //!
-//! # Capacity
+//! # Budget
 //!
-//! How many sockets the table holds is a *capacity*, not a security
-//! bound, and it is derived rather than chosen: the total is sized from
-//! the machine's usable physical RAM and an administrator may override it
-//! (`net.sockets.max`), and the per-principal figure is a sixteenth share
-//! of whatever that total came to. Both arrive on the delivered
-//! [`NetworkSettings`] — the stack is the network-parsing sandbox and can
-//! read neither the machine nor `system.conf` itself. What stays fixed is
-//! the *refusal*: exceeding the effective bound is
-//! [`Errno::LimitExceeded`] and an audited event, exactly as before. Only
-//! the figure stopped being a guess.
+//! What bounds the table is **bytes of socket memory**, not a count of
+//! sockets. A count cannot bound the resource actually at stake: the same
+//! number of sockets is a few kilobytes when they are idle and tens of
+//! megabytes when they are fully buffered, so any count is either a
+//! refusal while the memory is free or an overrun while it is not. The
+//! byte budget carries many idle sockets or few busy ones, according to
+//! what the workload really is.
+//!
+//! The budget is a *capacity*, derived rather than chosen — an eighth of
+//! the machine's usable physical RAM, which an administrator may override
+//! with `net.sockets.mem` — and each principal may hold a sixteenth share
+//! of it, so there is always room for sixteen principals at their full
+//! share. Both arrive on the delivered [`NetworkSettings`]: the stack is
+//! the network-parsing sandbox and can read neither the machine nor
+//! `system.conf` itself.
+//!
+//! **What a socket is charged is its commitment, not its occupancy.**
+//! Charging what a socket holds today would bound nothing: the window
+//! ceilings are handed out long before the data that fills them arrives,
+//! so a principal could open any number of quiet connections — each
+//! already entitled to a quarter of its share — and the stack would have
+//! nothing left to refuse when they all filled. Admission therefore
+//! *reserves*, and each new connection's send and receive ceilings are
+//! sized from what is left of its owner's share **and** of the stack's
+//! budget, whichever binds. Both, because a share bounds one principal
+//! and sixteen shares come to the budget, but a share does not shrink as
+//! others fill. The ceilings handed out consequently cannot sum past
+//! either bound and no buffer has to be clawed back later; what stays
+//! fixed is the *refusal*, [`Errno::LimitExceeded`] and an audited event.
+//!
+//! Because every term is a bound rather than a measurement, a socket's
+//! charge moves only when its kind or its ceilings do — at open, connect,
+//! and `listen` — and each move is applied as a difference, so no decision
+//! walks the table.
+//!
+//! A listener is priced when it starts listening, because only remote
+//! peers decide how much it comes to hold: its bounded half-open backlog
+//! plus its queue of completed connections at the window its template
+//! grants each. The queue's depth is what the budget sets; the backlog is
+//! the SYN-flood brake and is *charged* rather than sized, because a
+//! defence does not shrink because memory is tight. A share too small to
+//! hold it refuses `listen` outright — a stack that can connect but not
+//! serve, said plainly rather than by handing back a listener with no
+//! brake.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -49,7 +84,7 @@ use tairix_abi::net::{
 };
 use tairix_abi::net_ipc::{
     address_parts, ip_from_parts, NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord,
-    NetStackDefenceCounters, NetworkSettings, IF_NAME_LEN,
+    NetStackDefenceCounters, NetworkSettings, CONNECTION_BUFFER_SHARE_DIVISOR, IF_NAME_LEN,
 };
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
@@ -197,8 +232,48 @@ struct SocketEntry {
     local_addr: [u8; 16],
     /// Bound local port; `0` means unbound.
     local_port: u16,
+    /// Bytes this socket is charged against its owner's share and the
+    /// stack-wide budget, as of the last time its state changed. Held per
+    /// socket so a change costs a difference rather than a re-sum of the
+    /// table.
+    accounted_bytes: u64,
     /// The transport-specific state.
     proto: Proto,
+}
+
+/// What one principal holds: how many sockets, and the bytes they account
+/// for.
+///
+/// The count is the row's own refcount — it is what says when the last of
+/// a principal's sockets has gone, exactly as [`PortSlot::holders`] does
+/// for a port — while the byte total is what the principal's share is
+/// checked against.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct OwnerUsage {
+    sockets: u32,
+    bytes: u64,
+}
+
+/// Bytes one socket costs the table and its indices whatever transport it
+/// carries: its table slot, plus one row in each of the four indices.
+///
+/// Derived from the types rather than estimated, so adding a field to an
+/// entry or an index changes the charge with it. This is a *per-socket*
+/// attribution, which is what a per-principal share needs; the
+/// containers' spare capacity is nobody's socket and is measured against
+/// the stack as a whole ([`SocketService::structural_slack`]).
+pub(crate) const PER_SOCKET_OVERHEAD: u64 = widen_const(
+    size_of::<SocketEntry>()
+        + index_row::<SocketId, usize>()
+        + index_row::<ConnKey, SocketId>()
+        + index_row::<u16, PortSlot>()
+        + index_row::<ProcId, OwnerUsage>(),
+);
+
+/// Bytes one row of a [`HashMap`] occupies: its `(key, value)` slot and
+/// its control byte.
+const fn index_row<K, V>() -> usize {
+    size_of::<(K, V)>() + 1
 }
 
 impl SocketEntry {
@@ -372,8 +447,11 @@ pub struct SocketService {
     by_conn: HashMap<ConnKey, SocketId, BuildSipHash13>,
     /// Local port to what holds it.
     by_port: HashMap<u16, PortSlot, BuildSipHash13>,
-    /// Live socket count per owning principal, for the per-principal share.
-    owned: HashMap<ProcId, u32, BuildSipHash13>,
+    /// What each owning principal holds, for the per-principal share.
+    owned: HashMap<ProcId, OwnerUsage, BuildSipHash13>,
+    /// Bytes every live socket accounts for, summed. The stack-wide budget
+    /// is checked against this plus the containers' own spare capacity.
+    bytes_total: u64,
     /// Rolling handle allocator; the next candidate id, advanced past any
     /// live collision so a delivered message can never alias a reused id.
     next_id: SocketId,
@@ -405,6 +483,7 @@ impl SocketService {
             by_conn: HashMap::with_hasher(hasher),
             by_port: HashMap::with_hasher(hasher),
             owned: HashMap::with_hasher(hasher),
+            bytes_total: 0,
             next_id: 0,
             port_assignments: 0,
             retired_defence: ListenerStats::default(),
@@ -676,10 +755,10 @@ impl SocketService {
                 Errno::OutOfRange,
             );
         }
-        if self.at_capacity(&settings, owner) {
+        if self.budget_exhausted(&settings, owner) {
             return refuse(
                 audit,
-                "socket open refused: socket quota exhausted",
+                "socket open refused: socket memory budget exhausted",
                 Errno::LimitExceeded,
             );
         }
@@ -700,6 +779,7 @@ impl SocketService {
             family,
             local_addr: [0u8; 16],
             local_port: 0,
+            accounted_bytes: 0,
             proto,
         })?;
         emit(
@@ -998,12 +1078,29 @@ impl SocketService {
             );
         }
         let local_port = self.sockets[index].local_port;
+        // A listener holds completed connections that only remote peers
+        // decide the arrival of, so both the window each is given and how
+        // many may wait at once come out of the owner's remaining share. A
+        // share with no room for a workable connection is a listener that
+        // could not serve one.
+        let settings = interfaces.settings();
+        // The queue takes a slice of the share rather than all that is
+        // left: its slots are memory reserved for connections nobody has
+        // accepted yet, and reserving the lot would leave nothing for the
+        // ones the client does accept.
+        let allowance =
+            self.remaining_allowance(&settings, owner) / CONNECTION_BUFFER_SHARE_DIVISOR;
+        let Some(config) = listen_config(settings, allowance) else {
+            return refuse(
+                audit,
+                "socket listen refused: socket memory budget exhausted",
+                Errno::LimitExceeded,
+            );
+        };
         self.unindex_entry(index);
-        self.sockets[index].proto = Proto::Listen(Box::new(Listener::new(
-            local_port,
-            listen_config(interfaces.settings()),
-        )));
+        self.sockets[index].proto = Proto::Listen(Box::new(Listener::new(local_port, config)));
         self.index_entry(index);
+        self.reaccount(index);
         emit(
             audit,
             Level::Info,
@@ -1209,10 +1306,21 @@ impl SocketService {
         // The stack stays unconnected (the client may retry) when no
         // interface can reach the peer.
         let (iface, local_mss) = interfaces.egress_mss_for(dest, now)?;
+        // Size the connection's buffers out of what is left of the owner's
+        // share, so the ceilings handed out cannot sum past it. Too little
+        // left to carry data is the point at which the stack refuses,
+        // rather than admitting a connection it would cripple.
+        let owner = self.sockets[index].owner;
+        let remaining = self.remaining_allowance(&interfaces.settings(), owner);
+        let Some(buffer) = NetworkSettings::connection_buffer_bytes(remaining) else {
+            return Err(Errno::LimitExceeded);
+        };
         // The ISN is a CSPRNG draw (the engine makes no randomness).
         let iss = entropy();
         let config = TcpConfig {
             local_mss,
+            send_buffer: buffer,
+            receive_buffer: buffer,
             // Enable segmentation offload when the egress device negotiated
             // it (0 keeps the connection per-MSS).
             tso_max_payload: interfaces.tso_max_payload_on(iface),
@@ -1224,16 +1332,7 @@ impl SocketService {
             enable_ecn: interfaces.settings().tcp_ecn,
             ..TcpConfig::default()
         };
-        let mut tcb = Tcb::connect(config, local_port, peer.port, iss, now);
-        let segs = drain_segments(&mut tcb, now);
-        let mut frames = Vec::new();
-        for (meta, payload, gso_size, ecn) in &segs {
-            if let Ok(more) =
-                interfaces.send_tcp_on(iface, dest, meta, payload, *gso_size, *ecn, now)
-            {
-                frames.extend(more);
-            }
-        }
+        let tcb = Tcb::connect(config, local_port, peer.port, iss, now);
         // The socket becomes reachable by its four-tuple here, so it is
         // re-indexed rather than merely mutated.
         self.unindex_entry(index);
@@ -1248,11 +1347,10 @@ impl SocketService {
             accepted: true,
         })));
         self.index_entry(index);
-        let tx = if frames.is_empty() {
-            FrameBatch::new()
-        } else {
-            alloc::vec![(iface, frames)]
-        };
+        self.reaccount(index);
+        // The SYN leaves through the one drain-and-route path every other
+        // stream segment takes.
+        let tx = self.pump_stream(interfaces, index, now);
         let len = status_reply(response)?.len;
         Ok(SocketReply {
             len,
@@ -1490,9 +1588,17 @@ impl SocketService {
         let settings = interfaces.settings();
         let mut out = Vec::new();
         loop {
-            if self.at_capacity(&settings, owner) {
+            if self.budget_exhausted(&settings, owner) {
                 break;
             }
+            // Both budget questions are asked before the connection leaves
+            // the listener: a child taken and then refused would be a
+            // connection dropped, where one left queued is a connection the
+            // peer is still holding open.
+            let remaining = self.remaining_allowance(&settings, owner);
+            let Some(buffer) = NetworkSettings::connection_buffer_bytes(remaining) else {
+                break;
+            };
             let conn = match &mut self.sockets[lindex].proto {
                 Proto::Listen(listener) => listener.accept(),
                 _ => break,
@@ -1522,6 +1628,7 @@ impl SocketService {
                 family,
                 local_addr: [0u8; 16],
                 local_port,
+                accounted_bytes: 0,
                 proto: Proto::Stream(Some(Box::new(StreamConn {
                     tcb: {
                         // A listener template does not know the egress link,
@@ -1530,6 +1637,11 @@ impl SocketService {
                         // reaches its peer.
                         let mut tcb = conn.tcb;
                         tcb.set_tso_max_payload(interfaces.tso_max_payload_on(iface));
+                        // Re-ceiling against the share as it stands now: the
+                        // listener's template was sized when it began
+                        // listening, and its earlier children have since
+                        // taken part of the share.
+                        tcb.set_buffer_limits(buffer, buffer);
                         tcb
                     },
                     peer,
@@ -1895,20 +2007,122 @@ impl SocketService {
         out
     }
 
-    /// Whether a further socket for `owner` would exceed the delivered
-    /// capacity — the derived (or administratively overridden) total, or
-    /// this principal's share of it.
+    /// Whether a further socket for `owner` would take that principal past
+    /// its share, or the stack past the delivered budget.
     ///
-    /// The share is what stops one principal taking the table; the total
-    /// is what stops every principal together taking the stack's heap.
-    fn at_capacity(&self, settings: &NetworkSettings, owner: ProcId) -> bool {
-        self.sockets.len() >= settings.sockets_max as usize
-            || self.count_owned(owner) >= settings.sockets_per_principal()
+    /// The share is what stops one principal taking the stack's memory;
+    /// the budget is what stops every principal together taking it. A
+    /// socket costs at least its structural overhead however idle it is,
+    /// so that is the figure which must still fit.
+    fn budget_exhausted(&self, settings: &NetworkSettings, owner: ProcId) -> bool {
+        if self.owner_bytes(owner).saturating_add(PER_SOCKET_OVERHEAD)
+            > settings.socket_bytes_per_principal()
+        {
+            return true;
+        }
+        self.committed_bytes().saturating_add(PER_SOCKET_OVERHEAD) > settings.socket_budget_bytes
     }
 
-    /// Number of sockets owned by `owner`.
-    fn count_owned(&self, owner: ProcId) -> u32 {
-        self.owned.get(&owner).copied().unwrap_or(0)
+    /// Bytes of socket state `owner` currently holds.
+    fn owner_bytes(&self, owner: ProcId) -> u64 {
+        self.owned.get(&owner).map_or(0, |usage| usage.bytes)
+    }
+
+    /// Bytes a new commitment of `owner`'s may take: whichever of the
+    /// principal's remaining share and the stack's remaining budget is
+    /// smaller.
+    ///
+    /// Both, because neither alone bounds the stack. A share bounds one
+    /// principal, and sixteen of them come to the budget — but a
+    /// principal's share does not shrink as *others* fill, so enough
+    /// principals each taking their own share would together pass the
+    /// budget. Sizing every ceiling against what the stack has left as
+    /// well is what makes the reservation hold in aggregate.
+    fn remaining_allowance(&self, settings: &NetworkSettings, owner: ProcId) -> u64 {
+        let share = settings
+            .socket_bytes_per_principal()
+            .saturating_sub(self.owner_bytes(owner));
+        share.min(
+            settings
+                .socket_budget_bytes
+                .saturating_sub(self.committed_bytes()),
+        )
+    }
+
+    /// Bytes of socket state the stack holds across every principal: what
+    /// each socket is committed to, plus the spare capacity its table and
+    /// indices carry.
+    ///
+    /// The figure `net.sockets.mem` bounds. Constant time.
+    #[must_use]
+    pub fn committed_bytes(&self) -> u64 {
+        self.bytes_total.saturating_add(self.structural_slack())
+    }
+
+    /// Bytes the table and its indices hold beyond the rows they are
+    /// charged for: a container's spare slots and its growth headroom.
+    ///
+    /// Charged to the stack rather than to a socket, because no socket
+    /// asked for it. Constant time — each figure is a container's own — so
+    /// the budget stays honest about what is really allocated without any
+    /// decision walking the table.
+    fn structural_slack(&self) -> u64 {
+        let allocated = widen(self.sockets.capacity())
+            .saturating_mul(widen(size_of::<SocketEntry>()))
+            .saturating_add(widen(self.by_id.allocated_bytes()))
+            .saturating_add(widen(self.by_conn.allocated_bytes()))
+            .saturating_add(widen(self.by_port.allocated_bytes()))
+            .saturating_add(widen(self.owned.allocated_bytes()));
+        allocated.saturating_sub(widen(self.sockets.len()).saturating_mul(PER_SOCKET_OVERHEAD))
+    }
+
+    /// Bytes the socket at `index` is charged: its structural share, plus
+    /// what its transport is committed to.
+    ///
+    /// The **commitment**, never the occupancy. Charging what a socket
+    /// holds today would admit any number of quiet connections and then
+    /// leave the stack unable to refuse the data that filled them — the
+    /// ceilings were handed out long before, so there would be nothing
+    /// left to refuse. Charging what each may grow to makes admission a
+    /// reservation, which is what lets the ceilings be sized from the share
+    /// and never need clawing back.
+    ///
+    /// Every term is therefore a bound rather than a measurement, so a
+    /// socket's charge moves only when its kind or its ceilings do.
+    fn committed_of(&self, index: usize) -> u64 {
+        let transport = match &self.sockets[index].proto {
+            Proto::Datagram(_) => MAX_GROUPS_PER_SOCKET * size_of::<[u8; 16]>(),
+            // An echo socket and an unconnected stream socket hold nothing
+            // beyond their table slot.
+            Proto::Echo(_) | Proto::Stream(None) => 0,
+            // The boxed allocation, then the connection's own buffers,
+            // which `committed_bytes` deliberately excludes it from.
+            Proto::Stream(Some(conn)) => size_of::<StreamConn>() + conn.tcb.committed_bytes(),
+            Proto::Listen(listener) => size_of::<Listener>() + listener.committed_bytes(),
+        };
+        PER_SOCKET_OVERHEAD.saturating_add(widen(transport))
+    }
+
+    /// Bring the socket at `index`'s charge up to date, applying the
+    /// difference to its owner's share and to the stack total.
+    ///
+    /// A difference, never a re-sum: a recount would walk the table, which
+    /// is exactly the cost the indices exist to avoid. Called at the three
+    /// points a commitment can move — a socket appearing, connecting, or
+    /// beginning to listen; the test-build invariant check recomputes every
+    /// figure from scratch, so a site that forgets has nowhere to hide.
+    fn reaccount(&mut self, index: usize) {
+        let now = self.committed_of(index);
+        let was = self.sockets[index].accounted_bytes;
+        if now == was {
+            return;
+        }
+        self.sockets[index].accounted_bytes = now;
+        let owner = self.sockets[index].owner;
+        self.bytes_total = self.bytes_total.saturating_sub(was).saturating_add(now);
+        if let Some(usage) = self.owned.get_mut(&owner) {
+            usage.bytes = usage.bytes.saturating_sub(was).saturating_add(now);
+        }
     }
 
     /// The table index of the socket `owner` owns bearing `id`, or
@@ -1950,12 +2164,23 @@ impl SocketService {
         let id = self.sockets[index].id;
         let owner = self.sockets[index].owner;
         let port = self.sockets[index].local_port;
+        let accounted = self.sockets[index].accounted_bytes;
         let conn = self.conn_key_at(index);
         let _ = self.by_id.try_insert(id, index);
-        if let Some(count) = self.owned.get_mut(&owner) {
-            *count = count.saturating_add(1);
+        // The socket's charge travels with its owner row, so the bracket a
+        // key change is made inside puts back exactly what it took even
+        // when this is the principal's only socket and the row went with it.
+        if let Some(usage) = self.owned.get_mut(&owner) {
+            usage.sockets = usage.sockets.saturating_add(1);
+            usage.bytes = usage.bytes.saturating_add(accounted);
         } else {
-            let _ = self.owned.try_insert(owner, 1);
+            let _ = self.owned.try_insert(
+                owner,
+                OwnerUsage {
+                    sockets: 1,
+                    bytes: accounted,
+                },
+            );
         }
         if port != 0 {
             let mut slot = self.by_port.get(&port).copied().unwrap_or_default();
@@ -1975,11 +2200,13 @@ impl SocketService {
         let id = self.sockets[index].id;
         let owner = self.sockets[index].owner;
         let port = self.sockets[index].local_port;
+        let accounted = self.sockets[index].accounted_bytes;
         let conn = self.conn_key_at(index);
         self.by_id.remove(&id);
-        if let Some(count) = self.owned.get_mut(&owner) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
+        if let Some(usage) = self.owned.get_mut(&owner) {
+            usage.sockets = usage.sockets.saturating_sub(1);
+            usage.bytes = usage.bytes.saturating_sub(accounted);
+            if usage.sockets == 0 {
                 self.owned.remove(&owner);
             }
         }
@@ -2012,13 +2239,33 @@ impl SocketService {
         self.port_in_use(port)
     }
 
-    /// Assert every index row agrees with the table it indexes.
+    /// Bytes charged to `owner`, so the tests can assert the share is
+    /// respected rather than infer it from a refusal.
+    #[cfg(test)]
+    pub(crate) fn charged_to(&self, owner: ProcId) -> u64 {
+        self.owner_bytes(owner)
+    }
+
+    /// The send ceiling the connection behind `id` was given, so the tests
+    /// can assert what the budget handed out rather than infer it.
+    #[cfg(test)]
+    pub(crate) fn send_window_of(&self, id: SocketId) -> Option<usize> {
+        let index = *self.by_id.get(&id)?;
+        match &self.sockets[index].proto {
+            Proto::Stream(Some(conn)) => Some(conn.tcb.send_buffer_limit()),
+            _ => None,
+        }
+    }
+
+    /// Assert every index row, and every byte charged, agrees with the
+    /// table it describes.
     ///
-    /// The indices are maintained incrementally, so an update missed
-    /// beside a mutation is the one failure this structure has. Rebuilding
-    /// what the table implies and comparing leaves nowhere for such a miss
-    /// to hide; the whole suite drives it, because every served request,
-    /// inbound segment, and timer pass ends here in the test build.
+    /// Both the indices and the byte accounting are maintained
+    /// incrementally, so an update missed beside a mutation is the one
+    /// failure this structure has. Rebuilding what the table implies and
+    /// comparing leaves nowhere for such a miss to hide; the whole suite
+    /// drives it, because every served request, inbound segment, and timer
+    /// pass ends here in the test build.
     #[cfg(test)]
     fn assert_indices_agree(&self) {
         use alloc::collections::BTreeMap;
@@ -2026,10 +2273,20 @@ impl SocketService {
         assert_eq!(self.by_id.len(), self.sockets.len(), "by_id row count");
         let mut conns = 0usize;
         let mut ports: BTreeMap<u16, PortSlot> = BTreeMap::new();
-        let mut owners: BTreeMap<ProcId, u32> = BTreeMap::new();
+        let mut owners: BTreeMap<ProcId, OwnerUsage> = BTreeMap::new();
+        let mut total = 0u64;
         for (index, entry) in self.sockets.iter().enumerate() {
             assert_eq!(self.by_id.get(&entry.id), Some(&index), "by_id row");
-            *owners.entry(entry.owner).or_default() += 1;
+            let charge = self.committed_of(index);
+            assert_eq!(
+                entry.accounted_bytes, charge,
+                "socket {} charge is stale",
+                entry.id
+            );
+            total = total.saturating_add(charge);
+            let usage = owners.entry(entry.owner).or_default();
+            usage.sockets += 1;
+            usage.bytes += charge;
             let conn = self.conn_key_at(index);
             if let Some(key) = conn {
                 assert_eq!(self.by_conn.get(&key), Some(&entry.id), "by_conn row");
@@ -2052,9 +2309,10 @@ impl SocketService {
             assert_eq!(got.demux, want.demux, "port {port} demux");
         }
         assert_eq!(self.owned.len(), owners.len(), "owned row count");
-        for (who, count) in owners {
-            assert_eq!(self.owned.get(&who), Some(&count), "owned count");
+        for (who, want) in owners {
+            assert_eq!(self.owned.get(&who), Some(&want), "owner usage");
         }
+        assert_eq!(self.bytes_total, total, "stack byte total");
     }
 
     /// Push `entry` onto the table and index it, returning its position.
@@ -2076,6 +2334,7 @@ impl SocketService {
         self.sockets.push(entry);
         let index = self.sockets.len() - 1;
         self.index_entry(index);
+        self.reaccount(index);
         Ok(index)
     }
 
@@ -2106,6 +2365,9 @@ impl SocketService {
     /// — every other index is keyed to a handle, not a position.
     fn remove_at(&mut self, index: usize) {
         self.unindex_entry(index);
+        self.bytes_total = self
+            .bytes_total
+            .saturating_sub(self.sockets[index].accounted_bytes);
         self.sockets.swap_remove(index);
         if index < self.sockets.len() {
             let moved = self.sockets[index].id;
@@ -2328,20 +2590,51 @@ fn status_reply(response: &mut [u8]) -> Result<SocketReply, Errno> {
 /// exactly as an outbound one is. `net.tcp.ecn` likewise sets the
 /// template's `enable_ecn`, so an accepted connection negotiates RFC 3168
 /// ECN exactly as an outbound one does.
-pub(crate) fn listen_config(settings: NetworkSettings) -> ListenConfig {
-    ListenConfig {
+pub(crate) fn listen_config(settings: NetworkSettings, allowance: u64) -> Option<ListenConfig> {
+    let default = ListenConfig::default();
+    // Each connection the listener completes is given a window out of the
+    // allowance, exactly as an actively-opened one is.
+    let buffer = NetworkSettings::connection_buffer_bytes(allowance)?;
+    let mut config = ListenConfig {
+        // The half-open backlog is the SYN-flood brake, charged to the
+        // budget but never sized by it: a defence does not shrink because
+        // memory is tight. `syncookies_always` is the one policy that sets
+        // it aside, in favour of answering statelessly.
         max_half_open: if settings.syncookies_always {
             0
         } else {
-            ListenConfig::default().max_half_open
+            default.max_half_open
         },
         template: TcpConfig {
+            send_buffer: buffer,
+            receive_buffer: buffer,
             enable_keepalive: settings.tcp_keepalive,
             enable_ecn: settings.tcp_ecn,
             ..TcpConfig::default()
         },
-        ..ListenConfig::default()
+        ..default
+    };
+    // How many completed connections may wait at once is the one part of a
+    // listener only remote peers decide, so it is what the allowance sets.
+    // `lib/net` owns the arithmetic, because it knows what its own backlog
+    // and queue entries cost.
+    if !config.fit_within(usize::try_from(allowance).unwrap_or(usize::MAX)) {
+        return None;
     }
+    Some(config)
+}
+
+/// Widen a byte count to the budget's width, saturating rather than
+/// wrapping where a 32-bit target's `usize` is the narrower of the two.
+fn widen(bytes: usize) -> u64 {
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+/// [`widen`] for a `const` context, where `TryFrom` is not available.
+const fn widen_const(bytes: usize) -> u64 {
+    // `usize` is never wider than `u64` on any target TAIRiX builds for, so
+    // this is a widening on every one of them.
+    bytes as u64
 }
 
 /// Audit an after-capability refusal and return it as the typed error.

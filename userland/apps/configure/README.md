@@ -26,9 +26,9 @@ switches), `net.ipv6.privacy` (RFC 8981 temporary IPv6 addresses),
 `net.tcp.syncookies` (`auto` / `always`, the SYN-flood defence — never an
 `off`), `net.tcp.keepalive` (RFC 9293 §3.8.4 TCP keepalive probing on
 idle connections, off by default), `net.tcp.ecn` (RFC 3168 Explicit
-Congestion Notification, off by default), and `net.sockets.max` (the
-socket-table ceiling: `auto`, derived from the machine's RAM, or an
-explicit count). Per-interface network
+Congestion Notification, off by default), and `net.sockets.mem` (the
+socket-memory budget: `auto`, derived from the machine's RAM, or an
+explicit byte size such as `64M`). Per-interface network
 configuration is a separate declarative store
 (`/System/Settings/Network/network.conf`, the `lib/netconfig` engine), not
 part of this command.
