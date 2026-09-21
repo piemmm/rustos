@@ -368,6 +368,23 @@ pub struct NotifyReport {
     pub started: StartReport,
 }
 
+/// The outcome of an accepted liveness renewal.
+///
+/// The transport answers the renewing service with its current state and
+/// the interval it is being held to, which is what the service programs its
+/// own renewal cadence from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeartbeatReport {
+    /// The service the kernel-attested sender was resolved to.
+    pub service: String,
+    /// The watchdog interval the manager holds the service to, or
+    /// [`Duration64::ZERO`] when it is not watched — which tells the
+    /// service to stop renewing.
+    pub watchdog: Duration64,
+    /// The service's state as the manager holds it.
+    pub state: ServiceState,
+}
+
 /// The outcome of an accepted enrolment request.
 ///
 /// `changed` is what lets a tool distinguish "disabled it" from "it was
@@ -634,7 +651,7 @@ impl<'a> Init<'a> {
     /// Apply a readiness notification a service sent about itself.
     ///
     /// In production the manager maps the kernel-attested sender of a
-    /// [`ReadyNotice`](tairix_abi::ReadyNotice) to the service it started
+    /// [`ServiceNotice`](tairix_abi::ServiceNotice) to the service it started
     /// and calls this with that name; the notice never carries the name
     /// itself. A [`LifecycleSignal::Ready`] releases the service's
     /// dependents and satisfies the conditions it provides; a
@@ -727,14 +744,82 @@ impl<'a> Init<'a> {
     /// spawn and its resolution — a process id the kernel has since redrawn
     /// for someone else therefore has nothing to match.
     fn starting_service_of(&self, sender: ServiceSender) -> Option<String> {
-        self.services
-            .iter()
-            .find(|service| {
-                service.state == ServiceState::Starting
-                    && service.pid == Some(sender.pid)
-                    && service.spec.account() == sender.account
+        self.service_index_of(sender, |state| state == ServiceState::Starting)
+            .map(|idx| self.services[idx].spec.name().to_string())
+    }
+
+    /// The index of the service the attested `sender` is the live process
+    /// of, among those whose state `admits`.
+    ///
+    /// The attribution rule is the same for every self-report and lives
+    /// here once: both facts are the kernel's — the process id the manager
+    /// recorded when it spawned the service, and the account the kernel
+    /// switched that process onto — and both must match. Only the *state*
+    /// a given report is meaningful in differs, which is the caller's to
+    /// say.
+    fn service_index_of(
+        &self,
+        sender: ServiceSender,
+        admits: impl Fn(ServiceState) -> bool,
+    ) -> Option<usize> {
+        self.services.iter().position(|service| {
+            admits(service.state)
+                && service.pid == Some(sender.pid)
+                && service.spec.account() == sender.account
+        })
+    }
+
+    /// Renew the liveness heartbeat of the service the kernel-attested
+    /// `sender` is running, and report the interval it is being held to.
+    ///
+    /// This is the transport's entry for a `ServiceNotice::Alive`
+    /// (`tairix_abi`). Like a readiness notice the frame
+    /// names no service, so the manager resolves one from what the kernel
+    /// vouched for about the sender — but against a **running** service
+    /// rather than a starting one, because a renewal reports continued
+    /// progress, not a transition. Widening the readiness resolution to
+    /// cover it would have cost that one its narrow window, which is what
+    /// bounds a readiness edge to the span between a spawn and its
+    /// resolution.
+    ///
+    /// The returned interval is what the service programs its own renewal
+    /// cadence from, so the manager stays the single authority on it and
+    /// the service needs no copy of its own unit metadata. A service the
+    /// manager is not watching gets [`Duration64::ZERO`] and stops
+    /// renewing.
+    ///
+    /// Deliberately **not audited**, either way. A renewal is a
+    /// high-frequency steady-state signal with no diagnostic value, and the
+    /// notice endpoint takes no send capability — so auditing the *refusals*
+    /// would hand any process on the machine a log-flooding primitive
+    /// pointed at the audit trail. A sender that matches nothing is simply
+    /// refused, having learned only what it already knew about itself.
+    ///
+    /// # Errors
+    ///
+    /// [`NotifyError::UnknownSender`] if no running service was spawned as
+    /// that process on that account (fail closed — nothing is renewed).
+    pub fn heartbeat_sender(
+        &mut self,
+        sender: ServiceSender,
+        now: Duration64,
+    ) -> Result<HeartbeatReport, NotifyError> {
+        let idx = self
+            .service_index_of(sender, |state| {
+                matches!(state, ServiceState::Ready | ServiceState::Running)
             })
-            .map(|service| service.spec.name().to_string())
+            .ok_or(NotifyError::UnknownSender)?;
+        let service = self.services[idx].spec.name().to_string();
+        let interval = self.services[idx].spec.watchdog();
+        // `heartbeat` re-checks the watchdog opt-in and the live process, so
+        // a service that is running but not watched renews nothing and is
+        // told so by the zero interval it gets back.
+        self.heartbeat(&service, now);
+        Ok(HeartbeatReport {
+            service,
+            watchdog: interval,
+            state: self.services[idx].state,
+        })
     }
 
     /// Connect a client to a service's reserved endpoint, activating the
@@ -1037,7 +1122,12 @@ impl<'a> Init<'a> {
             if interval == Duration64::ZERO {
                 continue;
             }
+            // A process already forced down for wedging is excluded until
+            // its exit is reaped: it is `Running` with a live pid for that
+            // window, so re-arming here would audit a watchdog placed on a
+            // process the manager has just killed.
             let watched = self.services[idx].pid.is_some()
+                && !self.services[idx].killed_by_watchdog
                 && matches!(
                     self.services[idx].state,
                     ServiceState::Ready | ServiceState::Running
@@ -1089,6 +1179,18 @@ impl<'a> Init<'a> {
         }
         self.services[idx].watchdog_deadline = Some(add_duration(now, interval));
         true
+    }
+
+    /// The liveness interval a service is held to, or [`Duration64::ZERO`]
+    /// for one that opted out or is not registered.
+    ///
+    /// What the transport answers a readiness announcement with, so a
+    /// `notify`-ready service establishes its renewal cadence from the same
+    /// call that released its parked clients.
+    #[must_use]
+    pub fn watchdog_of(&self, name: &str) -> Duration64 {
+        self.index_of(name)
+            .map_or(Duration64::ZERO, |idx| self.services[idx].spec.watchdog())
     }
 
     /// The armed liveness-watchdog deadline of a service, or `None` if it is
@@ -3924,6 +4026,219 @@ mod tests {
         assert_eq!(init.watchdog_deadline("plain"), None);
     }
 
+    /// The window between a watchdog kill and the reap that observes it
+    /// leaves the service `Running` with a live pid, so an arming pass in
+    /// that window must not place the doomed process back under the
+    /// watchdog — the audit trail would then record a watchdog armed on a
+    /// process the manager had just force-terminated.
+    #[test]
+    fn a_force_killed_service_is_not_re_armed_before_its_reap() {
+        let spawner = MockSpawner::new();
+        let stopper = RecordingStopper::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::OnFailure))
+            .unwrap();
+        init.start_all().unwrap();
+        let pid = init.running_pid("svc").expect("svc was spawned");
+        init.arm_watchdogs(Duration64::from_secs(100));
+        assert_eq!(sink.count(events::SERVICE_WATCHDOG_ARMED), 1);
+
+        // The deadline lapses and the wedged process is forced down.
+        assert!(init.expire_watchdog("svc", Duration64::from_secs(106)));
+        assert_eq!(init.watchdog_deadline("svc"), None);
+        assert_eq!(stopper.forced.borrow().as_slice(), &[pid]);
+
+        // The reactor arms watchdogs after every pass, including this one —
+        // and the exit has not been reaped yet.
+        init.arm_watchdogs(Duration64::from_secs(106));
+        assert_eq!(init.watchdog_deadline("svc"), None);
+        assert_eq!(sink.count(events::SERVICE_WATCHDOG_ARMED), 1);
+
+        // Once the relaunched instance is running it is armed afresh, so
+        // the exclusion is for the doomed process only.
+        reaper.push(ReapedChild {
+            pid,
+            exit_code: 137,
+        });
+        init.reap(Duration64::from_secs(107));
+        init.expire_restart_backoff("svc", Duration64::from_secs(120));
+        assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
+        init.arm_watchdogs(Duration64::from_secs(120));
+        assert_eq!(
+            init.watchdog_deadline("svc"),
+            Some(Duration64::from_secs(125))
+        );
+        assert_eq!(sink.count(events::SERVICE_WATCHDOG_ARMED), 2);
+        // Dropping a spent one-shot is therefore safe rather than a hole:
+        // the ordinary arming pass puts a *live* opted-in service back
+        // under the watchdog, it just declines to do so for one the
+        // manager has already killed.
+    }
+
+    #[test]
+    fn a_renewal_resolves_against_the_running_service_that_sent_it() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::OnFailure))
+            .unwrap();
+        init.register(spec("plain", &[])).unwrap();
+        init.start_all().unwrap();
+        let svc = init.running_pid("svc").expect("svc was spawned");
+        let plain = init.running_pid("plain").expect("plain was spawned");
+        init.arm_watchdogs(Duration64::from_secs(100));
+
+        // The reply carries the interval, which is what the service
+        // programs its own renewal cadence from.
+        let report = init
+            .heartbeat_sender(
+                ServiceSender {
+                    pid: svc,
+                    account: TEST_ACCOUNT,
+                },
+                Duration64::from_secs(103),
+            )
+            .expect("svc renews its own liveness");
+        assert_eq!(report.service, "svc");
+        assert_eq!(report.watchdog, Duration64::from_secs(5));
+        assert_eq!(report.state, ServiceState::Running);
+        assert_eq!(
+            init.watchdog_deadline("svc"),
+            Some(Duration64::from_secs(108))
+        );
+
+        // A running service that opted out is answered honestly with a zero
+        // interval rather than refused: that is what tells its runtime to
+        // stop renewing, and refusing would leave it calling for ever.
+        let report = init
+            .heartbeat_sender(
+                ServiceSender {
+                    pid: plain,
+                    account: TEST_ACCOUNT,
+                },
+                Duration64::from_secs(103),
+            )
+            .expect("plain is running, merely unwatched");
+        assert_eq!(report.watchdog, Duration64::ZERO);
+        assert_eq!(init.watchdog_deadline("plain"), None);
+
+        // A renewal never renews another service's deadline: the resolution
+        // is by attested sender, exactly as a readiness notice is.
+        assert_eq!(
+            init.heartbeat_sender(
+                ServiceSender {
+                    pid: plain,
+                    account: TEST_ACCOUNT,
+                },
+                Duration64::from_secs(107),
+            )
+            .map(|r| r.service),
+            Ok(String::from("plain"))
+        );
+        assert_eq!(
+            init.watchdog_deadline("svc"),
+            Some(Duration64::from_secs(108))
+        );
+    }
+
+    /// A renewal is refused — silently, and without touching any deadline —
+    /// for every sender that is not a running service of this manager. The
+    /// notice endpoint takes no send capability, so this is the path any
+    /// process on the machine can reach.
+    #[test]
+    fn a_renewal_from_an_unmatched_sender_is_refused_without_auditing() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::OnFailure))
+            .unwrap();
+        init.register(notify_spec("starting", &[])).unwrap();
+        init.start_all().unwrap();
+        let svc = init.running_pid("svc").expect("svc was spawned");
+        let starting = init.running_pid("starting").expect("spawned");
+        init.arm_watchdogs(Duration64::from_secs(100));
+
+        // An unrelated process id.
+        assert_eq!(
+            init.heartbeat_sender(
+                ServiceSender {
+                    pid: Pid::new(svc.as_u64() ^ 0x5eed),
+                    account: TEST_ACCOUNT,
+                },
+                Duration64::from_secs(103),
+            ),
+            Err(NotifyError::UnknownSender)
+        );
+        // The right id on the wrong account: a redrawn id belonging to some
+        // other principal must not renew this service.
+        assert_eq!(
+            init.heartbeat_sender(
+                ServiceSender {
+                    pid: svc,
+                    account: TEST_ACCOUNT + 1,
+                },
+                Duration64::from_secs(103),
+            ),
+            Err(NotifyError::UnknownSender)
+        );
+        // A service that has not yet announced readiness is not running, so
+        // it has nothing to renew — a renewal must not stand in for the
+        // readiness edge it has still to announce.
+        assert_eq!(
+            init.heartbeat_sender(
+                ServiceSender {
+                    pid: starting,
+                    account: TEST_ACCOUNT,
+                },
+                Duration64::from_secs(103),
+            ),
+            Err(NotifyError::UnknownSender)
+        );
+        assert_eq!(init.state_of("starting"), Some(ServiceState::Starting));
+
+        // None of that moved the armed deadline, and none of it is audited:
+        // auditing a refusal here would hand any process a log-flooding
+        // primitive pointed at the audit trail.
+        assert_eq!(
+            init.watchdog_deadline("svc"),
+            Some(Duration64::from_secs(105))
+        );
+        assert_eq!(sink.count(events::NOTIFY_REJECTED), 0);
+    }
+
+    /// The manager is the single authority on the interval, so the value it
+    /// answers with is the one it enforces.
+    #[test]
+    fn the_reported_interval_is_the_one_the_manager_enforces() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(watchdog_spec("svc", RestartPolicy::OnFailure))
+            .unwrap();
+        init.register(spec("plain", &[])).unwrap();
+        init.start_all().unwrap();
+
+        assert_eq!(init.watchdog_of("svc"), Duration64::from_secs(5));
+        assert_eq!(init.watchdog_of("plain"), Duration64::ZERO);
+        // An unregistered name reports no watchdog rather than leaking that
+        // it is unknown.
+        assert_eq!(init.watchdog_of("ghost"), Duration64::ZERO);
+
+        // The armed deadline is exactly `now + the reported interval`, so a
+        // service renewing at half of it can never be late.
+        let armed_at = Duration64::from_secs(40);
+        init.arm_watchdogs(armed_at);
+        assert_eq!(
+            init.watchdog_deadline("svc"),
+            Some(add_duration(armed_at, init.watchdog_of("svc"))),
+        );
+    }
+
     #[test]
     fn a_wedged_service_is_force_killed_and_restarted() {
         let spawner = MockSpawner::new();
@@ -4710,34 +5025,5 @@ mod tests {
         );
         assert_eq!(init.restart_deadline("fontd"), None);
         assert_eq!(init.next_deadline(), None);
-    }
-
-    #[test]
-    fn a_disarmed_watchdog_is_re_armed_by_the_next_pass() {
-        let spawner = MockSpawner::new();
-        let stopper = RecordingStopper::new();
-        let reaper = ScriptedReaper::new(&[]);
-        let sink = RecordingSink::new();
-        let mut init = Init::new(cfg_stop(&spawner, &stopper, &reaper, &sink));
-        init.register(watchdog_spec("svc", RestartPolicy::Always))
-            .unwrap();
-        init.start_all().unwrap();
-
-        // Whatever drops a watchdog deadline, supervision is not lost: the
-        // ordinary arming pass the transport runs after every wakeup puts a
-        // still-running, still-opted-in service back under the watchdog. This
-        // is why dropping a spent one-shot is safe rather than a hole.
-        init.arm_watchdogs(Duration64::from_secs(0));
-        let first = init.watchdog_deadline("svc").expect("armed");
-        let pid = init.running_pid("svc").unwrap();
-        assert!(init.expire_watchdog("svc", first));
-        assert_eq!(init.watchdog_deadline("svc"), None);
-
-        init.arm_watchdogs(Duration64::from_secs(100));
-        assert_eq!(
-            init.watchdog_deadline("svc"),
-            Some(Duration64::from_secs(105))
-        );
-        assert_eq!(stopper.forced.borrow().as_slice(), &[pid]);
     }
 }

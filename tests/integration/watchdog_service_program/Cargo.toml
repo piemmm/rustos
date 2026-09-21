@@ -1,0 +1,42 @@
+[package]
+name = "tairix-test-watchdog-service"
+description = "plans/NEW-SERVICEMANAGER.md SVC-8 fixture: a test double for the netstack service that renews its liveness heartbeat for three intervals and then stops renewing and parks for good, so the aarch64 watchdog QEMU vertical can observe PID 1 detect the wedge, force-terminate it, reap it, and relaunch it under its restart policy. Planted only on that vertical's disk, never on a production image."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring the other fixture bundles
+# (`tairix-test-stalltrace`). The consuming vertical depends on the *library*
+# half alone for the audit-id vocabulary its witness sink keys on, so that
+# build never pulls the userland runtime's `_start` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The package is both the fixture's audit-id vocabulary library (shared with
+# the vertical's witness sink) and the `Run` entry-point binary of the bundle
+# the disk plants. The binary is a freestanding pure-Rust program on the
+# native Tier-1 targets and an inert host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "tairix-test-watchdog-service-run"
+path = "src/run.rs"
+
+[dependencies]
+# The wait-set vocabulary the fixture speaks; it invents no parallel
+# constants and links no kernel crate.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The audit-record vocabulary the fixture's ids are defined in, shared with
+# the vertical's witness sink.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime (`_start`,
+# panic handler, allocator) and the service-notice client under test.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }

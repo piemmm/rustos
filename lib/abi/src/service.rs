@@ -17,9 +17,10 @@
 //!   satisfied. This generalises the headless case: a GUI-only service that
 //!   requires `display-present` simply never activates on a headless boot,
 //!   because nothing ever satisfies that condition.
-//! * [`ReadyNotice`] + [`LifecycleSignal`] — the readiness-notification wire
-//!   record (an `sd_notify` analogue): a service announces "I am ready" (or
-//!   "I have failed to come up") to the manager over its supervised channel.
+//! * [`ServiceNotice`] + [`LifecycleSignal`] — the self-report wire record
+//!   (an `sd_notify` analogue): a service announces "I am ready" (or
+//!   "I have failed to come up", or "I am still making progress") to the
+//!   manager over its supervised channel.
 //!   The notice carries **no service identity** — the manager binds the
 //!   report to the kernel-attested sender of the message, never a
 //!   caller-supplied name — so a service can announce only its own
@@ -321,7 +322,7 @@ pub enum ReadinessKind {
     #[default]
     Immediate = 0,
     /// The service stays [`ServiceState::Starting`] until it sends a
-    /// [`ReadyNotice`] carrying [`LifecycleSignal::Ready`]. The manager
+    /// [`ServiceNotice`] carrying [`LifecycleSignal::Ready`]. The manager
     /// releases its dependents and satisfies the conditions it provides only
     /// then, so a dependent that needs the service *functional* (not merely
     /// spawned) waits for the real thing.
@@ -498,6 +499,16 @@ impl RestartPolicy {
         }
     }
 
+    /// Classify the stable identifier [`as_str`](Self::as_str) produces,
+    /// or `None` for anything outside the closed set (fail closed — an
+    /// unrecognised policy is a description defect, never a default).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Never, Self::OnFailure, Self::Always]
+            .into_iter()
+            .find(|policy| policy.as_str() == name)
+    }
+
     /// Whether a service with this policy should be restarted after an exit
     /// with `exit_code` that the manager did **not** itself initiate.
     ///
@@ -515,7 +526,7 @@ impl RestartPolicy {
 }
 
 /// The lifecycle transition a service may **announce about itself** through
-/// a [`ReadyNotice`].
+/// a [`ServiceNotice`].
 ///
 /// A service only ever reports its *own* progress, and only the transitions
 /// it is the authority on: that it has come up ([`Ready`](Self::Ready)) or
@@ -565,35 +576,77 @@ impl LifecycleSignal {
     }
 }
 
-/// A readiness notification a service sends to its manager — the `sd_notify`
-/// analogue.
+/// Which kind of self-report a [`ServiceNotice`] carries.
 ///
-/// The frame carries only the [`LifecycleSignal`] the service announces
-/// about itself. It carries **no identity**: the manager attributes the
-/// notice to the kernel-attested sender of the message, never a field the
-/// sender supplies, so one service can never announce another's readiness.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ReadyNotice {
-    /// The transition the sending service announces about itself.
-    pub signal: LifecycleSignal,
+/// A liveness renewal is not a lifecycle transition — it moves the service
+/// through no [`ServiceState`] at all — so it is a kind of its own rather
+/// than a third [`LifecycleSignal`]. Keeping them apart is what lets the
+/// manager resolve each against the state its own act requires: a
+/// transition against a service that is still starting, a renewal against
+/// one that is running.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum NoticeKind {
+    /// The notice announces a [`LifecycleSignal`].
+    Lifecycle = 1,
+    /// The notice renews the sender's liveness watchdog.
+    Alive = 2,
 }
 
-impl ReadyNotice {
-    /// Encoded size on the wire: magic (4), version (2), signal (1), and a
-    /// reserved byte that must be zero.
+impl NoticeKind {
+    /// The stable wire discriminant.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Classify a wire discriminant, or `None` outside the closed set
+    /// (fail closed).
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(NoticeKind::Lifecycle),
+            2 => Some(NoticeKind::Alive),
+            _ => None,
+        }
+    }
+}
+
+/// A self-report a service sends to its manager — the `sd_notify` analogue.
+///
+/// It carries **no identity**: the manager attributes the notice to the
+/// kernel-attested sender of the message, never a field the sender
+/// supplies, so one service can never report on another.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ServiceNotice {
+    /// A lifecycle transition the sender announces about itself.
+    Lifecycle(LifecycleSignal),
+    /// "I am still making progress" — renews the sender's watchdog
+    /// deadline. High-frequency and steady-state, so the manager records
+    /// no audit entry for it.
+    Alive,
+}
+
+impl ServiceNotice {
+    /// Encoded size on the wire: magic (4), version (2), kind (1), signal
+    /// (1).
     pub const WIRE_LEN: usize = 8;
 
     /// Wire offset of the version field.
     const OFF_VERSION: usize = 4;
-    /// Wire offset of the signal discriminant.
-    const OFF_SIGNAL: usize = 6;
-    /// Wire offset of the reserved byte.
-    const OFF_RESERVED: usize = 7;
+    /// Wire offset of the [`NoticeKind`] discriminant.
+    const OFF_KIND: usize = 6;
+    /// Wire offset of the signal discriminant; zero unless the kind is
+    /// [`NoticeKind::Lifecycle`].
+    const OFF_SIGNAL: usize = 7;
 
-    /// Build a notice announcing `signal`.
+    /// Which kind of report this notice carries.
     #[must_use]
-    pub const fn new(signal: LifecycleSignal) -> Self {
-        Self { signal }
+    pub const fn kind(&self) -> NoticeKind {
+        match self {
+            Self::Lifecycle(_) => NoticeKind::Lifecycle,
+            Self::Alive => NoticeKind::Alive,
+        }
     }
 
     /// Encode `self` little-endian.
@@ -603,7 +656,10 @@ impl ReadyNotice {
         put_u32(&mut out, 0, SERVICE_NOTICE_MAGIC);
         out[Self::OFF_VERSION..Self::OFF_VERSION + 2]
             .copy_from_slice(&SERVICE_VERSION_V1.to_le_bytes());
-        out[Self::OFF_SIGNAL] = self.signal.as_u8();
+        out[Self::OFF_KIND] = self.kind().as_u8();
+        if let Self::Lifecycle(signal) = self {
+            out[Self::OFF_SIGNAL] = signal.as_u8();
+        }
         out
     }
 
@@ -612,10 +668,11 @@ impl ReadyNotice {
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole notice.
-    /// * [`Errno::BadMagic`] — wrong magic or a non-zero reserved byte.
+    /// * [`Errno::BadMagic`] — wrong magic, or a non-zero signal byte on a
+    ///   kind that carries no signal (the canonical form).
     /// * [`Errno::AbiVersionUnsupported`] — not `service-v1`.
-    /// * [`Errno::OutOfRange`] — a signal outside the closed
-    ///   [`LifecycleSignal`] set.
+    /// * [`Errno::OutOfRange`] — a kind outside the closed [`NoticeKind`]
+    ///   set, or a signal outside the closed [`LifecycleSignal`] set.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -628,11 +685,14 @@ impl ReadyNotice {
         {
             return Err(Errno::AbiVersionUnsupported);
         }
-        if bytes[Self::OFF_RESERVED] != 0 {
-            return Err(Errno::BadMagic);
+        let signal = bytes[Self::OFF_SIGNAL];
+        match NoticeKind::from_u8(bytes[Self::OFF_KIND]).ok_or(Errno::OutOfRange)? {
+            NoticeKind::Lifecycle => Ok(Self::Lifecycle(
+                LifecycleSignal::from_u8(signal).ok_or(Errno::OutOfRange)?,
+            )),
+            NoticeKind::Alive if signal == 0 => Ok(Self::Alive),
+            NoticeKind::Alive => Err(Errno::BadMagic),
         }
-        let signal = LifecycleSignal::from_u8(bytes[Self::OFF_SIGNAL]).ok_or(Errno::OutOfRange)?;
-        Ok(Self { signal })
     }
 }
 
@@ -1349,9 +1409,9 @@ impl<'a> Iterator for Dependencies<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivationMode, LifecycleSignal, ReadinessKind, ReadyCondition, ReadyNotice, RestartPolicy,
-        ServiceLimit, ServiceManifest, ServiceState, ServiceUnit, SERVICE_MANIFEST_MAGIC,
-        SERVICE_MANIFEST_MAX_CONDITIONS, SERVICE_MANIFEST_MAX_DEPENDENCIES,
+        ActivationMode, LifecycleSignal, NoticeKind, ReadinessKind, ReadyCondition, RestartPolicy,
+        ServiceLimit, ServiceManifest, ServiceNotice, ServiceState, ServiceUnit,
+        SERVICE_MANIFEST_MAGIC, SERVICE_MANIFEST_MAX_CONDITIONS, SERVICE_MANIFEST_MAX_DEPENDENCIES,
         SERVICE_MANIFEST_MAX_LIMITS, SERVICE_MANIFEST_MAX_NAME_LEN, SERVICE_NOTICE_MAGIC,
         SERVICE_VERSION_V1,
     };
@@ -1412,6 +1472,19 @@ mod tests {
     }
 
     #[test]
+    fn restart_policy_names_round_trip() {
+        for policy in [
+            RestartPolicy::Never,
+            RestartPolicy::OnFailure,
+            RestartPolicy::Always,
+        ] {
+            assert_eq!(RestartPolicy::from_name(policy.as_str()), Some(policy));
+        }
+        assert_eq!(RestartPolicy::from_name("on_failure"), None);
+        assert_eq!(RestartPolicy::from_name(""), None);
+    }
+
+    #[test]
     fn magic_and_version_are_frozen() {
         assert_eq!(SERVICE_NOTICE_MAGIC, u32::from_le_bytes(*b"SVC1"));
         assert_eq!(SERVICE_VERSION_V1, 1);
@@ -1458,42 +1531,67 @@ mod tests {
     }
 
     #[test]
-    fn notice_round_trips() {
-        for signal in [LifecycleSignal::Ready, LifecycleSignal::Failed] {
-            let notice = ReadyNotice::new(signal);
-            let bytes = notice.to_le_bytes();
-            assert_eq!(bytes.len(), ReadyNotice::WIRE_LEN);
-            assert_eq!(ReadyNotice::from_bytes(&bytes), Ok(notice));
+    fn notice_kind_discriminants_are_frozen() {
+        for kind in [NoticeKind::Lifecycle, NoticeKind::Alive] {
+            assert_eq!(NoticeKind::from_u8(kind.as_u8()), Some(kind));
         }
+        // Zero is reserved, so a zeroed frame never reads as a kind.
+        assert_eq!(NoticeKind::from_u8(0), None);
+        assert_eq!(NoticeKind::from_u8(3), None);
+    }
+
+    #[test]
+    fn notice_round_trips() {
+        let notices = [
+            ServiceNotice::Lifecycle(LifecycleSignal::Ready),
+            ServiceNotice::Lifecycle(LifecycleSignal::Failed),
+            ServiceNotice::Alive,
+        ];
+        for notice in notices {
+            let bytes = notice.to_le_bytes();
+            assert_eq!(bytes.len(), ServiceNotice::WIRE_LEN);
+            assert_eq!(ServiceNotice::from_bytes(&bytes), Ok(notice));
+        }
+        assert_eq!(notices[0].kind(), NoticeKind::Lifecycle);
+        assert_eq!(notices[2].kind(), NoticeKind::Alive);
     }
 
     #[test]
     fn notice_decode_fails_closed() {
-        let good = ReadyNotice::new(LifecycleSignal::Ready).to_le_bytes();
+        let good = ServiceNotice::Lifecycle(LifecycleSignal::Ready).to_le_bytes();
 
         assert_eq!(
-            ReadyNotice::from_bytes(&good[..ReadyNotice::WIRE_LEN - 1]),
+            ServiceNotice::from_bytes(&good[..ServiceNotice::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
         let mut bad_magic = good;
         bad_magic[0] ^= 0xFF;
-        assert_eq!(ReadyNotice::from_bytes(&bad_magic), Err(Errno::BadMagic));
+        assert_eq!(ServiceNotice::from_bytes(&bad_magic), Err(Errno::BadMagic));
 
         let mut bad_version = good;
         bad_version[4] = 9;
         assert_eq!(
-            ReadyNotice::from_bytes(&bad_version),
+            ServiceNotice::from_bytes(&bad_version),
             Err(Errno::AbiVersionUnsupported)
         );
 
-        let mut bad_signal = good;
-        bad_signal[6] = 0; // not a self-announceable signal
-        assert_eq!(ReadyNotice::from_bytes(&bad_signal), Err(Errno::OutOfRange));
+        let mut bad_kind = good;
+        bad_kind[6] = 0;
+        assert_eq!(ServiceNotice::from_bytes(&bad_kind), Err(Errno::OutOfRange));
 
-        let mut dirty_reserved = good;
-        dirty_reserved[7] = 1;
+        let mut bad_signal = good;
+        bad_signal[7] = 0; // not a self-announceable signal
         assert_eq!(
-            ReadyNotice::from_bytes(&dirty_reserved),
+            ServiceNotice::from_bytes(&bad_signal),
+            Err(Errno::OutOfRange)
+        );
+
+        // A liveness renewal announces no transition, so a signal byte
+        // riding along with one is a non-canonical frame, not a renewal.
+        let mut dirty_alive = ServiceNotice::Alive.to_le_bytes();
+        dirty_alive[7] = LifecycleSignal::Ready.as_u8();
+        assert_eq!(
+            ServiceNotice::from_bytes(&dirty_alive),
             Err(Errno::BadMagic)
         );
     }

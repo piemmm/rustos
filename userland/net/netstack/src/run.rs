@@ -73,6 +73,7 @@ mod program {
         events, queue_tx, serve, BondChange, Caller, CryptoCookieSecret, Delivery, FrameBatch,
         NetChannelClient, NetChannelTransport, Netstack, ServiceHint, SocketService, StreamIo,
     };
+    use tairix_rt::servicenotice::Watchdog;
     use tairix_rt::LogSink;
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory
@@ -179,7 +180,12 @@ mod program {
     /// folding the per-interface deadlines and every connected stream's
     /// TCP timer — or [`tairix_abi::WAITSET_TIMEOUT_NONE`] (park
     /// indefinitely) when nothing is armed.
-    fn timeout_ns(stack: &Netstack, sockets: &SocketService) -> u64 {
+    fn timeout_ns(stack: &Netstack, sockets: &SocketService, watchdog: &Watchdog) -> u64 {
+        // The liveness renewal is a deadline like any other: folded in
+        // here, so an idle stack still proves it is alive without a second
+        // timer and without ever polling. An unwatched stack contributes
+        // `WAITSET_TIMEOUT_NONE` and the park stays indefinite.
+        let renewal = watchdog.timeout_ns(span_nanos(now()));
         let deadline = match (stack.next_deadline(), sockets.stream_next_deadline()) {
             (Some(a), Some(b)) => {
                 if (a.secs(), a.subsec_nanos()) <= (b.secs(), b.subsec_nanos()) {
@@ -189,11 +195,12 @@ mod program {
                 }
             }
             (Some(d), None) | (None, Some(d)) => d,
-            (None, None) => return tairix_abi::WAITSET_TIMEOUT_NONE,
+            (None, None) => return renewal,
         };
-        span_nanos(deadline)
+        let engines = span_nanos(deadline)
             .saturating_sub(span_nanos(now()))
-            .max(1)
+            .max(1);
+        engines.min(renewal)
     }
 
     /// Bind the endpoint and serve requests for the life of the service.
@@ -294,14 +301,27 @@ mod program {
         let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
         let mut reply = [0u8; NETSTACK_MAX_REPLY];
         let mut socket_reply = [0u8; SOCKET_MAX_REPLY];
+        // Ask the manager whether this stack is under a liveness watchdog
+        // and, if so, at what interval. `attach` rather than an announcement
+        // because the floor starts this service `immediate`-ready: the
+        // manager already considers it running, so it has no readiness edge
+        // left to announce. A stack the manager is not watching arms
+        // nothing and never calls again.
+        let mut watchdog = Watchdog::attach(span_nanos(now()));
         loop {
-            // Park until a request arrives, a driver rings a notify port, or
-            // the engines' one-shot deadline lapses; a lapsed deadline
-            // (a non-zero wake) pumps every channel so the engines emit
-            // their timer-due frames (DAD, SLAAC RS, IGMP, retransmits),
-            // then re-arms below against the new `now`.
+            // Renew before computing the park, so a deadline that has just
+            // lapsed is renewed now rather than yielding a zero timeout the
+            // loop would spin on.
+            watchdog.renew_if_due(span_nanos(now()));
+            // Park until a request arrives, a driver rings a notify port,
+            // the engines' one-shot deadline lapses, or the next liveness
+            // renewal falls due; a lapsed deadline (a non-zero wake) pumps
+            // every channel so the engines emit their timer-due frames
+            // (DAD, SLAAC RS, IGMP, retransmits), then re-arms below
+            // against the new `now`.
             let mut token = 0u64;
-            let woke = tairix_rt::waitset_wait(set, timeout_ns(&stack, &sockets), &mut token);
+            let woke =
+                tairix_rt::waitset_wait(set, timeout_ns(&stack, &sockets, &watchdog), &mut token);
             if woke != 0 {
                 pump_all(&mut stack, &mut sockets, &mut channels, &secret, now());
                 continue;

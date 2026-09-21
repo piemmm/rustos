@@ -87,7 +87,7 @@ mod program {
         ServiceActivationOp, ServiceActivationRequest, ServiceControlRequest, ServiceEnrolRequest,
     };
     use tairix_abi::{
-        ActivationMode, CapabilityId, Duration64, Errno, Origin, ReadinessKind, ReadyNotice,
+        ActivationMode, CapabilityId, Duration64, Errno, Origin, ReadinessKind, ServiceNotice,
         ServiceState, Signal, WaitSetOp, WaitSourceKind,
     };
     use tairix_caps::CapabilitySet;
@@ -100,7 +100,12 @@ mod program {
     use tairix_rt::LogSink;
     use tairix_util::retry::RetryLadder;
 
-    use crate::startup::{render_banner, service_name, StartupConfig, BANNER_MAX, DEFAULT_CONFIG};
+    // Aliased: the supervisor has its own `Launch` (a session to start on a
+    // console), and these are floor-description entries.
+    use crate::startup::{
+        render_banner, service_name, Launch as FloorEntry, StartupConfig, BANNER_MAX,
+        DEFAULT_CONFIG,
+    };
     use crate::supervisor::{supervise, Launch, Outcome, Services, Sessions, Woke};
 
     /// Exit code when the compiled-in startup config does not parse, names a
@@ -151,8 +156,7 @@ mod program {
     /// as that document appears.
     fn register_startup_services(engine: &mut Init<'_>, config: &StartupConfig<'_>) -> bool {
         for entry in config.services() {
-            let spec =
-                ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new());
+            let spec = floor_spec(entry);
             if engine.register(spec).is_err() {
                 // Two floor services resolved to the same name — a defect in
                 // the compiled-in `DEFAULT_CONFIG`, not a runtime input.
@@ -163,13 +167,7 @@ mod program {
                 return false;
             }
         }
-        let enrolled: Vec<ServiceSpec> = config
-            .enrolled()
-            .iter()
-            .map(|entry| {
-                ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new())
-            })
-            .collect();
+        let enrolled: Vec<ServiceSpec> = config.enrolled().iter().map(floor_spec).collect();
         // The image's layer is the `enrolled` tier itself: every directive it
         // carries is enrolled by default. It cannot come off disk, because a
         // document under `/System` is not reliably readable at the instant PID
@@ -196,7 +194,7 @@ mod program {
             return false;
         }
         for entry in config.ondemand() {
-            let spec = ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new())
+            let spec = floor_spec(entry)
                 .with_activation(ActivationMode::on_demand(ONDEMAND_LINGER))
                 // A client's connect is answered when the service's endpoint
                 // is answerable, which only the service can say — treating
@@ -213,6 +211,19 @@ mod program {
             }
         }
         true
+    }
+
+    /// The manager's spec for one floor-description entry.
+    ///
+    /// The directive is the floor's unit metadata, so everything it
+    /// declares — the account, the liveness interval, the restart policy —
+    /// is applied here rather than special-cased per service. A discovered
+    /// bundle takes the same fields from its own signed manifest through
+    /// `ServiceSpec::from_manifest`, so the two paths agree by shape.
+    fn floor_spec(entry: &FloorEntry<'_>) -> ServiceSpec {
+        ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new())
+            .with_watchdog(entry.watchdog)
+            .with_restart(entry.restart)
     }
 
     /// How long an idle on-demand service is kept alive after its last
@@ -562,7 +573,7 @@ mod program {
         }
 
         fn serve_notice(&mut self) {
-            let mut frame = [0u8; ReadyNotice::WIRE_LEN];
+            let mut frame = [0u8; ServiceNotice::WIRE_LEN];
             let mut ticket = 0u64;
             let Ok(len) = tairix_rt::call_recv_nonblock(NOTICE_ENDPOINT, &mut frame, &mut ticket)
             else {
@@ -570,12 +581,14 @@ mod program {
             };
 
             let now = Duration64::from_nanos(tairix_rt::clock_get());
-            let answer = self.apply_notice(&frame[..len], ticket);
+            let answer = self.apply_notice(&frame[..len], ticket, now);
             // The sender is parked on this ticket, so it is answered whether
             // the manager accepted the notice or refused it: a service that
             // announced readiness the manager did not record must learn so
-            // rather than serve behind a dependency gate that never opens.
-            Self::reply_state(NOTICE_ENDPOINT, ticket, answer);
+            // rather than serve behind a dependency gate that never opens,
+            // and one whose renewal was refused must learn to stop renewing
+            // rather than call into the manager for ever.
+            Self::reply_notice(ticket, answer);
             // A service reaching ready is what releases whoever was parked
             // waiting for it — this is the wake the whole on-demand path
             // turns on.
@@ -651,24 +664,41 @@ mod program {
             }
         }
 
-        /// Apply one decoded lifecycle notice, answering with the announcing
-        /// service's resulting state.
+        /// Apply one decoded self-report, answering with the sending
+        /// service's resulting state and the watchdog interval it is being
+        /// held to.
         ///
         /// The frame names no service: the manager resolves one from the
         /// call's kernel-attested origin, so a principal can only ever move
         /// its own service and a sender matching none is refused outright.
-        fn apply_notice(&mut self, frame: &[u8], ticket: u64) -> Result<ServiceState, Errno> {
-            let notice = ReadyNotice::from_bytes(frame)?;
+        /// A lifecycle transition and a liveness renewal resolve against
+        /// different states — starting and running respectively — which is
+        /// the engine's rule, not this transport's.
+        fn apply_notice(
+            &mut self,
+            frame: &[u8],
+            ticket: u64,
+            now: Duration64,
+        ) -> Result<(ServiceState, Duration64), Errno> {
+            let notice = ServiceNotice::from_bytes(frame)?;
             let origin = attested_peer(NOTICE_ENDPOINT, ticket)?;
+            let sender = ServiceSender {
+                pid: Pid::new(origin.pid()),
+                account: origin.uid(),
+            };
+            let signal = match notice {
+                ServiceNotice::Alive => {
+                    let report = self
+                        .engine
+                        .heartbeat_sender(sender, now)
+                        .map_err(notify_errno)?;
+                    return Ok((report.state, report.watchdog));
+                }
+                ServiceNotice::Lifecycle(signal) => signal,
+            };
             let report = self
                 .engine
-                .notify_sender(
-                    ServiceSender {
-                        pid: Pid::new(origin.pid()),
-                        account: origin.uid(),
-                    },
-                    notice.signal,
-                )
+                .notify_sender(sender, signal)
                 .map_err(notify_errno)?;
             for failed in &report.started.failed {
                 // Fail loud, degrade gracefully: a dependent the notice
@@ -679,7 +709,14 @@ mod program {
                     failed.name, failed.failure
                 ));
             }
-            self.state_for_reply(&report.service)
+            // The announcement is also what establishes the service's
+            // renewal cadence, so it is answered with the same pair a
+            // renewal is: one reply shape for the endpoint, and a
+            // `notify`-ready service needs no second call to learn it.
+            Ok((
+                self.state_for_reply(&report.service)?,
+                self.engine.watchdog_of(&report.service),
+            ))
         }
 
         /// The state to report for a service the engine has just accepted a
@@ -728,6 +765,23 @@ mod program {
                     }
                 }
             }
+        }
+
+        /// Encode and send one notice reply: the sender's resulting state
+        /// and the watchdog interval the manager holds it to.
+        ///
+        /// A wider reply than the other three endpoints', because a service
+        /// reporting on itself is the one caller that needs something back
+        /// beyond the outcome — the cadence it must renew at.
+        fn reply_notice(ticket: u64, answer: Result<(ServiceState, Duration64), Errno>) {
+            let mut reply = [0u8; tairix_abi::service_control::NOTICE_REPLY_LEN];
+            let written = match answer {
+                Ok((state, watchdog)) => {
+                    tairix_abi::service_control::encode_notice_reply(&mut reply, state, watchdog)
+                }
+                Err(err) => tairix_abi::service_control::encode_error_reply(&mut reply, err),
+            };
+            let _ = tairix_rt::call_reply(NOTICE_ENDPOINT, ticket, &reply[..written.unwrap_or(0)]);
         }
 
         /// Encode and send one status-framed reply. A caller blocked on a
@@ -942,8 +996,8 @@ mod program {
                 NOTICE_ENDPOINT,
                 &CapabilitySet::empty(),
                 &CapabilitySet::empty(),
-                ReadyNotice::WIRE_LEN,
-                tairix_abi::service_control::REPLY_LEN,
+                ServiceNotice::WIRE_LEN,
+                tairix_abi::service_control::NOTICE_REPLY_LEN,
                 crate::NOTICE_QUEUE_DEPTH,
             );
             if created != 0 {
@@ -1134,6 +1188,25 @@ mod program {
             // the confined `AuthorityScope::User` scope instead.
             scope: AuthorityScope::System,
         });
+        // Bind the four endpoints and the wait-set *before* anything is
+        // started. The wait-set is PID 1's only park — the control
+        // endpoints, any-child readiness, and the one-shot deadlines all
+        // wake it — and binding it here is also what makes the manager
+        // answerable before it spawns a service that reports to it: a
+        // service announcing readiness, or renewing its liveness, into an
+        // endpoint that does not exist yet would be refused and would then
+        // wait on a manager that never heard it. Without the wait-set there
+        // is nothing to supervise sessions from, so a refusal is fatal and
+        // says why rather than silently degrading to a wait on children.
+        let mut sessions = match RtSessions::new() {
+            Ok(sessions) => sessions,
+            Err(err) => {
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: service-control wait-set unavailable (err {err}); refusing to boot a system it cannot supervise\n"
+                ));
+                return EXIT_WAITSET_FAILED;
+            }
+        };
         if !register_startup_services(&mut engine, &config) {
             return EXIT_CONFIG_INVALID;
         }
@@ -1179,19 +1252,6 @@ mod program {
         let session = Launch {
             path: config.session().path.as_bytes(),
             uid: config.session().uid,
-        };
-        // The wait-set is PID 1's only park: the control endpoint, any-child
-        // readiness, and the one-shot deadlines all wake it. Without it there
-        // is nothing to supervise sessions *from*, so a refusal is fatal and
-        // says why rather than silently degrading to a wait on children.
-        let mut sessions = match RtSessions::new() {
-            Ok(sessions) => sessions,
-            Err(err) => {
-                let _ = Stderr.write_fmt(format_args!(
-                    "init: service-control wait-set unavailable (err {err}); refusing to boot a system it cannot supervise\n"
-                ));
-                return EXIT_WAITSET_FAILED;
-            }
         };
         match supervise(&mut services, &mut sessions, session) {
             Outcome::NoConsoles => EXIT_NO_CONSOLES,

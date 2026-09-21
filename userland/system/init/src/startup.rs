@@ -50,6 +50,28 @@
 //!   service knows when it has bound it — treating a successful spawn as
 //!   readiness would hand the client an endpoint that does not exist yet.
 //!
+//! A `service`, `enrolled`, or `ondemand` directive may carry trailing
+//! `key=value` options after its account. Two are defined:
+//!
+//! * `watchdog=<n>s` — the liveness interval the manager holds the service
+//!   to, in whole seconds. A service that declares one must renew its
+//!   heartbeat (`tairix_rt::servicenotice`) or be force-restarted as
+//!   wedged. Whole seconds because a watchdog measures a service having
+//!   stopped making progress, not latency, and the `s` is required so the
+//!   unit can never be misread.
+//! * `restart=never|on-failure|always` — what the manager does when the
+//!   service exits without being asked to.
+//!
+//! Both default to off (no watchdog, `never`), and an unknown option or
+//! value refuses the whole config rather than being ignored: a
+//! misspelled liveness interval that silently meant "unwatched" would
+//! disable a defence without saying so.
+//!
+//! This is the floor's own description, which is the one place a floor
+//! service's unit metadata has ever lived; a *discovered* bundle carries
+//! these in its own signed manifest (`tairix_abi::ServiceUnit`) instead, so
+//! there is no second source of truth.
+//!
 //! Every `session`/`service` directive names its account, and the parser
 //! resolves the name onto its uid **at parse time** through the compiled-in
 //! system identity (`tairix_users::system_account_uid`) — no volume, no
@@ -62,6 +84,7 @@
 
 use core::fmt;
 
+use tairix_abi::{Duration64, RestartPolicy};
 use tairix_util::conf::strip_comment;
 
 /// Maximum length, in bytes, of a startup config text [`StartupConfig::parse`]
@@ -127,7 +150,14 @@ pub const DEFAULT_CONFIG: &str = "\
 # endpoint (`AGENTS.md` §16.6) is published before any client queries it;
 # `netstack` (plans/NETWORK.md) owns the network interfaces and is launched
 # before `devmgr` so it is ready to receive the NIC device channels `devmgr`
-# binds to it; `seatmgr` (plans/DISPLAY.md D3) holds the seat-multiplexing
+# binds to it; it is the floor's one watchdog holder, because a stack whose
+# serve loop has stopped turning is still a live process — nothing else on
+# the machine notices, every socket simply stops being answered, and the
+# recovery (relaunch, sockets re-established) is one the system can make on
+# its own — which is why it is also the floor's one `on-failure` entry, since
+# detecting a wedge and then leaving the machine without a network stack
+# would be a worse outcome than the wedge. Thirty seconds is far longer than
+# any turn of its loop and far shorter than a user's patience; `seatmgr` (plans/DISPLAY.md D3) holds the seat-multiplexing
 # authority; `confd` (plans/APPDATA.md) owns every application's settings
 # store and is a boot-floor service because a headless machine needs it as
 # much as a desktop does — it binds its endpoint straight away and answers a
@@ -150,7 +180,7 @@ pub const DEFAULT_CONFIG: &str = "\
 # that consumer until the endpoint is answerable instead of racing the bind.
 console
 service /System/Services/sysinfod.app/Run sysinfod
-service /System/Services/netstack.app/Run netstack
+service /System/Services/netstack.app/Run netstack watchdog=30s restart=on-failure
 service /System/Services/audiod.app/Run audiod
 service /System/Services/devmgr.app/Run devmgr
 service /System/Services/seatmgr.app/Run seatmgr
@@ -274,6 +304,13 @@ pub enum ConfigError {
     SessionRequired,
     /// More than [`MAX_SERVICES`] `service` directives were declared.
     TooManyServices,
+    /// A directive's trailing option was not a well-formed
+    /// `watchdog=<n>s` with a non-zero whole-second count.
+    MalformedWatchdog,
+    /// A directive carried a trailing token that is not a `key=value`
+    /// option, names an option the parser does not define, or gives one an
+    /// unknown value.
+    UnknownOption,
 }
 
 impl fmt::Display for ConfigError {
@@ -290,13 +327,16 @@ impl fmt::Display for ConfigError {
             Self::ConsoleRequired => "startup config omits the required `console` directive",
             Self::SessionRequired => "startup config omits the required `session` directive",
             Self::TooManyServices => "startup config declares too many `service` directives",
+            Self::MalformedWatchdog => "a startup directive's watchdog option is malformed",
+            Self::UnknownOption => "a startup directive names an unknown option",
         };
         f.write_str(message)
     }
 }
 
-/// One validated launch entry: the program path and the uid of the
-/// compiled-in system account it runs as, resolved at parse time.
+/// One validated launch entry: the program path, the uid of the
+/// compiled-in system account it runs as, and its liveness interval — all
+/// resolved at parse time.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Launch<'a> {
     /// The absolute path of the program to launch.
@@ -304,6 +344,14 @@ pub struct Launch<'a> {
     /// The concrete `target_uid` the entry is spawned with — the
     /// compiled-in system account the directive named.
     pub uid: u32,
+    /// The liveness interval the manager holds the service to, or
+    /// [`Duration64::ZERO`] when the directive declared none (the default:
+    /// the service is not watched and renews nothing).
+    pub watchdog: Duration64,
+    /// What the manager does when the service exits without being asked
+    /// to. Defaults to [`RestartPolicy::Never`]: a service comes back only
+    /// when its own description asks for it.
+    pub restart: RestartPolicy,
 }
 
 /// A parsed, validated startup configuration borrowing from its source text.
@@ -347,7 +395,12 @@ impl<'a> StartupConfig<'a> {
     /// whose identities it cannot fully resolve — yields no
     /// [`StartupConfig`].
     pub fn parse(text: &'a str) -> Result<Self, ConfigError> {
-        const EMPTY: Launch<'_> = Launch { path: "", uid: 0 };
+        const EMPTY: Launch<'_> = Launch {
+            path: "",
+            uid: 0,
+            watchdog: Duration64::ZERO,
+            restart: RestartPolicy::Never,
+        };
         if text.len() > MAX_CONFIG_LEN {
             return Err(ConfigError::TooLong);
         }
@@ -492,22 +545,58 @@ pub fn service_name(path: &str) -> &str {
     path
 }
 
-/// Parse one `session`/`service` argument — `<path> <account>` — into a
-/// validated [`Launch`]: the path must be absolute, the account name must
-/// resolve against the compiled-in system identity, and nothing may
-/// follow the account.
+/// Parse one `session`/`service` argument — `<path> <account>
+/// [watchdog=<n>s]` — into a validated [`Launch`]: the path must be
+/// absolute, the account name must resolve against the compiled-in system
+/// identity, and the only thing that may follow the account is the
+/// watchdog option.
 fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
     let mut fields = argument.split_whitespace();
     let path = fields.next().ok_or(ConfigError::MissingArgument)?;
     let account = fields.next().ok_or(ConfigError::MissingAccount)?;
-    if fields.next().is_some() {
-        return Err(ConfigError::UnexpectedArgument);
+    let mut watchdog = Duration64::ZERO;
+    let mut restart = RestartPolicy::Never;
+    for option in fields {
+        let (key, value) = option.split_once('=').ok_or(ConfigError::UnknownOption)?;
+        match key {
+            "watchdog" => watchdog = parse_watchdog(value)?,
+            "restart" => {
+                restart = RestartPolicy::from_name(value).ok_or(ConfigError::UnknownOption)?;
+            }
+            _ => return Err(ConfigError::UnknownOption),
+        }
     }
     if !path.starts_with('/') {
         return Err(ConfigError::NotAbsolutePath);
     }
     let uid = tairix_users::system_account_uid(account).ok_or(ConfigError::UnknownAccount)?;
-    Ok(Launch { path, uid: uid.0 })
+    Ok(Launch {
+        path,
+        uid: uid.0,
+        watchdog,
+        restart,
+    })
+}
+
+/// Parse a `watchdog=` option's value — `<n>s` — into its interval.
+///
+/// The `s` suffix is required and the count is whole seconds: a bare number
+/// would leave the unit to the reader, and a watchdog misread by a factor of
+/// a thousand either kills every healthy service or watches none of them.
+/// Zero is refused rather than silently meaning "unwatched", because a
+/// directive that bothers to spell the option meant to ask for one.
+fn parse_watchdog(value: &str) -> Result<Duration64, ConfigError> {
+    let digits = value
+        .strip_suffix('s')
+        .ok_or(ConfigError::MalformedWatchdog)?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ConfigError::MalformedWatchdog);
+    }
+    let secs: i64 = digits.parse().map_err(|_| ConfigError::MalformedWatchdog)?;
+    if secs == 0 {
+        return Err(ConfigError::MalformedWatchdog);
+    }
+    Ok(Duration64::from_secs(secs))
 }
 
 /// Count the `service` directives a startup config `text` declares.
@@ -587,14 +676,25 @@ const fn is_ascii_whitespace(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        service_name, ConfigError, Launch, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN,
-        MAX_ENROLLED_SERVICES, MAX_ONDEMAND_SERVICES, MAX_SERVICES, REGISTERED_SERVICES,
+        service_name, ConfigError, Duration64, Launch, RestartPolicy, StartupConfig,
+        DEFAULT_CONFIG, MAX_CONFIG_LEN, MAX_ENROLLED_SERVICES, MAX_ONDEMAND_SERVICES, MAX_SERVICES,
+        REGISTERED_SERVICES,
     };
 
     extern crate alloc;
     use alloc::format;
     use alloc::string::String;
     use core::fmt::Write as _;
+
+    /// The entry a directive with no trailing options parses to.
+    fn plain(path: &'static str, uid: u32) -> Launch<'static> {
+        Launch {
+            path,
+            uid,
+            watchdog: Duration64::ZERO,
+            restart: RestartPolicy::Never,
+        }
+    }
 
     #[test]
     fn default_config_parses_to_console_login_session_and_the_startup_services() {
@@ -605,10 +705,7 @@ mod tests {
         // service uid it runs as (`plans/USERS.md`).
         assert_eq!(
             config.session(),
-            Launch {
-                path: "/System/Services/login.app/Run",
-                uid: tairix_users::LOGIN_UID.0,
-            }
+            plain("/System/Services/login.app/Run", tairix_users::LOGIN_UID.0)
         );
         // `sysinfod` is launched before `netstack`/`devmgr` so the
         // introspection endpoint is published before any client queries it;
@@ -622,50 +719,51 @@ mod tests {
         assert_eq!(
             config.services(),
             &[
-                Launch {
-                    path: "/System/Services/sysinfod.app/Run",
-                    uid: tairix_users::SYSINFOD_UID.0,
-                },
+                plain(
+                    "/System/Services/sysinfod.app/Run",
+                    tairix_users::SYSINFOD_UID.0
+                ),
+                // The floor's one watchdog holder, so its options are part
+                // of what the default config is asserted to mean.
                 Launch {
                     path: "/System/Services/netstack.app/Run",
                     uid: tairix_users::NETSTACK_UID.0,
+                    watchdog: Duration64::from_secs(30),
+                    restart: RestartPolicy::OnFailure,
                 },
-                Launch {
-                    path: "/System/Services/audiod.app/Run",
-                    uid: tairix_users::AUDIOD_UID.0,
-                },
-                Launch {
-                    path: "/System/Services/devmgr.app/Run",
-                    uid: tairix_users::DEVMGR_UID.0,
-                },
-                Launch {
-                    path: "/System/Services/seatmgr.app/Run",
-                    uid: tairix_users::SEATMGR_UID.0,
-                },
-                Launch {
-                    path: "/System/Services/confd.app/Run",
-                    uid: tairix_users::CONFD_UID.0,
-                },
+                plain(
+                    "/System/Services/audiod.app/Run",
+                    tairix_users::AUDIOD_UID.0
+                ),
+                plain(
+                    "/System/Services/devmgr.app/Run",
+                    tairix_users::DEVMGR_UID.0
+                ),
+                plain(
+                    "/System/Services/seatmgr.app/Run",
+                    tairix_users::SEATMGR_UID.0
+                ),
+                plain("/System/Services/confd.app/Run", tairix_users::CONFD_UID.0),
             ],
         );
         // The enrolment-governed tier: `timed` alone, so a user who turns
         // automatic time-setting off keeps it off across a reboot.
         assert_eq!(
             config.enrolled(),
-            &[Launch {
-                path: "/System/Services/timed.app/Run",
-                uid: tairix_users::TIMED_UID.0,
-            }],
+            &[plain(
+                "/System/Services/timed.app/Run",
+                tairix_users::TIMED_UID.0
+            )],
         );
         // The on-demand tier: `fontd` alone. It is on neither list above,
         // which is the whole point — nothing starts it at boot, so a
         // headless machine never runs it at all.
         assert_eq!(
             config.ondemand(),
-            &[Launch {
-                path: "/System/Services/fontd.app/Run",
-                uid: tairix_users::FONTD_UID.0,
-            }],
+            &[plain(
+                "/System/Services/fontd.app/Run",
+                tairix_users::FONTD_UID.0
+            )],
         );
         for started in config.services().iter().chain(config.enrolled()) {
             assert_ne!(started.path, "/System/Services/fontd.app/Run");
@@ -713,14 +811,11 @@ mod tests {
         assert_eq!(
             config.services(),
             &[
-                Launch {
-                    path: "/System/Services/devmgr.app/Run",
-                    uid: tairix_users::DEVMGR_UID.0,
-                },
-                Launch {
-                    path: "/System/Services/netd",
-                    uid: tairix_users::SYSINFOD_UID.0,
-                },
+                plain(
+                    "/System/Services/devmgr.app/Run",
+                    tairix_users::DEVMGR_UID.0
+                ),
+                plain("/System/Services/netd", tairix_users::SYSINFOD_UID.0),
             ],
         );
     }
@@ -767,9 +862,72 @@ mod tests {
 
     #[test]
     fn trailing_fields_after_the_account_fail_closed() {
+        // Anything after the account must be a `key=value` option the
+        // parser defines; a bare word is refused rather than ignored.
         assert_eq!(
             StartupConfig::parse("console\nsession /x login extra\n"),
+            Err(ConfigError::UnknownOption),
+        );
+        assert_eq!(
+            StartupConfig::parse("console\nsession /x login nosuch=1\n"),
+            Err(ConfigError::UnknownOption),
+        );
+        // A directive that takes no argument at all still refuses one.
+        assert_eq!(
+            StartupConfig::parse("console yes\nsession /x login\n"),
             Err(ConfigError::UnexpectedArgument),
+        );
+    }
+
+    #[test]
+    fn directive_options_parse_and_fail_closed() {
+        let text = "console\n\
+                    service /a.app/Run netstack watchdog=30s restart=on-failure\n\
+                    session /x login\n";
+        let config = StartupConfig::parse(text).expect("options parse");
+        assert_eq!(
+            config.services(),
+            &[Launch {
+                path: "/a.app/Run",
+                uid: tairix_users::NETSTACK_UID.0,
+                watchdog: Duration64::from_secs(30),
+                restart: RestartPolicy::OnFailure,
+            }],
+        );
+
+        // Order is free — they are named options, not positions.
+        let swapped = "console\n\
+                       service /a.app/Run netstack restart=always watchdog=1s\n\
+                       session /x login\n";
+        let config = StartupConfig::parse(swapped).expect("options parse in any order");
+        assert_eq!(config.services()[0].restart, RestartPolicy::Always);
+        assert_eq!(config.services()[0].watchdog, Duration64::from_secs(1));
+
+        // Every malformed liveness interval refuses the whole config. A
+        // watchdog silently read as "none" would disable a defence without
+        // saying so, which is exactly what must not happen.
+        for bad in [
+            "watchdog=30",   // no unit
+            "watchdog=30ms", // not whole seconds
+            "watchdog=s",    // no count
+            "watchdog=0s",   // a directive that asks for one means it
+            "watchdog=-5s",  // not a count at all
+            "watchdog=",
+        ] {
+            let text =
+                alloc::format!("console\nservice /a.app/Run netstack {bad}\nsession /x login\n");
+            assert_eq!(
+                StartupConfig::parse(&text),
+                Err(ConfigError::MalformedWatchdog),
+                "{bad}"
+            );
+        }
+        // An unknown restart policy is refused rather than defaulted.
+        assert_eq!(
+            StartupConfig::parse(
+                "console\nservice /a.app/Run netstack restart=on_failure\nsession /x login\n"
+            ),
+            Err(ConfigError::UnknownOption),
         );
     }
 
@@ -809,10 +967,10 @@ mod tests {
         .expect("an on-demand directive parses");
         assert_eq!(
             config.ondemand(),
-            &[Launch {
-                path: "/System/Services/fontd.app/Run",
-                uid: tairix_users::FONTD_UID.0,
-            }],
+            &[plain(
+                "/System/Services/fontd.app/Run",
+                tairix_users::FONTD_UID.0
+            )],
         );
         // An on-demand entry is on no other list: registering it must not
         // also start it.

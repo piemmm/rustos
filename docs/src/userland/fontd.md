@@ -292,11 +292,14 @@ has bound `FONT_ENDPOINT`, a consumer can no longer race the bind and paint
 textless frames.
 
 Readiness is the service's own announcement, not its spawn: `fontd` sends a
-`ReadyNotice` over the manager's lifecycle-notice endpoint immediately after
-the bind. The notice names no service — the manager attributes it to the
-call's kernel-attested origin — so a service can only ever announce its own.
-A refused notice is audited (`READINESS_REFUSED`) and the service carries on
-serving: it is answerable either way.
+`ServiceNotice` over the manager's lifecycle-notice endpoint immediately
+after the bind, through the shared `tairix_rt::servicenotice` client every
+service reports itself with. The notice names no service — the manager
+attributes it to the call's kernel-attested origin — so a service can only
+ever announce its own. A refused notice is audited (`READINESS_REFUSED`) and
+the service carries on serving: it is answerable either way. `fontd`
+declares no liveness watchdog, so the manager answers with a zero interval
+and it never renews.
 
 The manager spawns `fontd` by its path, which the kernel resolves through the
 same program gate as any other program: from the verified on-disk

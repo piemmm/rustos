@@ -86,6 +86,8 @@ pub mod net;
 
 pub mod pressure;
 
+pub mod servicenotice;
+
 pub mod shm;
 
 pub mod submit;

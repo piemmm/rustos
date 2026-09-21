@@ -369,6 +369,20 @@ enum FsDisk {
     /// fixture crate lives outside the userland discovery walk, so only this
     /// disk ever carries it; no production image ships it.
     StalltraceRootDisk,
+    /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
+    /// volume** carries the standard store with the `netstack` service
+    /// bundle **replaced** by the test-only watchdog fixture
+    /// ([`super::image_apps::watchdog_store_files`]) — the liveness-watchdog
+    /// vertical's backing (`plans/NEW-SERVICEMANAGER.md` SVC-8).
+    ///
+    /// A substitution rather than an extra bundle because a wedge is the
+    /// absence of a heartbeat and only the supervised program can produce
+    /// one, while PID 1 registers only the services its compiled-in floor
+    /// description names. The fixture crate lives outside the userland
+    /// discovery walk, so only this disk ever carries it; no production
+    /// image ships it, and the disk has no working network stack — nothing
+    /// in the run needs one.
+    WatchdogRootDisk,
     /// The [`Self::AutoloadRootDisk`] layout — the same graphical world, with
     /// the signed input and display driver bundles and the text-login
     /// document — whose store additionally carries the test-only `framestats`
@@ -6753,6 +6767,55 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "servicectl stop timed\n"),
         ],
     },
+    // `plans/NEW-SERVICEMANAGER.md` SVC-8: the live liveness-watchdog
+    // vertical. `tairix-test-watchdog-qemu-aarch64` boots the *production*
+    // aarch64 pipeline against a disk whose `netstack` service bundle is the
+    // watchdog fixture, and watches PID 1 run the whole watchdog path.
+    //
+    // Why the disk carries a double: a wedge is the *absence* of a
+    // heartbeat, so only the supervised program can produce one, and PID 1
+    // registers only the services its compiled-in floor description names.
+    // Substituting that one program leaves every other link production —
+    // the floor directive's `watchdog=30s restart=on-failure`, the arm, the
+    // real lifecycle-notice endpoint, the attested-sender resolution, the
+    // one-shot deadline in PID 1's park, the force-terminate, the reap's
+    // abnormal-exit classification, and the restart policy.
+    //
+    // Both halves are positive witnesses. The fixture renews three times —
+    // past a whole interval, the line an un-renewed watchdog would already
+    // have crossed — and the guest **fails** (code 12) if the timeout
+    // arrives with fewer behind it, because that timeout would be the
+    // trivial one a never-renewing service earns. It then stops renewing
+    // and parks for good; PASS is `SERVICE_STARTED` *after*
+    // `SERVICE_WATCHDOG_TIMEOUT`, so the boot's own first start cannot be
+    // mistaken for the relaunch.
+    //
+    // No serial script: the service is a boot-floor entry, so the whole
+    // sequence runs before and independently of the login prompt — the
+    // passphrase is never typed and the machine simply sits at it. The
+    // budget covers boot plus three 15-second renewals plus the 30-second
+    // interval that must then elapse un-renewed, on QEMU TCG; single CPU
+    // like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-watchdog-qemu-aarch64",
+        binary: "tairix-test-watchdog-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::WatchdogRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     // `plans/TIMESYNC.md` TS-5b: the live *enrolment* vertical.
     // `tairix-test-enrol-qemu-aarch64` boots the same production aarch64
     // pipeline and encrypted-root disk as the control vertical above, unlocks,
@@ -9426,6 +9489,10 @@ pub(crate) struct StoreSet {
     /// plants.
     apps_with_memsoak: &'static [AppStoreFile],
     apps_with_stalltrace: &'static [AppStoreFile],
+    /// The application/service bundles the liveness-watchdog vertical
+    /// plants: the shared set with its `netstack` bundle replaced by the
+    /// test-only watchdog fixture.
+    apps_with_watchdog: &'static [AppStoreFile],
     /// The application/service bundles the desktop-hover vertical plants: the
     /// shared set plus the test-only `framestats` fixture bundle, which the
     /// seeded program-library catalog is derived from and so lists.
@@ -9506,24 +9573,13 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         | FsDisk::GreeterRootDisk => super::image_apps::app_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
-    let apps_with_memsoak = match t.fs_disk {
-        FsDisk::MemsoakRootDisk => super::image_apps::memsoak_store_files(ctx, arch, profile)?,
-        _ => EMPTY,
-    };
-    let apps_with_stalltrace = match t.fs_disk {
-        FsDisk::StalltraceRootDisk => {
-            super::image_apps::stalltrace_store_files(ctx, arch, profile)?
-        }
-        _ => EMPTY,
-    };
-    let apps_with_framestats = match t.fs_disk {
-        FsDisk::HoverRootDisk => super::image_apps::framestats_store_files(ctx, arch, profile)?,
-        _ => EMPTY,
-    };
-    let apps_with_svgtext = match t.fs_disk {
-        FsDisk::SvgTextRootDisk => super::image_apps::svgtext_store_files(ctx, arch, profile)?,
-        _ => EMPTY,
-    };
+    let FixtureStores {
+        memsoak: apps_with_memsoak,
+        stalltrace: apps_with_stalltrace,
+        watchdog: apps_with_watchdog,
+        framestats: apps_with_framestats,
+        svgtext: apps_with_svgtext,
+    } = fixture_stores(ctx, t, arch, profile)?;
     let autoload_drivers = match t.fs_disk {
         FsDisk::AutoloadRootDisk
         | FsDisk::GreeterRootDisk
@@ -9574,6 +9630,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps,
         apps_with_memsoak,
         apps_with_stalltrace,
+        apps_with_watchdog,
         apps_with_framestats,
         apps_with_svgtext,
         autoload_drivers,
@@ -9603,6 +9660,63 @@ struct NetConfigStores {
     dhcpv4: &'static [AppStoreFile],
     /// The DHCPv6 set.
     dhcpv6: &'static [AppStoreFile],
+}
+
+/// The store sets that carry a **test-only fixture bundle**: the shared
+/// application set with one extra (or, for the watchdog, one substituted)
+/// bundle the consuming vertical needs.
+///
+/// Grouped out of [`stores_for`] for the reason the addressing sets are:
+/// they answer one question — which fixture bundle this disk carries — and
+/// they are mutually exclusive, which four separate arms there obscured.
+struct FixtureStores {
+    /// The memory-stability vertical's set.
+    memsoak: &'static [AppStoreFile],
+    /// The stall-trace vertical's set.
+    stalltrace: &'static [AppStoreFile],
+    /// The liveness-watchdog vertical's set — a *substitution*, not an
+    /// addition: its fixture stands in for the `netstack` service bundle.
+    watchdog: &'static [AppStoreFile],
+    /// The desktop-hover vertical's set.
+    framestats: &'static [AppStoreFile],
+    /// The SVG-text vertical's set.
+    svgtext: &'static [AppStoreFile],
+}
+
+/// Select the [`FixtureStores`] one disk layout plants.
+fn fixture_stores(
+    ctx: &Context,
+    t: &QemuTest,
+    arch: PieArch,
+    profile: tairix_mkimage::ImageProfile,
+) -> Result<FixtureStores, String> {
+    const EMPTY: &[AppStoreFile] = &[];
+    Ok(FixtureStores {
+        memsoak: match t.fs_disk {
+            FsDisk::MemsoakRootDisk => super::image_apps::memsoak_store_files(ctx, arch, profile)?,
+            _ => EMPTY,
+        },
+        stalltrace: match t.fs_disk {
+            FsDisk::StalltraceRootDisk => {
+                super::image_apps::stalltrace_store_files(ctx, arch, profile)?
+            }
+            _ => EMPTY,
+        },
+        watchdog: match t.fs_disk {
+            FsDisk::WatchdogRootDisk => {
+                super::image_apps::watchdog_store_files(ctx, arch, profile)?
+            }
+            _ => EMPTY,
+        },
+        framestats: match t.fs_disk {
+            FsDisk::HoverRootDisk => super::image_apps::framestats_store_files(ctx, arch, profile)?,
+            _ => EMPTY,
+        },
+        svgtext: match t.fs_disk {
+            FsDisk::SvgTextRootDisk => super::image_apps::svgtext_store_files(ctx, arch, profile)?,
+            _ => EMPTY,
+        },
+    })
 }
 
 /// Select the [`NetConfigStores`] one disk layout plants.
@@ -12790,6 +12904,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         apps,
         apps_with_memsoak,
         apps_with_stalltrace,
+        apps_with_watchdog,
         ..
     } = stores;
     Ok(match t.fs_disk {
@@ -12841,6 +12956,18 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
             let total_sectors = image_total_sectors(&bytes);
             Some(FsImage {
                 extension: "stalltrace-root.img",
+                bytes,
+                total_sectors,
+            })
+        }
+        // The liveness-watchdog vertical likewise uses the plain
+        // encrypted-root author: the standard store, with its `netstack`
+        // bundle substituted for the fixture.
+        FsDisk::WatchdogRootDisk => {
+            let bytes = encrypted_root_disk_bytes(t, apps_with_watchdog)?;
+            let total_sectors = image_total_sectors(&bytes);
+            Some(FsImage {
+                extension: "watchdog-root.img",
                 bytes,
                 total_sectors,
             })

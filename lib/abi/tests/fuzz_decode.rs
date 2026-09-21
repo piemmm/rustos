@@ -62,8 +62,10 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::rlimit::ResourceLimit;
 use tairix_abi::seat::SeatAdminRequest;
 use tairix_abi::service_control::{
-    decode_enrol_reply as decode_service_enrol_reply, decode_reply as decode_service_control_reply,
-    ServiceControlRequest, ServiceEnrolRequest, REQUEST_LEN as SERVICE_CONTROL_REQUEST_LEN,
+    decode_enrol_reply as decode_service_enrol_reply,
+    decode_notice_reply as decode_service_notice_reply,
+    decode_reply as decode_service_control_reply, ServiceControlRequest, ServiceEnrolRequest,
+    REQUEST_LEN as SERVICE_CONTROL_REQUEST_LEN,
 };
 use tairix_abi::session_ipc::{
     decode_account_page, encode_account_page, SessionRequest, SessionVerdict, SESSION_MAX_REPLY,
@@ -99,8 +101,8 @@ use tairix_abi::window_ipc::{
 };
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
-    ReadyCondition, ServiceLimit, ServiceManifest, ServiceUnit, PUBLISHER_CERT_CONTEXT,
-    PUBLISHER_ID_CONTEXT, SYSCALL_TABLE_HASH_LEN,
+    ReadyCondition, ServiceLimit, ServiceManifest, ServiceNotice, ServiceUnit,
+    PUBLISHER_CERT_CONTEXT, PUBLISHER_ID_CONTEXT, SYSCALL_TABLE_HASH_LEN,
 };
 
 /// Fixed CFI tag fed to [`LoadImage::parse`] in the harness. A random input
@@ -476,7 +478,21 @@ fn exercise_service_manifest(bytes: &[u8]) {
 /// [`exercise`]): an accepted control request round-trips through its
 /// canonical encoder, and the reply decoder — untrusted manager output the
 /// control tool parses — must refuse a corrupt frame cleanly, never panic.
+///
+/// The lifecycle-notice frame rides here too, and is the sharpest of the
+/// set: its endpoint takes no send capability, so *any* process on the
+/// machine can hand these bytes to PID 1.
 fn exercise_service_control(bytes: &[u8]) {
+    if let Ok(notice) = ServiceNotice::from_bytes(bytes) {
+        let out = notice.to_le_bytes();
+        assert_eq!(
+            ServiceNotice::from_bytes(&out),
+            Ok(notice),
+            "round-trip of an accepted notice must succeed"
+        );
+        // The encoding is canonical, so it reproduces the accepted prefix.
+        assert_eq!(&out[..], &bytes[..ServiceNotice::WIRE_LEN]);
+    }
     if let Ok(request) = ServiceControlRequest::decode(bytes) {
         let mut buf = [0u8; SERVICE_CONTROL_REQUEST_LEN];
         let len = request
@@ -500,6 +516,7 @@ fn exercise_service_control(bytes: &[u8]) {
     }
     let _ = decode_service_control_reply(bytes);
     let _ = decode_service_enrol_reply(bytes);
+    let _ = decode_service_notice_reply(bytes);
 }
 
 /// Drive the datagram-socket ABI decoders on `bytes` (one arm of

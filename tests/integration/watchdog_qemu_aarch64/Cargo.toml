@@ -1,0 +1,39 @@
+[package]
+name = "tairix-test-watchdog-qemu-aarch64"
+description = "plans/NEW-SERVICEMANAGER.md SVC-8 QEMU vertical: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) against a disk whose netstack service bundle is the watchdog fixture, and prove the live liveness-watchdog path end to end -- the service renews its heartbeat through the real notice endpoint for three intervals (so a renewing service is provably not killed), then stops renewing, and PID 1 detects the wedge, force-terminates the process, reaps it, and relaunches it under its on-failure restart policy."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-watchdog-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 pipeline and prove a wedged
+# supervised service is detected, killed and relaunched" integration test.
+# It reuses the entire production boot pipeline through `tairix-kernel`'s
+# library half and only swaps the diagnostic sink for the witness (no
+# duplication). Keeping the QEMU-exit shortcut in a dedicated bin (not a
+# Cargo feature on a production crate) prevents feature unification from
+# leaking it into any production build (fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The manager's own audit ids, so the vertical and the engine cannot
+# disagree about what "the wedge was detected and recovered" means.
+tairix-init = { path = "../../../userland/system/init", version = "=0.0.0" }
+# The fixture's audit-id vocabulary. `default-features = false`: the
+# fixture's `program` feature (its own `Run` binary's userland runtime) must
+# never link into this kernel bin.
+tairix-test-watchdog-service = { path = "../watchdog_service_program", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

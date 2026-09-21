@@ -1,0 +1,25 @@
+# Signed-AppInfo manifest source for the watchdog fixture — a **test double
+# for the `netstack` service** (plans/NEW-SERVICEMANAGER.md SVC-8).
+#
+# It declares `name = "netstack"` deliberately: PID 1's compiled-in floor
+# description names `/System/Services/netstack.app/Run`, so the bundle
+# directory is what decides which service this program is, and the composer
+# derives that directory from this name. The `id` stays the fixture's own, so
+# nothing about the bundle claims to be the real stack's build.
+#
+# Composed and planted ONLY on the aarch64 watchdog QEMU vertical's disk,
+# where it replaces the real netstack bundle; the crate lives outside the
+# userland discovery walk, so no production image ever ships it.
+#
+# The capability list is the bundle's request, intersected with the netstack
+# service account's ceiling: CAP_LOG_EMIT for the audit records that are this
+# fixture's whole output, and nothing else. Renewing a liveness heartbeat
+# needs no capability — the notice endpoint is unrestricted-sender because a
+# notice can only ever speak for its own sender — and neither does the pipe
+# it wedges on.
+id = "os.tairix.test.watchdog-service"
+name = "netstack"
+title = "Watchdog Fixture"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_LOG_EMIT"]

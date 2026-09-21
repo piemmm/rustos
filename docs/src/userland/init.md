@@ -22,9 +22,9 @@ and the account, never a capability set.
 > are live: the **control transport** (SVC-8: the wait-set park,
 > `CAP_SERVICE_CONTROL`, and the `servicectl` tool), the **activation
 > broker** a client connects through, and the **lifecycle-notice endpoint**
-> a service announces its own readiness on (SVC-5). The live heartbeat
-> transport and spawning the per-user manager at session start are still
-> ahead.
+> a service reports itself ready — or still alive — on (SVC-5, SVC-8).
+> Spawning the per-user manager at session start, and kernel-enforced
+> per-service resource limits, are still ahead.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`,
@@ -86,7 +86,7 @@ and releases a dependent only once every dependency it names is
   is `ready` the instant its spawn succeeds; a `notify` service
   (`Type=notify`) stays `starting` until it announces itself up.
 - **Readiness notification.** A `notify` service sends a
-  `tairix_abi::ReadyNotice` — an `sd_notify` analogue carrying a
+  `tairix_abi::ServiceNotice` — an `sd_notify` analogue carrying a
   `LifecycleSignal` (`ready` or `failed`) and **no identity**: the manager
   attributes the notice to the kernel-attested sender, never a
   caller-supplied name (`AGENTS.md` §5.4). `Init::notify_sender` is the
@@ -344,7 +344,7 @@ Restricting the endpoint instead would put every service behind one
 capability and make the per-service gate unreachable.
 
 Readiness is the service's own announcement, over the reserved
-`SERVICE_NOTICE_ENDPOINT`. The frame is a `ReadyNotice` and it **names no
+`SERVICE_NOTICE_ENDPOINT`. The frame is a `ServiceNotice` and it **names no
 service**: the manager resolves one from the call's kernel-attested origin —
 the process id it recorded when it spawned the service, and the account the
 kernel switched that process onto — and only while that service is still
@@ -353,6 +353,15 @@ readiness, and a notice that matches no starting service is refused before
 any state moves. That endpoint carries no send capability either, for a
 stronger reason: reaching it buys a principal nothing it could not already
 say about itself.
+
+The same endpoint carries a service's **liveness renewal**, because it is
+the same act — a service reporting on itself — resolved from the same
+attested sender. The two differ only in which state the report is
+meaningful in, which is the manager's to decide and not a second rendezvous
+to bind: a transition resolves against a *starting* service, a renewal
+against a *running* one. Widening the readiness resolution to cover both
+would have cost it the narrow window that bounds a readiness edge to the
+span between a spawn and its resolution.
 
 An on-demand service is necessarily `notify`-ready. What a connecting client
 waits for is the service's endpoint being answerable, and only the service
@@ -376,11 +385,15 @@ not the disk, is the problem" must never lock up the system — is met without
 a second restart engine (`AGENTS.md` §2.2). This is the analogue of systemd's
 `WatchdogSec`.
 
-A service opts in through a non-zero `watchdog` interval in its signed unit
-metadata (`tairix_abi::ServiceUnit::watchdog`; `Duration64::ZERO`, the
-default, opts out; a negative interval fails the manifest closed). Once such a
-service is running, `Init::arm_watchdogs(now)` arms a single one-shot deadline
-`now + interval`; the service must renew it at least that often by calling
+A service opts in through a non-zero `watchdog` interval: a discovered
+bundle declares it in its signed unit metadata
+(`tairix_abi::ServiceUnit::watchdog`), and a boot-floor service in the
+compiled-in boot description's `watchdog=<n>s` directive option, which is
+the one place the floor's own unit metadata has ever lived.
+`Duration64::ZERO` — the default — opts out; a negative interval fails the
+manifest closed. Once such a service is running, `Init::arm_watchdogs(now)`
+arms a single one-shot deadline `now + interval`; the service must renew it
+at least that often by calling
 `Init::heartbeat(name, now)` ("I am still making progress"). A heartbeat is a
 high-frequency steady-state signal and is deliberately **not** audited. If the
 deadline elapses with no heartbeat, `Init::expire_watchdog` force-terminates
@@ -393,12 +406,45 @@ the instant it starts is eventually left down, never relaunched forever); a
 `never` service is killed and left down, loudly. A deliberate `stop` disarms
 the watchdog first, so a graceful teardown is never mistaken for a wedge.
 
-This is the **engine core**. The live heartbeat transport — a supervised
-driver/daemon renewing its heartbeat to its manager, and the reactor arming
-the real one-shot off `Init::watchdog_deadline` and calling
-`Init::expire_watchdog` when it fires — lands with the same SVC-5/SVC-8
-control transport as the control surface above; the engine is proven
-host-side first, exactly as the readiness, activation, and restart paths were.
+### Renewing, and how a service learns its cadence
+
+A service renews over the lifecycle-notice endpoint above, and the manager
+answers **with the interval it is holding the service to**. That is what a
+service programs its renewal cadence from: it needs no copy of its own unit
+metadata, the two can never disagree, and a watchdog the manager later
+disarms is learned about on the next renewal rather than assumed to persist.
+A service the manager is not watching is told so by a zero interval and
+stops calling, so opting out costs it exactly one call.
+
+`tairix_rt::servicenotice` is the one place in the runtime that knows how to
+say any of this, so every service says it identically. Its `Watchdog` holds
+the interval and the next-due instant: `announce_ready` for a `notify`
+service (one call that both releases its parked clients and establishes the
+cadence), `attach` for an `immediate` one (which has no readiness edge left
+to announce, so its first renewal is what tells it whether it is watched at
+all), then `timeout_ns` folded into the park the service already performs
+and `renew_if_due` each time round its loop. Renewal is therefore a deadline
+on an existing wait, never a second timer and never a poll: the CPU sleeps
+between renewals and an idle service still proves it is alive. The cadence
+is half the interval, so a renewal and its reply have a whole further half
+to complete before the manager would call the service wedged — renewing on
+the deadline itself would make every scheduling delay a false kill.
+
+The floor's one holder is `netstack` (`watchdog=30s restart=on-failure`). A
+stack whose serve loop has stopped turning is still a live process, so
+nothing else on the machine notices: every socket simply stops being
+answered. Detecting that and then leaving the machine with no network stack
+would be the worse outcome, which is why it is also the floor's one
+`on-failure` entry.
+
+The live path is proven end to end by the aarch64 liveness-watchdog QEMU
+vertical, which boots the production pipeline against a disk whose
+`netstack` bundle is a fixture that renews three times — past a whole
+interval — and then stops renewing for good, and requires the manager to
+detect the wedge, force the process down, reap it, and relaunch it. A wedge
+cannot be provoked from outside a process (it is the absence of a call), and
+PID 1 registers only the services its floor description names, which is why
+that one program is a test double and everything around it is production.
 
 ## Reaping
 

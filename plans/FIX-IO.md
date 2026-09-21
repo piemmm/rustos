@@ -948,15 +948,18 @@ Remaining deliverables:
   (`lib/abi::ServiceUnit::watchdog`), and the `Init` engine's
   `arm_watchdogs`/`heartbeat`/`watchdog_deadline`/`expire_watchdog` (a missed
   heartbeat force-kills the wedged process and drives the existing
-  `RestartPolicy`/backoff/crash-loop budget), proven host-side. The **live
-  wiring** — a user-space block-driver serve loop renewing its heartbeat to its
-  manager as it makes progress, so a wedged serve loop is force-restarted —
-  rides with the SVC-5/SVC-8 control transport (the heartbeat-renewal path and
-  the reactor that arms the real one-shot off `watchdog_deadline`), exactly as
-  the other FIX-IO primitives landed their shared logic before their live
-  wiring. A driver process that keeps wedging past the crash-loop budget is left
-  down, and its device fails closed to its consumers through the existing IO1
-  per-request deadline / IO3 health machinery.
+  `RestartPolicy`/backoff/crash-loop budget). The **live transport** landed
+  with it: a supervised process renews over the lifecycle-notice endpoint
+  through the shared `tairix_rt::servicenotice::Watchdog`, learning its
+  cadence from the interval the manager answers with, and the reactor arms
+  the real one-shot off `watchdog_deadline`. What remains for a block driver
+  specifically is being a service a manager supervises: `devmgr` spawns
+  driver processes and holds no service-manager engine, so a driver's
+  heartbeat has no manager to reach until the per-manager scope work
+  (`plans/NEW-SERVICEMANAGER.md` SVC-6) gives it one. A driver process that
+  keeps wedging past the crash-loop budget is left down, and its device fails
+  closed to its consumers through the existing IO1 per-request deadline / IO3
+  health machinery.
 
 Tests (§7): assert the health-log events for each transition (including the
 returning-disk recovery event) and the `sysinfo` health read; a wedged driver

@@ -194,8 +194,8 @@ pub use rxe::{
     SEG_FLAG_READ, SEG_FLAG_WRITE,
 };
 pub use service::{
-    ActivationMode, Conditions, Dependencies, LifecycleSignal, Limits, ReadinessKind,
-    ReadyCondition, ReadyNotice, RestartPolicy, ServiceEnrolment, ServiceLimit, ServiceManifest,
+    ActivationMode, Conditions, Dependencies, LifecycleSignal, Limits, NoticeKind, ReadinessKind,
+    ReadyCondition, RestartPolicy, ServiceEnrolment, ServiceLimit, ServiceManifest, ServiceNotice,
     ServiceState, ServiceUnit, SERVICE_MANIFEST_MAGIC, SERVICE_MANIFEST_MAX_CONDITIONS,
     SERVICE_MANIFEST_MAX_DEPENDENCIES, SERVICE_MANIFEST_MAX_LIMITS, SERVICE_MANIFEST_MAX_NAME_LEN,
     SERVICE_NOTICE_MAGIC, SERVICE_OVERRIDES_DIR, SERVICE_OVERRIDES_PATH, SERVICE_VERSION_V1,

@@ -255,6 +255,64 @@ fn fixture_store_files(
         .map_err(Clone::clone)
 }
 
+/// As [`fixture_store_files`], but the fixture **replaces** the bundle it
+/// composes to rather than joining the store beside it.
+///
+/// The fixture's manifest names the bundle directory, so a fixture standing
+/// in for a production service declares that service's `name`; without this
+/// the disk would carry two `AppInfo`/`Run` pairs for one directory and the
+/// planter would lay down whichever came last. Refuses when the fixture
+/// replaces nothing, because a substitution that silently became an
+/// addition would leave the vertical testing the production program.
+///
+/// # Errors
+///
+/// As [`build_app_bundles`], or a fixture whose bundle directory matches no
+/// bundle in the base set.
+fn substituted_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+    crate_dir: &str,
+    label: &str,
+    cache: &'static [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS],
+) -> Result<&'static [AppStoreFile], String> {
+    cache[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            let base = app_store_files(ctx, arch, profile)?;
+            let crate_dir = ctx.workspace_root.join(crate_dir);
+            let app = discover_crate_manifest(&crate_dir)
+                .map_err(|e| format!("image: {label} manifest discovery: {e}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "image: {} has no {APP_MANIFEST_SOURCE}",
+                        crate_dir.display()
+                    )
+                })?;
+            let bundle = build_bundle(ctx, arch, &app, profile)?;
+            let replaced: Vec<Vec<u8>> = vec![
+                bundle.store_dir.as_bytes().to_vec(),
+                bundle.bundle_dir.as_bytes().to_vec(),
+            ];
+            let mut files: Vec<AppStoreFile> = base
+                .iter()
+                .filter(|file| file.components.len() < 2 || file.components[..2] != replaced[..])
+                .cloned()
+                .collect();
+            if files.len() == base.len() {
+                return Err(format!(
+                    "image: {label} substitutes {}/{}, which the store does not contain",
+                    bundle.store_dir, bundle.bundle_dir
+                ));
+            }
+            files.extend(store_files(&[bundle]));
+            Ok(files)
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
 /// The composed store files the memory-stability vertical's disk plants: the
 /// shared [`app_store_files`] set plus the test-only `memsoak` fixture bundle
 /// (`plans/APPS.md` "Immediate work" I2/I3), memoised per arch.
@@ -275,6 +333,37 @@ pub fn memsoak_store_files(
         profile,
         "tests/integration/memsoak_program",
         "memsoak",
+        &FILES,
+    )
+}
+
+/// The composed store files the liveness-watchdog vertical's disk plants:
+/// the shared [`app_store_files`] set with the **`netstack` service bundle
+/// replaced** by the watchdog fixture (`plans/NEW-SERVICEMANAGER.md`
+/// SVC-8), memoised per arch.
+///
+/// A substitution rather than an addition, because a wedge is the absence
+/// of a call and only the supervised program can produce one: PID 1's
+/// registered set is its compiled-in floor description, so the fixture has
+/// to *be* a service that description already names. Everything else on the
+/// disk, and every path PID 1 takes, is the production one.
+///
+/// # Errors
+///
+/// As [`substituted_store_files`].
+pub fn watchdog_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    substituted_store_files(
+        ctx,
+        arch,
+        profile,
+        "tests/integration/watchdog_service_program",
+        "watchdog-service",
         &FILES,
     )
 }

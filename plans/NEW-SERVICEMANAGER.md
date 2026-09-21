@@ -25,7 +25,7 @@ request, and fails closed (§4, §5.4).
 | SVC-5 | On-demand `fontd`: the activation broker, the lifecycle-notice endpoint, and the deleted `login`-starts-`fontd` hack | done |
 | SVC-6 | Per-user manager scope — the authority boundary (engine core) | done |
 | SVC-7 | Restart policy + reverse-dependency stop/shutdown ordering (engine core) | done |
-| SVC-8 | Control API, `servicectl`, audit, rlimits, docs/gate | in progress |
+| SVC-8 | Control API, `servicectl`, audit, the live liveness watchdog, rlimits, docs/gate | in progress |
 | SVC-9 | Reclaiming an activated service when its last client dies | planned |
 | SVC-10 | Readiness as a wake source a client can wait on *beside* its own, so a client that must observe something else does not fall back to a deadline | planned |
 
@@ -418,7 +418,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   stopping → stopped | failed`) with `is_ready`/`is_terminal`; the closed
   `ReadyCondition` set (`network-up`, `filesystems-mounted`, `boot-complete`,
   `display-present`, `seat-available`); `ReadinessKind` (`immediate` default
-  vs `notify`); and the `ReadyNotice` (`sd_notify` analogue) carrying a
+  vs `notify`); and the `ServiceNotice` (`sd_notify` analogue) carrying a
   `LifecycleSignal` (`ready`/`failed`) and **no identity** — the manager
   binds it to the kernel-attested sender. It is an IPC-protocol module like
   `font_ipc`, so it is outside the generated C header (no `abi-check`/
@@ -499,7 +499,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   length, and the canonical forms — reserved/connect-cap/linger forced to
   zero unless their flag says otherwise) so every accessor is infallible and
   a malformed byte fails closed. It is an IPC-protocol module like
-  `ReadyNotice`, so it is outside the generated C header (no `abi-check`/
+  `ServiceNotice`, so it is outside the generated C header (no `abi-check`/
   `c-header` change), and its decoder has a `fuzz_decode` arm asserting the
   never-panic + canonical-round-trip contract (§19.6). The metadata is the
   data that lives in the service's **signed** `AppInfo` bundle manifest (§2),
@@ -594,7 +594,7 @@ system's, and the whole handshake lives in one place on each side.
   itself) each take their own reserved id beside `SERVICE_CONTROL_ENDPOINT` /
   `SERVICE_ENROL_ENDPOINT`, for the reason recorded there: different acts,
   different gates, free to diverge. The activation request reuses the existing
-  frame prefix and bounded name; the notice *is* the existing `ReadyNotice`.
+  frame prefix and bounded name; the notice *is* the existing `ServiceNotice`.
 - **Neither new endpoint carries a send capability, deliberately.** Any
   principal may *ask* for a shared service — what decides the answer is the
   per-service `connect_capability` the engine checks against the caller's
@@ -822,13 +822,7 @@ it does not.
   fought as a wedge. Host-tested: arm+idempotent+renew, healthy service never
   killed, wedge→force-kill→reap→`on-failure` relaunch (even on a zero exit
   code), wedge under `never` killed-but-left-down, and a deliberate stop
-  disarming it. The **live heartbeat transport** — a supervised driver/daemon
-  renewing its heartbeat to its manager — is still ahead, so `plans/FIX-IO.md`'s
-  block drivers renew through it once it exists; the reactor already arms the
-  one-shot off `watchdog_deadline` through `next_deadline`/`expire_due`. A
-  heartbeat is the same act as a readiness notice — a service reporting on
-  itself — so it belongs on SVC-5's lifecycle-notice endpoint with the same
-  attested-sender attribution, not on a second one.
+  disarming it.
 - **One-shot deadline fold — DONE (engine core).** The four per-name
   deadline accessors left the transport to ask about each service in turn,
   which no reactor can do: it needs one instant to program its single wait
@@ -978,11 +972,98 @@ it does not.
   - PID 1 gains `CAP_FS_ACCESS` for the two documents. Per-inode
     authorisation still applies under its attested identity, and the vendor
     layer's volume is read-only, so its reach there can never write.
-- **Remaining.** The **live heartbeat transport** (a supervised driver
-  renewing its heartbeat, so `plans/FIX-IO.md`'s block drivers can — on SVC-5's
-  lifecycle-notice endpoint, which already attributes a service's report to its
-  attested sender), a vertical for a live watchdog kill+restart, and the live
-  rlimit enforcement at spawn. Full §7 gate on each landing.
+- **The live liveness watchdog — DONE (transport, first holder, vertical).**
+  A heartbeat is the same act as a readiness notice — a service reporting on
+  itself — so it rides SVC-5's lifecycle-notice endpoint with the same
+  attested-sender attribution, not a second one. Decisions worth not
+  re-deriving:
+  - **A kind on the notice frame, not a third `LifecycleSignal`.**
+    `ReadyNotice` became `ServiceNotice` (`Lifecycle(LifecycleSignal)` |
+    `Alive`), one byte of kind beside one of signal, canonical (a signal
+    riding an `Alive` frame is refused). A renewal moves the service through
+    no `ServiceState` at all, so adding it to `LifecycleSignal` would have
+    made that type's "an illegal self-report is unrepresentable" property a
+    lie and forced `notify` to validate away a variant it cannot accept. The
+    two enums share no discriminant space, so neither has to track the other.
+  - **The resolution widens for the renewal only.** `notify_sender` still
+    matches a `Starting` service — that narrow window is what bounds a
+    readiness edge to the span between a spawn and its resolution —
+    and `heartbeat_sender` matches a `Ready`/`Running` one. Both attribute
+    from the same two kernel-vouched facts through one shared
+    `service_index_of`, so the attribution rule has a single definition and
+    only the admissible state differs.
+  - **The reply carries the interval, which is how a service learns its
+    cadence.** The manager holds the watchdog, so the manager answers with
+    it: a service needs no copy of its own unit metadata, the two cannot
+    disagree, and a disarmed watchdog is learned about on the next renewal.
+    This is also what justifies keeping the synchronous ack — the reply is
+    load-bearing, not an acknowledgement for its own sake — and a
+    `NOTICE_REPLY_LEN` of its own beside the control and enrolment replies,
+    the same reason those two differ. An unwatched service is told so by a
+    zero interval and never calls again, so opting out costs one call.
+  - **Refused renewals are not audited, either.** The plan already had
+    heartbeats unaudited as high-frequency; the *refusals* must be too,
+    because the notice endpoint takes no send capability, so auditing them
+    would hand any process on the machine a log-flooding primitive pointed
+    at the audit trail. A sender that matches nothing is simply refused.
+  - **One client, in `lib/rt::servicenotice`.** `Watchdog` holds the
+    interval and the next-due instant: `announce_ready` for a `notify`
+    service, `attach` for an `immediate` one (which has no readiness edge
+    left to announce), `timeout_ns` folded into the park the service already
+    performs, `renew_if_due` each turn. Renewal is therefore a deadline on
+    an existing wait, never a second timer and never a poll. The cadence is
+    half the interval so a renewal and its reply have a further half to
+    complete; renewing on the deadline would make every scheduling delay a
+    false kill. `fontd`'s private `announce_ready` was deleted for it.
+  - **The floor directive carries the unit metadata, as `key=value`
+    options.** `service|enrolled|ondemand <path> <account>
+    [watchdog=<n>s] [restart=…]`: the floor description is the one place a
+    floor service's unit metadata has ever lived, and a discovered bundle
+    takes the same fields from its signed manifest. Named options rather
+    than positions because a third and fourth position would be unreadable;
+    an unknown option or value refuses the whole config, since a misspelled
+    interval silently meaning "unwatched" would disable a defence without
+    saying so.
+  - **`netstack` is the first holder** (`watchdog=30s restart=on-failure`).
+    A stack whose serve loop has stopped turning is still a live process, so
+    nothing else notices — every socket simply stops being answered — and
+    the recovery is one the system can make on its own. It is therefore also
+    the floor's one `on-failure` entry: detecting a wedge and then leaving
+    the machine with no network stack is the worse outcome.
+  - **Two defects the wiring surfaced, both pre-existing, both fixed here.**
+    PID 1 bound its four endpoints *after* `start_all`, so a floor service
+    reporting at startup would have been refused by an endpoint that did
+    not exist yet; `fontd` never hit it because an on-demand service is
+    activated once the loop is already running. The endpoints now bind
+    first — a manager must be answerable before it starts anything that
+    reports to it. And `arm_watchdogs` re-armed a process it had just
+    force-terminated: the service stays `Running` with a live pid until the
+    reap, so the pass in that window audited a watchdog placed on a corpse.
+    It now excludes a service carrying `killed_by_watchdog`, whose lifetime
+    is exactly that window.
+  - QEMU witness: `tairix-test-watchdog-qemu-aarch64` boots the production
+    pipeline against a disk whose `netstack` bundle is a fixture that renews
+    three times — past a whole interval — then stops renewing and parks for
+    good, and requires the manager to detect the wedge, force the process
+    down, reap it, and relaunch it. A timeout arriving with fewer renewals
+    behind it **fails** the run, because that is the trivial timeout a
+    never-renewing service earns. The disk carries a test *double* because a
+    wedge is the absence of a call — only the supervised program can produce
+    one — and PID 1 registers only the services its compiled-in floor
+    description names; that substitution retires when the
+    `/System/Services` discovery scan lands and a fixture service can simply
+    be discovered.
+- **Remaining: kernel-enforced per-service resource limits.** `ServiceSpec`
+  carries validated `limits` from the SUM1 record and nothing reads them on
+  the launch path. The carrier is **not** the `SpawnAttach` block: that
+  would make the manager the source of a security-relevant bound, which is
+  the second derivation path SVC-A exists to forbid. The kernel already
+  derives `manifest ∩ account-ceiling` from the signed bundle at load, so
+  the limits belong in that same signed manifest, decoded by `lib/appload`
+  and applied at admit as a pure narrowing of the inherited set (never a
+  widening, so no capability is involved). `AppInfoHeader` carries no unit
+  section today, so that section, its `AppInfo.toml` source key, and the
+  composer's encoding of it are the work. Full §7 gate on landing.
 
 ---
 
@@ -1027,7 +1108,7 @@ in hand, so a machine with no such device defers nothing and waits
 indefinitely — but it is a timer standing in for an event that now exists.
 The enabling piece is making the tree generation observable as a
 `WaitSourceKind`; `devmgr` then waits on tree ∪ readiness (readiness already
-has a wire form in `ReadyNotice`, and the wait-set already carries
+has a wire form in `ServiceNotice`, and the wait-set already carries
 `SystemNotice`) and the deadline retires instead of being tuned.
 
 ## 7. Cross-references

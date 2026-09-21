@@ -55,8 +55,7 @@ mod program {
 
     use tairix_abi::font_ipc::{FontRequest, FONT_ENDPOINT, FONT_MAX_GLYPH_REPLY};
     use tairix_abi::fs::{DirEntries, OpenFlags};
-    use tairix_abi::service_control::{REPLY_LEN, SERVICE_NOTICE_ENDPOINT};
-    use tairix_abi::{Errno, LifecycleSignal, ReadyNotice, WaitSetOp, WaitSourceKind};
+    use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
     use tairix_caps::CapabilitySet;
     use tairix_fontd::discovery::{discover, FaceLoad, FontStore};
     use tairix_fontd::events::{
@@ -99,12 +98,7 @@ mod program {
     /// answerable either way, and exiting over it would take away the only
     /// font service on the machine.
     fn announce_ready() {
-        let notice = ReadyNotice::new(LifecycleSignal::Ready).to_le_bytes();
-        let mut reply = [0u8; REPLY_LEN];
-        let accepted = tairix_rt::ipc_call(SERVICE_NOTICE_ENDPOINT, &notice, &mut reply)
-            .map_err(Errno::from_syscall)
-            .and_then(|len| tairix_abi::service_control::decode_reply(&reply[..len]));
-        if accepted.is_err() {
+        if tairix_rt::servicenotice::announce_ready().is_err() {
             record(
                 READINESS_REFUSED,
                 Level::Warn,

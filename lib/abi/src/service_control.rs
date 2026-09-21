@@ -12,9 +12,9 @@
 //! * [`SERVICE_ACTIVATION_ENDPOINT`] brokers a **client's** connection to a
 //!   shared service, activating it on demand and parking the client until it
 //!   is ready;
-//! * [`SERVICE_NOTICE_ENDPOINT`] carries a service's own readiness
-//!   announcement ([`crate::ReadyNotice`]), attributed to the kernel-attested
-//!   sender.
+//! * [`SERVICE_NOTICE_ENDPOINT`] carries a service's own self-report
+//!   ([`crate::ServiceNotice`]) — a readiness announcement or a liveness
+//!   renewal — attributed to the kernel-attested sender.
 //!
 //! They are four endpoints rather than operations on one because the acts
 //! differ in authority and the answers differ in kind: an administrator
@@ -26,7 +26,7 @@
 //! control-reply scrape.
 //!
 //! This module is the wire contract for the three name-carrying requests
-//! (the notice's own frame is [`crate::ReadyNotice`], which carries no name),
+//! (the notice's own frame is [`crate::ServiceNotice`], which carries no name),
 //! modelled on the
 //! read-only mailbox and font protocols ([`crate::mailbox_ipc`],
 //! [`crate::font_ipc`]): a fixed-size, bounds-checked request framing and a
@@ -62,7 +62,7 @@
 
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::service::SERVICE_MANIFEST_MAX_NAME_LEN;
-use crate::{Errno, ServiceEnrolment, ServiceState};
+use crate::{Duration64, Errno, ServiceEnrolment, ServiceState};
 
 /// Well-known kernel-owned call-endpoint id of the service manager's control
 /// surface (`"SVC\0"` little-endian).
@@ -116,17 +116,23 @@ pub const SERVICE_ACTIVATION_MAGIC: u32 = u32::from_le_bytes(*b"SVCA");
 /// **lifecycle-notice** surface (`"SVN\0"` little-endian).
 ///
 /// The fourth sibling of the three endpoints above, separate for the same
-/// reason they are separate from each other: a service announcing its *own*
-/// readiness is a different act from an administrator driving a service or a
-/// client brokering a connection, and it is gated differently. The other
+/// reason they are separate from each other: a service reporting on its
+/// *own* progress is a different act from an administrator driving a service
+/// or a client brokering a connection, and it is gated differently. The other
 /// three answer a request about *some* service the caller names; this one
 /// only ever resolves to the caller's own, because the manager attributes the
 /// notice to the kernel-attested sender and the frame
-/// ([`crate::ReadyNotice`]) carries no service name at all.
+/// ([`crate::ServiceNotice`]) carries no service name at all.
+///
+/// A readiness announcement and a liveness renewal share the endpoint
+/// because they are the same act — a service reporting on itself — and the
+/// manager resolves both from the same attested sender. They differ only in
+/// which state the sender must be in for the report to mean anything, which
+/// is the manager's to decide, not a second rendezvous to bind.
 ///
 /// The endpoint therefore needs no send capability: reaching it lets a
 /// principal say one thing about itself, and a principal the manager cannot
-/// match to a service it is currently starting is refused with
+/// match to a service in the state that report requires is refused with
 /// [`Errno::NotFound`] before any state is touched.
 pub const SERVICE_NOTICE_ENDPOINT: u64 = 0x5356_4E00;
 
@@ -583,6 +589,76 @@ pub fn decode_enrol_reply(reply: &[u8]) -> Result<(ServiceEnrolment, bool), Errn
     Ok((enrolment, changed))
 }
 
+/// Encoded length of a lifecycle-notice reply: the status word, the
+/// resulting [`ServiceState`] byte, a reserved tail, and the watchdog
+/// interval the manager holds for the sender. This is also the notice
+/// endpoint's maximum reply size.
+pub const NOTICE_REPLY_LEN: usize = REPLY_LEN + Duration64::WIRE_LEN;
+
+/// Wire offset of the watchdog interval in a notice reply.
+const OFF_NOTICE_WATCHDOG: usize = REPLY_LEN;
+
+/// Encode a successful notice reply: the sender's resulting `state` and the
+/// `watchdog` interval the manager is holding it to
+/// ([`Duration64::ZERO`] when it is not watched).
+///
+/// The interval rides the answer the service is already waiting for, so a
+/// service learns its renewal cadence from the authority that enforces it
+/// rather than from a second copy of its own unit metadata — the manager
+/// and the service can never disagree about it, and a service whose
+/// watchdog is later disarmed learns that from its next renewal.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] if `buf` cannot hold [`NOTICE_REPLY_LEN`] bytes.
+pub fn encode_notice_reply(
+    buf: &mut [u8],
+    state: ServiceState,
+    watchdog: Duration64,
+) -> Result<usize, Errno> {
+    if buf.len() < NOTICE_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    buf[..NOTICE_REPLY_LEN].fill(0);
+    buf[REPLY_STATUS_LEN] = state.as_u8();
+    buf[OFF_NOTICE_WATCHDOG..NOTICE_REPLY_LEN].copy_from_slice(&watchdog.to_le_bytes());
+    Ok(NOTICE_REPLY_LEN)
+}
+
+/// Decode a notice reply, returning the sender's resulting state and the
+/// watchdog interval the manager holds it to.
+///
+/// # Errors
+///
+/// The carried [`Errno`] for an error frame; [`Errno::BadMagic`] for a
+/// truncated success frame, an unknown state byte, a dirty reserved tail, or
+/// a negative interval (wire corruption — fail closed); or
+/// [`Errno::BufferTooSmall`] if `reply` is shorter than the status word.
+pub fn decode_notice_reply(reply: &[u8]) -> Result<(ServiceState, Duration64), Errno> {
+    let status = reply_status(reply)?;
+    if status != 0 {
+        return Err(Errno::try_from_status(status).unwrap_or(Errno::BadMagic));
+    }
+    if reply.len() < NOTICE_REPLY_LEN {
+        return Err(Errno::BadMagic);
+    }
+    let state = ServiceState::from_u8(reply[REPLY_STATUS_LEN]).ok_or(Errno::BadMagic)?;
+    if reply[REPLY_STATUS_LEN + 1..OFF_NOTICE_WATCHDOG]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let watchdog = Duration64::from_bytes(&reply[OFF_NOTICE_WATCHDOG..NOTICE_REPLY_LEN])
+        .map_err(|_| Errno::BadMagic)?;
+    // A renewal cadence derived from a negative interval would be
+    // meaningless, so it is refused rather than clamped.
+    if watchdog < Duration64::ZERO {
+        return Err(Errno::BadMagic);
+    }
+    Ok((state, watchdog))
+}
+
 /// The status word of a reply frame, shared by both endpoints' decoders.
 ///
 /// # Errors
@@ -987,7 +1063,7 @@ mod tests {
         }
         // A notice is shorter than the shared request frame, so a decoder
         // reading one refuses it on length before it reaches a magic.
-        let notice = crate::ReadyNotice::new(crate::LifecycleSignal::Ready).to_le_bytes();
+        let notice = crate::ServiceNotice::Lifecycle(crate::LifecycleSignal::Ready).to_le_bytes();
         assert!(notice.len() < REQUEST_LEN);
         assert_eq!(
             ServiceControlRequest::decode(&notice),
@@ -1012,8 +1088,60 @@ mod tests {
         .encode(&mut request)
         .expect("encodes");
         assert_eq!(
-            crate::ReadyNotice::from_bytes(&request),
+            crate::ServiceNotice::from_bytes(&request),
             Err(Errno::BadMagic)
         );
+    }
+
+    #[test]
+    fn notice_reply_round_trips_state_and_watchdog() {
+        let mut buf = [0u8; NOTICE_REPLY_LEN];
+        let interval = Duration64::from_secs(30);
+        let len = encode_notice_reply(&mut buf, ServiceState::Running, interval).expect("encodes");
+        assert_eq!(len, NOTICE_REPLY_LEN);
+        assert_eq!(
+            decode_notice_reply(&buf),
+            Ok((ServiceState::Running, interval))
+        );
+
+        // An unwatched service reports a zero interval, which is what tells
+        // its runtime to send no further renewals.
+        let len =
+            encode_notice_reply(&mut buf, ServiceState::Ready, Duration64::ZERO).expect("encodes");
+        assert_eq!(
+            decode_notice_reply(&buf[..len]),
+            Ok((ServiceState::Ready, Duration64::ZERO))
+        );
+    }
+
+    #[test]
+    fn notice_reply_decode_fails_closed() {
+        let mut good = [0u8; NOTICE_REPLY_LEN];
+        encode_notice_reply(&mut good, ServiceState::Running, Duration64::from_secs(5))
+            .expect("encodes");
+
+        assert_eq!(
+            decode_notice_reply(&good[..NOTICE_REPLY_LEN - 1]),
+            Err(Errno::BadMagic)
+        );
+
+        let mut bad_state = good;
+        bad_state[REPLY_STATUS_LEN] = 200;
+        assert_eq!(decode_notice_reply(&bad_state), Err(Errno::BadMagic));
+
+        let mut dirty_tail = good;
+        dirty_tail[REPLY_STATUS_LEN + 1] = 1;
+        assert_eq!(decode_notice_reply(&dirty_tail), Err(Errno::BadMagic));
+
+        // A negative interval would yield a meaningless renewal cadence.
+        let mut negative = good;
+        negative[OFF_NOTICE_WATCHDOG..OFF_NOTICE_WATCHDOG + 8]
+            .copy_from_slice(&(-1i64).to_le_bytes());
+        assert_eq!(decode_notice_reply(&negative), Err(Errno::BadMagic));
+
+        // An error frame surfaces its own refusal, never a fabricated state.
+        let mut err = [0u8; NOTICE_REPLY_LEN];
+        let len = encode_error_reply(&mut err, Errno::NotFound).expect("encodes");
+        assert_eq!(decode_notice_reply(&err[..len]), Err(Errno::NotFound));
     }
 }
