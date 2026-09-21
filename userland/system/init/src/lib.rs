@@ -103,14 +103,14 @@ pub mod service;
 
 pub use error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
 pub use manager::{
-    ActivationOutcome, EnrolReport, FailedService, Init, InitConfig, ReadyClient, StartReport,
-    StartedService,
+    ActivationOutcome, EnrolReport, FailedService, Init, InitConfig, NotifyReport, ParkOutcome,
+    ReleasedClient, StartReport, StartedService, MAX_PENDING_PER_SERVICE,
 };
 pub use registry::{
     effective, enrol, overrides_for, unenrol, EnrolError, Enrolment, EnrolmentOverride,
 };
 pub use scope::AuthorityScope;
 pub use service::{
-    ClientId, LoopReaper, Pid, ReapedChild, Reaper, ServiceSpec, Spawner, Stopper,
+    ClientId, LoopReaper, Pid, ReapedChild, Reaper, ServiceSender, ServiceSpec, Spawner, Stopper,
     DEFAULT_STOP_GRACE,
 };

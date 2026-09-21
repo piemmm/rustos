@@ -318,7 +318,7 @@ mod tests {
     }
 
     fn pubkey_of(sk: &Ed25519SecretKey) -> Ed25519PublicKey {
-        Ed25519PublicKey::from_bytes(&sk.public_key().as_bytes()).expect("valid key")
+        Ed25519PublicKey::from_bytes(sk.public_key().as_bytes()).expect("valid key")
     }
 
     #[test]

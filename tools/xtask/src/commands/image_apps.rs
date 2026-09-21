@@ -338,6 +338,30 @@ pub fn framestats_store_files(
 /// the library row it clicks.
 pub const FRAMESTATS_FIXTURE_CRATE: &str = "tests/integration/framestats_program";
 
+/// The composed store files the SVG-text vertical's disk plants: the shared
+/// [`app_store_files`] set plus the test-only `svgtext` fixture bundle
+/// (`plans/SVG.md` S23/S24), memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
+pub fn svgtext_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    fixture_store_files(
+        ctx,
+        arch,
+        profile,
+        "tests/integration/svgtext_program",
+        tairix_test_svgtext::COMMAND,
+        &FILES,
+    )
+}
+
 /// The composed store files the stream vertical's disk plants: the shared
 /// [`app_store_files`] set plus the test-only `tcpecho` stream-socket client
 /// fixture bundle (`plans/NETWORK.md` N5c), memoised per arch.

@@ -44,18 +44,6 @@ pub const ELEVATE_REFUSED: EventId = EventId(10_008);
 /// sessions run without an elevation broker: an `elevate` request fails
 /// closed at the missing rendezvous rather than being served unattested.
 pub const ELEVATE_UNAVAILABLE: EventId = EventId(10_009);
-/// The sandboxed OS font service (`fontd`) was started
-/// (`plans/FONT-SERVICE.md`): the graphical desktop draws text through it, so
-/// login brings it up (as the `fontd` service account) the first round this
-/// machine is display-capable — never on a headless boot. Started once per
-/// login process; a duplicate would fail closed on the reserved
-/// `FONT_ENDPOINT` bind.
-pub const FONTD_STARTED: EventId = EventId(10_010);
-/// The font service could not be started for a graphical session (its spawn was
-/// refused). Login degrades gracefully — the graphical session still launches —
-/// but desktop text will not render until a font service is up, so the refusal
-/// is audited loudly.
-pub const FONTD_UNAVAILABLE: EventId = EventId(10_011);
 /// A [`tairix_abi::elevate::ElevateRequest::Verify`] request re-authenticated
 /// the caller's own attested account; nothing was run.
 pub const VERIFY_GRANTED: EventId = EventId(10_012);
@@ -137,15 +125,15 @@ pub const CAPTURE_REFUSED: EventId = EventId(10_028);
 mod tests {
     use super::{
         AUTH_FAILED, CAPTURE_GRANTED, CAPTURE_REFUSED, CONSOLE_ERROR, ELEVATE_GRANTED,
-        ELEVATE_REFUSED, ELEVATE_UNAVAILABLE, FONTD_STARTED, FONTD_UNAVAILABLE, GREETER_DEGRADED,
-        GREETER_FAILED, LAUNCH_ENDED_ABNORMALLY, LAUNCH_GRANTED, LAUNCH_REFUSED, LOCKED_OUT,
-        LOGIN_RANGE_END, LOGIN_RANGE_START, SESSION_ACCOUNTS_SENT, SESSION_AUTH_GRANTED,
-        SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT,
-        SESSION_ENDPOINT_UNAVAILABLE, SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED,
-        SESSION_RESUMED, SESSION_STARTED, VERIFY_GRANTED, VERIFY_REFUSED,
+        ELEVATE_REFUSED, ELEVATE_UNAVAILABLE, GREETER_DEGRADED, GREETER_FAILED,
+        LAUNCH_ENDED_ABNORMALLY, LAUNCH_GRANTED, LAUNCH_REFUSED, LOCKED_OUT, LOGIN_RANGE_END,
+        LOGIN_RANGE_START, SESSION_ACCOUNTS_SENT, SESSION_AUTH_GRANTED, SESSION_AUTH_REFUSED,
+        SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT, SESSION_ENDPOINT_UNAVAILABLE,
+        SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED, SESSION_RESUMED, SESSION_STARTED,
+        VERIFY_GRANTED, VERIFY_REFUSED,
     };
 
-    const ALL: [u32; 28] = [
+    const ALL: [u32; 26] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -155,8 +143,6 @@ mod tests {
         ELEVATE_GRANTED.0,
         ELEVATE_REFUSED.0,
         ELEVATE_UNAVAILABLE.0,
-        FONTD_STARTED.0,
-        FONTD_UNAVAILABLE.0,
         VERIFY_GRANTED.0,
         VERIFY_REFUSED.0,
         SESSION_AUTH_GRANTED.0,

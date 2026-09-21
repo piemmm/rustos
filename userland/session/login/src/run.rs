@@ -78,7 +78,6 @@ mod program {
     use alloc::vec::Vec;
 
     use core::cell::RefCell;
-    use core::sync::atomic::{AtomicBool, Ordering};
     use tairix_abi::display_ipc::{DisplayRequest, DISPLAY_ENDPOINT, DISPLAY_MODE_REPLY_LEN};
     use tairix_abi::elevate::{
         elevate_endpoint, ElevateArgv, ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST,
@@ -105,70 +104,14 @@ mod program {
         AuthenticatedUser, Authenticator, Captured, ConfigStore, ConsoleMode, Credentials,
         CursesView, DbAccounts, DbLoad, LiveSessions, Login, LoginConfig, LoginError, LoginStatus,
         LoginView, SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker,
-        StatusSource, DESKTOP_SESSION_PATH, FONTD_SERVICE_PATH, GREETER_SERVICE_PATH,
+        StatusSource, DESKTOP_SESSION_PATH, GREETER_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
     use tairix_rt::LogSink;
     use tairix_termcap::TermType;
-    use tairix_users::{UsersDb, FONTD_UID, GREETER_UID, MAX_DB_LEN};
+    use tairix_users::{UsersDb, GREETER_UID, MAX_DB_LEN};
     use tairix_util::secret::wipe;
-
-    /// Set once the sandboxed OS font service (`fontd`) has been started, so
-    /// login launches it at most once per process (`plans/FONT-SERVICE.md`).
-    /// The graphical desktop draws text through `fontd`, so login — the one
-    /// holder of `CAP_SPAWN_AS_USER` on this path — starts it as the `fontd`
-    /// service account the first round a display is available, and never on a
-    /// headless boot. A duplicate start would in any case fail closed on the
-    /// reserved `FONT_ENDPOINT` bind, so this guard only avoids a redundant
-    /// spawn on a later round.
-    static FONTD_STARTED: AtomicBool = AtomicBool::new(false);
-
-    /// Start the sandboxed font service once, as the `fontd` service account.
-    ///
-    /// Called when this machine is display-capable (a graphical session may
-    /// run), whether the desktop is launched by a graphical login or on demand
-    /// by the shell's `desktop` command. `fontd` is a graphics-only OS
-    /// resource, so it is **not** a boot-floor service (a headless machine
-    /// never runs it); login brings it up here instead. login holds
-    /// `CAP_SPAWN_AS_USER`, so it drops `fontd` onto its own service account
-    /// (uid resolved from the kernel identity table, never fabricated) exactly
-    /// as it drops a session onto the authenticated user. The service is
-    /// detached — it outlives any one session and is not this login's child to
-    /// reap — and needs no console. A refused spawn is audited loudly and login
-    /// proceeds (fail loud, degrade gracefully): desktop text simply will not
-    /// render until a font service is up.
-    fn ensure_fontd(sink: LogSink) {
-        if FONTD_STARTED.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let ret = tairix_rt::spawn_as(FONTD_SERVICE_PATH.as_bytes(), CONSOLE_INHERIT, FONTD_UID.0);
-        let id = if ret < 0 {
-            events::FONTD_UNAVAILABLE
-        } else {
-            events::FONTD_STARTED
-        };
-        let (level, message) = if ret < 0 {
-            (
-                tairix_log::Level::Warn,
-                "font service could not be started; desktop text will not render until one is",
-            )
-        } else {
-            (
-                tairix_log::Level::Info,
-                "font service started for the graphical session",
-            )
-        };
-        tairix_log::log(
-            &sink,
-            &tairix_log::Event {
-                level,
-                id,
-                message,
-                fields: &[],
-            },
-        );
-    }
 
     /// Authentication attempts per login round before the round fails
     /// closed and the loop opens a fresh one. The
@@ -1486,21 +1429,9 @@ mod program {
         };
         // Re-probed each round: whether a graphical session is possible this
         // round (both bundles are installed and a display service is live).
-        // It both selects a configured graphical default (degrading to
-        // text — never an error — when unavailable) and gates bringing up the
-        // font service.
+        // It selects a configured graphical default, degrading to text —
+        // never an error — when unavailable.
         let graphical_available = graphical_session_available();
-        // The graphical desktop draws text through the sandboxed OS font
-        // service, whether it is launched by a graphical login or on demand by
-        // the shell's `desktop` command. So bring `fontd` up (once) as soon as
-        // this machine is display-capable — not as a boot-floor service (a
-        // headless machine, where this stays false, never runs it) and not tied
-        // to one launch path. login holds `CAP_SPAWN_AS_USER`, the authority
-        // the graphics-only service account needs and neither the shell nor the
-        // desktop app has.
-        if graphical_available {
-            ensure_fontd(sink);
-        }
         // The same rule the text state machine applies: a graphical session
         // only when this round can start one and the resolved default asks
         // for it.

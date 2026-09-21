@@ -36,18 +36,65 @@
 mod startup;
 mod supervisor;
 
+/// How many control requests either administrative endpoint queues
+/// before a further caller is refused by the kernel.
+///
+/// A control tool call is synchronous and PID 1 answers one per wakeup, so
+/// the queue only absorbs callers that arrive while an earlier one is
+/// being served. A bound rather than a capacity: this is the depth at
+/// which a flood of control calls is refused instead of consuming kernel
+/// memory, and only an administrator can reach these endpoints at all.
+const CONTROL_QUEUE_DEPTH: usize = 4;
+
+/// How many activation calls may be outstanding at once.
+///
+/// The kernel counts a *parked* call against this, and the whole point of
+/// the activation endpoint is that a client waits on it while its service
+/// starts — so this is not a burst allowance like the control depth, it
+/// is how many clients may be waiting. It is therefore the engine's own
+/// per-service pending bound plus the one call being served, so the
+/// engine's bound is what a flood actually meets (refused with
+/// `QueueFull`, and audited by the manager) instead of the kernel
+/// refusing first and leaving that bound dead. Every graphical process
+/// reaches this endpoint, so a hand-picked small depth would refuse
+/// ordinary desktop start-up, not a flood.
+const ACTIVATION_QUEUE_DEPTH: usize = tairix_init::MAX_PENDING_PER_SERVICE + 1;
+
+/// How many readiness notices may be outstanding at once.
+///
+/// A notice is answered in the wakeup that receives it and never parked,
+/// so this only absorbs services announcing simultaneously — at most
+/// every service the boot description registers. Derived from that
+/// description rather than picked, so it cannot be outgrown by adding a
+/// service. A refused notice would be worse than a refused control call:
+/// the service's readiness would be lost and its clients left waiting.
+const NOTICE_QUEUE_DEPTH: usize = startup::REGISTERED_SERVICES;
+
+// A depth the kernel refuses is a bind PID 1 cannot make, which ends the
+// boot; caught here rather than at the first boot after a bound moves.
+const _: () = assert!(ACTIVATION_QUEUE_DEPTH <= tairix_abi::ipc::IPC_CALL_CAPACITY_MAX);
+const _: () = assert!(NOTICE_QUEUE_DEPTH <= tairix_abi::ipc::IPC_CALL_CAPACITY_MAX);
+const _: () = assert!(CONTROL_QUEUE_DEPTH <= tairix_abi::ipc::IPC_CALL_CAPACITY_MAX);
+
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
     extern crate alloc;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
-    use tairix_abi::service_control::{ServiceControlRequest, ServiceEnrolRequest};
-    use tairix_abi::{CapabilityId, Duration64, Errno, Signal, WaitSetOp, WaitSourceKind};
+    use tairix_abi::service_control::{
+        ServiceActivationOp, ServiceActivationRequest, ServiceControlRequest, ServiceEnrolRequest,
+    };
+    use tairix_abi::{
+        ActivationMode, CapabilityId, Duration64, Errno, Origin, ReadinessKind, ReadyNotice,
+        ServiceState, Signal, WaitSetOp, WaitSourceKind,
+    };
     use tairix_caps::CapabilitySet;
     use tairix_init::{
-        enrol, AuthorityScope, ControlError, Enrolment, EnrolmentOverride, Init, InitConfig,
-        LoopReaper, Pid, ReapedChild, ServiceSpec, Spawner, Stopper,
+        enrol, ActivateError, ActivationOutcome, AuthorityScope, ClientId, ControlError, Enrolment,
+        EnrolmentOverride, Init, InitConfig, LoopReaper, NotifyError, ParkOutcome, Pid,
+        ReapedChild, ServiceSender, ServiceSpec, Spawner, Stopper,
     };
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::LogSink;
@@ -148,8 +195,36 @@ mod program {
             ));
             return false;
         }
+        for entry in config.ondemand() {
+            let spec = ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new())
+                .with_activation(ActivationMode::on_demand(ONDEMAND_LINGER))
+                // A client's connect is answered when the service's endpoint
+                // is answerable, which only the service can say — treating
+                // the spawn as readiness would hand back an endpoint that is
+                // not bound yet, the very race on-demand activation exists
+                // to close.
+                .with_readiness(ReadinessKind::Notify);
+            if engine.register(spec).is_err() {
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: duplicate service name for {}; refusing to boot a surprising system\n",
+                    entry.path
+                ));
+                return false;
+            }
+        }
         true
     }
+
+    /// How long an idle on-demand service is kept alive after its last
+    /// client disconnects, before the manager stops it.
+    ///
+    /// A policy default for the compiled-in floor description, which has no
+    /// room for a per-service figure; a discovered bundle names its own in
+    /// its signed manifest. Half a minute is long enough that a desktop
+    /// closing one window and opening another does not pay a relaunch, and
+    /// short enough that a machine does not carry the service for a session
+    /// that has finished with it.
+    const ONDEMAND_LINGER: Duration64 = Duration64::from_secs(30);
 
     /// The production [`Spawner`]: launch a service's `Run` binary on the
     /// primary console as its own service account through `spawn_as`.
@@ -302,6 +377,24 @@ mod program {
         /// enrolment overrides off the encrypted root, or `None` once they
         /// have been adopted or the ladder is spent.
         override_retry: Option<RetryLadder>,
+        /// Call tickets of clients the engine parked, awaiting their
+        /// service's readiness.
+        ///
+        /// The reply is owed to a *ticket*, which only the transport holds,
+        /// while readiness is the engine's to report — so the two are joined
+        /// here. Every entry is one outstanding call on the activation
+        /// endpoint, so the kernel's own bound on those is what bounds this;
+        /// it cannot grow past it however the calls are spread across
+        /// clients.
+        parked: Vec<ParkedClient>,
+    }
+
+    /// A client parked on its service's readiness, and the call ticket its
+    /// reply is owed to.
+    struct ParkedClient {
+        service: String,
+        client: ClientId,
+        ticket: u64,
     }
 
     impl Services for EngineServices<'_, '_> {
@@ -316,6 +409,10 @@ mod program {
             // service is registered.
             let now = Duration64::from_nanos(tairix_rt::clock_get());
             self.engine.reap(now);
+            // An exit resolves every park on the service that died — as an
+            // abandonment, or as a connection if a restart carried it back
+            // to ready.
+            self.release_parked_clients();
             self.engine.arm_watchdogs(now);
         }
 
@@ -444,6 +541,48 @@ mod program {
             self.engine.arm_watchdogs(now);
         }
 
+        fn serve_activation(&mut self) {
+            const ENDPOINT: u64 = tairix_abi::service_control::SERVICE_ACTIVATION_ENDPOINT;
+            let mut request = [0u8; tairix_abi::service_control::REQUEST_LEN];
+            let mut ticket = 0u64;
+            let Ok(len) = tairix_rt::call_recv_nonblock(ENDPOINT, &mut request, &mut ticket) else {
+                return;
+            };
+
+            let now = Duration64::from_nanos(tairix_rt::clock_get());
+            match self.activate(&request[..len], ticket, now) {
+                // The client is parked; its ticket is answered once the
+                // service reports ready, so nothing is replied here.
+                Ok(None) => {}
+                Ok(Some(state)) => Self::reply_state(ENDPOINT, ticket, Ok(state)),
+                Err(err) => Self::reply_state(ENDPOINT, ticket, Err(err)),
+            }
+            self.release_parked_clients();
+            self.engine.arm_watchdogs(now);
+        }
+
+        fn serve_notice(&mut self) {
+            let mut frame = [0u8; ReadyNotice::WIRE_LEN];
+            let mut ticket = 0u64;
+            let Ok(len) = tairix_rt::call_recv_nonblock(NOTICE_ENDPOINT, &mut frame, &mut ticket)
+            else {
+                return;
+            };
+
+            let now = Duration64::from_nanos(tairix_rt::clock_get());
+            let answer = self.apply_notice(&frame[..len], ticket);
+            // The sender is parked on this ticket, so it is answered whether
+            // the manager accepted the notice or refused it: a service that
+            // announced readiness the manager did not record must learn so
+            // rather than serve behind a dependency gate that never opens.
+            Self::reply_state(NOTICE_ENDPOINT, ticket, answer);
+            // A service reaching ready is what releases whoever was parked
+            // waiting for it — this is the wake the whole on-demand path
+            // turns on.
+            self.release_parked_clients();
+            self.engine.arm_watchdogs(now);
+        }
+
         fn expire_deadlines(&mut self) {
             let now = Duration64::from_nanos(tairix_rt::clock_get());
             self.try_adopt_overrides(now);
@@ -457,11 +596,153 @@ mod program {
                     failed.name, failed.failure
                 ));
             }
+            // A lapsed deadline can restart a service into readiness, which
+            // releases whoever was parked waiting for it.
+            self.release_parked_clients();
             self.engine.arm_watchdogs(now);
         }
     }
 
     impl EngineServices<'_, '_> {
+        /// Serve one decoded activation frame, answering with the service's
+        /// resulting state — or `None` when the client has been parked and
+        /// its ticket is owed a later reply.
+        ///
+        /// The caller's identity and authority are read from the call's
+        /// kernel-attested origin, never from the frame, so a client can
+        /// neither claim another principal's connection nor widen the
+        /// authority its connect is checked against.
+        fn activate(
+            &mut self,
+            frame: &[u8],
+            ticket: u64,
+            now: Duration64,
+        ) -> Result<Option<ServiceState>, Errno> {
+            let request = ServiceActivationRequest::decode(frame)?;
+            let origin = attested_peer(ACTIVATION_ENDPOINT, ticket)?;
+            let client = ClientId::new(origin.proc_id());
+            let held = CapabilitySet::from_le_bytes(origin.capabilities().as_bytes())?;
+            match request.op {
+                ServiceActivationOp::Connect => {
+                    match self
+                        .engine
+                        .connect(request.name, &held, client)
+                        .map_err(activate_errno)?
+                    {
+                        ActivationOutcome::Connected => {
+                            Ok(Some(self.state_for_reply(request.name)?))
+                        }
+                        ActivationOutcome::Queued => {
+                            self.parked.push(ParkedClient {
+                                service: request.name.to_string(),
+                                client,
+                                ticket,
+                            });
+                            Ok(None)
+                        }
+                    }
+                }
+                ServiceActivationOp::Disconnect => {
+                    self.engine
+                        .disconnect(request.name, client, now)
+                        .map_err(activate_errno)?;
+                    Ok(Some(self.state_for_reply(request.name)?))
+                }
+            }
+        }
+
+        /// Apply one decoded lifecycle notice, answering with the announcing
+        /// service's resulting state.
+        ///
+        /// The frame names no service: the manager resolves one from the
+        /// call's kernel-attested origin, so a principal can only ever move
+        /// its own service and a sender matching none is refused outright.
+        fn apply_notice(&mut self, frame: &[u8], ticket: u64) -> Result<ServiceState, Errno> {
+            let notice = ReadyNotice::from_bytes(frame)?;
+            let origin = attested_peer(NOTICE_ENDPOINT, ticket)?;
+            let report = self
+                .engine
+                .notify_sender(
+                    ServiceSender {
+                        pid: Pid::new(origin.pid()),
+                        account: origin.uid(),
+                    },
+                    notice.signal,
+                )
+                .map_err(notify_errno)?;
+            for failed in &report.started.failed {
+                // Fail loud, degrade gracefully: a dependent the notice
+                // could not release is stated on the diagnostic stream, and
+                // the rest of the system stays up.
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: service {} not started ({:?}); continuing without it\n",
+                    failed.name, failed.failure
+                ));
+            }
+            self.state_for_reply(&report.service)
+        }
+
+        /// The state to report for a service the engine has just accepted a
+        /// request against. Absent means the registry changed underneath the
+        /// call, which is answered as a refusal rather than a guess.
+        fn state_for_reply(&self, name: &str) -> Result<ServiceState, Errno> {
+            self.engine.state_of(name).ok_or(Errno::NotFound)
+        }
+
+        /// Answer every client whose park the engine has since resolved.
+        ///
+        /// Draining is the whole wake: the engine reports each parked client
+        /// once — connected, or abandoned because its service is not coming
+        /// — and the reply releases its `ipc_call` either way.
+        ///
+        /// One report can owe *several* tickets. The engine parks a client
+        /// identity, and a second thread of the same process connecting to
+        /// the same service is deduplicated into that one park while still
+        /// holding a call of its own; every such ticket gets the report's
+        /// answer, because it is equally true of all of them. Answering only
+        /// the first would leave the rest blocked for ever.
+        fn release_parked_clients(&mut self) {
+            for released in self.engine.take_released_clients() {
+                let answer = match released.outcome {
+                    ParkOutcome::Connected => self.state_for_reply(&released.service),
+                    // The service died, failed, or the client withdrew: there
+                    // is no connection to hand back, so the caller is refused
+                    // rather than left blocked on one that is not coming. The
+                    // same retryable answer a synchronous connect gets when
+                    // the service is not in a state to serve it — a restart
+                    // may well make the next attempt succeed.
+                    ParkOutcome::Abandoned => Err(Errno::Busy),
+                };
+                // Swap-remove in place: the entry moved into `at` is the
+                // one examined next, so the scan stays one pass and answers
+                // every ticket without rebuilding the list.
+                let mut at = 0;
+                while at < self.parked.len() {
+                    if self.parked[at].client == released.client
+                        && self.parked[at].service == released.service
+                    {
+                        let parked = self.parked.swap_remove(at);
+                        Self::reply_state(ACTIVATION_ENDPOINT, parked.ticket, answer);
+                    } else {
+                        at += 1;
+                    }
+                }
+            }
+        }
+
+        /// Encode and send one status-framed reply. A caller blocked on a
+        /// ticket is always answered, so an encode that somehow did not fit
+        /// still sends a zero-length frame, which the client decodes as a
+        /// refusal.
+        fn reply_state(endpoint: u64, ticket: u64, answer: Result<ServiceState, Errno>) {
+            let mut reply = [0u8; tairix_abi::service_control::REPLY_LEN];
+            let written = match answer {
+                Ok(state) => tairix_abi::service_control::encode_reply(&mut reply, state),
+                Err(err) => tairix_abi::service_control::encode_error_reply(&mut reply, err),
+            };
+            let _ = tairix_rt::call_reply(endpoint, ticket, &reply[..written.unwrap_or(0)]);
+        }
+
         /// Try once to read the administrator's enrolment overrides, if the
         /// ladder is armed and its rung is due.
         ///
@@ -513,6 +794,55 @@ mod program {
     /// the manager has already audited the refusal with its cause, so the
     /// caller learns *that* it was refused and the operator reads *why* in the
     /// log.
+    /// The reserved endpoint clients broker their connections over.
+    const ACTIVATION_ENDPOINT: u64 = tairix_abi::service_control::SERVICE_ACTIVATION_ENDPOINT;
+
+    /// The reserved endpoint a service announces its own readiness over.
+    const NOTICE_ENDPOINT: u64 = tairix_abi::service_control::SERVICE_NOTICE_ENDPOINT;
+
+    /// Read the kernel-attested origin of the caller holding `ticket`.
+    fn attested_peer(endpoint: u64, ticket: u64) -> Result<Origin, Errno> {
+        let mut wire = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
+        let read = tairix_rt::call_peer_origin(endpoint, ticket, &mut wire)
+            .map_err(Errno::from_syscall)?;
+        Origin::from_bytes(&wire[..read])
+    }
+
+    /// The errno an activation refusal is reported to the client as.
+    const fn activate_errno(err: ActivateError) -> Errno {
+        match err {
+            ActivateError::UnknownService => Errno::NotFound,
+            // The caller's own authority was short of the service's connect
+            // capability, so the caller is the right thing to blame.
+            ActivateError::Denied => Errno::PermissionDenied,
+            // Retryable: a required readiness condition is unmet (a
+            // graphics-only service on a headless machine), or the service
+            // is mid-teardown.
+            ActivateError::Unavailable => Errno::Busy,
+            ActivateError::QueueFull => Errno::WouldBlock,
+            // As for the control endpoint: the caller was entitled to ask
+            // and the *target's* bundle is what the load gate refused.
+            ActivateError::NotActivatable => Errno::NotSupported,
+        }
+    }
+
+    /// The errno a refused lifecycle notice is reported to its sender as.
+    const fn notify_errno(err: NotifyError) -> Errno {
+        match err {
+            // Both are the same answer to the sender: the manager has no
+            // readiness edge of yours to resolve. They differ only in which
+            // half of the resolution failed, which the audit record carries
+            // and the sender could do nothing with.
+            NotifyError::UnknownService | NotifyError::UnknownSender => Errno::NotFound,
+            // The manager is not waiting for a readiness transition from
+            // this service — it already announced one, or it was never
+            // declared `notify`-ready. Not retryable, and not about the
+            // sender's authority: it is the target's own shape that has no
+            // edge to resolve.
+            NotifyError::NotStarting => Errno::NotSupported,
+        }
+    }
+
     const fn control_errno(err: ControlError) -> Errno {
         match err {
             ControlError::UnknownService => Errno::NotFound,
@@ -537,15 +867,11 @@ mod program {
     /// Wait-set token identifying the service-enrolment endpoint member.
     const TOKEN_ENROL: u64 = 3;
 
-    /// How many control requests the endpoint queues before a further caller
-    /// is refused by the kernel.
-    ///
-    /// A control tool call is synchronous and PID 1 answers one per wakeup, so
-    /// the queue only absorbs callers that arrive while an earlier one is
-    /// being served. A bound rather than a capacity: this is the depth at
-    /// which a flood of control calls is refused instead of consuming kernel
-    /// memory, and only an administrator can reach the endpoint at all.
-    const CONTROL_QUEUE_DEPTH: usize = 4;
+    /// Wait-set token for "the service-activation endpoint has a request".
+    const TOKEN_ACTIVATION: u64 = 4;
+
+    /// Wait-set token for "a service has announced its own readiness".
+    const TOKEN_NOTICE: u64 = 5;
 
     /// The production [`Sessions`] backing: the real `tairix-rt` syscall
     /// wrappers (`console_count`, the console-selecting `spawn_at`) over the
@@ -583,11 +909,45 @@ mod program {
                     &CapabilitySet::empty(),
                     tairix_abi::service_control::REQUEST_LEN,
                     reply_len,
-                    CONTROL_QUEUE_DEPTH,
+                    crate::CONTROL_QUEUE_DEPTH,
                 );
                 if created != 0 {
                     return Err(created);
                 }
+            }
+            // The activation endpoint carries no send restriction: any
+            // principal may *ask* to use a shared service, and what decides
+            // the answer is the per-service connect capability the engine
+            // checks against the caller's attested authority. Restricting
+            // the endpoint instead would gate every service behind one
+            // capability and make the per-service gate unreachable.
+            let created = tairix_rt::call_create(
+                tairix_abi::service_control::SERVICE_ACTIVATION_ENDPOINT,
+                &CapabilitySet::empty(),
+                &CapabilitySet::empty(),
+                tairix_abi::service_control::REQUEST_LEN,
+                tairix_abi::service_control::REPLY_LEN,
+                crate::ACTIVATION_QUEUE_DEPTH,
+            );
+            if created != 0 {
+                return Err(created);
+            }
+            // The notice endpoint is unrestricted for a stronger reason
+            // still: a notice names no service, so reaching this endpoint
+            // buys a principal nothing it could not already say about
+            // itself. What decides the answer is the engine's match of the
+            // call's attested origin against a service it is starting, and
+            // no capability could express that.
+            let created = tairix_rt::call_create(
+                NOTICE_ENDPOINT,
+                &CapabilitySet::empty(),
+                &CapabilitySet::empty(),
+                ReadyNotice::WIRE_LEN,
+                tairix_abi::service_control::REPLY_LEN,
+                crate::NOTICE_QUEUE_DEPTH,
+            );
+            if created != 0 {
+                return Err(created);
             }
             let set = tairix_rt::waitset_create();
             if set < 0 {
@@ -607,6 +967,12 @@ mod program {
                     tairix_abi::service_control::SERVICE_ENROL_ENDPOINT,
                     TOKEN_ENROL,
                 ),
+                (
+                    WaitSourceKind::Endpoint,
+                    tairix_abi::service_control::SERVICE_ACTIVATION_ENDPOINT,
+                    TOKEN_ACTIVATION,
+                ),
+                (WaitSourceKind::Endpoint, NOTICE_ENDPOINT, TOKEN_NOTICE),
                 (
                     WaitSourceKind::Child,
                     tairix_abi::WAITSET_CHILD_ANY,
@@ -658,6 +1024,8 @@ mod program {
             match token {
                 TOKEN_CONTROL => Woke::Control,
                 TOKEN_ENROL => Woke::Enrol,
+                TOKEN_ACTIVATION => Woke::Activation,
+                TOKEN_NOTICE => Woke::Notice,
                 TOKEN_CHILD => {
                     // A child member's readiness is a peek, so the reap is a
                     // separate non-blocking call — it must never park the one
@@ -806,6 +1174,7 @@ mod program {
                 OVERRIDE_RETRY_ATTEMPTS,
                 false,
             ),
+            parked: Vec::new(),
         };
         let session = Launch {
             path: config.session().path.as_bytes(),
@@ -886,6 +1255,8 @@ impl supervisor::Sessions for StubSessions {
 struct StubServices {
     control: usize,
     enrol: usize,
+    activation: usize,
+    notice: usize,
     deadlines: usize,
     exits: usize,
 }
@@ -907,6 +1278,12 @@ impl supervisor::Services for StubServices {
     fn serve_enrol(&mut self) {
         self.enrol += 1;
     }
+    fn serve_activation(&mut self) {
+        self.activation += 1;
+    }
+    fn serve_notice(&mut self) {
+        self.notice += 1;
+    }
     fn expire_deadlines(&mut self) {
         self.deadlines += 1;
     }
@@ -919,7 +1296,12 @@ fn main() {
         // Touch the `service_name` derivation every startup entry now flows
         // through — the floor and the enrolment-governed tier alike — so a
         // regression in it is caught by an ordinary host build.
-        for entry in config.services().iter().chain(config.enrolled()) {
+        for entry in config
+            .services()
+            .iter()
+            .chain(config.enrolled())
+            .chain(config.ondemand())
+        {
             let _ = startup::service_name(entry.path);
         }
         let _ = (
@@ -929,13 +1311,16 @@ fn main() {
     }
     // Drive the reactor's dispatch over a scripted seam so an ordinary host
     // build covers every arm: a control request, an enrolment request, a
-    // lapsed deadline, a non-session child exit, then a failed park that ends
-    // the loop.
+    // client activation, a service's own readiness notice, a lapsed
+    // deadline, a non-session child exit, then a failed park that ends the
+    // loop.
     let mut services = StubServices::default();
     let mut sessions = StubSessions {
         script: &[
             supervisor::Woke::Control,
             supervisor::Woke::Enrol,
+            supervisor::Woke::Activation,
+            supervisor::Woke::Notice,
             supervisor::Woke::Deadline,
             supervisor::Woke::Child(4242),
             supervisor::Woke::Failed,
@@ -957,9 +1342,11 @@ fn main() {
         (
             services.control,
             services.enrol,
+            services.activation,
+            services.notice,
             services.deadlines,
             services.exits
         ),
-        (1, 1, 1, 1)
+        (1, 1, 1, 1, 1, 1)
     );
 }

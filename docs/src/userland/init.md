@@ -18,10 +18,12 @@ and the account, never a capability set.
 > below have landed, as has the **authority-scope boundary** that confines
 > a per-user manager to its own user (SVC-6, *Authority scope* below). The
 > engine cores of on-demand endpoint activation, idle linger, and
-> stop/shutdown ordering are in place, and the **control transport** that
-> serves them is live (SVC-8: the wait-set park, `CAP_SERVICE_CONTROL`, and
-> the `servicectl` tool). Persistent enablement, the live heartbeat
-> transport, and spawning the per-user manager at session start are still
+> stop/shutdown ordering are in place, and the transports that serve them
+> are live: the **control transport** (SVC-8: the wait-set park,
+> `CAP_SERVICE_CONTROL`, and the `servicectl` tool), the **activation
+> broker** a client connects through, and the **lifecycle-notice endpoint**
+> a service announces its own readiness on (SVC-5). The live heartbeat
+> transport and spawning the per-user manager at session start are still
 > ahead.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
@@ -87,10 +89,14 @@ and releases a dependent only once every dependency it names is
   `tairix_abi::ReadyNotice` — an `sd_notify` analogue carrying a
   `LifecycleSignal` (`ready` or `failed`) and **no identity**: the manager
   attributes the notice to the kernel-attested sender, never a
-  caller-supplied name (`AGENTS.md` §5.4). `Init::notify` applies it —
-  `ready` releases the service's dependents, `failed` marks it failed and
-  skips the dependents blocked on it — and fails closed (`NotifyError`) on
-  an unknown service or a notice for one that is not `starting`.
+  caller-supplied name (`AGENTS.md` §5.4). `Init::notify_sender` is the
+  transport's entry: it resolves the sender's attested process id and
+  account to a service the manager is currently *starting*, then applies
+  the notice — `ready` releases the service's dependents, `failed` marks it
+  failed and skips the dependents blocked on it. It fails closed
+  (`NotifyError`) on a sender that matches no starting service, or a notice
+  for one that is not `starting`. The endpoint it arrives on is described
+  under *On-demand activation* below.
 - **Named readiness conditions.** A service may `require` and `provide`
   named conditions (`tairix_abi::ReadyCondition`: `network-up`,
   `filesystems-mounted`, `boot-complete`, `display-present`,
@@ -98,10 +104,13 @@ and releases a dependent only once every dependency it names is
   condition it requires is satisfied; a condition is satisfied when a
   providing service becomes ready or when the manager/kernel signals it
   through `Init::satisfy_condition`. Conditions decouple readiness from a
-  service name — a client requires `network-up` without naming
-  `netstack` — and generalise the headless case: a GUI-only service that
-  requires `display-present` simply never activates on a headless boot,
-  because nothing ever satisfies that condition (`AGENTS.md` §17.3).
+  service name — a client requires `network-up` without naming `netstack`.
+  A condition is only ever satisfied by a principal that genuinely knows it:
+  `display-present` has no truthful producer today (`seatmgr` and `devmgr`
+  both reach ready on a headless machine), so nothing declares it. The
+  headless guarantee for a GUI-only service does not rest on a condition
+  anyway — it is `on-demand`, so a machine where nothing graphical runs never
+  activates it (`AGENTS.md` §17.3).
 
 Bring-up runs this as an admission fixpoint: it repeatedly admits every
 service whose dependencies are ready and whose required conditions are
@@ -308,6 +317,55 @@ makes the derived park length safe rather than a zero-length spin.
 enablement mutates the registration store and status is served through the
 System Information API, never a control-reply scrape.
 
+## On-demand activation and its two endpoints (`NEW-SERVICEMANAGER.md` SVC-5)
+
+A shared service that only a graphical session ever needs — `fontd` today —
+is registered but not started. A client reaches it by asking the manager to
+connect it, over the reserved `SERVICE_ACTIVATION_ENDPOINT`
+(`ServiceActivationRequest`: `connect` or `disconnect`, plus the bounded
+service name). The manager checks the service's declared connect capability
+against the caller's **kernel-attested** authority before it touches any
+state, starts the service if it is down, and parks the caller until it is
+ready. A parked caller blocks in the kernel on its own `ipc_call`: the
+manager holds the call's *ticket* and replies to it when the engine reports
+the park resolved, so there is no poll and no retry anywhere on the path.
+
+Every park resolves exactly once, and both ways resolve through the same
+report (`Init::take_released_clients`). A service that reaches readiness
+connects its parked clients; a service whose process dies first, announces
+its own failure, or whose client withdraws, **abandons** them — and the
+transport refuses each abandoned caller rather than leaving it blocked on a
+service that is not coming.
+
+The endpoint carries **no** send capability, deliberately. Any principal may
+*ask* for a shared service; what decides the answer is the per-service
+connect capability the engine checks against the caller's attested authority.
+Restricting the endpoint instead would put every service behind one
+capability and make the per-service gate unreachable.
+
+Readiness is the service's own announcement, over the reserved
+`SERVICE_NOTICE_ENDPOINT`. The frame is a `ReadyNotice` and it **names no
+service**: the manager resolves one from the call's kernel-attested origin —
+the process id it recorded when it spawned the service, and the account the
+kernel switched that process onto — and only while that service is still
+`starting`. So a principal can only ever announce its own service's
+readiness, and a notice that matches no starting service is refused before
+any state moves. That endpoint carries no send capability either, for a
+stronger reason: reaching it buys a principal nothing it could not already
+say about itself.
+
+An on-demand service is necessarily `notify`-ready. What a connecting client
+waits for is the service's endpoint being answerable, and only the service
+knows when it has bound it; treating a successful spawn as readiness would
+hand the client an endpoint that does not exist yet — the very race
+on-demand activation exists to close.
+
+The compiled-in boot description spells this as its own directive:
+`ondemand <path> <account>` registers a service, gives it the shared
+idle-linger default, marks it `notify`-ready, and starts nothing. A discovered
+bundle carries its own activation mode, linger and readiness kind in its
+signed `AppInfo` instead (`ServiceSpec::from_manifest`).
+
 ## Liveness watchdog
 
 A crashed service is one that *exited*; a **wedged** one is still present but
@@ -386,7 +444,7 @@ plumbing and exhaustively testable.
 | 9007 | `GRAPH_REJECTED`       | Error | the service graph was structurally invalid    |
 | 9008 | `SERVICE_READY`        | Info  | a service reached readiness, releasing dependents |
 | 9009 | `CONDITION_SATISFIED`  | Info  | a named readiness condition became satisfied  |
-| 9010 | `NOTIFY_REJECTED`      | Warn  | a readiness notice named an unknown or non-starting service |
+| 9010 | `NOTIFY_REJECTED`      | Warn  | a readiness notice matched no starting service, or named a non-starting one |
 | 9011 | `SERVICE_NOT_ENROLLED` | Info  | a discovered bundle was skipped because it is not enrolled |
 
 (On-demand-activation and stop/linger events `9012`–`9017`, the restart and
@@ -443,7 +501,7 @@ binary (`src/startup.rs`) rather than in the library.
 What `init` should do at user-mode entry is **data, not control flow**: a
 small, fail-closed startup config (`src/startup.rs`). The config is
 line-oriented; `#` begins a comment, and blank or comment-only lines are
-ignored. Three directives are defined; each names the compiled-in system
+ignored. Five directives are defined; each names the compiled-in system
 account its program runs as, resolved to a uid at parse time:
 
 - `console` — open the system console so the banner (and later output)
@@ -460,6 +518,13 @@ account its program runs as, resolved to a uid at parse time:
   the launch order. This is the compiled-in **boot floor**
   (`AGENTS.md` §18.6); services past the floor are discovered and
   registered rather than named here (`plans/NEW-SERVICEMANAGER.md`).
+- `enrolled <path> <account>` — the same, for a service the **enrolment
+  record** governs, so an administrator's `disable` survives a reboot.
+  Optional and repeatable.
+- `ondemand <path> <account>` — a service that is registered but **not
+  started**: the manager activates it when a client asks to connect to it
+  and idle-stops it afterwards. Optional and repeatable. Such a service is
+  necessarily `notify`-ready (see *On-demand activation* above).
 
 Because the config is the first thing a freshly spawned program reads, the
 parser treats it as untrusted input (`AGENTS.md` §19.5): it is

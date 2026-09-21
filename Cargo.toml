@@ -418,6 +418,8 @@ members = [
     "tests/integration/stalltrace_qemu_aarch64",
     "tests/integration/framestats_program",
     "tests/integration/desktop_hover_qemu_aarch64",
+    "tests/integration/svgtext_program",
+    "tests/integration/svgtext_qemu_aarch64",
     "tests/integration/pipeline_qemu_aarch64",
     "tests/integration/drvhost_qemu",
     "tests/integration/ps2_input_qemu_x86_64",

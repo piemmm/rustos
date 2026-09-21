@@ -1,0 +1,51 @@
+[package]
+name = "tairix-test-svgtext"
+description = "plans/SVG.md S23/S24 fixture: the `svgtext` command app the aarch64 SVG-text QEMU vertical plants on its disk and runs from the scripted root shell. It opens two drawings that differ only in the one character they letter through the parser sandbox against a live `fontd`, measures the ink each render left, and repeats one of them with no font seam to prove the glyphs had to come from the service. Never planted on a production image."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime is an optional,
+# on-by-default build feature, mirroring the other fixture bundles.
+# `tools/xtask` depends on the *library* half alone for the command word and
+# the record vocabulary, so the script build never pulls the userland
+# runtime's `_start` / `#[global_allocator]` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "dep:tairix-sandbox", "dep:tairix-font", "dep:tairix-raster"]
+
+# The package is both the `tairix-test-svgtext` vocabulary library (the
+# command word, the two drawings, and the report record both the fixture and
+# the vertical's guest gate read) and the `Run` entry-point binary of the
+# `svgtext` fixture bundle.
+[[bin]]
+name = "tairix-test-svgtext-run"
+path = "src/run.rs"
+
+[dependencies]
+# The structured-record vocabulary the measurement is reported through; the
+# guest gate decodes the same record.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The decoder's own font seam, for the `NoFonts` provider the fail-closed
+# control renders through.
+tairix-svg = { path = "../../../lib/svg", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime, the parser
+# sandbox with its production pipe transport, the `fontd`-backed SVG font
+# seam, and the destination rectangle a render is asked for.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", optional = true, features = [
+    "program",
+] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", optional = true, features = [
+    "rt",
+    "svg",
+] }
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0", optional = true }

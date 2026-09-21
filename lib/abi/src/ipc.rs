@@ -85,6 +85,8 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::font_ipc::FONT_ENDPOINT
         || id == crate::service_control::SERVICE_CONTROL_ENDPOINT
         || id == crate::service_control::SERVICE_ENROL_ENDPOINT
+        || id == crate::service_control::SERVICE_ACTIVATION_ENDPOINT
+        || id == crate::service_control::SERVICE_NOTICE_ENDPOINT
         || id == crate::session_ipc::SESSION_ENDPOINT
         || id == crate::raid_ipc::RAID_REGISTRY_ENDPOINT
         || id == crate::raid_admin::RAID_CONTROL_ENDPOINT
@@ -507,6 +509,9 @@ mod tests {
         assert!(is_reserved_endpoint(crate::net::NETSTACK_SOCKET_ENDPOINT));
         assert!(is_reserved_endpoint(crate::font_ipc::FONT_ENDPOINT));
         assert!(is_reserved_endpoint(crate::session_ipc::SESSION_ENDPOINT));
+        assert!(is_reserved_endpoint(
+            crate::service_control::SERVICE_NOTICE_ENDPOINT
+        ));
         let base = crate::elevate::ELEVATE_ENDPOINT_BASE;
         let max = u64::from(crate::process::CONSOLE_INDEX_MAX);
         assert!(is_reserved_endpoint(base));

@@ -585,20 +585,34 @@ hostile document cannot turn one decode into thousands of round trips. The
 outline points a glyph contributes are charged against the same total-vertex
 budget a `<path>` spends. All fixed containment bounds.
 
-### Outstanding verification
+### What the running machine attests
 
-Every layer of the text path is covered by host tests — the wire form and
-its refusals, the service's resolution and synthesis, the layout against the
-SVG 1.1 positioning rules, the two-round sandbox exchange, and the decoder's
-own `<text>` drawing — and the `fuzz_svg` harness drives text through a
-provider that answers. What is **not** yet covered is one end-to-end QEMU
-vertical: `view.app` opening a drawing that carries text, so the sandboxed
-two-phase exchange runs against a live `fontd` rather than against a host
-double on either side. The build-time icon verification already drives the
-real service (through `tools/xtask`'s `host_fonts`), so the service and the
-decoder do meet in a test; what the vertical would add is the *sandbox pipe*
-between them under a real kernel. It is the one item of S23/S24 left to
-land.
+Host tests cover every layer — the wire form and its refusals, the service's
+resolution and synthesis, the layout against the SVG 1.1 positioning rules,
+the two-round exchange, and the decoder's own `<text>` drawing — and the
+build-time icon verification drives the real service. The **pipe between
+them** is what only a running machine can show, so one QEMU vertical
+(`tests/integration/svgtext_qemu_aarch64`) does: a command app opens
+drawings through the viewer's own `open_view`/`render_page` sequence inside
+the parser sandbox, against a `fontd` its own first glyph request activated.
+
+Its measurement is what keeps it honest. Two drawings that differ in exactly
+one character must ink *differently*, and in the direction their characters
+do — nothing but real, character-dependent outlines does that, where a
+witness marker alone would pass on a decode that drew nothing. The wide
+drawing is then opened a third time through a sandbox given no font seam and
+must be **refused**, which leaves the service as the only place the outlines
+could have come from. Each expectation fails with its own name, so a broken
+run says which one it missed.
+
+Nothing in the script waits for the font service, deliberately. `fontd` is
+registered on-demand, so the fixture's first glyph request is what activates
+it, and the service manager holds that call until the endpoint is answerable
+(`plans/NEW-SERVICEMANAGER.md` SVC-5). A script that gated on a readiness
+line instead would be proving its own ordering rather than the system's, so
+the enrolment pins that it does not. The vertical still boots with a
+framebuffer because the fixture renders a picture, not because the service
+needs one; its script never leaves the shell.
 
 ### What is left
 

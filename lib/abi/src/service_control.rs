@@ -1,26 +1,33 @@
 //! The service-manager control IPC protocol (`plans/NEW-SERVICEMANAGER.md`
 //! SVC-8).
 //!
-//! The service manager (PID 1, and a per-user manager instance) owns two
-//! reserved synchronous call endpoints, through which a control tool
-//! (`servicectl`, the `systemctl` analogue) reaches it:
+//! The service manager (PID 1, and a per-user manager instance) owns four
+//! reserved synchronous call endpoints:
 //!
 //! * [`SERVICE_CONTROL_ENDPOINT`] drives a registered service's **runtime**
 //!   lifecycle — `start` a down service now, or `stop` a running one;
 //! * [`SERVICE_ENROL_ENDPOINT`] changes its **persistent** enrolment —
 //!   `enable` or `disable`, which the manager records in the registration
-//!   store and obeys on the next boot.
+//!   store and obeys on the next boot;
+//! * [`SERVICE_ACTIVATION_ENDPOINT`] brokers a **client's** connection to a
+//!   shared service, activating it on demand and parking the client until it
+//!   is ready;
+//! * [`SERVICE_NOTICE_ENDPOINT`] carries a service's own readiness
+//!   announcement ([`crate::ReadyNotice`]), attributed to the kernel-attested
+//!   sender.
 //!
-//! They are two endpoints rather than two operations on one, because the acts
-//! differ in durability and the answers differ in kind: control answers with a
-//! [`ServiceState`], enrolment with a [`ServiceEnrolment`] and whether the
-//! request changed anything. Both are gated by the same capability today; the
-//! separation is what lets that diverge without reshaping either protocol, and
-//! both become scope-derived together when a per-user manager is spawned.
-//! Observability (`status`) is on neither: it is served through the System
-//! Information API, never a control-reply scrape.
+//! They are four endpoints rather than operations on one because the acts
+//! differ in authority and the answers differ in kind: an administrator
+//! reaches the first two, any client the third, and a service speaks only for
+//! itself on the fourth. Keeping them apart is what lets their gates diverge
+//! without reshaping any of the protocols, and what makes them scope-derived
+//! together when a per-user manager is spawned. Observability (`status`) is on
+//! none of them: it is served through the System Information API, never a
+//! control-reply scrape.
 //!
-//! This module is the wire contract for both, modelled on the
+//! This module is the wire contract for the three name-carrying requests
+//! (the notice's own frame is [`crate::ReadyNotice`], which carries no name),
+//! modelled on the
 //! read-only mailbox and font protocols ([`crate::mailbox_ipc`],
 //! [`crate::font_ipc`]): a fixed-size, bounds-checked request framing and a
 //! status-framed reply, both little-endian, `no_std` and allocation-free (the
@@ -89,6 +96,39 @@ pub const SERVICE_ENROL_ENDPOINT: u64 = 0x5356_4500;
 /// Distinct from [`SERVICE_CONTROL_MAGIC`], so a frame built for one endpoint
 /// is refused by the other's decoder before its operation is even classified.
 pub const SERVICE_ENROL_MAGIC: u32 = u32::from_le_bytes(*b"SVCE");
+
+/// Well-known kernel-owned call-endpoint id of the service manager's
+/// **activation** surface (`"SVA\0"` little-endian).
+///
+/// The third sibling of [`SERVICE_CONTROL_ENDPOINT`] /
+/// [`SERVICE_ENROL_ENDPOINT`], and a separate id for the same reason they
+/// are separate from each other: brokering a *client's* connection to a
+/// shared service is a different act from an administrator starting one, so
+/// their gates are different and stay free to diverge. A client reaches this
+/// endpoint; only an administrator reaches the other two.
+pub const SERVICE_ACTIVATION_ENDPOINT: u64 = 0x5356_4100;
+
+/// Magic number identifying an `abi-v1` service-activation request
+/// (`"SVCA"` little-endian).
+pub const SERVICE_ACTIVATION_MAGIC: u32 = u32::from_le_bytes(*b"SVCA");
+
+/// Well-known kernel-owned call-endpoint id of the service manager's
+/// **lifecycle-notice** surface (`"SVN\0"` little-endian).
+///
+/// The fourth sibling of the three endpoints above, separate for the same
+/// reason they are separate from each other: a service announcing its *own*
+/// readiness is a different act from an administrator driving a service or a
+/// client brokering a connection, and it is gated differently. The other
+/// three answer a request about *some* service the caller names; this one
+/// only ever resolves to the caller's own, because the manager attributes the
+/// notice to the kernel-attested sender and the frame
+/// ([`crate::ReadyNotice`]) carries no service name at all.
+///
+/// The endpoint therefore needs no send capability: reaching it lets a
+/// principal say one thing about itself, and a principal the manager cannot
+/// match to a service it is currently starting is refused with
+/// [`Errno::NotFound`] before any state is touched.
+pub const SERVICE_NOTICE_ENDPOINT: u64 = 0x5356_4E00;
 
 /// Version of the service-control protocol carried in every request.
 pub const SERVICE_CONTROL_VERSION_V1: u16 = 1;
@@ -266,6 +306,81 @@ impl<'a> ServiceControlRequest<'a> {
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
         let (op, name) = decode_frame(bytes, SERVICE_CONTROL_MAGIC)?;
         let op = ServiceControlOp::from_u16(op).ok_or(Errno::OutOfRange)?;
+        Ok(Self { op, name })
+    }
+}
+
+/// The activation operation a request names.
+///
+/// A closed set of the two halves of one client's interest in a shared
+/// service: `connect` declares it (activating the service if it is down and
+/// parking the caller until it is ready), `disconnect` withdraws it. An
+/// unknown discriminant fails the decode closed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum ServiceActivationOp {
+    /// Take an interest in the named service, waiting for it to be ready.
+    Connect = 1,
+    /// Release a previously declared interest.
+    Disconnect = 2,
+}
+
+impl ServiceActivationOp {
+    /// The wire discriminant.
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        self as u16
+    }
+
+    /// The operation a wire discriminant names, or `None` for an unknown one.
+    #[must_use]
+    pub const fn from_u16(raw: u16) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Connect),
+            2 => Some(Self::Disconnect),
+            _ => None,
+        }
+    }
+}
+
+/// A decoded service-activation request: an operation and the name of the
+/// service it targets, borrowed from the request buffer.
+///
+/// The request carries **no** client identity. The manager binds the call to
+/// the kernel-attested origin of the caller, so a client can neither claim
+/// another principal's connection nor forge the authority its connect is
+/// checked against.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ServiceActivationRequest<'a> {
+    /// The activation operation to perform.
+    pub op: ServiceActivationOp,
+    /// The target service name (bounded, validated as UTF-8; the manager
+    /// re-validates it against its strict service-name policy).
+    pub name: &'a str,
+}
+
+impl<'a> ServiceActivationRequest<'a> {
+    /// Encode this request into `buf`, returning the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `buf` cannot hold [`REQUEST_LEN`] bytes.
+    /// * [`Errno::LengthOutOfRange`] if the name exceeds
+    ///   [`SERVICE_MANIFEST_MAX_NAME_LEN`] bytes.
+    pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        encode_frame(buf, SERVICE_ACTIVATION_MAGIC, self.op.as_u16(), self.name)
+    }
+
+    /// Decode a service-activation request from `bytes`, validating the whole
+    /// frame up front exactly as [`ServiceControlRequest::decode`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`ServiceControlRequest::decode`], with [`Errno::BadMagic`] for a
+    /// frame built for a sibling endpoint.
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
+        let (op, name) = decode_frame(bytes, SERVICE_ACTIVATION_MAGIC)?;
+        let op = ServiceActivationOp::from_u16(op).ok_or(Errno::OutOfRange)?;
         Ok(Self { op, name })
     }
 }
@@ -762,5 +877,143 @@ mod tests {
         let mut buf = [0u8; REPLY_LEN];
         buf[..REPLY_STATUS_LEN].copy_from_slice(&i32::MIN.to_le_bytes());
         assert_eq!(decode_reply(&buf), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn an_activation_request_round_trips() {
+        for op in [
+            ServiceActivationOp::Connect,
+            ServiceActivationOp::Disconnect,
+        ] {
+            let mut buf = [0u8; REQUEST_LEN];
+            let written = ServiceActivationRequest { op, name: "fontd" }
+                .encode(&mut buf)
+                .expect("encodes");
+            assert_eq!(written, REQUEST_LEN);
+            assert_eq!(
+                ServiceActivationRequest::decode(&buf),
+                Ok(ServiceActivationRequest { op, name: "fontd" })
+            );
+        }
+    }
+
+    #[test]
+    fn activation_discriminants_are_pinned_and_closed() {
+        assert_eq!(ServiceActivationOp::Connect.as_u16(), 1);
+        assert_eq!(ServiceActivationOp::Disconnect.as_u16(), 2);
+        assert_eq!(
+            ServiceActivationOp::from_u16(1),
+            Some(ServiceActivationOp::Connect)
+        );
+        assert_eq!(
+            ServiceActivationOp::from_u16(2),
+            Some(ServiceActivationOp::Disconnect)
+        );
+        assert_eq!(ServiceActivationOp::from_u16(0), None);
+        assert_eq!(ServiceActivationOp::from_u16(3), None);
+    }
+
+    /// Each endpoint's decoder refuses the other two's frames on the magic,
+    /// before any operation is classified — so a client frame can never be
+    /// mistaken for an administrator's, whichever endpoint it reaches.
+    #[test]
+    fn a_frame_built_for_one_endpoint_is_refused_by_the_others() {
+        let mut control = [0u8; REQUEST_LEN];
+        ServiceControlRequest {
+            op: ServiceControlOp::Start,
+            name: "fontd",
+        }
+        .encode(&mut control)
+        .expect("encodes");
+        let mut enrol = [0u8; REQUEST_LEN];
+        ServiceEnrolRequest {
+            op: ServiceEnrolOp::Enable,
+            name: "fontd",
+        }
+        .encode(&mut enrol)
+        .expect("encodes");
+        let mut activation = [0u8; REQUEST_LEN];
+        ServiceActivationRequest {
+            op: ServiceActivationOp::Connect,
+            name: "fontd",
+        }
+        .encode(&mut activation)
+        .expect("encodes");
+
+        assert_eq!(
+            ServiceActivationRequest::decode(&control),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            ServiceActivationRequest::decode(&enrol),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            ServiceControlRequest::decode(&activation),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            ServiceEnrolRequest::decode(&activation),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    /// The activation endpoint is reserved, so the kernel gates who may bind
+    /// it — a squatter cannot stand between a client and the manager.
+    #[test]
+    fn the_activation_endpoint_is_reserved_and_distinct() {
+        assert!(crate::ipc::is_reserved_endpoint(
+            SERVICE_ACTIVATION_ENDPOINT
+        ));
+        assert_ne!(SERVICE_ACTIVATION_ENDPOINT, SERVICE_CONTROL_ENDPOINT);
+        assert_ne!(SERVICE_ACTIVATION_ENDPOINT, SERVICE_ENROL_ENDPOINT);
+        assert_ne!(SERVICE_ACTIVATION_MAGIC, SERVICE_CONTROL_MAGIC);
+        assert_ne!(SERVICE_ACTIVATION_MAGIC, SERVICE_ENROL_MAGIC);
+    }
+
+    /// The notice endpoint is reserved and distinct from its three siblings,
+    /// and a notice frame is refused by every name-carrying decoder: the
+    /// notice grammar names no service, so it must never be readable as a
+    /// request that does.
+    #[test]
+    fn the_notice_endpoint_is_reserved_and_its_frame_is_not_a_request() {
+        assert!(crate::ipc::is_reserved_endpoint(SERVICE_NOTICE_ENDPOINT));
+        for sibling in [
+            SERVICE_CONTROL_ENDPOINT,
+            SERVICE_ENROL_ENDPOINT,
+            SERVICE_ACTIVATION_ENDPOINT,
+        ] {
+            assert_ne!(SERVICE_NOTICE_ENDPOINT, sibling);
+        }
+        // A notice is shorter than the shared request frame, so a decoder
+        // reading one refuses it on length before it reaches a magic.
+        let notice = crate::ReadyNotice::new(crate::LifecycleSignal::Ready).to_le_bytes();
+        assert!(notice.len() < REQUEST_LEN);
+        assert_eq!(
+            ServiceControlRequest::decode(&notice),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            ServiceEnrolRequest::decode(&notice),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            ServiceActivationRequest::decode(&notice),
+            Err(Errno::LengthOutOfRange)
+        );
+        // And the reverse: a request frame is not a notice. It is long
+        // enough to reach the notice decoder's magic check, which refuses
+        // it, so an operation can never arrive as an announcement.
+        let mut request = [0u8; REQUEST_LEN];
+        ServiceControlRequest {
+            op: ServiceControlOp::Stop,
+            name: "fontd",
+        }
+        .encode(&mut request)
+        .expect("encodes");
+        assert_eq!(
+            crate::ReadyNotice::from_bytes(&request),
+            Err(Errno::BadMagic)
+        );
     }
 }

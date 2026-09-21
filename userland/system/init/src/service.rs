@@ -22,8 +22,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_abi::{
-    ActivationMode, CapabilityId, Duration64, Errno, ReadinessKind, ReadyCondition, RestartPolicy,
-    ServiceLimit, ServiceManifest,
+    ActivationMode, CapabilityId, Duration64, Errno, ProcId, ReadinessKind, ReadyCondition,
+    RestartPolicy, ServiceLimit, ServiceManifest,
 };
 
 use crate::registry::{validate_service_name, EnrolError};
@@ -389,27 +389,49 @@ pub trait Spawner {
 /// Identifier of a client connected (or waiting to connect) to a service's
 /// reserved endpoint through on-demand activation.
 ///
-/// Like [`Pid`] it is a newtype rather than a bare `u64` so a connection id
-/// cannot be confused with any other identifier. It is issued and attested
-/// by the kernel/IPC layer for the connecting principal, never chosen by the
-/// client, so a client can only ever refer to its *own* connection when it
-/// asks the manager to connect or disconnect.
+/// It is the connecting principal's kernel-attested [`ProcId`], read from the
+/// call's origin and never chosen by the client, so a client can only refer
+/// to its *own* connection. A process id would not do: pids are reused, so a
+/// departed client's connection could be released or double-counted by an
+/// unrelated later process holding the same number.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct ClientId(u64);
+pub struct ClientId(ProcId);
 
 impl ClientId {
-    /// Construct a [`ClientId`] from its raw kernel-attested value.
+    /// Construct a [`ClientId`] from the kernel-attested principal.
     #[must_use]
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
+    pub const fn new(principal: ProcId) -> Self {
+        Self(principal)
     }
 
-    /// Raw kernel-attested value.
+    /// The attested principal this connection belongs to.
     #[must_use]
-    pub const fn as_u64(self) -> u64 {
+    pub const fn principal(self) -> ProcId {
         self.0
     }
+}
+
+/// The kernel-attested facts about a principal that sent a lifecycle notice,
+/// as the transport read them from the call's origin.
+///
+/// A notice carries no identity of its own, so this is the whole of what the
+/// manager may attribute one to. Both fields are the kernel's answer, never
+/// anything the sender put on the wire: the numeric process id the manager
+/// itself recorded when it spawned the service, and the account the kernel
+/// switched that process onto at creation.
+///
+/// Matching both is what keeps one service from announcing another's
+/// readiness. The account is the load-bearing half — only the manager holds
+/// the authority to start a process on a service account, so the set of
+/// principals bearing one is exactly the set of instances it spawned — and
+/// the process id then picks the instance out of that set.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ServiceSender {
+    /// The sender's attested process id.
+    pub pid: Pid,
+    /// The sender's attested owning account.
+    pub account: u32,
 }
 
 /// Stops a running service that the manager supervises.

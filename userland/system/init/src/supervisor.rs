@@ -116,6 +116,25 @@ pub trait Services {
     /// The loop again neither reads nor interprets the wire.
     fn serve_enrol(&mut self);
 
+    /// Answer one pending request on the service-activation endpoint.
+    ///
+    /// The client-facing sibling of [`serve_control`](Self::serve_control): a
+    /// client declares or withdraws interest in a shared service, and the
+    /// engine activates it and parks the caller when it is not ready yet. A
+    /// parked caller is answered later, so this may return having replied to
+    /// nothing, to this request, or to an earlier one — the loop neither
+    /// reads nor interprets the wire.
+    fn serve_activation(&mut self);
+
+    /// Apply one pending notice on the service-lifecycle-notice endpoint.
+    ///
+    /// The service-facing sibling of [`serve_control`](Self::serve_control):
+    /// a service announces its own readiness (or its own failure), which can
+    /// release both its dependents and any client parked on it. The engine
+    /// attributes the notice to the call's kernel-attested sender, so the
+    /// loop again neither reads nor interprets the wire.
+    fn serve_notice(&mut self);
+
     /// Run every one-shot deadline that has lapsed.
     ///
     /// Called when the wait lapses at the deadline
@@ -142,13 +161,13 @@ pub trait Sessions {
     /// Wait for whichever supervised event happens next, parking for at most
     /// `timeout_ns` (`WAITSET_TIMEOUT_NONE` to park indefinitely).
     ///
-    /// PID 1 has three things to wake for — a child exiting, a request on the
-    /// service-control endpoint, and a lapsed one-shot deadline — and it must
-    /// wake for whichever comes first. A blocking wait on children alone
-    /// would leave a control request unanswered until some unrelated process
-    /// happened to exit, and a deadline unserved indefinitely; polling
-    /// between them would peg a core. So the seam is one multiplexed park and
-    /// the backing is a wait-set.
+    /// PID 1 has three kinds of thing to wake for — a child exiting, a
+    /// request on one of the manager's endpoints, and a lapsed one-shot
+    /// deadline — and it must wake for whichever comes first. A blocking wait
+    /// on children alone would leave a request unanswered until some
+    /// unrelated process happened to exit, and a deadline unserved
+    /// indefinitely; polling between them would peg a core. So the seam is
+    /// one multiplexed park and the backing is a wait-set.
     ///
     /// For [`Woke::Child`] the child has been reaped and its exit code
     /// written to `status`.
@@ -164,8 +183,9 @@ pub trait Sessions {
 
 /// What one [`Sessions::wait_next`] park observed.
 ///
-/// A closed set: PID 1 wakes for a child exit, a service-control request, or
-/// a lapsed deadline, and reports a failed wait rather than guessing.
+/// A closed set: PID 1 wakes for a child exit, a request on one of the
+/// manager's endpoints, or a lapsed deadline, and reports a failed wait
+/// rather than guessing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Woke {
     /// A child exited and has been reaped; its PID, with the exit code in the
@@ -175,6 +195,11 @@ pub enum Woke {
     Control,
     /// The service-enrolment endpoint has a request waiting to be answered.
     Enrol,
+    /// The service-activation endpoint has a request waiting to be answered.
+    Activation,
+    /// The service-lifecycle-notice endpoint has a notice waiting to be
+    /// applied.
+    Notice,
     /// The park lapsed at the deadline the caller passed.
     Deadline,
     /// The park itself failed (`-errno`) — a kernel-state inconsistency PID 1
@@ -343,6 +368,14 @@ pub fn supervise<E: Services, S: Sessions>(
                 services.serve_enrol();
                 continue;
             }
+            Woke::Activation => {
+                services.serve_activation();
+                continue;
+            }
+            Woke::Notice => {
+                services.serve_notice();
+                continue;
+            }
             Woke::Deadline => {
                 services.expire_deadlines();
                 continue;
@@ -414,6 +447,9 @@ mod tests {
         exits: Vec<(u64, i32)>,
         /// Control requests the loop asked the engine to answer.
         served: usize,
+        activated: usize,
+        /// Readiness notices the loop asked the engine to apply.
+        noticed: usize,
         /// Enrolment requests the loop asked the engine to answer.
         enrolled: usize,
         /// Deadline wakeups the loop asked the engine to expire.
@@ -430,6 +466,8 @@ mod tests {
                 running: false,
                 exits: Vec::new(),
                 served: 0,
+                activated: 0,
+                noticed: 0,
                 enrolled: 0,
                 expired: 0,
                 timeouts: Vec::new(),
@@ -465,6 +503,12 @@ mod tests {
         }
         fn serve_enrol(&mut self) {
             self.enrolled += 1;
+        }
+        fn serve_activation(&mut self) {
+            self.activated += 1;
+        }
+        fn serve_notice(&mut self) {
+            self.noticed += 1;
         }
         fn expire_deadlines(&mut self) {
             self.expired += 1;
@@ -808,9 +852,10 @@ mod tests {
 
     #[test]
     fn control_and_deadline_wakeups_never_end_the_loop() {
-        // A perpetual service with a stream of control, enrolment and deadline
-        // wakeups: the loop keeps parking, so no event can be mistaken for the
-        // exhaustion or failure that ends PID 1.
+        // A perpetual service with a stream of control, enrolment,
+        // activation, notice and deadline wakeups: the loop keeps parking, so
+        // no event can be mistaken for the exhaustion or failure that ends
+        // PID 1, and each is routed to its own server rather than another's.
         let mut services = MockServices::perpetual();
         let mut sys = ScriptedSessions::new(
             1,
@@ -821,9 +866,13 @@ mod tests {
                 Woke::Deadline,
                 Woke::Control,
                 Woke::Enrol,
+                Woke::Activation,
+                Woke::Notice,
                 Woke::Deadline,
                 Woke::Control,
                 Woke::Enrol,
+                Woke::Activation,
+                Woke::Notice,
                 child(10),
                 Woke::Failed,
             ],
@@ -833,8 +882,14 @@ mod tests {
             Outcome::WaitFailed
         );
         assert_eq!(
-            (services.served, services.enrolled, services.expired),
-            (2, 2, 2)
+            (
+                services.served,
+                services.enrolled,
+                services.activated,
+                services.noticed,
+                services.expired
+            ),
+            (2, 2, 2, 2, 2)
         );
         // The child exit was the session's, so it was relaunched rather than
         // routed to the engine.

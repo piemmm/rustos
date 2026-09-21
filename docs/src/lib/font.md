@@ -157,7 +157,19 @@ With the `render` feature, `BitmapFont` is a thin, cached client of `fontd`
 (see [the font service](../userland/fontd.md)). It parses no TrueType and holds
 no face: `BitmapFont::draw_text` fetches each glyph's 8-bit coverage from the
 service over `tairix_abi::font_ipc::FONT_ENDPOINT` and blits it through the one
-shared `lib/raster` premultiplied-alpha path. Steady-state redraws issue no IPC
+shared `lib/raster` premultiplied-alpha path.
+
+Under the `rt` feature the client asks the service manager to connect it to
+`fontd` once, before its first request, and the manager holds that call until
+the service has bound its endpoint. `fontd` is activated on demand, so on a
+machine where nothing has drawn text yet the connect is what starts it; the
+handshake lives here so every graphical consumer inherits the ordering rather
+than each racing the bind and painting textless frames. The connection is held
+for the life of the process — while it lives it may ask for a glyph at any
+moment, which is exactly what the manager's idle-stop refcount is asking — and
+a refusal is not fatal: the call is an ordering handshake, not an
+authorisation, so a machine whose manager does not broker the service simply
+degrades as before. Steady-state redraws issue no IPC
 — each `(family, scalar, pixel height, weight)` reply is memoised client-side
 in a `tairix_reclaim::ReclaimCache`.
 

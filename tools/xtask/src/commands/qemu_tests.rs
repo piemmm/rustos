@@ -382,6 +382,18 @@ enum FsDisk {
     /// desktop vertical's library rows out from under the coordinates their
     /// scripts click.
     HoverRootDisk,
+    /// The [`Self::AutoloadRootDisk`] layout — the same graphical world, with
+    /// the signed input and display driver bundles and the text-login
+    /// document — whose store additionally carries the test-only `svgtext`
+    /// fixture bundle ([`super::image_apps::svgtext_store_files`]): the
+    /// SVG-text vertical's backing (`plans/SVG.md` S23/S24).
+    ///
+    /// It needs the *graphical* world although its script never leaves the
+    /// shell: the font service is a graphics-only resource, so login brings
+    /// it up only on a machine that could run a desktop. Its own disk rather
+    /// than a bundle added to the shared autoload image, because a fixture
+    /// bundle belongs on the one vertical that runs it.
+    SvgTextRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
     /// volume** additionally carries the signed virtio-net driver bundle
     /// (only — no display/input driver, so the console stays the UART text
@@ -749,6 +761,23 @@ const AUTOLOAD_LOGIN_MARKER: &str = "users database loaded";
 /// time out loudly at the [`AUTOLOAD_DESKTOP_REVEALED_MARKER`] gate, never
 /// pass on the wrong exchange.
 const AUTOLOAD_LOGIN_DIALOGUE: &str = "root\nroot\ndesktop\n";
+
+/// The login + command dialogue the SVG-text vertical types at the seat
+/// keyboard: the fixture account's credentials, then the fixture's own
+/// command word at the text shell's prompt. Pinned against the fixture
+/// credentials and the fixture's own `COMMAND` by a unit test below, so the
+/// bundle it installs under and the word the script types cannot drift.
+const SVGTEXT_LOGIN_DIALOGUE: &str = "root\nroot\nsvgtext\n";
+
+/// Serial marker after which the SVG-text vertical types the shell `exit`
+/// that completes its PASS chain: the fixture's measured record, read from
+/// the fixture's own definition so the script and the program cannot drift.
+///
+/// The fixture's stdout goes to the video console this disk gives it, not to
+/// serial, so its *record* — which the kernel decodes off `log_emit` and the
+/// guest replays — is what the transcript carries and the only honest thing
+/// to wait on.
+const SVGTEXT_MEASURED_MARKER: &str = tairix_test_svgtext::REPORT_MESSAGE;
 
 /// Serial marker after which the desktop verticals take their screendump
 /// **and** inject the mouse motion: the session's one-shot
@@ -1120,6 +1149,36 @@ const _: () = {
             tairix_test_encrypted_root_image::PASSWORD.as_bytes()
         ),
         "SESSION_PASSWORD_LINE drifted from the fixture account"
+    );
+    // The SVG-text dialogue is the same credentials, then the fixture's own
+    // command word — so a renamed bundle fails to build here rather than
+    // leaving the vertical typing a word no store answers.
+    assert!(
+        starts_with_bytes(
+            SVGTEXT_LOGIN_DIALOGUE.as_bytes(),
+            SESSION_USERNAME_LINE.as_bytes()
+        ),
+        "SVGTEXT_LOGIN_DIALOGUE must start with the fixture username line"
+    );
+    assert!(
+        starts_with_bytes(
+            SVGTEXT_LOGIN_DIALOGUE
+                .as_bytes()
+                .split_at(SESSION_USERNAME_LINE.len())
+                .1,
+            SESSION_PASSWORD_LINE.as_bytes()
+        ),
+        "SVGTEXT_LOGIN_DIALOGUE must continue with the fixture password line"
+    );
+    assert!(
+        is_line_of(
+            SVGTEXT_LOGIN_DIALOGUE
+                .as_bytes()
+                .split_at(SESSION_USERNAME_LINE.len() + SESSION_PASSWORD_LINE.len())
+                .1,
+            tairix_test_svgtext::COMMAND.as_bytes()
+        ),
+        "SVGTEXT_LOGIN_DIALOGUE must end with the fixture's own command word"
     );
 };
 
@@ -8053,6 +8112,92 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
+    // `plans/SVG.md` S23/S24: the SVG-text vertical — the only test in which a
+    // sandboxed decode's glyphs travel from a live font service, over the
+    // parser-sandbox pipe, into a picture, on a running machine.
+    //
+    // Every layer of the text path is host-tested (the wire form and its
+    // refusals, the service's resolution and synthesis, the layout, the
+    // two-round exchange, and the decoder's own `<text>` drawing), and the
+    // build-time icon verification already drives the real `FontService`. What
+    // none of that reaches is the **pipe between them**: a worker holding no
+    // capability recording what it could not answer, a parent fetching exactly
+    // that from `fontd` over `FONT_ENDPOINT`, and a second decode drawing the
+    // outlines that came back — under a real kernel, with real processes and
+    // the production spawn/pipe/wait.
+    //
+    // It boots the graphical world (`FsDisk::SvgTextRootDisk` — the autoload
+    // layout plus the test-only `svgtext` fixture bundle) and types the unlock
+    // passphrase. The disk plants `os.loginType text`, so the script logs in
+    // at the shell and types the fixture's command word — no desktop, no
+    // pointer, nothing to drive but a command.
+    //
+    // Nothing starts `fontd` for the fixture and nothing in the script waits
+    // for it: it is registered on-demand, so the fixture's first glyph
+    // request is what activates it, and the service manager holds that call
+    // until the endpoint is answerable. A vertical that had to wait for a
+    // readiness line before typing would be testing the script's ordering
+    // rather than the system's.
+    //
+    // The fixture opens two drawings that differ in exactly one character
+    // through its own sandbox, and the wide one a third time through a sandbox
+    // given no font seam. The guest judges the measured record it emits: both
+    // renders inked, neither a solid fill, the wide one inked *more* than the
+    // narrow one, and the seamless render refused. Nothing but real,
+    // character-dependent outlines fetched from the service satisfies all of
+    // that — a decode that drew nothing, a placeholder, or a fixed box fails a
+    // named expectation rather than passing by measuring nothing. The PASS
+    // then fires on the shell's scripted `exit`, typed only after the record
+    // appeared, so the measurement provably reached the transcript before the
+    // run ended.
+    //
+    // No screendump: the claim is what the sandbox drew, which the guest
+    // measures pixel by pixel in the buffer itself — a screendump of a shell
+    // would show none of it.
+    //
+    // Single CPU and the same 300-second *inactivity* budget as its siblings:
+    // the longest the guest may fall silent, never a runtime deadline, so
+    // co-scheduling cannot turn a slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-svgtext-qemu-aarch64",
+        binary: "tairix-test-svgtext-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        crypto: false,
+        fs_disk: FsDisk::SvgTextRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            // The encrypted-root passphrase, held until the keyboard driver
+            // has armed its interrupt so no keystroke hits a dead device.
+            // This vertical scripts no pointer, so the board carries no
+            // mouse and the marker rises once.
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                KEYBOARD_ONLY_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            // The fixture account's login, then the fixture's command word.
+            // Nothing here waits on the font service: the fixture's first
+            // glyph request connects through the service manager, which
+            // activates `fontd` and holds the call until its endpoint is
+            // answerable, so the ordering is the system's rather than the
+            // script's.
+            (AUTOLOAD_LOGIN_MARKER, 1, SVGTEXT_LOGIN_DIALOGUE),
+            // The shell exit that completes the PASS chain, held until the
+            // measured record is on the transcript.
+            (SVGTEXT_MEASURED_MARKER, 1, "exit\n"),
+        ],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     // `plans/NEW-DESKTOP-LOGIN.md` G7.1: a display-capable machine that
     // nobody has configured boots to the **graphical** login screen on its
     // own. The sibling verticals above all plant `os.loginType text` because
@@ -9043,7 +9188,7 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
             // The pull-request matrix runs each enrolment exactly once, so
             // every run is replica zero and keeps the plain sidecar names.
             Ok(Job::closure(label, weight, move || {
-                run_one(&target_dir, t, 0, stores)
+                run_one(&target_dir, t, 0, &stores)
             }))
         })
         .collect::<Result<Vec<Job>, String>>()?;
@@ -9083,7 +9228,7 @@ impl Enrolment {
         &self,
         target_dir: &Path,
         replica: usize,
-        stores: StoreSet,
+        stores: &StoreSet,
     ) -> Result<(), String> {
         run_one(target_dir, self.test, replica, stores)
     }
@@ -9197,10 +9342,12 @@ fn root_volume_components(t: &QemuTest, path: &str) -> Result<Vec<String>, Strin
 /// parses.
 fn login_type_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
     let settings = match t.fs_disk {
-        FsDisk::AutoloadRootDisk | FsDisk::HoverRootDisk => tairix_sysconfig::SystemConfig {
-            login_type: tairix_sysconfig::LoginType::Text,
-            ..tairix_sysconfig::SystemConfig::default()
-        },
+        FsDisk::AutoloadRootDisk | FsDisk::HoverRootDisk | FsDisk::SvgTextRootDisk => {
+            tairix_sysconfig::SystemConfig {
+                login_type: tairix_sysconfig::LoginType::Text,
+                ..tairix_sysconfig::SystemConfig::default()
+            }
+        }
         // The time vertical's server list lives on this same layer: `timed`
         // reads the store through the ordinary VFS, where `/System/Settings`
         // is the writable sub-mount the encrypted root backs, so a document
@@ -9261,6 +9408,9 @@ pub(crate) struct StoreSet {
     /// shared set plus the test-only `framestats` fixture bundle, which the
     /// seeded program-library catalog is derived from and so lists.
     apps_with_framestats: &'static [AppStoreFile],
+    /// The application/service bundles the SVG-text vertical plants: the
+    /// shared set plus the test-only `svgtext` fixture bundle.
+    apps_with_svgtext: &'static [AppStoreFile],
     /// The signed autoload driver bundles the `-M virt` autoload verticals
     /// plant in the `/System/Drivers/` store.
     autoload_drivers: &'static [AppStoreFile],
@@ -9348,8 +9498,15 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         FsDisk::HoverRootDisk => super::image_apps::framestats_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
+    let apps_with_svgtext = match t.fs_disk {
+        FsDisk::SvgTextRootDisk => super::image_apps::svgtext_store_files(ctx, arch, profile)?,
+        _ => EMPTY,
+    };
     let autoload_drivers = match t.fs_disk {
-        FsDisk::AutoloadRootDisk | FsDisk::GreeterRootDisk | FsDisk::HoverRootDisk => {
+        FsDisk::AutoloadRootDisk
+        | FsDisk::GreeterRootDisk
+        | FsDisk::HoverRootDisk
+        | FsDisk::SvgTextRootDisk => {
             super::image_drivers::autoload_driver_store_files(ctx, arch, profile)?
         }
         _ => EMPTY,
@@ -9396,6 +9553,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps_with_memsoak,
         apps_with_stalltrace,
         apps_with_framestats,
+        apps_with_svgtext,
         autoload_drivers,
         apps_with_tcpecho,
         apps_with_audiotone,
@@ -9528,7 +9686,7 @@ fn run_one(
     target_dir: &Path,
     t: &QemuTest,
     replica: usize,
-    stores: StoreSet,
+    stores: &StoreSet,
 ) -> Result<(), String> {
     let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
@@ -12600,7 +12758,7 @@ fn image_total_sectors(bytes: &[u8]) -> u64 {
 /// the planted on-disk layout and the guest's expectations cannot drift:
 /// the FAT32 fixture is hand-built; the arxfs fixture is authored by the
 /// real arxfs driver itself (format + plant).
-fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, String> {
+fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, String> {
     // Only the two plain encrypted-root disks name their app set directly
     // here; every driver-store (net-root) disk is authored in
     // `net_root_fs_disk_image`, which selects its own sets from `stores`.
@@ -12670,6 +12828,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
         FsDisk::AutoloadRootDisk
         | FsDisk::GreeterRootDisk
         | FsDisk::HoverRootDisk
+        | FsDisk::SvgTextRootDisk
         | FsDisk::StreamRootDisk
         | FsDisk::EcnRootDisk
         | FsDisk::ListenRootDisk
@@ -12690,10 +12849,11 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
 /// selected. Every net-root disk routes through `net_root_image`, so they
 /// cannot drift in how the whole disk is authored. Called only for the
 /// net-root `FsDisk` variants (the caller's match guarantees it).
-fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, String> {
+fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, String> {
     let StoreSet {
         apps,
         apps_with_framestats,
+        apps_with_svgtext,
         autoload_drivers,
         apps_with_tcpecho,
         apps_with_audiotone,
@@ -12716,6 +12876,12 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
             apps_with_framestats,
             "hover-root.img",
             "hover-root",
+        ),
+        FsDisk::SvgTextRootDisk => (
+            autoload_drivers,
+            apps_with_svgtext,
+            "svgtext-root.img",
+            "svgtext-root",
         ),
         FsDisk::StreamRootDisk => (
             net_only_drivers,
@@ -13336,11 +13502,13 @@ mod tests {
         desktop_hover_pointer_script, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
         qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest, AUDIOTONE_PASS_PREFIX,
-        BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
-        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX, STALLTRACE_COMMAND_LINE,
-        STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
-        SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
-        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        AUTOLOAD_INPUT_ARMED_OCCURRENCES, AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER,
+        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES, MEMSOAK_PASS_PREFIX,
+        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
+        SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER,
+        TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
+        UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
         VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
         VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
@@ -13928,6 +14096,83 @@ mod tests {
         // and the run would pass having proven nothing.
         assert!(!tairix_test_stalltrace::PROVOKED_MARKER
             .starts_with(tairix_test_stalltrace::INERT_MARKER));
+    }
+
+    /// Every enrolment that waits on the input-driver arming marker waits
+    /// for exactly as many occurrences as it attaches input drivers: the
+    /// board carries a mouse only when the test scripts a pointer, so the
+    /// count is a function of the enrolment and never a copied constant.
+    ///
+    /// Pinned because the failure mode is silent and expensive — a count of
+    /// two on a keyboard-only board never releases, so nothing is ever
+    /// typed and the run burns its whole runtime ceiling looking like a
+    /// hung guest rather than a mis-specified gate.
+    #[test]
+    fn the_input_armed_gate_counts_the_drivers_the_board_actually_has() {
+        for t in TESTS {
+            let Some((_, occurrences, _)) = t
+                .typed_keys
+                .iter()
+                .find(|(marker, _, _)| *marker == AUTOLOAD_INPUT_KEY_MARKER)
+            else {
+                continue;
+            };
+            let expected = if t.pointer_script.is_some() {
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES
+            } else {
+                KEYBOARD_ONLY_ARMED_OCCURRENCES
+            };
+            assert_eq!(
+                *occurrences,
+                expected,
+                "{}: a board with {} input driver(s) raises the arming marker {expected} time(s)",
+                t.binary,
+                if t.pointer_script.is_some() { 2 } else { 1 },
+            );
+        }
+    }
+
+    /// The SVG-text vertical types the fixture's own command word and waits
+    /// on the fixture's measured record, read from the fixture's own
+    /// definition, so a reworded line moves the waiter with it instead of
+    /// leaving the run to time out on a string nothing prints.
+    #[test]
+    fn svgtext_script_matches_the_vocabulary_it_waits_on() {
+        assert_eq!(SVGTEXT_MEASURED_MARKER, tairix_test_svgtext::REPORT_MESSAGE);
+        // The failure record must not satisfy the measured marker, or a run
+        // that could not render at all would type the shell `exit` and end
+        // as a timeout rather than as the named failure the guest reports.
+        assert!(
+            !tairix_test_svgtext::REPORT_FAILED_MESSAGE.contains(SVGTEXT_MEASURED_MARKER),
+            "the failure record must not read as a measurement"
+        );
+    }
+
+    /// The SVG-text vertical is enrolled on its own disk, with a display and
+    /// no pointer script (its script drives a shell). Pinned because each of
+    /// those is a premise the vertical would silently stop testing without.
+    ///
+    /// The display is the fixture's own premise — it renders a picture — not
+    /// a precondition of the font service, which is now reached through
+    /// on-demand activation from whatever asks for a glyph.
+    #[test]
+    fn the_svgtext_vertical_boots_a_display_capable_machine() {
+        let t = TESTS
+            .iter()
+            .find(|t| t.binary == "tairix-test-svgtext-qemu-aarch64")
+            .expect("the SVG-text vertical is enrolled");
+        assert!(t.ramfb, "the fixture renders into a real framebuffer");
+        assert!(matches!(t.fs_disk, FsDisk::SvgTextRootDisk));
+        assert!(t.pointer_script.is_none());
+        assert!(t.serial.is_empty(), "this disk types at the seat keyboard");
+        // The script must not gate on a font-service readiness line: the
+        // ordering it is here to prove belongs to the activation broker, and
+        // a script that waited for the service first would hide a broker
+        // that never released the call.
+        assert!(t
+            .typed_keys
+            .iter()
+            .all(|(marker, _, _)| *marker != tairix_fontd::events::SERVICE_READY_MESSAGE));
     }
 
     /// The value-pipe vertical's machine-id marker is exactly what the

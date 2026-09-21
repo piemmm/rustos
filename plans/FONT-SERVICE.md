@@ -392,26 +392,30 @@ Load-bearing facts a future reader needs:
   the faces that manifest names — at `/System/Fonts/<key>/` in the shared
   `app_store_files` (discovered from the assets tree, never a list), and
   `fontd.app` is auto-discovered under `/System/Services`. `fontd` is **not** a
-  boot-floor service (`init`'s `DEFAULT_CONFIG` does not name it): text
-  rendering is a
-  graphics-only resource, so **`login` starts `fontd`** (as its uid-15 service
-  account, via `CAP_SPAWN_AS_USER`) the first login round a machine is
-  display-capable — covering both a graphical login and the shell's `desktop`
-  command, and never on a headless/text-only boot (§17.3). **This `login`-owned
-  start is a transitional ad-hoc placement that `plans/NEW-SERVICEMANAGER.md`
-  (SVC-5) removes:** once the service manager gains readiness-condition
-  activation, `fontd` becomes an on-demand, `display-present`-gated service and
-  the `login` start path plus the x86_64/riscv64 compiled-in fallbacks below
-  are deleted (§2.14). Until then, login resolves it by
-  path through the ordinary program gate: from the on-disk `/System/Services`
-  bundle on aarch64, and from the compiled-in program registry
-  (`spawn_paths::FONTD_PATH`, `program_manifests::FONTD_MANIFEST`,
+  boot-floor service: text rendering is a graphics-only resource, so PID 1
+  *registers* it on-demand (`init`'s `DEFAULT_CONFIG` names it with the
+  `ondemand` directive) and starts nothing. The service manager activates it
+  the first time a client asks to connect, and idle-stops it when the last
+  client has gone (`plans/NEW-SERVICEMANAGER.md` SVC-4/SVC-5). Nothing on a
+  headless or text-only machine ever asks, so nothing ever starts it — the
+  headless guarantee is structural rather than a condition somebody has to
+  assert.
+  The client half of that handshake is in `lib/font` alone: it connects
+  through the activation endpoint before its first request, and the manager
+  holds the call until `fontd` announces (over the lifecycle-notice endpoint)
+  that it has bound `FONT_ENDPOINT`. So a consumer can no longer reach the
+  endpoint before it exists — the race that made `lib/svg` refuse a whole
+  document for want of a service that was merely late.
+  The manager resolves the path through the ordinary program gate: the
+  on-disk `/System/Services` bundle on aarch64, and the compiled-in program
+  registry (`spawn_paths::FONTD_PATH`, `program_manifests::FONTD_MANIFEST`,
   `spawn_layout::SPAWN_PROGRAMS`, `build.rs`) on x86_64/riscv64 until their
-  storage floors land — a *spawnable* program there, not an init-auto-started
-  service. Post-boot start is the headless-first-correct design on its own
-  (§17.3); an earlier worry that a 5th concurrent boot service crashed the
-  kernel (D18) was investigated and closed non-reproducing once this service's
-  ~10 MB payload was removed (`plans/OPEN-DEFECTS.md`).
+  storage floors land. That registry row is those ports' whole boot floor —
+  every service and command app is in it — so it is not `fontd`'s to remove;
+  it goes when the table does (`plans/ARCHSUPPORT.md`). An earlier worry that
+  a 5th concurrent boot service crashed the kernel (D18) was investigated and
+  closed non-reproducing once this service's ~10 MB payload was removed
+  (`plans/OPEN-DEFECTS.md`).
 - **Profile fix (§2.6).** The image → Cargo-profile mapping lives once on
   `tairix_mkimage::ImageProfile`; both `kernel_build_profile` and
   `pie_build::cross_compile_pie_elf` read it, so `installer` cross-compiles
@@ -569,6 +573,14 @@ Load-bearing facts a future reader needs:
   `lib/font/assets/` tree through the `FontStore`/`FaceLoad` seams it
   already has for host testing, so an icon the build admits is one the
   running desktop can draw.
+- **A QEMU vertical attests the sandboxed consumer.** The build check above
+  and the host tests both stop at the pipe, so
+  `tests/integration/svgtext_qemu_aarch64` runs the two-round exchange on a
+  booted machine: a capability-empty decoder records what it cannot answer,
+  a parent fetches it here, and the second decode draws it. It measures the
+  pixels rather than witnessing a marker — two drawings differing in one
+  character must ink differently, and the same drawing with no seam must be
+  refused (`plans/SVG.md`).
 
 ## 4. Cross-references
 
@@ -577,9 +589,9 @@ Load-bearing facts a future reader needs:
 - `plans/FIX-DESKTOP.md` — the async launch (done) and the demand-paged/CoW
   image build (DESK-4..7, planned); this plan removes the *payload* the
   launch path must move, complementary to shrinking the *per-page* cost.
-- `plans/NEW-SERVICEMANAGER.md` — the first-class service manager that (SVC-5)
-  replaces the transitional `login`-starts-`fontd` placement (§3) with
-  readiness-condition on-demand activation, deleting the `login` start path.
+- `plans/NEW-SERVICEMANAGER.md` — the first-class service manager whose SVC-5
+  activation broker and lifecycle-notice endpoint start `fontd` on demand,
+  replacing the `login`-starts-`fontd` placement this plan used to describe.
 - `plans/DISPLAY.md`, `plans/COMPOSITOR-WORK.md`, `plans/GUI-CONTROLS-DESIGN.md`
   — the text-drawing consumers of the font client.
 - `plans/SVG.md` — S22 (the glyph-outline API), S23 (the font seam SVG text

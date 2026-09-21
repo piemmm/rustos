@@ -277,31 +277,36 @@ The weight is part of the service's cache key, so each
 `fontd` ships as a signed `/System/Services/fontd.app` bundle — a service is an
 app (§16.2, §16.5). It is **not** a boot-floor service: text rendering is only
 needed by the graphical desktop, so a headless or text-only system never runs
-it (headless-first, §17.3). Instead **`login` starts it** the first login round
-a machine is display-capable (the desktop bundle is installed and a display
-service is live). login is the natural owner: it holds `CAP_SPAWN_AS_USER` —
-the authority the graphics-only `fontd` account (uid 15) needs and that neither
-the shell nor the desktop app has — so it drops `fontd` onto its own service
-account exactly as it drops a session onto the authenticated user. This covers
-both ways the desktop is launched (a graphical login, or the shell's `desktop`
-command) and starts `fontd` once per login process; a duplicate would fail
-closed on the reserved-endpoint bind. A refused start is audited
-(`FONTD_UNAVAILABLE`) and login proceeds — the desktop degrades to unrendered
-text rather than failing (§2.24).
+it (headless-first, §17.3). PID 1 **registers** it on-demand (the `ondemand`
+directive in the startup description) and starts nothing; the service manager
+activates it the first time a client asks to connect to it, and idle-stops it
+once the last client has gone (`plans/NEW-SERVICEMANAGER.md` SVC-4/SVC-5).
+Nothing on a headless machine ever asks, so nothing ever starts it — the
+guarantee is structural rather than a condition somebody has to assert.
 
-`login` spawns `fontd` by its path, which the kernel resolves through the same
-program gate as any other program: from the verified on-disk
+The client side of that handshake lives in exactly one place: `lib/font`
+connects through the service manager's activation endpoint before it sends its
+first request, so every graphical consumer inherits the ordering without its
+own handshake. Because the manager holds that call until `fontd` announces it
+has bound `FONT_ENDPOINT`, a consumer can no longer race the bind and paint
+textless frames.
+
+Readiness is the service's own announcement, not its spawn: `fontd` sends a
+`ReadyNotice` over the manager's lifecycle-notice endpoint immediately after
+the bind. The notice names no service — the manager attributes it to the
+call's kernel-attested origin — so a service can only ever announce its own.
+A refused notice is audited (`READINESS_REFUSED`) and the service carries on
+serving: it is answerable either way.
+
+The manager spawns `fontd` by its path, which the kernel resolves through the
+same program gate as any other program: from the verified on-disk
 `/System/Services/fontd.app` bundle on the aarch64 production build, and from
 the compiled-in program registry on x86_64/riscv64 until those ports' on-disk
-storage floors land (`fontd` is a registered spawnable program on those ports,
-not an init-auto-started boot service). The desktop's font client fails closed
-until `fontd` has bound `FONT_ENDPOINT`, so the first frames may paint no text
-and then fill in once the service is serving.
+storage floors land.
 
-> Note: starting `fontd` from the post-boot graphical path (rather than as an
-> init boot service) is the headless-first-correct design in its own right — a
-> text-only or headless system never needs a font renderer. An earlier concern
-> that a 5th concurrent boot service crashed the kernel (D18 in
-> `plans/OPEN-DEFECTS.md`) was investigated and found non-reproducing once this
-> service's ~10 MB payload was removed; the design choice stands on
-> headless-first alone.
+> Note: activating `fontd` on demand (rather than as an init boot service) is
+> the headless-first-correct design in its own right — a text-only or headless
+> system never needs a font renderer. An earlier concern that a 5th concurrent
+> boot service crashed the kernel (D18 in `plans/OPEN-DEFECTS.md`) was
+> investigated and found non-reproducing once this service's ~10 MB payload was
+> removed; the design choice stands on headless-first alone.

@@ -1,0 +1,18 @@
+# Signed-AppInfo manifest source for the `svgtext` SVG-text fixture
+# (plans/SVG.md S23/S24). Composed and planted ONLY on the aarch64 SVG-text
+# QEMU vertical's disk image by tools/xtask — the crate lives outside the
+# userland discovery walk, so no production image ever ships it.
+#
+# The capability list is the bundle's request, intersected with the launching
+# user's grants, and is exactly the viewer's own minus the window: it holds no
+# filesystem and no font authority. CAP_PROC_SPAWN re-enters this binary as
+# the capability-empty decoder, so the drawings are decoded in an address
+# space that cannot reach the font endpoint and must ask for its glyphs over
+# the pipe. CAP_LOG_EMIT puts the measured record where the vertical's guest
+# gate reads it, and CAP_CONSOLE_WRITE carries the fail-loud stderr reason.
+# Calling FONT_ENDPOINT and creating the sandbox's pipes need no capability.
+id = "os.tairix.test.svgtext"
+name = "svgtext"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_PROC_SPAWN", "CAP_LOG_EMIT", "CAP_CONSOLE_WRITE"]

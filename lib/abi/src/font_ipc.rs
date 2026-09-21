@@ -56,6 +56,15 @@ use crate::Errno;
 /// in-protocol.
 pub const FONT_ENDPOINT: u64 = 0x464E_5400;
 
+/// The service-manager name of the font service, as a client asks for it.
+///
+/// A client reaches [`FONT_ENDPOINT`] only after the manager has activated
+/// the service behind it, and the manager names a service by its bundle
+/// directory. One definition, shared by the client that asks and the boot
+/// description that registers it, so the two cannot drift into a connect for
+/// a name no service answers to.
+pub const FONT_SERVICE_NAME: &str = "fontd";
+
 /// Magic number identifying a font-service request (`"FNT1"` little-endian).
 pub const FONT_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"FNT1");
 

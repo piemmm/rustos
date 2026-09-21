@@ -3915,16 +3915,19 @@ Shipped (headless-testable, model + renderer over injected seams):
     settings surface offers exactly that. **Remaining:** the desktop-side
     picker — a system-menu row per family, persisted per user and validated
     against the reported list on session start.
-  - **`fontd` starts with the desktop, not at boot** — text is a
-    graphics-only resource,
-    so `login` starts it (as its uid-15 account, via `CAP_SPAWN_AS_USER`) the
-    first login round a machine is display-capable, covering both a graphical
-    login and the shell `desktop` command and never a headless/text boot
-    (§17.3); it resolves by path from the on-disk `/System/Services` bundle on
-    aarch64 and from the compiled-in program registry on x86_64/riscv64.
-    Post-boot start is the headless-first-correct design in its own right; an
-    earlier concurrent-spawn crash worry (D18) was closed non-reproducing once
-    the ~10 MB payload was removed (`plans/OPEN-DEFECTS.md`). The independent
+  - **`fontd` is activated on demand, never started at boot** — text is a
+    graphics-only resource, so PID 1 registers it (`ondemand` in the boot
+    description) and starts nothing; the service manager activates it when a
+    client asks to connect and idle-stops it afterwards
+    (`plans/NEW-SERVICEMANAGER.md` SVC-5). Nothing on a headless or text-only
+    machine asks, so the headless guarantee is structural. `lib/font` makes
+    that connect once before its first request and the manager holds the call
+    until `fontd` has announced it bound `FONT_ENDPOINT`, so a consumer can no
+    longer race the bind and have its document refused. It resolves by path
+    from the on-disk `/System/Services` bundle on aarch64 and from the
+    compiled-in program registry on x86_64/riscv64. An earlier
+    concurrent-spawn crash worry (D18) was closed non-reproducing once the
+    ~10 MB payload was removed (`plans/OPEN-DEFECTS.md`). The independent
     profile fix (`pie_build::cross_compile_pie_elf` reading `ImageProfile`)
     ships `installer` userland/drivers `--release`.
 - `userland/gui/taskbar` (permanent Library/Files launchers + program-library

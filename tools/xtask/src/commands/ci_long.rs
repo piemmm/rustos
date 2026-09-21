@@ -194,7 +194,7 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
                 // a memoised composition failure fails the job closed.
                 let stores = enrol.stores(ctx);
                 Job::closure(job_label, weight, move || {
-                    enrol.run(&target_dir, replica, stores.clone()?)
+                    enrol.run(&target_dir, replica, &stores.clone()?)
                 })
             })
         })

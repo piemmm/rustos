@@ -55,10 +55,13 @@ mod program {
 
     use tairix_abi::font_ipc::{FontRequest, FONT_ENDPOINT, FONT_MAX_GLYPH_REPLY};
     use tairix_abi::fs::{DirEntries, OpenFlags};
-    use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
+    use tairix_abi::service_control::{REPLY_LEN, SERVICE_NOTICE_ENDPOINT};
+    use tairix_abi::{Errno, LifecycleSignal, ReadyNotice, WaitSetOp, WaitSourceKind};
     use tairix_caps::CapabilitySet;
     use tairix_fontd::discovery::{discover, FaceLoad, FontStore};
-    use tairix_fontd::events::{SERVICE_READY, SERVICE_UNAVAILABLE};
+    use tairix_fontd::events::{
+        READINESS_REFUSED, SERVICE_READY, SERVICE_READY_MESSAGE, SERVICE_UNAVAILABLE,
+    };
     use tairix_fontd::FontService;
     use tairix_fontface::FAMILY_MANIFEST;
     use tairix_log::{Event, EventId, Level};
@@ -82,6 +85,33 @@ mod program {
     /// The audit sink every record — startup, and the reclaim model's own
     /// classification/defect events — is written through.
     static LOG_SINK: LogSink = LogSink;
+
+    /// Tell the service manager the endpoint is answerable.
+    ///
+    /// Sent only after the bind, because that is what the announcement
+    /// means: a client the manager parked on this activation is released by
+    /// this call, so announcing any earlier would hand one an endpoint that
+    /// does not exist yet. The notice names no service — the manager
+    /// attributes it to this process's kernel-attested origin — so it can
+    /// only ever move this service's own readiness.
+    ///
+    /// A refusal is stated and the service carries on serving: it is
+    /// answerable either way, and exiting over it would take away the only
+    /// font service on the machine.
+    fn announce_ready() {
+        let notice = ReadyNotice::new(LifecycleSignal::Ready).to_le_bytes();
+        let mut reply = [0u8; REPLY_LEN];
+        let accepted = tairix_rt::ipc_call(SERVICE_NOTICE_ENDPOINT, &notice, &mut reply)
+            .map_err(Errno::from_syscall)
+            .and_then(|len| tairix_abi::service_control::decode_reply(&reply[..len]));
+        if accepted.is_err() {
+            record(
+                READINESS_REFUSED,
+                Level::Warn,
+                "fontd: the service manager did not record this readiness",
+            );
+        }
+    }
 
     /// Record a startup or runtime outcome. Recorded through the kernel audit
     /// log so an operator can see the font service's state before the
@@ -365,7 +395,8 @@ mod program {
         let Some(set) = bind_and_watch() else {
             return 1;
         };
-        record(SERVICE_READY, Level::Info, "fontd: serving FONT_ENDPOINT");
+        record(SERVICE_READY, Level::Info, SERVICE_READY_MESSAGE);
+        announce_ready();
         serve(&mut service, set)
     }
 

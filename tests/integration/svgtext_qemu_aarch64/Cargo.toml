@@ -1,0 +1,40 @@
+[package]
+name = "tairix-test-svgtext-qemu-aarch64"
+description = "plans/SVG.md S23/S24 QEMU vertical: boot the production aarch64 tairix-kernel pipeline with the graphical autoload disk carrying the standard signed store bundles plus the test-only svgtext fixture bundle, unlock the root, wait for the sandboxed OS font service to bind FONT_ENDPOINT, authenticate root/root at the console login, and run `svgtext` from the scripted shell. PASS once the fixture's measured record shows two drawings that differ only in one character inked differently through the parser-sandbox pipe against the live service, and the same drawing with no font seam was refused."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-svgtext-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 graphical world and prove a
+# sandboxed decode drew real glyphs fetched from a live `fontd`" integration
+# test. It reuses the entire production boot pipeline through
+# `tairix-kernel`'s library half and only swaps the diagnostic sink for the
+# gate (no duplication). Keeping the QEMU-exit shortcut in a dedicated bin
+# (not a Cargo feature on a production crate) prevents feature unification
+# from leaking it into any production build (fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared failure-code minter, so each refused-measurement case exits with
+# its own distinguishable code rather than an indistinguishable timeout.
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+# The fixture's vocabulary library — the measured record and the one
+# definition of the rule that judges it. `default-features = false`: the
+# fixture's `program` feature (its own `Run` binary's userland runtime) must
+# never link into this kernel bin.
+tairix-test-svgtext = { path = "../svgtext_program", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

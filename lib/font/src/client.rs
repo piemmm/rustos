@@ -1009,6 +1009,7 @@ fn install_defaults() {
             }
             channel.defaulted = true;
             if channel.transport.is_none() {
+                connect_font_service();
                 channel.install_transport(Box::new(RtTransport));
             }
             (default_cache(), default_measure_cache())
@@ -1032,6 +1033,45 @@ fn install_defaults() {
             channel.install_transport(Box::new(SolidTestTransport));
         }
     }
+}
+
+/// Ask the service manager to connect this process to the font service,
+/// before the first request is ever sent to it.
+///
+/// The font service is activated on demand, so on a machine where nothing
+/// has drawn text yet it is not running at all — and even once it has been
+/// started, it is answerable only from the moment it binds its endpoint. The
+/// manager holds this call until then, so every graphical consumer inherits
+/// the ordering from this one place instead of each racing the bind and
+/// falling back to no text.
+///
+/// The connection is held for the life of the process: while it lives it may
+/// ask for a glyph at any moment, and that is exactly what the manager's
+/// idle-stop refcount is asking about. It is not withdrawn on the way out,
+/// because a process cannot promise to run its own teardown.
+///
+/// A refusal is not fatal here. The call is an ordering handshake, not an
+/// authorisation: the request that follows is checked by the service on its
+/// own endpoint, so a machine whose manager does not broker this service
+/// simply falls back to the behaviour it had before — the endpoint answers,
+/// or the caller degrades.
+#[cfg(feature = "rt")]
+fn connect_font_service() {
+    use tairix_abi::service_control::{
+        ServiceActivationOp, ServiceActivationRequest, REPLY_LEN, REQUEST_LEN,
+        SERVICE_ACTIVATION_ENDPOINT,
+    };
+
+    let mut request = [0u8; REQUEST_LEN];
+    let Ok(len) = (ServiceActivationRequest {
+        op: ServiceActivationOp::Connect,
+        name: tairix_abi::font_ipc::FONT_SERVICE_NAME,
+    })
+    .encode(&mut request) else {
+        return;
+    };
+    let mut reply = [0u8; REPLY_LEN];
+    let _ = tairix_rt::ipc_call(SERVICE_ACTIVATION_ENDPOINT, &request[..len], &mut reply);
 }
 
 /// Build the client's own glyph cache, budgeted from the machine's total

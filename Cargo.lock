@@ -5813,6 +5813,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-svgtext"
+version = "0.0.0"
+dependencies = [
+ "tairix-font",
+ "tairix-log",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-svg",
+]
+
+[[package]]
+name = "tairix-test-svgtext-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-svgtext",
+]
+
+[[package]]
 name = "tairix-test-syscall-dispatch-qemu"
 version = "0.0.0"
 dependencies = [
@@ -6813,6 +6838,7 @@ dependencies = [
  "tairix-test-rng-soak",
  "tairix-test-rtc-fixture",
  "tairix-test-stalltrace",
+ "tairix-test-svgtext",
  "tairix-test-tcpecho",
  "tairix-test-tcpserve",
  "tairix-theme",

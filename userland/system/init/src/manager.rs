@@ -26,7 +26,9 @@ use crate::registry::{
     effective, enrol, overrides_for, unenrol, validate_service_name, Enrolment, EnrolmentOverride,
 };
 use crate::scope::AuthorityScope;
-use crate::service::{ClientId, Pid, ReapedChild, Reaper, ServiceSpec, Spawner, Stopper};
+use crate::service::{
+    ClientId, Pid, ReapedChild, Reaper, ServiceSender, ServiceSpec, Spawner, Stopper,
+};
 
 /// Number of distinct named readiness conditions, sized from the closed
 /// [`ReadyCondition`] set so the satisfied-conditions bitmap tracks the
@@ -43,7 +45,12 @@ const CONDITION_COUNT: usize = ReadyCondition::ALL.len();
 /// starve another's queue. A legitimate service with more genuinely
 /// concurrent first-connections than this is vanishingly unlikely; if one
 /// ever arises it is raised deliberately here, never removed.
-const MAX_PENDING_PER_SERVICE: usize = 64;
+///
+/// Public because the transport must size its endpoint's outstanding-call
+/// bound from it: a kernel queue shorter than this would refuse a connect
+/// before the engine's own bound was ever reached, leaving that bound dead
+/// and the refusal unaudited by the manager.
+pub const MAX_PENDING_PER_SERVICE: usize = 64;
 
 /// How many times the restart policy will relaunch a single service that
 /// keeps dying before it has run stably, before the manager gives up on it.
@@ -156,20 +163,36 @@ pub struct StartedService {
     pub pid: Pid,
 }
 
-/// A client whose parked connection request has been satisfied because its
-/// service reached readiness.
+/// A client whose parked connection request has ended, and how.
 ///
-/// The manager accumulates these as services become ready; the caller
-/// drains them with [`Init::take_ready_clients`] to wake each parked client
-/// and hand it the connection to its service's endpoint. A client that
+/// The manager accumulates these as parks resolve; the caller drains them
+/// with [`Init::take_released_clients`] and answers each one. A client that
 /// connected while its service was already ready is returned synchronously
 /// from [`Init::connect`] instead and never appears here.
+///
+/// Every park resolves through this one list, whichever way it went: a park
+/// the manager stopped tracking without reporting would leave its client
+/// blocked on a reply nothing will ever send.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReadyClient {
-    /// The service the client is now connected to.
+pub struct ReleasedClient {
+    /// The service the client was waiting for.
     pub service: String,
-    /// The client to wake and hand the endpoint.
+    /// The client whose park ended.
     pub client: ClientId,
+    /// How it ended.
+    pub outcome: ParkOutcome,
+}
+
+/// How a parked connection request ended.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ParkOutcome {
+    /// The service reached readiness: the client is in its sink and the
+    /// caller hands it the connection.
+    Connected,
+    /// The service's process went away before it reached readiness, so
+    /// there is nothing to connect to. The caller refuses the client rather
+    /// than leaving it parked on a service that is not coming.
+    Abandoned,
 }
 
 /// The outcome of a successful [`Init::connect`].
@@ -180,8 +203,9 @@ pub enum ActivationOutcome {
     Connected,
     /// The service is not yet ready (it was just activated, or is still
     /// starting): the client is parked and will be reported through
-    /// [`Init::take_ready_clients`] once the service becomes ready. The
-    /// client is never busy-polled.
+    /// [`Init::take_released_clients`] once the service becomes ready — or
+    /// refused there if its process goes away first. The client is never
+    /// busy-polled.
     Queued,
 }
 
@@ -265,7 +289,8 @@ struct Service {
     sink: Vec<ClientId>,
     /// Clients parked waiting for this service to reach readiness, in
     /// arrival order. Drained into [`Service::sink`] (and reported through
-    /// [`Init::ready_clients`]) when the service becomes ready. Bounded by
+    /// [`Init::take_released_clients`]) when the service becomes ready or
+    /// its process goes away. Bounded by
     /// [`MAX_PENDING_PER_SERVICE`].
     waiters: VecDeque<ClientId>,
     /// When set, the absolute monotonic instant at (or after) which an idle
@@ -330,6 +355,19 @@ impl Service {
     }
 }
 
+/// The outcome of an accepted lifecycle notice.
+///
+/// The transport needs the resolved service back because the notice named
+/// none: it answers the announcing service by state and reports whatever the
+/// resulting admission pass could not bring up.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotifyReport {
+    /// The service the kernel-attested sender was resolved to.
+    pub service: String,
+    /// What the admission pass the notice drove started or failed.
+    pub started: StartReport,
+}
+
 /// The outcome of an accepted enrolment request.
 ///
 /// `changed` is what lets a tool distinguish "disabled it" from "it was
@@ -369,10 +407,11 @@ pub struct Init<'a> {
     /// [`ReadyCondition::as_u16`].
     satisfied: [bool; CONDITION_COUNT],
     /// Parked clients that became connected because their service reached
-    /// readiness, awaiting the caller's [`take_ready_clients`](Self::take_ready_clients)
-    /// drain. The manager never wakes a client itself; it records who is now
-    /// ready and lets the transport layer deliver the endpoint.
-    ready_clients: Vec<ReadyClient>,
+    /// readiness, awaiting the caller's
+    /// [`take_released_clients`](Self::take_released_clients) drain. The
+    /// manager never wakes a client itself; it records whose park ended and
+    /// lets the transport layer answer it.
+    released_clients: Vec<ReleasedClient>,
     /// The image's enrolment layer — which discovered bundles it enrols.
     vendor: Enrolment,
     /// The administrator's override layer, holding only what differs from
@@ -397,7 +436,7 @@ impl<'a> Init<'a> {
             services: Vec::new(),
             order: Vec::new(),
             satisfied: [false; CONDITION_COUNT],
-            ready_clients: Vec::new(),
+            released_clients: Vec::new(),
             vendor: Enrolment::empty(),
             overrides: EnrolmentOverride::empty(),
             unenrolled: Vec::new(),
@@ -633,6 +672,9 @@ impl<'a> Init<'a> {
             LifecycleSignal::Failed => {
                 self.services[idx].state = ServiceState::Failed;
                 self.services[idx].pid = None;
+                // It announced that it will not serve, so nothing parked on
+                // it is going to be connected.
+                self.abandon_waiters(idx);
                 let owned = name.to_string();
                 self.audit(
                     events::SERVICE_START_FAILED,
@@ -643,6 +685,56 @@ impl<'a> Init<'a> {
             }
         }
         Ok(self.pump())
+    }
+
+    /// Apply a readiness notification to the service the kernel-attested
+    /// `sender` is running.
+    ///
+    /// This is the transport's entry: the notice itself names no service, so
+    /// the manager resolves one from what the kernel vouched for about the
+    /// sender and then takes the ordinary [`notify`](Self::notify) decision.
+    /// A sender matching no service the manager is currently starting is
+    /// refused before any state is touched.
+    ///
+    /// # Errors
+    ///
+    /// * [`NotifyError::UnknownSender`] if no starting service was spawned
+    ///   as that process on that account.
+    /// * Whatever [`notify`](Self::notify) reports for the resolved service.
+    pub fn notify_sender(
+        &mut self,
+        sender: ServiceSender,
+        signal: LifecycleSignal,
+    ) -> Result<NotifyReport, NotifyError> {
+        let Some(service) = self.starting_service_of(sender) else {
+            self.audit(
+                events::NOTIFY_REJECTED,
+                Level::Warn,
+                "?",
+                "sender is no starting service",
+            );
+            return Err(NotifyError::UnknownSender);
+        };
+        let started = self.notify(&service, signal)?;
+        Ok(NotifyReport { service, started })
+    }
+
+    /// The name of the service the attested `sender` is the live process of,
+    /// while that service is still starting.
+    ///
+    /// Restricted to `Starting` because that is the only state a readiness
+    /// edge exists in, which also bounds the match to the window between a
+    /// spawn and its resolution — a process id the kernel has since redrawn
+    /// for someone else therefore has nothing to match.
+    fn starting_service_of(&self, sender: ServiceSender) -> Option<String> {
+        self.services
+            .iter()
+            .find(|service| {
+                service.state == ServiceState::Starting
+                    && service.pid == Some(sender.pid)
+                    && service.spec.account() == sender.account
+            })
+            .map(|service| service.spec.name().to_string())
     }
 
     /// Connect a client to a service's reserved endpoint, activating the
@@ -664,8 +756,8 @@ impl<'a> Init<'a> {
     ///
     /// A new connection always cancels a pending idle-linger stop: fresh
     /// interest keeps the service alive. Parked clients are woken through
-    /// [`take_ready_clients`](Self::take_ready_clients) when the service
-    /// becomes ready — never by polling.
+    /// [`take_released_clients`](Self::take_released_clients) when the
+    /// service becomes ready — never by polling.
     ///
     /// # Errors
     ///
@@ -777,6 +869,15 @@ impl<'a> Init<'a> {
         let in_waiters =
             if let Some(pos) = self.services[idx].waiters.iter().position(|c| *c == client) {
                 self.services[idx].waiters.remove(pos);
+                // The park is over, so its ticket is owed an answer: a
+                // client that withdrew one thread's connect while another
+                // is blocked on it must not be left waiting for a reply
+                // nothing will send.
+                self.released_clients.push(ReleasedClient {
+                    service: self.services[idx].spec.name().to_string(),
+                    client,
+                    outcome: ParkOutcome::Abandoned,
+                });
                 true
             } else {
                 false
@@ -1056,17 +1157,18 @@ impl<'a> Init<'a> {
         true
     }
 
-    /// Drain the clients whose parked connections have been satisfied since
-    /// the last call.
+    /// Drain the clients whose parked connections have resolved since the
+    /// last call.
     ///
     /// A client parked by [`connect`](Self::connect) is reported here once
     /// its service reaches readiness (through the boot admission engine, a
-    /// readiness notice, or a satisfied condition). The caller wakes each
-    /// one and hands it the connection to its service's endpoint. Draining
-    /// clears the buffer, so each satisfied client is reported exactly once.
+    /// readiness notice, or a satisfied condition), or once that service's
+    /// process goes away without reaching it. Draining clears the buffer, so
+    /// each park is reported exactly once and none is dropped silently —
+    /// the caller owes every parked client a reply.
     #[must_use]
-    pub fn take_ready_clients(&mut self) -> Vec<ReadyClient> {
-        core::mem::take(&mut self.ready_clients)
+    pub fn take_released_clients(&mut self) -> Vec<ReleasedClient> {
+        core::mem::take(&mut self.released_clients)
     }
 
     /// The armed idle-linger deadline of a service, or `None` if it has no
@@ -1821,7 +1923,7 @@ impl<'a> Init<'a> {
                         ServiceState::Failed
                     };
                 self.services[pos].sink.clear();
-                self.services[pos].waiters.clear();
+                self.abandon_waiters(pos);
                 self.services[pos].linger_deadline = None;
                 self.services[pos].grace_deadline = None;
                 self.services[pos].restart_deadline = None;
@@ -2015,9 +2117,31 @@ impl<'a> Init<'a> {
             if !self.services[idx].sink.contains(&client) {
                 self.services[idx].sink.push(client);
             }
-            self.ready_clients.push(ReadyClient {
+            self.released_clients.push(ReleasedClient {
                 service: name.clone(),
                 client,
+                outcome: ParkOutcome::Connected,
+            });
+        }
+    }
+
+    /// End every park on `idx` without a connection, reporting each so the
+    /// transport refuses it.
+    ///
+    /// The counterpart of the release in [`mark_ready`](Self::mark_ready):
+    /// a service whose process is gone, or which announced its own failure,
+    /// is not going to connect anyone, and a park dropped without a report
+    /// would leave its client blocked forever on a reply nothing sends.
+    fn abandon_waiters(&mut self, idx: usize) {
+        if self.services[idx].waiters.is_empty() {
+            return;
+        }
+        let name = self.services[idx].spec.name().to_string();
+        while let Some(client) = self.services[idx].waiters.pop_front() {
+            self.released_clients.push(ReleasedClient {
+                service: name.clone(),
+                client,
+                outcome: ParkOutcome::Abandoned,
             });
         }
     }
@@ -2364,16 +2488,17 @@ impl fmt::Write for DecWriter<'_> {
 mod tests {
     use super::{
         add_duration, event_message, ActivateError, ActivationOutcome, AuthorityScope,
-        ControlError, DecBuf, Init, InitConfig, InitError, NotifyError, ServiceSpec, StartFailure,
+        ControlError, DecBuf, Init, InitConfig, InitError, NotifyError, ParkOutcome, ServiceSpec,
+        StartFailure, MAX_PENDING_PER_SERVICE,
     };
     use crate::events;
-    use crate::service::{ClientId, Pid, ReapedChild, Reaper, Spawner, Stopper};
+    use crate::service::{ClientId, Pid, ReapedChild, Reaper, ServiceSender, Spawner, Stopper};
     use alloc::collections::VecDeque;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
     use tairix_abi::{
-        ActivationMode, CapabilityId, Duration64, Errno, LifecycleSignal, ReadinessKind,
+        ActivationMode, CapabilityId, Duration64, Errno, LifecycleSignal, ProcId, ReadinessKind,
         ReadyCondition, RestartPolicy, ServiceControlOp, ServiceControlRequest, ServiceEnrolOp,
         ServiceEnrolRequest, ServiceEnrolment, ServiceState,
     };
@@ -2385,6 +2510,12 @@ mod tests {
     /// the signed bundle); it exists only so a [`ServiceSpec`] names an
     /// account like a real one does.
     const TEST_ACCOUNT: u32 = 10;
+
+    /// A distinct attested principal per test client. Real ones come from the
+    /// call's origin; these only have to differ from one another.
+    fn client(n: u8) -> ClientId {
+        ClientId::new(ProcId::from_raw([n; tairix_abi::PROC_ID_LEN]))
+    }
 
     fn cap_set(list: &[CapabilityId]) -> CapabilitySet {
         let mut set = CapabilitySet::empty();
@@ -3037,6 +3168,143 @@ mod tests {
         assert_eq!(sink.count(events::NOTIFY_REJECTED), 2);
     }
 
+    /// The transport entry resolves a notice from the two facts the kernel
+    /// attests about its sender and nothing else, so one service can never
+    /// announce another's readiness.
+    #[test]
+    fn a_notice_resolves_to_the_attested_senders_own_starting_service() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(notify_spec("a", &[])).unwrap();
+        init.register(notify_spec("b", &[])).unwrap();
+        init.start_all().unwrap();
+        let a = init.running_pid("a").expect("a was spawned");
+        let b = init.running_pid("b").expect("b was spawned");
+        assert_ne!(a, b);
+
+        // The right process on the right account resolves to its own
+        // service — and only that one moves.
+        init.notify_sender(
+            ServiceSender {
+                pid: a,
+                account: TEST_ACCOUNT,
+            },
+            LifecycleSignal::Ready,
+        )
+        .expect("a announces its own readiness");
+        assert_eq!(init.state_of("a"), Some(ServiceState::Running));
+        assert_eq!(init.state_of("b"), Some(ServiceState::Starting));
+
+        // `b`'s process cannot re-announce `a`: the resolution is by sender,
+        // so it only ever reaches `b`, which is still starting.
+        init.notify_sender(
+            ServiceSender {
+                pid: b,
+                account: TEST_ACCOUNT,
+            },
+            LifecycleSignal::Ready,
+        )
+        .expect("b announces its own readiness");
+        assert_eq!(init.state_of("b"), Some(ServiceState::Running));
+    }
+
+    /// Every way a sender can fail to name a starting service is refused
+    /// before any state moves, and audited.
+    #[test]
+    fn a_notice_from_an_unmatched_sender_is_refused_and_audited() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(notify_spec("a", &[])).unwrap();
+        init.start_all().unwrap();
+        let a = init.running_pid("a").expect("a was spawned");
+
+        // A process id no service holds.
+        assert_eq!(
+            init.notify_sender(
+                ServiceSender {
+                    pid: Pid::new(a.as_u64() ^ 0x5eed),
+                    account: TEST_ACCOUNT,
+                },
+                LifecycleSignal::Ready
+            ),
+            Err(NotifyError::UnknownSender)
+        );
+        // The right process id on the wrong account: a redrawn id belonging
+        // to some other principal must not resolve to this service.
+        assert_eq!(
+            init.notify_sender(
+                ServiceSender {
+                    pid: a,
+                    account: TEST_ACCOUNT + 1,
+                },
+                LifecycleSignal::Ready
+            ),
+            Err(NotifyError::UnknownSender)
+        );
+        assert_eq!(init.state_of("a"), Some(ServiceState::Starting));
+        assert_eq!(sink.count(events::NOTIFY_REJECTED), 2);
+
+        // Once the service is past `starting` its own process no longer
+        // resolves either: there is no readiness edge left to announce.
+        init.notify_sender(
+            ServiceSender {
+                pid: a,
+                account: TEST_ACCOUNT,
+            },
+            LifecycleSignal::Ready,
+        )
+        .expect("the first notice lands");
+        assert_eq!(
+            init.notify_sender(
+                ServiceSender {
+                    pid: a,
+                    account: TEST_ACCOUNT,
+                },
+                LifecycleSignal::Ready
+            ),
+            Err(NotifyError::UnknownSender)
+        );
+    }
+
+    /// A sender may also announce its own failure, which fails the service
+    /// and skips whatever was waiting on it.
+    #[test]
+    fn a_sender_can_announce_its_own_failure() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(notify_spec("a", &[])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
+        init.start_all().unwrap();
+        let a = init.running_pid("a").expect("a was spawned");
+
+        let report = init
+            .notify_sender(
+                ServiceSender {
+                    pid: a,
+                    account: TEST_ACCOUNT,
+                },
+                LifecycleSignal::Failed,
+            )
+            .expect("a announces its own failure");
+        assert_eq!(init.state_of("a"), Some(ServiceState::Failed));
+        assert_eq!(report.service, "a");
+        assert_eq!(
+            report
+                .started
+                .failed
+                .iter()
+                .map(|f| (f.name.as_str(), f.failure))
+                .collect::<Vec<_>>(),
+            [("b", StartFailure::DependencyFailed)]
+        );
+    }
+
     // --- SVC-4: on-demand endpoint activation + idle linger -------------
 
     /// An immediate-readiness on-demand service with the given idle-linger.
@@ -3076,17 +3344,17 @@ mod tests {
         init.register(on_demand_spec("fontd", 30)).unwrap();
         init.start_all().unwrap();
 
-        let out = init.connect("fontd", &caps, ClientId::new(1)).unwrap();
+        let out = init.connect("fontd", &caps, client(1)).unwrap();
         assert_eq!(out, ActivationOutcome::Connected);
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Running));
         assert_eq!(init.connected_count("fontd"), 1);
         assert_eq!(sink.count(events::SERVICE_ACTIVATED), 1);
         // Immediate readiness connects synchronously, so nothing is queued.
-        assert!(init.take_ready_clients().is_empty());
+        assert!(init.take_released_clients().is_empty());
         assert_eq!(init.pending_count("fontd"), 0);
 
         // A second client shares the already-running service.
-        let out = init.connect("fontd", &caps, ClientId::new(2)).unwrap();
+        let out = init.connect("fontd", &caps, client(2)).unwrap();
         assert_eq!(out, ActivationOutcome::Connected);
         assert_eq!(init.connected_count("fontd"), 2);
         assert_eq!(sink.count(events::SERVICE_ACTIVATED), 1);
@@ -3102,25 +3370,82 @@ mod tests {
         init.register(on_demand_notify_spec("fontd", 30)).unwrap();
         init.start_all().unwrap();
 
-        let out = init.connect("fontd", &caps, ClientId::new(7)).unwrap();
+        let out = init.connect("fontd", &caps, client(7)).unwrap();
         assert_eq!(out, ActivationOutcome::Queued);
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Starting));
         assert_eq!(init.pending_count("fontd"), 1);
         // Not ready yet: the client is parked, not woken (no busy-poll).
-        assert!(init.take_ready_clients().is_empty());
+        assert!(init.take_released_clients().is_empty());
         assert_eq!(sink.count(events::ACTIVATION_QUEUED), 1);
 
         // The service announces readiness: the parked client is released.
         init.notify("fontd", LifecycleSignal::Ready).unwrap();
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Running));
-        let ready = init.take_ready_clients();
-        assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].service, "fontd");
-        assert_eq!(ready[0].client, ClientId::new(7));
+        let released = init.take_released_clients();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].service, "fontd");
+        assert_eq!(released[0].client, client(7));
+        assert_eq!(released[0].outcome, ParkOutcome::Connected);
         assert_eq!(init.connected_count("fontd"), 1);
         assert_eq!(init.pending_count("fontd"), 0);
         // Drained exactly once.
-        assert!(init.take_ready_clients().is_empty());
+        assert!(init.take_released_clients().is_empty());
+    }
+
+    /// A park the manager stops tracking is always reported, so its client
+    /// is answered instead of blocking for ever on a service that is not
+    /// coming. Every way a park can end without a connection: the process
+    /// dies before it announces readiness, the service announces its own
+    /// failure, and the client withdraws.
+    #[test]
+    fn a_park_that_cannot_connect_is_reported_rather_than_dropped() {
+        let caps = CapabilitySet::empty();
+
+        // (1) The process dies before it ever announces readiness.
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(on_demand_notify_spec("fontd", 30)).unwrap();
+        init.start_all().unwrap();
+        init.connect("fontd", &caps, client(1)).unwrap();
+        let pid = init.running_pid("fontd").expect("activated");
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(Duration64::ZERO);
+        let released = init.take_released_clients();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].client, client(1));
+        assert_eq!(released[0].outcome, ParkOutcome::Abandoned);
+        assert_eq!(init.pending_count("fontd"), 0);
+
+        // (2) The service announces its own failure while a client waits.
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(on_demand_notify_spec("fontd", 30)).unwrap();
+        init.start_all().unwrap();
+        init.connect("fontd", &caps, client(2)).unwrap();
+        init.notify("fontd", LifecycleSignal::Failed).unwrap();
+        let released = init.take_released_clients();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].client, client(2));
+        assert_eq!(released[0].outcome, ParkOutcome::Abandoned);
+
+        // (3) The client withdraws the park it is still blocked on.
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(on_demand_notify_spec("fontd", 30)).unwrap();
+        init.start_all().unwrap();
+        init.connect("fontd", &caps, client(3)).unwrap();
+        init.disconnect("fontd", client(3), Duration64::ZERO)
+            .unwrap();
+        let released = init.take_released_clients();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].client, client(3));
+        assert_eq!(released[0].outcome, ParkOutcome::Abandoned);
     }
 
     #[test]
@@ -3134,13 +3459,13 @@ mod tests {
         init.register(on_demand_spec("fontd", 30)).unwrap();
         init.start_all().unwrap();
 
-        init.connect("fontd", &caps, ClientId::new(1)).unwrap();
+        init.connect("fontd", &caps, client(1)).unwrap();
         let pid = init.running_pid("fontd").unwrap();
         assert_eq!(init.linger_deadline("fontd"), None);
 
         // Last client disconnects at t=100 -> one-shot linger armed at t=130.
         let t0 = Duration64::from_secs(100);
-        init.disconnect("fontd", ClientId::new(1), t0).unwrap();
+        init.disconnect("fontd", client(1), t0).unwrap();
         assert_eq!(init.connected_count("fontd"), 0);
         assert_eq!(
             init.linger_deadline("fontd"),
@@ -3197,8 +3522,8 @@ mod tests {
         init.register(on_demand_spec("fontd", 30)).unwrap();
         init.start_all().unwrap();
 
-        init.connect("fontd", &caps, ClientId::new(1)).unwrap();
-        init.disconnect("fontd", ClientId::new(1), Duration64::from_secs(100))
+        init.connect("fontd", &caps, client(1)).unwrap();
+        init.disconnect("fontd", client(1), Duration64::from_secs(100))
             .unwrap();
         assert_eq!(
             init.linger_deadline("fontd"),
@@ -3206,7 +3531,7 @@ mod tests {
         );
 
         // Fresh interest before the deadline cancels the pending stop.
-        let out = init.connect("fontd", &caps, ClientId::new(2)).unwrap();
+        let out = init.connect("fontd", &caps, client(2)).unwrap();
         assert_eq!(out, ActivationOutcome::Connected);
         assert_eq!(init.linger_deadline("fontd"), None);
 
@@ -3230,7 +3555,7 @@ mod tests {
         // A client without the required capability is refused, and the
         // service is not started (the check runs before any state change).
         assert_eq!(
-            init.connect("secure", &CapabilitySet::empty(), ClientId::new(1)),
+            init.connect("secure", &CapabilitySet::empty(), client(1)),
             Err(ActivateError::Denied)
         );
         assert_eq!(init.state_of("secure"), Some(ServiceState::Inactive));
@@ -3240,11 +3565,7 @@ mod tests {
 
         // A client that holds it connects and activates the service.
         let out = init
-            .connect(
-                "secure",
-                &cap_set(&[CapabilityId::FS_MOUNT]),
-                ClientId::new(2),
-            )
+            .connect("secure", &cap_set(&[CapabilityId::FS_MOUNT]), client(2))
             .unwrap();
         assert_eq!(out, ActivationOutcome::Connected);
         assert_eq!(init.state_of("secure"), Some(ServiceState::Running));
@@ -3260,7 +3581,7 @@ mod tests {
         init.start_all().unwrap();
 
         assert_eq!(
-            init.connect("ghost", &caps, ClientId::new(1)),
+            init.connect("ghost", &caps, client(1)),
             Err(ActivateError::UnknownService)
         );
         assert_eq!(sink.count(events::ACTIVATION_DENIED), 1);
@@ -3280,7 +3601,7 @@ mod tests {
         init.start_all().unwrap();
 
         assert_eq!(
-            init.connect("fontd", &caps, ClientId::new(1)),
+            init.connect("fontd", &caps, client(1)),
             Err(ActivateError::Unavailable)
         );
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Inactive));
@@ -3289,7 +3610,7 @@ mod tests {
 
         // Once the display appears the same connect activates the service.
         init.satisfy_condition(ReadyCondition::DisplayPresent);
-        let out = init.connect("fontd", &caps, ClientId::new(1)).unwrap();
+        let out = init.connect("fontd", &caps, client(1)).unwrap();
         assert_eq!(out, ActivationOutcome::Connected);
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Running));
     }
@@ -3305,25 +3626,25 @@ mod tests {
         init.start_all().unwrap();
 
         // Fill the queue exactly to the bound.
-        for i in 0..super::MAX_PENDING_PER_SERVICE {
+        for i in 0..MAX_PENDING_PER_SERVICE {
             assert_eq!(
-                init.connect("fontd", &caps, ClientId::new(i as u64))
+                init.connect("fontd", &caps, client(u8::try_from(i).expect("bound fits")))
                     .unwrap(),
                 ActivationOutcome::Queued
             );
         }
-        assert_eq!(init.pending_count("fontd"), super::MAX_PENDING_PER_SERVICE);
+        assert_eq!(init.pending_count("fontd"), MAX_PENDING_PER_SERVICE);
 
         // One more is refused rather than growing the queue without limit.
         assert_eq!(
             init.connect(
                 "fontd",
                 &caps,
-                ClientId::new(super::MAX_PENDING_PER_SERVICE as u64)
+                client(u8::try_from(MAX_PENDING_PER_SERVICE).expect("bound fits"))
             ),
             Err(ActivateError::QueueFull)
         );
-        assert_eq!(init.pending_count("fontd"), super::MAX_PENDING_PER_SERVICE);
+        assert_eq!(init.pending_count("fontd"), MAX_PENDING_PER_SERVICE);
         assert_eq!(sink.count(events::ACTIVATION_DENIED), 1);
     }
 
@@ -4369,7 +4690,7 @@ mod tests {
         init.register(on_demand_spec("fontd", 30).with_restart(RestartPolicy::Always))
             .unwrap();
         init.start_all().unwrap();
-        init.connect("fontd", &caps, ClientId::new(1)).unwrap();
+        init.connect("fontd", &caps, client(1)).unwrap();
         let pid = init.running_pid("fontd").unwrap();
 
         // The crash arms a restart backoff — `schedule_restart` applies the

@@ -94,6 +94,11 @@ pub enum NotifyError {
     /// production the manager maps the kernel-attested sender to a service,
     /// so this is wire corruption or a stale sender, never a normal path.
     UnknownService,
+    /// The kernel-attested sender matches no service the manager is
+    /// currently starting, so there is nothing the notice could be about.
+    /// A principal can only ever announce its own service's readiness, and
+    /// this one is not one.
+    UnknownSender,
     /// The named service is not in the `starting` state, so it has no
     /// pending readiness edge to resolve — a service cannot become ready
     /// before it is spawned, nor announce readiness twice. The notice is a
@@ -105,6 +110,7 @@ impl fmt::Display for NotifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::UnknownService => "readiness notice names an unknown service",
+            Self::UnknownSender => "readiness notice from a principal that is no starting service",
             Self::NotStarting => "readiness notice for a service that is not starting",
         };
         f.write_str(message)

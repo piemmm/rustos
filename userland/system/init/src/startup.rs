@@ -41,6 +41,14 @@
 //!   image's layer with the administrator's overrides applied) enables it, so
 //!   an administrator can turn it off durably. Optional and **repeatable**,
 //!   up to [`MAX_ENROLLED_SERVICES`].
+//! * `ondemand <path> <account>` — a service that is **registered but not
+//!   started**: it is activated only when a client asks the manager to
+//!   connect to it, and stops again once it has been idle for its linger.
+//!   Optional and **repeatable**, up to [`MAX_ONDEMAND_SERVICES`].
+//!   Such a service is necessarily `notify`-ready: what a connecting client
+//!   waits for is the service's endpoint being answerable, and only the
+//!   service knows when it has bound it — treating a successful spawn as
+//!   readiness would hand the client an endpoint that does not exist yet.
 //!
 //! Every `session`/`service` directive names its account, and the parser
 //! resolves the name onto its uid **at parse time** through the compiled-in
@@ -86,6 +94,22 @@ pub const MAX_SERVICES: usize = count_keyword_directives(DEFAULT_CONFIG, b"servi
 /// `enrolled` directive grows the bound with it.
 pub const MAX_ENROLLED_SERVICES: usize = count_keyword_directives(DEFAULT_CONFIG, b"enrolled");
 
+/// The on-demand tier's size: how many `ondemand` directives the compiled-in
+/// [`DEFAULT_CONFIG`] declares.
+///
+/// Derived from the floor text exactly as [`MAX_SERVICES`] is, so adding an
+/// `ondemand` directive grows the bound with it.
+pub const MAX_ONDEMAND_SERVICES: usize = count_keyword_directives(DEFAULT_CONFIG, b"ondemand");
+
+/// Every service the compiled-in boot description registers, across all
+/// three tiers.
+///
+/// The number that can announce readiness at once, which is what the
+/// lifecycle-notice endpoint's outstanding-call bound is sized from. Derived
+/// from the floor text like its three parts, so it tracks the floor rather
+/// than a magic number.
+pub const REGISTERED_SERVICES: usize = MAX_SERVICES + MAX_ENROLLED_SERVICES + MAX_ONDEMAND_SERVICES;
+
 /// The startup configuration compiled into the `init` `Run` binary.
 ///
 /// The session is the login service (`plans/PI.md` P11): every text console
@@ -119,7 +143,11 @@ pub const DEFAULT_CONFIG: &str = "\
 # administrator's `disable` survives a reboot. It starts after `netstack` so
 # the interfaces exist by the time its first query is due, and needs no
 # readiness gate of its own — a query it cannot send simply fails and its
-# bounded backoff paces the retry.
+# bounded backoff paces the retry. `fontd` (plans/FONT-SERVICE.md) is the one
+# `ondemand` entry: nothing but a graphical consumer ever wants glyphs, so it
+# is registered here and started only when one asks the manager to connect to
+# it — which is what keeps it off a headless machine entirely, and what parks
+# that consumer until the endpoint is answerable instead of racing the bind.
 console
 service /System/Services/sysinfod.app/Run sysinfod
 service /System/Services/netstack.app/Run netstack
@@ -128,6 +156,7 @@ service /System/Services/devmgr.app/Run devmgr
 service /System/Services/seatmgr.app/Run seatmgr
 service /System/Services/confd.app/Run confd
 enrolled /System/Services/timed.app/Run timed
+ondemand /System/Services/fontd.app/Run fontd
 session /System/Services/login.app/Run login
 ";
 
@@ -297,6 +326,11 @@ pub struct StartupConfig<'a> {
     enrolled: [Launch<'a>; MAX_ENROLLED_SERVICES],
     /// How many of [`enrolled`](Self::enrolled) are populated.
     enrolled_count: usize,
+    /// The declared `ondemand` entries in declaration order; only the first
+    /// [`ondemand_count`](Self::ondemand_count) entries are populated.
+    ondemand: [Launch<'a>; MAX_ONDEMAND_SERVICES],
+    /// How many of [`ondemand`](Self::ondemand) are populated.
+    ondemand_count: usize,
 }
 
 impl<'a> StartupConfig<'a> {
@@ -324,6 +358,8 @@ impl<'a> StartupConfig<'a> {
         let mut service_count = 0usize;
         let mut enrolled: [Launch<'a>; MAX_ENROLLED_SERVICES] = [EMPTY; MAX_ENROLLED_SERVICES];
         let mut enrolled_count = 0usize;
+        let mut ondemand: [Launch<'a>; MAX_ONDEMAND_SERVICES] = [EMPTY; MAX_ONDEMAND_SERVICES];
+        let mut ondemand_count = 0usize;
 
         for raw in text.lines() {
             let line = strip_comment(raw).trim();
@@ -370,6 +406,14 @@ impl<'a> StartupConfig<'a> {
                     enrolled[enrolled_count] = launch;
                     enrolled_count += 1;
                 }
+                "ondemand" => {
+                    let launch = parse_launch(argument.ok_or(ConfigError::MissingArgument)?)?;
+                    if ondemand_count >= MAX_ONDEMAND_SERVICES {
+                        return Err(ConfigError::TooManyServices);
+                    }
+                    ondemand[ondemand_count] = launch;
+                    ondemand_count += 1;
+                }
                 _ => return Err(ConfigError::UnknownDirective),
             }
         }
@@ -384,6 +428,8 @@ impl<'a> StartupConfig<'a> {
             service_count,
             enrolled,
             enrolled_count,
+            ondemand,
+            ondemand_count,
         })
     }
 
@@ -410,6 +456,14 @@ impl<'a> StartupConfig<'a> {
     #[must_use]
     pub fn enrolled(&self) -> &[Launch<'a>] {
         &self.enrolled[..self.enrolled_count]
+    }
+
+    /// The on-demand services, in declaration order. Each is registered so a
+    /// client can ask for it, and started only when one does. Empty when the
+    /// config declares none.
+    #[must_use]
+    pub fn ondemand(&self) -> &[Launch<'a>] {
+        &self.ondemand[..self.ondemand_count]
     }
 }
 
@@ -484,9 +538,9 @@ const fn count_keyword_directives(text: &str, keyword: &[u8]) -> usize {
     count
 }
 
-/// Whether the config line `bytes[start..end]`'s keyword is `keyword`: its
-/// keyword — the first whitespace-delimited token, after a `#`-comment is
-/// stripped and surrounding whitespace trimmed — is exactly `service`.
+/// Whether the config line `bytes[start..end]` opens with `keyword`: its
+/// first whitespace-delimited token, after a `#`-comment is stripped and
+/// surrounding whitespace trimmed, equals it exactly.
 const fn line_keyword_is(bytes: &[u8], start: usize, end: usize, keyword: &[u8]) -> bool {
     let mut lo = start;
     let mut hi = end;
@@ -534,7 +588,7 @@ const fn is_ascii_whitespace(b: u8) -> bool {
 mod tests {
     use super::{
         service_name, ConfigError, Launch, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN,
-        MAX_ENROLLED_SERVICES, MAX_SERVICES,
+        MAX_ENROLLED_SERVICES, MAX_ONDEMAND_SERVICES, MAX_SERVICES, REGISTERED_SERVICES,
     };
 
     extern crate alloc;
@@ -602,6 +656,26 @@ mod tests {
                 path: "/System/Services/timed.app/Run",
                 uid: tairix_users::TIMED_UID.0,
             }],
+        );
+        // The on-demand tier: `fontd` alone. It is on neither list above,
+        // which is the whole point — nothing starts it at boot, so a
+        // headless machine never runs it at all.
+        assert_eq!(
+            config.ondemand(),
+            &[Launch {
+                path: "/System/Services/fontd.app/Run",
+                uid: tairix_users::FONTD_UID.0,
+            }],
+        );
+        for started in config.services().iter().chain(config.enrolled()) {
+            assert_ne!(started.path, "/System/Services/fontd.app/Run");
+        }
+        // The name the boot description registers is the name a font client
+        // asks the manager to connect to; a drift here would leave every
+        // graphical consumer connecting to a service nothing answers to.
+        assert_eq!(
+            service_name(config.ondemand()[0].path),
+            tairix_abi::font_ipc::FONT_SERVICE_NAME
         );
     }
 
@@ -714,6 +788,67 @@ mod tests {
         // The same derivation over the `enrolled` keyword: `timed` alone.
         assert_eq!(floor.enrolled().len(), MAX_ENROLLED_SERVICES);
         assert_eq!(MAX_ENROLLED_SERVICES, 1);
+        // And over `ondemand`: `fontd` alone.
+        assert_eq!(floor.ondemand().len(), MAX_ONDEMAND_SERVICES);
+        assert_eq!(MAX_ONDEMAND_SERVICES, 1);
+        // The three tiers together are what the notice endpoint is sized
+        // from, so the sum must be the whole registered population.
+        assert_eq!(
+            REGISTERED_SERVICES,
+            floor.services().len() + floor.enrolled().len() + floor.ondemand().len()
+        );
+    }
+
+    #[test]
+    fn ondemand_directives_are_collected_in_order_and_bounded() {
+        let config = StartupConfig::parse(
+            "console\n\
+             session /x login\n\
+             ondemand /System/Services/fontd.app/Run fontd\n",
+        )
+        .expect("an on-demand directive parses");
+        assert_eq!(
+            config.ondemand(),
+            &[Launch {
+                path: "/System/Services/fontd.app/Run",
+                uid: tairix_users::FONTD_UID.0,
+            }],
+        );
+        // An on-demand entry is on no other list: registering it must not
+        // also start it.
+        assert!(config.services().is_empty());
+        assert!(config.enrolled().is_empty());
+
+        // The bound is derived from the floor the same way the others are,
+        // and an overflow fails closed rather than dropping an entry.
+        let mut text = String::from("console\nsession /x login\n");
+        for n in 0..=MAX_ONDEMAND_SERVICES {
+            let _ = writeln!(text, "ondemand /System/Services/o{n} fontd");
+        }
+        assert_eq!(
+            StartupConfig::parse(&text),
+            Err(ConfigError::TooManyServices),
+        );
+    }
+
+    #[test]
+    fn an_ondemand_directive_validates_like_every_other_launch() {
+        assert_eq!(
+            StartupConfig::parse("console\nsession /x login\nondemand\n"),
+            Err(ConfigError::MissingArgument),
+        );
+        assert_eq!(
+            StartupConfig::parse("console\nsession /x login\nondemand relative fontd\n"),
+            Err(ConfigError::NotAbsolutePath),
+        );
+        assert_eq!(
+            StartupConfig::parse("console\nsession /x login\nondemand /x\n"),
+            Err(ConfigError::MissingAccount),
+        );
+        assert_eq!(
+            StartupConfig::parse("console\nsession /x login\nondemand /x nobody-here\n"),
+            Err(ConfigError::UnknownAccount),
+        );
     }
 
     #[test]

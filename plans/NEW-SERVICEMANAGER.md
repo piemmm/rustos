@@ -12,6 +12,22 @@ request, and fails closed (§4, §5.4).
 
 ---
 
+## Ledger
+
+| Item | What it is | State |
+|---|---|---|
+| SVC-1 | `MAX_SERVICES` derived from the floor text rather than a magic cap | done |
+| SVC-A | The kernel as the single capability authority, and the live PID 1 engine | done |
+| SVC-2 | Service lifecycle + the readiness protocol (`lib/abi` types and the admission engine) | done |
+| SVC-3 | Discovery + the fail-closed enrolment store under `/System/Settings` | done |
+| SVC-3b | The signed unit-metadata record and its discovery parser | done |
+| SVC-4 | On-demand endpoint activation + the tickless idle linger (engine core) | done |
+| SVC-5 | On-demand `fontd`: the activation broker, the lifecycle-notice endpoint, and the deleted `login`-starts-`fontd` hack | done |
+| SVC-6 | Per-user manager scope — the authority boundary (engine core) | done |
+| SVC-7 | Restart policy + reverse-dependency stop/shutdown ordering (engine core) | done |
+| SVC-8 | Control API, `servicectl`, audit, rlimits, docs/gate | in progress |
+| SVC-9 | Reclaiming an activated service when its last client dies | planned |
+
 ## 1. What exists today (evolve, do not greenfield)
 
 PID 1 (`userland/system/init`) is already an embryonic service manager:
@@ -168,12 +184,19 @@ merely *spawned*. Add:
 - **Named readiness conditions / targets** (`network-up`,
   `filesystems-mounted`, `boot-complete`, `display-present`,
   `seat-available`, …). A service declares the conditions it requires; the
-  manager releases it only when all are satisfied. This **generalises the
-  headless case**: GUI-only services (`fontd`) simply never activate because
-  `display-present` / `seat-available` is never satisfied (§17.3), which is
-  exactly how the current "`login` starts `fontd`" hack (`FONT-SERVICE.md`
-  §3) is **deleted** (§2.14), not reworked. The one-way non-GUI→GUI edge
-  stays intact (§17.3/§17.4).
+  manager releases it only when all are satisfied.
+  A condition is only ever satisfied by a principal that genuinely knows it,
+  which is the whole of its value: `display-present` has no truthful producer
+  today (`seatmgr` and `devmgr` both reach ready on a headless machine), so
+  nothing declares it and nothing asserts it. The honest candidate is the
+  display driver's bind of `DISPLAY_ENDPOINT`, which no registered service
+  observes yet.
+  The headless case does **not** rest on a condition: a GUI-only service is
+  `on-demand`, so a machine where nothing graphical runs never activates it —
+  structurally, and without anything having to assert a fact. That is how the
+  "`login` starts `fontd`" hack (`FONT-SERVICE.md` §3) was **deleted** (§2.14,
+  SVC-5), not reworked. The one-way non-GUI→GUI edge stays intact
+  (§17.3/§17.4).
 
 ### 3.4 On-demand activation — capability-brokered endpoint activation
 
@@ -457,9 +480,9 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   bundle's signed unit metadata decodes into a `ServiceSpec` via
   `ServiceSpec::from_manifest`. Not yet wired to a live boot path: the
   `/System/Services` **scan** itself, and reading the store off `/System`,
-  are done by the loader/kernel seam that SVC-4/SVC-5 wire; the boot floor
-  still comes from the compiled-in `DEFAULT_CONFIG` until the growable
-  registered tier lands on the `lib/rt` heap (§3.10).
+  wait on the discovery scan; the boot floor still comes from the compiled-in
+  `DEFAULT_CONFIG` until the growable registered tier lands on the `lib/rt`
+  heap (§3.10).
 
 ### SVC-3b — Service unit-metadata record + discovery parser — DONE
 - `lib/abi/src/service.rs` gains the `ServiceManifest`/`ServiceUnit` pair —
@@ -488,9 +511,11 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   path-traversal-shaped dependency into the graph. Fails closed on a name
   defect. Host tests cover the full round trip of every field and the
   name-policy rejection of a bad service or dependency name.
-- Still deferred to the loader/kernel seam (SVC-4/SVC-5): reading the
-  `ServiceManifest` bytes out of a discovered `/System/Services` bundle's
-  signed `AppInfo` and calling `from_manifest` on the live boot path.
+- Still ahead: reading the `ServiceManifest` bytes out of a discovered
+  `/System/Services` bundle's signed `AppInfo` and calling `from_manifest` on
+  the live boot path. Until the discovery scan lands, the floor's own shape —
+  including which entries are `ondemand` — comes from the compiled-in boot
+  description, which is the one place the floor has ever been described.
 
 ### SVC-4 — On-demand endpoint activation + idle linger — DONE (engine core)
 - `lib/abi/src/service.rs` gains `ActivationMode` (`Permanent` |
@@ -532,19 +557,122 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   before any state; unknown-service and condition-gated (headless) connects
   fail closed; the pending queue is bounded and fails closed; `add_duration`
   carry/saturation.
-- Not yet wired to a live transport: binding the reserved endpoint, mapping a
-  kernel-attested connecting principal to a `ClientId`, and arming the real
-  one-shot timers off `linger_deadline`/`grace_deadline` is the loader/kernel
-  seam SVC-5/SVC-8 wire (the QEMU vertical lands with the live `fontd`
-  activation in SVC-5). The growable registered tier past the floor still
-  waits on the `lib/rt` heap (§3.10).
+- The live transport is SVC-5 below: PID 1 binds the activation endpoint,
+  reads the connecting principal's `ClientId` from the call's attested
+  origin, and arms the one-shot timers off `linger_deadline`/`grace_deadline`
+  through `next_deadline`/`expire_due`. The growable registered tier past the
+  floor still waits on the `lib/rt` heap (§3.10).
 
-### SVC-5 — Delete the `login`-starts-`fontd` hack
-- `fontd` becomes an on-demand, `display-present`-gated service; remove the
-  `login` start path and the x86_64/riscv64 compiled-in fallbacks. Update
-  `FONT-SERVICE.md` §3 in the same change (§2.14).
-- QEMU: graphical login/`desktop` still gets fonts (via activation); a
-  headless boot never activates `fontd`.
+### SVC-5 — On-demand `fontd`; the `login`-starts-`fontd` hack deleted — DONE
+
+**The defect this closed, measured.** `ipc_call` to an unbound endpoint fails
+closed with `NotFound` — it does not park. `login::ensure_fontd` spawned the
+service detached and went straight on, so a consumer that reached
+`FONT_ENDPOINT` first got `FontUnavailable` and `lib/svg` refused the whole
+document. The desktop was exposed to it; it was a live race, not a test
+artefact.
+
+**What now happens.** `fontd` is registered on-demand and started by nothing.
+A client asks the manager to connect it, the manager activates the service and
+parks the call, the service announces readiness once it has bound its
+endpoint, and the manager answers the parked call. The ordering is the
+system's, and the whole handshake lives in one place on each side.
+
+**The transport, and why it needed no kernel change.**
+
+- **Park without polling.** `call_recv` yields a per-call *ticket* and
+  `call_reply(endpoint, ticket, …)` answers it later, so the manager holds a
+  parked client's ticket and replies when the engine reports the park
+  resolved. The client's own `ipc_call` blocks in the kernel throughout.
+- **Identity and authority are kernel-attested.** `call_peer_origin` returns
+  an `Origin`; the activation path reads its `ProcId` as the `ClientId` and
+  its `CapabilitySummary` as the set `Init::connect` checks, never anything
+  the frame carried.
+- **Four endpoints, not four ops.** `SERVICE_ACTIVATION_ENDPOINT` (a client
+  brokering a connection) and `SERVICE_NOTICE_ENDPOINT` (a service announcing
+  itself) each take their own reserved id beside `SERVICE_CONTROL_ENDPOINT` /
+  `SERVICE_ENROL_ENDPOINT`, for the reason recorded there: different acts,
+  different gates, free to diverge. The activation request reuses the existing
+  frame prefix and bounded name; the notice *is* the existing `ReadyNotice`.
+- **Neither new endpoint carries a send capability, deliberately.** Any
+  principal may *ask* for a shared service — what decides the answer is the
+  per-service `connect_capability` the engine checks against the caller's
+  attested authority, and restricting the endpoint would instead put every
+  service behind one capability and make the per-service gate unreachable.
+  Reaching the notice endpoint buys even less: a notice names no service, so
+  it can only ever say something about its own sender.
+
+**How a notice is attributed, and why that is sound.** The manager resolves a
+notice from two facts the kernel vouches for about the sender — the process id
+it recorded when it spawned the service, and the account the kernel switched
+that process onto — and only against a service that is still `starting`. The
+account is the load-bearing half: only the manager holds the authority to
+start a process on a service account, so the set of principals bearing one is
+exactly the set of instances it spawned, and the process id then picks the
+instance out of that set. Task ids are drawn at random from the 40-bit pid
+space and are not reusable while their task is live, so the residue is a
+same-account instance drawing a dead sibling's number inside the reap window —
+an accident, not a reachable attack, and one that could gain nothing a
+same-account instance does not already have. `ClientId` is the attested
+`ProcId` rather than a pid for the reason recorded in its own docs: a client
+identity outlives the call that made it, where a notice does not.
+
+**Every park resolves, both ways.** `Init::take_released_clients` reports each
+park exactly once as `Connected` or `Abandoned`; the transport replies to the
+held ticket either way. Abandonment is what a service whose process dies
+before readiness, one that announces its own failure, or a client that
+withdraws all produce — before this, each of those silently dropped the
+engine's waiter and left the client blocked on a reply nothing would send.
+
+**Registration.** The compiled-in boot description gained an `ondemand <path>
+<account>` directive: registered, not started, given the shared idle-linger
+default and marked `notify`-ready. An on-demand service is necessarily
+`notify`-ready — what a client waits for is the endpoint being answerable, and
+only the service knows when it has bound it. That directive is the *floor's*
+description, the one place the floor's shape has ever lived; a discovered
+bundle carries its own activation mode, linger and readiness in its signed
+manifest through `ServiceSpec::from_manifest`, so there is no second source of
+truth.
+
+**`fontd` requires no readiness condition, and this is deliberate.** The
+earlier sketch had it `require` `display-present` with `seatmgr` providing it.
+`seatmgr` is a seat-administration broker that runs on a headless machine
+exactly as it does on a graphical one, and `devmgr` likewise reaches ready
+either way, so `provides = display-present` on either would assert something
+neither knows — and a lie in a security gate is worse than no gate. Nor is the
+condition needed: only a graphical consumer ever asks for a glyph, so
+on-demand activation *is* the "never on a headless machine" guarantee,
+structurally and exactly. The condition machinery (engine and ABI) stands
+unchanged and gains its producer when a truthful one exists — the honest
+candidate is the display driver's bind of `DISPLAY_ENDPOINT`, which no
+registered service observes today.
+
+**The consumer side, in one place.** `lib/font` connects through the broker
+once, before its first request, under the same one-shot that installs its
+transport — so every graphical consumer inherits the ordering without its own
+handshake. A refused connect is not fatal: the call is an ordering handshake,
+not an authorisation, so a machine whose manager does not broker the service
+degrades exactly as it did before.
+
+**Deleted (§2.14).** `login::ensure_fontd`, its `FONTD_STARTED` latch,
+`FONTD_SERVICE_PATH`, and the `FONTD_STARTED` / `FONTD_UNAVAILABLE` audit ids
+(numbers left as gaps, never reused). `FONT-SERVICE.md` §3 and
+`docs/src/userland/fontd.md` were rewritten in the same change.
+
+**Kept, deliberately: the compiled-in `FONTD_RXE` program row.** It is not a
+`login` fallback. `spawn_layout.rs` embeds every service and command app on
+x86_64/riscv64 — the explicitly-justified boot floor for the ports whose
+on-disk storage floors have not landed (`plans/ARCHSUPPORT.md`) — and compiles
+none of them on aarch64, which spawns from the verified store bundle. Removing
+`fontd`'s row alone would break the font service on two ports while leaving
+its twenty siblings; it goes when that whole table does.
+
+**QEMU witness.** `tairix-test-svgtext-qemu-aarch64` no longer waits for a
+`fontd` readiness line before typing its command: the fixture's first glyph
+request is what activates the service, and the broker holds that call until
+the endpoint answers. A script that gated on the service first would have been
+testing its own ordering rather than the system's, so the enrolment pins that
+it does not.
 
 ### SVC-6 — Per-user manager scope — DONE (engine core)
 - **Authority scope is a first-class engine value.** `init/src/scope.rs`
@@ -571,14 +699,12 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   service nor another user's service (fail closed + audited); an out-of-scope
   enrolment fails closed; and `permits_account`/`scope()` behaviour. Docs
   updated (`docs/src/userland/init.md` *Authority scope*).
-- **Remaining (transport, deferred like the sibling stages).** Spawning the
-  per-user manager at session start with the user's sub-ceiling, parenting/
-  supervising/reaping the user's services, and logout teardown in
-  reverse-dependency order ride with the loader/kernel transport seam
-  (SVC-5/SVC-8) and the `lib/rt` heap for the growable tier (§3.10). The
-  *shared sandboxed service* case (a user activation of system-scoped `fontd`
-  is brokered a connection, never the service's authority, §3.2) lands with
-  that live activation transport (SVC-5).
+- **Remaining.** Spawning the per-user manager at session start with the
+  user's sub-ceiling, parenting/supervising/reaping the user's services, and
+  logout teardown in reverse-dependency order. The *shared sandboxed service*
+  case — a user activation of system-scoped `fontd` is brokered a connection,
+  never the service's authority (§3.2) — is live with SVC-5's activation
+  broker.
 
 ### SVC-7 — Restart policy + reverse-dependency stop/shutdown ordering — DONE (engine core)
 - `lib/abi/src/service.rs` gains `RestartPolicy` (`never` | `on-failure` |
@@ -622,10 +748,9 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   independents untouched); fail-closed unknown-service stop; and shutdown
   cancelling a pending restart.
 - The capability-gated control surface that gates *who* may `stop`/restart a
-  service is SVC-8; the live one-shot-timer wiring off `restart_deadline` rides
-  with the loader/kernel transport seam SVC-5/SVC-8 wire, on the `lib/rt` heap
-  for the growable tier (§3.10). A blind periodic restart is not offered (§2.1,
-  §3.7). The health-check/liveness **watchdog** that turns a *wedged* (rather
+  service is SVC-8; the one-shot-timer wiring off `restart_deadline` is live in
+  PID 1's park through `next_deadline`/`expire_due`. A blind periodic restart
+  is not offered (§2.1, §3.7). The health-check/liveness **watchdog** that turns a *wedged* (rather
   than exited) service into that same restart path landed as an engine core in
   SVC-8 (below).
 
@@ -648,9 +773,9 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   gains `limits`/`with_limits`/`limits()`, and `ServiceSpec::from_manifest`
   threads the decoded limits through so a discovered bundle's declared
   limits reach the manager. **Kernel enforcement at spawn** (threading
-  `spec.limits()` into the `spawn_as` path) rides with the loader/kernel
-  transport seam (SVC-5) — the metadata is carried and validated now; the
-  live enforcement wiring is not yet in the boot path.
+  `spec.limits()` into the `spawn_as` path) is still ahead — the metadata is
+  carried and validated now; the live enforcement wiring is not yet in the
+  boot path.
 - **Control surface (start/stop) — DONE (ABI + engine core).** The versioned
   reserved-endpoint control protocol is `lib/abi/src/service_control.rs`:
   `SERVICE_CONTROL_ENDPOINT` (registered in `is_reserved_endpoint`), a
@@ -697,11 +822,12 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   killed, wedge→force-kill→reap→`on-failure` relaunch (even on a zero exit
   code), wedge under `never` killed-but-left-down, and a deliberate stop
   disarming it. The **live heartbeat transport** — a supervised driver/daemon
-  renewing its heartbeat to its manager, and the reactor arming the real
-  one-shot off `watchdog_deadline` — rides with the SVC-5 control transport
-  below, so `plans/FIX-IO.md`'s block drivers renew through it once it exists;
-  the engine core is complete and proven host-side first, exactly as the
-  sibling stages staged their transport.
+  renewing its heartbeat to its manager — is still ahead, so `plans/FIX-IO.md`'s
+  block drivers renew through it once it exists; the reactor already arms the
+  one-shot off `watchdog_deadline` through `next_deadline`/`expire_due`. A
+  heartbeat is the same act as a readiness notice — a service reporting on
+  itself — so it belongs on SVC-5's lifecycle-notice endpoint with the same
+  attested-sender attribution, not on a second one.
 - **One-shot deadline fold — DONE (engine core).** The four per-name
   deadline accessors left the transport to ask about each service in turn,
   which no reactor can do: it needs one instant to program its single wait
@@ -825,7 +951,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
     readable at the instant the manager must decide what to bring up, and the
     only sanctioned pre-unlock read is the store service's `CAP_DRV_LOAD`-gated
     whitelist, which PID 1 must not hold. An on-disk vendor record waits for the
-    `/System/Services` discovery scan (SVC-5), which needs that same read path
+    `/System/Services` discovery scan, which needs that same read path
     and must answer the question properly. `effective` is one pure function over
     the pair. This retires the `SystemConfigFile::SystemServices` whitelist
     entry, which named a path the mount table makes unreachable and never had a
@@ -851,20 +977,38 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   - PID 1 gains `CAP_FS_ACCESS` for the two documents. Per-inode
     authorisation still applies under its attested identity, and the vendor
     layer's volume is read-only, so its reach there can never write.
-- **Remaining (TODO).** The **live heartbeat transport** (a supervised driver
-  renewing its heartbeat, so `plans/FIX-IO.md`'s block drivers can) and a
-  vertical for a live watchdog kill+restart, and the live rlimit enforcement at
-  spawn (which rides the loader/kernel seam, SVC-5). Full §7 gate on each
-  landing.
+- **Remaining.** The **live heartbeat transport** (a supervised driver
+  renewing its heartbeat, so `plans/FIX-IO.md`'s block drivers can — on SVC-5's
+  lifecycle-notice endpoint, which already attributes a service's report to its
+  attested sender), a vertical for a live watchdog kill+restart, and the live
+  rlimit enforcement at spawn. Full §7 gate on each landing.
 
 ---
+
+### SVC-9 — Reclaiming an activated service when its last client dies — PLANNED
+
+The idle-linger path is armed by an explicit `disconnect`, and a client that
+*dies* sends none: the manager is not the parent of a font client and has no
+event for its exit, so its reference stays in the sink and the service it
+activated is never idle-stopped. Nothing is leaked and nothing is wrong — the
+service simply outlives its last user, which is exactly the behaviour the
+`login`-spawned `fontd` had — but the linger `ondemand` promises only bites
+for clients that exit cleanly enough to say so, and `lib/font` deliberately
+does not (a process cannot promise to run its own teardown).
+
+What this needs is client liveness the manager does not have: a kernel-side
+signal that the principal holding a connection is gone. The shape worth
+considering first is the one the endpoint already knows — the kernel owns the
+call endpoint and the process table, so it can retire a connection with its
+process — rather than a manager-side reaper, which would have to poll.
+Surfaced here rather than papered over with a heartbeat or a scan.
 
 ## 7. Cross-references
 
 - `plans/SPAWN.md` — the `SPAWN` syscall, admit/parent-child wait link, and
   the `lib/rt` heap (SP5b) the growable registered tier depends on.
 - `plans/FONT-SERVICE.md` — `fontd`, the `FONT_ENDPOINT` protocol, and the
-  `login`-starts-`fontd` hack this plan deletes (§3/SVC-5).
+  on-demand activation that replaced the `login`-starts-`fontd` hack (SVC-5).
 - `plans/FIX-DESKTOP.md` §2.4 — why a launcher-as-parent breaks reaping (and
   why a service manager legitimately parents what it supervises).
 - `plans/USERS.md` — the service accounts system services run as.
