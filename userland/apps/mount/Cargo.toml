@@ -12,6 +12,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The shared command-line option-value resolver: one definition of
+# "attached value or the following argument", so no two tools disagree.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The frozen `Errno`, the `MountFlags` mount-policy bitmap the tool parses
 # and presents, and the `sysinfo-v1` mount-list surface; `mount` invents no
 # parallel error or flag set and never links a kernel or driver crate.

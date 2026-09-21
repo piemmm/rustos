@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::GroupaddError;
+use tairix_util::argv::option_value;
 
 /// Maximum length of a group name, in bytes.
 ///
@@ -126,12 +127,7 @@ fn value<'a>(
     args: &[&'a str],
     index: &mut usize,
 ) -> Result<&'a str, GroupaddError> {
-    if let Some(v) = inline {
-        return Ok(v);
-    }
-    let v = args.get(*index).copied().ok_or(GroupaddError::Usage)?;
-    *index += 1;
-    Ok(v)
+    option_value(inline, args, index).ok_or(GroupaddError::Usage)
 }
 
 /// Validate a group name against `[a-z_][a-z0-9_-]*` within [`MAX_NAME_LEN`].

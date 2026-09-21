@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::UseraddError;
+use tairix_util::argv::option_value;
 
 /// Maximum length of a login name, in bytes.
 ///
@@ -166,12 +167,7 @@ fn value<'a>(
     args: &[&'a str],
     index: &mut usize,
 ) -> Result<&'a str, UseraddError> {
-    if let Some(v) = inline {
-        return Ok(v);
-    }
-    let v = args.get(*index).copied().ok_or(UseraddError::Usage)?;
-    *index += 1;
-    Ok(v)
+    option_value(inline, args, index).ok_or(UseraddError::Usage)
 }
 
 /// Validate a login name against `[a-z_][a-z0-9_-]*` within

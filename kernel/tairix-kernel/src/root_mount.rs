@@ -76,8 +76,8 @@ use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::boot_session::{LateBootSession, LATE_BOOT_SESSION};
 use tairix_kernel_core::{
     build_identity_table, load_groups_db, load_users_db_source, ConsoleRead, ConsoleWrite,
-    GroupsLoadError, HeldUsersDbSource, LateIdentity, LateUsersAdmin, LateUsersDb, SleepLock,
-    UserAdminEngine, UsersDbSource, UsersLoadError,
+    GroupsLoadError, HeldUsersDbSource, LateGroupsDb, LateIdentity, LateUsersAdmin, LateUsersDb,
+    SleepLock, UserAdminEngine, UsersDbSource, UsersLoadError,
 };
 use tairix_kernel_sec::{GroupId, IdentityTable};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -333,6 +333,9 @@ pub struct UnlockInstall<'a> {
     /// The set-once cell the verified user/group identity table is published
     /// into (the `fs_*` group-resolution source).
     pub identity: &'a LateIdentity,
+    /// The cell the validated `groups-v1` text is published into, so the
+    /// ungated group directory can render a gid as a name.
+    pub groups: &'a LateGroupsDb,
     /// The sink that publishes the writable `/System/Logs` + `/System/Settings`
     /// backing from a second read-write view of the just-unlocked volume.
     pub writable: &'a dyn WritableRootSink,
@@ -366,6 +369,9 @@ pub struct AdminInstall {
     /// The live identity-table cell the engine swaps on each commit — the
     /// same cell as [`UnlockInstall::identity`], in `'static` form.
     pub identity: &'static LateIdentity,
+    /// The live group-registry cell the engine swaps on each commit — the
+    /// same cell as [`UnlockInstall::groups`], in `'static` form.
+    pub groups: &'static LateGroupsDb,
     /// The audit sink the engine records every operation outcome to.
     pub audit: &'static (dyn Sink + Sync),
 }
@@ -901,6 +907,15 @@ pub static LATE_USERS_ADMIN: LateUsersAdmin = LateUsersAdmin::new();
 /// halves the one unlock publishes are one definition.
 pub static LATE_IDENTITY: LateIdentity = LateIdentity::new();
 
+/// The live group registry the ungated group directory is served from.
+///
+/// Published by the trusted unlock step beside [`LATE_USERS_DB`] and
+/// replaced by the audited admin engine's commit. Carries no credential,
+/// so it needs neither the users cell's set-once install nor its pending
+/// state: before the unlock the directory answers the compiled-in system
+/// groups alone.
+pub static LATE_GROUPS_DB: LateGroupsDb = LateGroupsDb::new();
+
 /// The result of [`unlock_root_disk_interactively`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum UnlockOutcome {
@@ -985,6 +1000,9 @@ pub(crate) fn finish_install(
     if let Some(group) = groups_db.lookup(tairix_users::STORAGE_GROUP) {
         install.storage_gid.install(GroupId(group.gid().0));
     }
+    // The registry carries no credential, so it is published as its own
+    // text for the ungated group directory to render names from.
+    install.groups.publish(groups_db.serialise().into_bytes());
     // With both live cells installed, build and publish the
     // `CAP_USER_ADMIN` engine over the same verified state
     // (`plans/CAPABILITY_USE.md` CU4). Fail-soft: a boot path that wires
@@ -998,6 +1016,7 @@ pub(crate) fn finish_install(
             groups_db,
             admin.users,
             admin.identity,
+            admin.groups,
             backing,
             admin.audit,
         );
@@ -2630,6 +2649,7 @@ mod tests {
             &UnlockInstall {
                 users: &late,
                 identity: &late_identity,
+                groups: &LateGroupsDb::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &storage_gid,
@@ -2695,6 +2715,7 @@ mod tests {
             &UnlockInstall {
                 users: &late,
                 identity: &late_identity,
+                groups: &LateGroupsDb::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),
@@ -2750,6 +2771,7 @@ mod tests {
             &UnlockInstall {
                 users: &late,
                 identity: &late_identity,
+                groups: &LateGroupsDb::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),
@@ -2818,6 +2840,7 @@ mod tests {
             &UnlockInstall {
                 users: &late,
                 identity: &late_identity,
+                groups: &LateGroupsDb::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),
@@ -2866,6 +2889,7 @@ mod tests {
             &UnlockInstall {
                 users: &late,
                 identity: &late_identity,
+                groups: &LateGroupsDb::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),
@@ -2908,6 +2932,7 @@ mod tests {
             &UnlockInstall {
                 users: &LateUsersDb::new(),
                 identity: &boot_identity(),
+                groups: &LateGroupsDb::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),
@@ -2933,6 +2958,7 @@ mod tests {
             &UnlockInstall {
                 users: &LateUsersDb::new(),
                 identity: &boot_identity(),
+                groups: &LateGroupsDb::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),
@@ -2967,6 +2993,7 @@ mod tests {
             &UnlockInstall {
                 users: &late,
                 identity: &late_identity,
+                groups: &LateGroupsDb::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),
@@ -3005,6 +3032,7 @@ mod tests {
             &UnlockInstall {
                 users: &late,
                 identity: &late_identity,
+                groups: &LateGroupsDb::new(),
                 writable: &NoWritableRootSink,
                 admin: None,
                 storage_gid: &LateStorageGid::new(),

@@ -34,7 +34,7 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define TAIRIX_SYSINFO_QUERY_NAME_MAX 20u
 #define TAIRIX_SYSINFO_QUERY_RECORD_LEN 26u
-#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1092u
+#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1144u
 #define TAIRIX_SYSINFO_LOAD_FIXED_SHIFT 11u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
@@ -80,6 +80,8 @@
 #define TAIRIX_SYSINFO_QUERY_VOLUME_IO_QUEUE ((uint16_t)39u)
 #define TAIRIX_SYSINFO_QUERY_GPU_DEVICE_STATS ((uint16_t)40u)
 #define TAIRIX_SYSINFO_QUERY_SYSTEM_CONFIG ((uint16_t)41u)
+#define TAIRIX_SYSINFO_QUERY_GROUP_DIRECTORY ((uint16_t)42u)
+#define TAIRIX_SYSINFO_QUERY_SELF_ACCOUNT ((uint16_t)43u)
 
 /* Process lifecycle state carried in a process record (uint8_t). */
 #define TAIRIX_PROCESS_STATE_RUNNABLE ((uint8_t)0u)
@@ -114,7 +116,11 @@
 #define TAIRIX_MOUNT_MEDIUM_SOLID_STATE ((uint8_t)2u)
 #define TAIRIX_MOUNT_MEDIUM_REMOVABLE ((uint8_t)3u)
 #define TAIRIX_MOUNT_MEDIUM_VIRTUAL ((uint8_t)4u)
-#define TAIRIX_USER_DIRECTORY_NAME_MAX 32u
+#define TAIRIX_MAX_USERNAME_LEN 32u
+#define TAIRIX_MAX_GROUPNAME_LEN 32u
+#define TAIRIX_MAX_DISPLAY_NAME_LEN 64u
+#define TAIRIX_MAX_PATH_LEN 128u
+#define TAIRIX_MAX_SUPPLEMENTARY_GIDS 16u
 
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */
 #define TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN 24u
@@ -129,6 +135,9 @@
 #define TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
 #define TAIRIX_USER_DIRECTORY_REQUEST_WIRE_LEN 8u
 #define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 40u
+#define TAIRIX_GROUP_DIRECTORY_REQUEST_WIRE_LEN 8u
+#define TAIRIX_GROUP_DIRECTORY_RECORD_WIRE_LEN 40u
+#define TAIRIX_SELF_ACCOUNT_RECORD_WIRE_LEN 432u
 
 /* Byte length of a full RESOURCE_LIMITS response: one record per LimitKind. */
 #define TAIRIX_SYSINFO_RESOURCE_LIMITS_REPORT_LEN 224u
@@ -274,7 +283,40 @@ typedef struct tairix_user_directory_request {
 typedef struct tairix_user_directory_record {
     uint32_t uid;
     uint8_t name_len;
-    uint8_t name[TAIRIX_USER_DIRECTORY_NAME_MAX];
+    uint8_t name[TAIRIX_MAX_USERNAME_LEN];
 } tairix_user_directory_record_t;
+
+/* Group-directory request payload (offset/limit paging). */
+typedef struct tairix_group_directory_request {
+    uint32_t offset;
+    uint16_t limit;
+    uint16_t flags;
+} tairix_group_directory_request_t;
+
+/* One group entry: the gid + group-name pairing, and nothing else (no
+* membership list, ACL, or grant). Valid for name_len bytes. */
+typedef struct tairix_group_directory_record {
+    uint32_t gid;
+    uint8_t name_len;
+    uint8_t name[TAIRIX_MAX_GROUPNAME_LEN];
+} tairix_group_directory_record_t;
+
+/* The calling principal's own account record: the identity fields a
+* person is shown about themselves. Deliberately carries no capability
+* grant ceiling, no account state, and no password material. */
+typedef struct tairix_self_account_record {
+    uint32_t uid;
+    uint32_t primary_gid;
+    uint8_t gid_count;
+    uint8_t name_len;
+    uint8_t display_len;
+    uint8_t home_len;
+    uint8_t shell_len;
+    uint32_t supplementary_gids[TAIRIX_MAX_SUPPLEMENTARY_GIDS];
+    uint8_t name[TAIRIX_MAX_USERNAME_LEN];
+    uint8_t display_name[TAIRIX_MAX_DISPLAY_NAME_LEN];
+    uint8_t home[TAIRIX_MAX_PATH_LEN];
+    uint8_t shell[TAIRIX_MAX_PATH_LEN];
+} tairix_self_account_record_t;
 
 #endif /* TAIRIX_SYSINFO_H */

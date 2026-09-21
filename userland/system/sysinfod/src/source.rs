@@ -20,10 +20,11 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
-    CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord,
-    KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
-    MountRecord, ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord, SystemIdentity,
-    Uptime, UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord,
+    GroupDirectoryRecord, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand,
+    MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord, RamzipStats, ResourceLimitRecord,
+    SeatRecord, SelfAccountRecord, SystemIdentity, Uptime, UserDirectoryRecord,
+    VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin, ProcId};
@@ -168,6 +169,29 @@ pub trait SysinfoSource {
     /// list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
     fn user_directory(&self, caller: &Caller) -> Result<Vec<UserDirectoryRecord>, Errno>;
+
+    /// Return the group directory: every group's gid + name pair, and
+    /// nothing else — no membership list, no ACL, no grant.
+    ///
+    /// The group sibling of [`user_directory`](Self::user_directory), and
+    /// ungated on the same ground: rendering a gid as a name is the same
+    /// display need as rendering a uid as one. The owned list is returned
+    /// whole and [`crate::serve`] applies the `offset`/`limit` paging;
+    /// ordering must be stable across paged calls.
+    fn group_directory(&self, caller: &Caller) -> Result<Vec<GroupDirectoryRecord>, Errno>;
+
+    /// Return the record of the account `caller` runs as: its name,
+    /// display name, home, shell, primary group, and memberships.
+    ///
+    /// Self-scoped and ungated. The implementation resolves the record
+    /// against [`Caller::uid`] — the uid the kernel attested on the
+    /// request — never a value the payload carries, so a caller can only
+    /// ever read *its own* account. The record carries no grant ceiling,
+    /// no account state, and no credential.
+    ///
+    /// [`None`] is an account no database holds, which a caller renders
+    /// as an unknown record rather than an error.
+    fn self_account(&self, caller: &Caller) -> Result<Option<SelfAccountRecord>, Errno>;
 
     /// Return the per-CPU execution-time accounting, one record per online
     /// CPU in ascending CPU order.

@@ -6046,8 +6046,20 @@ account-authoring policy (`tairix_users::{DEFAULT_SHELL, default_home,
 next_id}`) was hoisted into `lib/users` and the `users` session +
 `tools/mkimage` deduplicated onto it, and `useradd` creates the account
 with an unusable random password record (the GNU `!`-field equivalent —
-a password is set afterwards via the `users` tool), the
+a password is set afterwards via `passwd`), the
 session-baseline ceiling, and the shared shell/home defaults.
+`usermod`, `userdel`, `passwd` and `groupdel` complete that
+shadow-utils family, over the same syscall and the same manifest
+request (`passwd` additionally requests console-read, because it
+prompts). Every one of the six, and the interactive `users` session,
+now shares one `users_admin` client — `lib/useradmin`: the encode
+buffer, the reply capacity, the fail-closed listing walk, the one
+refusal wording, and the `:`-delimited relayed-listing form whose
+renderer and parser are a single definition. `users` gained a
+non-interactive `-l`/`--list` that prints that form, which is what a
+graphical caller reads back through the elevated-capture seam: the
+interactive session cannot serve one, because a captured run's standard
+input is closed.
 
 The `plans/APPS.md` §12.1 Stage C coreutils build-out is under way:
 `true`, `false`, `yes`, `basename`, `dirname`, `mkdir`, `rmdir`, `head`,

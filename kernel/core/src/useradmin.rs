@@ -46,6 +46,7 @@ use tairix_util::fmt::format_usize;
 use crate::audit::{emit, AuditEvent};
 use crate::fs::LateIdentity;
 use crate::groups::build_identity_table;
+use crate::groups::LateGroupsDb;
 use crate::sleeplock::SleepLock;
 use crate::users::{HeldUsersDbSource, LateUsersDb};
 
@@ -226,6 +227,10 @@ pub struct UserAdminEngine {
     /// The live identity table spawn/fs resolution reads; swapped on
     /// every successful mutation.
     identity_cell: &'static LateIdentity,
+    /// The live group registry the ungated group directory renders names
+    /// from; swapped on every successful mutation, so a created or deleted
+    /// group is visible to a display as soon as it is durable.
+    groups_cell: &'static LateGroupsDb,
     /// The root-volume writes the engine commits through.
     backing: &'static dyn UserAdminBacking,
     /// The audit sink every operation outcome is recorded to.
@@ -241,6 +246,7 @@ impl UserAdminEngine {
         groups: GroupsDb,
         users_cell: &'static LateUsersDb,
         identity_cell: &'static LateIdentity,
+        groups_cell: &'static LateGroupsDb,
         backing: &'static dyn UserAdminBacking,
         audit: &'static (dyn Sink + Sync),
     ) -> Self {
@@ -248,6 +254,7 @@ impl UserAdminEngine {
             state: SleepLock::new(AdminState { users, groups }),
             users_cell,
             identity_cell,
+            groups_cell,
             backing,
             audit,
         }
@@ -295,6 +302,7 @@ impl UserAdminEngine {
             .replace(HeldUsersDbSource::new(core::mem::take(&mut users_bytes)));
         replaced?;
         self.identity_cell.replace(table)?;
+        self.groups_cell.publish(groups_text.into_bytes());
 
         *state = candidate;
         Ok(())

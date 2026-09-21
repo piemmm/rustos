@@ -14,12 +14,12 @@ use tairix_abi::sysinfo::{
     fold_cache_ledgers, spec_for, CacheLedgerListRequest, CacheLedgerRecord, CacheReportRequest,
     CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
     CpuTimeRecord, CrashRecord, CrashRecordRequest, DesktopFrameRecord, DesktopFrameStatsRequest,
-    DesktopFrameTotals, DeviceStatsRequest, HardwareTreeRequest, IrqListRequest, IrqRecord,
-    MountListRequest, MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest,
-    ProcessListRequest, ProcessRecord, RaidListRequest, ReclaimClassRecord, ReclaimListRequest,
-    ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
-    UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoQueueRecord,
-    VolumeIoRequest, VolumeIoStatsRecord,
+    DesktopFrameTotals, DeviceStatsRequest, GroupDirectoryRecord, GroupDirectoryRequest,
+    HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest, MountRecord,
+    NetInterfaceListRequest, NetInterfaceRatesRequest, ProcessListRequest, ProcessRecord,
+    RaidListRequest, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
+    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
+    VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest, VolumeIoStatsRecord,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -190,6 +190,10 @@ fn dispatch(
         resource_limits(source, caller, response)
     } else if query == SysinfoQueryId::USER_DIRECTORY {
         user_directory(source, caller, payload, response)
+    } else if query == SysinfoQueryId::GROUP_DIRECTORY {
+        group_directory(source, caller, payload, response)
+    } else if query == SysinfoQueryId::SELF_ACCOUNT {
+        self_account(source, caller, response)
     } else if query == SysinfoQueryId::MEMORY_PRESSURE {
         write_bytes(&source.memory_pressure(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::MEMORY_PRESSURE_BAND {
@@ -925,6 +929,43 @@ fn user_directory(
     )
 }
 
+/// Decode the [`GroupDirectoryRequest`], apply paging, and pack the
+/// selected [`GroupDirectoryRecord`]s into `response`.
+fn group_directory(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = GroupDirectoryRequest::from_bytes(payload)?;
+    let records = source.group_directory(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        GroupDirectoryRecord::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
+/// Answer the caller's own account record, resolved against the uid the
+/// kernel attested on this request.
+///
+/// An account no database holds answers zero bytes rather than an error:
+/// the caller asked about itself and the honest answer is that there is no
+/// record, which a client renders as an unknown account.
+fn self_account(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let Some(record) = source.self_account(caller)? else {
+        return Ok(0);
+    };
+    write_bytes(&record.to_le_bytes(), response)
+}
+
 /// Pack a paged window of fixed-`wire_len` records into `response`.
 ///
 /// Shared by every list query so the paging arithmetic — offset bounds, the
@@ -1013,11 +1054,12 @@ mod tests {
         CacheReportRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
         CpuTimeRecord, CrashAccess, CrashFaultBucket, CrashFaultClass, CrashRecord,
         CrashRecordRequest, DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals,
-        HardwareTreeRequest, IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage,
-        MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest,
-        MountRecord, MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState,
-        RaidListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        GroupDirectoryRecord, GroupDirectoryRequest, HardwareTreeRequest, IrqListRequest,
+        IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats,
+        MemoryTotal, MountAvailability, MountListRequest, MountRecord, MountVolumeState,
+        ProcessListRequest, ProcessRecord, ProcessState, RaidListRequest, RamzipStats,
+        ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
+        SelfAccountRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoQueueRecord,
         VolumeIoRequest, VolumeIoStatsRecord, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
         MACHINE_ID_LEN, MAX_CACHE_REPORT_ENTRIES, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN,
@@ -1387,6 +1429,35 @@ mod tests {
                 UserDirectoryRecord::new(1000, b"alice").unwrap(),
                 UserDirectoryRecord::new(1001, b"bob").unwrap(),
             ])
+        }
+        fn group_directory(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<GroupDirectoryRecord>, Errno> {
+            Ok(alloc::vec![
+                GroupDirectoryRecord::new(0, b"system").unwrap(),
+                GroupDirectoryRecord::new(100, b"storage").unwrap(),
+                GroupDirectoryRecord::new(1000, b"alice").unwrap(),
+            ])
+        }
+        fn self_account(&self, caller: &Caller) -> Result<Option<SelfAccountRecord>, Errno> {
+            // Keyed on the attested uid, exactly as the production source
+            // is, so a test that changes the caller changes the answer.
+            if caller.uid() != 1000 {
+                return Ok(None);
+            }
+            SelfAccountRecord::new(
+                1000,
+                1000,
+                &[100],
+                tairix_abi::sysinfo::SelfAccountText {
+                    name: b"alice",
+                    display_name: b"Alice Liddell",
+                    home: b"/Users/alice",
+                    shell: b"/System/Commands/elsh.app/Run",
+                },
+            )
+            .map(Some)
         }
         fn system_identity(&self, _caller: &Caller) -> Result<SystemIdentity, Errno> {
             SystemIdentity::new([9u8; MACHINE_ID_LEN], 1, 0, 0, b"tairix-box")
@@ -2208,6 +2279,73 @@ mod tests {
         assert_eq!(
             serve_once(&source, &caller(&caps), &sink, &req_end, &mut resp),
             Ok(0)
+        );
+    }
+
+    #[test]
+    fn group_directory_needs_no_capability_and_pages() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let page = |offset: u32, limit: u16, resp: &mut [u8]| {
+            let gdr = GroupDirectoryRequest {
+                offset,
+                limit,
+                flags: 0,
+            };
+            let req = request_bytes(SysinfoQueryId::GROUP_DIRECTORY, &gdr.to_le_bytes());
+            serve_once(&source, &caller(&caps), &sink, &req, resp)
+        };
+        let mut resp = [0u8; 1024];
+        let n = page(0, 10, &mut resp).unwrap();
+        assert_eq!(n, 3 * GroupDirectoryRecord::WIRE_LEN);
+        let first =
+            GroupDirectoryRecord::from_bytes(&resp[..GroupDirectoryRecord::WIRE_LEN]).unwrap();
+        assert_eq!(first.gid, 0);
+        assert_eq!(first.name_bytes(), b"system");
+        // A gid-to-name pairing is self-evidently public, so unaudited.
+        assert!(sink.events.borrow().as_slice().is_empty());
+
+        let n = page(2, 10, &mut resp).unwrap();
+        assert_eq!(n, GroupDirectoryRecord::WIRE_LEN);
+        let tail =
+            GroupDirectoryRecord::from_bytes(&resp[..GroupDirectoryRecord::WIRE_LEN]).unwrap();
+        assert_eq!(tail.name_bytes(), b"alice");
+
+        // Paging past the end is the empty terminator.
+        assert_eq!(page(9, 10, &mut resp), Ok(0));
+    }
+
+    #[test]
+    fn self_account_answers_the_attested_caller_and_needs_no_capability() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let req = request_bytes(SysinfoQueryId::SELF_ACCOUNT, &[]);
+        let mut resp = [0u8; 1024];
+        let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, SelfAccountRecord::WIRE_LEN);
+        let record = SelfAccountRecord::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(record.uid, 1000);
+        assert_eq!(record.name_bytes(), b"alice");
+        assert_eq!(record.display_name_bytes(), b"Alice Liddell");
+        assert_eq!(record.home_bytes(), b"/Users/alice");
+        assert_eq!(record.supplementary_gids(), &[100]);
+        // Self-scoped, so unaudited.
+        assert!(sink.events.borrow().as_slice().is_empty());
+
+        // The answer follows the *attested* uid: a different principal
+        // asking the same query gets its own record, never this one.
+        assert_eq!(
+            serve_once(&source, &kernel_caller(), &sink, &req, &mut resp),
+            Ok(0)
+        );
+
+        // Fails closed when the response buffer cannot hold the record.
+        let mut tiny = [0u8; SelfAccountRecord::WIRE_LEN - 1];
+        assert_eq!(
+            serve_once(&source, &caller(&caps), &sink, &req, &mut tiny),
+            Err(Errno::BufferTooSmall)
         );
     }
 

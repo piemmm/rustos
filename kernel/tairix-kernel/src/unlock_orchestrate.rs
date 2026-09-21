@@ -48,7 +48,7 @@ use crate::driver_catalog::KERNEL_DRIVER_SIGNER_PUBKEY;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
 use crate::root_mount::{
     unlock_root_disk_interactively, with_system_volume, AdminInstall, UnlockInstall, UnlockOutcome,
-    WritableRootSink, LATE_IDENTITY, LATE_USERS_ADMIN, LATE_USERS_DB,
+    WritableRootSink, LATE_GROUPS_DB, LATE_IDENTITY, LATE_USERS_ADMIN, LATE_USERS_DB,
 };
 use crate::shared_block::{DriverStoreService, SharedBlock};
 use crate::system_mount::{
@@ -389,11 +389,13 @@ pub fn finish_unlock<B: Block + 'static>(
         let install = UnlockInstall {
             users: &LATE_USERS_DB,
             identity: &LATE_IDENTITY,
+            groups: &LATE_GROUPS_DB,
             writable: &writable,
             admin: Some(AdminInstall {
                 cell: &LATE_USERS_ADMIN,
                 users: &LATE_USERS_DB,
                 identity: &LATE_IDENTITY,
+                groups: &LATE_GROUPS_DB,
                 audit,
             }),
             storage_gid: &crate::volume_policy::LATE_STORAGE_GID,

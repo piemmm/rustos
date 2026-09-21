@@ -77,11 +77,13 @@ use tairix_abi::switchboard_ipc::{
 use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerListRequest, CacheLedgerRecord,
     CacheReportRequest, CpuLoadRecord, CpuLoadRequest, DesktopFrameRecord,
-    DesktopFrameStatsRequest, DesktopFrameTotals, DeviceStatsRequest, IntrospectDomain,
-    KernelMemoryStats, MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest,
-    ProcessRecord, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-    SeatListRequest, SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime, VolumeIoQueueRecord,
-    VolumeIoRequest, VolumeIoStatsRecord, SYSINFO_REPLY_STATUS_LEN,
+    DesktopFrameStatsRequest, DesktopFrameTotals, DeviceStatsRequest, GroupDirectoryRecord,
+    GroupDirectoryRequest, IntrospectDomain, KernelMemoryStats, MemoryPressureStats,
+    MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, RamzipStats,
+    ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
+    SelfAccountRecord, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
+    UserDirectoryRequest, VolumeIoQueueRecord, VolumeIoRequest, VolumeIoStatsRecord,
+    SYSINFO_REPLY_STATUS_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::users_admin::{
@@ -264,7 +266,47 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
     }
+    exercise_sysinfo_directory_records(bytes);
     exercise_sysinfo_memory_records(bytes);
+}
+
+/// The account-directory half of the `sysinfo-v1` record sweep: the two
+/// ungated directory frames and the caller's own account record.
+fn exercise_sysinfo_directory_records(bytes: &[u8]) {
+    if let Ok(req) = UserDirectoryRequest::from_bytes(bytes) {
+        let redecoded = UserDirectoryRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(rec) = UserDirectoryRecord::from_bytes(bytes) {
+        let redecoded = UserDirectoryRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+        assert!(rec.name_bytes().len() <= usize::from(rec.name_len));
+    }
+    if let Ok(req) = GroupDirectoryRequest::from_bytes(bytes) {
+        let redecoded = GroupDirectoryRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(rec) = GroupDirectoryRecord::from_bytes(bytes) {
+        let redecoded = GroupDirectoryRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+        assert!(rec.name_bytes().len() <= usize::from(rec.name_len));
+    }
+    if let Ok(rec) = SelfAccountRecord::from_bytes(bytes) {
+        let redecoded = SelfAccountRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+        // Every borrowed field stays inside its own inline buffer, so a
+        // hostile declared length can never read a neighbouring field.
+        assert_eq!(rec.name_bytes().len(), usize::from(rec.name_len));
+        assert_eq!(rec.display_name_bytes().len(), usize::from(rec.display_len));
+        assert_eq!(rec.home_bytes().len(), usize::from(rec.home_len));
+        assert_eq!(rec.shell_bytes().len(), usize::from(rec.shell_len));
+        assert_eq!(rec.supplementary_gids().len(), usize::from(rec.gid_count));
+    }
 }
 
 /// Every `sysinfo-v1` record family: the inventory, the memory accounting,

@@ -993,6 +993,7 @@ fn try_boot(
     // root. Until that install the cell fails every `users_db_read` closed, so
     // login refuses every attempt until a root is mounted.
     .with_users_db(&crate::root_mount::LATE_USERS_DB)
+    .with_groups_db(&crate::root_mount::LATE_GROUPS_DB)
     .with_users_admin(&crate::root_mount::LATE_USERS_ADMIN)
     // Serve the `fs_*` syscalls through the production filesystem service: it
     // routes each operation through the secured VFS against the late-installed

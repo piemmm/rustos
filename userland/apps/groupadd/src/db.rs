@@ -12,30 +12,13 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::users_admin::{decode_group_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST};
+use tairix_abi::users_admin::{UsersAdminRequest, USERS_ADMIN_MAX_REQUEST};
 use tairix_abi::Errno;
-use tairix_users::{next_id, IdRange, MAX_GROUPS_DB_LEN};
+use tairix_users::{next_id, IdRange};
 
 use crate::io::{GroupDb, GroupSpec};
 
-/// Byte capacity for a `ListGroups` reply: comfortably above the largest
-/// registry the kernel serialises (the same headroom the `users` tool's
-/// session uses for its list replies).
-const RESPONSE_CAPACITY: usize = 2 * MAX_GROUPS_DB_LEN;
-
-/// The transport that carries one encoded `users_admin` request and
-/// returns the response bytes written. On a running system this is the
-/// `users_admin` syscall; in tests an in-memory registry. Every
-/// authorisation decision stays on the far side of this seam.
-pub trait AdminChannel {
-    /// Submit `req`, writing any response into `out`.
-    ///
-    /// # Errors
-    ///
-    /// The [`Errno`] the registry raises — e.g.
-    /// [`Errno::PermissionDenied`] for a caller without `CAP_USER_ADMIN`.
-    fn call(&self, req: &[u8], out: &mut [u8]) -> Result<usize, Errno>;
-}
+pub use tairix_useradmin::AdminChannel;
 
 /// The production [`GroupDb`] over an [`AdminChannel`].
 pub struct GroupsAdminDb<'a> {
@@ -51,17 +34,10 @@ impl<'a> GroupsAdminDb<'a> {
 
     /// Every group's `(name, gid)`, from a `ListGroups` round trip.
     fn list(&self) -> Result<Vec<(String, u32)>, Errno> {
-        let mut req = [0u8; USERS_ADMIN_MAX_REQUEST];
-        let len = UsersAdminRequest::ListGroups.encode_into(&mut req)?;
-        let mut out = alloc::vec![0u8; RESPONSE_CAPACITY];
-        let used = self.channel.call(&req[..len], &mut out)?;
-        let bytes = out.get(..used).ok_or(Errno::LengthOutOfRange)?;
-        let mut groups = Vec::new();
-        for entry in decode_group_list(bytes)? {
-            let entry = entry?;
-            groups.push((String::from(entry.name), entry.gid));
-        }
-        Ok(groups)
+        Ok(tairix_useradmin::list_groups(self.channel)?
+            .into_iter()
+            .map(|group| (group.name, group.gid))
+            .collect())
     }
 }
 
@@ -89,7 +65,7 @@ impl GroupDb for GroupsAdminDb<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdminChannel, GroupsAdminDb, RESPONSE_CAPACITY};
+    use super::{AdminChannel, GroupsAdminDb};
     use crate::io::{GroupDb, GroupSpec};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -224,7 +200,7 @@ mod tests {
         struct Overlong;
         impl AdminChannel for Overlong {
             fn call(&self, _req: &[u8], _out: &mut [u8]) -> Result<usize, Errno> {
-                Ok(RESPONSE_CAPACITY + 1)
+                Ok(usize::MAX)
             }
         }
         let db = GroupsAdminDb::new(&Overlong);

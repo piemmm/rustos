@@ -227,7 +227,8 @@ pub use fs::{
     NULL_VOLUME_SERVICE,
 };
 pub use groups::{
-    build_identity_table, load_groups_db, system_identity_table, GroupsLoadError, GROUPS_DB_PATH,
+    build_identity_table, load_groups_db, system_identity_table, GroupsDbSource, GroupsLoadError,
+    LateGroupsDb, NullGroupsDbSource, GROUPS_DB_PATH, NULL_GROUPS_DB,
 };
 pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase, SchedWaitQueueArch};

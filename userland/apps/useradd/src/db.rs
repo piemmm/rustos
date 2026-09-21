@@ -32,39 +32,21 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::users_admin::{
-    decode_user_list, gid_list_into, grant_list_into, CreateUser, UsersAdminRequest,
-    USERS_ADMIN_MAX_REQUEST,
+    gid_list_into, grant_list_into, CreateUser, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::Errno;
 use tairix_users::{
-    default_home, next_id, IdRange, PasswordRecord, Salt, DEFAULT_SHELL, MAX_DB_LEN,
-    MIN_ITERATIONS, SALT_LEN, SESSION_BASELINE,
+    default_home, next_id, IdRange, PasswordRecord, Salt, DEFAULT_SHELL, MIN_ITERATIONS, SALT_LEN,
+    SESSION_BASELINE,
 };
 
 use crate::io::{UserDb, UserSpec};
-
-/// Byte capacity for a `ListUsers` reply: comfortably above the largest
-/// database the kernel serialises (the same headroom the `users` tool's
-/// session uses).
-const RESPONSE_CAPACITY: usize = 2 * MAX_DB_LEN;
 
 /// Length of the throwaway random secret behind the created account's
 /// unusable password record: 256 bits, so no guess can match it.
 const THROWAWAY_SECRET_LEN: usize = 32;
 
-/// The transport that carries one encoded `users_admin` request and
-/// returns the response bytes written. On a running system this is the
-/// `users_admin` syscall; in tests an in-memory database. Every
-/// authorisation decision stays on the far side of this seam.
-pub trait AdminChannel {
-    /// Submit `req`, writing any response into `out`.
-    ///
-    /// # Errors
-    ///
-    /// The [`Errno`] the database raises — e.g.
-    /// [`Errno::PermissionDenied`] for a caller without `CAP_USER_ADMIN`.
-    fn call(&self, req: &[u8], out: &mut [u8]) -> Result<usize, Errno>;
-}
+pub use tairix_useradmin::AdminChannel;
 
 /// A cryptographic randomness source (the kernel CSPRNG through
 /// `sys:random` in production). Refuses — never guesses — when the draw
@@ -94,17 +76,10 @@ impl<'a> UsersAdminDb<'a> {
 
     /// Every account's `(name, uid)`, from a `ListUsers` round trip.
     fn list(&self) -> Result<Vec<(String, u32)>, Errno> {
-        let mut req = [0u8; USERS_ADMIN_MAX_REQUEST];
-        let len = UsersAdminRequest::ListUsers.encode_into(&mut req)?;
-        let mut out = alloc::vec![0u8; RESPONSE_CAPACITY];
-        let used = self.channel.call(&req[..len], &mut out)?;
-        let bytes = out.get(..used).ok_or(Errno::LengthOutOfRange)?;
-        let mut users = Vec::new();
-        for entry in decode_user_list(bytes)? {
-            let entry = entry?;
-            users.push((String::from(entry.username), entry.uid));
-        }
-        Ok(users)
+        Ok(tairix_useradmin::list_users(self.channel)?
+            .into_iter()
+            .map(|account| (account.username, account.uid))
+            .collect())
     }
 
     /// A well-formed password record no password matches, from a
@@ -168,7 +143,7 @@ impl UserDb for UsersAdminDb<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdminChannel, Entropy, UsersAdminDb, RESPONSE_CAPACITY};
+    use super::{AdminChannel, Entropy, UsersAdminDb};
     use crate::io::{UserDb, UserSpec};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -421,7 +396,7 @@ mod tests {
         struct Overlong;
         impl AdminChannel for Overlong {
             fn call(&self, _req: &[u8], _out: &mut [u8]) -> Result<usize, Errno> {
-                Ok(RESPONSE_CAPACITY + 1)
+                Ok(usize::MAX)
             }
         }
         let db = UsersAdminDb::new(&Overlong, &ENTROPY);

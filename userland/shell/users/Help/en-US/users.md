@@ -4,7 +4,7 @@ users — administer user accounts and groups
 
 ## SYNOPSIS
 
-`users [-h | -?]`
+`users [-h | -? | -l]`
 
 ## DESCRIPTION
 
@@ -33,6 +33,7 @@ typed inside the session.
 
 ## OPTIONS
 
+- `-l, --list` — print the whole account and group listing in the relayable line form and exit, without a session.
 - `-h, -?` — show this command's own short help and exit.
 
 ## EXIT STATUS

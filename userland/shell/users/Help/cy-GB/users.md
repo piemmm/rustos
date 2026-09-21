@@ -4,7 +4,7 @@ users — gweinyddu cyfrifon defnyddwyr a grwpiau
 
 ## SYNOPSIS
 
-`users [-h | -?]`
+`users [-h | -? | -l]`
 
 ## DESCRIPTION
 
@@ -34,6 +34,7 @@ gorchmynion a deipir o fewn y sesiwn.
 
 ## OPTIONS
 
+- `-l, --list` — argraffu'r rhestriad cyfrifon a grwpiau cyfan ar ffurf llinellau y gellir eu trosglwyddo, ac ymadael, heb sesiwn.
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn ei hun a gadael.
 
 ## EXIT STATUS

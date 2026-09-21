@@ -30,6 +30,10 @@ name = "tairix-users-cli-run"
 path = "src/run.rs"
 
 [dependencies]
+# The shared `users_admin` client: the channel seam, the listing decode,
+# the relayable line form, and the one refusal wording every account
+# tool renders.
+tairix-useradmin = { path = "../../../lib/useradmin", version = "=0.0.0" }
 # The typed `users_admin` request/response wire surface plus the stable
 # `Errno` and capability vocabulary: the CLI encodes every operation through
 # these ABI types and invents no parallel format or error set.

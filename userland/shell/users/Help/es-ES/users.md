@@ -4,7 +4,7 @@ users — administrar cuentas de usuario y grupos
 
 ## SYNOPSIS
 
-`users [-h | -?]`
+`users [-h | -? | -l]`
 
 ## DESCRIPTION
 
@@ -34,6 +34,7 @@ comandos escritos dentro de la sesión.
 
 ## OPTIONS
 
+- `-l, --list` — imprimir todo el listado de cuentas y grupos en la forma de líneas retransmisibles y salir, sin sesión.
 - `-h, -?` — mostrar la ayuda corta de este comando y salir.
 
 ## EXIT STATUS

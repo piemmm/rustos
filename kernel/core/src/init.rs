@@ -2090,6 +2090,7 @@ fn run_phases<A: KernelArch>(
         app_store,
         seat_registry,
         users_db,
+        groups_db,
         users_admin,
         hw_tree,
         filesystem,
@@ -2503,7 +2504,11 @@ fn run_phases<A: KernelArch>(
             // material) is derived from the same kernel-held database
             // `users_db_read` serves; with none installed the directory is
             // truthfully empty.
-            users_db, heap,
+            users_db,
+            // The group directory (gid + group name, nothing else) is
+            // derived from the registry the unlock published; with none
+            // published it answers the compiled-in system groups alone.
+            groups_db, heap,
         )),
     );
 
@@ -3079,6 +3084,7 @@ mod tests {
             &crate::fs::NULL_FILESYSTEM,
             &crate::wallclock::NULL_WALL_CLOCK,
             &crate::NULL_USERS_DB,
+            &crate::NULL_GROUPS_DB,
             heap,
         );
         let read = || {

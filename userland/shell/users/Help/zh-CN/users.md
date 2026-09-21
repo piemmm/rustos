@@ -4,7 +4,7 @@ users — 管理用户账户和组
 
 ## SYNOPSIS
 
-`users [-h | -?]`
+`users [-h | -? | -l]`
 
 ## DESCRIPTION
 
@@ -29,6 +29,7 @@ users — 管理用户账户和组
 
 ## OPTIONS
 
+- `-l, --list` — 以可转发的行形式打印全部账户与组的清单并退出，不进入会话。
 - `-h, -?` — 显示本命令自身的简短帮助并退出。
 
 ## EXIT STATUS

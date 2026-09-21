@@ -38,6 +38,7 @@ use crate::fs::{
     FilesystemService, LateIdentity, VolumeForest, VolumeService, NULL_FILESYSTEM,
     NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
 };
+use crate::groups::{GroupsDbSource, NULL_GROUPS_DB};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
@@ -995,6 +996,16 @@ where
     /// move, not a global mutable static).
     pub users_db: &'static (dyn UsersDbSource + 'static),
 
+    /// The live group registry the ungated group-directory introspection
+    /// serves.
+    ///
+    /// Unwired until a boot path mounts the root volume and publishes the
+    /// loaded registry, in which case the directory truthfully answers the
+    /// compiled-in system groups alone. The registry carries no credential,
+    /// so unlike [`Self::users_db`] nothing authenticates against it and
+    /// nothing parks waiting for it.
+    pub groups_db: &'static (dyn GroupsDbSource + 'static),
+
     /// The account-administration engine the `users_admin` syscall
     /// dispatches into (`plans/CAPABILITY_USE.md` CU4).
     ///
@@ -1178,6 +1189,10 @@ where
             // `with_users_db` (`plans/PI.md` P11): `users_db_read` fails
             // closed through `NULL_USERS_DB`.
             users_db: &NULL_USERS_DB,
+            // Group registry unwired until a boot path mounts the root
+            // volume and publishes it: the group directory then answers the
+            // compiled-in system groups alone, never a fabricated one.
+            groups_db: &NULL_GROUPS_DB,
             users_admin: &NULL_USERS_ADMIN,
             // Hardware-tree store unwired until a boot path seeds the
             // discovered inventory and installs its store through
@@ -1340,6 +1355,19 @@ where
     #[must_use]
     pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.users_db = users_db;
+        self
+    }
+
+    /// Install the group registry the ungated group directory is served
+    /// from, consuming and returning `self`.
+    ///
+    /// The group half of [`Self::with_users_db`], handed the same
+    /// `'static` cell the unlock publishes the loaded registry into. Until
+    /// this is called the directory answers the compiled-in system groups
+    /// alone — the honest answer for a machine whose root is not unlocked.
+    #[must_use]
+    pub fn with_groups_db(mut self, groups_db: &'static (dyn GroupsDbSource + 'static)) -> Self {
+        self.groups_db = groups_db;
         self
     }
 

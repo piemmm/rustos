@@ -1019,7 +1019,9 @@ mod root_unlock {
         unlock_root_disk_interactively, NoWritableRootSink, UnlockInstall, UnlockOutcome,
     };
     use tairix_kernel::volume_policy::LateStorageGid;
-    use tairix_kernel_core::{ConsoleRead, LateIdentity, LateUsersDb, NullConsole, UsersDbSource};
+    use tairix_kernel_core::{
+        ConsoleRead, LateGroupsDb, LateIdentity, LateUsersDb, NullConsole, UsersDbSource,
+    };
     use tairix_test_encrypted_root_image as disk_image;
     use tairix_users::UsersDb;
 
@@ -1121,6 +1123,10 @@ mod root_unlock {
             &UnlockInstall {
                 users: &late,
                 identity: &late_identity,
+                // A fresh, unpublished registry cell: this vertical asserts
+                // nothing about the group directory, so it stands where the
+                // boot-wired cell would.
+                groups: &LateGroupsDb::new(),
                 // This vertical proves the unlock policy + users/identity
                 // install, not the writable-state mount (no driver-store
                 // device here to open a second window from), so nothing is

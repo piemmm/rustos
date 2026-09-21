@@ -669,6 +669,7 @@ tairix/
 │   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).
 │   ├── tz/              # Civil time zones: compiled IANA rule store reader.
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol.
+│   ├── useradmin/       # Shared `users_admin` client: requests, listings, refusals.
 │   ├── users/           # User-account database.
 │   ├── util/            # Strictly justified utilities.
 │   ├── vcmailbox/       # BCM2711 VideoCore firmware mailbox client.

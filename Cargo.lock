@@ -2209,6 +2209,19 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-useradmin",
+ "tairix-users",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-groupdel"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
+ "tairix-useradmin",
  "tairix-users",
 ]
 
@@ -2746,6 +2759,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-procinfo",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2835,6 +2849,18 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+]
+
+[[package]]
+name = "tairix-passwd"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
+ "tairix-useradmin",
+ "tairix-users",
+ "tairix-util",
 ]
 
 [[package]]
@@ -6479,7 +6505,40 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-useradmin",
  "tairix-users",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-useradmin"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-users",
+]
+
+[[package]]
+name = "tairix-userdel"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
+ "tairix-useradmin",
+ "tairix-users",
+]
+
+[[package]]
+name = "tairix-usermod"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
+ "tairix-useradmin",
+ "tairix-users",
+ "tairix-util",
 ]
 
 [[package]]
@@ -6499,6 +6558,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-useradmin",
  "tairix-users",
 ]
 

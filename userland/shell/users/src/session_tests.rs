@@ -4,6 +4,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use tairix_abi::users_admin::{
     gid_list_into, grant_list_into, GroupEntry, ListResponseBuilder, UserEntry, UsersAdminRequest,
@@ -53,14 +54,14 @@ impl ToolIo for ScriptedIo {
 /// The scripted result of one channel call.
 enum Reply {
     Ok(Vec<u8>),
-    Err(i64),
+    Err(Errno),
 }
 
 /// A recording channel: captures every encoded request and answers from
 /// a script.
 struct RecordingChannel {
-    requests: Vec<Vec<u8>>,
-    replies: Vec<Reply>,
+    requests: RefCell<Vec<Vec<u8>>>,
+    replies: RefCell<Vec<Reply>>,
 }
 
 impl RecordingChannel {
@@ -68,8 +69,8 @@ impl RecordingChannel {
         let mut replies = replies;
         replies.reverse();
         Self {
-            requests: Vec::new(),
-            replies,
+            requests: RefCell::new(Vec::new()),
+            replies: RefCell::new(replies),
         }
     }
 
@@ -79,18 +80,18 @@ impl RecordingChannel {
 }
 
 impl AdminChannel for RecordingChannel {
-    fn call(&mut self, req: &[u8], out: &mut [u8]) -> Result<usize, i64> {
-        self.requests.push(req.to_vec());
-        match self.replies.pop() {
+    fn call(&self, req: &[u8], out: &mut [u8]) -> Result<usize, Errno> {
+        self.requests.borrow_mut().push(req.to_vec());
+        match self.replies.borrow_mut().pop() {
             Some(Reply::Ok(bytes)) => {
                 if bytes.len() > out.len() {
-                    return Err(-i64::from(Errno::BufferTooSmall.as_i32()));
+                    return Err(Errno::BufferTooSmall);
                 }
                 out[..bytes.len()].copy_from_slice(&bytes);
                 Ok(bytes.len())
             }
             Some(Reply::Err(err)) => Err(err),
-            None => Err(-i64::from(Errno::NotImplemented.as_i32())),
+            None => Err(Errno::NotImplemented),
         }
     }
 }
@@ -153,22 +154,18 @@ fn group_list_response() -> Vec<u8> {
 #[test]
 fn lock_and_unlock_encode_the_typed_state_request() {
     let mut io = ScriptedIo::new(&["lock ada", "unlock ada", "exit"], &[]);
-    let mut channel =
-        RecordingChannel::new(alloc::vec![Reply::Ok(Vec::new()), Reply::Ok(Vec::new()),]);
+    let channel = RecordingChannel::new(alloc::vec![Reply::Ok(Vec::new()), Reply::Ok(Vec::new()),]);
+    assert_eq!(run_session(&mut io, &channel, &mut FixedSalt, config()), 0);
+    assert_eq!(channel.requests.borrow().len(), 2);
     assert_eq!(
-        run_session(&mut io, &mut channel, &mut FixedSalt, config()),
-        0
-    );
-    assert_eq!(channel.requests.len(), 2);
-    assert_eq!(
-        UsersAdminRequest::decode(&channel.requests[0]),
+        UsersAdminRequest::decode(&channel.requests.borrow()[0]),
         Ok(UsersAdminRequest::SetAccountState {
             username: "ada",
             locked: true,
         })
     );
     assert_eq!(
-        UsersAdminRequest::decode(&channel.requests[1]),
+        UsersAdminRequest::decode(&channel.requests.borrow()[1]),
         Ok(UsersAdminRequest::SetAccountState {
             username: "ada",
             locked: false,
@@ -183,11 +180,12 @@ fn create_builds_a_baseline_account_with_a_verifiable_password_record() {
         &["create grace 1001 100", "Grace Hopper", "exit"],
         &[b"lovelace", b"lovelace"],
     );
-    let mut channel = RecordingChannel::ok();
-    run_session(&mut io, &mut channel, &mut FixedSalt, config());
+    let channel = RecordingChannel::ok();
+    run_session(&mut io, &channel, &mut FixedSalt, config());
 
-    assert_eq!(channel.requests.len(), 1);
-    let decoded = UsersAdminRequest::decode(&channel.requests[0]).expect("decodes");
+    assert_eq!(channel.requests.borrow().len(), 1);
+    let requests = channel.requests.borrow();
+    let decoded = UsersAdminRequest::decode(&requests[0]).expect("decodes");
     let UsersAdminRequest::CreateUser(create) = decoded else {
         unreachable!("create submits a CreateUser request");
     };
@@ -215,9 +213,9 @@ fn create_builds_a_baseline_account_with_a_verifiable_password_record() {
 #[test]
 fn mismatched_passwords_submit_nothing() {
     let mut io = ScriptedIo::new(&["passwd ada", "exit"], &[b"first", b"second"]);
-    let mut channel = RecordingChannel::ok();
-    run_session(&mut io, &mut channel, &mut FixedSalt, config());
-    assert!(channel.requests.is_empty());
+    let channel = RecordingChannel::ok();
+    run_session(&mut io, &channel, &mut FixedSalt, config());
+    assert!(channel.requests.borrow().is_empty());
     assert!(io
         .errors
         .iter()
@@ -227,14 +225,15 @@ fn mismatched_passwords_submit_nothing() {
 #[test]
 fn grant_merges_with_the_accounts_current_ceiling() {
     let mut io = ScriptedIo::new(&["grant ada CAP_PROC_SPAWN", "exit"], &[]);
-    let mut channel = RecordingChannel::new(alloc::vec![
+    let channel = RecordingChannel::new(alloc::vec![
         Reply::Ok(user_list_response()),
         Reply::Ok(Vec::new()),
     ]);
-    run_session(&mut io, &mut channel, &mut FixedSalt, config());
+    run_session(&mut io, &channel, &mut FixedSalt, config());
 
-    assert_eq!(channel.requests.len(), 2);
-    let decoded = UsersAdminRequest::decode(&channel.requests[1]).expect("decodes");
+    assert_eq!(channel.requests.borrow().len(), 2);
+    let requests = channel.requests.borrow();
+    let decoded = UsersAdminRequest::decode(&requests[1]).expect("decodes");
     let UsersAdminRequest::SetGrants { username, grants } = decoded else {
         unreachable!("grant submits a SetGrants request");
     };
@@ -249,12 +248,13 @@ fn grant_merges_with_the_accounts_current_ceiling() {
 #[test]
 fn revoke_removes_one_capability() {
     let mut io = ScriptedIo::new(&["revoke ada CAP_FS_ACCESS", "exit"], &[]);
-    let mut channel = RecordingChannel::new(alloc::vec![
+    let channel = RecordingChannel::new(alloc::vec![
         Reply::Ok(user_list_response()),
         Reply::Ok(Vec::new()),
     ]);
-    run_session(&mut io, &mut channel, &mut FixedSalt, config());
-    let decoded = UsersAdminRequest::decode(&channel.requests[1]).expect("decodes");
+    run_session(&mut io, &channel, &mut FixedSalt, config());
+    let requests = channel.requests.borrow();
+    let decoded = UsersAdminRequest::decode(&requests[1]).expect("decodes");
     let UsersAdminRequest::SetGrants { grants, .. } = decoded else {
         unreachable!("revoke submits a SetGrants request");
     };
@@ -264,12 +264,12 @@ fn revoke_removes_one_capability() {
 #[test]
 fn listings_render_and_refusals_report_tersely() {
     let mut io = ScriptedIo::new(&["list", "groups", "deluser root", "exit"], &[]);
-    let mut channel = RecordingChannel::new(alloc::vec![
+    let channel = RecordingChannel::new(alloc::vec![
         Reply::Ok(user_list_response()),
         Reply::Ok(group_list_response()),
-        Reply::Err(-i64::from(Errno::PermissionDenied.as_i32())),
+        Reply::Err(Errno::PermissionDenied),
     ]);
-    run_session(&mut io, &mut channel, &mut FixedSalt, config());
+    run_session(&mut io, &channel, &mut FixedSalt, config());
 
     assert!(io.out.iter().any(|line| line.contains("ada")
         && line.contains("active")
@@ -287,8 +287,8 @@ fn unknown_commands_and_bad_usage_report_without_calling() {
         &["frobnicate", "lock", "grant ada CAP_NOT_A_THING", "exit"],
         &[],
     );
-    let mut channel = RecordingChannel::new(Vec::new());
-    run_session(&mut io, &mut channel, &mut FixedSalt, config());
-    assert!(channel.requests.is_empty());
+    let channel = RecordingChannel::new(Vec::new());
+    run_session(&mut io, &channel, &mut FixedSalt, config());
+    assert!(channel.requests.borrow().is_empty());
     assert_eq!(io.errors.len(), 3);
 }

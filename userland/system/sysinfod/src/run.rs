@@ -64,12 +64,12 @@ mod program {
     use tairix_abi::reply::decode_page_reply;
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord,
-        CpuTimeRecord, CrashRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
-        MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord,
-        RamzipStats, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
-        VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN,
-        SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
-        SYSTEM_CONFIG_MAX_LEN,
+        CpuTimeRecord, CrashRecord, GroupDirectoryRecord, IntrospectDomain, IrqRecord,
+        KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
+        MountRecord, ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord,
+        SelfAccountRecord, SystemIdentity, Uptime, UserDirectoryRecord, VolumeIoHealthRecord,
+        VolumeIoQueueRecord, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
+        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN, SYSTEM_CONFIG_MAX_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, Origin, ProcId, ORIGIN_WIRE_LEN, PROC_ID_LEN};
@@ -208,6 +208,34 @@ mod program {
                 records.push(UserDirectoryRecord::from_bytes(chunk)?);
             }
             Ok(records)
+        }
+
+        fn group_directory(&self, _caller: &Caller) -> Result<Vec<GroupDirectoryRecord>, Errno> {
+            let bytes = read_list(
+                IntrospectDomain::GroupDirectory,
+                GroupDirectoryRecord::WIRE_LEN,
+            )?;
+            let mut records = Vec::new();
+            for chunk in bytes.as_chunks::<{ GroupDirectoryRecord::WIRE_LEN }>().0 {
+                records.push(GroupDirectoryRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
+        }
+
+        fn self_account(&self, caller: &Caller) -> Result<Option<SelfAccountRecord>, Errno> {
+            // The kernel-attested uid off this request, never a value the
+            // payload carried: a caller can only ever read its own record.
+            let mut buf = [0u8; SelfAccountRecord::WIRE_LEN];
+            let n = tairix_rt::sysinfo_introspect(
+                IntrospectDomain::Account.as_u32(),
+                u64::from(caller.uid()),
+                &mut buf,
+            )
+            .map_err(Errno::from_syscall)?;
+            if n == 0 {
+                return Ok(None);
+            }
+            SelfAccountRecord::from_bytes(&buf[..n]).map(Some)
         }
 
         fn cpu_times(&self, _caller: &Caller) -> Result<Vec<CpuTimeRecord>, Errno> {

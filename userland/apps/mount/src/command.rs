@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::filesystem::MountFlags;
 
 use crate::error::MountError;
+use tairix_util::argv::option_value;
 
 /// One thing the `mount` tool can do.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,12 +160,7 @@ fn value<'a>(
     args: &[&'a str],
     index: &mut usize,
 ) -> Result<&'a str, MountError> {
-    if let Some(v) = inline {
-        return Ok(v);
-    }
-    let v = args.get(*index).copied().ok_or(MountError::Usage)?;
-    *index += 1;
-    Ok(v)
+    option_value(inline, args, index).ok_or(MountError::Usage)
 }
 
 /// Parse a comma-separated `-o` option list into the [`MountFlags`] it sets.

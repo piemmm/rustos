@@ -169,6 +169,36 @@ pub trait IntrospectSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn user_directory(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
+    /// Encode up to `max_records`
+    /// [`tairix_abi::sysinfo::GroupDirectoryRecord`]s beginning at record
+    /// index `offset`, in a stable order, packed little-endian
+    /// back-to-back.
+    ///
+    /// The group sibling of [`Self::user_directory`], on the same terms:
+    /// each record pairs a gid with its group name and carries nothing
+    /// else — no membership list, no ACL, no grant. A kernel holding no
+    /// group registry answers the compiled-in system groups alone.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn group_directory(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
+    /// The wire image of one [`tairix_abi::sysinfo::SelfAccountRecord`]:
+    /// the identity fields of the account `uid` names, or an empty `Vec`
+    /// for a uid no database holds.
+    ///
+    /// The record carries no capability grant ceiling, no account state,
+    /// and no password material, so this answer is the display half of an
+    /// account and nothing more. The broker names the uid of the client
+    /// asking about itself, exactly as it names its client's own attested
+    /// [`ProcId`] for [`Self::task_limits`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn account(&self, uid: u32) -> Result<Vec<u8>, Errno>;
+
     /// Encode up to `max_records` [`tairix_abi::sysinfo::CpuTimeRecord`]s
     /// beginning at CPU index `offset`, in ascending CPU order, packed
     /// little-endian back-to-back.
@@ -352,6 +382,14 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn user_directory(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn group_directory(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn account(&self, _uid: u32) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 

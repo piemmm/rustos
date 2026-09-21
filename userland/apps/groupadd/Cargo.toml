@@ -30,6 +30,12 @@ name = "tairix-groupadd-run"
 path = "src/run.rs"
 
 [dependencies]
+# The shared `users_admin` client: the channel seam and the one
+# listing walk every account tool reads a reply through.
+tairix-useradmin = { path = "../../../lib/useradmin", version = "=0.0.0" }
+# The shared command-line option-value resolver: one definition of
+# "attached value or the following argument", so no two tools disagree.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The stable `Errno` and the `users_admin` request/response vocabulary: the
 # tool writes a record to the group registry through an injected seam that
 # speaks the frozen `Errno`, so it invents no parallel error set and

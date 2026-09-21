@@ -41,6 +41,9 @@
 
 use std::path::Path;
 
+use tairix_abi::account::{
+    MAX_DISPLAY_NAME_LEN, MAX_GROUPNAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
+};
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::field::{
     TAG_BOOL, TAG_BYTES, TAG_CAP, TAG_DECIMAL, TAG_DURATION, TAG_ERROR, TAG_IP, TAG_LIST, TAG_MAC,
@@ -50,17 +53,18 @@ use tairix_abi::sysinfo::SYSINFO_QUERIES;
 use tairix_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DriverBindKey,
     DriverError, DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
-    HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
-    KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LinkFlags, LoadAverage,
-    LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountListRequest, MountRecord,
-    NamedKeyCode, NeededLibrary, NoticeTopic, OpenFlags, PointerButtonCode, PointerInput, PortName,
-    PowerAction, ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags,
-    RealpathMode, ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority, Segment,
-    Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId,
-    SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord,
-    UserDirectoryRequest, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-    BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    GroupDirectoryRecord, GroupDirectoryRequest, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode,
+    HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryCategory,
+    LibraryScope, LimitKind, LinkFlags, LoadAverage, LoadHeader, ManifestHeader, MapFlags,
+    MountAvailability, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, NoticeTopic,
+    OpenFlags, PointerButtonCode, PointerInput, PortName, PowerAction, ProcessListRequest,
+    ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, RealpathMode, ResourceLimit,
+    ResourceLimitRecord, RxePermission, SchedPriority, Segment, SelfAccountRecord, Severity,
+    Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader,
+    SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord, UserDirectoryRequest,
+    WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES,
+    APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX,
+    BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
@@ -82,7 +86,7 @@ use tairix_abi::{
     STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN,
     SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
     SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
-    THREAD_STACK_DEFAULT, USER_DIRECTORY_NAME_MAX,
+    THREAD_STACK_DEFAULT,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1688,6 +1692,23 @@ fn sysinfo_emit_mount_media(out: &mut String) {
 }
 
 /// Emit the inline-buffer capacities and the per-record packed wire sizes.
+/// Emit the account-record field bounds every directory and account
+/// frame is sized by: the one `lib/abi` definition the databases share.
+fn sysinfo_emit_account_bounds(out: &mut String) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "#define TAIRIX_MAX_USERNAME_LEN {MAX_USERNAME_LEN}u");
+    let _ = writeln!(out, "#define TAIRIX_MAX_GROUPNAME_LEN {MAX_GROUPNAME_LEN}u");
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_MAX_DISPLAY_NAME_LEN {MAX_DISPLAY_NAME_LEN}u"
+    );
+    let _ = writeln!(out, "#define TAIRIX_MAX_PATH_LEN {MAX_PATH_LEN}u");
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_MAX_SUPPLEMENTARY_GIDS {MAX_SUPPLEMENTARY_GIDS}u"
+    );
+}
+
 fn sysinfo_emit_record_sizes(out: &mut String) {
     use std::fmt::Write as _;
     out.push_str("/* Inline fixed-buffer capacities carried in the record types below. */\n");
@@ -1727,10 +1748,7 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
         let _ = writeln!(out, "#define {name} ((uint8_t){}u)", state.as_u8());
     }
     sysinfo_emit_mount_media(out);
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_USER_DIRECTORY_NAME_MAX {USER_DIRECTORY_NAME_MAX}u"
-    );
+    sysinfo_emit_account_bounds(out);
     out.push('\n');
 
     out.push_str("/* Packed little-endian wire size of each sysinfo record type, in bytes. */\n");
@@ -1767,6 +1785,18 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
         (
             "TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN",
             UserDirectoryRecord::WIRE_LEN,
+        ),
+        (
+            "TAIRIX_GROUP_DIRECTORY_REQUEST_WIRE_LEN",
+            GroupDirectoryRequest::WIRE_LEN,
+        ),
+        (
+            "TAIRIX_GROUP_DIRECTORY_RECORD_WIRE_LEN",
+            GroupDirectoryRecord::WIRE_LEN,
+        ),
+        (
+            "TAIRIX_SELF_ACCOUNT_RECORD_WIRE_LEN",
+            SelfAccountRecord::WIRE_LEN,
         ),
     ];
     for (name, len) in wire_lens {
@@ -1917,8 +1947,38 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          typedef struct tairix_user_directory_record {\n\
          \x20   uint32_t uid;\n\
          \x20   uint8_t name_len;\n\
-         \x20   uint8_t name[TAIRIX_USER_DIRECTORY_NAME_MAX];\n\
+         \x20   uint8_t name[TAIRIX_MAX_USERNAME_LEN];\n\
          } tairix_user_directory_record_t;\n\n",
+    "/* Group-directory request payload (offset/limit paging). */\n\
+         typedef struct tairix_group_directory_request {\n\
+         \x20   uint32_t offset;\n\
+         \x20   uint16_t limit;\n\
+         \x20   uint16_t flags;\n\
+         } tairix_group_directory_request_t;\n\n",
+    "/* One group entry: the gid + group-name pairing, and nothing else (no\n\
+         * membership list, ACL, or grant). Valid for name_len bytes. */\n\
+         typedef struct tairix_group_directory_record {\n\
+         \x20   uint32_t gid;\n\
+         \x20   uint8_t name_len;\n\
+         \x20   uint8_t name[TAIRIX_MAX_GROUPNAME_LEN];\n\
+         } tairix_group_directory_record_t;\n\n",
+    "/* The calling principal's own account record: the identity fields a\n\
+         * person is shown about themselves. Deliberately carries no capability\n\
+         * grant ceiling, no account state, and no password material. */\n\
+         typedef struct tairix_self_account_record {\n\
+         \x20   uint32_t uid;\n\
+         \x20   uint32_t primary_gid;\n\
+         \x20   uint8_t gid_count;\n\
+         \x20   uint8_t name_len;\n\
+         \x20   uint8_t display_len;\n\
+         \x20   uint8_t home_len;\n\
+         \x20   uint8_t shell_len;\n\
+         \x20   uint32_t supplementary_gids[TAIRIX_MAX_SUPPLEMENTARY_GIDS];\n\
+         \x20   uint8_t name[TAIRIX_MAX_USERNAME_LEN];\n\
+         \x20   uint8_t display_name[TAIRIX_MAX_DISPLAY_NAME_LEN];\n\
+         \x20   uint8_t home[TAIRIX_MAX_PATH_LEN];\n\
+         \x20   uint8_t shell[TAIRIX_MAX_PATH_LEN];\n\
+         } tairix_self_account_record_t;\n\n",
 );
 
 /// Emit the driver-manifest magic / count / key-length / wire-size constants
@@ -4474,10 +4534,42 @@ mod tests {
         ]
     }
 
+    /// The directory and account frames' in-memory pins, split out so
+    /// neither table outgrows the function-length bar.
+    fn account_struct_pins() -> [(&'static str, usize, usize, usize, usize); 3] {
+        use tairix_abi::{GroupDirectoryRecord, GroupDirectoryRequest, SelfAccountRecord};
+        [
+            (
+                "GroupDirectoryRequest",
+                core::mem::size_of::<GroupDirectoryRequest>(),
+                8,
+                core::mem::align_of::<GroupDirectoryRequest>(),
+                4,
+            ),
+            (
+                "GroupDirectoryRecord",
+                core::mem::size_of::<GroupDirectoryRecord>(),
+                40,
+                core::mem::align_of::<GroupDirectoryRecord>(),
+                4,
+            ),
+            (
+                "SelfAccountRecord",
+                core::mem::size_of::<SelfAccountRecord>(),
+                432,
+                core::mem::align_of::<SelfAccountRecord>(),
+                4,
+            ),
+        ]
+    }
+
     #[test]
     fn sysinfo_header_struct_layout_matches_lib_abi() {
         use tairix_abi::{ProcessState, SysinfoQueryId};
-        for (name, size, want_size, align, want_align) in sysinfo_struct_pins() {
+        for (name, size, want_size, align, want_align) in sysinfo_struct_pins()
+            .into_iter()
+            .chain(account_struct_pins())
+        {
             assert_eq!(size, want_size, "{name} repr(C) size");
             assert_eq!(align, want_align, "{name} repr(C) align");
         }

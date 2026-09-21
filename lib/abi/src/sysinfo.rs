@@ -17,6 +17,9 @@
 //! `/System/Services/sysinfod.app/Run` (`userland/system/sysinfod`); the kernel has
 //! no privileged path that bypasses the capability check.
 
+use crate::account::{
+    MAX_DISPLAY_NAME_LEN, MAX_GROUPNAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
+};
 use crate::blkio::{
     BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkHealthState, BlkIoCounters,
     BlkQueueCounters, BlkStatus, IoBudget, BLK_DEVICE_NAME_LEN, BLK_HEALTH_COUNTERS_LEN,
@@ -587,6 +590,34 @@ impl SysinfoQueryId {
     /// one.
     pub const SYSTEM_CONFIG: Self = Self(41);
 
+    /// List the group directory: every group's gid and name, one
+    /// [`GroupDirectoryRecord`] per group.
+    ///
+    /// Ungated, on exactly the ground [`Self::USER_DIRECTORY`] is: rendering
+    /// a gid as a name is the same display need as rendering a uid as one,
+    /// and the pairing carries no membership list, no ACL, and no grant. A
+    /// system whose group registry is not loaded answers with the
+    /// compiled-in system groups alone, never a fabricated one.
+    pub const GROUP_DIRECTORY: Self = Self(42);
+
+    /// Read the **calling principal's own** account record: its name,
+    /// display name, home, shell, primary group, and group memberships —
+    /// one [`SelfAccountRecord`].
+    ///
+    /// Ungated and self-scoped, exactly like [`Self::PROCESS_IDENTITY`] and
+    /// [`Self::RESOURCE_LIMITS`]: the answer describes only the caller,
+    /// resolved by the broker against the uid the kernel attested rather
+    /// than any value the request supplies, so a principal reading its own
+    /// record crosses no boundary. Reading *another* account's fields is the
+    /// `CAP_USER_ADMIN`-gated `users_admin` listing and has no path here.
+    ///
+    /// What it deliberately does **not** carry is the account's capability
+    /// grant ceiling, its lock state, and any password material: the ceiling
+    /// is a map of the machine's authority rather than directory data, the
+    /// state enumerates which accounts are live, and credentials stay behind
+    /// `CAP_USERS_READ`.
+    pub const SELF_ACCOUNT: Self = Self(43);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -728,6 +759,22 @@ pub enum IntrospectDomain {
     /// on the root volume behind the block cache, and is bounded before a
     /// byte is read.
     SystemConfig = 22,
+    /// The group directory: every group, one packed
+    /// [`GroupDirectoryRecord`], with the syscall's `arg` naming the record
+    /// offset to page from. The sibling of [`Self::UserDirectory`].
+    GroupDirectory = 23,
+    /// One account's non-secret identity fields: a single
+    /// [`SelfAccountRecord`] for the uid the syscall's `arg` names, and no
+    /// bytes at all for a uid the databases do not hold.
+    ///
+    /// The broker passes the *attested* uid of the client asking about
+    /// itself, exactly as [`Self::TaskLimits`] passes the client's own
+    /// attested [`ProcId`]. The record deliberately carries no grant
+    /// ceiling, no account state, and no credential, so even a broker
+    /// naming a uid that is not its client's learns nothing the ungated
+    /// [`Self::UserDirectory`] pairing does not already publish, beyond
+    /// that account's own display fields.
+    Account = 24,
 }
 
 impl IntrospectDomain {
@@ -765,6 +812,8 @@ impl IntrospectDomain {
             20 => Ok(Self::VolumeIoStats),
             21 => Ok(Self::VolumeIoQueue),
             22 => Ok(Self::SystemConfig),
+            23 => Ok(Self::GroupDirectory),
+            24 => Ok(Self::Account),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -1079,6 +1128,18 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::SYSTEM_CONFIG,
         name: "system_config",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::GROUP_DIRECTORY,
+        name: "group_directory",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::SELF_ACCOUNT,
+        name: "self_account",
         required_capability: None,
         audit: false,
     },
@@ -1956,10 +2017,6 @@ impl LoadAverage {
     }
 }
 
-/// Maximum bytes of a username carried in a [`UserDirectoryRecord`] — the
-/// same bound the `users-v1` database enforces on account names.
-pub const USER_DIRECTORY_NAME_MAX: usize = 32;
-
 /// Request payload for [`SysinfoQueryId::USER_DIRECTORY`]: the record
 /// window to return, mirroring the process-list paging shape.
 #[repr(C)]
@@ -2020,27 +2077,27 @@ pub struct UserDirectoryRecord {
     /// The account's numeric user identifier.
     pub uid: u32,
     /// Valid byte count in the inline name buffer
-    /// (`<= USER_DIRECTORY_NAME_MAX`); read the bytes through
+    /// (`<= MAX_USERNAME_LEN`); read the bytes through
     /// [`UserDirectoryRecord::name_bytes`].
     pub name_len: u8,
-    name: [u8; USER_DIRECTORY_NAME_MAX],
+    name: [u8; MAX_USERNAME_LEN],
 }
 
 impl UserDirectoryRecord {
     /// Encoded size on the wire: uid + name length + three reserved bytes
     /// + the inline name buffer.
-    pub const WIRE_LEN: usize = 8 + USER_DIRECTORY_NAME_MAX;
+    pub const WIRE_LEN: usize = 8 + MAX_USERNAME_LEN;
 
-    /// Construct a record, copying up to [`USER_DIRECTORY_NAME_MAX`] bytes
+    /// Construct a record, copying up to [`MAX_USERNAME_LEN`] bytes
     /// of `name`.
     ///
     /// Returns [`Errno::LengthOutOfRange`] if `name` is longer than
-    /// [`USER_DIRECTORY_NAME_MAX`]; the name is never silently truncated.
+    /// [`MAX_USERNAME_LEN`]; the name is never silently truncated.
     pub fn new(uid: u32, name: &[u8]) -> Result<Self, Errno> {
-        if name.len() > USER_DIRECTORY_NAME_MAX {
+        if name.len() > MAX_USERNAME_LEN {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut buf = [0u8; USER_DIRECTORY_NAME_MAX];
+        let mut buf = [0u8; MAX_USERNAME_LEN];
         buf[..name.len()].copy_from_slice(name);
         let name_len = u8::try_from(name.len()).map_err(|_| Errno::LengthOutOfRange)?;
         Ok(Self {
@@ -2063,7 +2120,7 @@ impl UserDirectoryRecord {
         put_u32(&mut out, 0, self.uid);
         out[4] = self.name_len;
         // out[5..8] reserved, already zero.
-        out[8..8 + USER_DIRECTORY_NAME_MAX].copy_from_slice(&self.name);
+        out[8..8 + MAX_USERNAME_LEN].copy_from_slice(&self.name);
         out
     }
 
@@ -2071,23 +2128,389 @@ impl UserDirectoryRecord {
     ///
     /// Returns [`Errno::BufferTooSmall`] if the slice is short, or
     /// [`Errno::LengthOutOfRange`] if `name_len` exceeds
-    /// [`USER_DIRECTORY_NAME_MAX`].
+    /// [`MAX_USERNAME_LEN`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
         let name_len = bytes[4];
-        if name_len as usize > USER_DIRECTORY_NAME_MAX {
+        if name_len as usize > MAX_USERNAME_LEN {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut name = [0u8; USER_DIRECTORY_NAME_MAX];
-        name.copy_from_slice(&bytes[8..8 + USER_DIRECTORY_NAME_MAX]);
+        let mut name = [0u8; MAX_USERNAME_LEN];
+        name.copy_from_slice(&bytes[8..8 + MAX_USERNAME_LEN]);
         Ok(Self {
             uid: read_u32(bytes, 0),
             name_len,
             name,
         })
     }
+}
+
+/// Request payload for [`SysinfoQueryId::GROUP_DIRECTORY`]: the record
+/// window to return, the group sibling of [`UserDirectoryRequest`].
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct GroupDirectoryRequest {
+    /// Zero-based index of the first record to return.
+    pub offset: u32,
+    /// Maximum number of records to return.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl GroupDirectoryRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if the slice is short, or
+    /// [`Errno::BadMagic`] if a reserved flag bit is set.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
+/// One group entry in a [`SysinfoQueryId::GROUP_DIRECTORY`] response: the
+/// numeric gid and the group's name, and **nothing else** — no membership
+/// list, no ACL, and no grant. The group counterpart of
+/// [`UserDirectoryRecord`], carrying exactly the pairing a display needs to
+/// render a gid as a name.
+///
+/// Allocation-free: the name is stored inline in a fixed buffer with its
+/// valid length alongside.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GroupDirectoryRecord {
+    /// The group's numeric identifier.
+    pub gid: u32,
+    /// Valid byte count in the inline name buffer
+    /// (`<= MAX_GROUPNAME_LEN`); read the bytes through
+    /// [`GroupDirectoryRecord::name_bytes`].
+    pub name_len: u8,
+    name: [u8; MAX_GROUPNAME_LEN],
+}
+
+impl GroupDirectoryRecord {
+    /// Encoded size on the wire: gid + name length + three reserved bytes
+    /// + the inline name buffer.
+    pub const WIRE_LEN: usize = 8 + MAX_GROUPNAME_LEN;
+
+    /// Construct a record, copying up to [`MAX_GROUPNAME_LEN`] bytes of
+    /// `name`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `name` is longer than
+    /// [`MAX_GROUPNAME_LEN`]; the name is never silently truncated.
+    pub fn new(gid: u32, name: &[u8]) -> Result<Self, Errno> {
+        if name.len() > MAX_GROUPNAME_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut buf = [0u8; MAX_GROUPNAME_LEN];
+        buf[..name.len()].copy_from_slice(name);
+        let name_len = u8::try_from(name.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        Ok(Self {
+            gid,
+            name_len,
+            name: buf,
+        })
+    }
+
+    /// Borrow the valid prefix of the name buffer.
+    #[must_use]
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name[..self.name_len as usize]
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.gid);
+        out[4] = self.name_len;
+        // out[5..8] reserved, already zero.
+        out[8..8 + MAX_GROUPNAME_LEN].copy_from_slice(&self.name);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if the slice is short, or
+    /// [`Errno::LengthOutOfRange`] if `name_len` exceeds
+    /// [`MAX_GROUPNAME_LEN`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let name_len = bytes[4];
+        if name_len as usize > MAX_GROUPNAME_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut name = [0u8; MAX_GROUPNAME_LEN];
+        name.copy_from_slice(&bytes[8..8 + MAX_GROUPNAME_LEN]);
+        Ok(Self {
+            gid: read_u32(bytes, 0),
+            name_len,
+            name,
+        })
+    }
+}
+
+/// The calling principal's **own** account record, as answered by
+/// [`SysinfoQueryId::SELF_ACCOUNT`]: the identity fields a person is shown
+/// about themselves.
+///
+/// Deliberately narrower than the administrator's
+/// [`UserEntry`](crate::users_admin::UserEntry): it carries **no** capability
+/// grant ceiling, **no** account state, and **no** password material. The
+/// ceiling is a map of the machine's authority rather than directory data and
+/// stays behind `CAP_USER_ADMIN`; the lock state enumerates which accounts are
+/// live and so worth attacking. Neither is needed to render a person's own
+/// details, so neither crosses this ungated boundary.
+///
+/// Allocation-free: every text field is inline with its valid length
+/// alongside, sized from the one shared account bound
+/// ([`crate::account`]) the database enforces, so a record the database
+/// accepts always fits this frame.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SelfAccountRecord {
+    /// The account's numeric user identifier.
+    pub uid: u32,
+    /// The account's primary group.
+    pub primary_gid: u32,
+    /// The supplementary groups the account is a member of; the first
+    /// [`gid_count`](Self::gid_count) entries are valid, read through
+    /// [`supplementary_gids`](Self::supplementary_gids).
+    supplementary: [u32; MAX_SUPPLEMENTARY_GIDS],
+    /// Valid entries in the supplementary buffer.
+    pub gid_count: u8,
+    /// Valid bytes of the inline account name.
+    pub name_len: u8,
+    /// Valid bytes of the inline display name.
+    pub display_len: u8,
+    /// Valid bytes of the inline home path.
+    pub home_len: u8,
+    /// Valid bytes of the inline shell path.
+    pub shell_len: u8,
+    name: [u8; MAX_USERNAME_LEN],
+    display_name: [u8; MAX_DISPLAY_NAME_LEN],
+    home: [u8; MAX_PATH_LEN],
+    shell: [u8; MAX_PATH_LEN],
+}
+
+/// The text fields of a [`SelfAccountRecord`], gathered so the constructor
+/// takes one argument per *kind* of thing rather than four look-alike
+/// byte slices a caller could transpose unnoticed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SelfAccountText<'a> {
+    /// The account name.
+    pub name: &'a [u8],
+    /// The display name, empty when the account declares none.
+    pub display_name: &'a [u8],
+    /// The home path, or the database's own absent-path marker.
+    pub home: &'a [u8],
+    /// The shell path, or the database's own absent-path marker.
+    pub shell: &'a [u8],
+}
+
+impl SelfAccountRecord {
+    /// Byte offset of the supplementary-gid array: the fixed header, sized
+    /// so the array stays four-byte aligned.
+    const GIDS_AT: usize = 16;
+    /// Byte offset of the inline account name.
+    const NAME_AT: usize = Self::GIDS_AT + 4 * MAX_SUPPLEMENTARY_GIDS;
+    /// Byte offset of the inline display name.
+    const DISPLAY_AT: usize = Self::NAME_AT + MAX_USERNAME_LEN;
+    /// Byte offset of the inline home path.
+    const HOME_AT: usize = Self::DISPLAY_AT + MAX_DISPLAY_NAME_LEN;
+    /// Byte offset of the inline shell path.
+    const SHELL_AT: usize = Self::HOME_AT + MAX_PATH_LEN;
+
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = Self::SHELL_AT + MAX_PATH_LEN;
+
+    /// Build a record for `uid` in `primary_gid`, a member of
+    /// `supplementary_gids`, carrying `text`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] when any field exceeds its shared bound
+    /// ([`crate::account`]); nothing is ever silently truncated.
+    pub fn new(
+        uid: u32,
+        primary_gid: u32,
+        supplementary_gids: &[u32],
+        text: SelfAccountText<'_>,
+    ) -> Result<Self, Errno> {
+        if supplementary_gids.len() > MAX_SUPPLEMENTARY_GIDS {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut supplementary = [0u32; MAX_SUPPLEMENTARY_GIDS];
+        supplementary[..supplementary_gids.len()].copy_from_slice(supplementary_gids);
+        let mut record = Self {
+            uid,
+            primary_gid,
+            supplementary,
+            gid_count: len_byte(supplementary_gids.len())?,
+            name_len: len_byte(text.name.len())?,
+            display_len: len_byte(text.display_name.len())?,
+            home_len: len_byte(text.home.len())?,
+            shell_len: len_byte(text.shell.len())?,
+            name: [0u8; MAX_USERNAME_LEN],
+            display_name: [0u8; MAX_DISPLAY_NAME_LEN],
+            home: [0u8; MAX_PATH_LEN],
+            shell: [0u8; MAX_PATH_LEN],
+        };
+        fill(&mut record.name, text.name)?;
+        fill(&mut record.display_name, text.display_name)?;
+        fill(&mut record.home, text.home)?;
+        fill(&mut record.shell, text.shell)?;
+        Ok(record)
+    }
+
+    /// Borrow the valid prefix of the inline account name.
+    #[must_use]
+    pub fn name_bytes(&self) -> &[u8] {
+        &self.name[..self.name_len as usize]
+    }
+
+    /// Borrow the valid prefix of the inline display name.
+    #[must_use]
+    pub fn display_name_bytes(&self) -> &[u8] {
+        &self.display_name[..self.display_len as usize]
+    }
+
+    /// Borrow the valid prefix of the inline home path.
+    #[must_use]
+    pub fn home_bytes(&self) -> &[u8] {
+        &self.home[..self.home_len as usize]
+    }
+
+    /// Borrow the valid prefix of the inline shell path.
+    #[must_use]
+    pub fn shell_bytes(&self) -> &[u8] {
+        &self.shell[..self.shell_len as usize]
+    }
+
+    /// The supplementary groups the account is a member of.
+    #[must_use]
+    pub fn supplementary_gids(&self) -> &[u32] {
+        &self.supplementary[..self.gid_count as usize]
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.uid);
+        put_u32(&mut out, 4, self.primary_gid);
+        out[8] = self.gid_count;
+        out[9] = self.name_len;
+        out[10] = self.display_len;
+        out[11] = self.home_len;
+        out[12] = self.shell_len;
+        // out[13..16] reserved, already zero.
+        for (index, gid) in self.supplementary.iter().enumerate() {
+            put_u32(&mut out, Self::GIDS_AT + index * 4, *gid);
+        }
+        out[Self::NAME_AT..Self::DISPLAY_AT].copy_from_slice(&self.name);
+        out[Self::DISPLAY_AT..Self::HOME_AT].copy_from_slice(&self.display_name);
+        out[Self::HOME_AT..Self::SHELL_AT].copy_from_slice(&self.home);
+        out[Self::SHELL_AT..Self::WIRE_LEN].copy_from_slice(&self.shell);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if the slice is short, or
+    /// [`Errno::LengthOutOfRange`] if any declared length exceeds its
+    /// field's shared bound (fail closed — never a partial decode).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut record = Self {
+            uid: read_u32(bytes, 0),
+            primary_gid: read_u32(bytes, 4),
+            supplementary: [0u32; MAX_SUPPLEMENTARY_GIDS],
+            gid_count: bounded(bytes[8], MAX_SUPPLEMENTARY_GIDS)?,
+            name_len: bounded(bytes[9], MAX_USERNAME_LEN)?,
+            display_len: bounded(bytes[10], MAX_DISPLAY_NAME_LEN)?,
+            home_len: bounded(bytes[11], MAX_PATH_LEN)?,
+            shell_len: bounded(bytes[12], MAX_PATH_LEN)?,
+            name: [0u8; MAX_USERNAME_LEN],
+            display_name: [0u8; MAX_DISPLAY_NAME_LEN],
+            home: [0u8; MAX_PATH_LEN],
+            shell: [0u8; MAX_PATH_LEN],
+        };
+        for (index, gid) in record.supplementary.iter_mut().enumerate() {
+            *gid = read_u32(bytes, Self::GIDS_AT + index * 4);
+        }
+        record
+            .name
+            .copy_from_slice(&bytes[Self::NAME_AT..Self::DISPLAY_AT]);
+        record
+            .display_name
+            .copy_from_slice(&bytes[Self::DISPLAY_AT..Self::HOME_AT]);
+        record
+            .home
+            .copy_from_slice(&bytes[Self::HOME_AT..Self::SHELL_AT]);
+        record
+            .shell
+            .copy_from_slice(&bytes[Self::SHELL_AT..Self::WIRE_LEN]);
+        Ok(record)
+    }
+}
+
+/// `len` as a byte, refusing a field longer than a byte can count.
+fn len_byte(len: usize) -> Result<u8, Errno> {
+    u8::try_from(len).map_err(|_| Errno::LengthOutOfRange)
+}
+
+/// Copy `src` into the head of `dst`, refusing a source that does not fit.
+fn fill(dst: &mut [u8], src: &[u8]) -> Result<(), Errno> {
+    let head = dst.get_mut(..src.len()).ok_or(Errno::LengthOutOfRange)?;
+    head.copy_from_slice(src);
+    Ok(())
+}
+
+/// `declared` as a validated field length, refusing one past `bound`.
+fn bounded(declared: u8, bound: usize) -> Result<u8, Errno> {
+    if declared as usize > bound {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(declared)
 }
 
 /// Request payload for [`SysinfoQueryId::CPU_TIME_STATS`].
@@ -6577,11 +7000,11 @@ mod tests {
         ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest,
         SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, UserDirectoryRequest, VolumeHealth, VolumeStats, ENCODED_QUERY_TABLE,
-        ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
-        MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
-        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+        ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MAX_GROUPNAME_LEN,
+        MAX_USERNAME_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE,
+        PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
         SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
+        SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
     };
     use super::{
         CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CPU_INFO_FLAG_FREQ_MEASURED,
@@ -6592,6 +7015,10 @@ mod tests {
         CrashRecordRequest, CRASH_FLAG_WRITE, CRASH_MAX_FRAMES, CRASH_MAX_REGS, CRASH_REG_NAME_LEN,
     };
     use super::{DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals};
+    use super::{
+        GroupDirectoryRecord, GroupDirectoryRequest, SelfAccountRecord, SelfAccountText,
+        MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS,
+    };
     use super::{IrqListRequest, IrqRecord, IRQ_FLAG_QUARANTINED};
     use super::{VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest, VolumeIoStatsRecord};
     use crate::blkio::{
@@ -6797,12 +7224,14 @@ mod tests {
             (20, IntrospectDomain::VolumeIoStats),
             (21, IntrospectDomain::VolumeIoQueue),
             (22, IntrospectDomain::SystemConfig),
+            (23, IntrospectDomain::GroupDirectory),
+            (24, IntrospectDomain::Account),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(23), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(25), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -6945,13 +7374,13 @@ mod tests {
         assert_eq!(decoded, rec);
         assert_eq!(decoded.uid, 1000);
 
-        let too_long = [b'x'; USER_DIRECTORY_NAME_MAX + 1];
+        let too_long = [b'x'; MAX_USERNAME_LEN + 1];
         assert_eq!(
             UserDirectoryRecord::new(0, &too_long),
             Err(Errno::LengthOutOfRange)
         );
         let mut bytes = rec.to_le_bytes();
-        bytes[4] = u8::try_from(USER_DIRECTORY_NAME_MAX + 1).unwrap();
+        bytes[4] = u8::try_from(MAX_USERNAME_LEN + 1).unwrap();
         assert_eq!(
             UserDirectoryRecord::from_bytes(&bytes),
             Err(Errno::LengthOutOfRange)
@@ -6960,6 +7389,155 @@ mod tests {
             UserDirectoryRecord::from_bytes(&[0u8; UserDirectoryRecord::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
+    }
+
+    #[test]
+    fn group_directory_request_and_record_round_trip_and_fail_closed() {
+        let req = GroupDirectoryRequest {
+            offset: 5,
+            limit: 32,
+            flags: 0,
+        };
+        assert_eq!(
+            GroupDirectoryRequest::from_bytes(&req.to_le_bytes()),
+            Ok(req)
+        );
+        let mut bytes = req.to_le_bytes();
+        bytes[6] = 1; // reserved flag set
+        assert_eq!(
+            GroupDirectoryRequest::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            GroupDirectoryRequest::from_bytes(&[0u8; 4]),
+            Err(Errno::BufferTooSmall)
+        );
+
+        let rec = GroupDirectoryRecord::new(100, b"storage").expect("record");
+        assert_eq!(rec.name_bytes(), b"storage");
+        let decoded = GroupDirectoryRecord::from_bytes(&rec.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, rec);
+        assert_eq!(decoded.gid, 100);
+
+        let too_long = [b'x'; MAX_GROUPNAME_LEN + 1];
+        assert_eq!(
+            GroupDirectoryRecord::new(0, &too_long),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut bytes = rec.to_le_bytes();
+        bytes[4] = u8::try_from(MAX_GROUPNAME_LEN + 1).expect("fits");
+        assert_eq!(
+            GroupDirectoryRecord::from_bytes(&bytes),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            GroupDirectoryRecord::from_bytes(&[0u8; GroupDirectoryRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn self_account_record_round_trips_every_field() {
+        let gids = [10u32, 20, 30];
+        let rec = SelfAccountRecord::new(
+            1000,
+            1000,
+            &gids,
+            SelfAccountText {
+                name: b"alice",
+                display_name: b"Alice Liddell",
+                home: b"/Users/alice",
+                shell: b"/System/Commands/elsh.app/Run",
+            },
+        )
+        .expect("record");
+        let decoded = SelfAccountRecord::from_bytes(&rec.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, rec);
+        assert_eq!(decoded.uid, 1000);
+        assert_eq!(decoded.primary_gid, 1000);
+        assert_eq!(decoded.supplementary_gids(), &gids);
+        assert_eq!(decoded.name_bytes(), b"alice");
+        assert_eq!(decoded.display_name_bytes(), b"Alice Liddell");
+        assert_eq!(decoded.home_bytes(), b"/Users/alice");
+        assert_eq!(decoded.shell_bytes(), b"/System/Commands/elsh.app/Run");
+    }
+
+    #[test]
+    fn self_account_record_refuses_every_oversized_field() {
+        let empty = SelfAccountText {
+            name: b"",
+            display_name: b"",
+            home: b"",
+            shell: b"",
+        };
+        let long_name = [b'x'; MAX_USERNAME_LEN + 1];
+        let long_display = [b'x'; MAX_DISPLAY_NAME_LEN + 1];
+        let long_path = [b'x'; MAX_PATH_LEN + 1];
+        for text in [
+            SelfAccountText {
+                name: &long_name,
+                ..empty
+            },
+            SelfAccountText {
+                display_name: &long_display,
+                ..empty
+            },
+            SelfAccountText {
+                home: &long_path,
+                ..empty
+            },
+            SelfAccountText {
+                shell: &long_path,
+                ..empty
+            },
+        ] {
+            assert_eq!(
+                SelfAccountRecord::new(0, 0, &[], text),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        let many = [0u32; MAX_SUPPLEMENTARY_GIDS + 1];
+        assert_eq!(
+            SelfAccountRecord::new(0, 0, &many, empty),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn self_account_record_decode_fails_closed() {
+        let rec = SelfAccountRecord::new(
+            7,
+            7,
+            &[1],
+            SelfAccountText {
+                name: b"bob",
+                display_name: b"",
+                home: b"/Users/bob",
+                shell: b"none",
+            },
+        )
+        .expect("record");
+        assert_eq!(
+            SelfAccountRecord::from_bytes(&[0u8; SelfAccountRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // Each declared length is checked against its own field's bound, so
+        // no over-long claim can make a decode read another field's bytes.
+        for (at, bound) in [
+            (8usize, MAX_SUPPLEMENTARY_GIDS),
+            (9, MAX_USERNAME_LEN),
+            (10, MAX_DISPLAY_NAME_LEN),
+            (11, MAX_PATH_LEN),
+            (12, MAX_PATH_LEN),
+        ] {
+            let mut bytes = rec.to_le_bytes();
+            bytes[at] = u8::try_from(bound + 1).expect("fits");
+            assert_eq!(
+                SelfAccountRecord::from_bytes(&bytes),
+                Err(Errno::LengthOutOfRange),
+                "byte {at} must be bounded"
+            );
+        }
     }
 
     #[test]

@@ -11,7 +11,8 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, gid_list_into, grant_list_into, AccountStateCode,
     CreateUser, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::CapabilityId;
+use tairix_useradmin::{refusal, AdminChannel};
 use tairix_users::{
     default_home, PasswordRecord, Salt, DEFAULT_ITERATIONS, DEFAULT_SHELL, MAX_DB_LEN,
     SESSION_BASELINE,
@@ -31,18 +32,6 @@ pub trait ToolIo {
     /// off; `None` on end-of-input. Returned as raw bytes so the caller
     /// can zeroise the secret after use.
     fn read_secret(&mut self, prompt: &str) -> Option<Vec<u8>>;
-}
-
-/// The `users_admin` syscall seam (the `tairix_rt::users_admin` shape).
-pub trait AdminChannel {
-    /// Submit one encoded request; a list response is written into `out`
-    /// and its byte length returned. Errors are the raw negative kernel
-    /// result (`-errno`).
-    ///
-    /// # Errors
-    ///
-    /// The raw negative kernel result.
-    fn call(&mut self, req: &[u8], out: &mut [u8]) -> Result<usize, i64>;
 }
 
 /// The salt source for client-side password hashing (the kernel CSPRNG
@@ -92,12 +81,40 @@ const HELP: &[&str] = &[
     "  help | exit",
 ];
 
+/// Print the whole account and group listing in the shared relayable
+/// line form, and answer the process exit code.
+///
+/// The non-interactive read a caller with no terminal performs. The line
+/// form and its parser are one definition in `lib/useradmin`, so this
+/// tool and the surface reading what it printed cannot disagree about
+/// what a field means — and neither is the human `list` table, which
+/// stays what an operator reads at a terminal.
+pub fn print_listing(io: &mut dyn ToolIo, channel: &dyn AdminChannel) -> i32 {
+    let (Some(users), Some(groups)) = (
+        submit_list(io, channel, &UsersAdminRequest::ListUsers),
+        submit_list(io, channel, &UsersAdminRequest::ListGroups),
+    ) else {
+        return 1;
+    };
+    let (Ok(accounts), Ok(groups)) = (
+        tairix_useradmin::decode_accounts(&users),
+        tairix_useradmin::decode_groups(&groups),
+    ) else {
+        io.error_line("users: malformed response");
+        return 1;
+    };
+    for line in tairix_useradmin::listing::render(&accounts, &groups).lines() {
+        io.write_line(line);
+    }
+    0
+}
+
 /// Run the interactive session until `exit` or end-of-input. Returns the
 /// process exit code (`0`; refusals are reported per command and the
 /// session continues).
 pub fn run_session(
     io: &mut dyn ToolIo,
-    channel: &mut dyn AdminChannel,
+    channel: &dyn AdminChannel,
     salt: &mut dyn SaltSource,
     config: SessionConfig,
 ) -> i32 {
@@ -140,7 +157,7 @@ pub fn run_session(
 /// line; a mutating operation's success prints `ok`.
 fn submit_mutation(
     io: &mut dyn ToolIo,
-    channel: &mut dyn AdminChannel,
+    channel: &dyn AdminChannel,
     request: &UsersAdminRequest<'_>,
 ) {
     let mut req_buf = [0u8; USERS_ADMIN_MAX_REQUEST];
@@ -150,7 +167,7 @@ fn submit_mutation(
     };
     match channel.call(&req_buf[..encoded], &mut []) {
         Ok(_) => io.write_line("ok"),
-        Err(err) => io.error_line(&format!("users: {}", errno_message(err))),
+        Err(err) => io.error_line(&format!("users: {}", refusal(err))),
     }
     // The request may carry a password record (a salted hash, but still
     // credential material): scrub the encode buffer.
@@ -160,7 +177,7 @@ fn submit_mutation(
 /// Submit a list request, returning the response bytes.
 fn submit_list(
     io: &mut dyn ToolIo,
-    channel: &mut dyn AdminChannel,
+    channel: &dyn AdminChannel,
     request: &UsersAdminRequest<'_>,
 ) -> Option<Vec<u8>> {
     let mut req_buf = [0u8; USERS_ADMIN_MAX_REQUEST];
@@ -175,13 +192,13 @@ fn submit_list(
             Some(out)
         }
         Err(err) => {
-            io.error_line(&format!("users: {}", errno_message(err)));
+            io.error_line(&format!("users: {}", refusal(err)));
             None
         }
     }
 }
 
-fn list_users(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel) {
+fn list_users(io: &mut dyn ToolIo, channel: &dyn AdminChannel) {
     let Some(response) = submit_list(io, channel, &UsersAdminRequest::ListUsers) else {
         return;
     };
@@ -217,7 +234,7 @@ fn list_users(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel) {
     }
 }
 
-fn list_groups(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel) {
+fn list_groups(io: &mut dyn ToolIo, channel: &dyn AdminChannel) {
     let Some(response) = submit_list(io, channel, &UsersAdminRequest::ListGroups) else {
         return;
     };
@@ -283,7 +300,7 @@ fn encode_password_record(
 
 fn create_user(
     io: &mut dyn ToolIo,
-    channel: &mut dyn AdminChannel,
+    channel: &dyn AdminChannel,
     salt: &mut dyn SaltSource,
     config: SessionConfig,
     args: &[&str],
@@ -335,7 +352,7 @@ fn create_user(
 
 fn set_password(
     io: &mut dyn ToolIo,
-    channel: &mut dyn AdminChannel,
+    channel: &dyn AdminChannel,
     salt: &mut dyn SaltSource,
     config: SessionConfig,
     args: &[&str],
@@ -357,7 +374,7 @@ fn set_password(
     );
 }
 
-fn set_state(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&str], locked: bool) {
+fn set_state(io: &mut dyn ToolIo, channel: &dyn AdminChannel, args: &[&str], locked: bool) {
     let [name] = args else {
         io.error_line(if locked {
             "usage: lock <name>"
@@ -380,7 +397,7 @@ fn set_state(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&str],
 /// ceiling: read the current grants from the listing, apply the edit,
 /// and submit the full replacement set (the kernel bounds any addition
 /// by the caller's own effective set).
-fn edit_grants(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&str], add: bool) {
+fn edit_grants(io: &mut dyn ToolIo, channel: &dyn AdminChannel, args: &[&str], add: bool) {
     let [name, cap_name] = args else {
         io.error_line(if add {
             "usage: grant <name> <CAP_...>"
@@ -437,7 +454,7 @@ fn edit_grants(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&str
     );
 }
 
-fn delete_user(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&str]) {
+fn delete_user(io: &mut dyn ToolIo, channel: &dyn AdminChannel, args: &[&str]) {
     let [name] = args else {
         io.error_line("usage: deluser <name>");
         return;
@@ -449,7 +466,7 @@ fn delete_user(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&str
     );
 }
 
-fn add_group(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&str]) {
+fn add_group(io: &mut dyn ToolIo, channel: &dyn AdminChannel, args: &[&str]) {
     let [name, gid] = args else {
         io.error_line("usage: addgroup <name> <gid>");
         return;
@@ -461,26 +478,12 @@ fn add_group(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&str])
     submit_mutation(io, channel, &UsersAdminRequest::CreateGroup { name, gid });
 }
 
-fn delete_group(io: &mut dyn ToolIo, channel: &mut dyn AdminChannel, args: &[&str]) {
+fn delete_group(io: &mut dyn ToolIo, channel: &dyn AdminChannel, args: &[&str]) {
     let [name] = args else {
         io.error_line("usage: delgroup <name>");
         return;
     };
     submit_mutation(io, channel, &UsersAdminRequest::DeleteGroup { name });
-}
-
-/// Render a raw negative kernel result (`-errno`) as a terse, stable
-/// message.
-fn errno_message(err: i64) -> &'static str {
-    match Errno::try_from_syscall(err) {
-        Some(Errno::PermissionDenied) => "permission denied",
-        Some(Errno::NotFound) => "no such account or group",
-        Some(Errno::AlreadyExists) => "already exists",
-        Some(Errno::NoSpace) => "database full",
-        Some(Errno::NotImplemented) => "account administration unavailable",
-        Some(Errno::LengthOutOfRange | Errno::OutOfRange) => "malformed field",
-        _ => "operation failed",
-    }
 }
 
 #[cfg(test)]

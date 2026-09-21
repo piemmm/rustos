@@ -38,12 +38,13 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::{InputMode, OpenFlags};
+    use tairix_abi::{Errno, InputMode, OpenFlags};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_rt::io::{write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_users::{Salt, SALT_LEN};
     use tairix_users_cli::{
-        parse, run_session, AdminChannel, Command, SaltSource, SessionConfig, ToolIo, USAGE,
+        parse, print_listing, run_session, AdminChannel, Command, SaltSource, SessionConfig,
+        ToolIo, USAGE,
     };
 
     /// The inherited-standard-stream terminal: prompts on fd 1, lines
@@ -116,8 +117,8 @@ mod program {
     struct RtChannel;
 
     impl AdminChannel for RtChannel {
-        fn call(&mut self, req: &[u8], out: &mut [u8]) -> Result<usize, i64> {
-            tairix_rt::users_admin(req, out)
+        fn call(&self, req: &[u8], out: &mut [u8]) -> Result<usize, Errno> {
+            tairix_rt::users_admin(req, out).map_err(Errno::from_syscall)
         }
     }
 
@@ -172,17 +173,15 @@ mod program {
         match parse(&arguments) {
             Ok(Command::Session) => {}
             Ok(Command::Help) => return short_help(),
+            // The non-interactive read: no session, no prompts, just the
+            // relayable listing on standard output.
+            Ok(Command::List) => return print_listing(&mut RtIo, &RtChannel),
             Err(_) => {
                 write_stderr_line(USAGE);
                 return 2;
             }
         }
-        run_session(
-            &mut RtIo,
-            &mut RtChannel,
-            &mut RtSalt,
-            SessionConfig::default(),
-        )
+        run_session(&mut RtIo, &RtChannel, &mut RtSalt, SessionConfig::default())
     }
 
     tairix_rt::entry!(main);

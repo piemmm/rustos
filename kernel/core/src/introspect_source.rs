@@ -25,11 +25,11 @@ use alloc::vec::Vec;
 use tairix_abi::sysinfo::SYSTEM_CONFIG_MAX_LEN;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
-    KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
-    MountRecord, ProcessRecord, ProcessState, ResourceLimitRecord, SystemIdentity, Uptime,
-    UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
-    CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE,
-    RESOURCE_LIMITS_REPORT_LEN,
+    GroupDirectoryRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats,
+    MemoryTotal, MountRecord, ProcessRecord, ProcessState, ResourceLimitRecord, SelfAccountRecord,
+    SystemIdentity, Uptime, UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
+    VolumeIoStatsRecord, CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX, PRESSURE_BAND_COUNT,
+    PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{
     CapabilityId, CapabilityQuery, Duration64, Errno, LimitKind, ProcId, Time64, MEMORY_CLASS_COUNT,
@@ -47,6 +47,9 @@ use crate::init::KernelState;
 use crate::introspect::IntrospectSource;
 use crate::loadavg::LoadTracker;
 use crate::sched::{level_of_priority, SchedulerArch};
+use tairix_users::NO_PATH_MARKER;
+
+use crate::groups::GroupsDbSource;
 use crate::users::UsersDbSource;
 use crate::wallclock::WallClockSource;
 
@@ -173,6 +176,9 @@ pub struct KernelIntrospectSource<A: KernelArch + 'static> {
     /// from. Only the uid + username pairing is ever exposed; credential
     /// material stays behind the capability-gated `users_db_read` syscall.
     users_db: &'static (dyn UsersDbSource + 'static),
+    /// The kernel-held group registry the group directory is derived
+    /// from: the gid + group-name pairing and nothing else.
+    groups_db: &'static (dyn GroupsDbSource + 'static),
     /// The damped run-queue averages, advanced at each load-average read
     /// (the tickless observation model — see [`crate::loadavg`]).
     load: LoadTracker,
@@ -190,6 +196,7 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
         filesystem: &'static (dyn FilesystemService + 'static),
         wall_clock: &'static (dyn WallClockSource + 'static),
         users_db: &'static (dyn UsersDbSource + 'static),
+        groups_db: &'static (dyn GroupsDbSource + 'static),
         heap: &'static FreeListAllocator,
     ) -> Self {
         Self {
@@ -197,6 +204,7 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
             filesystem,
             wall_clock,
             users_db,
+            groups_db,
             heap,
             load: LoadTracker::new(),
         }
@@ -491,6 +499,14 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         user_directory_page(self.users_db, offset, max_records)
     }
 
+    fn group_directory(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
+        group_directory_page(self.groups_db, offset, max_records)
+    }
+
+    fn account(&self, uid: u32) -> Result<Vec<u8>, Errno> {
+        account_record(self.users_db, uid)
+    }
+
     fn cpu_times(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
         // One monotonic sample shared by every record so the busy/idle
         // split of each CPU describes the same instant; idle is the
@@ -753,10 +769,14 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
 /// the same fail-closed parser at load, so a re-parse failure equally
 /// yields no human rows.
 ///
-/// Only the uid + username pairing crosses this boundary; password
-/// records, homes, shells, and grants stay behind the capability-gated
-/// `users_db_read` syscall. Row order is stable across paged calls (the
-/// held text only changes through the audited admin path).
+/// Only the uid + username pairing crosses this boundary: password
+/// records stay behind the capability-gated `users_db_read` syscall, and
+/// an account's grants behind the `CAP_USER_ADMIN` listing. A principal
+/// reads its own home and shell through the self-scoped account read,
+/// never here — the directory answers about *every* account, so it
+/// carries only what rendering a uid needs. Row order is stable across
+/// paged calls (the held text only changes through the audited admin
+/// path).
 fn user_directory_page(
     users_db: &dyn UsersDbSource,
     offset: u64,
@@ -767,39 +787,162 @@ fn user_directory_page(
             .ok()
             .and_then(|text| tairix_users::UsersDb::parse(text).ok())
     });
-    // Page across the concatenation with shared skip/take counters: the
-    // two halves borrow with different lifetimes, so a single chained
-    // iterator cannot express them.
-    let mut skip = usize::try_from(offset).unwrap_or(usize::MAX);
-    let mut remaining = max_records;
-    let mut out = Vec::new();
+    let mut page = Page::new(offset, max_records);
     for (uid, username) in tairix_users::system_account_directory() {
-        if skip > 0 {
-            skip -= 1;
-            continue;
-        }
-        if remaining == 0 {
-            break;
-        }
-        let entry = UserDirectoryRecord::new(uid, username.as_bytes())?;
-        out.extend_from_slice(&entry.to_le_bytes());
-        remaining -= 1;
+        page.push(|| {
+            UserDirectoryRecord::new(uid, username.as_bytes()).map(|entry| entry.to_le_bytes())
+        })?;
     }
     if let Some(db) = &humans {
         for record in db.records() {
-            if skip > 0 {
-                skip -= 1;
-                continue;
-            }
-            if remaining == 0 {
-                break;
-            }
-            let entry = UserDirectoryRecord::new(record.uid().0, record.username().as_bytes())?;
-            out.extend_from_slice(&entry.to_le_bytes());
-            remaining -= 1;
+            page.push(|| {
+                UserDirectoryRecord::new(record.uid().0, record.username().as_bytes())
+                    .map(|entry| entry.to_le_bytes())
+            })?;
         }
     }
-    Ok(out)
+    Ok(page.finish())
+}
+
+/// Encode one page of the group directory: the compiled-in system groups
+/// first, then the on-disk registry's, each as a
+/// [`GroupDirectoryRecord`].
+///
+/// The group sibling of [`user_directory_page`], on the same terms: a
+/// kernel with no registry held (the root is not mounted/unlocked, or none
+/// is published) truthfully lists just the compiled half, and a held text
+/// the shared parser will not take equally yields no on-disk rows — never
+/// an error the broker would refuse ungated clients over, and never a
+/// fabricated group.
+///
+/// Only the gid + name pairing crosses this boundary: membership is the
+/// account record's, and the grant ceiling is the `CAP_USER_ADMIN`
+/// listing's.
+fn group_directory_page(
+    groups_db: &dyn GroupsDbSource,
+    offset: u64,
+    max_records: usize,
+) -> Result<Vec<u8>, Errno> {
+    let held = groups_db.text().ok().and_then(|text| {
+        core::str::from_utf8(&text)
+            .ok()
+            .and_then(|text| tairix_users::GroupsDb::parse(text).ok())
+    });
+    let mut page = Page::new(offset, max_records);
+    for group in tairix_users::system_groups().unwrap_or_default() {
+        page.push(|| {
+            GroupDirectoryRecord::new(group.gid().0, group.name().as_bytes())
+                .map(|record| record.to_le_bytes())
+        })?;
+    }
+    if let Some(db) = &held {
+        for record in db.records() {
+            page.push(|| {
+                GroupDirectoryRecord::new(record.gid().0, record.name().as_bytes())
+                    .map(|entry| entry.to_le_bytes())
+            })?;
+        }
+    }
+    Ok(page.finish())
+}
+
+/// The wire image of one account's display fields, or no bytes at all for
+/// a uid neither the compiled-in table nor the on-disk database holds.
+///
+/// Absence is an empty answer rather than an error, exactly as an
+/// out-of-range directory page is: the broker's client asked about an
+/// account that is not there, which is a fact rather than a failure.
+fn account_record(users_db: &dyn UsersDbSource, uid: u32) -> Result<Vec<u8>, Errno> {
+    if let Some(record) = tairix_users::system_accounts()
+        .unwrap_or_default()
+        .iter()
+        .find(|record| record.uid().0 == uid)
+    {
+        return Ok(encode_account(record)?.to_le_bytes().to_vec());
+    }
+    let held = users_db.text().ok().and_then(|text| {
+        core::str::from_utf8(&text)
+            .ok()
+            .and_then(|text| tairix_users::UsersDb::parse(text).ok())
+    });
+    let Some(db) = held else {
+        return Ok(Vec::new());
+    };
+    let Some(record) = db.records().iter().find(|record| record.uid().0 == uid) else {
+        return Ok(Vec::new());
+    };
+    Ok(encode_account(record)?.to_le_bytes().to_vec())
+}
+
+/// One account's display fields as a [`SelfAccountRecord`].
+///
+/// An absent home or shell is reported as the database's own `none`
+/// marker rather than an empty string, so a no-login account states the
+/// intent it actually carries instead of looking like a missing reading.
+fn encode_account(record: &tairix_users::UserRecord) -> Result<SelfAccountRecord, Errno> {
+    let gids: Vec<u32> = record
+        .supplementary_gids()
+        .iter()
+        .map(|gid| gid.0)
+        .collect();
+    SelfAccountRecord::new(
+        record.uid().0,
+        record.primary_gid().0,
+        &gids,
+        tairix_abi::sysinfo::SelfAccountText {
+            name: record.username().as_bytes(),
+            display_name: record.display_name().as_bytes(),
+            home: record.home().unwrap_or(NO_PATH_MARKER).as_bytes(),
+            shell: record.shell().unwrap_or(NO_PATH_MARKER).as_bytes(),
+        },
+    )
+}
+
+/// The skip/take cursor a two-half directory page is built through.
+///
+/// Both directories concatenate a compiled-in half with an on-disk one
+/// whose records borrow with a different lifetime, so a single chained
+/// iterator cannot express them; this holds the shared counters instead of
+/// each page re-deriving them.
+struct Page {
+    skip: usize,
+    remaining: usize,
+    out: Vec<u8>,
+}
+
+impl Page {
+    /// A cursor that drops the first `offset` records and takes at most
+    /// `max_records` of the rest.
+    fn new(offset: u64, max_records: usize) -> Self {
+        Self {
+            skip: usize::try_from(offset).unwrap_or(usize::MAX),
+            remaining: max_records,
+            out: Vec::new(),
+        }
+    }
+
+    /// Offer one record, encoding it only where the cursor is inside the
+    /// window — a skipped or past-the-window row costs nothing.
+    fn push<const N: usize>(
+        &mut self,
+        encode: impl FnOnce() -> Result<[u8; N], Errno>,
+    ) -> Result<(), Errno> {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return Ok(());
+        }
+        if self.remaining == 0 {
+            return Ok(());
+        }
+        self.out.extend_from_slice(&encode()?);
+        self.remaining -= 1;
+        Ok(())
+    }
+
+    /// The encoded page.
+    fn finish(self) -> Vec<u8> {
+        self.out
+    }
 }
 
 /// Encode one page of a snapshot-backed record list: at most `max_records`
@@ -1022,11 +1165,13 @@ mod tests {
         assert!(!counts_toward_load(TaskState::Ready, 7, Some(7)));
     }
 
-    use super::user_directory_page;
+    use super::{account_record, group_directory_page, user_directory_page};
+    use crate::groups::{LateGroupsDb, NullGroupsDbSource};
     use crate::users::{HeldUsersDbSource, LateUsersDb, NullUsersDbSource};
     use alloc::string::String;
     use alloc::vec::Vec;
-    use tairix_abi::sysinfo::UserDirectoryRecord;
+    use tairix_abi::sysinfo::{GroupDirectoryRecord, SelfAccountRecord, UserDirectoryRecord};
+    use tairix_users::NO_PATH_MARKER;
 
     /// Decode a page's packed records into owned `(uid, name)` rows.
     fn rows(bytes: &[u8]) -> Vec<(u32, String)> {
@@ -1107,5 +1252,112 @@ mod tests {
         );
         // An offset past the end is the empty paging terminator.
         assert!(rows(&user_directory_page(&cell, 12, 64).expect("page encodes")).is_empty());
+    }
+
+    /// Decode a group page's packed records into owned `(gid, name)` rows.
+    fn group_rows(bytes: &[u8]) -> Vec<(u32, String)> {
+        assert_eq!(bytes.len() % GroupDirectoryRecord::WIRE_LEN, 0);
+        bytes
+            .as_chunks::<{ GroupDirectoryRecord::WIRE_LEN }>()
+            .0
+            .iter()
+            .map(|chunk| {
+                let record = GroupDirectoryRecord::from_bytes(chunk).expect("record decodes");
+                (
+                    record.gid,
+                    String::from(core::str::from_utf8(record.name_bytes()).expect("utf8")),
+                )
+            })
+            .collect()
+    }
+
+    /// A group cell holding one on-disk group, mirroring the unlock's
+    /// publish of the loaded registry.
+    fn human_groups() -> LateGroupsDb {
+        let record =
+            tairix_users::GroupRecord::new("staff", tairix_users::Gid(1000)).expect("valid group");
+        let db = tairix_users::GroupsDb::new(alloc::vec![record]).expect("valid registry");
+        let cell = LateGroupsDb::new();
+        cell.publish(db.serialise().into_bytes());
+        cell
+    }
+
+    #[test]
+    fn the_group_directory_lists_the_compiled_groups_without_a_registry() {
+        // No volume, no registry: the compiled-in system groups still
+        // list in full, and nothing is fabricated beyond them.
+        let page = group_directory_page(&NullGroupsDbSource, 0, 64).expect("page encodes");
+        let expected: Vec<(u32, String)> = tairix_users::system_groups()
+            .expect("compiled groups build")
+            .iter()
+            .map(|group| (group.gid().0, String::from(group.name())))
+            .collect();
+        assert_eq!(group_rows(&page), expected);
+    }
+
+    #[test]
+    fn the_group_directory_pages_across_the_compiled_and_on_disk_halves() {
+        let cell = human_groups();
+        let compiled = tairix_users::system_groups()
+            .expect("compiled groups build")
+            .len();
+        let all = group_rows(&group_directory_page(&cell, 0, 64).expect("page encodes"));
+        assert_eq!(all.len(), compiled + 1);
+        assert_eq!(all[compiled], (1000, String::from("staff")));
+        // A page straddling the seam carries the tail of the compiled half
+        // and the head of the on-disk half, so a paging client sees every
+        // row once and none twice.
+        let seam = group_rows(
+            &group_directory_page(&cell, u64::try_from(compiled - 1).expect("fits"), 2)
+                .expect("page encodes"),
+        );
+        assert_eq!(seam.len(), 2);
+        assert_eq!(seam[1], (1000, String::from("staff")));
+        // An offset past the end is the empty paging terminator.
+        assert!(group_rows(
+            &group_directory_page(&cell, u64::try_from(compiled + 1).expect("fits"), 64)
+                .expect("page encodes")
+        )
+        .is_empty());
+        assert!(
+            group_rows(&group_directory_page(&cell, u64::MAX, 64).expect("page encodes"))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_account_read_answers_a_held_record_and_nothing_for_an_unknown_uid() {
+        let cell = human_db();
+        let bytes = account_record(&cell, 1000).expect("the read answers");
+        let record = SelfAccountRecord::from_bytes(&bytes).expect("a whole record");
+        assert_eq!(record.uid, 1000);
+        assert_eq!(record.name_bytes(), b"root");
+        assert_eq!(record.home_bytes(), b"/Users/root");
+        assert_eq!(record.shell_bytes(), b"/System/Commands/elsh.app/Run");
+        assert_eq!(record.primary_gid, 1000);
+        assert!(record.supplementary_gids().is_empty());
+
+        // A uid no database holds is an empty answer, not an error: the
+        // account is simply not there.
+        assert!(account_record(&cell, 4242)
+            .expect("the read answers")
+            .is_empty());
+    }
+
+    #[test]
+    fn the_account_read_serves_a_compiled_account_before_any_volume() {
+        // A system account resolves from the compiled-in table, so a
+        // service reads its own record from first boot; its absent home
+        // and shell state the database's own marker rather than looking
+        // like a missing reading.
+        let bytes = account_record(&NullUsersDbSource, 0).expect("the read answers");
+        let record = SelfAccountRecord::from_bytes(&bytes).expect("a whole record");
+        assert_eq!(record.name_bytes(), b"system");
+        assert_eq!(record.home_bytes(), NO_PATH_MARKER.as_bytes());
+        assert_eq!(record.shell_bytes(), NO_PATH_MARKER.as_bytes());
+        // With no database there is no human account to answer for.
+        assert!(account_record(&NullUsersDbSource, 1000)
+            .expect("the read answers")
+            .is_empty());
     }
 }

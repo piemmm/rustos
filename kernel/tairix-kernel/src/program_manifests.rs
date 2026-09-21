@@ -1082,8 +1082,10 @@ mod tests {
 
     /// The store-only account-administration tools' expected request:
     /// console write for their output, the administrative gate the
-    /// `usine admin` syscall demands, and the filesystem gate their
-    /// short-help read needs. No console-read: they never prompt. They
+    /// `users_admin` syscall demands, and the filesystem gate their
+    /// short-help read needs. No console-read: they never prompt
+    /// (`passwd`, which does, is pinned to the users tool's console pair
+    /// instead). They
     /// ship purely as discovered on-disk bundles — the boot floor never
     /// grows — so no `spawn_layout` row or manifest constant exists for
     /// them and their `AppInfo.toml` is pinned here directly.
@@ -1506,6 +1508,7 @@ mod tests {
             ("fstree", ProgramKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
             ("greeter", ProgramKind::Service, GREETER_REQUEST),
             ("groupadd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+            ("groupdel", ProgramKind::Command, ADMIN_TOOL_REQUEST),
             ("head", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("host", ProgramKind::Command, HOST_TOOL_REQUEST),
             ("link", ProgramKind::Command, PURE_TOOL_REQUEST),
@@ -1519,6 +1522,7 @@ mod tests {
             ("mkdir", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("mv", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("netstack", ProgramKind::Service, NETSTACK_MANIFEST),
+            ("passwd", ProgramKind::Command, USERS_TOOL_MANIFEST),
             ("ping", ProgramKind::Command, PING_TOOL_REQUEST),
             ("printf", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("ps", ProgramKind::Command, PS_MANIFEST),
@@ -1553,6 +1557,8 @@ mod tests {
             ("unlink", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("unmount", ProgramKind::Command, UNMOUNT_TOOL_REQUEST),
             ("useradd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+            ("userdel", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+            ("usermod", ProgramKind::Command, ADMIN_TOOL_REQUEST),
             ("users", ProgramKind::Command, USERS_TOOL_MANIFEST),
             ("view", ProgramKind::Application, VIEW_REQUEST),
             ("vim", ProgramKind::Command, FILE_TOOL_REQUEST),

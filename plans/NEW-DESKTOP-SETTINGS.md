@@ -43,12 +43,51 @@ dropped is a category the surface then has to lie about.
 | **DS8a** | The elevated-read seam: an `ElevateRequest` whose reply carries the bounded output of the run, so an authenticated account can *show* a store no unprivileged caller may read — with `configure`'s per-interface **read** registry and the Ethernet pane that states it | DS6 | DS8a | done |
 | **DS8** | The network store's writer — `lib/netconfig`'s draft/commit mutation API, `configure`'s write side and its *unset* spelling, the live apply over the stack's admin surface, and the device manager's runtime re-read | DS6, DS7, DS8a | DS8 | done |
 | **DS8b** | Ethernet and DNS stage and apply through that writer — the addressing reading becomes a settable per-interface form, and Apply is the one elevated `configure` run | DS8 | DS8b | done |
-| **DS9** | Users & Groups — the ungated `GROUP_DIRECTORY` sibling, the caller's own record, the admin-authenticated read of every other account, and the user-admin operations the syscall carries but no tool spells | DS6, DS8a | DS9 | planned |
+| **DS9a** | The three reads' plumbing and the command family they and the write side are driven through: the ungated `GROUP_DIRECTORY` and `SELF_ACCOUNT` queries end to end, the shared `lib/useradmin` client, `users --list`, and the `usermod`/`userdel`/`passwd`/`groupdel` bundles | DS6, DS8a | DS9 | done |
+| **DS9** | Users & Groups — the pane itself: the three reads composed, the per-account staged edits, and the one elevated run that applies them | DS9a | DS9 | in progress — the plumbing landed with DS9a; the pane is not composed yet and its row stays `Elsewhere` |
 | **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | planned |
 | **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | planned |
 | **DS12** | Lock Screen and Screensaver — the session's single idle deadline and the one timer armed only while a policy has one pending | DS3 | DS12 | planned |
 | **DS13** | The `settings_qemu_aarch64` vertical and the docs pages the surface owes | DS2–DS12 | DS13 | planned |
 | **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | in progress — `datetime.app` landed with DS1 (its grid deleted, its extent now measured through `Dialog::height_for_content`); `PermGrid` remains |
+
+**DS9a, and what the pane still owes.** DS9's read half needs three
+answers of different authority, and its write half needs tools an
+elevated run can actually drive; neither existed, and both are
+independent of how the pane draws them. They landed first, as DS9a:
+
+- `SysinfoQueryId::GROUP_DIRECTORY` (ungated, paged, fixed-width) and
+  `SysinfoQueryId::SELF_ACCOUNT` (ungated, self-scoped), each with its
+  `lib/abi` frame in the fuzz sweep, its kernel introspect domain, its
+  `sysinfod` seam, and its `lib/procinfo` client. The group directory
+  needed a live registry the kernel could serve names from, so the
+  unlock now publishes `groups-v1` into a `LateGroupsDb` the audited
+  admin engine swaps on every commit — a created group is visible to a
+  display as soon as it is durable, not at the next boot.
+- `lib/useradmin`, the one `users_admin` client every account tool now
+  shares, including the `:`-delimited relayed-listing form whose
+  renderer and parser are one definition.
+- `users --list`, the non-interactive read the pane's capture drives:
+  the interactive session cannot serve one, because `ElevateRequest::Capture`
+  closes the child's standard input.
+- `usermod`, `userdel`, `passwd` and `groupdel` as `plans/APPS.md`
+  command bundles, completing the shadow-utils family beside `useradd`
+  and `groupadd`.
+
+Two decisions the pane inherits, recorded here so they are not
+re-derived:
+
+- **Every Users write elevates a *named* account and the kernel decides.**
+  `users_admin` is gated whole on `CAP_USER_ADMIN`, so a principal
+  editing *its own* record still needs that grant; a genuinely
+  unprivileged self-service password change would be a new authority
+  path, not a widened gate, and is out of scope here. The pane offers
+  the action, the kernel refuses it where it must, and the pane states
+  the refusal.
+- **`passwd` takes a ready record.** The pane hashes with the shared
+  `lib/users` builder and passes `--record`, so no plaintext leaves the
+  Settings process and none rides an argv. The password row is a masked
+  `TextField` (`lib/controls`' secret mode), never a visible one.
 
 **The honest shape of the deliverable.** Seven of the categories the desktop
 should offer have no subsystem beneath them today: there is no audio stack, no

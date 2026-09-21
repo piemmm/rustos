@@ -4,7 +4,7 @@ users — Benutzerkonten und Gruppen verwalten
 
 ## SYNOPSIS
 
-`users [-h | -?]`
+`users [-h | -? | -l]`
 
 ## DESCRIPTION
 
@@ -35,6 +35,7 @@ verwaltet, die innerhalb der Sitzung eingegeben werden.
 
 ## OPTIONS
 
+- `-l, --list` — die gesamte Konten- und Gruppenliste in der weiterleitbaren Zeilenform ausgeben und ohne Sitzung beenden.
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen und beenden.
 
 ## EXIT STATUS

@@ -86,9 +86,9 @@ use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket,
-    CrashFaultClass, CrashNamedReg, CrashRecord, IrqRecord, MountRecord, ProcessRecord, SeatRecord,
-    UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
-    CRASH_MAX_FRAMES,
+    CrashFaultClass, CrashNamedReg, CrashRecord, GroupDirectoryRecord, IrqRecord, MountRecord,
+    ProcessRecord, SeatRecord, UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
+    VolumeIoStatsRecord, CRASH_MAX_FRAMES,
 };
 #[cfg(feature = "watchdog-diagnostics")]
 use tairix_abi::time::NANOS_PER_MILLI;
@@ -7674,6 +7674,19 @@ where
                 arg,
                 records_that_fit(out_cap, UserDirectoryRecord::WIRE_LEN)?,
             )?,
+            IntrospectDomain::GroupDirectory => self.introspect.group_directory(
+                arg,
+                records_that_fit(out_cap, GroupDirectoryRecord::WIRE_LEN)?,
+            )?,
+            IntrospectDomain::Account => {
+                // The uid fits the `u64` `arg`, so unlike `TaskLimits` the
+                // broker names its client's attested account directly. The
+                // record carries no grant ceiling, no state and no
+                // credential, so a value outside the u32 range is simply
+                // an account that does not exist rather than an error.
+                let uid = u32::try_from(arg).map_err(|_| Errno::OutOfRange)?;
+                self.introspect.account(uid)?
+            }
             IntrospectDomain::CpuTimes => self
                 .introspect
                 .cpu_times(arg, records_that_fit(out_cap, CpuTimeRecord::WIRE_LEN)?)?,
@@ -30432,6 +30445,16 @@ mod tests {
             _offset: u64,
             _max_records: usize,
         ) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn group_directory(
+            &self,
+            _offset: u64,
+            _max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn account(&self, _uid: u32) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(alloc::vec::Vec::new())
         }
         fn cpu_times(

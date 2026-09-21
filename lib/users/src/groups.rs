@@ -38,9 +38,9 @@ use crate::ParseError;
 /// The exact first line of every `groups-v1` database.
 pub const GROUPS_FORMAT_HEADER: &str = "tairix-groups-v1";
 
-/// Longest group name, in bytes (the same bound as a username, since both
-/// obey the one identifier grammar).
-pub const MAX_GROUPNAME_LEN: usize = 32;
+/// The group-name bound, from the one shared definition the fixed-width
+/// `sysinfo` group-directory frame is also sized by.
+pub use tairix_abi::account::MAX_GROUPNAME_LEN;
 
 /// Largest database file, in bytes, the parser will consider (a validation
 /// bound — a defence, not a capacity).

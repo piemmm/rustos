@@ -99,6 +99,7 @@
   - [`tairix-termcap`](./lib/termcap.md)
   - [`tairix-timesync`](./lib/timesync.md)
   - [`tairix-usb`](./lib/usb.md)
+  - [`tairix-useradmin`](./lib/useradmin.md)
   - [`tairix-users`](./lib/users.md)
   - [`tairix-util`](./lib/util.md)
   - [`tairix-virtio-input`](./lib/virtio_input.md)

@@ -5,9 +5,9 @@
 //! command-line grammar ([`command`]: the reserved `-h`/`-?` short-help
 //! switches, plans/APPS.md §4, against running the session), the in-session
 //! command grammar, the typed `users_admin` request encoding, and the
-//! response rendering — behind three seams ([`session::ToolIo`],
-//! [`session::AdminChannel`], [`session::SaltSource`]) so every path is
-//! host-testable without a kernel. The freestanding `Run` binary
+//! response rendering — behind three seams ([`session::ToolIo`], the
+//! shared [`AdminChannel`], and [`session::SaltSource`]) so every path
+//! is host-testable without a kernel. The freestanding `Run` binary
 //! (`src/run.rs`) merely binds the seams to the inherited standard
 //! streams, the `users_admin` syscall wrapper, and the `sys:random`
 //! resource.
@@ -40,4 +40,5 @@ pub mod command;
 pub mod session;
 
 pub use command::{parse, Command, UsageError, USAGE};
-pub use session::{run_session, AdminChannel, SaltSource, SessionConfig, ToolIo};
+pub use session::{print_listing, run_session, SaltSource, SessionConfig, ToolIo};
+pub use tairix_useradmin::AdminChannel;

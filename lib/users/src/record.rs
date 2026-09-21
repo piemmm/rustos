@@ -26,17 +26,12 @@ pub struct Uid(pub u32);
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Gid(pub u32);
 
-/// Longest username, in bytes.
-pub const MAX_USERNAME_LEN: usize = 32;
-
-/// Longest display name, in bytes.
-pub const MAX_DISPLAY_NAME_LEN: usize = 64;
-
-/// Longest home or shell path, in bytes.
-pub const MAX_PATH_LEN: usize = 128;
-
-/// Most supplementary groups one account may carry.
-pub const MAX_SUPPLEMENTARY_GIDS: usize = 16;
+/// The account-record field bounds, from the one shared definition the
+/// fixed-width `sysinfo` frames are also sized by: a record this parser
+/// accepts must fit the frame that reports it.
+pub use tairix_abi::account::{
+    MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
+};
 
 /// The explicit stored spelling of an absent home or shell — a
 /// non-interactive account states "none", never a fake path. It can

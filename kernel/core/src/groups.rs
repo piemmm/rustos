@@ -62,6 +62,89 @@ use crate::fs::{read_bootstrap_file, BootstrapReadError, VfsError};
 /// Absolute path of the group registry on the root volume.
 pub const GROUPS_DB_PATH: &str = "/System/Security/Groups";
 
+/// The live group registry the ungated group-directory introspection
+/// serves.
+///
+/// The registry is a plain `name:gid` table with no credential material,
+/// so unlike [`crate::users::UsersDbSource`] its holder needs no
+/// zero-on-drop snapshot and no pending state to park a login on: nothing
+/// authenticates against it, and a system that has not unlocked its root
+/// simply has the compiled-in system groups and no others.
+///
+/// `Sync` because the single installed source is shared by the per-CPU
+/// syscall handlers, exactly like [`crate::users::UsersDbSource`].
+pub trait GroupsDbSource: Sync {
+    /// The held registry's exact `groups-v1` text.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when no registry is held — the root volume is
+    /// not mounted, or the boot read refused it — so the directory
+    /// answers the compiled-in system groups alone rather than inventing
+    /// one.
+    fn text(&self) -> Result<alloc::vec::Vec<u8>, Errno>;
+}
+
+/// The group-registry source installed before any real holder exists.
+///
+/// Every read fails closed with [`Errno::NotImplemented`], marking an
+/// inert interface exactly as [`crate::users::NullUsersDbSource`] does.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct NullGroupsDbSource;
+
+impl GroupsDbSource for NullGroupsDbSource {
+    fn text(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared [`NullGroupsDbSource`] a boot path defaults to.
+pub static NULL_GROUPS_DB: NullGroupsDbSource = NullGroupsDbSource;
+
+/// The live group registry, published by the unlock and replaced by the
+/// audited `CAP_USER_ADMIN` engine's commit.
+///
+/// The parallel of [`crate::users::LateUsersDb`] with its three-state
+/// machinery removed: no caller blocks on the registry, so there is no
+/// pending state to distinguish from an empty one. A read before any
+/// install answers [`Errno::NotFound`], which the directory renders as
+/// "the compiled-in system groups, and nothing on disk yet".
+pub struct LateGroupsDb {
+    held: tairix_sync::RwLock<Option<alloc::vec::Vec<u8>>>,
+}
+
+impl LateGroupsDb {
+    /// Construct an empty cell. `const` so a boot path can place it in a
+    /// `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            held: tairix_sync::RwLock::new(None),
+        }
+    }
+
+    /// Publish `text` as the live registry.
+    ///
+    /// Unlike the users cell this is not set-once: the registry carries no
+    /// credential, the only writers are the trusted unlock and the audited
+    /// admin engine, and both legitimately publish a whole new text.
+    pub fn publish(&self, text: alloc::vec::Vec<u8>) {
+        *self.held.write() = Some(text);
+    }
+}
+
+impl Default for LateGroupsDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GroupsDbSource for LateGroupsDb {
+    fn text(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+        self.held.read().clone().ok_or(Errno::NotFound)
+    }
+}
+
 /// Why [`load_groups_db`] yielded no group registry.
 ///
 /// Each variant carries the underlying refusal; the load stops at the first

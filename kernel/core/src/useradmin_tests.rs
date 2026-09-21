@@ -20,6 +20,7 @@ use tairix_users::{
 };
 
 use crate::fs::LateIdentity;
+use crate::groups::{GroupsDbSource, LateGroupsDb};
 use crate::test_sink::TestSink;
 use crate::useradmin::{UserAdminBacking, UserAdminEngine, UsersAdmin};
 use crate::users::{HeldUsersDbSource, LateUsersDb, UsersDbSource};
@@ -103,6 +104,7 @@ struct Fixture {
     engine: UserAdminEngine,
     users_cell: &'static LateUsersDb,
     identity_cell: &'static LateIdentity,
+    groups_cell: &'static LateGroupsDb,
     backing: &'static RecordingBacking,
     sink: &'static TestSink,
 }
@@ -136,13 +138,24 @@ fn fixture() -> Fixture {
     identity_cell
         .install(crate::groups::build_identity_table(&users, &groups, sink).expect("boot verify"))
         .expect("boot install");
+    let groups_cell: &'static LateGroupsDb = Box::leak(Box::new(LateGroupsDb::new()));
+    groups_cell.publish(groups.serialise().into_bytes());
     let backing: &'static RecordingBacking = Box::leak(Box::new(RecordingBacking::default()));
     sink.clear();
 
     Fixture {
-        engine: UserAdminEngine::new(users, groups, users_cell, identity_cell, backing, sink),
+        engine: UserAdminEngine::new(
+            users,
+            groups,
+            users_cell,
+            identity_cell,
+            groups_cell,
+            backing,
+            sink,
+        ),
         users_cell,
         identity_cell,
+        groups_cell,
         backing,
         sink,
     }
@@ -411,6 +424,47 @@ fn duplicate_accounts_and_groups_are_refused() {
         ),
         Err(Errno::AlreadyExists)
     );
+}
+
+#[test]
+fn a_committed_group_edit_moves_the_live_registry_the_directory_renders_from() {
+    let f = fixture();
+    let published = |cell: &LateGroupsDb| {
+        let text = cell.text().expect("a registry is published");
+        String::from_utf8(text).expect("the registry is text")
+    };
+    assert!(!published(f.groups_cell).contains("audio"));
+
+    assert_eq!(
+        handle(
+            &f,
+            &UsersAdminRequest::CreateGroup {
+                name: "audio",
+                gid: 2000,
+            },
+        ),
+        Ok(0)
+    );
+    // The directory renders names from the published registry, so a
+    // committed edit has to move it or a created group stays invisible
+    // until the next boot.
+    assert!(published(f.groups_cell).contains("audio:2000"));
+
+    assert_eq!(
+        handle(&f, &UsersAdminRequest::DeleteGroup { name: "audio" }),
+        Ok(0)
+    );
+    assert!(!published(f.groups_cell).contains("audio"));
+}
+
+#[test]
+fn a_refused_group_edit_leaves_the_live_registry_untouched() {
+    let f = fixture();
+    let before = f.groups_cell.text().expect("a registry is published");
+    // Deleting a group an account references fails the identity
+    // verification, so nothing is persisted and nothing is published.
+    assert!(handle(&f, &UsersAdminRequest::DeleteGroup { name: "wheel" }).is_err());
+    assert_eq!(f.groups_cell.text().expect("still published"), before);
 }
 
 #[test]

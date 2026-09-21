@@ -41,6 +41,8 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `PROCESS_IDENTITY`      | none (self-scoped)     | no      |
 | `LOAD_AVERAGE`          | none                   | no      |
 | `USER_DIRECTORY`        | none                   | no      |
+| `GROUP_DIRECTORY`       | none                   | no      |
+| `SELF_ACCOUNT`          | none (self-scoped)     | no      |
 | `CPU_TIME_STATS`        | none                   | no      |
 | `SEAT_LIST`             | `CAP_SYSINFO_HW`       | yes     |
 | `MEMORY_PRESSURE`       | `CAP_SYSINFO_KERNEL`   | yes     |
@@ -94,6 +96,29 @@ ungated for the same reason: each `UserDirectoryRecord` carries only the
 `/etc/passwd`-class public uid + username pairing — never credential
 material, which stays behind the capability-gated `users_db_read`
 syscall — so any task may resolve account names for display.
+`GROUP_DIRECTORY` is its sibling on identical ground: each
+`GroupDirectoryRecord` carries a gid and a group name and nothing else —
+no membership list, no ACL, no grant — because rendering a gid as a name
+is the same display need as rendering a uid as one. A system whose group
+registry is not loaded answers the compiled-in system groups alone,
+never a fabricated one.
+
+`SELF_ACCOUNT` answers the **caller's own** account record — its name,
+display name, home, shell, primary group and memberships — as a single
+`SelfAccountRecord`. It is ungated and self-scoped exactly as
+`PROCESS_IDENTITY` and `RESOURCE_LIMITS` are: the broker resolves it
+against the uid the kernel attested on the request, never a value the
+payload supplies, so a principal can only ever read *itself* and there is
+no field naming whose account to read. What it deliberately does **not**
+carry is the capability grant ceiling, the account's lock state, and any
+password material — the ceiling is a map of the machine's authority
+rather than directory data, the lock state enumerates which accounts are
+live and so worth attacking, and credentials stay behind
+`CAP_USERS_READ`. Reading another account's fields is the
+`CAP_USER_ADMIN` `users_admin` listing's job and has no path here. A uid
+no database holds answers zero bytes, which a client renders as an
+unknown record rather than as a failure.
+
 `CPU_TIME_STATS` is ungated like `LOAD_AVERAGE`: each `CpuTimeRecord`
 carries one CPU's cumulative busy nanoseconds (accounted on the
 scheduler's dispatch bracket) and the idle remainder of the same
