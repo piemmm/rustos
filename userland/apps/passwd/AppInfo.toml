@@ -1,0 +1,21 @@
+# Signed-AppInfo manifest source for the `passwd` command app
+# (plans/APPS.md deliverable 8). Discovered by the build's app-bundle
+# composer, which cross-compiles Run, signs the manifest, and plants the
+# bundle on the read-only /System/Commands store. The capability list is the
+# bundle's request: the launched process receives this set intersected
+# with the launching user's grants, never more. `CAP_USER_ADMIN` sits
+# above the session baseline, so the tool works only for an administrator
+# account and is inert for everyone else; `CAP_FS_ACCESS` covers the
+# short-help read of the bundle's own Help/ tree. `CAP_CONSOLE_READ` is
+# what the echo-off password prompts need, and is why this bundle's
+# request is the `users` tool's console pair rather than its siblings'
+# write-only one: `--record` skips the prompts, but the interactive form
+# is the ordinary use.
+id = "os.tairix.passwd"
+name = "passwd"
+title = "Passwd"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_USER_ADMIN", "CAP_FS_ACCESS"]
+# This bundle's own scalable icon in its Resources/ (plans/ICONS.md).
+library-icon = "passwd.svg"

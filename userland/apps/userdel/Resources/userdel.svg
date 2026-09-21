@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>userdel</title>
+  <!-- Every shape is a filled polygon: the desktop's SVG subset has no
+       curves, no strokes and no transforms, so a round edge is cut as
+       integer line segments. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#8A3A33" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#A6483F" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <polygon fill="#FFFFFF" points="84,74 92,66 104,62 116,66 124,74 124,90 116,98 104,102 92,98 84,90"/>
+  <polygon fill="#FFFFFF" points="68,152 76,128 90,116 104,112 118,116 132,128 140,152"/>
+  <polygon fill="#FFE08A" points="166,132 186,152 206,132 222,148 202,168 222,188 206,204 186,184 166,204 150,188 170,168 150,148"/>
+</svg>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>groupdel</title>
+  <!-- Every shape is a filled polygon: the desktop's SVG subset has no
+       curves, no strokes and no transforms, so a round edge is cut as
+       integer line segments. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#7A3A6A" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#96487F" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <polygon fill="#FFFFFF" points="48,76 54,68 64,64 74,68 80,76 80,90 74,98 64,102 54,98 48,90"/>
+  <polygon fill="#FFFFFF" points="92,72 99,63 110,58 121,63 128,72 128,90 121,99 110,104 99,99 92,90"/>
+  <polygon fill="#DCE6F0" points="140,76 146,68 156,64 166,68 172,76 172,90 166,98 156,102 146,98 140,90"/>
+  <polygon fill="#FFFFFF" points="36,150 44,130 62,118 110,112 158,118 176,130 184,150 184,160 36,160"/>
+  <polygon fill="#FFE08A" points="166,168 186,188 206,168 222,184 202,204 222,224 206,236 186,220 166,236 150,224 170,204 150,184"/>
+</svg>

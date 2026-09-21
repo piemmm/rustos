@@ -1,0 +1,21 @@
+[package]
+name = "tairix-useradmin"
+description = "TAIRiX shared `users_admin` client: request building, response decoding, and the one refusal wording every account-administration command app renders (`lib/useradmin`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The frozen `users_admin` request/response vocabulary and the stable
+# `Errno` every refusal is rendered from.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The account policy the client's bounds and password records come from:
+# the database maxima the reply buffer is sized to, and the salted
+# PBKDF2 builder a password-setting tool composes a record with.
+tairix-users = { path = "../users", version = "=0.0.0" }

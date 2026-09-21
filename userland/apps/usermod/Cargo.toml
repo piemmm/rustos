@@ -1,0 +1,42 @@
+[package]
+name = "tairix-usermod"
+description = "TAIRiX `usermod` CLI: modify a user account (`userland/apps/` — a plans/APPS.md command app)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature. Host tooling builds only the
+# library, so the host test build never pulls the runtime's `_start` /
+# `#[global_allocator]` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+[[bin]]
+name = "tairix-usermod-run"
+path = "src/run.rs"
+
+[dependencies]
+# The stable `Errno` and the `users_admin` request vocabulary.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one help engine: locale fallback, the bounded structured-Markdown
+# parser, and the shared own-bundle short-help render.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The shared `users_admin` client: request submission, listing decode, and
+# the one refusal wording every account tool renders.
+tairix-useradmin = { path = "../../../lib/useradmin", version = "=0.0.0" }
+# The shared command-line option-value resolver.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The shared account policy and the salted PBKDF2 password-record builder.
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
