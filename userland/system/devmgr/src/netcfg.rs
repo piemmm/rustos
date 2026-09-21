@@ -511,14 +511,21 @@ mod tests {
             ipv6_privacy: privacy,
             tcp_keepalive: keepalive,
             tcp_ecn: ecn,
+            // The capacity a 1 GiB machine derives, so a delivered policy
+            // is a fixed figure rather than the host's own RAM.
+            sockets_max: 1024,
         }
     }
+
+    /// A one-gibibyte machine, the size the derived capacities here
+    /// are stated against.
+    const GIB: u64 = 1024 * 1024 * 1024;
 
     #[test]
     fn settings_map_from_the_config_registry() {
         let mut config = tairix_sysconfig::SystemConfig::default();
         assert_eq!(
-            config.network_settings(),
+            config.network_settings(GIB),
             settings(true, true, false, false, false, false),
             "the registry defaults map to families-on, cookies-auto, privacy-off, keepalive-off, ecn-off"
         );
@@ -528,9 +535,12 @@ mod tests {
         config.net_tcp_keepalive = tairix_sysconfig::NetToggle::Enabled;
         config.net_tcp_ecn = tairix_sysconfig::NetToggle::Enabled;
         assert_eq!(
-            config.network_settings(),
+            config.network_settings(GIB),
             settings(true, false, true, true, true, true)
         );
+        // A capacity follows the machine the deliverer read, so the same
+        // document yields a different table on a larger one.
+        assert_eq!(config.network_settings(512 * GIB).sockets_max, 524_288);
     }
 
     #[test]

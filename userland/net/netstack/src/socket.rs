@@ -25,6 +25,19 @@
 //! are bounded, failing closed with [`Errno::LimitExceeded`] at capacity.
 //! A stream's per-connection send/receive/reassembly buffers are the
 //! bounded [`TcpConfig`] capacities, so a hostile peer cannot grow memory.
+//!
+//! # Capacity
+//!
+//! How many sockets the table holds is a *capacity*, not a security
+//! bound, and it is derived rather than chosen: the total is sized from
+//! the machine's usable physical RAM and an administrator may override it
+//! (`net.sockets.max`), and the per-principal figure is a sixteenth share
+//! of whatever that total came to. Both arrive on the delivered
+//! [`NetworkSettings`] — the stack is the network-parsing sandbox and can
+//! read neither the machine nor `system.conf` itself. What stays fixed is
+//! the *refusal*: exceeding the effective bound is
+//! [`Errno::LimitExceeded`] and an audited event, exactly as before. Only
+//! the figure stopped being a guess.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -41,6 +54,8 @@ use tairix_abi::net_ipc::{
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::{CapabilityId, Duration64, Errno};
+use tairix_collections::HashMap;
+use tairix_hash::{BuildSipHash13, HashSeed};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr};
 use tairix_net::checksum::Pseudo;
@@ -66,18 +81,6 @@ type OutSeg = (TcpSegmentMeta, Vec<u8>, Option<u16>, Ecn);
 /// shape a listener's `advance` yields (each retransmitted SYN-ACK may be
 /// destined for a different peer).
 type PeerOutSeg = (IpAddr, TcpSegmentMeta, Vec<u8>, Option<u16>, Ecn);
-
-/// Largest number of sockets a single principal may hold at once.
-///
-/// A per-principal fail-closed bound so one principal cannot exhaust the
-/// table and starve others. It is a security bound (a denial-of-service
-/// ceiling), not a scaling capacity, so it stays fixed rather than growing
-/// with the machine.
-pub const MAX_SOCKETS_PER_PRINCIPAL: usize = 64;
-
-/// Largest number of sockets the service holds in total, across every
-/// principal — the global fail-closed backstop.
-pub const MAX_SOCKETS_TOTAL: usize = 1024;
 
 /// Largest number of multicast groups one socket may join at once.
 pub const MAX_GROUPS_PER_SOCKET: usize = 16;
@@ -324,10 +327,53 @@ pub struct StreamIo {
     pub cookies_engaged: bool,
 }
 
+/// The four-tuple that identifies an established stream, and the key its
+/// demux index is looked up by.
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+struct ConnKey {
+    family: NetAddrFamily,
+    local_port: u16,
+    peer_addr: [u8; 16],
+    peer_port: u16,
+}
+
+/// What holds one local port.
+///
+/// `holders` counts every socket carrying the port — the one that bound it
+/// and any stream children that inherited it from a listener — so the
+/// globally-unique-port rule reads the same as a scan of the whole table
+/// would. `demux` names the socket inbound traffic for the port goes to,
+/// which is never an established stream: those are reached by their full
+/// four-tuple instead, so a listener and its children do not contend.
+#[derive(Copy, Clone, Default)]
+struct PortSlot {
+    holders: u32,
+    demux: Option<SocketId>,
+}
+
 /// The socket table and its dispatcher.
-#[derive(Default)]
+///
+/// # Lookup
+///
+/// The table is indexed, not scanned. Its capacity scales with the
+/// machine, so every lookup on a path a remote peer can drive has to be
+/// independent of how many sockets exist: a scan would let one principal's
+/// sockets slow every other principal's traffic, which is a denial of
+/// service rather than merely slow. The indices are keyed with the
+/// process's `SipHash` key, because a peer chooses the address and port half
+/// of a connection key and an unkeyed hash would be collision-floodable —
+/// the same O(n) defect by another route.
 pub struct SocketService {
     sockets: Vec<SocketEntry>,
+    /// Handle to its position in `sockets` — the only index holding a
+    /// position, so a `swap_remove` repairs one row rather than many.
+    by_id: HashMap<SocketId, usize, BuildSipHash13>,
+    /// Established stream four-tuple to its handle.
+    by_conn: HashMap<ConnKey, SocketId, BuildSipHash13>,
+    /// Local port to what holds it.
+    by_port: HashMap<u16, PortSlot, BuildSipHash13>,
+    /// Live socket count per owning principal, for the per-principal share.
+    owned: HashMap<ProcId, u32, BuildSipHash13>,
     /// Rolling handle allocator; the next candidate id, advanced past any
     /// live collision so a delivered message can never alias a reused id.
     next_id: SocketId,
@@ -344,10 +390,25 @@ pub struct SocketService {
 }
 
 impl SocketService {
-    /// An empty socket table.
+    /// An empty socket table whose indices hash under `hash_key`.
+    ///
+    /// The key is the process's published one. It is an argument rather
+    /// than read here so the table cannot silently fall back to an
+    /// unkeyed hash: a peer picks the address and port half of every
+    /// connection key, so the caller states what it is hashing under.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(hash_key: HashSeed) -> Self {
+        let hasher = BuildSipHash13::with_seed(hash_key);
+        Self {
+            sockets: Vec::new(),
+            by_id: HashMap::with_hasher(hasher),
+            by_conn: HashMap::with_hasher(hasher),
+            by_port: HashMap::with_hasher(hasher),
+            owned: HashMap::with_hasher(hasher),
+            next_id: 0,
+            port_assignments: 0,
+            retired_defence: ListenerStats::default(),
+        }
     }
 
     /// Number of open sockets across all principals.
@@ -466,6 +527,8 @@ impl SocketService {
         if self.port_assignments != assignments || self.sockets.len() != population {
             interfaces.publish_datagram_ports(broadcast_consumer_ports(&self.sockets));
         }
+        #[cfg(test)]
+        self.assert_indices_agree();
         result
     }
 
@@ -613,9 +676,7 @@ impl SocketService {
                 Errno::OutOfRange,
             );
         }
-        if self.sockets.len() >= MAX_SOCKETS_TOTAL
-            || self.count_owned(owner) >= MAX_SOCKETS_PER_PRINCIPAL
-        {
+        if self.at_capacity(&settings, owner) {
             return refuse(
                 audit,
                 "socket open refused: socket quota exhausted",
@@ -631,7 +692,7 @@ impl SocketService {
             SocketType::Stream => Proto::Stream(None),
         };
         let id = self.alloc_id();
-        self.sockets.push(SocketEntry {
+        self.insert_entry(SocketEntry {
             id,
             owner,
             owner_pid,
@@ -640,7 +701,7 @@ impl SocketService {
             local_addr: [0u8; 16],
             local_port: 0,
             proto,
-        });
+        })?;
         emit(
             audit,
             Level::Info,
@@ -671,13 +732,23 @@ impl SocketService {
         if local.family != self.sockets[index].family {
             return Err(Errno::OutOfRange);
         }
+        // A socket already carrying a local port is not re-bound. Moving
+        // one would strand the port it holds and, for a connected socket,
+        // silently cut its inbound traffic adrift from the four-tuple it
+        // is reached by.
+        if self.sockets[index].local_port != 0 {
+            return Err(Errno::AlreadyExists);
+        }
         if local.addr != [0u8; 16] && !interfaces.has_local_address(local.family, local.addr) {
             return Err(Errno::AddressUnavailable);
         }
+        self.reserve_index_rows()?;
         let port = self.assign_port(entropy, local.port)?;
+        self.unindex_entry(index);
         let entry = &mut self.sockets[index];
         entry.local_addr = local.addr;
         entry.local_port = port;
+        self.index_entry(index);
         let len = encode_bind_reply(Ok(port), response)?;
         Ok(SocketReply {
             len,
@@ -705,10 +776,7 @@ impl SocketService {
         }
         match self.sockets[index].proto {
             Proto::Datagram(_) => {
-                if self.sockets[index].local_port == 0 {
-                    let port = self.assign_port(entropy, 0)?;
-                    self.sockets[index].local_port = port;
-                }
+                self.ensure_local_port(entropy, index)?;
                 if let Proto::Datagram(dg) = &mut self.sockets[index].proto {
                     dg.peer = Some(peer);
                 }
@@ -729,10 +797,7 @@ impl SocketService {
                 }
                 // Assign the stack-owned ICMP identifier now (its lifetime
                 // is the socket's), so it is stable across every send.
-                if self.sockets[index].local_port == 0 {
-                    let ident = self.assign_port(entropy, 0)?;
-                    self.sockets[index].local_port = ident;
-                }
+                self.ensure_local_port(entropy, index)?;
                 if let Proto::Echo(echo) = &mut self.sockets[index].proto {
                     echo.peer = Some(peer);
                 }
@@ -813,13 +878,28 @@ impl SocketService {
             if let Proto::Listen(listener) = &self.sockets[index].proto {
                 self.retired_defence = fold_defence(self.retired_defence, listener.stats());
             }
-            self.sockets.swap_remove(index);
-            self.sockets.retain(|e| {
-                !(e.owner == listener_owner
-                    && e.family == family
-                    && e.local_port == port
-                    && matches!(&e.proto, Proto::Stream(Some(c)) if !c.accepted))
-            });
+            self.remove_at(index);
+            // Highest position first, so each `swap_remove` only ever moves
+            // an entry from beyond the one being dropped and no unvisited
+            // match can be carried over a position already passed. A scan
+            // is right here where it is wrong on the demux path above: this
+            // is the owner closing its own listener, not something a remote
+            // peer can drive.
+            let abandoned: Vec<usize> = self
+                .sockets
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    e.owner == listener_owner
+                        && e.family == family
+                        && e.local_port == port
+                        && matches!(&e.proto, Proto::Stream(Some(c)) if !c.accepted)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            for position in abandoned.into_iter().rev() {
+                self.remove_at(position);
+            }
         } else {
             let family = self.sockets[index].family;
             let groups = match &mut self.sockets[index].proto {
@@ -830,7 +910,7 @@ impl SocketService {
                 let ip = ip_from_parts(family, *group);
                 tx.extend(interfaces.leave_multicast_all(ip, now));
             }
-            self.sockets.swap_remove(index);
+            self.remove_at(index);
         }
         let len = status_reply(response)?.len;
         Ok(SocketReply {
@@ -918,10 +998,12 @@ impl SocketService {
             );
         }
         let local_port = self.sockets[index].local_port;
+        self.unindex_entry(index);
         self.sockets[index].proto = Proto::Listen(Box::new(Listener::new(
             local_port,
             listen_config(interfaces.settings()),
         )));
+        self.index_entry(index);
         emit(
             audit,
             Level::Info,
@@ -1038,11 +1120,7 @@ impl SocketService {
         if target.family != family {
             return Err(Errno::OutOfRange);
         }
-        if self.sockets[index].local_port == 0 {
-            let port = self.assign_port(entropy, 0)?;
-            self.sockets[index].local_port = port;
-        }
-        let source_port = self.sockets[index].local_port;
+        let source_port = self.ensure_local_port(entropy, index)?;
         match interfaces.originate(ip_of(target), source_port, target.port, payload, now) {
             Ok(tx) => {
                 let len = status_reply(response)?.len;
@@ -1095,11 +1173,7 @@ impl SocketService {
         }
         // The identifier is the socket's globally-unique local id; assign
         // it on first send so replies demux to exactly this socket.
-        if self.sockets[index].local_port == 0 {
-            let ident = self.assign_port(entropy, 0)?;
-            self.sockets[index].local_port = ident;
-        }
-        let identifier = self.sockets[index].local_port;
+        let identifier = self.ensure_local_port(entropy, index)?;
         match interfaces.originate_echo(ip_of(target), identifier, sequence, payload, now) {
             Ok(tx) => {
                 let len = status_reply(response)?.len;
@@ -1126,11 +1200,8 @@ impl SocketService {
         now: Duration64,
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
-        if self.sockets[index].local_port == 0 {
-            let port = self.assign_port(entropy, 0)?;
-            self.sockets[index].local_port = port;
-        }
-        let local_port = self.sockets[index].local_port;
+        let local_port = self.ensure_local_port(entropy, index)?;
+        self.reserve_index_rows()?;
         let dest = ip_of(peer);
         // Bind the egress interface and learn its effective MSS for this
         // family *before* building the TCB, so the SYN advertises — and the
@@ -1163,6 +1234,9 @@ impl SocketService {
                 frames.extend(more);
             }
         }
+        // The socket becomes reachable by its four-tuple here, so it is
+        // re-indexed rather than merely mutated.
+        self.unindex_entry(index);
         self.sockets[index].proto = Proto::Stream(Some(Box::new(StreamConn {
             tcb,
             peer,
@@ -1173,6 +1247,7 @@ impl SocketService {
             // An actively-opened connection is the client's from birth.
             accepted: true,
         })));
+        self.index_entry(index);
         let tx = if frames.is_empty() {
             FrameBatch::new()
         } else {
@@ -1275,18 +1350,26 @@ impl SocketService {
         let (dst_port, src_port) = (seg.destination_port, seg.source_port);
         // 1. An established connection (active open, or a child accepted off
         //    a listener) claims the segment by its full four-tuple.
-        if let Some(index) = self.sockets.iter().position(|e| {
-            e.family == fam
-                && e.local_port == dst_port
-                && matches!(&e.proto, Proto::Stream(Some(c))
-                    if c.peer.port == src_port && c.peer.addr == src_bytes)
-        }) {
+        let key = ConnKey {
+            family: fam,
+            local_port: dst_port,
+            peer_addr: src_bytes,
+            peer_port: src_port,
+        };
+        if let Some(index) = self
+            .by_conn
+            .get(&key)
+            .and_then(|id| self.by_id.get(id))
+            .copied()
+        {
             if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
                 conn.tcb.on_segment(&seg, ecn, now);
             }
             let tx = self.pump_stream(interfaces, index, now);
             let deliveries = self.collect_stream_events(index);
             self.reap_if_done(index);
+            #[cfg(test)]
+            self.assert_indices_agree();
             return StreamIo {
                 tx,
                 deliveries,
@@ -1294,10 +1377,15 @@ impl SocketService {
             };
         }
         // 2. A passive listener on the destination port demultiplexes it.
-        if let Some(lindex) = self.sockets.iter().position(|e| {
-            e.family == fam && e.local_port == dst_port && matches!(&e.proto, Proto::Listen(_))
-        }) {
-            return self.drive_listener(interfaces, lindex, source, destination, &seg, now, secret);
+        if let Some(lindex) = self.demux_index(dst_port) {
+            let entry = &self.sockets[lindex];
+            if entry.family == fam && matches!(&entry.proto, Proto::Listen(_)) {
+                let io =
+                    self.drive_listener(interfaces, lindex, source, destination, &seg, now, secret);
+                #[cfg(test)]
+                self.assert_indices_agree();
+                return io;
+            }
         }
         StreamIo::default()
     }
@@ -1399,11 +1487,10 @@ impl SocketService {
         let family = self.sockets[lindex].family;
         let local_port = self.sockets[lindex].local_port;
         let listener_id = self.sockets[lindex].id;
+        let settings = interfaces.settings();
         let mut out = Vec::new();
         loop {
-            if self.sockets.len() >= MAX_SOCKETS_TOTAL
-                || self.count_owned(owner) >= MAX_SOCKETS_PER_PRINCIPAL
-            {
+            if self.at_capacity(&settings, owner) {
                 break;
             }
             let conn = match &mut self.sockets[lindex].proto {
@@ -1426,7 +1513,7 @@ impl SocketService {
                 port: conn.peer.port,
             };
             let id = self.alloc_id();
-            self.sockets.push(SocketEntry {
+            let child = self.insert_entry(SocketEntry {
                 id,
                 owner,
                 owner_pid,
@@ -1454,6 +1541,12 @@ impl SocketService {
                     accepted: false,
                 }))),
             });
+            // A child the table cannot index is a connection nothing could
+            // reach, so draining stops and the rest stay queued in the
+            // listener, exactly as they do at the capacity bound.
+            if child.is_err() {
+                break;
+            }
             push_stream_event(
                 &mut out,
                 deliver_port,
@@ -1497,6 +1590,8 @@ impl SocketService {
             }
             i += 1;
         }
+        #[cfg(test)]
+        self.assert_indices_agree();
         io
     }
 
@@ -1589,7 +1684,7 @@ impl SocketService {
         let done = matches!(&self.sockets[index].proto,
             Proto::Stream(Some(c)) if c.client_closed && matches!(c.tcb.state(), State::Closed));
         if done {
-            self.sockets.swap_remove(index);
+            self.remove_at(index);
         }
         done
     }
@@ -1699,18 +1794,18 @@ impl SocketService {
         };
         let (src_family, src_bytes) = address_parts(*source);
         let mut out = Vec::new();
-        for entry in &self.sockets {
+        // The identifier lives in `local_port` and is globally unique, so
+        // at most one socket matches — a reply never crosses sockets.
+        if let Some(entry) = self.demux_index(*identifier).map(|i| &self.sockets[i]) {
             let Proto::Echo(echo) = &entry.proto else {
-                continue;
+                return out;
             };
-            // The identifier lives in `local_port` and is globally unique,
-            // so at most one socket matches — a reply never crosses sockets.
-            if entry.family != src_family || entry.local_port != *identifier {
-                continue;
+            if entry.family != src_family {
+                return out;
             }
             if let Some(peer) = echo.peer {
                 if peer.family != src_family || peer.addr != src_bytes {
-                    continue;
+                    return out;
                 }
             }
             let echo_msg = SocketEcho {
@@ -1753,12 +1848,17 @@ impl SocketService {
         let (src_family, src_bytes) = address_parts(*source);
         let dest_multicast = is_multicast_ip(*destination);
         let mut out = Vec::new();
-        for entry in &self.sockets {
+        // A port is bound by at most one socket, so the destination port
+        // names the one candidate rather than selecting from a scan.
+        if let Some(entry) = self
+            .demux_index(*destination_port)
+            .map(|index| &self.sockets[index])
+        {
             let Proto::Datagram(dg) = &entry.proto else {
-                continue;
+                return out;
             };
-            if entry.family != dest_family || entry.local_port != *destination_port {
-                continue;
+            if entry.family != dest_family {
+                return out;
             }
             let dest_ok = if dest_multicast {
                 dg.groups.contains(&dest_bytes)
@@ -1766,12 +1866,12 @@ impl SocketService {
                 entry.local_addr == [0u8; 16] || entry.local_addr == dest_bytes
             };
             if !dest_ok {
-                continue;
+                return out;
             }
             if let Some(peer) = dg.peer {
                 if peer.family != src_family || peer.addr != src_bytes || peer.port != *source_port
                 {
-                    continue;
+                    return out;
                 }
             }
             let datagram = SocketDatagram {
@@ -1795,19 +1895,244 @@ impl SocketService {
         out
     }
 
+    /// Whether a further socket for `owner` would exceed the delivered
+    /// capacity — the derived (or administratively overridden) total, or
+    /// this principal's share of it.
+    ///
+    /// The share is what stops one principal taking the table; the total
+    /// is what stops every principal together taking the stack's heap.
+    fn at_capacity(&self, settings: &NetworkSettings, owner: ProcId) -> bool {
+        self.sockets.len() >= settings.sockets_max as usize
+            || self.count_owned(owner) >= settings.sockets_per_principal()
+    }
+
     /// Number of sockets owned by `owner`.
-    fn count_owned(&self, owner: ProcId) -> usize {
-        self.sockets.iter().filter(|s| s.owner == owner).count()
+    fn count_owned(&self, owner: ProcId) -> u32 {
+        self.owned.get(&owner).copied().unwrap_or(0)
     }
 
     /// The table index of the socket `owner` owns bearing `id`, or
     /// [`Errno::NotFound`] — a handle another principal owns is reported as
     /// absent, never distinguished (existence is not leaked).
     fn owned_index(&self, owner: ProcId, id: SocketId) -> Result<usize, Errno> {
+        let index = *self.by_id.get(&id).ok_or(Errno::NotFound)?;
+        if self.sockets[index].owner == owner {
+            Ok(index)
+        } else {
+            Err(Errno::NotFound)
+        }
+    }
+
+    /// The connection key of the entry at `index`, when it is an
+    /// established stream (the only kind reached by four-tuple).
+    fn conn_key_at(&self, index: usize) -> Option<ConnKey> {
+        let entry = &self.sockets[index];
+        let Proto::Stream(Some(conn)) = &entry.proto else {
+            return None;
+        };
+        Some(ConnKey {
+            family: entry.family,
+            local_port: entry.local_port,
+            peer_addr: conn.peer.addr,
+            peer_port: conn.peer.port,
+        })
+    }
+
+    /// Add every index row the entry at `index` implies, from its current
+    /// state. Paired with [`Self::unindex_entry`]: a field the indices are
+    /// keyed on is changed between the two, never under them.
+    ///
+    /// An index row is dropped on an allocation failure rather than the
+    /// operation failing: the table is still correct, only slower to
+    /// search, and refusing a socket the caller is entitled to because a
+    /// cache could not grow would be the worse answer.
+    fn index_entry(&mut self, index: usize) {
+        let id = self.sockets[index].id;
+        let owner = self.sockets[index].owner;
+        let port = self.sockets[index].local_port;
+        let conn = self.conn_key_at(index);
+        let _ = self.by_id.try_insert(id, index);
+        if let Some(count) = self.owned.get_mut(&owner) {
+            *count = count.saturating_add(1);
+        } else {
+            let _ = self.owned.try_insert(owner, 1);
+        }
+        if port != 0 {
+            let mut slot = self.by_port.get(&port).copied().unwrap_or_default();
+            slot.holders = slot.holders.saturating_add(1);
+            if conn.is_none() {
+                slot.demux = Some(id);
+            }
+            let _ = self.by_port.try_insert(port, slot);
+        }
+        if let Some(key) = conn {
+            let _ = self.by_conn.try_insert(key, id);
+        }
+    }
+
+    /// Remove every index row the entry at `index` implies.
+    fn unindex_entry(&mut self, index: usize) {
+        let id = self.sockets[index].id;
+        let owner = self.sockets[index].owner;
+        let port = self.sockets[index].local_port;
+        let conn = self.conn_key_at(index);
+        self.by_id.remove(&id);
+        if let Some(count) = self.owned.get_mut(&owner) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.owned.remove(&owner);
+            }
+        }
+        if port != 0 {
+            if let Some(mut slot) = self.by_port.get(&port).copied() {
+                slot.holders = slot.holders.saturating_sub(1);
+                if slot.demux == Some(id) {
+                    slot.demux = None;
+                }
+                if slot.holders == 0 {
+                    self.by_port.remove(&port);
+                } else {
+                    let _ = self.by_port.try_insert(port, slot);
+                }
+            }
+        }
+        if let Some(key) = conn {
+            // Only if it is still this socket's row: a stale key can never
+            // evict a live socket's.
+            if self.by_conn.get(&key) == Some(&id) {
+                self.by_conn.remove(&key);
+            }
+        }
+    }
+
+    /// Whether any live socket holds local `port` — the port index as the
+    /// tests see it, so a release can be asserted rather than inferred.
+    #[cfg(test)]
+    pub(crate) fn port_is_held(&self, port: u16) -> bool {
+        self.port_in_use(port)
+    }
+
+    /// Assert every index row agrees with the table it indexes.
+    ///
+    /// The indices are maintained incrementally, so an update missed
+    /// beside a mutation is the one failure this structure has. Rebuilding
+    /// what the table implies and comparing leaves nowhere for such a miss
+    /// to hide; the whole suite drives it, because every served request,
+    /// inbound segment, and timer pass ends here in the test build.
+    #[cfg(test)]
+    fn assert_indices_agree(&self) {
+        use alloc::collections::BTreeMap;
+
+        assert_eq!(self.by_id.len(), self.sockets.len(), "by_id row count");
+        let mut conns = 0usize;
+        let mut ports: BTreeMap<u16, PortSlot> = BTreeMap::new();
+        let mut owners: BTreeMap<ProcId, u32> = BTreeMap::new();
+        for (index, entry) in self.sockets.iter().enumerate() {
+            assert_eq!(self.by_id.get(&entry.id), Some(&index), "by_id row");
+            *owners.entry(entry.owner).or_default() += 1;
+            let conn = self.conn_key_at(index);
+            if let Some(key) = conn {
+                assert_eq!(self.by_conn.get(&key), Some(&entry.id), "by_conn row");
+                conns += 1;
+            }
+            if entry.local_port != 0 {
+                let slot = ports.entry(entry.local_port).or_default();
+                slot.holders += 1;
+                if conn.is_none() {
+                    assert!(slot.demux.is_none(), "two binders on one port");
+                    slot.demux = Some(entry.id);
+                }
+            }
+        }
+        assert_eq!(self.by_conn.len(), conns, "by_conn row count");
+        assert_eq!(self.by_port.len(), ports.len(), "by_port row count");
+        for (port, want) in ports {
+            let got = self.by_port.get(&port).expect("indexed port");
+            assert_eq!(got.holders, want.holders, "port {port} holders");
+            assert_eq!(got.demux, want.demux, "port {port} demux");
+        }
+        assert_eq!(self.owned.len(), owners.len(), "owned row count");
+        for (who, count) in owners {
+            assert_eq!(self.owned.get(&who), Some(&count), "owned count");
+        }
+    }
+
+    /// Push `entry` onto the table and index it, returning its position.
+    ///
+    /// Every index row is reserved before the table gains the socket. A
+    /// row that could not be added afterwards would leave a socket that
+    /// nothing can address, close, or demultiplex to while it still
+    /// counts against its owner's share — so the open fails closed
+    /// instead, which is the answer an exhausted heap should give.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the table or an index cannot grow.
+    fn insert_entry(&mut self, entry: SocketEntry) -> Result<usize, Errno> {
+        self.reserve_index_rows()?;
         self.sockets
-            .iter()
-            .position(|s| s.owner == owner && s.id == id)
-            .ok_or(Errno::NotFound)
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        self.sockets.push(entry);
+        let index = self.sockets.len() - 1;
+        self.index_entry(index);
+        Ok(index)
+    }
+
+    /// Reserve room for one further row in each index.
+    ///
+    /// Removal never shrinks a table, so a bracketed
+    /// [`unindex_entry`](Self::unindex_entry) →  mutate →
+    /// [`index_entry`](Self::index_entry) can always put back what it
+    /// took; only a mutation that adds a *new* kind of row (a first port,
+    /// a first connection) can need to grow, and it reserves here first.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when an index cannot grow.
+    fn reserve_index_rows(&mut self) -> Result<(), Errno> {
+        self.by_id.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        self.owned.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        self.by_port
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        self.by_conn.try_reserve(1).map_err(|_| Errno::OutOfMemory)
+    }
+
+    /// Drop the socket at `index`, keeping every index row in step.
+    ///
+    /// `swap_remove` moves the last entry into the hole, so exactly one
+    /// other socket changes position and only its `by_id` row is repaired
+    /// — every other index is keyed to a handle, not a position.
+    fn remove_at(&mut self, index: usize) {
+        self.unindex_entry(index);
+        self.sockets.swap_remove(index);
+        if index < self.sockets.len() {
+            let moved = self.sockets[index].id;
+            let _ = self.by_id.try_insert(moved, index);
+        }
+    }
+
+    /// Give this socket an ephemeral local port if it has none, keeping
+    /// the port index in step, and return the port it now holds.
+    ///
+    /// Idempotent: a socket that already bound one keeps it. Datagram,
+    /// echo, and actively-opening stream sockets all reach a port this
+    /// way on their first use, so the drawing and the indexing live here
+    /// rather than once per transport.
+    fn ensure_local_port(
+        &mut self,
+        entropy: &mut dyn FnMut() -> u32,
+        index: usize,
+    ) -> Result<u16, Errno> {
+        if self.sockets[index].local_port == 0 {
+            self.reserve_index_rows()?;
+            let port = self.assign_port(entropy, 0)?;
+            self.unindex_entry(index);
+            self.sockets[index].local_port = port;
+            self.index_entry(index);
+        }
+        Ok(self.sockets[index].local_port)
     }
 
     /// Assign a local port: the requested port if free, or a CSPRNG-drawn
@@ -1839,9 +2164,18 @@ impl SocketService {
         Err(Errno::AddressInUse)
     }
 
+    /// The table position of the socket inbound traffic for local `port`
+    /// goes to, if any. Never an established stream: those are reached by
+    /// their four-tuple, so a listener and its accepted children on one
+    /// port do not contend for this row.
+    fn demux_index(&self, port: u16) -> Option<usize> {
+        let id = self.by_port.get(&port)?.demux?;
+        self.by_id.get(&id).copied()
+    }
+
     /// Whether any live socket already holds local `port`.
     fn port_in_use(&self, port: u16) -> bool {
-        self.sockets.iter().any(|s| s.local_port == port)
+        self.by_port.get(&port).is_some_and(|slot| slot.holders > 0)
     }
 
     /// Allocate a socket handle not currently held by any live socket.
@@ -1849,7 +2183,7 @@ impl SocketService {
         loop {
             self.next_id = self.next_id.wrapping_add(1);
             let id = self.next_id;
-            if id != 0 && !self.sockets.iter().any(|s| s.id == id) {
+            if id != 0 && !self.by_id.contains_key(&id) {
                 return id;
             }
         }

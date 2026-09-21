@@ -101,6 +101,18 @@ The policy is enforced, not advisory:
   `net.ipv4.enabled false` is the symmetric IPv4 case. Applying the
   policy reconfigures every interface already managed as well as those
   bound later, so delivery order does not matter (idempotent).
+- **`net.sockets.max`** is the socket table's capacity, and it is
+  *derived* rather than written down: `auto` (the default) sizes the
+  total from the machine's usable physical RAM — an eighth of it at the
+  configured worst case of one socket's TCP send and receive buffers —
+  and each principal may hold a sixteenth of that total, so a full table
+  always has room for sixteen principals. A 1 GiB machine comes to 1024
+  and 64, a 256 MiB board to 256 and 16, and a 512 GiB server to 524 288
+  and 32 768. An explicit count overrides the derivation. The *refusal*
+  at the bound is unchanged and fixed: `Errno::LimitExceeded`, audited,
+  never a partial grant. The stack reads neither the machine nor
+  `system.conf` — it is the network-parsing sandbox — so the deliverer
+  resolves both and hands it the one effective figure.
 - **`net.tcp.syncookies always`** sets each new listener's
   `max_half_open = 0`, so it holds no half-open state and answers every
   SYN with a stateless RFC 4987 cookie; `auto` keeps the bounded default
@@ -265,7 +277,13 @@ contract (`docs/src/abi/net-sockets.md`) from the same event-driven loop.
 `tairix_netstack::SocketService` is the origin-keyed socket table — one id
 space for **datagram** (UDP) and **stream** (TCP) sockets alike, as a POSIX
 fd table holds every kind — gating every call on `CAP_NET` before any state
-is touched. A datagram socket demultiplexes each inbound
+is touched. It is *indexed*, not scanned: a handle, an established
+four-tuple, a local port, and a principal's live count each resolve through
+their own keyed hash index, because the table's capacity scales with the
+machine and a scan on the packet-receive path would let one principal's
+sockets slow every other principal's traffic. The indices are keyed with
+the process's SipHash key, since a peer chooses the address and port half
+of every connection key and an unkeyed hash would be collision-floodable. A datagram socket demultiplexes each inbound
 `StackEvent::UdpDatagram` to its bound socket and delivers a
 `SocketDatagram`; a socket bound to the wildcard address (or to a broadcast
 address) receives IPv4 broadcast on its port, and after every socket

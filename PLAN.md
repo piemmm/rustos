@@ -9394,11 +9394,13 @@ host key is identical on every machine flashed from it.
 **Three defects it fixes on the way (§2.18).**
 
 - `netstack`'s `MAX_SOCKETS_PER_PRINCIPAL = 64` / `MAX_SOCKETS_TOTAL = 1024`
-  are hand-picked constants whose rustdoc argues they are fixed security
-  bounds. The total is a §24.1 capacity (it bounds `netstack`'s own heap) and
-  the per-principal figure is a fairness share of it; both become derived, with
-  a `CAP_NET_ADMIN` override in the existing `net.*` store and the fail-closed
-  refusal untouched. The rustdoc is corrected in the same change.
+  were hand-picked constants whose rustdoc argued they were fixed security
+  bounds. **Done (S0b).** The total is a §24.1 capacity (it bounds
+  `netstack`'s own heap) and is derived from discovered RAM; the per-principal
+  figure is a sixteenth share of it; `net.sockets.max` overrides the
+  derivation under the existing `CAP_NET_ADMIN`, and the fail-closed refusal
+  is untouched. Letting the capacity scale first required the socket table to
+  be indexed rather than scanned per received packet, so that landed with it.
 - `lib/sandbox` has only a one-shot request→reply worker; an SSH connection is
   a duplex session either side may originate on. A `session` seam lands beside
   `host`/`worker` (§27), reusable by any future long-lived protocol service.

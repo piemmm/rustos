@@ -337,6 +337,17 @@ impl Reassembly {
         self.segments.is_empty()
     }
 
+    /// Heap bytes the held segments occupy: the segment list and each
+    /// segment's payload, by allocated capacity rather than length.
+    fn footprint_bytes(&self) -> usize {
+        self.segments.capacity() * core::mem::size_of::<(SeqNumber, Vec<u8>)>()
+            + self
+                .segments
+                .iter()
+                .map(|(_, data)| data.capacity())
+                .sum::<usize>()
+    }
+
     /// Insert `data` starting at `start`, trimming any part at or below
     /// `rcv_nxt` (already delivered) and coalescing with neighbours.
     /// Returns `false` (dropping the insert) when the set is full and the
@@ -939,6 +950,37 @@ impl Tcb {
     /// on-wire bytes.
     pub fn set_tso_max_payload(&mut self, max_payload: u16) {
         self.config.tso_max_payload = max_payload;
+    }
+
+    /// Heap bytes this connection's buffers and bookkeeping hold right
+    /// now, excluding the fixed [`Tcb`] itself (its owner made that
+    /// allocation and knows its size).
+    ///
+    /// Allocated capacity rather than occupied length: capacity is what
+    /// the allocator has actually given out and what nothing else can
+    /// use, and a buffer that drained still holds it. A memory budget
+    /// reasoning over lengths would under-count and over-admit.
+    #[must_use]
+    pub fn footprint_bytes(&self) -> usize {
+        self.tx.capacity()
+            + self.rx.capacity()
+            + self.ooo.footprint_bytes()
+            + self.scoreboard.ranges.capacity()
+                * core::mem::size_of::<(SeqNumber, SeqNumber)>()
+    }
+
+    /// Re-ceiling this connection's send and receive buffers.
+    ///
+    /// The receive ceiling is the advertised window's source, so lowering
+    /// it closes the window as the peer drains what is already buffered —
+    /// ordinary TCP flow control, which is how a memory budget slows a
+    /// sender rather than dropping its data. Lowering the send ceiling
+    /// makes the application's next `send` accept fewer bytes. Neither
+    /// discards buffered data, so a reduction is always safe: it bounds
+    /// what may still be added, never what is already owed.
+    pub fn set_buffer_limits(&mut self, send: usize, receive: usize) {
+        self.config.send_buffer = send;
+        self.config.receive_buffer = receive;
     }
 
     /// The current connection state.

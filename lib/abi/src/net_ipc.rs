@@ -113,7 +113,7 @@ pub fn ip_from_parts(family: NetAddrFamily, addr: [u8; 16]) -> core::net::IpAddr
 }
 
 /// An IP address family as carried on this protocol.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[repr(u8)]
 pub enum NetAddrFamily {
     /// IPv4; the address field's first four bytes are significant.
@@ -239,14 +239,143 @@ pub struct NetworkSettings {
     /// CE mark as a congestion signal instead of forcing a drop. `false`
     /// (the default) leaves connections Not-ECT.
     pub tcp_ecn: bool,
+    /// Bytes of socket state the stack may hold across every principal
+    /// ([`socket_budget_for_ram`], or the operator's `net.sockets.mem`
+    /// override). Never zero — a decode refuses zero, because a stack
+    /// that can hold no socket at all is a delivery bug rather than a
+    /// policy anyone expresses.
+    pub socket_budget_bytes: u64,
+}
+
+/// RAM of the smallest machine TAIRiX targets.
+///
+/// The socket budget is never sized below this machine's, so a stack
+/// whose RAM figure is still unknown — the sysinfo query unanswered, or
+/// the broker not yet running — serves a small board's worth of sockets
+/// rather than none. Total RAM is reported as zero when unknown, and zero
+/// admits nothing unless a caller states its own floor; this is that
+/// floor, stated as a machine rather than as a bare figure.
+const SMALLEST_MACHINE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Share of the machine's RAM the network stack's socket state may hold.
+///
+/// An eighth. Networking is a first-class workload, and seven eighths
+/// remain for the processes whose traffic those sockets carry. The figure
+/// bounds the resource genuinely at stake — bytes the stack has actually
+/// allocated — so the same budget serves a great many idle sockets or far
+/// fewer fully-buffered connections, according to what the workload
+/// really is, instead of the stack guessing which one to provision for.
+const SOCKET_BUDGET_RAM_DIVISOR: u64 = 8;
+
+/// Principals the budget always has room for at their full share, which
+/// is what fixes the per-principal share at a sixteenth
+/// ([`NetworkSettings::socket_bytes_per_principal`]).
+const SOCKET_PRINCIPAL_SHARE_DIVISOR: u64 = 16;
+
+/// Largest socket budget `net.sockets.mem` may name, in bytes.
+///
+/// A validation bound on an administrator's configuration text, not a
+/// capacity: it stops a mistyped or pasted figure being read as a policy.
+/// A machine whose derived budget would exceed it still gets the derived
+/// budget — the bound constrains what may be *written*, never what RAM
+/// yields.
+pub const SOCKET_BUDGET_MAX_SETTABLE: u64 = 1 << 40;
+
+/// Smallest socket budget `net.sockets.mem` may name, in bytes.
+///
+/// One principal's share of this must still admit a connection that can
+/// carry data, so the floor is the per-principal divisor times the
+/// smallest useful connection. Below it the stack would be configured
+/// into uselessness, which is an outage an operator should be told about
+/// rather than given.
+pub const SOCKET_BUDGET_MIN_SETTABLE: u64 =
+    SOCKET_PRINCIPAL_SHARE_DIVISOR * MIN_CONNECTION_BUFFER_BYTES as u64 * 2;
+
+/// The smallest receive (or send) buffer a TCP connection is given.
+///
+/// A window below a few maximum-size segments stalls a transfer into
+/// stop-and-wait, so this is a protocol floor rather than a capacity: the
+/// budget declines to admit a connection it could only cripple, instead
+/// of admitting one that cannot work.
+pub const MIN_CONNECTION_BUFFER_BYTES: usize = 4 * 1460;
+
+/// The largest receive (or send) buffer a TCP connection is given when
+/// the budget is not the binding constraint.
+///
+/// A ceiling on *speculation*, not a capacity: beyond roughly a
+/// bandwidth-delay product more buffering buys no throughput and only
+/// adds queueing delay, so a connection is never handed more than this
+/// however much budget is free.
+pub const MAX_CONNECTION_BUFFER_BYTES: usize = 64 * 1024;
+
+/// The socket-memory budget a machine with `total_ram_bytes` of usable
+/// physical RAM carries, when the operator has not overridden it.
+///
+/// A derived budget over *measured* bytes, never a guessed count of
+/// sockets: the stack admits whatever its real allocation allows, so an
+/// idle workload reaches far more sockets than a fully-buffered one and
+/// neither is provisioned for the other. `total_ram_bytes` is the System
+/// Information API's total, which reports zero when it is unknown; a
+/// figure below the smallest machine TAIRiX targets — zero included —
+/// yields that machine's budget rather than nothing.
+#[must_use]
+pub fn socket_budget_for_ram(total_ram_bytes: u64) -> u64 {
+    let bytes = if total_ram_bytes > SMALLEST_MACHINE_BYTES {
+        total_ram_bytes
+    } else {
+        SMALLEST_MACHINE_BYTES
+    };
+    bytes / SOCKET_BUDGET_RAM_DIVISOR
+}
+
+impl NetworkSettings {
+    /// Bytes of socket state any one principal may hold at once: a
+    /// sixteenth of [`socket_budget_bytes`](Self::socket_budget_bytes).
+    ///
+    /// A fairness share of the budget rather than a fixed figure, so the
+    /// guarantee it states — that the stack always has room for sixteen
+    /// principals at their full share — holds on every machine instead of
+    /// only on the one a constant was picked for.
+    #[must_use]
+    pub const fn socket_bytes_per_principal(&self) -> u64 {
+        match self.socket_budget_bytes / SOCKET_PRINCIPAL_SHARE_DIVISOR {
+            0 => 1,
+            share => share,
+        }
+    }
+
+    /// The send and receive ceiling a new connection is given, out of
+    /// `remaining` bytes of its owner's share.
+    ///
+    /// Sized from what is actually left rather than from a fixed figure,
+    /// so a principal opening many connections gets smaller windows on
+    /// each instead of the first few taking the whole share — and the sum
+    /// of the ceilings it hands out cannot exceed the share, which is what
+    /// makes the budget hold without having to claw buffers back later.
+    /// `None` when too little is left to give a connection a window it
+    /// could work over: that is the point at which the stack refuses
+    /// rather than admitting a connection it would cripple.
+    #[must_use]
+    pub fn connection_buffer_bytes(remaining: u64) -> Option<usize> {
+        // Both directions come out of the share, and a connection is not
+        // handed everything that is left: leaving room for a second keeps
+        // one connection from making the next impossible.
+        let per_direction = remaining / 4;
+        if per_direction < MIN_CONNECTION_BUFFER_BYTES as u64 {
+            return None;
+        }
+        let capped = per_direction.min(MAX_CONNECTION_BUFFER_BYTES as u64);
+        usize::try_from(capped).ok()
+    }
 }
 
 impl Default for NetworkSettings {
     /// The stack's safe pre-delivery defaults, matching the
-    /// `lib/sysconfig` registry defaults: both families enabled and SYN
+    /// `lib/sysconfig` registry defaults: both families enabled, SYN
     /// cookies in `auto` mode (a bounded half-open backlog, not
-    /// unconditional cookies). These hold until an FS-capable component
-    /// delivers the real `system.conf` policy.
+    /// unconditional cookies), and the socket budget sized for a machine
+    /// whose RAM is not yet known. These hold until an FS-capable
+    /// component delivers the real `system.conf` policy.
     fn default() -> Self {
         Self {
             ipv4_enabled: true,
@@ -255,6 +384,7 @@ impl Default for NetworkSettings {
             ipv6_privacy: false,
             tcp_keepalive: false,
             tcp_ecn: false,
+            socket_budget_bytes: socket_budget_for_ram(0),
         }
     }
 }
@@ -549,6 +679,7 @@ impl NetstackRequest {
                 out[11] = u8::from(settings.ipv6_privacy);
                 out[12] = u8::from(settings.tcp_keepalive);
                 out[13] = u8::from(settings.tcp_ecn);
+                put_u64(&mut out, 16, settings.socket_budget_bytes);
             }
             Self::ResolverServers => {
                 put_u16(&mut out, 6, OP_RESOLVER_SERVERS);
@@ -732,10 +863,22 @@ fn decode_bind_driver(bytes: &[u8]) -> Result<NetstackRequest, Errno> {
     })
 }
 
-/// Decode the [`NetworkSettings`] operation block (six wire booleans at
-/// bytes 8..14) and enforce its zero reserved tail.
+/// Decode the [`NetworkSettings`] operation block: six wire booleans at
+/// bytes 8..14, two reserved bytes, then the socket-memory budget at
+/// 16..24. Enforces a zero pad and a zero reserved tail.
+///
+/// A zero budget is refused: no policy expresses "hold no socket at all",
+/// so a zero on the wire is a deliverer's bug, and adopting it would
+/// silently take the stack off the air.
 fn decode_settings(bytes: &[u8]) -> Result<NetworkSettings, Errno> {
-    reserved_zero(bytes, 14)?;
+    if bytes[14] != 0 || bytes[15] != 0 {
+        return Err(Errno::BadMagic);
+    }
+    reserved_zero(bytes, 24)?;
+    let socket_budget_bytes = read_u64(bytes, 16);
+    if socket_budget_bytes == 0 {
+        return Err(Errno::OutOfRange);
+    }
     Ok(NetworkSettings {
         ipv4_enabled: decode_bool(bytes[8])?,
         ipv6_enabled: decode_bool(bytes[9])?,
@@ -743,6 +886,7 @@ fn decode_settings(bytes: &[u8]) -> Result<NetworkSettings, Errno> {
         ipv6_privacy: decode_bool(bytes[11])?,
         tcp_keepalive: decode_bool(bytes[12])?,
         tcp_ecn: decode_bool(bytes[13])?,
+        socket_budget_bytes,
     })
 }
 
@@ -2647,6 +2791,7 @@ mod tests {
                 ipv6_privacy: false,
                 tcp_keepalive: true,
                 tcp_ecn: false,
+                socket_budget_bytes: 128 * 1024 * 1024,
             }),
             NetstackRequest::ApplyNetworkSettings(NetworkSettings {
                 ipv4_enabled: false,
@@ -2655,6 +2800,7 @@ mod tests {
                 ipv6_privacy: true,
                 tcp_keepalive: false,
                 tcp_ecn: true,
+                socket_budget_bytes: 64 * 1024 * 1024 * 1024,
             }),
             // Bind with no resolved hardware location.
             NetstackRequest::BindDriver {
@@ -3367,6 +3513,7 @@ mod tests {
             ipv6_privacy: true,
             tcp_keepalive: true,
             tcp_ecn: true,
+            socket_budget_bytes: 4 * 1024 * 1024,
         })
         .to_le_bytes();
         // A byte that is neither 0 nor 1 in any flag position fails closed.
@@ -3378,12 +3525,81 @@ mod tests {
                 Err(Errno::OutOfRange)
             );
         }
-        // A non-zero reserved tail byte is refused.
-        let mut dirty_tail = good;
-        dirty_tail[14] = 1;
+        // A non-zero reserved tail byte, or a dirty pad between the
+        // flags and the budget, is refused.
+        for pos in [14usize, 15, 24] {
+            let mut dirty = good;
+            dirty[pos] = 1;
+            assert_eq!(NetstackRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+        }
+        // A zero budget is a deliverer's bug, never a policy.
+        let mut no_budget = good;
+        no_budget[16..24].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(
-            NetstackRequest::from_bytes(&dirty_tail),
-            Err(Errno::BadMagic)
+            NetstackRequest::from_bytes(&no_budget),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn the_socket_budget_is_derived_from_ram_and_shared_per_principal() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(socket_budget_for_ram(GIB), 128 * 1024 * 1024);
+        let gib = NetworkSettings {
+            socket_budget_bytes: socket_budget_for_ram(GIB),
+            ..NetworkSettings::default()
+        };
+        assert_eq!(gib.socket_bytes_per_principal(), 8 * 1024 * 1024);
+
+        // A small board gets a small budget, a large server a large one —
+        // both from the one policy, neither from a constant.
+        assert_eq!(socket_budget_for_ram(256 * 1024 * 1024), 32 * 1024 * 1024);
+        assert_eq!(socket_budget_for_ram(512 * GIB), 64 * GIB);
+
+        // An unknown or implausibly small figure yields the smallest
+        // machine's budget, never zero: a stack that can hold no socket is
+        // not a floor, it is an outage.
+        assert_eq!(socket_budget_for_ram(0), 32 * 1024 * 1024);
+        assert_eq!(socket_budget_for_ram(1), 32 * 1024 * 1024);
+        assert_eq!(
+            NetworkSettings::default().socket_budget_bytes,
+            32 * 1024 * 1024
+        );
+
+        // The share never rounds away to nothing.
+        let tiny = NetworkSettings {
+            socket_budget_bytes: 1,
+            ..NetworkSettings::default()
+        };
+        assert_eq!(tiny.socket_bytes_per_principal(), 1);
+    }
+
+    #[test]
+    fn a_connection_window_is_sized_from_what_the_share_has_left() {
+        // Plenty left: the connection gets the speculation ceiling, not
+        // everything that is free.
+        assert_eq!(
+            NetworkSettings::connection_buffer_bytes(64 * 1024 * 1024),
+            Some(MAX_CONNECTION_BUFFER_BYTES)
+        );
+        // Tight: it gets a quarter of what is left, so the next
+        // connection is still possible.
+        assert_eq!(
+            NetworkSettings::connection_buffer_bytes(80 * 1024),
+            Some(20 * 1024)
+        );
+        // Too little to carry data: refused rather than crippled.
+        assert_eq!(
+            NetworkSettings::connection_buffer_bytes(
+                4 * MIN_CONNECTION_BUFFER_BYTES as u64 - 4
+            ),
+            None
+        );
+        assert_eq!(NetworkSettings::connection_buffer_bytes(0), None);
+        // The floor is the point either side of which the answer flips.
+        assert_eq!(
+            NetworkSettings::connection_buffer_bytes(4 * MIN_CONNECTION_BUFFER_BYTES as u64),
+            Some(MIN_CONNECTION_BUFFER_BYTES)
         );
     }
 

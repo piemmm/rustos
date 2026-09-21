@@ -29,7 +29,7 @@ ordinary pre-release changes (§2.13).
 | # | Item | Status |
 |---|---|---|
 | S0a | `lib/crypto` extension: the algorithm set §4 admits, each with its §2.12 justification, exact pin, `deny.toml`/`supply-chain.toml`/SBOM entry, and §19.1 constant-time test | done |
-| S0b | The `netstack` socket-quota defect: a derived total, a per-principal share of it, and a `net.*` administrative override — the fail-closed refusal unchanged | planned |
+| S0b | The `netstack` socket-quota defect: a derived total, a per-principal share of it, and a `net.*` administrative override — the fail-closed refusal unchanged, over an indexed socket table | done |
 | S0c | `lib/sandbox::session` — the duplex, long-lived worker seam beside the one-shot `host`/`worker` pair | planned |
 | S0d | `lib/compress` gains the DEFLATE **compressor** (RFC 1951) and the zlib envelope encoder (RFC 1950); the decoders already exist | planned |
 | S1 | `lib/ssh` wire codec (RFC 4251 §5), version exchange, the binary packet protocol with every cipher/MAC framing, strict KEX, rekey thresholds | planned |
@@ -430,42 +430,59 @@ may have 1 GiB of RAM.
 
 ## 2. Defects fixed on the way (§2.18)
 
-**S0b — the `netstack` socket quota.** `MAX_SOCKETS_PER_PRINCIPAL = 64` and
-`MAX_SOCKETS_TOTAL = 1024` (`userland/net/netstack/src/socket.rs`) are
-hand-picked constants that ignore the machine entirely. Their rustdoc today
-argues they are §24.4 security bounds rather than §24.1 capacities. That
-argument is **wrong for the total and half-wrong for the per-principal share**,
-and the rustdoc is corrected in the same increment:
+**S0b — the `netstack` socket quota (done).** `MAX_SOCKETS_PER_PRINCIPAL`
+and `MAX_SOCKETS_TOTAL` are gone. The total is derived from the machine's
+usable physical RAM — an eighth of it at the configured worst case of one
+socket's TCP send and receive buffers — and the per-principal figure is a
+sixteenth share of that total, so a full table always has room for sixteen
+principals. A 1 GiB machine derives exactly the 1024 and 64 the constants
+named, which is the evidence the fraction and the share are not another
+guess. `net.sockets.max` (`auto` or a count) overrides the derivation
+through the existing `system.conf` store under the existing
+`CAP_NET_ADMIN`; no new capability. The fail-closed `LimitExceeded`
+refusal is untouched.
 
-- `MAX_SOCKETS_TOTAL` bounds how much of `netstack`'s own heap the socket table
-  may occupy. That is a capacity, and §24.1 is explicit: size it from discovered
-  RAM, do not hand-pick it. A 512 GiB server is capped at 1 024 sockets by a
-  constant chosen on a laptop.
-- `MAX_SOCKETS_PER_PRINCIPAL` is a *fairness* bound — no principal may take more
-  than a share. The right expression of that is a share of the derived total,
-  not a fixed 64. `LimitKind::Threads` and `LimitKind::FileLocks` already reason
-  about exactly this and reached the same answer: "a settable bound rather than
-  a `MAX_THREADS` const, so a busy server scales with the machine while one
-  runaway process cannot exhaust the arena for everyone else".
-- The **fail-closed refusal is untouched**. Exceeding the effective bound stays
-  a typed error and an audited event. Only the *value* stops being a guess.
+The stack reads neither the machine nor `system.conf` — it is the
+network-parsing sandbox — so both deliverers (`devmgr` at boot,
+`configure` on a live edit) resolve the document against the ungated
+System Information API RAM total and hand the stack one effective figure.
+`SystemConfig::network_settings` therefore takes that total as an
+argument: one mapping, so a live edit and the next boot cannot differ.
+`netstack` deliberately does **not** query the total itself, because
+`sysinfod` already calls `netstack` for its socket listing and the reverse
+edge would close an IPC cycle.
 
-The administrative override is a `net.*` key in the existing
-`/System/Settings/Configuration/system.conf` store, gated by the existing
-`CAP_NET_ADMIN` — the capability that already governs the network stack's
-policy. No new capability (§5.2).
+**The prerequisite this turned out to need.** The table was a `Vec` found
+only by linear scan — per received packet (the established four-tuple,
+then the listener), on all eleven owned-handle lookups, up to 128×O(n) per
+ephemeral bind, and O(n) per id allocation. Letting a derived capacity
+grow that ~170× would have made packet-receive cost follow the table and
+let one principal's sockets slow every other principal's traffic, which is
+a denial of service rather than merely slow — so the bound could not
+honestly be derived until the table was indexed. It now carries four keyed
+indices (handle→position, four-tuple→handle, port→holders and demux
+target, principal→live count), keyed with the process's SipHash key
+because a peer chooses the address and port half of a connection key and
+an unkeyed hash would be collision-floodable. Every index row is derived
+from an entry's own state by one `index_entry`/`unindex_entry` pair, and a
+`#[cfg(test)]` invariant check runs after every served request, inbound
+segment, and timer pass; each of the five index-maintenance steps was
+verified to fail the suite when removed.
 
-A per-principal `LimitKind::Sockets` would be the better shape in the abstract,
-since it is what `ulimit` means, but the socket table lives in a *user-space*
-service and the kernel cannot today attest a caller's effective limit to a
-user-space resource owner. Inventing that channel for one consumer is
-speculative interface (§2.4). It becomes the right answer the moment a second
-user-space service owns a per-principal resource; the condition is recorded here
-so the decision is revisited on evidence rather than re-argued.
+Two defects fell out of that work and are fixed with it: `bind` on an
+already-bound socket silently moved its port, stranding the old one and
+cutting a connected socket's inbound segments adrift from the four-tuple
+they are demultiplexed by (now refused); and five copies of the lazy
+"assign an ephemeral port if unbound" block are one `ensure_local_port`.
 
-This defect is independent of SSH — and it would also have capped `sshd` at
-roughly 30 concurrent sessions, since every session's socket belongs to the one
-`sshd` principal.
+A per-principal `LimitKind::Sockets` would be the better shape in the
+abstract, since it is what `ulimit` means, but the socket table lives in a
+*user-space* service and the kernel cannot today attest a caller's
+effective limit to a user-space resource owner. Inventing that channel for
+one consumer is speculative interface (§2.4). It becomes the right answer
+the moment a second user-space service owns a per-principal resource; the
+condition is recorded here so the decision is revisited on evidence rather
+than re-argued.
 
 **S0c — `lib/sandbox` has no long-lived worker.** `host::ParserSandbox::request`
 is one-shot request→reply and `worker::serve` answers one frame at a time

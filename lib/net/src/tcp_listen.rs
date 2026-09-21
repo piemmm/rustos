@@ -169,6 +169,29 @@ impl Listener {
         self.local_port
     }
 
+    /// Heap bytes this listener's defence state holds: the half-open
+    /// table and the completed-connection queue, each including the
+    /// connections' own buffers.
+    ///
+    /// A listener under flood is the one socket whose footprint is driven
+    /// entirely by remote peers, so a memory budget has to be able to see
+    /// it.
+    #[must_use]
+    pub fn footprint_bytes(&self) -> usize {
+        self.half_open.capacity() * core::mem::size_of::<HalfOpen>()
+            + self
+                .half_open
+                .iter()
+                .map(|h| h.tcb.footprint_bytes())
+                .sum::<usize>()
+            + self.accept_queue.capacity() * core::mem::size_of::<Connection>()
+            + self
+                .accept_queue
+                .iter()
+                .map(|c| c.tcb.footprint_bytes())
+                .sum::<usize>()
+    }
+
     /// The listener's running counters.
     #[must_use]
     pub fn stats(&self) -> ListenerStats {

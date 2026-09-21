@@ -279,6 +279,17 @@ pub trait NetPolicy {
     /// running. The store write has already succeeded either way.
     fn apply(&self, settings: NetworkSettings) -> Result<(), Errno>;
 
+    /// The machine's usable physical RAM in bytes, or zero when the
+    /// figure is not available.
+    ///
+    /// A `net.*` *capacity* is derived from the machine rather than
+    /// written down, so rendering this document into a policy needs the
+    /// machine as well as the document. It sits on this seam because the
+    /// engine performs no I/O of its own, and because the boot-time
+    /// deliverer reads the same ungated total — the two must agree about
+    /// the same document or a live edit and the next boot would differ.
+    fn machine_ram_bytes(&self) -> u64;
+
     /// Ask the running stack to adopt one managed interface's configuration
     /// — the same framed message the device manager delivers at boot, so a
     /// live edit and a boot-time read cannot mean different things.
@@ -466,7 +477,9 @@ pub fn run(
             if let Some(config) = machine.as_ref() {
                 let keys = machine_network_keys(&named);
                 if !keys.is_empty() {
-                    if let Err(err) = policy.apply(config.network_settings()) {
+                    if let Err(err) =
+                        policy.apply(config.network_settings(policy.machine_ram_bytes()))
+                    {
                         notice.push_str(&deferred_notice(&keys, err));
                     }
                 }
@@ -919,6 +932,12 @@ mod tests {
             self.result
         }
 
+        fn machine_ram_bytes(&self) -> u64 {
+            // A 1 GiB machine, so a derived capacity in an asserted
+            // policy is a fixed figure rather than the host's own RAM.
+            1024 * 1024 * 1024
+        }
+
         fn apply_interface(&self, config: &NetInterfaceConfigMsg) -> Result<(), Errno> {
             self.interfaces.borrow_mut().push(*config);
             self.result
@@ -998,6 +1017,7 @@ mod tests {
              net.tcp.syncookies auto\n\
              net.tcp.keepalive false\n\
              net.tcp.ecn false\n\
+             net.sockets.max auto\n\
              time.servers none\n\
              time.refresh 1d\n\
              input.mouse.debounce 25\n",

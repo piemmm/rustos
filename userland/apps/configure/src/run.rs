@@ -173,6 +173,11 @@ mod program {
     struct StackPolicy;
 
     impl NetPolicy for StackPolicy {
+        fn machine_ram_bytes(&self) -> u64 {
+            // Zero when the broker cannot answer, which derives the
+            // smallest machine's capacity rather than none.
+            tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0)
+        }
         fn apply(&self, settings: NetworkSettings) -> Result<(), Errno> {
             admin_call(&NetstackRequest::ApplyNetworkSettings(settings).to_le_bytes())
         }

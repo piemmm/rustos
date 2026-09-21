@@ -280,8 +280,11 @@ mod program {
         // identifiers from the platform CSPRNG through this factory; the
         // engine consults it only while net.ipv6.privacy is enabled.
         let temp_factory = Box::new(|| Box::new(RandomTempSource) as Box<dyn TempAddrSource>);
-        let mut stack = Netstack::new(temp_factory, dhcp_rng_factory(), peer_hash_key());
-        let mut sockets = SocketService::new();
+        let hash_key = peer_hash_key();
+        let mut stack = Netstack::new(temp_factory, dhcp_rng_factory(), hash_key);
+        // The socket table's demux indices hash under the same process key
+        // as the bond's flow hash: a peer chooses half of a connection key.
+        let mut sockets = SocketService::new(hash_key);
         // The bound NIC channels, one per slot in the reserved endpoint
         // block. A fixed table (not a growable capacity): the channel count
         // is bounded by the endpoint block itself.

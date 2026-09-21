@@ -390,7 +390,35 @@ mod program {
     /// parse — so delivery keeps the network stack on its safe defaults and
     /// retries on the next generation bump, never guessing at a policy (fail
     /// closed).
-    struct RtNetworkConfig;
+    /// The production policy read, carrying the machine's RAM total once
+    /// it has been answered.
+    ///
+    /// Installed RAM is a static hardware fact, so it is read once and
+    /// kept rather than queried per generation bump. A `None` is "not
+    /// answered yet" — the sysinfo broker may not be running this early —
+    /// and is retried, because the capacity derived from a zero total is
+    /// the smallest machine's rather than this machine's.
+    #[derive(Default)]
+    struct RtNetworkConfig {
+        machine_ram_bytes: Option<u64>,
+    }
+
+    impl RtNetworkConfig {
+        /// The machine's usable physical RAM, zero until the ungated
+        /// System Information API answers.
+        fn machine_ram_bytes(&mut self) -> u64 {
+            if let Some(bytes) = self.machine_ram_bytes {
+                return bytes;
+            }
+            match tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport) {
+                Ok(bytes) if bytes > 0 => {
+                    self.machine_ram_bytes = Some(bytes);
+                    bytes
+                }
+                _ => 0,
+            }
+        }
+    }
 
     impl NetworkConfigSource for RtNetworkConfig {
         fn load(&mut self) -> Option<NetworkSettings> {
@@ -409,7 +437,7 @@ mod program {
                 malformed_document(SystemConfigFile::System);
                 return None;
             };
-            Some(config.network_settings())
+            Some(config.network_settings(self.machine_ram_bytes()))
         }
     }
 
@@ -482,12 +510,13 @@ mod program {
         // reply buffer comfortably.
         #[allow(clippy::large_stack_arrays)]
         let mut reply_buf = [0u8; REPLY_BUF_LEN];
+        let mut net_config_source = RtNetworkConfig::default();
         match tairix_devmgr::run(
             &mut RtTreeService,
             &mut RtStoreCall,
             &mut RtNetstackBind,
             &mut RtAudiodBind,
-            &mut RtNetworkConfig,
+            &mut net_config_source,
             &mut RtNetworkInterfaceConfig,
             &LogSink,
             &mut reply_buf,

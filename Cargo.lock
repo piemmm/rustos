@@ -1268,6 +1268,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-netconfig",
+ "tairix-procinfo",
  "tairix-rt",
  "tairix-sysconfig",
  "tairix-util",
@@ -1459,6 +1460,7 @@ dependencies = [
  "tairix-devmatch",
  "tairix-log",
  "tairix-netconfig",
+ "tairix-procinfo",
  "tairix-rt",
  "tairix-sysconfig",
  "tairix-util",
@@ -2815,6 +2817,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-collections",
  "tairix-crypto",
  "tairix-fuzzseed",
  "tairix-hash",

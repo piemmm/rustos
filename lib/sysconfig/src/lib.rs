@@ -63,6 +63,17 @@
 //!   connection offers ECN in its SYN/SYN-ACK and, once negotiated, marks
 //!   eligible segments ECT(0) and treats a CE mark as a congestion signal
 //!   instead of forcing a drop; `false` leaves connections Not-ECT.
+//! * `net.sockets.mem` — `auto` (default) or a byte size such as `64M`:
+//!   the network stack's socket-memory budget, in *bytes* rather than a
+//!   count of sockets, because bytes are what a socket actually costs. The
+//!   same budget therefore carries a great many idle sockets or far fewer
+//!   fully-buffered connections, according to the workload, instead of the
+//!   stack provisioning for one and refusing the other. `auto` sizes it
+//!   from the machine's usable physical RAM; a size is the administrator
+//!   overriding that. Each principal may hold a sixteenth, so the stack
+//!   always has room for sixteen. There is deliberately no `unlimited`:
+//!   the budget bounds the stack's own heap, and a bound that can be
+//!   switched off is not one.
 //! * `time.servers` — `none` (default) or a comma-separated list of at most
 //!   [`MAX_TIME_SERVERS`] network time servers, each a host name or an
 //!   address literal (`plans/TIMESYNC.md` §3). This key is the *operator's*
@@ -108,7 +119,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::driver_store::SystemConfigFile;
-use tairix_abi::net_ipc::NetworkSettings;
+use tairix_abi::net_ipc::{
+    socket_budget_for_ram, NetworkSettings, SOCKET_BUDGET_MAX_SETTABLE,
+    SOCKET_BUDGET_MIN_SETTABLE,
+};
 use tairix_abi::time::Duration64;
 use tairix_abi::MAX_TIME_SERVERS;
 use tairix_util::conf::{strip_comment, ValueShape};
@@ -360,6 +374,73 @@ impl NetToggle {
     }
 }
 
+/// The network stack's socket-memory budget (`net.sockets.mem`).
+///
+/// The bound is *bytes of socket state*, not a count of sockets, because
+/// bytes are the resource: a count would have to be provisioned for one
+/// workload or the other, refusing idle sockets whose memory is not
+/// committed while never actually bounding the memory a few busy
+/// connections hold. [`Auto`](Self::Auto), the default, sizes the budget
+/// from the RAM the machine has; [`Bytes`](Self::Bytes) is the
+/// administrator overriding that for a machine whose workload they know
+/// better.
+///
+/// There is deliberately no `unlimited`: the budget bounds the stack's own
+/// heap, and a bound that can be switched off is not a bound.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum SocketBudget {
+    /// Derive the budget from the machine's usable physical RAM — the
+    /// default, and the value an absent store implies.
+    #[default]
+    Auto,
+    /// The administrator's explicit budget, in bytes.
+    Bytes(u64),
+}
+
+impl SocketBudget {
+    /// The budget this policy yields on a machine with `total_ram_bytes`
+    /// of usable physical RAM.
+    ///
+    /// The one place the operator's intent and the machine's size are
+    /// combined, so the boot-time deliverer and the live `configure` apply
+    /// cannot reach different answers for the same document.
+    #[must_use]
+    pub fn resolve(self, total_ram_bytes: u64) -> u64 {
+        match self {
+            Self::Auto => socket_budget_for_ram(total_ram_bytes),
+            Self::Bytes(bytes) => bytes,
+        }
+    }
+
+    /// Decode a value spelling: `auto`, or a byte size with an optional
+    /// `K`, `M`, or `G` binary suffix (`64M`).
+    ///
+    /// A budget outside [`SOCKET_BUDGET_MIN_SETTABLE`] ..=
+    /// [`SOCKET_BUDGET_MAX_SETTABLE`] is refused rather than clamped: one
+    /// too small to give a single connection a usable window is an outage
+    /// an operator should be told about, not handed.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        if value == "auto" {
+            return Some(Self::Auto);
+        }
+        let (digits, scale) = match value.as_bytes().last()? {
+            b'K' => (&value[..value.len() - 1], 1024u64),
+            b'M' => (&value[..value.len() - 1], 1024 * 1024),
+            b'G' => (&value[..value.len() - 1], 1024 * 1024 * 1024),
+            _ => (value, 1),
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let bytes = digits.parse::<u64>().ok()?.checked_mul(scale)?;
+        if !(SOCKET_BUDGET_MIN_SETTABLE..=SOCKET_BUDGET_MAX_SETTABLE).contains(&bytes) {
+            return None;
+        }
+        Some(Self::Bytes(bytes))
+    }
+}
+
 /// The TCP SYN-flood defence policy (`net.tcp.syncookies`).
 ///
 /// There is deliberately no `Off` variant: an undefended or unbounded SYN
@@ -497,6 +578,8 @@ pub enum Key {
     NetTcpKeepalive,
     /// `net.tcp.ecn` — the stack-wide RFC 3168 TCP ECN switch.
     NetTcpEcn,
+    /// `net.sockets.mem` — the socket-memory budget.
+    NetSocketsMem,
     /// `time.servers` — the network time servers the operator named, which
     /// outrank every other source the clock service would otherwise use.
     TimeServers,
@@ -522,6 +605,7 @@ impl Key {
         Self::NetTcpSynCookies,
         Self::NetTcpKeepalive,
         Self::NetTcpEcn,
+        Self::NetSocketsMem,
         Self::TimeServers,
         Self::TimeRefresh,
         Self::InputMouseDebounce,
@@ -541,7 +625,8 @@ impl Key {
             | Self::NetIpv6Privacy
             | Self::NetTcpSynCookies
             | Self::NetTcpKeepalive
-            | Self::NetTcpEcn => true,
+            | Self::NetTcpEcn
+            | Self::NetSocketsMem => true,
             Self::LoginType
             | Self::CacheAll
             | Self::CacheFilesystem
@@ -570,6 +655,7 @@ impl Key {
             Self::NetTcpSynCookies => "net.tcp.syncookies",
             Self::NetTcpKeepalive => "net.tcp.keepalive",
             Self::NetTcpEcn => "net.tcp.ecn",
+            Self::NetSocketsMem => "net.sockets.mem",
             Self::InputMouseDebounce => "input.mouse.debounce",
             Self::TimeServers => "time.servers",
             Self::TimeRefresh => "time.refresh",
@@ -599,6 +685,9 @@ impl Key {
             Self::NetTcpSynCookies => &["auto", "always"],
             Self::NetTcpKeepalive | Self::NetTcpEcn => &["true", "false"],
             Self::TimeRefresh => &["6h", "12h", "1d", "2d", "7d"],
+            Self::NetSocketsMem => {
+                return ValueShape::Free("`auto`, or a byte size such as `64M`")
+            }
             Self::TimeServers => {
                 return ValueShape::Free("`none`, or a comma-separated list of host names")
             }
@@ -607,6 +696,25 @@ impl Key {
             }
         })
     }
+}
+
+/// Render a byte size in the largest binary unit that divides it exactly,
+/// so a value round-trips through [`SocketBudget::from_value`] as the
+/// operator would have written it.
+fn render_byte_size(bytes: u64) -> String {
+    let mut buf = [0u8; 20];
+    for (scale, suffix) in [
+        (1024 * 1024 * 1024, "G"),
+        (1024 * 1024, "M"),
+        (1024, "K"),
+    ] {
+        if bytes % scale == 0 {
+            let mut out = String::from(tairix_util::fmt::format_u64(bytes / scale, &mut buf));
+            out.push_str(suffix);
+            return out;
+        }
+    }
+    String::from(tairix_util::fmt::format_u64(bytes, &mut buf))
 }
 
 /// Parse `input.mouse.debounce` — whole milliseconds, `0` disabling the filter.
@@ -702,6 +810,9 @@ pub struct SystemConfig {
     /// Notification (`net.tcp.ecn`). Disabled by default: connections are
     /// Not-ECT unless the operator opts in.
     pub net_tcp_ecn: NetToggle,
+    /// The socket-memory budget (`net.sockets.mem`). Derived from the
+    /// machine's RAM by default.
+    pub net_sockets_mem: SocketBudget,
     /// The network time servers the operator named (`time.servers`), in
     /// configured order. Empty by default, meaning no operator preference —
     /// the clock service then prefers what DHCP offered and falls back to its
@@ -740,6 +851,7 @@ impl Default for SystemConfig {
             net_tcp_syncookies: SynCookies::default(),
             net_tcp_keepalive: NetToggle::Disabled,
             net_tcp_ecn: NetToggle::Disabled,
+            net_sockets_mem: SocketBudget::default(),
             time_servers: Vec::new(),
             time_refresh: RefreshCadence::default(),
             input_mouse_debounce_ms: DEFAULT_CLICK_DEBOUNCE_MS,
@@ -749,13 +861,22 @@ impl Default for SystemConfig {
 
 impl SystemConfig {
     /// The stack-wide network policy these `net.*` keys describe, in the
-    /// wire form the network stack's admin endpoint accepts.
+    /// wire form the network stack's admin endpoint accepts, for a machine
+    /// carrying `total_ram_bytes` of usable physical RAM.
     ///
     /// The one mapping from this document to that message, so every
     /// deliverer — the device manager at boot, `configure` when it changes a
     /// key — hands the stack the same policy for the same document.
+    ///
+    /// RAM is an argument because the document alone cannot decide a
+    /// *capacity*: `net.sockets.max auto` means "size it for this machine",
+    /// and the network stack is the parsing sandbox, so it can read neither
+    /// the document nor the machine. Both deliverers read the same ungated
+    /// System Information API total and so reach the same answer; a
+    /// `total_ram_bytes` of zero means the figure is not known yet and
+    /// yields the smallest supported machine's capacity, never none.
     #[must_use]
-    pub const fn network_settings(&self) -> NetworkSettings {
+    pub fn network_settings(&self, total_ram_bytes: u64) -> NetworkSettings {
         NetworkSettings {
             ipv4_enabled: self.net_ipv4_enabled.is_enabled(),
             ipv6_enabled: self.net_ipv6_enabled.is_enabled(),
@@ -763,6 +884,7 @@ impl SystemConfig {
             ipv6_privacy: self.net_ipv6_privacy.is_enabled(),
             tcp_keepalive: self.net_tcp_keepalive.is_enabled(),
             tcp_ecn: self.net_tcp_ecn.is_enabled(),
+            socket_budget_bytes: self.net_sockets_mem.resolve(total_ram_bytes),
         }
     }
 
@@ -823,6 +945,10 @@ impl SystemConfig {
                     &mut buf,
                 ))
             }
+            Key::NetSocketsMem => match self.net_sockets_mem {
+                SocketBudget::Auto => String::from("auto"),
+                SocketBudget::Bytes(bytes) => render_byte_size(bytes),
+            },
             _ => String::from(self.closed_value(key)),
         }
     }
@@ -837,6 +963,9 @@ impl SystemConfig {
             Key::TimeServers => NO_TIME_SERVERS,
             // Rendered numerically by `render_value`; no fixed spelling exists.
             Key::InputMouseDebounce => "",
+            // `auto` has a spelling; an explicit budget is rendered as a
+            // byte size by `render_value`.
+            Key::NetSocketsMem => "auto",
             Key::TimeRefresh => self.time_refresh.as_str(),
             Key::LoginType => self.login_type.as_str(),
             Key::CacheAll => self.cache_all.as_str(),
@@ -934,6 +1063,10 @@ impl SystemConfig {
                 self.time_refresh =
                     RefreshCadence::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
+            Key::NetSocketsMem => {
+                self.net_sockets_mem =
+                    SocketBudget::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
             Key::InputMouseDebounce => {
                 self.input_mouse_debounce_ms = parse_click_debounce_ms(value)?;
             }
@@ -1029,7 +1162,7 @@ mod tests {
 
     use super::{
         CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, NetToggle, RefreshCadence,
-        SynCookies, SystemConfig, ValueShape, CONFIG_PATH, DEFAULT_CLICK_DEBOUNCE_MS,
+        SocketBudget, SynCookies, SystemConfig, ValueShape, CONFIG_PATH, DEFAULT_CLICK_DEBOUNCE_MS,
         MAX_CLICK_DEBOUNCE_MS, MAX_CONFIG_LEN, MAX_TIME_SERVERS, MAX_TIME_SERVER_LEN,
         NO_TIME_SERVERS,
     };
@@ -1185,7 +1318,8 @@ mod tests {
                 for cache_filesystem in [CacheMode::Auto, CacheMode::Off] {
                     for net_ipv4_enabled in [NetToggle::Enabled, NetToggle::Disabled] {
                         for syncookies in [SynCookies::Auto, SynCookies::Always] {
-                            for keepalive in [NetToggle::Enabled, NetToggle::Disabled] {
+                            for net_sockets_mem in [SocketBudget::Auto, SocketBudget::Bytes(64 * 1024 * 1024)] {
+                                let keepalive = NetToggle::Enabled;
                                 let config = SystemConfig {
                                     login_type,
                                     cache_all,
@@ -1199,6 +1333,7 @@ mod tests {
                                     net_tcp_syncookies: syncookies,
                                     net_tcp_keepalive: keepalive,
                                     net_tcp_ecn: NetToggle::Enabled,
+                                    net_sockets_mem,
                                     time_servers: vec![
                                         String::from("0.example.test"),
                                         String::from("2001:db8::1"),
@@ -1531,21 +1666,103 @@ mod tests {
 
     #[test]
     fn the_network_settings_mapping_reads_every_net_key() {
+        const GIB: u64 = 1024 * 1024 * 1024;
         let mut config = SystemConfig::default();
-        let defaults = config.network_settings();
+        let defaults = config.network_settings(GIB);
         assert!(defaults.ipv4_enabled && defaults.ipv6_enabled);
         assert!(!defaults.syncookies_always);
         assert!(!defaults.ipv6_privacy && !defaults.tcp_keepalive && !defaults.tcp_ecn);
+        assert_eq!(defaults.socket_budget_bytes, 128 * 1024 * 1024);
 
         config.net_ipv4_enabled = NetToggle::Disabled;
         config.net_tcp_syncookies = SynCookies::Always;
         config.net_ipv6_privacy = NetToggle::Enabled;
         config.net_tcp_keepalive = NetToggle::Enabled;
         config.net_tcp_ecn = NetToggle::Enabled;
-        let set = config.network_settings();
+        config.net_sockets_mem = SocketBudget::Bytes(4 * 1024 * 1024);
+        let set = config.network_settings(GIB);
         assert!(!set.ipv4_enabled && set.ipv6_enabled);
         assert!(set.syncookies_always && set.ipv6_privacy);
         assert!(set.tcp_keepalive && set.tcp_ecn);
+        assert_eq!(set.socket_budget_bytes, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn the_socket_budget_follows_the_machine_unless_overridden() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const MIB: u64 = 1024 * 1024;
+        let mut config = SystemConfig::default();
+
+        // `auto` tracks the machine: a small board and a large server get
+        // different budgets from the same document.
+        assert_eq!(config.network_settings(256 * MIB).socket_budget_bytes, 32 * MIB);
+        assert_eq!(config.network_settings(GIB).socket_budget_bytes, 128 * MIB);
+        assert_eq!(config.network_settings(512 * GIB).socket_budget_bytes, 64 * GIB);
+        // An unread figure is the smallest machine, never nothing.
+        assert_eq!(config.network_settings(0).socket_budget_bytes, 32 * MIB);
+
+        // The per-principal figure is a share of whatever the budget came to.
+        assert_eq!(
+            config.network_settings(GIB).socket_bytes_per_principal(),
+            8 * MIB
+        );
+        assert_eq!(
+            config.network_settings(512 * GIB).socket_bytes_per_principal(),
+            4 * GIB
+        );
+
+        // An override outranks the machine, in both directions.
+        config.net_sockets_mem = SocketBudget::Bytes(16 * MIB);
+        assert_eq!(config.network_settings(512 * GIB).socket_budget_bytes, 16 * MIB);
+        assert_eq!(
+            config.network_settings(512 * GIB).socket_bytes_per_principal(),
+            MIB
+        );
+    }
+
+    #[test]
+    fn the_socket_budget_value_set_is_closed() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(SocketBudget::from_value("auto"), Some(SocketBudget::Auto));
+        assert_eq!(
+            SocketBudget::from_value("64M"),
+            Some(SocketBudget::Bytes(64 * MIB))
+        );
+        assert_eq!(
+            SocketBudget::from_value("2G"),
+            Some(SocketBudget::Bytes(2 * 1024 * MIB))
+        );
+        assert_eq!(
+            SocketBudget::from_value("1048576"),
+            Some(SocketBudget::Bytes(MIB))
+        );
+        // A budget too small to give one connection a usable window is an
+        // outage, so it is refused rather than clamped; so is an absurd one.
+        assert_eq!(SocketBudget::from_value("0"), None);
+        assert_eq!(SocketBudget::from_value("1K"), None);
+        assert_eq!(SocketBudget::from_value("2T"), None);
+        assert_eq!(SocketBudget::from_value("99999999999999999999"), None);
+        // An overflowing multiply is refused, never wrapped.
+        assert_eq!(SocketBudget::from_value("18446744073709551615G"), None);
+        assert_eq!(SocketBudget::from_value("-1"), None);
+        assert_eq!(SocketBudget::from_value("unlimited"), None);
+        assert_eq!(SocketBudget::from_value("Auto"), None);
+        assert_eq!(SocketBudget::from_value(""), None);
+        assert_eq!(SocketBudget::from_value(" 8M"), None);
+        assert_eq!(SocketBudget::from_value("M"), None);
+
+        // The document round-trips through the store's own grammar.
+        let parsed = SystemConfig::parse("net.sockets.mem 64M\n").expect("parses");
+        assert_eq!(parsed.net_sockets_mem, SocketBudget::Bytes(64 * MIB));
+        assert_eq!(parsed.render_value(Key::NetSocketsMem), "64M");
+        assert_eq!(
+            SystemConfig::default().render_value(Key::NetSocketsMem),
+            "auto"
+        );
+        assert_eq!(
+            SystemConfig::parse("net.sockets.mem 0\n"),
+            Err(ConfigError::InvalidValue)
+        );
     }
 
     #[test]

@@ -1970,8 +1970,8 @@ asserting the ECN handshake on the wire** are all landed and gate-green.
   end to end exactly like `net.tcp.keepalive` (N12) — a `net.tcp.ecn`
   `NetToggle` key in the `lib/sysconfig` `net.*` registry (§6.2, off by
   default), the `tcp_ecn` boolean on `NetworkSettings`
-  (`lib/abi/src/net_ipc.rs`, wire byte 13, reserved tail from byte 14,
-  fail-closed encode/decode + round-trip/dirty-tail tests), the
+  (`lib/abi/src/net_ipc.rs`, wire byte 13, fail-closed encode/decode +
+  round-trip/dirty-tail tests), the
   `devmgr::netcfg::settings_from_config` mapping, and `netstack` seeding
   `enable_ecn` on both connection paths — `socket.rs::connect_stream`
   (outbound `TcpConfig`) and `listen_config` (the listener's
@@ -2699,6 +2699,22 @@ tree, exactly like `os.*`:
   the handshake and, once negotiated, mark eligible segments ECT(0) and
   react to a CE mark as a congestion signal instead of forcing a drop
   (N13).
+- `net.sockets.max` (`auto`|a socket count) — the socket table's
+  capacity. A *capacity*, so it is derived and not written down: `auto`
+  (the default) sizes the total from the machine's usable physical RAM —
+  an eighth of it at the configured worst case of one socket's TCP send
+  and receive buffers — and each principal may hold a sixteenth of that
+  total. A 1 GiB machine comes to 1024 and 64, which is what the
+  superseded hand-picked constants were, so the derivation agrees with
+  the considered figure where it applied and scales where it did not. An
+  explicit count is the administrator overriding it; there is
+  deliberately no `unlimited`, because the table bounds the stack's own
+  heap. The fail-closed `LimitExceeded` refusal at the bound is
+  unchanged. Because the stack reads neither the machine nor
+  `system.conf`, both deliverers resolve the document against the
+  ungated System Information API total and send the one effective
+  figure — which is why `SystemConfig::network_settings` takes the RAM
+  total as an argument.
 - Per-interface settings live in `network.conf` (6.1), never in
   `system.conf`; `configure net.<key> <value>` edits the stack-wide
   registry, and `configure` grows no interface sub-grammar — interface

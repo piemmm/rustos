@@ -75,7 +75,7 @@ one range test. The assigned identifiers:
 
 The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
 `net.ipv6.privacy`, `net.tcp.syncookies`, `net.tcp.keepalive`,
-`net.tcp.ecn`) is read from
+`net.tcp.ecn`, `net.sockets.max`) is read from
 `system.conf` and delivered to
 `netstack` by the FS-capable device manager, which records the delivery
 in its own `devmgr` range: `13_012` `NETWORK_SETTINGS_DELIVERED` (Info,

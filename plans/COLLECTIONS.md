@@ -242,7 +242,7 @@ is not in this plan — see §6.
 
 | Type | Guarantee | Replaces |
 |---|---|---|
-| `HashMap<K, V, S>` | O(1) expected lookup/insert/remove, no allocation on lookup | `BTreeMap` used as an unordered index across `kernel/*`, `lib/*`, `drivers/*` |
+| `HashMap<K, V, S>` | O(1) expected lookup/insert/remove, no allocation on lookup | `BTreeMap` used as an unordered index across `kernel/*`, `lib/*`, `drivers/*`, and a `Vec` searched linearly on a load-bearing path. Its first production consumer is `netstack`'s socket table, whose four indices replaced a scan per received packet (`plans/SSH.md` S0b) |
 | `HashSet<T, S>` | as above | `BTreeSet` used as an unordered set. **No such site exists yet**: C1 surveyed every in-tree `BTreeSet` and each is either order-load-bearing (`kernel/sec`'s per-process thread set fans signals out in ascending id order; `kernel/sched/cfq`'s run queue is keyed on virtual runtime) or a handful of entries, where the ordered set is cheaper and a conversion would worsen the counters. The type is a zero-duplication wrapper over `HashMap<T, ()>`; C10 either lands its first caller or deletes it |
 
 `S` carries **no default**, though the two rows above once spelled one. A

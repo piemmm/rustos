@@ -142,7 +142,10 @@ fn serve_never_panics_and_gates_on_cap_net() {
         "serve_never_panics_and_gates_on_cap_net",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
-    let mut svc = SocketService::new();
+    let mut svc = SocketService::new(tairix_hash::HashSeed::from_words(
+        0xF00D_5EED_0000_0001,
+        0xF00D_5EED_0000_0002,
+    ));
     let mut stack = routed_stack();
     let sink = NullSink;
     let mut entropy_state: u32 = 0x1234_5678;
@@ -184,8 +187,9 @@ fn serve_never_panics_and_gates_on_cap_net() {
                 assert!(result.is_err(), "a capless caller is always refused");
                 assert_eq!(svc.len(), before, "no socket created without CAP_NET");
             }
-            // The global bound is never exceeded.
-            assert!(svc.len() <= tairix_netstack::MAX_SOCKETS_TOTAL);
+            // The delivered capacity is never exceeded, whatever the
+            // request stream asked for.
+            assert!(svc.len() <= stack.settings().sockets_max as usize);
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

@@ -42,10 +42,7 @@ pub use iface::{
     ServiceHint, ServiceOutcome, TempAddrFactory,
 };
 pub use service::{serve, Caller};
-pub use socket::{
-    Delivery, SocketReply, SocketService, StreamIo, MAX_GROUPS_PER_SOCKET,
-    MAX_SOCKETS_PER_PRINCIPAL, MAX_SOCKETS_TOTAL,
-};
+pub use socket::{Delivery, SocketReply, SocketService, StreamIo, MAX_GROUPS_PER_SOCKET};
 
 #[cfg(test)]
 mod tests;

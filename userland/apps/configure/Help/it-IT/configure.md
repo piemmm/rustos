@@ -74,6 +74,12 @@ interessato — non cambia mai un risultato.
   predefinito) lascia le connessioni Not-ECT; `true` offre ECN
   nell'handshake e poi tratta un contrassegno di congestione come un
   segnale di rallentamento invece di forzare la perdita di un pacchetto.
+- `net.sockets.max` — `auto` oppure un numero di socket: il tetto dei
+  socket che lo stack di rete tiene fra tutti i principali. `auto` (il
+  valore predefinito) lo dimensiona sulla RAM della macchina, così un
+  server grande non resta legato a una cifra scelta su uno piccolo; un
+  numero lo sostituisce per un carico che conoscete meglio. Ogni principale
+  può tenerne un sedicesimo del totale effettivo.
 - `time.servers` — `none` oppure un elenco di server di ora di rete
   separati da virgole, ciascuno un nome host o un indirizzo. `none` (il
   valore predefinito) significa che l'orologio non viene mai impostato

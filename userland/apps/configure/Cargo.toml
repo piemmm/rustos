@@ -51,6 +51,9 @@ tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0" }
 # The shared configuration vocabulary: the one `ValueShape` both registries
 # state a key's accepted values in, so this tool names the valid choices from
 # the same definition whichever registry refused a value.
+# The ungated System Information API client: the machine's total RAM, which
+# a derived `net.*` capacity is sized from when a live edit is delivered.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`

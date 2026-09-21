@@ -32,7 +32,7 @@ use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 
 use crate::channel::{FrameService, LocalFrameService};
-use crate::socket::{Delivery, SocketService, MAX_SOCKETS_PER_PRINCIPAL};
+use crate::socket::{Delivery, SocketService};
 use crate::{serve, Caller, Netstack};
 
 const MAC_A: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
@@ -99,6 +99,21 @@ fn test_temp_factory() -> crate::iface::TempAddrFactory {
 /// CSPRNG-drawn key.
 fn test_flow_key() -> tairix_hash::HashSeed {
     tairix_hash::HashSeed::from_words(0xF10E_5EED_0000_0001, 0xF10E_5EED_0000_0002)
+}
+
+/// An empty socket table keyed for the tests, so index layout is
+/// reproducible run to run.
+fn socket_service() -> SocketService {
+    SocketService::new(test_flow_key())
+}
+
+/// The stack-wide policy a deliverer pushes once it has resolved the
+/// machine's RAM against `net.sockets.max`, carrying `sockets_max`.
+fn settings_with_sockets(sockets_max: u32) -> NetworkSettings {
+    NetworkSettings {
+        sockets_max,
+        ..NetworkSettings::default()
+    }
 }
 
 /// A deterministic DHCPv4 client randomness factory for the tests: a
@@ -477,7 +492,7 @@ fn serve_ok(
     reply: &mut [u8],
 ) -> usize {
     let sink = RecordingSink::new();
-    let sockets = SocketService::new();
+    let sockets = socket_service();
     serve(
         stack,
         &sockets,
@@ -642,7 +657,7 @@ fn admin_surface_is_denied_without_net_admin() {
         assert_eq!(
             serve(
                 &mut stack,
-                &SocketService::new(),
+                &socket_service(),
                 &broker(),
                 &sink,
                 &request.to_le_bytes(),
@@ -683,7 +698,7 @@ fn broker_reads_are_denied_without_sysinfo_introspect() {
         assert_eq!(
             serve(
                 &mut stack,
-                &SocketService::new(),
+                &socket_service(),
                 &admin(),
                 &sink,
                 &request.to_le_bytes(),
@@ -709,7 +724,7 @@ fn addr_and_route_add_apply_and_are_audited() {
     };
     let len = serve(
         &mut stack,
-        &SocketService::new(),
+        &socket_service(),
         &admin(),
         &sink,
         &addr.to_le_bytes(),
@@ -727,7 +742,7 @@ fn addr_and_route_add_apply_and_are_audited() {
     };
     let len = serve(
         &mut stack,
-        &SocketService::new(),
+        &socket_service(),
         &admin(),
         &sink,
         &route.to_le_bytes(),
@@ -773,7 +788,7 @@ fn mutations_on_an_unknown_interface_are_refused_and_audited() {
     assert_eq!(
         serve(
             &mut stack,
-            &SocketService::new(),
+            &socket_service(),
             &admin(),
             &sink,
             &request.to_le_bytes(),
@@ -795,7 +810,7 @@ fn malformed_frames_are_refused_and_audited() {
     assert_eq!(
         serve(
             &mut stack,
-            &SocketService::new(),
+            &socket_service(),
             &admin(),
             &sink,
             &bad,
@@ -987,7 +1002,7 @@ fn routed_stack() -> Netstack {
 
 #[test]
 fn socket_open_requires_cap_net() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = managed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1016,7 +1031,7 @@ fn socket_open_requires_cap_net() {
 
 #[test]
 fn socket_open_and_bind_assigns_a_port() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1097,7 +1112,7 @@ fn socket_open_and_bind_assigns_a_port() {
 
 #[test]
 fn socket_open_rejects_zero_delivery_port() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = managed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1123,7 +1138,7 @@ fn socket_open_rejects_zero_delivery_port() {
 
 #[test]
 fn a_handle_is_scoped_to_its_creating_principal() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1165,9 +1180,12 @@ fn a_handle_is_scoped_to_its_creating_principal() {
 }
 
 #[test]
-fn per_principal_socket_quota_fails_closed() {
-    let mut svc = SocketService::new();
+fn the_socket_capacity_is_a_share_of_the_delivered_total() {
+    // A machine the deliverer sized at 1024 gives each principal a
+    // sixteenth of it; the figure is the delivered one, not a constant.
+    let mut svc = socket_service();
     let mut stack = managed_stack();
+    stack.apply_settings(settings_with_sockets(1024), t(1));
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
     let mut reply = [0u8; 64];
@@ -1176,22 +1194,103 @@ fn per_principal_socket_quota_fails_closed() {
         sock_type: SocketType::Datagram,
         deliver_port: 0x5000,
     });
-    for _ in 0..MAX_SOCKETS_PER_PRINCIPAL {
+    let mut open = |svc: &mut SocketService, stack: &mut Netstack, who: u8| {
         svc.serve(
-            &mut stack,
-            &net_caller(1),
+            stack,
+            &net_caller(who),
             &sink,
             &mut ent,
             &request,
             &mut reply,
             t(2),
         )
-        .expect("open within quota");
+    };
+    for _ in 0..64 {
+        open(&mut svc, &mut stack, 1).expect("open within the principal's share");
+    }
+    // The refusal at the bound is unchanged: a typed `LimitExceeded`.
+    assert_eq!(open(&mut svc, &mut stack, 1), Err(Errno::LimitExceeded));
+    // A different principal still has its own share.
+    open(&mut svc, &mut stack, 2).expect("other principal unaffected");
+}
+
+#[test]
+fn a_smaller_machine_derives_a_smaller_share_and_a_larger_one_a_larger() {
+    let sink = RecordingSink::new();
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    // The share tracks the total it is a sixteenth of, so the same code
+    // serves a small board and a large server without an edit.
+    for (sockets_max, share) in [(256u32, 64usize), (4096, 1024)] {
+        let mut svc = socket_service();
+        let mut stack = managed_stack();
+        stack.apply_settings(settings_with_sockets(sockets_max), t(1));
+        let mut ent = counter_entropy();
+        let mut reply = [0u8; 64];
+        let allowed = sockets_max as usize / 16;
+        assert_eq!(allowed * 16, share * 4, "share arithmetic");
+        for _ in 0..allowed {
+            svc.serve(
+                &mut stack,
+                &net_caller(1),
+                &sink,
+                &mut ent,
+                &request,
+                &mut reply,
+                t(2),
+            )
+            .expect("open within the derived share");
+        }
+        assert_eq!(
+            svc.serve(
+                &mut stack,
+                &net_caller(1),
+                &sink,
+                &mut ent,
+                &request,
+                &mut reply,
+                t(2)
+            ),
+            Err(Errno::LimitExceeded)
+        );
+        assert_eq!(svc.len(), allowed);
+    }
+}
+
+#[test]
+fn an_administrative_override_bounds_the_whole_table_across_principals() {
+    // `net.sockets.max 4` delivered: the share floors at one, so four
+    // distinct principals fill the table and the fifth meets the total.
+    let mut svc = socket_service();
+    let mut stack = managed_stack();
+    stack.apply_settings(settings_with_sockets(4), t(1));
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    for who in 1..=4u8 {
+        svc.serve(
+            &mut stack,
+            &net_caller(who),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2),
+        )
+        .expect("open within the overridden total");
     }
     assert_eq!(
         svc.serve(
             &mut stack,
-            &net_caller(1),
+            &net_caller(5),
             &sink,
             &mut ent,
             &request,
@@ -1200,22 +1299,25 @@ fn per_principal_socket_quota_fails_closed() {
         ),
         Err(Errno::LimitExceeded)
     );
-    // A different principal still has its own quota.
+    assert_eq!(svc.len(), 4);
+    // Raising the ceiling admits more at once: the bound is the live
+    // delivered policy, never a figure frozen when the table was built.
+    stack.apply_settings(settings_with_sockets(64), t(3));
     svc.serve(
         &mut stack,
-        &net_caller(2),
+        &net_caller(5),
         &sink,
         &mut ent,
         &request,
         &mut reply,
-        t(2),
+        t(4),
     )
-    .expect("other principal unaffected");
+    .expect("a raised ceiling takes effect at once");
 }
 
 #[test]
 fn unicast_send_originates_frames() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1262,7 +1364,7 @@ fn unicast_send_originates_frames() {
 
 #[test]
 fn send_without_a_peer_or_dest_is_not_connected() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1305,7 +1407,7 @@ fn send_without_a_peer_or_dest_is_not_connected() {
 
 #[test]
 fn inbound_datagram_is_delivered_to_the_bound_socket() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1390,7 +1492,7 @@ fn raw_caller(proc_byte: u8) -> Caller {
 
 #[test]
 fn icmp_echo_socket_open_requires_cap_net_raw() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1430,7 +1532,7 @@ fn icmp_echo_socket_open_requires_cap_net_raw() {
 
 #[test]
 fn echo_request_is_originated_and_the_reply_is_delivered() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1531,7 +1633,7 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
 
 #[test]
 fn echo_send_on_an_unconnected_socket_without_dest_is_refused() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1575,7 +1677,7 @@ fn echo_send_on_an_unconnected_socket_without_dest_is_refused() {
 
 #[test]
 fn a_connected_socket_only_receives_from_its_peer() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1649,7 +1751,7 @@ fn a_connected_socket_only_receives_from_its_peer() {
 #[test]
 fn multicast_join_gates_group_delivery() {
     const GROUP: Ipv4Addr = Ipv4Addr::new(239, 1, 2, 3);
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
     let mut ent = counter_entropy();
@@ -1761,7 +1863,7 @@ fn serve_req(
 
 #[test]
 fn binding_a_privileged_port_requires_the_capability() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     // A bare CAP_NET principal; `caller` keys every summary to one ProcId,
     // so the privileged caller below owns the same socket.
@@ -1813,7 +1915,7 @@ fn binding_a_privileged_port_requires_the_capability() {
 /// target socket closing stays visible instead of vanishing from the count.
 #[test]
 fn defence_counters_survive_a_listener_close() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let who = net_caller(1);
 
@@ -1906,7 +2008,7 @@ fn defence_counters_survive_a_listener_close() {
 /// a flood must not turn the audit log into its own amplifier.
 #[test]
 fn cookies_engaged_is_reported_once_per_listener() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let who = net_caller(1);
     let secret = crate::CryptoCookieSecret::new([0x5A; 32]);
@@ -1994,7 +2096,7 @@ fn feed_bare_syn(
 
 #[test]
 fn listen_requires_a_bound_stream_socket() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let who = net_caller(1);
 
@@ -2056,7 +2158,7 @@ fn listen_requires_a_bound_stream_socket() {
 /// implies, never silently accepted.
 #[test]
 fn shutdown_requires_a_connected_stream_socket() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let who = raw_caller(1);
 
@@ -2128,7 +2230,7 @@ fn shutdown_requires_a_connected_stream_socket() {
 
 #[test]
 fn accept_without_a_ready_connection_would_block() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = routed_stack();
     let who = net_caller(1);
     let st = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open");
@@ -2494,6 +2596,14 @@ impl PeerTcpNet {
         }
     }
 
+    /// Close the server's side of the connection, so its FIN follows the
+    /// client's and the teardown can actually complete. The echo server
+    /// never closes on its own, so a test that needs a finished teardown
+    /// says so here.
+    fn close(&mut self) {
+        let _ = self.tcb.close(self.now);
+    }
+
     /// Drain the server connection's outbound segments through the peer
     /// stack (folding the checksum toward the client), pushing the frames
     /// onto the receive ring.
@@ -2712,7 +2822,7 @@ impl<'r> StreamFixture<'r> {
         let now = t(2);
         Self {
             ns: routed_stack(),
-            svc: SocketService::new(),
+            svc: socket_service(),
             fs: local_service_tcp(PeerTcpNet::new(now), region),
             who: caller(&[CapabilityId::NET]),
             now,
@@ -2740,6 +2850,25 @@ impl<'r> StreamFixture<'r> {
     /// Run the link to quiescence, returning the client deliveries.
     fn pump(&mut self) -> Vec<Delivery> {
         pump_client(&mut self.ns, &mut self.svc, &mut self.fs, self.now)
+    }
+
+    /// Close the peer's side of the connection.
+    fn close_peer(&mut self) {
+        self.fs.net_mut().close();
+    }
+
+    /// Drive the stream timers one pass, staging whatever they emit.
+    fn advance(&mut self) {
+        self.now = t(self.now.secs() + 60);
+        let io = self.svc.advance_streams(&mut self.ns, self.now);
+        stage_batch(&mut self.fs, &io.tx);
+    }
+
+    /// The local port of the fixture's one socket.
+    fn sole_local_port(&self) -> u16 {
+        let records = self.svc.socket_records(0, u16::MAX);
+        assert_eq!(records.len(), 1, "the fixture holds one socket");
+        records[0].local_port
     }
 
     /// Open a stream socket and drive it to ESTABLISHED against the peer
@@ -2830,6 +2959,183 @@ impl<'r> StreamFixture<'r> {
         )
         .err()
     }
+}
+
+#[test]
+fn a_closed_stream_releases_its_port_and_its_demux_row() {
+    // The table is indexed, so a socket that goes away has to take its
+    // index rows with it. Nothing else in the suite drives an established
+    // stream all the way to removal, and a stale four-tuple row there
+    // would route a later connection's segments to freed state.
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let mut response = [0u8; 64];
+
+    let sid = fx.established_stream();
+    let port = fx.sole_local_port();
+    assert!(
+        fx.svc.port_is_held(port),
+        "an established stream holds its port"
+    );
+
+    let reply = fx
+        .serve(SocketRequest::Close { socket: sid }, &mut response)
+        .expect("close");
+    // The FIN reaches the peer, then the link and the timers run until
+    // TIME-WAIT (2·MSL) lapses and the socket is reaped.
+    stage_batch(&mut fx.fs, &reply.tx);
+    fx.close_peer();
+    for _ in 0..8 {
+        fx.pump();
+        fx.advance();
+        if fx.svc.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(fx.svc.len(), 0, "the closed stream was reaped");
+    assert!(
+        !fx.svc.port_is_held(port),
+        "a reaped stream releases the port it held"
+    );
+
+    // The handle is gone rather than merely orphaned.
+    assert_eq!(
+        fx.serve(SocketRequest::Close { socket: sid }, &mut response),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn closing_a_socket_leaves_every_survivor_addressable() {
+    // The table is a vector whose hole a removal fills from the end, so a
+    // socket after the closed one changes position. A handle left pointing
+    // at the old position would address whichever socket moved into it —
+    // the same principal's, so the ownership check would not catch it.
+    let mut svc = socket_service();
+    let mut stack = managed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let mut serve =
+        |svc: &mut SocketService, stack: &mut Netstack, req: &[u8], reply: &mut [u8; 64]| {
+            svc.serve(stack, &net_caller(1), &sink, &mut ent, req, reply, t(2))
+        };
+    let open = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    let mut ids = Vec::new();
+    for port in [4100u16, 4101, 4102] {
+        serve(&mut svc, &mut stack, &open, &mut reply).expect("open");
+        let sid = decode_socket_reply(&reply).expect("socket id");
+        let bind = encode_request(&SocketRequest::Bind {
+            socket: sid,
+            local: sockaddr_v4(Ipv4Addr::UNSPECIFIED, port),
+        });
+        serve(&mut svc, &mut stack, &bind, &mut reply).expect("bind");
+        ids.push((sid, port));
+    }
+
+    // Close the middle one; the last socket takes its place in the table.
+    let (closed, closed_port) = ids.remove(1);
+    let close = encode_request(&SocketRequest::Close { socket: closed });
+    serve(&mut svc, &mut stack, &close, &mut reply).expect("close");
+    assert!(
+        !svc.port_is_held(closed_port),
+        "the closed socket's port went"
+    );
+    assert_eq!(
+        serve(
+            &mut svc,
+            &mut stack,
+            &encode_request(&SocketRequest::Close { socket: closed }),
+            &mut reply
+        ),
+        Err(Errno::NotFound),
+        "a closed handle is gone"
+    );
+
+    // Each survivor still answers on its own handle, with its own port —
+    // not the one that moved into its former slot.
+    for (sid, port) in ids {
+        assert!(svc.port_is_held(port), "survivor keeps its port");
+        let records = svc.socket_records(0, u16::MAX);
+        let mine = records
+            .iter()
+            .find(|r| r.local_port == port)
+            .expect("survivor listed");
+        assert_eq!(mine.local_port, port);
+        // Reachable by handle: a stale position would address the socket
+        // that moved, or run off the end of a now-shorter table.
+        serve(
+            &mut svc,
+            &mut stack,
+            &encode_request(&SocketRequest::Close { socket: sid }),
+            &mut reply,
+        )
+        .expect("survivor closes on its own handle");
+        assert!(!svc.port_is_held(port), "and releases its own port");
+    }
+    assert!(svc.is_empty());
+}
+
+#[test]
+fn a_bound_socket_is_never_rebound() {
+    // Moving a bound socket's port would strand the port it holds and,
+    // once connected, cut its inbound segments adrift from the four-tuple
+    // they are demultiplexed by.
+    let mut svc = socket_service();
+    let mut stack = managed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = counter_entropy();
+    let mut reply = [0u8; 64];
+    let open = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: 0x5000,
+    });
+    svc.serve(
+        &mut stack,
+        &net_caller(1),
+        &sink,
+        &mut ent,
+        &open,
+        &mut reply,
+        t(2),
+    )
+    .expect("open");
+    let sid = decode_socket_reply(&reply).expect("socket id");
+    let bind = |port| {
+        encode_request(&SocketRequest::Bind {
+            socket: sid,
+            local: sockaddr_v4(Ipv4Addr::UNSPECIFIED, port),
+        })
+    };
+    svc.serve(
+        &mut stack,
+        &net_caller(1),
+        &sink,
+        &mut ent,
+        &bind(4000),
+        &mut reply,
+        t(2),
+    )
+    .expect("first bind");
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &bind(4001),
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::AlreadyExists)
+    );
+    assert!(svc.port_is_held(4000), "the original port is still held");
+    assert!(!svc.port_is_held(4001), "the refused port was never taken");
 }
 
 #[test]
@@ -2957,7 +3263,7 @@ fn socket_listing_reports_open_sockets_and_is_broker_gated() {
     let mut ns = managed_stack();
     ns.addr_add(name("wan"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(1))
         .expect("addr add");
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let who = caller(&[CapabilityId::NET]);
     let mut entropy = || 0x2468_ACE0u32;
     let mut response = [0u8; 64];
@@ -3053,7 +3359,7 @@ fn resolver_servers_is_a_broker_read_and_frames_a_page() {
     // With no DHCP lease learned, the active resolver set is empty; the
     // dispatcher still frames a well-formed (count 0) page.
     let mut ns = managed_stack();
-    let sockets = SocketService::new();
+    let sockets = socket_service();
     let request = NetstackRequest::ResolverServers;
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
 
@@ -3145,7 +3451,7 @@ fn statically_configured_dns_servers_join_the_resolver_set() {
 #[test]
 fn apply_network_settings_requires_cap_net_admin() {
     let mut stack = managed_stack();
-    let sockets = SocketService::new();
+    let sockets = socket_service();
     let sink = RecordingSink::new();
     let request = NetstackRequest::ApplyNetworkSettings(NetworkSettings {
         ipv4_enabled: true,
@@ -3154,6 +3460,7 @@ fn apply_network_settings_requires_cap_net_admin() {
         ipv6_privacy: false,
         tcp_keepalive: false,
         tcp_ecn: false,
+        sockets_max: 1024,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     // A broker capability (introspect) is not admin authority.
@@ -3177,7 +3484,7 @@ fn apply_network_settings_requires_cap_net_admin() {
 #[test]
 fn apply_network_settings_is_applied_and_audited() {
     let mut stack = managed_stack();
-    let sockets = SocketService::new();
+    let sockets = socket_service();
     let sink = RecordingSink::new();
     let request = NetstackRequest::ApplyNetworkSettings(NetworkSettings {
         ipv4_enabled: false,
@@ -3186,6 +3493,7 @@ fn apply_network_settings_is_applied_and_audited() {
         ipv6_privacy: false,
         tcp_keepalive: true,
         tcp_ecn: true,
+        sockets_max: 1024,
     });
     let mut reply = [0u8; NETSTACK_MAX_REPLY];
     let len = serve(
@@ -3209,7 +3517,7 @@ fn apply_network_settings_is_applied_and_audited() {
 
 #[test]
 fn disabling_a_family_refuses_a_socket_open_for_it() {
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut stack = managed_stack();
     stack.apply_settings(
         NetworkSettings {
@@ -3219,6 +3527,7 @@ fn disabling_a_family_refuses_a_socket_open_for_it() {
             ipv6_privacy: false,
             tcp_keepalive: false,
             tcp_ecn: false,
+            sockets_max: 1024,
         },
         t(2),
     );
@@ -3287,6 +3596,7 @@ fn applying_settings_reconfigures_an_existing_interface() {
             ipv6_privacy: false,
             tcp_keepalive: false,
             tcp_ecn: false,
+            sockets_max: 1024,
         },
         t(2),
     );
@@ -3807,6 +4117,7 @@ fn listen_config_maps_the_syncookie_keepalive_and_ecn_policy() {
         ipv6_privacy: false,
         tcp_keepalive: true,
         tcp_ecn: true,
+        sockets_max: 1024,
     });
     assert_eq!(always.max_half_open, 0);
     assert!(
@@ -3827,6 +4138,7 @@ fn listen_config_maps_the_syncookie_keepalive_and_ecn_policy() {
         ipv6_privacy: false,
         tcp_keepalive: false,
         tcp_ecn: false,
+        sockets_max: 1024,
     });
     assert_eq!(auto.max_half_open, ListenConfig::default().max_half_open);
     assert!(
@@ -3954,7 +4266,7 @@ fn binding_a_datagram_socket_widens_the_broadcast_ports_the_driver_admits() {
     // the device's pre-filter — so a broadcast datagram to that port is no
     // longer shed a hop before the stack could deliver it.
     let mut stack = managed_stack();
-    let mut svc = SocketService::new();
+    let mut svc = socket_service();
     let mut ent = || 0x2222_u32;
     let mut reply = vec![0u8; 256];
     let mut region = rings_region();
@@ -4307,7 +4619,7 @@ fn bond_members_are_listed_with_health_and_are_broker_gated() {
 
     // The `BondMembers` dispatch is a broker read: SYSINFO_INTROSPECT
     // succeeds, an admin capability does not.
-    let svc = SocketService::new();
+    let svc = socket_service();
     let sink = RecordingSink::new();
     let request = NetstackRequest::BondMembers {
         offset: 0,
