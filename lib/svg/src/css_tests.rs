@@ -18,13 +18,13 @@ use crate::xml::{self, Element};
 #[track_caller]
 fn matched(document: &str, path: &[&str]) -> Vec<(String, String)> {
     let root = xml::parse(document).expect("a document");
-    let sheet = Stylesheet::collect(&root).expect("a sheet");
+    let sheets = crate::css::sheet_texts(&root);
+    let sheet = Stylesheet::collect(&sheets).expect("a sheet");
     let mut chain: Vec<&Element<'_>> = alloc::vec![&root];
     for step in path {
         let parent = *chain.last().expect("a parent");
         let child = parent
-            .children
-            .iter()
+            .children()
             .find(|child| child.attr("id") == Some(*step) || child.name == *step)
             .unwrap_or_else(|| panic!("no child {step}"));
         chain.push(child);
@@ -290,7 +290,8 @@ fn a_sheet_for_another_medium_or_language_is_skipped() {
 #[test]
 fn a_document_with_no_sheet_matches_nothing() {
     let root = xml::parse("<svg><rect/></svg>").expect("a document");
-    assert!(Stylesheet::collect(&root).expect("a sheet").is_empty());
+    let sheets = crate::css::sheet_texts(&root);
+    assert!(Stylesheet::collect(&sheets).expect("a sheet").is_empty());
 }
 
 // --- the bounds ------------------------------------------------------------
@@ -303,12 +304,17 @@ fn a_sheet_past_the_rule_bound_refuses_the_document() {
     }
     let document = format!("<svg><style>{text}</style><rect/></svg>");
     let root = xml::parse(&document).expect("a document");
-    assert_eq!(Stylesheet::collect(&root).err(), Some(SvgError::TooComplex));
+    let sheets = crate::css::sheet_texts(&root);
+    assert_eq!(
+        Stylesheet::collect(&sheets).err(),
+        Some(SvgError::TooComplex)
+    );
 }
 
 #[test]
 fn a_selector_past_the_part_bound_is_dropped() {
     let document = "<svg><style>g g g g g g g g g rect{fill:red}</style><rect/></svg>";
     let root = xml::parse(document).expect("a document");
-    assert!(Stylesheet::collect(&root).expect("a sheet").is_empty());
+    let sheets = crate::css::sheet_texts(&root);
+    assert!(Stylesheet::collect(&sheets).expect("a sheet").is_empty());
 }

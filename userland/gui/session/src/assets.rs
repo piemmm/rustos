@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_cursor::{cursor_asset_path, CursorAssetSource, CursorTheme};
 use tairix_icon::{icon_vector_path, IconAssetSource, IconKind, IconSet, ICON_KINDS};
+use tairix_svg::font::FontProvider;
 use tairix_theme::{CursorKind, CursorSet, CursorSetId, CURSOR_KINDS};
 
 /// The desktop session's file-reading seam.
@@ -88,7 +89,12 @@ impl IconAssetSource for LoadedIconAssets {
 /// that set's name. A theme naming an asset the store could not hold is
 /// refused at the path itself and keeps its built-in cursor too. The result is a plain [`CursorTheme`] the window manager
 /// registers through its existing `CursorRegistry`.
-pub fn load_cursor_theme<R>(reader: &mut R, set: CursorSetId, cursors: &CursorSet) -> CursorTheme
+pub fn load_cursor_theme<R>(
+    reader: &mut R,
+    set: CursorSetId,
+    cursors: &CursorSet,
+    fonts: &mut dyn FontProvider,
+) -> CursorTheme
 where
     R: SessionFileReader + ?Sized,
 {
@@ -101,7 +107,7 @@ where
             assets.push((kind, bytes));
         }
     }
-    CursorTheme::from_assets(&LoadedCursorAssets { assets })
+    CursorTheme::from_assets(&LoadedCursorAssets { assets }, fonts)
 }
 
 /// Build a notification-icon set from the on-disk SVG assets under
@@ -111,7 +117,7 @@ where
 /// `reader` and lets `lib/icon` decode it. A kind whose asset cannot be read,
 /// or whose bytes do not decode, falls back to its built-in glyph at draw time, so this never fails. The result is an [`IconSet`] the
 /// taskbar installs through `TaskbarRenderer::set_icons`.
-pub fn load_icon_set<R>(reader: &mut R) -> IconSet
+pub fn load_icon_set<R>(reader: &mut R, fonts: &mut dyn FontProvider) -> IconSet
 where
     R: SessionFileReader + ?Sized,
 {
@@ -121,5 +127,5 @@ where
             assets.push((kind, bytes));
         }
     }
-    IconSet::from_assets(&LoadedIconAssets { assets })
+    IconSet::from_assets(&LoadedIconAssets { assets }, fonts)
 }

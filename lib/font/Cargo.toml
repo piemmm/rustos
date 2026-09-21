@@ -56,6 +56,11 @@ tairix-procinfo = { path = "../procinfo", version = "=0.0.0", optional = true, d
 # forbids; a clash is caught by comparing the retained bytes, so the checksum
 # decides only what is *looked up*, never what is answered.
 tairix-crc32c = { path = "../crc32c", version = "=0.0.0", optional = true }
+# The SVG decoder whose injected font seam `svgfont` implements over this
+# client. Optional and off by default: only a consumer that draws SVG text
+# links it, and the decoder itself depends on nothing here, so the edge runs
+# one way.
+tairix-svg = { path = "../svg", version = "=0.0.0", optional = true }
 
 [dev-dependencies]
 # The audit-sink trait a host test's glyph cache is built with. A test has
@@ -87,6 +92,11 @@ glyph-cache = ["dep:tairix-reclaim", "dep:tairix-hash"]
 # also defaults the client's glyph cache lazily, sized from the machine's
 # total RAM through `tairix-procinfo`.
 rt = ["render", "dep:tairix-procinfo"]
+# The SVG decoder's font seam, backed by this client (`svgfont`). A
+# consumer that decodes SVG documents carrying text enables it; the atlas and
+# coverage paths do not, so `lib/svg` stays out of a build that only blits
+# glyphs.
+svg = ["render", "dep:tairix-svg"]
 # A deterministic solid-coverage test transport (`SolidTestTransport`),
 # installed lazily on first draw. A text-drawing consumer enables this as a
 # dev-dependency feature so its host tests render without a running `fontd`;

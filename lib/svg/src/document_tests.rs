@@ -16,12 +16,13 @@ use tairix_raster::{
 };
 
 use crate::error::SvgError;
+use crate::font::NoFonts;
 use crate::{decode, Viewport, DESIGN_GRID};
 
 /// Fit a document to the square slot, which is what all but the viewport's
 /// own tests are about.
 fn decode_square(bytes: &[u8]) -> Result<crate::SvgImage, SvgError> {
-    decode(bytes, Viewport::Square)
+    decode(bytes, Viewport::Square, &mut NoFonts)
 }
 
 /// The nesting bound the decoder and the renderer share.
@@ -503,7 +504,7 @@ fn assorted_hostile_documents_never_panic() {
 /// The contour of the only layer a document decodes to, under `viewport`.
 #[track_caller]
 fn only_contour(svg: &str, viewport: Viewport) -> Vec<(i32, i32)> {
-    let image = decode(svg.as_bytes(), viewport).expect("a decodable document");
+    let image = decode(svg.as_bytes(), viewport, &mut NoFonts).expect("a decodable document");
     let decoded = flatten(image.nodes());
     assert_eq!(decoded.len(), 1, "expected one layer");
     contour(&decoded[0]).to_vec()
@@ -539,7 +540,8 @@ fn the_natural_shape_fills_the_grid_on_both_axes() {
 fn the_authored_shape_is_carried_whichever_viewport_is_asked_for() {
     // What a consumer rasterising the natural form sizes its surface from.
     for viewport in [Viewport::Square, Viewport::Natural] {
-        let image = decode(wide().as_bytes(), viewport).expect("a decodable document");
+        let image =
+            decode(wide().as_bytes(), viewport, &mut NoFonts).expect("a decodable document");
         assert_eq!(image.source_extent(), (16.0, 4.0), "{viewport:?}");
         assert_eq!(image.design(), DESIGN_GRID, "{viewport:?}");
     }
@@ -552,8 +554,8 @@ fn a_square_document_decodes_the_same_under_either_viewport() {
     // not square.
     let svg = document(r#"<rect x="1" y="2" width="4" height="3"/>"#);
     assert_eq!(
-        decode(svg.as_bytes(), Viewport::Square),
-        decode(svg.as_bytes(), Viewport::Natural)
+        decode(svg.as_bytes(), Viewport::Square, &mut NoFonts),
+        decode(svg.as_bytes(), Viewport::Natural, &mut NoFonts)
     );
 }
 
@@ -587,7 +589,7 @@ fn a_malformed_preserve_aspect_ratio_refuses_the_document_under_both() {
     let svg = r#"<svg viewBox="0 0 8 8" preserveAspectRatio="sideways"><rect width="1" height="1"/></svg>"#;
     for viewport in [Viewport::Square, Viewport::Natural] {
         assert_eq!(
-            decode(svg.as_bytes(), viewport),
+            decode(svg.as_bytes(), viewport, &mut NoFonts),
             Err(SvgError::InvalidViewBox),
             "{viewport:?}"
         );
@@ -601,7 +603,8 @@ fn a_stroke_is_carried_into_the_stretch_rather_than_dropped_from_it() {
     // What matters here is that the stroke still produces its own layer and
     // spans the wider axis further than the narrow one.
     let svg = r#"<svg viewBox="0 0 16 4"><line x1="0" y1="2" x2="16" y2="2" stroke="black" stroke-width="2"/></svg>"#;
-    let image = decode(svg.as_bytes(), Viewport::Natural).expect("a decodable document");
+    let image =
+        decode(svg.as_bytes(), Viewport::Natural, &mut NoFonts).expect("a decodable document");
     let decoded = flatten(image.nodes());
     assert_eq!(decoded.len(), 1, "the stroke is the only layer");
     let points = contour(&decoded[0]);
@@ -2291,7 +2294,7 @@ fn the_grids_shape_does_not_change_a_non_scaling_pens_roundness() {
             r##"<svg viewBox="0 0 16 8"><path d="{data}" stroke="#000" stroke-width="1"
                 fill="none" vector-effect="non-scaling-stroke"/></svg>"##
         );
-        let image = decode(svg.as_bytes(), viewport).expect("a decodable document");
+        let image = decode(svg.as_bytes(), viewport, &mut NoFonts).expect("a decodable document");
         axis(ink_box(&flatten(image.nodes())[0]))
     };
     let (across, down) = ("M1 4 H15", "M8 1 V7");
@@ -2363,4 +2366,260 @@ fn an_overflowing_transform_under_a_non_scaling_stroke_still_fails_closed() {
             "the renderer refused artwork the decoder accepted at {scale}",
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------
+
+/// A provider whose every glyph is a filled half-em square on a 1000-unit
+/// em, so a `<text>` produces geometry a test can locate exactly.
+struct SquareFont {
+    /// What the face reports it could not furnish.
+    synthetic_bold: f64,
+    synthetic_shear: f64,
+}
+
+impl SquareFont {
+    const EM: f64 = 1000.0;
+    const ADVANCE: f64 = 500.0;
+
+    const fn plain() -> Self {
+        Self {
+            synthetic_bold: 0.0,
+            synthetic_shear: 0.0,
+        }
+    }
+}
+
+impl crate::font::FontProvider for SquareFont {
+    fn select(
+        &mut self,
+        _req: &crate::font::FaceRequest<'_>,
+    ) -> Result<crate::font::FaceMetrics, crate::font::FontUnavailable> {
+        Ok(crate::font::FaceMetrics {
+            id: crate::font::FaceId::new(0),
+            units_per_em: Self::EM,
+            ascent: 800.0,
+            descent: 200.0,
+            line_gap: 0.0,
+        })
+    }
+
+    fn outlines(
+        &mut self,
+        _face: crate::font::FaceId,
+        run: &[char],
+        out: &mut Vec<crate::font::GlyphOutline>,
+    ) -> Result<(), crate::font::FontUnavailable> {
+        use crate::font::{GlyphOutline, OutlineContour, OutlineSegment};
+        for scalar in run {
+            out.push(GlyphOutline {
+                units_per_em: Self::EM,
+                advance: Self::ADVANCE,
+                synthetic_bold: self.synthetic_bold,
+                synthetic_shear: self.synthetic_shear,
+                contours: if *scalar == ' ' {
+                    Vec::new()
+                } else {
+                    alloc::vec![OutlineContour {
+                        start: (0.0, 0.0),
+                        segments: alloc::vec![
+                            OutlineSegment::Line {
+                                to: (Self::ADVANCE, 0.0)
+                            },
+                            OutlineSegment::Line {
+                                to: (Self::ADVANCE, Self::EM)
+                            },
+                            OutlineSegment::Line {
+                                to: (0.0, Self::EM)
+                            },
+                            OutlineSegment::Line { to: (0.0, 0.0) },
+                        ],
+                    }]
+                },
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Decode `document` against a provider that furnishes square glyphs.
+#[track_caller]
+fn decode_text(document: &str) -> Result<crate::SvgImage, SvgError> {
+    decode(
+        document.as_bytes(),
+        Viewport::Square,
+        &mut SquareFont::plain(),
+    )
+}
+
+#[test]
+fn text_becomes_a_filled_layer_of_glyph_contours() {
+    let image = decode_text(
+        r##"<svg viewBox="0 0 8 8"><text x="1" y="4" font-size="2" fill="#ff0000">ab</text></svg>"##,
+    )
+    .expect("a drawable document");
+    let layers = flatten(image.nodes());
+    assert_eq!(layers.len(), 1, "one run is one layer");
+    let layer = &layers[0];
+    assert_eq!(layer.rule, FillRule::NonZero, "TrueType fills non-zero");
+    assert_eq!(solid(layer), Color::rgb(255, 0, 0));
+    assert_eq!(
+        layer.contours.len(),
+        2,
+        "both glyphs' contours fill together, so they are one layer's"
+    );
+    // A glyph is a half-em square: at a 2-unit font size the first sits
+    // from x=1 to x=2 with its baseline at y=4 and its top an em above.
+    let xs: Vec<i32> = layer.contours[0].iter().map(|point| point.0).collect();
+    let ys: Vec<i32> = layer.contours[0].iter().map(|point| point.1).collect();
+    assert_eq!(xs.iter().copied().min(), Some(UNIT));
+    assert_eq!(xs.iter().copied().max(), Some(2 * UNIT));
+    assert_eq!(ys.iter().copied().max(), Some(4 * UNIT));
+    assert_eq!(ys.iter().copied().min(), Some(2 * UNIT));
+}
+
+#[test]
+fn a_document_with_text_and_no_font_provider_is_refused_rather_than_drawn_bare() {
+    let document = br#"<svg viewBox="0 0 8 8"><text x="1" y="4">a</text></svg>"#;
+    assert_eq!(
+        decode(document, Viewport::Square, &mut NoFonts),
+        Err(SvgError::FontUnavailable),
+        "absent lettering is a wrong picture, not a missing decoration"
+    );
+}
+
+#[test]
+fn a_document_with_no_text_needs_no_font_provider_at_all() {
+    // The seam costs a caller that draws no text nothing: the provider is
+    // never touched, so a compositor path keeps its `NoFonts`.
+    assert!(decode_square(br#"<svg viewBox="0 0 8 8"><rect width="4" height="4"/></svg>"#).is_ok());
+}
+
+#[test]
+fn an_empty_text_element_draws_nothing_and_refuses_nothing() {
+    let image =
+        decode_text(r#"<svg viewBox="0 0 8 8"><text x="1" y="4">   </text></svg>"#).expect("ok");
+    assert!(image.nodes().is_empty());
+}
+
+#[test]
+fn a_tspan_with_its_own_fill_is_its_own_layer_in_document_order() {
+    let image = decode_text(
+        r##"<svg viewBox="0 0 8 8"><text x="0" y="4" font-size="2" fill="#ff0000">a<tspan
+             fill="#00ff00">b</tspan>c</text></svg>"##,
+    )
+    .expect("a drawable document");
+    let layers = flatten(image.nodes());
+    assert_eq!(layers.len(), 3, "three style runs, three layers");
+    assert_eq!(solid(&layers[0]), Color::rgb(255, 0, 0));
+    assert_eq!(solid(&layers[1]), Color::rgb(0, 255, 0));
+    assert_eq!(solid(&layers[2]), Color::rgb(255, 0, 0));
+}
+
+#[test]
+fn stroked_text_paints_its_outline_over_its_fill() {
+    let image = decode_text(
+        r##"<svg viewBox="0 0 8 8"><text x="1" y="4" font-size="2" fill="#ff0000"
+             stroke="#0000ff" stroke-width="0.2">a</text></svg>"##,
+    )
+    .expect("a drawable document");
+    let layers = flatten(image.nodes());
+    assert_eq!(layers.len(), 2, "a fill and the stroke over it");
+    assert_eq!(solid(&layers[0]), Color::rgb(255, 0, 0));
+    assert_eq!(solid(&layers[1]), Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn a_synthetic_bold_thickens_the_glyph_through_the_crates_own_stroker() {
+    let plain =
+        decode_text(r#"<svg viewBox="0 0 8 8"><text x="1" y="4" font-size="2">a</text></svg>"#)
+            .expect("a drawable document");
+    let bold = decode(
+        br#"<svg viewBox="0 0 8 8"><text x="1" y="4" font-size="2">a</text></svg>"#,
+        Viewport::Square,
+        &mut SquareFont {
+            synthetic_bold: 1.0 / 24.0,
+            synthetic_shear: 0.0,
+        },
+    )
+    .expect("a drawable document");
+    let contours = |image: &crate::SvgImage| flatten(image.nodes())[0].contours.len();
+    assert!(
+        contours(&bold) > contours(&plain),
+        "the reported stroke must be applied, and through the one stroker"
+    );
+}
+
+#[test]
+fn a_synthetic_oblique_leans_the_letterforms_without_moving_the_baseline() {
+    let upright =
+        decode_text(r#"<svg viewBox="0 0 8 8"><text x="1" y="4" font-size="2">a</text></svg>"#)
+            .expect("a drawable document");
+    let leaning = decode(
+        br#"<svg viewBox="0 0 8 8"><text x="1" y="4" font-size="2">a</text></svg>"#,
+        Viewport::Square,
+        &mut SquareFont {
+            synthetic_bold: 0.0,
+            synthetic_shear: 0.25,
+        },
+    )
+    .expect("a drawable document");
+    let edge = |image: &crate::SvgImage, y: i32| {
+        flatten(image.nodes())[0].contours[0]
+            .iter()
+            .filter(|point| point.1 == y)
+            .map(|point| point.0)
+            .min()
+            .expect("a point on the named edge")
+    };
+    let top_left = |image: &crate::SvgImage| edge(image, 2 * UNIT);
+    let baseline = |image: &crate::SvgImage| edge(image, 4 * UNIT);
+    assert_eq!(
+        baseline(&leaning),
+        baseline(&upright),
+        "a lean pivots about the baseline"
+    );
+    assert!(
+        top_left(&leaning) > top_left(&upright),
+        "the tops of the letterforms move forward"
+    );
+}
+
+#[test]
+fn text_is_clipped_and_transformed_exactly_as_a_shape_is() {
+    let image = decode_text(
+        r#"<svg viewBox="0 0 8 8">
+              <clipPath id="c"><rect width="8" height="8"/></clipPath>
+              <g transform="translate(2 0)" clip-path="url(#c)">
+                <text x="0" y="4" font-size="2">a</text>
+              </g>
+            </svg>"#,
+    )
+    .expect("a drawable document");
+    let Node::Group(group) = &image.nodes()[0] else {
+        panic!("a clip composites its subtree as a unit");
+    };
+    assert!(group.mask.is_some());
+    let layer = &flatten(&group.children)[0];
+    let min_x = layer.contours[0]
+        .iter()
+        .map(|point| point.0)
+        .min()
+        .expect("a point");
+    assert_eq!(min_x, 2 * UNIT, "the group's transform placed the glyph");
+}
+
+#[test]
+fn a_font_size_in_em_measures_the_size_the_element_inherited() {
+    let image = decode_text(
+        r#"<svg viewBox="0 0 8 8"><text x="0" y="4" font-size="4"><tspan
+             font-size="0.5em">a</tspan></text></svg>"#,
+    )
+    .expect("a drawable document");
+    let layer = &flatten(image.nodes())[0];
+    // Half of four user units is two, so the half-em glyph is one wide.
+    let xs: Vec<i32> = layer.contours[0].iter().map(|point| point.0).collect();
+    assert_eq!(xs.iter().copied().max(), Some(UNIT));
 }

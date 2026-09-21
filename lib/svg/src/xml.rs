@@ -35,8 +35,24 @@ pub const MAX_DEPTH: usize = 64;
 /// decoder allocate before it has drawn anything.
 pub const MAX_ELEMENTS: usize = 8192;
 
-/// One element of the parsed document: its name, attributes, character data,
-/// and children.
+/// One node of an element's content: a child element, or a run of character
+/// data.
+///
+/// Text and elements interleave, so they are one ordered list rather than a
+/// child list beside a concatenated string. `<text>a<tspan>b</tspan>c</text>`
+/// has three content nodes in that order, and no other representation can
+/// say where `b` sits between `a` and `c`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Content<'a> {
+    /// A child element.
+    Element(Element<'a>),
+    /// A run of character data, with entity references decoded and CDATA
+    /// sections taken verbatim.
+    Text(Cow<'a, str>),
+}
+
+/// One element of the parsed document: its name, attributes, and its
+/// interleaved character data and children.
 ///
 /// Comments, processing instructions, and the doctype are dropped.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -48,17 +64,14 @@ pub struct Element<'a> {
     /// The attributes in document order, each a `(name, value)` pair. A value
     /// carrying an entity reference is decoded, and so owns its text.
     pub attrs: Vec<(&'a str, Cow<'a, str>)>,
-    /// The element's own character data, with entity references decoded and
-    /// CDATA sections taken verbatim, in document order.
+    /// The element's children and character data, in document order.
     ///
-    /// A run that is entirely whitespace is dropped: `<style>` is the only
-    /// element of the supported subset that reads its text, and CSS does not
-    /// care where an element's children left blank lines. Dropping them is
-    /// what keeps a document of a thousand indented shapes from carrying a
-    /// thousand owned strings of indentation.
-    pub text: Cow<'a, str>,
-    /// The element's children, in document order.
-    pub children: Vec<Element<'a>>,
+    /// Whitespace-only runs are kept, because `xml:space="preserve"` has
+    /// nothing to preserve otherwise and a space between two `<tspan>`s is
+    /// a space the author wrote. A run is a borrowed slice of the source, so
+    /// a document of a thousand indented shapes carries a thousand fat
+    /// pointers rather than a thousand owned strings of indentation.
+    pub content: Vec<Content<'a>>,
 }
 
 impl<'a> Element<'a> {
@@ -78,16 +91,51 @@ impl<'a> Element<'a> {
         self.attr("href").or_else(|| self.attr("xlink:href"))
     }
 
-    /// Append one run of character data, borrowing while it is the only one.
+    /// The child elements, in document order, skipping character data.
+    pub fn children(&self) -> impl Iterator<Item = &Element<'a>> {
+        self.content.iter().filter_map(|node| match node {
+            Content::Element(child) => Some(child),
+            Content::Text(_) => None,
+        })
+    }
+
+    /// Whether the element has any child element at all.
+    #[must_use]
+    pub fn has_children(&self) -> bool {
+        self.children().next().is_some()
+    }
+
+    /// The element's own character data, concatenated in document order.
+    ///
+    /// Borrowed while the element holds one run, which is every stylesheet
+    /// in practice.
+    #[must_use]
+    pub fn text(&self) -> Cow<'a, str> {
+        let mut runs = self.content.iter().filter_map(|node| match node {
+            Content::Text(run) => Some(run),
+            Content::Element(_) => None,
+        });
+        let Some(first) = runs.next() else {
+            return Cow::Borrowed("");
+        };
+        let mut joined = first.clone();
+        for run in runs {
+            joined.to_mut().push_str(run);
+        }
+        joined
+    }
+
+    /// Append one run of character data.
     fn push_text(&mut self, run: Cow<'a, str>) {
         if run.is_empty() {
             return;
         }
-        if self.text.is_empty() {
-            self.text = run;
-            return;
-        }
-        self.text.to_mut().push_str(&run);
+        self.content.push(Content::Text(run));
+    }
+
+    /// Append one child element.
+    fn push_child(&mut self, child: Element<'a>) {
+        self.content.push(Content::Element(child));
     }
 }
 
@@ -114,7 +162,7 @@ pub fn parse(input: &str) -> Result<Element<'_>, SvgError> {
             continue;
         }
         if let Some(open) = stack.last_mut() {
-            open.push_text(decode_entities(significant(&input[text_from..i])));
+            open.push_text(decode_entities(&input[text_from..i]));
         }
         let next = bytes.get(i + 1).copied().ok_or(SvgError::Malformed)?;
         if input[i..].starts_with("<!--") {
@@ -151,7 +199,7 @@ pub fn parse(input: &str) -> Result<Element<'_>, SvgError> {
             }
             drop_namespaces(&mut namespaces, &ended);
             match stack.last_mut() {
-                Some(parent) => parent.children.push(ended),
+                Some(parent) => parent.push_child(ended),
                 None if root.is_none() => root = Some(ended),
                 // A second root-level element is not a well-formed document.
                 None => return Err(SvgError::Malformed),
@@ -168,7 +216,7 @@ pub fn parse(input: &str) -> Result<Element<'_>, SvgError> {
         if self_closing {
             drop_namespaces(&mut namespaces, &node);
             match stack.last_mut() {
-                Some(parent) => parent.children.push(node),
+                Some(parent) => parent.push_child(node),
                 None if root.is_none() => root = Some(node),
                 None => return Err(SvgError::Malformed),
             }
@@ -185,15 +233,6 @@ pub fn parse(input: &str) -> Result<Element<'_>, SvgError> {
     } else {
         Err(SvgError::Malformed)
     }
-}
-
-/// A character-data run, or the empty string when it holds nothing but
-/// whitespace.
-fn significant(run: &str) -> &str {
-    if run.bytes().all(|b| b.is_ascii_whitespace()) {
-        return "";
-    }
-    run
 }
 
 /// Forget the namespace prefixes `node` declared, now that its scope has
@@ -256,8 +295,7 @@ fn parse_start_tag<'a>(
             .into_iter()
             .map(|(key, value)| (key, decode_entities(value)))
             .collect(),
-        text: Cow::Borrowed(""),
-        children: Vec::new(),
+        content: Vec::new(),
     })
 }
 

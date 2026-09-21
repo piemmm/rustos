@@ -120,6 +120,7 @@
 //! part of reading the file: `tairix_image` rights a turned photograph as it
 //! decodes it.
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -130,6 +131,10 @@ use tairix_image::{
 };
 use tairix_raster::{resample, resample_window, Region, Rgba8Image, Surface, MAX_DRAWING_EXTENT};
 use tairix_svg::{SvgError, SvgImage};
+
+use tairix_svg::font::{FaceRequest, FontProvider};
+
+use crate::svgfonts::{FontTable, FontWants, TableFonts};
 use tairix_util::fallible;
 use tairix_wallpaper::{Placement, WallpaperFit};
 
@@ -160,11 +165,21 @@ const PNG_DECODE_MAX_PIXELS: u64 = (MAX_ARTWORK_SIDE as u64) * (MAX_ARTWORK_SIDE
 /// Icon-rasterisation request opcode.
 const OP_RASTERISE: u8 = 1;
 
+/// Glyph-geometry supply opcode: the host answering what a previous request
+/// reported it wanted.
+const OP_FONTS_SUPPLY: u8 = 12;
+
 /// Reply tag shared by every refusal this service returns, whatever the
 /// request opcode: an error code byte follows.
 const REPLY_ERROR: u8 = 0;
 /// Icon-rasterisation success reply tag.
 const REPLY_PIXELS: u8 = 1;
+/// Reply tag shared by every op that decodes a document which turned out to
+/// need glyph geometry the worker has not been given: the encoded wants
+/// follow, and the host supplies them and asks again.
+const REPLY_FONTS_NEEDED: u8 = 2;
+/// Acknowledgement of a supplied glyph table.
+const REPLY_FONTS_STORED: u8 = 3;
 
 /// Icon refusal wire codes.
 const REFUSAL_MALFORMED_REQUEST: u8 = 1;
@@ -235,6 +250,10 @@ pub enum IconRasterFailure {
     /// geometry: it cannot be believed, so the caller gets nothing
     /// (fail closed).
     ReplyMalformed,
+    /// The drawing names lettering no installed font can furnish, so the
+    /// caller's own font seam could not answer what the worker asked for.
+    /// The picture would be wrong without it, so nothing is drawn.
+    FontsUnavailable,
 }
 
 impl core::fmt::Display for IconRasterFailure {
@@ -243,6 +262,7 @@ impl core::fmt::Display for IconRasterFailure {
             Self::Sandbox(inner) => write!(f, "parser sandbox failed: {inner:?}"),
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
+            Self::FontsUnavailable => f.write_str("no installed font can draw this lettering"),
         }
     }
 }
@@ -266,12 +286,20 @@ pub struct ImageRenderService {
     document: Option<Document>,
     wallpaper: Option<PreparedWallpaper>,
     view: Option<ViewSession>,
+    /// The glyph geometry the host last supplied, which a decode of a
+    /// document carrying `<text>` is served from. Empty until the host
+    /// sends one, which is what makes the first round report what it wants.
+    fonts: FontTable,
 }
 
 impl Service for ImageRenderService {
     fn handle(&mut self, request: &[u8]) -> Vec<u8> {
         match request.first().copied() {
-            Some(OP_RASTERISE) => match dispatch_icon(request) {
+            Some(OP_RASTERISE) => match dispatch_icon(request, &self.fonts) {
+                Ok(reply) => reply,
+                Err(refusal) => encode_error(refusal.to_wire()),
+            },
+            Some(OP_FONTS_SUPPLY) => match self.handle_fonts_supply(request) {
                 Ok(reply) => reply,
                 Err(refusal) => encode_error(refusal.to_wire()),
             },
@@ -306,7 +334,7 @@ fn encode_error(code: u8) -> Vec<u8> {
 }
 
 /// Decode the icon-rasterisation request, rasterise, and encode the reply.
-fn dispatch_icon(request: &[u8]) -> Result<Vec<u8>, IconRefusal> {
+fn dispatch_icon(request: &[u8], fonts: &FontTable) -> Result<Vec<u8>, IconRefusal> {
     let mut r = Reader::new(request);
     let op = r.u8().map_err(|_| IconRefusal::MalformedRequest)?;
     if op != OP_RASTERISE {
@@ -322,22 +350,51 @@ fn dispatch_icon(request: &[u8]) -> Result<Vec<u8>, IconRefusal> {
     if !r.is_exhausted() {
         return Err(IconRefusal::MalformedRequest);
     }
-    let rgba = rasterise(side, icon)?;
+    match rasterise(side, icon, fonts)? {
+        Rasterised::Pixels(rgba) => {
+            let mut w = Writer::new();
+            w.u8(REPLY_PIXELS);
+            w.u32(side);
+            w.bytes(&rgba);
+            Ok(w.finish())
+        }
+        Rasterised::FontsNeeded(wants) => Ok(encode_fonts_needed(&wants)),
+    }
+}
+
+/// Encode a "this document needs glyphs I have not been given" reply.
+fn encode_fonts_needed(wants: &FontWants) -> Vec<u8> {
     let mut w = Writer::new();
-    w.u8(REPLY_PIXELS);
-    w.u32(side);
-    w.bytes(&rgba);
-    Ok(w.finish())
+    w.u8(REPLY_FONTS_NEEDED);
+    wants.encode(&mut w);
+    w.finish()
+}
+
+/// What a decode that may have needed glyphs came to.
+enum Rasterised {
+    /// The finished pixels.
+    Pixels(Vec<u8>),
+    /// The glyph geometry the host must supply before this can be drawn.
+    FontsNeeded(FontWants),
 }
 
 /// Sniff `icon`'s format and rasterise it to a `side`×`side` straight-alpha
 /// RGBA8 buffer of exactly `side * side * 4` bytes.
-fn rasterise(side: u32, icon: &[u8]) -> Result<Vec<u8>, IconRefusal> {
+fn rasterise(side: u32, icon: &[u8], fonts: &FontTable) -> Result<Rasterised, IconRefusal> {
     if tairix_image::sniff(icon) == Some(ImageFormat::Png) {
-        return rasterise_png(side, icon);
+        return rasterise_png(side, icon).map(Rasterised::Pixels);
     }
-    match tairix_svg::decode(icon, tairix_svg::Viewport::Square) {
-        Ok(image) => rasterise_svg(side, &image),
+    let mut provider = TableFonts::new(fonts);
+    let decoded = tairix_svg::decode(icon, tairix_svg::Viewport::Square, &mut provider);
+    let wants = provider.into_wants();
+    // A decode that had to record anything drew placeholder geometry, so
+    // its picture is discarded whole and asked for again once the host has
+    // supplied what it wanted.
+    if !wants.is_empty() {
+        return Ok(Rasterised::FontsNeeded(wants));
+    }
+    match decoded {
+        Ok(image) => rasterise_svg(side, &image).map(Rasterised::Pixels),
         Err(err) if unrecognised_svg(err) => Err(IconRefusal::UnsupportedFormat),
         Err(_) => Err(IconRefusal::MalformedImage),
     }
@@ -545,6 +602,7 @@ pub fn rasterise_icon<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     side: u32,
     icon: &[u8],
+    fonts: &mut dyn FontProvider,
 ) -> Result<Vec<u8>, IconRasterFailure> {
     if side == 0 || side > MAX_ICON_SIDE || icon.len() > MAX_ARTWORK_BYTES {
         return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
@@ -553,10 +611,98 @@ pub fn rasterise_icon<L: Launcher, S: tairix_log::Sink>(
     w.u8(OP_RASTERISE);
     w.u32(side);
     w.bytes(icon);
-    let reply = sandbox
-        .request(&w.finish())
-        .map_err(IconRasterFailure::Sandbox)?;
+    let reply =
+        request_supplying_fonts(sandbox, &w.finish(), fonts).map_err(|failure| match failure {
+            SuppliedFailure::Sandbox(inner) => IconRasterFailure::Sandbox(inner),
+            SuppliedFailure::ReplyMalformed => IconRasterFailure::ReplyMalformed,
+            SuppliedFailure::FontsUnavailable => IconRasterFailure::FontsUnavailable,
+        })?;
     decode_icon_reply(&reply, side)
+}
+
+/// Send `payload` to the worker, supplying glyph geometry once if the
+/// worker answers that it needs some, and return the final reply.
+///
+/// **Exactly two rounds at most.** A worker that reports what it wants has
+/// already walked the whole document against placeholder geometry, so the
+/// report is complete: supplying it and asking again answers everything the
+/// first round asked for. A second report therefore means the caller's own
+/// font seam could not furnish a face, which is a refusal rather than a
+/// reason to ask again.
+fn request_supplying_fonts<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    payload: &[u8],
+    fonts: &mut dyn FontProvider,
+) -> Result<Vec<u8>, SuppliedFailure> {
+    let reply = sandbox.request(payload).map_err(SuppliedFailure::Sandbox)?;
+    let Some(wants) = fonts_needed(&reply)? else {
+        return Ok(reply);
+    };
+    let table = gather_fonts(&wants, fonts).ok_or(SuppliedFailure::FontsUnavailable)?;
+    let mut w = Writer::new();
+    w.u8(OP_FONTS_SUPPLY);
+    table.encode(&mut w);
+    let stored = sandbox
+        .request(&w.finish())
+        .map_err(SuppliedFailure::Sandbox)?;
+    if stored.first().copied() != Some(REPLY_FONTS_STORED) || stored.len() != 1 {
+        return Err(SuppliedFailure::ReplyMalformed);
+    }
+    let second = sandbox.request(payload).map_err(SuppliedFailure::Sandbox)?;
+    if fonts_needed(&second)?.is_some() {
+        return Err(SuppliedFailure::FontsUnavailable);
+    }
+    Ok(second)
+}
+
+/// How a request that may have needed glyphs failed, before it is turned
+/// into whichever typed failure the calling op reports.
+enum SuppliedFailure {
+    Sandbox(SandboxError),
+    ReplyMalformed,
+    FontsUnavailable,
+}
+
+/// The wants a reply reports, or `None` when it is an ordinary reply.
+fn fonts_needed(reply: &[u8]) -> Result<Option<FontWants>, SuppliedFailure> {
+    let mut r = Reader::new(reply);
+    if r.u8() != Ok(REPLY_FONTS_NEEDED) {
+        return Ok(None);
+    }
+    let wants = FontWants::decode(&mut r).map_err(|_| SuppliedFailure::ReplyMalformed)?;
+    if !r.is_exhausted() || wants.is_empty() {
+        return Err(SuppliedFailure::ReplyMalformed);
+    }
+    Ok(Some(wants))
+}
+
+/// Resolve every face the worker asked for through the caller's own font
+/// seam, building the table to send back.
+///
+/// `None` when any face or glyph cannot be furnished: a table missing part
+/// of what was asked for would only produce a second identical report, so
+/// the refusal is taken here.
+fn gather_fonts(wants: &FontWants, fonts: &mut dyn FontProvider) -> Option<FontTable> {
+    let mut table = FontTable::new();
+    for want in &wants.faces {
+        let request = FaceRequest {
+            family: &want.family,
+            weight: want.weight,
+            style: crate::svgfonts::style_of_wire(want.style)?,
+            stretch: want.stretch,
+        };
+        let metrics = fonts.select(&request).ok()?;
+        let mut outlines = Vec::with_capacity(want.scalars.len());
+        fonts
+            .outlines(metrics.id, &want.scalars, &mut outlines)
+            .ok()?;
+        if outlines.len() != want.scalars.len() {
+            return None;
+        }
+        let glyphs = want.scalars.iter().copied().zip(outlines).collect();
+        table.push(want.clone(), metrics, glyphs).ok()?;
+    }
+    Some(table)
 }
 
 /// Decode and validate the worker's icon reply fail-closed.
@@ -836,6 +982,28 @@ struct PreparedWallpaper {
 }
 
 impl ImageRenderService {
+    /// `OP_FONTS_SUPPLY`: install the glyph geometry the host fetched for a
+    /// document this worker reported it could not draw.
+    ///
+    /// Replaces whatever was held: a table describes one document's needs,
+    /// and carrying an earlier one forward would let a document be drawn
+    /// with glyphs fetched for another.
+    fn handle_fonts_supply(&mut self, request: &[u8]) -> Result<Vec<u8>, IconRefusal> {
+        let mut r = Reader::new(request);
+        let op = r.u8().map_err(|_| IconRefusal::MalformedRequest)?;
+        if op != OP_FONTS_SUPPLY {
+            return Err(IconRefusal::MalformedRequest);
+        }
+        let table = FontTable::decode(&mut r).map_err(|_| IconRefusal::MalformedRequest)?;
+        if !r.is_exhausted() {
+            return Err(IconRefusal::MalformedRequest);
+        }
+        self.fonts = table;
+        let mut w = Writer::new();
+        w.u8(REPLY_FONTS_STORED);
+        Ok(w.finish())
+    }
+
     /// Route a wallpaper request to the op it names.
     fn dispatch_wallpaper(&mut self, request: &[u8]) -> Result<Vec<u8>, WallpaperRefusal> {
         let mut r = Reader::new(request);
@@ -2009,6 +2177,8 @@ pub enum ViewFailure {
     /// geometry: it cannot be believed, so the caller gets nothing
     /// (fail closed).
     ReplyMalformed,
+    /// The document names lettering no installed font can furnish.
+    FontsUnavailable,
 }
 
 impl core::fmt::Display for ViewFailure {
@@ -2018,6 +2188,7 @@ impl core::fmt::Display for ViewFailure {
             Self::Document(inner) => write!(f, "document upload failed: {inner}"),
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
+            Self::FontsUnavailable => f.write_str("no installed font can draw this lettering"),
         }
     }
 }
@@ -2249,11 +2420,10 @@ impl ImageRenderService {
             0 => None,
             raw => Some(ViewFormat::from_wire(raw).ok_or(ViewRefusal::MalformedRequest)?),
         };
-        // Taken rather than borrowed: the backing owns the document from
-        // here, so the bytes are never held twice.
-        let document = self
+        let held = self
             .document
-            .take_if(|document| document.is_complete())
+            .as_ref()
+            .filter(|document| document.is_complete())
             .ok_or(ViewRefusal::NoDocument)?;
         self.view = None;
         // Nothing in the raster sniff order opens with `<` or whitespace,
@@ -2262,12 +2432,29 @@ impl ImageRenderService {
         // signature either, is reached only by being named.
         let vector = match format {
             Some(format) => format.raster().is_none(),
-            None => tairix_image::sniff(&document.bytes).is_none(),
+            None => tairix_image::sniff(&held.bytes).is_none(),
         };
         let (opened, backing) = if vector {
-            open_vector(&document.bytes)?
+            // Decoded from a *borrow*, so a document that turns out to need
+            // glyphs is still held when the host supplies them and asks
+            // again — an upload is never repeated for the second round.
+            match open_vector(&held.bytes, &self.fonts)? {
+                Opened::FontsNeeded(wants) => return Ok(encode_fonts_needed(&wants)),
+                Opened::Document(document) => {
+                    self.document = None;
+                    *document
+                }
+            }
         } else {
-            open_raster(format, document.bytes)?
+            // Taken rather than borrowed: the backing owns the document
+            // from here, so the bytes are never held twice.
+            let document = self.document.take().ok_or(ViewRefusal::NoDocument)?;
+            match open_raster(format, document.bytes)? {
+                Opened::Document(opened) => *opened,
+                // A raster document asks for no glyphs, so the branch the
+                // vector path needs cannot arise here.
+                Opened::FontsNeeded(_) => return Err(ViewRefusal::MalformedDocument),
+            }
         };
         // Everything the reply needs is settled before the view is
         // installed, so a refusal here cannot leave a document open that
@@ -2490,10 +2677,7 @@ impl ViewBacking {
 
 /// Open `bytes` as a raster container, answering what it declares and the
 /// walk that reads it.
-fn open_raster(
-    format: Option<ViewFormat>,
-    bytes: Vec<u8>,
-) -> Result<(ViewDocument, ViewBacking), ViewRefusal> {
+fn open_raster(format: Option<ViewFormat>, bytes: Vec<u8>) -> Result<Opened, ViewRefusal> {
     let limits = view_limits();
     let sequence = match format.and_then(ViewFormat::raster) {
         Some(format) => Sequence::open_as(format, bytes, &limits),
@@ -2516,7 +2700,10 @@ fn open_raster(
         width: info.width(),
         height: info.height(),
     };
-    Ok((opened, ViewBacking::Raster(sequence)))
+    Ok(Opened::Document(Box::new((
+        opened,
+        ViewBacking::Raster(sequence),
+    ))))
 }
 
 /// Open `bytes` as a vector drawing, answering what it declares and the
@@ -2525,8 +2712,14 @@ fn open_raster(
 /// Decoded to its own proportions rather than letter-boxed into a square,
 /// so a render fills whatever rectangle it is given at the design grid's
 /// full precision on both axes.
-fn open_vector(bytes: &[u8]) -> Result<(ViewDocument, ViewBacking), ViewRefusal> {
-    let drawing = tairix_svg::decode(bytes, tairix_svg::Viewport::Natural).map_err(|err| {
+fn open_vector(bytes: &[u8], fonts: &FontTable) -> Result<Opened, ViewRefusal> {
+    let mut provider = TableFonts::new(fonts);
+    let decoded = tairix_svg::decode(bytes, tairix_svg::Viewport::Natural, &mut provider);
+    let wants = provider.into_wants();
+    if !wants.is_empty() {
+        return Ok(Opened::FontsNeeded(wants));
+    }
+    let drawing = decoded.map_err(|err| {
         if unrecognised_svg(err) {
             ViewRefusal::UnsupportedFormat
         } else {
@@ -2542,14 +2735,25 @@ fn open_vector(bytes: &[u8]) -> Result<(ViewDocument, ViewBacking), ViewRefusal>
         width: extent.0,
         height: extent.1,
     };
-    Ok((
+    Ok(Opened::Document(Box::new((
         opened,
         ViewBacking::Vector {
             drawing,
             extent,
             selected: false,
         },
-    ))
+    ))))
+}
+
+/// What opening a document came to: the document, or the glyph geometry the
+/// host must supply before it can be read.
+enum Opened {
+    /// The opened document and the backing a render draws from. Boxed
+    /// because a decoded raster sequence dwarfs the other variant, and an
+    /// open is not on any path where one pointer hop matters.
+    Document(Box<(ViewDocument, ViewBacking)>),
+    /// The glyph geometry the host must supply.
+    FontsNeeded(FontWants),
 }
 
 /// The pixel extent a drawing's own coordinate box declares: what "actual
@@ -2634,11 +2838,20 @@ fn view_decode_refusal(err: &DecodeError) -> ViewRefusal {
 pub fn open_view<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     format: Option<ViewFormat>,
+    fonts: &mut dyn FontProvider,
 ) -> Result<ViewDocument, ViewFailure> {
     let mut w = Writer::new();
     w.u8(OP_VIEW_OPEN);
     w.u8(format.map_or(0, ViewFormat::to_wire));
-    let reply = view_reply(sandbox, w)?;
+    // The only op that decodes a whole document, so the only one whose
+    // reply can be a request for the glyphs that document draws with.
+    let reply =
+        request_supplying_fonts(sandbox, &w.finish(), fonts).map_err(|failure| match failure {
+            SuppliedFailure::Sandbox(inner) => ViewFailure::Sandbox(inner),
+            SuppliedFailure::ReplyMalformed => ViewFailure::ReplyMalformed,
+            SuppliedFailure::FontsUnavailable => ViewFailure::FontsUnavailable,
+        })?;
+    let reply = view_refusal(reply)?;
     let mut r = Reader::new(&reply);
     expect_tag(&mut r, REPLY_VIEW_OPENED)?;
     let named = r.u8().map_err(|_| ViewFailure::ReplyMalformed)?;
@@ -2828,6 +3041,12 @@ fn view_reply<L: Launcher, S: tairix_log::Sink>(
     let reply = sandbox
         .request(&request.finish())
         .map_err(ViewFailure::Sandbox)?;
+    view_refusal(reply)
+}
+
+/// Turn a worker's error frame into the typed refusal it carries, leaving
+/// every other reply alone.
+fn view_refusal(reply: Vec<u8>) -> Result<Vec<u8>, ViewFailure> {
     let mut probe = Reader::new(&reply);
     if probe.u8() == Ok(REPLY_ERROR) {
         return Err(match probe.u8().ok().and_then(ViewRefusal::from_wire) {

@@ -101,14 +101,19 @@ pub mod glyph;
 pub mod glyph_cache;
 #[cfg(feature = "render")]
 mod measure;
+#[cfg(feature = "render")]
+pub mod outline_cache;
+#[cfg(feature = "svg")]
+pub mod svgfont;
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(feature = "render")]
 pub use client::{
-    families, set_font_transport, set_glyph_cache, trim_glyph_cache, FontTransport, GlyphCache,
-    GlyphKey,
+    families, outline_run, set_font_transport, set_glyph_cache, set_outline_cache,
+    trim_glyph_cache, FontTransport, GlyphCache, GlyphKey, OutlineReply, OwnedContour,
+    OwnedOutline, OwnedSegment,
 };
 #[cfg(feature = "test-util")]
 pub use client::{install_test_transport, SolidTestTransport};
@@ -121,4 +126,12 @@ pub use glyph_cache::{
     GLYPH_CACHE_ENTRY_METADATA_BYTES,
 };
 #[cfg(feature = "render")]
-pub use tairix_abi::font_ipc::{FamilyEntry, FamilyKey, FamilyKind, FontMetrics, FontWeight};
+pub use outline_cache::{
+    outline_cache_budget, outline_cache_candidate, CachedOutline, OutlineCache, OutlineKey,
+};
+#[cfg(feature = "svg")]
+pub use svgfont::{seam_outlines, ServiceFonts};
+#[cfg(feature = "render")]
+pub use tairix_abi::font_ipc::{
+    FamilyEntry, FamilyKey, FamilyKind, FontMetrics, FontStretch, FontStyle, FontWeight,
+};

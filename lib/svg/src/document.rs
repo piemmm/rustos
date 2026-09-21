@@ -39,15 +39,17 @@ use tairix_raster::{
 };
 use tairix_util::mathf::{round_i32, sqrt};
 
-use crate::css::{Declaration, Stylesheet};
+use crate::css::{self, Declaration, Stylesheet};
 use crate::error::SvgError;
-use crate::geom::{bounds, Point, SubPath, Vertex, Vertices};
+use crate::font::FontProvider;
+use crate::geom::{bounds, LineCap, LineJoin, Point, StrokeStyle, SubPath, Vertex, Vertices};
 use crate::marker::{Marker, Position};
 use crate::number::{opacity_to_alpha, parse_length, parse_number};
 use crate::paint::{PaintServers, PatternTile, Resolved};
 use crate::shape::{is_shape, shape_subpaths, takes_markers};
 use crate::stroke::stroke_outline;
 use crate::style::{scale_alpha, Overflow, PaintOrder, PaintSlot, PaintSpec, Style};
+use crate::text::{self, TextBudget, TextCascade};
 use crate::transform::{
     parse_aspect_ratio, parse_transform, parse_view_box, viewport_transform, Align, AspectRatio,
     ViewBox,
@@ -208,7 +210,11 @@ impl SvgImage {
 ///
 /// # Errors
 /// See [`SvgError`] for the closed set of rejection reasons.
-pub fn decode(bytes: &[u8], viewport: Viewport) -> Result<SvgImage, SvgError> {
+pub fn decode(
+    bytes: &[u8],
+    viewport: Viewport,
+    provider: &mut dyn FontProvider,
+) -> Result<SvgImage, SvgError> {
     let text = core::str::from_utf8(bytes).map_err(|_| SvgError::NotUtf8)?;
     let root = xml::parse(text)?;
     if root.name != "svg" {
@@ -233,13 +239,18 @@ pub fn decode(bytes: &[u8], viewport: Viewport) -> Result<SvgImage, SvgError> {
     let grid = f64::from(DESIGN_GRID);
     let to_design = viewport_transform(view_box, (grid, grid), ratio);
 
+    // Gathered before the decoder so the rules may borrow a sheet that had
+    // to be joined from several runs.
+    let sheets = css::sheet_texts(&root);
     let mut decoder = Decoder {
         root: &root,
+        provider,
+        text: TextBudget::default(),
         ids: Vec::new(),
         chains: Vec::new(),
         styles: Vec::new(),
         servers: PaintServers::collect(&root),
-        sheet: Stylesheet::collect(&root)?,
+        sheet: Stylesheet::collect(&sheets)?,
         cascade: Vec::new(),
         path: Vec::new(),
         extents: Vec::new(),
@@ -337,8 +348,14 @@ struct Region {
 
 /// The walk's state: what it has drawn so far, and what it needs to draw the
 /// rest.
-struct Decoder<'a> {
+struct Decoder<'a, 'p> {
     root: &'a Element<'a>,
+    /// The injected seam a `<text>`'s faces and glyphs come from. Held
+    /// rather than passed because every walk arm can reach text, and no arm
+    /// but the text one touches it.
+    provider: &'p mut dyn FontProvider,
+    /// What text is allowed to spend across the whole document.
+    text: TextBudget,
     ids: Vec<(&'a str, &'a Element<'a>)>,
     chains: Vec<(&'a Element<'a>, Vec<&'a Element<'a>>)>,
     styles: Vec<(&'a Element<'a>, (f64, f64), Style)>,
@@ -399,14 +416,31 @@ struct Instancing {
     depth: usize,
 }
 
-impl<'a> Decoder<'a> {
+impl<'a> TextCascade<'a> for Decoder<'a, '_> {
+    fn enter(&mut self, element: &'a Element<'a>, inherited: &Style) -> Result<Style, SvgError> {
+        // The text walk visits the same elements the tree walk would, so it
+        // is charged the same visit — a `<text>` of a thousand spans cannot
+        // cost less than a `<g>` of a thousand children.
+        self.visit()?;
+        // The selector path is the decoder's, and a `<tspan>` matches a
+        // stylesheet rule exactly as any other element does.
+        self.path.push(element);
+        self.style_of(inherited, element)
+    }
+
+    fn leave(&mut self) {
+        self.path.pop();
+    }
+}
+
+impl<'a> Decoder<'a, '_> {
     /// Record every element that carries an `id`, so a reference can find it
     /// wherever in the document it appears.
     fn index(&mut self, element: &'a Element<'a>) {
         if let Some(id) = element.attr("id") {
             self.ids.push((id, element));
         }
-        for child in &element.children {
+        for child in element.children() {
             self.index(child);
         }
     }
@@ -627,6 +661,7 @@ impl<'a> Decoder<'a> {
             "switch" => self.walk_switch(element, style, transform, depth, out)?,
             "svg" => self.walk_viewport(element, style, transform, depth, None, out)?,
             "g" | "a" => self.walk_children(element, style, transform, depth, out)?,
+            "text" => return self.draw_text(element, style, transform, depth, opacity, out),
             // Everything else is either a definition rendered only where it
             // is referenced, or metadata. Both are skipped whole: descending
             // into a `<defs>` would paint its contents twice.
@@ -718,7 +753,7 @@ impl<'a> Decoder<'a> {
         out: &mut Vec<Node>,
     ) -> Result<(), SvgError> {
         let inherited = style.inherit();
-        for child in &element.children {
+        for child in element.children() {
             self.walk(child, &inherited, transform, depth, out)?;
         }
         Ok(())
@@ -824,7 +859,7 @@ impl<'a> Decoder<'a> {
         out: &mut Vec<Node>,
     ) -> Result<(), SvgError> {
         let inherited = style.inherit();
-        for child in &element.children {
+        for child in element.children() {
             if !is_switchable(child.name) || !conditions_met(child) {
                 continue;
             }
@@ -1019,6 +1054,167 @@ impl<'a> Decoder<'a> {
             layers
         };
         out.append(&mut drawn);
+        Ok(())
+    }
+
+    /// Draw one `<text>` element: lay its characters out, flatten every
+    /// glyph, and fill each run's contours together.
+    ///
+    /// Answers whether the element's own opacity is already accounted for,
+    /// exactly as a shape does.
+    fn draw_text(
+        &mut self,
+        element: &'a Element<'a>,
+        style: &Style,
+        transform: Affine,
+        depth: usize,
+        opacity: u8,
+        out: &mut Vec<Node>,
+    ) -> Result<bool, SvgError> {
+        let viewport = self.viewport;
+        let collected = text::collect(element, style, viewport, self)?;
+        let Decoder {
+            provider,
+            text: budget,
+            ..
+        } = self;
+        let Some(laid) = text::lay_out(collected, *provider, budget)? else {
+            return Ok(true);
+        };
+        let runs = glyph_runs(&laid);
+        // Two layers of one element overlap, so folding the element's
+        // opacity into each would show the fill through its own stroke, and
+        // two runs of one `<text>` can overlap wherever the author moved
+        // them. Either case is composited as a unit instead.
+        let isolate = opacity != u8::MAX
+            && (runs.len() > 1
+                || runs.first().is_some_and(|&(from, _)| {
+                    laid.glyphs
+                        .get(from)
+                        .and_then(|glyph| laid.styles.get(glyph.run))
+                        .is_some_and(paints_both)
+                }));
+        if isolate {
+            self.fits_group()?;
+        }
+        let group = if isolate {
+            1.0
+        } else {
+            f64::from(opacity) / 255.0
+        };
+        let mut drawn = Vec::new();
+        for span in runs {
+            self.draw_text_run(&laid, span, (transform, depth, group), &mut drawn)?;
+        }
+        let mut wrapped = if isolate {
+            grouped(opacity, None, drawn)
+        } else {
+            drawn
+        };
+        out.append(&mut wrapped);
+        Ok(true)
+    }
+
+    /// Fill (and stroke) one run of glyphs, all its contours together.
+    ///
+    /// The contours are built in **user space**, exactly as a shape's are,
+    /// so the stroke's width and dashes are read in the space the author
+    /// wrote them in and the placement onto the grid happens once at the
+    /// end. Only the flattening tolerance is resolved against the full
+    /// font-units-to-grid map, which is what makes a glyph subdivide like a
+    /// `<path>` of the same shape at the same size.
+    fn draw_text_run(
+        &mut self,
+        laid: &text::Laid,
+        span: (usize, usize),
+        placement: (Affine, usize, f64),
+        out: &mut Vec<Node>,
+    ) -> Result<(), SvgError> {
+        let (from, to) = span;
+        let (transform, depth, group) = placement;
+        let run = laid.glyphs.get(from).ok_or(SvgError::Malformed)?.run;
+        let style = laid.styles.get(run).ok_or(SvgError::Malformed)?;
+        self.text.run()?;
+        let mut subpaths: Vec<SubPath> = Vec::new();
+        for index in from..to {
+            let (Some(glyph), Some(outline)) = (laid.glyphs.get(index), laid.outlines.get(index))
+            else {
+                continue;
+            };
+            let tolerance = flatten_tolerance(glyph.to_user.then(transform));
+            let mut drawn = text::glyph_subpaths(outline, glyph.to_user, tolerance);
+            // A synthetic bold the face could not furnish is this crate's own
+            // stroker run over the glyph's contours and unioned into the same
+            // non-zero fill: there is no second thickening implementation.
+            // The stroke is a fraction of the em, and the em in user units is
+            // the font size, whichever face the glyph resolved to.
+            let bold = glyph.synthetic_bold * style.font_size;
+            if bold > 0.0 && !drawn.is_empty() {
+                let pen = StrokeStyle {
+                    width: bold,
+                    cap: LineCap::Round,
+                    join: LineJoin::Round,
+                    ..StrokeStyle::default()
+                };
+                let mut thickened = stroke_outline(
+                    &drawn,
+                    &pen,
+                    flatten_tolerance(transform),
+                    self.vertices_left,
+                )?;
+                drawn.append(&mut thickened);
+            }
+            subpaths.append(&mut drawn);
+        }
+        if subpaths.is_empty() {
+            return Ok(());
+        }
+        self.measure(&subpaths, transform);
+        if !style.visible {
+            return Ok(());
+        }
+        let box_of = bounds(&subpaths);
+        let painted = self.paint_of(
+            &style.fill,
+            style,
+            style.fill_opacity * group,
+            box_of,
+            transform,
+            depth,
+        )?;
+        let stroked = style.stroke_style.width > 0.0 && !matches!(style.stroke, PaintSpec::None);
+        let outlined = if stroked {
+            self.paint_of(
+                &style.stroke,
+                style,
+                style.stroke_opacity * group,
+                box_of,
+                transform,
+                depth,
+            )?
+        } else {
+            None
+        };
+        let fill = painted
+            .map(|paint| Layer::filled(paint, FillRule::NonZero, place(&subpaths, transform)));
+        let stroke = match outlined {
+            Some(paint) => {
+                let outline = stroke_outline(
+                    &subpaths,
+                    &style.stroke_style,
+                    flatten_tolerance(transform),
+                    self.vertices_left,
+                )?;
+                Some(Layer::filled(
+                    paint,
+                    FillRule::NonZero,
+                    place(&outline, transform),
+                ))
+            }
+            None => None,
+        };
+        let mut layers = self.ordered(style.paint_order, fill, stroke, Vec::new())?;
+        out.append(&mut layers);
         Ok(())
     }
 
@@ -1402,7 +1598,7 @@ impl<'a> Decoder<'a> {
         out: &mut Vec<Node>,
     ) -> Result<(), SvgError> {
         let inherited = inherited.inherit();
-        for child in &node.children {
+        for child in node.children() {
             self.visit()?;
             self.path.push(child);
             let resolved = self.style_of(&inherited, child);
@@ -1624,7 +1820,7 @@ fn descend<'a>(
     if core::ptr::eq(element, target) {
         return true;
     }
-    for child in &element.children {
+    for child in element.children() {
         if descend(child, target, chain) {
             return true;
         }
@@ -1741,6 +1937,28 @@ fn flatten_tolerance(transform: Affine) -> f64 {
     } else {
         f64::MAX
     }
+}
+
+/// Whether a style paints both a fill and a stroke, so its two layers
+/// overlap and a group opacity cannot be folded into either.
+fn paints_both(style: &Style) -> bool {
+    paints(&style.fill, style.fill_opacity)
+        && style.stroke_style.width > 0.0
+        && !matches!(style.stroke, PaintSpec::None)
+        && style.stroke_opacity > 0.0
+}
+
+/// The maximal stretches of consecutive glyphs that share a style run, in
+/// paint order.
+fn glyph_runs(laid: &text::Laid) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (index, glyph) in laid.glyphs.iter().enumerate() {
+        match runs.last_mut() {
+            Some(last) if laid.glyphs[last.0].run == glyph.run && last.1 == index => last.1 += 1,
+            _ => runs.push((index, index + 1)),
+        }
+    }
+    runs
 }
 
 /// The length a percentage with no axis of its own resolves against.

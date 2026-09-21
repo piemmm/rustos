@@ -1034,6 +1034,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-rt",
  "tairix-sandbox",
+ "tairix-svg",
  "tairix-taskbar",
  "tairix-theme",
  "tairix-util",
@@ -1667,6 +1668,7 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-rt",
+ "tairix-svg",
  "tairix-theme",
  "tairix-vt",
 ]
@@ -6381,6 +6383,7 @@ dependencies = [
  "tairix-drv-storage-volmgr",
  "tairix-drvhost",
  "tairix-font",
+ "tairix-fontd",
  "tairix-fontface",
  "tairix-fsmeta",
  "tairix-fuzzseed",

@@ -13,6 +13,8 @@ use alloc::vec::Vec;
 use tairix_abi::desktop::{CURSOR_SETS_MAX, CURSOR_SET_NAME_MAX};
 use tairix_theme::{CursorKind, CursorSetId, CURSOR_KINDS};
 
+use tairix_svg::font::NoFonts;
+
 use super::{
     catalog_sets, cursor_asset_kind_for_file, cursor_asset_path, is_cursor_set_name, set_path,
     CURSOR_STORE, SHIPPED_CURSOR_SET,
@@ -270,7 +272,7 @@ fn every_shipped_set_covers_every_kind_within_the_byte_bound() {
 fn every_shipped_asset_decodes_into_a_cursor_that_draws() {
     for set in shipped_sets() {
         for (name, bytes) in shipped_assets(&set) {
-            let cursor = crate::decode_svg(&bytes)
+            let cursor = crate::decode_svg(&bytes, &mut NoFonts)
                 .unwrap_or_else(|err| panic!("`{set}/{name}` does not decode: {err:?}"));
             let image = cursor
                 .rasterise(super::CURSOR_BASE_SIDE_PX)

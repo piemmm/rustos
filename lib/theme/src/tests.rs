@@ -870,7 +870,7 @@ fn the_ladder_derives_every_role_from_one_base_size() {
         fonts.spec(TextRole::SectionHeader).size_px,
         fonts.spec(TextRole::Body).size_px
     );
-    assert_eq!(fonts.spec(TextRole::SectionHeader).weight, FontWeight::Bold);
+    assert_eq!(fonts.spec(TextRole::SectionHeader).weight, FontWeight::BOLD);
     // The display rung breaks out of the cluster: a screen-filling readout is
     // dominant, not merely one step up from a panel heading.
     assert!(fonts.spec(TextRole::Display).size_px >= fonts.spec(TextRole::Body).size_px * 2);
@@ -887,17 +887,17 @@ fn the_ladder_carries_the_boards_weights_and_families() {
     // On the boards the hierarchy is carried mostly by weight: titling text
     // is medium, column headers and metric readouts are bold, and running
     // text stays regular.
-    assert_eq!(fonts.spec(TextRole::Heading).weight, FontWeight::Medium);
-    assert_eq!(fonts.spec(TextRole::ItemTitle).weight, FontWeight::Medium);
+    assert_eq!(fonts.spec(TextRole::Heading).weight, FontWeight::MEDIUM);
+    assert_eq!(fonts.spec(TextRole::ItemTitle).weight, FontWeight::MEDIUM);
     // The display rung is the exception: at that size a medium weight reads
     // heavy, so it states its hierarchy on size alone.
-    assert_eq!(fonts.spec(TextRole::Display).weight, FontWeight::Regular);
-    assert_eq!(fonts.spec(TextRole::WindowTitle).weight, FontWeight::Medium);
-    assert_eq!(fonts.spec(TextRole::SectionHeader).weight, FontWeight::Bold);
-    assert_eq!(fonts.spec(TextRole::Metric).weight, FontWeight::Bold);
-    assert_eq!(fonts.spec(TextRole::Body).weight, FontWeight::Regular);
-    assert_eq!(fonts.spec(TextRole::Caption).weight, FontWeight::Regular);
-    assert_eq!(fonts.spec(TextRole::Monospace).weight, FontWeight::Regular);
+    assert_eq!(fonts.spec(TextRole::Display).weight, FontWeight::REGULAR);
+    assert_eq!(fonts.spec(TextRole::WindowTitle).weight, FontWeight::MEDIUM);
+    assert_eq!(fonts.spec(TextRole::SectionHeader).weight, FontWeight::BOLD);
+    assert_eq!(fonts.spec(TextRole::Metric).weight, FontWeight::BOLD);
+    assert_eq!(fonts.spec(TextRole::Body).weight, FontWeight::REGULAR);
+    assert_eq!(fonts.spec(TextRole::Caption).weight, FontWeight::REGULAR);
+    assert_eq!(fonts.spec(TextRole::Monospace).weight, FontWeight::REGULAR);
 
     // Only the fixed-width role leaves the UI family.
     assert_eq!(fonts.ui_family(), key("board-sans"));

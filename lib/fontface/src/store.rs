@@ -49,6 +49,47 @@ const MAX_FACE_NAME: usize = 64;
 /// outlines only, so a manifest cannot name a container it could not read.
 const FACE_EXTENSION: &str = ".ttf";
 
+/// One of CSS's generic family names — the vocabulary a document uses when
+/// it asks for a *kind* of face rather than a named one.
+///
+/// A family declares which generic the store answers with, in its own
+/// manifest, so the mapping is discovered like everything else about the
+/// store: shipping a cursive family is dropping its directory in with
+/// `generic = cursive`, and nothing in the service, the kernel or the image
+/// builder names a family. A generic no installed family claims falls
+/// through to [`SansSerif`](Self::SansSerif) and then fails closed, rather
+/// than silently substituting a face of the wrong kind.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum GenericFamily {
+    /// Letterforms with finishing strokes.
+    Serif,
+    /// Letterforms without them. The generic every other one falls through
+    /// to, being the one a desktop always has.
+    SansSerif,
+    /// A fixed-advance face: a character grid.
+    Monospace,
+    /// Joined, handwriting-like letterforms.
+    Cursive,
+    /// Decorative letterforms.
+    Fantasy,
+}
+
+impl GenericFamily {
+    /// The generic `key` spells, or `None` for a key naming a concrete
+    /// family.
+    #[must_use]
+    pub fn from_key(key: FamilyKey) -> Option<Self> {
+        match key.as_str() {
+            "serif" => Some(Self::Serif),
+            "sans-serif" => Some(Self::SansSerif),
+            "monospace" => Some(Self::Monospace),
+            "cursive" => Some(Self::Cursive),
+            "fantasy" => Some(Self::Fantasy),
+            _ => None,
+        }
+    }
+}
+
 /// What a family is for.
 ///
 /// A [`Selectable`](Self::Selectable) family is offered to the user and can
@@ -68,6 +109,7 @@ pub enum FamilyRole {
 pub struct FamilyManifest {
     key: FamilyKey,
     label: String,
+    generic: Option<GenericFamily>,
     role: FamilyRole,
     faces: Vec<String>,
     fallback: Option<FamilyKey>,
@@ -80,15 +122,18 @@ impl FamilyManifest {
     ///
     /// A [`FontError`] when the text is over [`MAX_MANIFEST_BYTES`], carries
     /// a line that is neither blank, a `#` comment, nor `key = value`, names
-    /// an unknown key or an unknown `kind`, repeats a single-valued key,
-    /// lists no face or more than [`MAX_FACES`], names a face file that is
-    /// not a plain `.ttf` name in this directory, names itself as its own
-    /// fallback, or omits `label` or `kind`.
+    /// an unknown key, an unknown `kind`, or an unknown `generic`, repeats a
+    /// single-valued key, lists no face or more than [`MAX_FACES`], names a
+    /// face file that is not a plain `.ttf` name in this directory, names
+    /// itself as its own fallback, claims a `generic` while being a
+    /// fallback-role family (which a user never selects, so it can answer
+    /// for no generic), or omits `label` or `kind`.
     pub fn parse(key: FamilyKey, text: &str) -> Result<Self, FontError> {
         if text.len() > MAX_MANIFEST_BYTES {
             return Err(FontError::new("font family manifest is too large"));
         }
         let mut label = None;
+        let mut generic = None;
         let mut role = None;
         let mut faces = Vec::new();
         let mut fallback = None;
@@ -104,6 +149,7 @@ impl FamilyManifest {
             match field.trim() {
                 "label" => set_once(&mut label, validate_label(value)?.to_string())?,
                 "kind" => set_once(&mut role, parse_role(value)?)?,
+                "generic" => set_once(&mut generic, parse_generic(value)?)?,
                 "face" => {
                     if faces.len() == MAX_FACES {
                         return Err(FontError::new("font family lists too many faces"));
@@ -124,9 +170,13 @@ impl FamilyManifest {
         if faces.is_empty() {
             return Err(FontError::new("font family lists no face"));
         }
+        if generic.is_some() && role == Some(FamilyRole::Fallback) {
+            return Err(FontError::new("fallback font family claims a generic"));
+        }
         Ok(Self {
             key,
             label: label.ok_or(FontError::new("font family has no label"))?,
+            generic,
             role: role.ok_or(FontError::new("font family has no kind"))?,
             faces,
             fallback,
@@ -149,6 +199,13 @@ impl FamilyManifest {
     #[must_use]
     pub const fn role(&self) -> FamilyRole {
         self.role
+    }
+
+    /// The CSS generic family this family is the store's answer for, if it
+    /// claims one.
+    #[must_use]
+    pub const fn generic(&self) -> Option<GenericFamily> {
+        self.generic
     }
 
     /// The face file names, in resolution order.
@@ -192,6 +249,14 @@ fn parse_role(value: &str) -> Result<FamilyRole, FontError> {
         "fallback" => Ok(FamilyRole::Fallback),
         _ => Err(FontError::new("unknown font family kind")),
     }
+}
+
+/// The generic `value` names.
+fn parse_generic(value: &str) -> Result<GenericFamily, FontError> {
+    FamilyKey::new(value)
+        .ok()
+        .and_then(GenericFamily::from_key)
+        .ok_or(FontError::new("unknown font family generic"))
 }
 
 /// A label a picker can draw: non-empty, within the wire field, and free of

@@ -45,6 +45,7 @@ use tairix_itest_harness::USER_IMAGE_BIAS;
 use tairix_mkimage::ImageProfile;
 
 use super::font_store;
+use super::host_fonts::HostFonts;
 use super::image_drivers::build_support;
 use super::pie_build::cross_compile_pie_elf;
 use crate::Context;
@@ -697,6 +698,7 @@ fn build_bundle(
     // here — where the bundle is composed — is verifying what the image
     // actually carries.
     verify_library_icon(
+        &mut host_fonts(ctx)?,
         &bundle_dir,
         app.manifest.library_icon.as_deref(),
         tairix_syshelp::RESOURCE_FILES
@@ -809,6 +811,7 @@ fn verify_planted_entries(crate_dir: &Path, bundle_dir: &str) -> Result<(), Stri
 }
 
 fn verify_library_icon<'a>(
+    fonts: &mut dyn tairix_svg::font::FontProvider,
     bundle_dir: &str,
     library_icon: Option<&str>,
     resources: impl IntoIterator<Item = (&'a str, &'a [u8])>,
@@ -828,7 +831,19 @@ fn verify_library_icon<'a>(
     verify_icon_master(
         &format!("{bundle_dir} library-icon Resources/{icon}"),
         bytes,
+        fonts,
     )
+}
+
+/// The build-time font provider over the committed store.
+///
+/// Built where an icon is verified rather than held for the whole build:
+/// discovery reads only the family manifests (kilobytes), and a face's
+/// bytes are read on first use — which, for artwork that carries no
+/// `<text>`, is never. The desktop's own resolution is what answers, so an
+/// icon the build admits is one the running system can draw.
+fn host_fonts(ctx: &Context) -> Result<HostFonts, String> {
+    HostFonts::open(&ctx.workspace_root.join(font_store::ASSETS_DIR))
 }
 
 /// Verify one icon master is artwork the desktop will actually draw.
@@ -850,7 +865,11 @@ fn verify_library_icon<'a>(
 ///
 /// Returns an actionable build-error message naming `label` and what is wrong
 /// with the artwork.
-fn verify_icon_master(label: &str, bytes: &[u8]) -> Result<(), String> {
+fn verify_icon_master(
+    label: &str,
+    bytes: &[u8],
+    fonts: &mut dyn tairix_svg::font::FontProvider,
+) -> Result<(), String> {
     if bytes.len() > tairix_icon::MAX_ARTWORK_BYTES {
         return Err(format!(
             "image: {label} is {} bytes, exceeding the {}-byte desktop artwork \
@@ -863,7 +882,7 @@ fn verify_icon_master(label: &str, bytes: &[u8]) -> Result<(), String> {
     if tairix_image::sniff(bytes) == Some(ImageFormat::Png) {
         verify_raster_master(label, bytes)
     } else {
-        verify_vector_master(label, bytes)
+        verify_vector_master(label, bytes, fonts)
     }
 }
 
@@ -933,8 +952,12 @@ fn verify_raster_master(label: &str, bytes: &[u8]) -> Result<(), String> {
 ///
 /// Returns an actionable build-error message naming `label` and why the bytes
 /// are not artwork the desktop can draw.
-fn verify_vector_master(label: &str, bytes: &[u8]) -> Result<(), String> {
-    let image = tairix_svg::decode(bytes, tairix_svg::Viewport::Square).map_err(|e| {
+fn verify_vector_master(
+    label: &str,
+    bytes: &[u8],
+    fonts: &mut dyn tairix_svg::font::FontProvider,
+) -> Result<(), String> {
+    let image = tairix_svg::decode(bytes, tairix_svg::Viewport::Square, fonts).map_err(|e| {
         format!("image: {label} is neither a PNG nor an SVG the desktop can decode: {e:?}")
     })?;
     let (width, height) = image.source_extent();
@@ -961,6 +984,7 @@ fn verify_vector_master(label: &str, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{verify_icon_master, verify_library_icon};
+    use tairix_svg::font::NoFonts;
 
     /// A minimal but wholly valid `width`×`height` 8-bit greyscale PNG,
     /// opaque white, or grey+alpha at `alpha` when one is given.
@@ -1045,7 +1069,9 @@ mod tests {
     /// A bundle that declares no library icon has nothing to verify.
     #[test]
     fn no_declared_icon_passes() {
-        assert!(verify_library_icon("terminal.app", None, core::iter::empty()).is_ok());
+        assert!(
+            verify_library_icon(&mut NoFonts, "terminal.app", None, core::iter::empty()).is_ok()
+        );
     }
 
     /// A present icon that decodes as a square master at the shipped side is
@@ -1058,7 +1084,13 @@ mod tests {
             None,
         );
         let resources: [(&str, &[u8]); 2] = [("other.bin", &[0u8; 4]), ("terminal.png", &master)];
-        assert!(verify_library_icon("terminal.app", Some("terminal.png"), resources).is_ok());
+        assert!(verify_library_icon(
+            &mut NoFonts,
+            "terminal.app",
+            Some("terminal.png"),
+            resources
+        )
+        .is_ok());
     }
 
     /// A vector master is accepted, and needs no pixel side: SVG is
@@ -1069,7 +1101,9 @@ mod tests {
         let master: &[u8] =
             br##"<svg viewBox="0 0 32 32"><polygon points="2,2 30,2 30,30 2,30" fill="#3070f0"/></svg>"##;
         let resources: [(&str, &[u8]); 1] = [("files.svg", master)];
-        assert!(verify_library_icon("files.app", Some("files.svg"), resources).is_ok());
+        assert!(
+            verify_library_icon(&mut NoFonts, "files.app", Some("files.svg"), resources).is_ok()
+        );
     }
 
     /// A vector master whose design box is not square is refused: the decoder
@@ -1079,7 +1113,7 @@ mod tests {
     fn a_non_square_vector_master_is_refused() {
         let master: &[u8] =
             br##"<svg viewBox="0 0 32 16"><polygon points="0,0 32,0 32,16 0,16" fill="#3070f0"/></svg>"##;
-        let err = verify_icon_master("x.app icon", master)
+        let err = verify_icon_master("x.app icon", master, &mut NoFonts)
             .expect_err("a rectangular vector master must be refused");
         assert!(err.contains("must be square"), "{err}");
     }
@@ -1089,8 +1123,12 @@ mod tests {
     /// silent failure this check exists to turn into a build error.
     #[test]
     fn a_vector_master_that_draws_nothing_is_refused() {
-        let err = verify_icon_master("x.app icon", br#"<svg viewBox="0 0 32 32"></svg>"#)
-            .expect_err("a vector master that draws nothing must be refused");
+        let err = verify_icon_master(
+            "x.app icon",
+            br#"<svg viewBox="0 0 32 32"></svg>"#,
+            &mut NoFonts,
+        )
+        .expect_err("a vector master that draws nothing must be refused");
         assert!(err.contains("draws nothing"), "{err}");
     }
 
@@ -1099,7 +1137,7 @@ mod tests {
     #[test]
     fn a_fully_transparent_raster_master_is_refused() {
         let side = tairix_icon::MIN_ARTWORK_SIDE;
-        let err = verify_icon_master("x.app icon", &png(side, side, Some(0)))
+        let err = verify_icon_master("x.app icon", &png(side, side, Some(0)), &mut NoFonts)
             .expect_err("a fully transparent master must be refused");
         assert!(err.contains("transparent"), "{err}");
     }
@@ -1109,8 +1147,13 @@ mod tests {
     #[test]
     fn missing_icon_is_refused() {
         let resources: [(&str, &[u8]); 1] = [("other.bin", &[0u8; 4])];
-        let err = verify_library_icon("terminal.app", Some("terminal.png"), resources)
-            .expect_err("a declared icon absent from Resources/ must be refused");
+        let err = verify_library_icon(
+            &mut NoFonts,
+            "terminal.app",
+            Some("terminal.png"),
+            resources,
+        )
+        .expect_err("a declared icon absent from Resources/ must be refused");
         assert!(err.contains("terminal.app"), "{err}");
         assert!(err.contains("terminal.png"), "{err}");
     }
@@ -1122,8 +1165,13 @@ mod tests {
         let size = tairix_icon::MAX_ARTWORK_BYTES + 1;
         let over = vec![0u8; size];
         let resources: [(&str, &[u8]); 1] = [("terminal.png", &over)];
-        let err = verify_library_icon("terminal.app", Some("terminal.png"), resources)
-            .expect_err("an over-large icon must be refused");
+        let err = verify_library_icon(
+            &mut NoFonts,
+            "terminal.app",
+            Some("terminal.png"),
+            resources,
+        )
+        .expect_err("an over-large icon must be refused");
         assert!(err.contains("terminal.png"), "{err}");
         assert!(err.contains(&size.to_string()), "{err}");
         assert!(
@@ -1136,7 +1184,7 @@ mod tests {
     /// the desktop's own decoder, not the file's name.
     #[test]
     fn a_file_that_is_not_an_image_is_refused() {
-        let err = verify_icon_master("x.app icon", b"PNG? no.")
+        let err = verify_icon_master("x.app icon", b"PNG? no.", &mut NoFonts)
             .expect_err("undecodable bytes must be refused");
         assert!(err.contains("decode"), "{err}");
     }
@@ -1146,7 +1194,7 @@ mod tests {
     #[test]
     fn a_non_square_master_is_refused() {
         let side = tairix_icon::MIN_ARTWORK_SIDE;
-        let err = verify_icon_master("x.app icon", &png(side, side / 2, None))
+        let err = verify_icon_master("x.app icon", &png(side, side / 2, None), &mut NoFonts)
             .expect_err("a rectangular master must be refused");
         assert!(err.contains("square"), "{err}");
     }
@@ -1156,7 +1204,7 @@ mod tests {
     #[test]
     fn an_undersized_master_is_refused() {
         let small = tairix_icon::MIN_ARTWORK_SIDE / 2;
-        let err = verify_icon_master("x.app icon", &png(small, small, None))
+        let err = verify_icon_master("x.app icon", &png(small, small, None), &mut NoFonts)
             .expect_err("an undersized master must be refused");
         assert!(
             err.contains(&tairix_icon::MIN_ARTWORK_SIDE.to_string()),
@@ -1193,6 +1241,7 @@ mod tests {
             verify_icon_master(
                 &format!("Graphics/{}/{}", asset.family.target_dir(), asset.file),
                 asset.bytes,
+                &mut NoFonts,
             )
             .expect("a shipped icon master");
         }
@@ -1210,6 +1259,7 @@ mod tests {
                 bundle_icons += 1;
             }
             verify_library_icon(
+                &mut NoFonts,
                 &bundle_dir,
                 app.manifest.library_icon.as_deref(),
                 tairix_syshelp::RESOURCE_FILES
@@ -1252,7 +1302,7 @@ mod tests {
             .join("Resources")
             .join(file);
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path:?} should ship: {e}"));
-        let image = tairix_svg::decode(&bytes, tairix_svg::Viewport::Square)
+        let image = tairix_svg::decode(&bytes, tairix_svg::Viewport::Square, &mut NoFonts)
             .unwrap_or_else(|e| panic!("{file} should decode: {e:?}"));
         tairix_icon::VectorIcon::from_svg(&image)
     }
@@ -1456,7 +1506,7 @@ mod tests {
                 tairix_cursor::MAX_CURSOR_ASSET_BYTES
             ));
         }
-        let cursor = tairix_cursor::decode_svg(bytes)
+        let cursor = tairix_cursor::decode_svg(bytes, &mut NoFonts)
             .map_err(|err| format!("image: {label} does not decode as a cursor: {err:?}"))?;
         let side = tairix_cursor::CURSOR_BASE_SIDE_PX;
         let image = cursor.rasterise(side).ok_or_else(|| {

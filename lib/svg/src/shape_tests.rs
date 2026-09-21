@@ -30,7 +30,7 @@ fn shapes(tag: &str) -> Vec<SubPath> {
 fn flatten(tag: &str) -> Result<Vec<SubPath>, SvgError> {
     let document = format!("<svg>{tag}</svg>");
     let root = xml::parse(&document).expect("a document");
-    let child = root.children.first().expect("a child element");
+    let child = root.children().next().expect("a child element");
     shape_subpaths(child, VIEWPORT, TOL, BUDGET, None)
 }
 
@@ -255,7 +255,7 @@ fn a_path_element_flattens_its_data() {
 fn a_shape_that_exceeds_the_budget_is_refused() {
     let document = format!("<svg>{}</svg>", r#"<polygon points="0,0 1,1 2,2 3,3"/>"#);
     let root = xml::parse(&document).expect("a document");
-    let child = root.children.first().expect("a child element");
+    let child = root.children().next().expect("a child element");
     assert_eq!(
         shape_subpaths(child, VIEWPORT, TOL, 2, None),
         Err(SvgError::TooComplex)
@@ -269,7 +269,7 @@ fn a_shape_that_exceeds_the_budget_is_refused() {
 fn vertices(tag: &str) -> Vec<Vertex> {
     let document = format!("<svg>{tag}</svg>");
     let root = xml::parse(&document).expect("a document");
-    let child = root.children.first().expect("a child element");
+    let child = root.children().next().expect("a child element");
     let mut sink = Vertices::new(BUDGET);
     shape_subpaths(child, VIEWPORT, TOL, BUDGET, Some(&mut sink)).expect("a shape");
     sink.finish()

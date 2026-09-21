@@ -7,6 +7,7 @@
 //! Unlike the built-in glyphs, an SVG icon carries its own per-layer paints,
 //! so it is not tinted by the caller.
 
+use tairix_svg::font::FontProvider;
 use tairix_svg::{SvgError, SvgImage};
 
 use crate::vector::VectorIcon;
@@ -28,11 +29,18 @@ impl VectorIcon {
 /// back to a [`builtin_icon`](crate::builtin_icon) rather than crashing the
 /// compositor.
 ///
+/// `fonts` is the seam an icon carrying `<text>` resolves its faces
+/// through. A caller with no font authority supplies
+/// [`tairix_svg::font::NoFonts`], and such an icon is then refused rather
+/// than drawn with its lettering silently missing — which is exactly what
+/// makes the built-in glyph the answer instead.
+///
 /// # Errors
 /// Propagates the [`SvgError`] from [`tairix_svg::decode`].
-pub fn decode(bytes: &[u8]) -> Result<VectorIcon, SvgError> {
+pub fn decode(bytes: &[u8], fonts: &mut dyn FontProvider) -> Result<VectorIcon, SvgError> {
     Ok(VectorIcon::from_svg(&tairix_svg::decode(
         bytes,
         tairix_svg::Viewport::Square,
+        fonts,
     )?))
 }

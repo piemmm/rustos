@@ -60,9 +60,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::{
-    decode_families_reply, decode_glyphs_reply, decode_metrics_reply, FamilyEntry, FamilyKey,
-    FontMetrics, FontRequest, FontWeight, GlyphRun, FONT_FAMILY_KEY_LEN, FONT_MAX_FAMILIES_REPLY,
-    FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN, FONT_METRICS_REPLY_LEN,
+    decode_families_reply, decode_glyphs_reply, decode_metrics_reply, decode_outlines_reply,
+    FamilyEntry, FamilyKey, FontMetrics, FontRequest, FontStretch, FontStyle, FontWeight,
+    GlyphOutline, GlyphRun, GlyphSegment, OutlineBatch, FONT_FAMILY_KEY_LEN,
+    FONT_MAX_FAMILIES_REPLY, FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN, FONT_MAX_OUTLINE_REPLY,
+    FONT_METRICS_REPLY_LEN,
 };
 use tairix_abi::Errno;
 use tairix_hash::BuildSipHash13;
@@ -72,6 +74,7 @@ use tairix_rt::sync::{Mutex, MutexGuard};
 use crate::atlas;
 use crate::glyph_cache::CachedGlyph;
 use crate::measure::{self, MeasureCache, MeasureEpoch, MeasuredText};
+use crate::outline_cache::{CachedOutline, OutlineCache, OutlineKey};
 
 /// One synchronous font-service call: send one request frame, receive one
 /// reply frame. The `ipc_call` syscall behind a seam, so the render path is
@@ -187,6 +190,9 @@ pub(crate) struct Caches {
     /// fetched and served without being retained — correct, merely one IPC
     /// per glyph.
     glyphs: Option<GlyphCache>,
+    /// `None` until a cache is installed, in which case every glyph outline
+    /// is fetched afresh — correct, merely one round trip per run.
+    outlines: Option<OutlineCache>,
     metrics: MetricsCache,
     /// `None` until a memo is installed, in which case every measurement is
     /// walked afresh — correct, merely one advance lookup per character.
@@ -200,13 +206,14 @@ impl Caches {
     const fn new() -> Self {
         Self {
             glyphs: None,
+            outlines: None,
             metrics: MetricsCache::new(),
             measure: None,
             advance_source: 0,
         }
     }
 
-    /// Shrink both byte-budgeted caches to the band's ceiling, returning the
+    /// Shrink every byte-budgeted cache to the band's ceiling, returning the
     /// bytes released. A cache that is not installed is nothing to release,
     /// and neither is built to answer.
     fn trim(&mut self) -> usize {
@@ -214,11 +221,15 @@ impl Caches {
             .glyphs
             .as_mut()
             .map_or(0, ReclaimCache::enforce_pressure);
+        let outlines = self
+            .outlines
+            .as_mut()
+            .map_or(0, ReclaimCache::enforce_pressure);
         let measurements = self
             .measure
             .as_mut()
             .map_or(0, ReclaimCache::enforce_pressure);
-        glyphs.saturating_add(measurements)
+        glyphs.saturating_add(outlines).saturating_add(measurements)
     }
 }
 
@@ -251,6 +262,25 @@ impl Channel {
     /// Install `transport` as this channel's advance source.
     fn install_transport(&mut self, transport: Box<dyn FontTransport>) {
         self.transport = Some(transport);
+    }
+
+    /// Fetch the outlines of a prefix of `scalars`, or `None` when no
+    /// transport is installed or the call or its reply could not be read
+    /// (fail closed: the caller draws nothing).
+    fn outlines(
+        &mut self,
+        scalars: &[char],
+        family: FamilyKey,
+        instance: (FontWeight, FontStyle, FontStretch),
+    ) -> Option<OutlineReply> {
+        let transport = self.transport.as_mut()?;
+        fetch_outlines(
+            transport.as_mut(),
+            &mut self.reply,
+            scalars,
+            family,
+            instance,
+        )
     }
 
     /// Fetch the coverage of a prefix of `scalars`, or an empty batch when no
@@ -346,6 +376,15 @@ pub(crate) trait FontClient {
         weight: FontWeight,
     ) -> Vec<CachedGlyph>;
 
+    /// Fetch a run of glyph outlines over the channel, with the caches
+    /// released.
+    fn fetch_outlines(
+        &mut self,
+        scalars: &[char],
+        family: FamilyKey,
+        instance: (FontWeight, FontStyle, FontStretch),
+    ) -> Option<OutlineReply>;
+
     /// Fetch one family's line metrics over the channel, with the caches
     /// released.
     fn fetch_metrics(
@@ -354,6 +393,74 @@ pub(crate) trait FontClient {
         pixel_height: u32,
         weight: FontWeight,
     ) -> Option<FontMetrics>;
+
+    /// Serve every scalar of `run`'s outline, from the cache where it is
+    /// held and over the channel where it is not.
+    ///
+    /// Fetches the misses in *runs*, so a cold alphabet costs one round trip
+    /// per batch rather than one per character, and retains what it fetched
+    /// so a second drawing of the same lettering costs none. The reply
+    /// header — the requested family's own geometry — always comes from the
+    /// fetch, since it describes the family rather than a glyph; a run the
+    /// cache answers whole therefore reports the geometry of the last fetch
+    /// it needed, and a caller wanting it alone asks for one scalar.
+    fn serve_outlines(
+        &mut self,
+        scalars: &[char],
+        family: FamilyKey,
+        instance: (FontWeight, FontStyle, FontStretch),
+    ) -> Option<OutlineReply> {
+        let (weight, style, stretch) = instance;
+        let mut reply = OutlineReply::default();
+        let mut served: Vec<OwnedOutline> = Vec::with_capacity(scalars.len());
+        let mut at = 0;
+        while at < scalars.len() {
+            let key = OutlineKey::new(family, scalars[at], weight, style, stretch);
+            if let Some(hit) = self
+                .caches()
+                .outlines
+                .as_mut()
+                .and_then(|cache| cache.get_or_build(&(), key, || None))
+            {
+                served.push(hit.0.clone());
+                at += 1;
+                continue;
+            }
+            // Everything from here that the cache does not hold is fetched
+            // together: the protocol answers a prefix, so the batch bounds
+            // itself and the loop asks again for whatever it left.
+            let missing = &scalars[at..];
+            let fetched = self.fetch_outlines(missing, family, instance)?;
+            if fetched.glyphs.is_empty() {
+                return None;
+            }
+            reply.units_per_em = fetched.units_per_em;
+            reply.ascent = fetched.ascent;
+            reply.descent = fetched.descent;
+            reply.line_gap = fetched.line_gap;
+            for (offset, glyph) in fetched.glyphs.into_iter().enumerate() {
+                let key = OutlineKey::new(family, missing[offset], weight, style, stretch);
+                served.push(glyph.clone());
+                if let Some(cache) = self.caches().outlines.as_mut() {
+                    cache.retain(&(), key, CachedOutline(glyph));
+                }
+            }
+            at = served.len();
+        }
+        // A run the cache answered whole never reached the service, so its
+        // header was never stated: one fetch of the first scalar supplies it
+        // rather than reporting an em of zero a caller cannot divide by.
+        if reply.units_per_em == 0 {
+            let first = scalars.first().copied()?;
+            let header = self.fetch_outlines(&[first], family, instance)?;
+            reply.units_per_em = header.units_per_em;
+            reply.ascent = header.ascent;
+            reply.descent = header.descent;
+            reply.line_gap = header.line_gap;
+        }
+        reply.glyphs = served;
+        Some(reply)
+    }
 
     /// List the installed families over the channel, with the caches
     /// released.
@@ -655,6 +762,149 @@ fn fetch_glyphs(
         .collect()
 }
 
+/// Fetch the outlines of a prefix of `scalars` from `family`, instanced at
+/// `instance`, over `transport`.
+///
+/// `None` on any failure — a run the protocol will not carry, a refused
+/// call, a frame that does not decode, or a batch answering more than was
+/// asked for — so a caller draws nothing rather than geometry the service
+/// did not send.
+pub(crate) fn fetch_outlines(
+    transport: &mut dyn FontTransport,
+    reply: &mut Vec<u8>,
+    scalars: &[char],
+    family: FamilyKey,
+    instance: (FontWeight, FontStyle, FontStretch),
+) -> Option<OutlineReply> {
+    let run = GlyphRun::new(scalars).ok()?;
+    if reply.len() < FONT_MAX_OUTLINE_REPLY {
+        reply.resize(FONT_MAX_OUTLINE_REPLY, 0);
+    }
+    let (weight, style, stretch) = instance;
+    let request = FontRequest::Outlines {
+        family,
+        scalars: run,
+        weight,
+        style,
+        stretch,
+    }
+    .to_le_bytes();
+    let len = transport.call(&request, reply).ok()?;
+    let frame = reply.get(..len)?;
+    let batch = decode_outlines_reply(frame).ok()?;
+    // The reply bound admits a batch as long as any run, so only the caller
+    // knows how long *this* run was.
+    if batch.glyphs().len() > scalars.len() {
+        return None;
+    }
+    Some(OutlineReply::from_batch(&batch))
+}
+
+/// One decoded outline record, owned so it outlives the reply frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OwnedOutline {
+    /// The resolved face's em.
+    pub units_per_em: u32,
+    /// The pen advance in that face's font units.
+    pub advance: f64,
+    /// A synthetic bold stroke the face could not furnish, as a fraction of
+    /// the em.
+    pub synthetic_bold: f64,
+    /// A synthetic oblique shear the face could not furnish.
+    pub synthetic_shear: f64,
+    /// The closed contours, in font units with y up.
+    pub contours: Vec<OwnedContour>,
+}
+
+/// One closed contour of an owned outline.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OwnedContour {
+    /// Where the contour begins and ends.
+    pub start: (f64, f64),
+    /// The segments, in order.
+    pub segments: Vec<OwnedSegment>,
+}
+
+/// One segment of an owned contour.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum OwnedSegment {
+    /// A straight line.
+    Line {
+        /// Where the segment ends.
+        to: (f64, f64),
+    },
+    /// A quadratic Bézier.
+    Quadratic {
+        /// The off-curve control point.
+        control: (f64, f64),
+        /// Where the segment ends.
+        to: (f64, f64),
+    },
+}
+
+/// The requested family's own geometry and the run of outlines answered.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OutlineReply {
+    /// The primary face's em.
+    pub units_per_em: u32,
+    /// The primary face's ascender, in its own font units.
+    pub ascent: i32,
+    /// The primary face's descender magnitude, in its own font units.
+    pub descent: i32,
+    /// The primary face's extra leading, in its own font units.
+    pub line_gap: i32,
+    /// The glyphs answered, a prefix of the run in order.
+    pub glyphs: Vec<OwnedOutline>,
+}
+
+impl OutlineReply {
+    /// Copy a decoded batch out of the frame it borrows, so it outlives the
+    /// receive buffer.
+    ///
+    /// The one place the wire form becomes an owned one: the client's own
+    /// fetch and the build-time verification that drives the service
+    /// directly both go through it, so neither can read a reply the other
+    /// would read differently.
+    #[must_use]
+    pub fn from_batch(batch: &OutlineBatch<'_>) -> Self {
+        Self {
+            units_per_em: batch.units_per_em,
+            ascent: batch.ascent,
+            descent: batch.descent,
+            line_gap: batch.line_gap,
+            glyphs: batch.glyphs().iter().map(owned_outline).collect(),
+        }
+    }
+}
+
+/// Copy one borrowed outline record out of the reply frame.
+fn owned_outline(glyph: &GlyphOutline<'_>) -> OwnedOutline {
+    OwnedOutline {
+        units_per_em: glyph.units_per_em,
+        advance: glyph.advance.to_f64(),
+        synthetic_bold: glyph.synth.bold_fraction(),
+        synthetic_shear: glyph.synth.shear(),
+        contours: glyph
+            .contours()
+            .map(|contour| OwnedContour {
+                start: (contour.start.0.to_f64(), contour.start.1.to_f64()),
+                segments: contour
+                    .segments()
+                    .map(|segment| match segment {
+                        GlyphSegment::Line { to } => OwnedSegment::Line {
+                            to: (to.0.to_f64(), to.1.to_f64()),
+                        },
+                        GlyphSegment::Quadratic { control, to } => OwnedSegment::Quadratic {
+                            control: (control.0.to_f64(), control.1.to_f64()),
+                            to: (to.0.to_f64(), to.1.to_f64()),
+                        },
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 /// Fetch `family`'s line metrics at `pixel_height` in `weight` over
 /// `transport`.
 ///
@@ -944,6 +1194,15 @@ impl FontClient for LockedClient<'_> {
         self.with_channel(|channel| channel.glyphs(scalars, family, pixel_height, weight))
     }
 
+    fn fetch_outlines(
+        &mut self,
+        scalars: &[char],
+        family: FamilyKey,
+        instance: (FontWeight, FontStyle, FontStretch),
+    ) -> Option<OutlineReply> {
+        self.with_channel(|channel| channel.outlines(scalars, family, instance))
+    }
+
     fn fetch_metrics(
         &mut self,
         family: FamilyKey,
@@ -960,6 +1219,28 @@ impl FontClient for LockedClient<'_> {
     fn set_transport(&mut self, transport: Box<dyn FontTransport>) {
         self.with_channel(|channel| channel.install_transport(transport));
     }
+}
+
+/// Fetch a bounded run of glyph outlines from `family`, instanced at
+/// `weight`/`style`/`stretch`.
+///
+/// The geometry seam a vector consumer draws text through: the reply carries
+/// contours in the face's own font units, so the caller scales and flattens
+/// at whatever accuracy its own placement needs rather than blitting a cell
+/// fixed at one size.
+///
+/// `None` on any failure, so a caller falls back rather than drawing
+/// geometry the service did not send. The batch answers a **prefix** of
+/// `scalars`, so a caller asks again for any remainder.
+#[must_use]
+pub fn outline_run(
+    scalars: &[char],
+    family: FamilyKey,
+    weight: FontWeight,
+    style: FontStyle,
+    stretch: FontStretch,
+) -> Option<OutlineReply> {
+    with_client(|client| client.serve_outlines(scalars, family, (weight, style, stretch)))
 }
 
 /// Install (or replace) the font-service transport.
@@ -991,6 +1272,18 @@ pub fn set_font_transport(transport: Box<dyn FontTransport>) {
 /// declared sensitivity requires.
 pub fn set_glyph_cache(cache: GlyphCache) {
     CACHES.lock().glyphs = Some(cache);
+}
+
+/// Install (or replace) the process-global cache fetched glyph *outlines*
+/// are memoised in.
+///
+/// The same seam as [`set_glyph_cache`], for the geometry a vector consumer
+/// draws text through: a session opening one drawing after another
+/// re-requests the same Latin alphabet from the service every time without
+/// it. Until one is installed every run is fetched afresh — correct, merely
+/// one round trip per run.
+pub fn set_outline_cache(cache: OutlineCache) {
+    CACHES.lock().outlines = Some(cache);
 }
 
 /// Shrink the client's caches — glyph coverage and text measurements — to
@@ -1102,6 +1395,10 @@ impl FontTransport for SolidTestTransport {
                 weight: _,
             } => test_metrics_reply(reply, family, pixel_height),
             FontRequest::Families => test_families_reply(reply),
+            // The solid test face draws coverage, never geometry: a
+            // consumer wanting outlines drives a provider of its own rather
+            // than this one answering a shape it has not got.
+            FontRequest::Outlines { .. } => Err(Errno::NotSupported),
         }
     }
 }
@@ -1145,19 +1442,20 @@ fn test_advance(family: FamilyKey, scalar: char, pixel_height: u32, weight: Font
     base.saturating_add(test_weight_widening(weight))
 }
 
-/// How much wider than [`FontWeight::Regular`] the test transport's
+/// How much wider than [`FontWeight::REGULAR`] the test transport's
 /// proportional face advances at `weight`, in pixels.
 ///
-/// One pixel per step: enough that a measurement taken in the wrong weight can
-/// never round back onto the right answer, and small enough to stay a
-/// plausible face rather than a caricature.
+/// One pixel per hundred of the `wght` axis above Regular: enough that a
+/// measurement taken in the wrong weight can never round back onto the right
+/// answer, and small enough to stay a plausible face rather than a
+/// caricature. Lighter than Regular advances the same as Regular, which is
+/// the fixture declining to model a narrowing it has no need to.
 #[cfg(any(test, feature = "test-util"))]
 const fn test_weight_widening(weight: FontWeight) -> u32 {
-    match weight {
-        FontWeight::Regular => 0,
-        FontWeight::Medium => 1,
-        FontWeight::Bold => 2,
-    }
+    let above = weight
+        .axis_value()
+        .saturating_sub(FontWeight::REGULAR.axis_value());
+    above as u32 / 100
 }
 
 /// Encode a [`FontRequest::Glyphs`] reply for [`SolidTestTransport`],
@@ -1285,6 +1583,15 @@ pub(crate) mod tests {
             weight: FontWeight,
         ) -> Vec<CachedGlyph> {
             self.channel.glyphs(scalars, family, pixel_height, weight)
+        }
+
+        fn fetch_outlines(
+            &mut self,
+            scalars: &[char],
+            family: FamilyKey,
+            instance: (FontWeight, FontStyle, FontStretch),
+        ) -> Option<super::OutlineReply> {
+            self.channel.outlines(scalars, family, instance)
         }
 
         fn fetch_metrics(
@@ -1476,7 +1783,7 @@ pub(crate) mod tests {
         family: FamilyKey,
         height: u32,
     ) -> Option<(u32, u32, Vec<u8>)> {
-        client.with_glyph(scalar, family, height, FontWeight::Regular, |glyph| {
+        client.with_glyph(scalar, family, height, FontWeight::REGULAR, |glyph| {
             (glyph.width, glyph.height, glyph.data.to_vec())
         })
     }
@@ -1489,12 +1796,12 @@ pub(crate) mod tests {
         // one width for both and hid a box measured in the wrong face.
         let sans = FamilyKey::new(super::TEST_PROPORTIONAL_FAMILY).expect("family");
         let at = |w| test_advance(sans, 'S', 28, w);
-        assert!(at(FontWeight::Medium) > at(FontWeight::Regular));
-        assert!(at(FontWeight::Bold) > at(FontWeight::Medium));
-        for w in [FontWeight::Regular, FontWeight::Medium, FontWeight::Bold] {
+        assert!(at(FontWeight::MEDIUM) > at(FontWeight::REGULAR));
+        assert!(at(FontWeight::BOLD) > at(FontWeight::MEDIUM));
+        for w in [FontWeight::REGULAR, FontWeight::MEDIUM, FontWeight::BOLD] {
             assert_eq!(
                 test_advance(FamilyKey::MONO, 'S', 28, w),
-                test_advance(FamilyKey::MONO, 'S', 28, FontWeight::Regular),
+                test_advance(FamilyKey::MONO, 'S', 28, FontWeight::REGULAR),
                 "a fixed pitch is the same width at every weight"
             );
         }
@@ -1508,7 +1815,7 @@ pub(crate) mod tests {
         assert_eq!(height, 28);
         assert_eq!(
             width,
-            test_advance(FamilyKey::MONO, 'A', 28, FontWeight::Regular)
+            test_advance(FamilyKey::MONO, 'A', 28, FontWeight::REGULAR)
         );
         assert_eq!(data.len(), (width * height) as usize);
         assert!(data.iter().all(|&c| c == 255));
@@ -1535,7 +1842,7 @@ pub(crate) mod tests {
             .into_iter()
             .map(|ch| {
                 client
-                    .with_glyph(ch, INTER, 28, FontWeight::Regular, |g| g.advance)
+                    .with_glyph(ch, INTER, 28, FontWeight::REGULAR, |g| g.advance)
                     .expect("fetched")
             })
             .collect();
@@ -1548,7 +1855,7 @@ pub(crate) mod tests {
     #[test]
     fn a_heavier_weight_is_a_distinct_cache_entry() {
         let (mut client, _gauge) = cached_client();
-        for weight in [FontWeight::Regular, FontWeight::Medium, FontWeight::Bold] {
+        for weight in [FontWeight::REGULAR, FontWeight::MEDIUM, FontWeight::BOLD] {
             assert!(client
                 .with_glyph('A', FamilyKey::MONO, 28, weight, |_| ())
                 .is_some());
@@ -1578,7 +1885,7 @@ pub(crate) mod tests {
         assert_eq!(client.caches.glyphs.as_ref().expect("installed").len(), 0);
         // Metrics fail closed to the atlas-scaled fallback rather than
         // leaving the caller with nothing to lay text out with.
-        let metrics = client.metrics(FamilyKey::MONO, 20, FontWeight::Regular);
+        let metrics = client.metrics(FamilyKey::MONO, 20, FontWeight::REGULAR);
         assert_eq!(metrics, fallback_metrics(20));
         // Families fail closed to an empty list.
         assert!(client.families().is_empty());
@@ -1763,7 +2070,7 @@ pub(crate) mod tests {
         client.caches.glyphs = Some(cache);
 
         let run = "Switchboard";
-        let (measured, resolved) = client.measure_text(run, INTER, 28, FontWeight::Regular);
+        let (measured, resolved) = client.measure_text(run, INTER, 28, FontWeight::REGULAR);
         assert!(resolved, "every glyph of the run must resolve");
         assert!(measured.width() > 0);
         assert_eq!(
@@ -1788,7 +2095,7 @@ pub(crate) mod tests {
         let run: String = ('a'..='z').chain('A'..='N').collect();
         let scalars = distinct(&run);
         assert_eq!(scalars.len(), 40);
-        let (_, resolved) = client.measure_text(&run, INTER, 28, FontWeight::Regular);
+        let (_, resolved) = client.measure_text(&run, INTER, 28, FontWeight::REGULAR);
         assert!(resolved);
         assert_eq!(tally.get(), 2, "40 distinct scalars is two bounded runs");
         assert_eq!(
@@ -1804,7 +2111,7 @@ pub(crate) mod tests {
     fn an_uncached_client_pays_no_batch_it_could_not_keep() {
         let (mut client, tally) = counting_client();
         let run = "Switchboard";
-        let (_, resolved) = client.measure_text(run, INTER, 28, FontWeight::Regular);
+        let (_, resolved) = client.measure_text(run, INTER, 28, FontWeight::REGULAR);
         assert!(resolved);
         assert_eq!(
             tally.get(),
@@ -1825,7 +2132,7 @@ pub(crate) mod tests {
 
         let run: String = ('a'..='z').chain('A'..='N').collect();
         assert_eq!(distinct(&run).len(), 40);
-        let (_, resolved) = client.measure_text(&run, INTER, 28, FontWeight::Regular);
+        let (_, resolved) = client.measure_text(&run, INTER, 28, FontWeight::REGULAR);
         assert!(resolved);
         assert_eq!(
             tally.get(),
@@ -1851,7 +2158,7 @@ pub(crate) mod tests {
         let height = tairix_abi::font_ipc::FONT_MAX_PIXEL_HEIGHT;
         let run = "abcdefgh";
         let scalars = distinct(run);
-        let (_, resolved) = client.measure_text(run, INTER, height, FontWeight::Regular);
+        let (_, resolved) = client.measure_text(run, INTER, height, FontWeight::REGULAR);
         assert!(resolved, "every glyph of the run must still resolve");
         assert!(
             tally.get() > 1,
@@ -1941,7 +2248,7 @@ pub(crate) mod tests {
     #[test]
     fn metrics_are_fetched_then_served_from_the_metrics_cache() {
         let mut client = client_with(SolidTestTransport);
-        let first = client.metrics(FamilyKey::MONO, 28, FontWeight::Regular);
+        let first = client.metrics(FamilyKey::MONO, 28, FontWeight::REGULAR);
         assert_eq!(
             first.monospace_advance,
             fallback_metrics(28).monospace_advance
@@ -1949,14 +2256,14 @@ pub(crate) mod tests {
         // A second call for the same key must not need the transport at all;
         // swap in a refusing one and confirm the cached value still answers.
         client.channel.transport = Some(Box::new(Refusing));
-        let second = client.metrics(FamilyKey::MONO, 28, FontWeight::Regular);
+        let second = client.metrics(FamilyKey::MONO, 28, FontWeight::REGULAR);
         assert_eq!(first, second);
     }
 
     #[test]
     fn a_proportional_familys_metrics_report_no_monospace_advance() {
         let mut client = client_with(SolidTestTransport);
-        let metrics = client.metrics(INTER, 28, FontWeight::Regular);
+        let metrics = client.metrics(INTER, 28, FontWeight::REGULAR);
         assert_eq!(metrics.monospace_advance, 0);
     }
 
@@ -1965,7 +2272,7 @@ pub(crate) mod tests {
         let mut client = client_with(SolidTestTransport);
         let capacity = u32::try_from(METRICS_CACHE_CAPACITY).expect("a small fixed capacity");
         for height in 8..8 + capacity + 8 {
-            let _ = client.metrics(FamilyKey::MONO, height, FontWeight::Regular);
+            let _ = client.metrics(FamilyKey::MONO, height, FontWeight::REGULAR);
         }
         let occupied = client
             .caches
@@ -2006,9 +2313,9 @@ pub(crate) mod tests {
         let mut client = LockedClient::over(caches, channel);
         // A metrics miss and a glyph miss are the two fetch shapes; both have to
         // reach the service with nothing held.
-        let metrics = client.metrics(FamilyKey::MONO, 20, FontWeight::Regular);
+        let metrics = client.metrics(FamilyKey::MONO, 20, FontWeight::REGULAR);
         let ink = client
-            .with_glyph('A', FamilyKey::MONO, 20, FontWeight::Regular, |glyph| {
+            .with_glyph('A', FamilyKey::MONO, 20, FontWeight::REGULAR, |glyph| {
                 glyph.data.iter().any(|&level| level > 0)
             })
             .expect("the probe serves the test transport's coverage");
@@ -2036,7 +2343,7 @@ pub(crate) mod tests {
             .install_transport(Box::new(SolidTestTransport));
 
         let mut client = LockedClient::over(caches, channel);
-        let _ = client.metrics(FamilyKey::MONO, 20, FontWeight::Regular);
+        let _ = client.metrics(FamilyKey::MONO, 20, FontWeight::REGULAR);
         drop(client);
 
         assert!(caches.try_lock().is_some(), "the caches stayed locked");

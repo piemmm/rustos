@@ -98,7 +98,11 @@ tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # The shared text rasteriser: the trusted file picker renders (and hit-tests)
 # its listing at the theme's font size, so it resolves the `BitmapFont` it
 # hands to `tairix_browse::render`.
-tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["svg"] }
+# The SVG decoder's seam types the chrome asset loaders name when they hand
+# a font provider to `lib/icon` / `lib/cursor`. The decoder itself is
+# reached through those two; only its seam vocabulary is used here.
+tairix-svg = { path = "../../../lib/svg", version = "=0.0.0" }
 # The one authentication surface (plans/NEW-DESKTOP-LOGIN.md G2): the screen
 # lock is that surface with the account fixed to this session's own, so the
 # panel, masked field, wording, and geometry are the engine's and this crate
@@ -154,7 +158,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", features = [
 ] }
 # The trusted picker's host tests draw text, so they inject the shared solid
 # test transport via the `test-util` feature (never a running `fontd`).
-tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = [
+    "test-util",
+    "svg",
+] }
 
 # The package is both the desktop-session glue library (above) and the `Run`
 # entry-point binary of the desktop session service (`plans/DISPLAY.md` D7c):
@@ -207,7 +214,7 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 # On the real target the session reaches the sandboxed font service over the
 # runtime `ipc_call` transport; the base dependency stays host-neutral so host
 # tests inject the mock transport instead.
-tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt", "svg"] }
 # The parser-sandbox seam: untrusted bundle icon bytes (SVG or PNG) are
 # decoded and rasterised in a capability-empty worker process (the session's
 # own binary re-entered in worker mode via the `program` feature), never in

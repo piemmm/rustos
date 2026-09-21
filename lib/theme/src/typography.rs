@@ -152,49 +152,49 @@ const LADDER: [Rung; 9] = [
     Rung {
         role: TextRole::Display,
         percent: 250,
-        weight: FontWeight::Regular,
+        weight: FontWeight::REGULAR,
     },
     Rung {
         role: TextRole::Heading,
         percent: 133,
-        weight: FontWeight::Medium,
+        weight: FontWeight::MEDIUM,
     },
     Rung {
         role: TextRole::ItemTitle,
         percent: 113,
-        weight: FontWeight::Medium,
+        weight: FontWeight::MEDIUM,
     },
     Rung {
         role: TextRole::WindowTitle,
         percent: 100,
-        weight: FontWeight::Medium,
+        weight: FontWeight::MEDIUM,
     },
     Rung {
         role: TextRole::Body,
         percent: 100,
-        weight: FontWeight::Regular,
+        weight: FontWeight::REGULAR,
     },
     Rung {
         role: TextRole::Metric,
         percent: 100,
-        weight: FontWeight::Bold,
+        weight: FontWeight::BOLD,
     },
     Rung {
         role: TextRole::Caption,
         percent: 87,
-        weight: FontWeight::Regular,
+        weight: FontWeight::REGULAR,
     },
     // A header carries its hierarchy on weight, at the size of the text it
     // heads: set smaller than its own rows it reads as a caption instead.
     Rung {
         role: TextRole::SectionHeader,
         percent: 100,
-        weight: FontWeight::Bold,
+        weight: FontWeight::BOLD,
     },
     Rung {
         role: TextRole::Monospace,
         percent: 100,
-        weight: FontWeight::Regular,
+        weight: FontWeight::REGULAR,
     },
 ];
 

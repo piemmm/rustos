@@ -1,7 +1,7 @@
 //! Unit tests for the synthetic-emboldening coverage transform.
 
 use super::{embolden, stroke_subpixels, SUBPIXEL};
-use tairix_abi::font_ipc::FontWeight;
+use tairix_abi::font_ipc::{FontWeight, FONT_MAX_WEIGHT, FONT_MIN_WEIGHT};
 
 /// The rendered em of a `px`-tall glyph, in the 1/256 px unit the stroke
 /// arithmetic is carried in.
@@ -80,31 +80,55 @@ fn a_degenerate_bitmap_is_left_alone_rather_than_indexed_out_of_range() {
 
 #[test]
 fn the_stroke_scales_with_the_rendered_em_size() {
-    let small = stroke_subpixels(em_subpixels(16), FontWeight::Bold);
-    let double = stroke_subpixels(em_subpixels(32), FontWeight::Bold);
+    let small = stroke_subpixels(em_subpixels(16), FontWeight::BOLD);
+    let double = stroke_subpixels(em_subpixels(32), FontWeight::BOLD);
 
     assert_eq!(small, (em_subpixels(16) + 12) / 24);
     assert!(double.abs_diff(2 * small) <= 1);
 }
 
 #[test]
-fn medium_is_half_the_bold_stroke_and_regular_adds_none() {
+fn the_stroke_ramps_linearly_with_the_axis_above_regular() {
     let em = em_subpixels(18);
+    let weight = |axis| FontWeight::new(axis).expect("a weight on the axis");
 
-    assert_eq!(stroke_subpixels(em, FontWeight::Regular), 0);
+    assert_eq!(stroke_subpixels(em, FontWeight::REGULAR), 0);
 
-    let medium = stroke_subpixels(em, FontWeight::Medium);
-    let bold = stroke_subpixels(em, FontWeight::Bold);
-    assert!(medium > 0 && medium < bold);
-    assert!(bold.abs_diff(2 * medium) <= 1);
+    let half = stroke_subpixels(em, weight(550));
+    let bold = stroke_subpixels(em, FontWeight::BOLD);
+    assert!(half > 0 && half < bold);
+    assert!(bold.abs_diff(2 * half) <= 1, "{bold} is not twice {half}");
+
+    // Every step of the axis is resolved, rather than snapping to the
+    // nearest named weight.
+    assert!(stroke_subpixels(em, weight(500)) < stroke_subpixels(em, weight(600)));
+}
+
+#[test]
+fn a_weight_at_or_below_regular_adds_no_stroke() {
+    let em = em_subpixels(18);
+    for axis in [FONT_MIN_WEIGHT, 100, 399, 400] {
+        let weight = FontWeight::new(axis).expect("a weight on the axis");
+        assert_eq!(stroke_subpixels(em, weight), 0, "axis {axis}");
+    }
 }
 
 #[test]
 fn a_degenerate_em_size_yields_no_stroke_rather_than_wrapping() {
-    assert_eq!(stroke_subpixels(0, FontWeight::Bold), 0);
-    assert_eq!(stroke_subpixels(u32::MAX, FontWeight::Regular), 0);
-    assert_eq!(
-        stroke_subpixels(u32::MAX, FontWeight::Bold),
-        (u32::MAX / 24) + 1
+    assert_eq!(stroke_subpixels(0, FontWeight::BOLD), 0);
+    assert_eq!(stroke_subpixels(u32::MAX, FontWeight::REGULAR), 0);
+
+    // Still about a twenty-fourth of the em, and nowhere near a wrap.
+    let widest = stroke_subpixels(u32::MAX, FontWeight::BOLD);
+    assert!(
+        widest > u32::MAX / 25 && widest < u32::MAX / 23,
+        "{widest} is not about a twenty-fourth of the em"
     );
+}
+
+#[test]
+fn a_weight_past_bold_goes_on_thickening() {
+    let em = em_subpixels(18);
+    let heaviest = FontWeight::new(FONT_MAX_WEIGHT).expect("the axis maximum");
+    assert!(stroke_subpixels(em, heaviest) > stroke_subpixels(em, FontWeight::BOLD));
 }

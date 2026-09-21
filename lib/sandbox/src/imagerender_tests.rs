@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use tairix_icon::MAX_ARTWORK_BYTES;
 use tairix_log::{Event, Sink};
 use tairix_raster::Region;
+use tairix_svg::font::NoFonts;
 use tairix_wallpaper::WallpaperFit;
 
 use super::{
@@ -253,7 +254,7 @@ fn rgba_at(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 fn a_full_square_svg_icon_rasterises_to_an_exact_uniform_colour() {
     let mut sandbox = sandbox();
     let svg = svg_square("#3070f0");
-    let pixels = rasterise_icon(&mut sandbox, 4, &svg).expect("rasterises");
+    let pixels = rasterise_icon(&mut sandbox, 4, &svg, &mut NoFonts).expect("rasterises");
     assert_eq!(pixels.len(), 4 * 4 * 4);
     // The polygon covers the entire design grid, so every pixel of the
     // fully opaque surface un-premultiplies back to the exact fill colour.
@@ -272,7 +273,7 @@ fn a_full_square_svg_icon_rasterises_to_an_exact_uniform_colour() {
 fn a_png_icon_reply_is_exactly_side_squared_times_four_bytes() {
     let mut sandbox = sandbox();
     let png = png_with(3, 3, |_, _| [10, 20, 30, 255]);
-    let pixels = rasterise_icon(&mut sandbox, 5, &png).expect("rasterises");
+    let pixels = rasterise_icon(&mut sandbox, 5, &png, &mut NoFonts).expect("rasterises");
     assert_eq!(pixels.len(), 5 * 5 * 4);
 }
 
@@ -289,7 +290,7 @@ fn a_two_by_two_checkerboard_downsamples_to_the_exact_midpoint_average() {
             [255, 255, 255, 255]
         }
     });
-    let pixels = rasterise_icon(&mut sandbox, 1, &png).expect("rasterises");
+    let pixels = rasterise_icon(&mut sandbox, 1, &png, &mut NoFonts).expect("rasterises");
     assert_eq!(pixels, vec![128, 128, 128, 255]);
 }
 
@@ -300,7 +301,7 @@ fn a_wide_source_is_letterboxed_and_centred_with_transparent_padding() {
     // A 4x2 source fitted into a 4x4 square maps 1:1 onto a 4x2 band
     // centred with one fully transparent padding row above and below.
     let png = png_with(4, 2, |_, _| colour);
-    let pixels = rasterise_icon(&mut sandbox, 4, &png).expect("rasterises");
+    let pixels = rasterise_icon(&mut sandbox, 4, &png, &mut NoFonts).expect("rasterises");
     for x in 0..4 {
         assert_eq!(rgba_at(&pixels, 4, x, 0), [0, 0, 0, 0], "padding row 0");
         assert_eq!(rgba_at(&pixels, 4, x, 3), [0, 0, 0, 0], "padding row 3");
@@ -322,7 +323,7 @@ fn a_malformed_svg_document_is_a_typed_refusal() {
             &mut sandbox,
             4,
             b"<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\" fill=\"chartreuseish\"/></svg>"
-        ),
+        , &mut NoFonts),
         Err(IconRasterFailure::Refused(IconRefusal::MalformedImage))
     );
 }
@@ -331,13 +332,13 @@ fn a_malformed_svg_document_is_a_typed_refusal() {
 fn bytes_that_are_neither_png_nor_svg_are_unsupported() {
     let mut sandbox = sandbox();
     assert_eq!(
-        rasterise_icon(&mut sandbox, 4, b"plainly not an icon"),
+        rasterise_icon(&mut sandbox, 4, b"plainly not an icon", &mut NoFonts),
         Err(IconRasterFailure::Refused(IconRefusal::UnsupportedFormat))
     );
     // Non-UTF-8 noise is unsupported the same way (it fails `SvgError::NotUtf8`
     // before any content is even inspected).
     assert_eq!(
-        rasterise_icon(&mut sandbox, 4, &[0xFF, 0xFE, 0x00, 0x01]),
+        rasterise_icon(&mut sandbox, 4, &[0xFF, 0xFE, 0x00, 0x01], &mut NoFonts),
         Err(IconRasterFailure::Refused(IconRefusal::UnsupportedFormat))
     );
 }
@@ -349,7 +350,7 @@ fn a_corrupted_png_is_a_typed_refusal() {
     let last = png.len() - 1;
     png[last] ^= 0xFF; // corrupt the trailing IEND CRC
     assert_eq!(
-        rasterise_icon(&mut sandbox, 4, &png),
+        rasterise_icon(&mut sandbox, 4, &png, &mut NoFonts),
         Err(IconRasterFailure::Refused(IconRefusal::MalformedImage))
     );
 }
@@ -358,11 +359,16 @@ fn a_corrupted_png_is_a_typed_refusal() {
 fn a_zero_or_oversize_side_is_refused_before_any_request() {
     let mut sandbox = sandbox();
     assert_eq!(
-        rasterise_icon(&mut sandbox, 0, &svg_square("#000000")),
+        rasterise_icon(&mut sandbox, 0, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest))
     );
     assert_eq!(
-        rasterise_icon(&mut sandbox, MAX_ICON_SIDE + 1, &svg_square("#000000")),
+        rasterise_icon(
+            &mut sandbox,
+            MAX_ICON_SIDE + 1,
+            &svg_square("#000000"),
+            &mut NoFonts
+        ),
         Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest))
     );
 }
@@ -372,7 +378,7 @@ fn an_oversize_icon_is_refused_locally_before_any_request() {
     let mut sandbox = sandbox();
     let oversize = vec![0u8; MAX_ARTWORK_BYTES + 1];
     assert_eq!(
-        rasterise_icon(&mut sandbox, 4, &oversize),
+        rasterise_icon(&mut sandbox, 4, &oversize, &mut NoFonts),
         Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest))
     );
 }
@@ -439,7 +445,7 @@ fn evil_sandbox(
 fn a_reply_with_an_unknown_tag_is_refused() {
     let mut sandbox = evil_sandbox(vec![0xEE]);
     assert_eq!(
-        rasterise_icon(&mut sandbox, 2, &svg_square("#000000")),
+        rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
     );
 }
@@ -452,7 +458,7 @@ fn a_reply_with_the_wrong_echoed_side_is_refused() {
     w.bytes(&[0u8; 2 * 2 * 4]);
     let mut sandbox = evil_sandbox(w.finish());
     assert_eq!(
-        rasterise_icon(&mut sandbox, 2, &svg_square("#000000")),
+        rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
     );
 }
@@ -465,7 +471,7 @@ fn a_reply_with_the_wrong_pixel_length_is_refused() {
     w.bytes(&[0u8; 3]); // not 2*2*4
     let mut sandbox = evil_sandbox(w.finish());
     assert_eq!(
-        rasterise_icon(&mut sandbox, 2, &svg_square("#000000")),
+        rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
     );
 }
@@ -480,7 +486,7 @@ fn trailing_bytes_after_an_otherwise_well_formed_reply_are_refused() {
     reply.push(0xAB);
     let mut sandbox = evil_sandbox(reply);
     assert_eq!(
-        rasterise_icon(&mut sandbox, 2, &svg_square("#000000")),
+        rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
     );
 }
@@ -492,7 +498,7 @@ fn an_unknown_refusal_code_in_an_error_reply_is_refused() {
     w.u8(0xFF);
     let mut sandbox = evil_sandbox(w.finish());
     assert_eq!(
-        rasterise_icon(&mut sandbox, 2, &svg_square("#000000")),
+        rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
     );
 }
@@ -939,7 +945,8 @@ fn the_icon_op_still_round_trips_after_a_wallpaper_sequence() {
     let png = solid_png(2, 2, WALLPAPER_COLOUR);
     render_wallpaper(&mut sandbox, 4, 4, WallpaperFit::Fill, &png).expect("wallpaper renders");
     let svg = svg_square("#3070f0");
-    let pixels = rasterise_icon(&mut sandbox, 4, &svg).expect("icon still rasterises");
+    let pixels =
+        rasterise_icon(&mut sandbox, 4, &svg, &mut NoFonts).expect("icon still rasterises");
     assert_eq!(pixels.len(), 4 * 4 * 4);
 }
 
@@ -1246,7 +1253,7 @@ fn open(
     bytes: &[u8],
 ) -> Result<super::ViewDocument, super::ViewFailure> {
     super::send_document(sandbox, bytes).map_err(super::ViewFailure::Document)?;
-    super::open_view(sandbox, None)
+    super::open_view(sandbox, None, &mut NoFonts)
 }
 
 #[test]
@@ -1441,7 +1448,7 @@ fn a_format_with_no_signature_is_reached_by_being_named() {
     let png = png_with(2, 2, |_, _| [1, 1, 1, 255]);
     super::send_document(&mut sandbox, &png).expect("the document uploads");
     assert_eq!(
-        super::open_view(&mut sandbox, Some(super::ViewFormat::Sprite)),
+        super::open_view(&mut sandbox, Some(super::ViewFormat::Sprite), &mut NoFonts),
         Err(super::ViewFailure::Refused(
             super::ViewRefusal::MalformedDocument
         )),
@@ -1472,7 +1479,7 @@ fn releasing_a_view_drops_the_document_with_it() {
         Err(super::ViewFailure::Refused(super::ViewRefusal::NotOpen))
     );
     assert_eq!(
-        super::open_view(&mut sandbox, None),
+        super::open_view(&mut sandbox, None, &mut NoFonts),
         Err(super::ViewFailure::Refused(super::ViewRefusal::NoDocument)),
         "the released document is gone, not left to be reopened"
     );
@@ -1700,7 +1707,7 @@ fn a_magnification_no_buffer_could_hold_still_renders_its_window() {
 fn a_drawing_is_reached_by_being_named_as_well_as_by_having_no_signature() {
     let mut sandbox = sandbox();
     super::send_document(&mut sandbox, &svg_half(6, 4)).expect("the document uploads");
-    let document = super::open_view(&mut sandbox, Some(super::ViewFormat::Svg))
+    let document = super::open_view(&mut sandbox, Some(super::ViewFormat::Svg), &mut NoFonts)
         .expect("naming the vector format opens the drawing");
     assert_eq!(
         (document.format, document.width, document.height),
@@ -1714,7 +1721,7 @@ fn naming_the_vector_format_for_a_raster_file_is_unsupported_not_malformed() {
     super::send_document(&mut sandbox, &png_with(2, 2, |_, _| [1, 2, 3, 255]))
         .expect("the document uploads");
     assert_eq!(
-        super::open_view(&mut sandbox, Some(super::ViewFormat::Svg)),
+        super::open_view(&mut sandbox, Some(super::ViewFormat::Svg), &mut NoFonts),
         Err(super::ViewFailure::Refused(
             super::ViewRefusal::UnsupportedFormat
         )),
@@ -2083,7 +2090,7 @@ fn drive_tampered(
 ) -> Result<(), super::ViewFailure> {
     let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
     super::send_document(sandbox, &png).map_err(super::ViewFailure::Document)?;
-    super::open_view(sandbox, None)?;
+    super::open_view(sandbox, None, &mut NoFonts)?;
     super::select_page(sandbox, 0)?;
     let mut out = vec![0u8; 2 * 2 * 4];
     super::render_page(sandbox, (2, 2), whole(2, 2), &mut out)

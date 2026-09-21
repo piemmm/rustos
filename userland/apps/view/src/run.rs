@@ -317,7 +317,14 @@ mod program {
         // is nothing to act on.
         let _ = close_view(sandbox);
         let length = upload(sandbox, &source.handle)?;
-        let declared = open_view(sandbox, source.format).map_err(Refusal::Failed)?;
+        // The viewer holds a font client, so a drawing carrying `<text>`
+        // is supplied its glyphs across the sandbox rather than refused.
+        let declared = open_view(
+            sandbox,
+            source.format,
+            &mut tairix_font::ServiceFonts::new(),
+        )
+        .map_err(Refusal::Failed)?;
         Ok((declared, source.name.clone(), length))
     }
 

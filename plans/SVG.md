@@ -38,9 +38,9 @@ opens a drawing as a document.
 | S20 | `<marker>`: `marker-start` / `-mid` / `-end`, and the element-visit bound their instancing needs | done |
 | S21 | `vector-effect="non-scaling-stroke"`: the outline built in the host space, and what stands in for that space here | done |
 | S22 | Glyph outlines out of `lib/fontface`: a public contour API, so text reaches this crate as geometry and never as pixels | done |
-| S23 | The font seam: resolving `font-family`/`font-weight`/`font-style`/`font-stretch` to a face at decode time, injected and capability-scoped | planned |
-| S24 | `<text>` and `<tspan>`: the `x`/`y`/`dx`/`dy`/`rotate` lists, `text-anchor`, white-space and `xml:space`, `letter-spacing`/`word-spacing`, `textLength`/`lengthAdjust` | planned |
-| S25 | The text property cascade: the `font-*` family, the baselines (`dominant-baseline`, `alignment-baseline`, `baseline-shift`), `text-decoration` | planned |
+| S23 | The font seam: resolving `font-family`/`font-weight`/`font-style`/`font-stretch` to a face at decode time, injected and capability-scoped | done |
+| S24 | `<text>` and `<tspan>`: the `x`/`y`/`dx`/`dy`/`rotate` lists, `text-anchor`, white-space and `xml:space`, `letter-spacing`/`word-spacing`, `textLength`/`lengthAdjust` | done |
+| S25 | The text property cascade beyond the `font-*` family: the baselines (`dominant-baseline`, `alignment-baseline`, `baseline-shift`), `text-decoration` | planned |
 | S26 | `<textPath>`: glyphs laid along a path, `startOffset`, `method`, `spacing`, `side` | planned |
 | S27 | Bidirectional text and shaping: UAX#9, `direction`/`unicode-bidi`, OpenType `GSUB`/`GPOS`, `writing-mode` and vertical text | planned |
 | S28 | The SVG 1.1 text leftovers: `<tref>`, and SVG fonts (`<font>`, `<glyph>`, `<altGlyph>`) | planned |
@@ -66,8 +66,9 @@ opens a drawing as a document.
 | S48 | The SVG DOM binding: the document/element/attribute/style interfaces, and the mutation path back into the artwork tree | planned |
 | S49 | Events and timers: `load`/pointer/keyboard events with the hit testing they need, `setTimeout`/`setInterval`/`requestAnimationFrame` | planned |
 
-S1–S22 are `done` and none is half-built. S23–S44 are the rest of SVG, which
-this crate must draw and does not yet: text, embedded images, filters,
+S1–S24 are `done` and none is half-built. S25–S44 are the rest of SVG, which
+this crate must draw and does not yet: the remaining text surface, embedded
+images, filters,
 animation, the CSS surface the cascade still drops, and the reference
 resolution that reaches outside the document. S45–S49 follow from the
 decisions recorded under [Decisions taken](#decisions-taken).
@@ -487,80 +488,126 @@ this inverts that order and needs both spaces at once.
 
 ## Text
 
-Text is the largest missing piece and the one that needs a capability from
-outside this crate before any of it can be written.
+Latin, Greek and Cyrillic text draws (S23, S24). What remains is the
+property surface beyond the `font-*` family (S25), `<textPath>` (S26), and
+the reordering and shaping the other scripts need (S27–S28).
 
-- **A glyph is geometry, never pixels.** SVG text is filled, stroked,
-  gradient-painted, clipped, masked and transformed exactly as a `<path>` is,
-  and an `SvgImage` is resolution-independent. So a glyph must arrive as
-  contours and join the one geometry currency — `SubPath`s through the single
-  flattening step — not as a rasterised cell. Anything else would fix a
-  resolution at decode time and put text on a second rasterisation path, both
-  of which this crate exists to avoid.
-- **`lib/fontface` exposes that (S22, done):
-  `Face::glyph_outline(glyph) -> Vec<Contour>`.** A `Contour` is a start point
-  and an ordered run of `OutlineSegment::{Line, Quadratic}` closing back on
-  it. What it settled, because S24 builds directly on each:
-  - **Quadratics come through whole, and there is no tolerance parameter.**
-    A caller-supplied tolerance would put a second flattening step in the
-    crate; a fixed chord count would facet a glyph as the asset is drawn
-    larger, the defect already rejected for marker tangents and for the
-    design-grid tolerance. `lib/svg` instead flattens through its own
-    `flatten_quadratic`, at the tolerance the *placement* resolves — the same
-    single step every other curve in the document takes, so a glyph is
-    subdivided exactly as a `<path>` of the same shape would be. TrueType
-    outlines are quadratic throughout, so nothing else is needed.
-  - **Font units, y up, nothing pre-applied.** The y-flip and the
-    `font-size / units_per_em` scale stay with the caller, because the two
-    consumers place a glyph differently: the rasteriser flips about a baseline
-    row in a pixel cell, S24 flips about the baseline in user units as part of
-    the text transform it is building anyway. `Face::units_per_em` was already
-    public.
-  - **Contours are closed, and winding is the fill.** TrueType fills non-zero,
-    so a counter is a contour wound against the one enclosing it, not a
-    separate shape — S24 emits one `Layer` per glyph run with
-    `FillRule::NonZero` and all contours together, exactly as a multi-contour
-    `<path>` does. `lib/fontface` names no `FillRule`; it states the
-    convention and `lib/svg` names its own type.
-  - **One walk, genuinely shared.** The decode is a single traversal of `glyf`
-    over a private sink trait, with the rasteriser and the outline API as its
-    two implementations — not a second decoder beside the old one. Measured:
-    the generated console atlas is byte-identical, and rasterising D2Coding's
-    19,966 mapped glyphs costs 0.4641 s through the shared walk against
-    0.4628 s before it, so the sharing is free and adds no per-glyph
-    allocation to the atlas path.
-  - **The bounds are charged across the whole walk.** Outline points and
-    composite component records are each held to a total per glyph, not a cap
-    per nesting level — a per-level cap multiplies with depth, and the walk
-    could previously expand a malformed composite without end. The existing
-    composite-depth bound stays. These are validation bounds on a hostile
-    face, not capacities.
-- **The font is resolved through an injected seam (S23), never ambient.** This
-  crate is `no_std` and has no file access; the faces live in `/System/Fonts`
-  behind the font service (`plans/FONT-SERVICE.md`). `decode` therefore takes a
-  font provider the caller supplies, capability-scoped like the help engine's
-  read seam, and a caller that supplies none decodes documents without text
-  rather than gaining ambient authority. A document naming a family the
-  provider cannot furnish falls back through the generic families and finally
-  fails closed — it must not silently draw nothing, because absent lettering is
-  a wrong picture, not a missing decoration.
-- **Layout is the part that is genuinely hard.** S24 is the positioning model
-  (per-character `x`/`y`/`dx`/`dy`/`rotate` lists, anchoring, white-space
-  collapsing under `xml:space`, `textLength` adjustment). S27 is bidi and
-  shaping: UAX#9 reordering and OpenType `GSUB`/`GPOS`, neither of which
-  `lib/fontface` has today. Latin text is correct without S27; Arabic, Hebrew,
-  and the Indic and CJK scripts are not, so S27 is what makes the claim "full"
-  true rather than "full for scripts that need no shaping".
-- **New bounds.** Glyph count per document, total outline points (against the
-  existing vertex budget), `<tspan>` nesting, and the resolved text length —
-  all fixed containment bounds, sized like the rest.
-- **The order is S22 (done), then S23–S26, then S27.** The outline API came
-  first because nothing else could start without it; Latin, Greek and Cyrillic
-  text then works correctly through S26, and S27 adds the scripts that need
-  reordering and shaping. Each stage is complete in itself rather than a
-  thinner version of the next — a script that needs shaping is not
-  half-drawn before S27, it is skipped like any other element this decoder
-  cannot yet draw.
+### A glyph is geometry, never pixels
+
+SVG text is filled, stroked, gradient-painted, clipped, masked and
+transformed exactly as a `<path>` is, and an `SvgImage` is
+resolution-independent. So a glyph arrives as contours in font units and
+joins the one geometry currency: `lib/svg` flattens the quadratics through
+its own `flatten_quadratic` at the tolerance the *placement* resolves, the
+same single step every other curve takes, so a glyph subdivides exactly as a
+`<path>` of the same shape. A rasterised cell would fix a resolution at
+decode time and put text on a second rasterisation path.
+
+`lib/fontface`'s `Face::glyph_outline` (S22) is where that geometry comes
+from, and `plans/FONT-SERVICE.md` §3.3's open question is closed: it reaches
+a consumer as a **contour reply kind on `FONT_ENDPOINT`**
+(`FontRequest::Outlines`), never as face bytes — handing over a face would
+put an untrusted TrueType parser back into every consumer, which is the
+defect the font service exists to remove.
+
+- **No pixel height on the request.** A drawing has no resolution, so the
+  field must be zero and a frame carrying one is refused. Coordinates are
+  26.6 fixed-point font units, which makes NaN and infinity
+  *unrepresentable* rather than merely checked for.
+- **The resolved face's em and its synthesis travel per record**, not per
+  batch, because a per-scalar fallback crosses faces: a family's primary and
+  its Chinese companion need share neither an em nor a `wght` axis. The
+  batch header carries the *requested family's primary* face geometry, which
+  is what a run's baseline and line box are measured in.
+- **What the face cannot furnish is stated, not substituted.** A face with
+  no `wght` axis reports an em-relative bold stroke; one that cannot lean
+  reports an oblique shear. The caller completes it with the crate's own
+  stroker and one shear folded into the glyph transform, so there is no
+  second thickening or slanting implementation. Width is never synthesised:
+  stretching letterforms is a distortion, not a width.
+- **The byte budget did not move.** A worst-case outline reply is 163,876
+  bytes against the coverage reply's 524,312, so no receive buffer grew and
+  no existing bound changed. A reply answers a prefix of the run under the
+  one shared fill rule both batch kinds obey.
+
+### The seam is injected, and the caller decides what text can do
+
+`decode(bytes, viewport, provider)`. `lib/svg` gains no `lib/abi` edge and
+no authority: the provider is a pure trait modelled on the help engine's
+read seam. `NoFonts` furnishes nothing, so a compositor asset path decodes
+drawings without text rather than acquiring the authority to draw them;
+`tairix_font::ServiceFonts` is the one adapter to the endpoint.
+
+The `font-family` *list* is walked by the decoder, since that is CSS
+semantics; the **generic** ladder lives at the service, which is the thing
+that knows the store, and a family declares which generic it answers for in
+its own `FontFamily` manifest. A family nothing can furnish **fails the
+document closed** rather than drawing a picture with its lettering missing:
+that is the one place this crate refuses instead of skipping, and it is why
+the [Open question](#open-question) below is now about decorations alone.
+
+### The sandbox supplies glyphs without gaining a capability
+
+`view.app` decodes inside the §19.5 parser sandbox, which holds two pipe
+ends and nothing else, so it cannot call the font endpoint — and is not
+given the ability to. A **two-phase exchange** over the pipes it already has
+supplies the glyphs: the worker decodes once against placeholder geometry,
+recording every face and scalar the table it holds cannot answer; the host,
+a GUI process that does hold a font client, fetches exactly that and sends
+it back; the worker decodes again. It terminates in two rounds by
+construction, because glyph geometry cannot change which elements the walk
+visits or which scalars the text holds. A document with no text records
+nothing and costs one round.
+
+### Layout
+
+A run of one style emits **one `Layer`** with `FillRule::NonZero` and all
+its glyphs' contours together — the TrueType rule S22 settled, so a counter
+is a contour wound against the one enclosing it. White space is collapsed
+across the whole `<text>` before any positioning, because
+`<text>a <tspan> b</tspan></text>` is `a b` and no per-element pass can see
+that space. An element's `x`/`y`/`dx`/`dy`/`rotate` lists address the
+characters its *descendants* contributed as well as its own, a descendant's
+own value winning; an absolute position begins the chunk `text-anchor`
+shifts.
+
+`textLength` spreads its difference across the gaps, or scales the glyphs
+too under `spacingAndGlyphs`. A `font-size` is computed before every other
+length in the same cascade, which is what lets `stroke-width: 0.1em` mean
+the size the element ends up set in.
+
+### Bounds
+
+Glyphs per document, `<tspan>` nesting, the resolved length of one `<text>`,
+the runs a document may emit, and — because a provider may be a live service
+across an IPC boundary — the *requests* one document may make of it, so a
+hostile document cannot turn one decode into thousands of round trips. The
+outline points a glyph contributes are charged against the same total-vertex
+budget a `<path>` spends. All fixed containment bounds.
+
+### Outstanding verification
+
+Every layer of the text path is covered by host tests — the wire form and
+its refusals, the service's resolution and synthesis, the layout against the
+SVG 1.1 positioning rules, the two-round sandbox exchange, and the decoder's
+own `<text>` drawing — and the `fuzz_svg` harness drives text through a
+provider that answers. What is **not** yet covered is one end-to-end QEMU
+vertical: `view.app` opening a drawing that carries text, so the sandboxed
+two-phase exchange runs against a live `fontd` rather than against a host
+double on either side. The build-time icon verification already drives the
+real service (through `tools/xtask`'s `host_fonts`), so the service and the
+decoder do meet in a test; what the vertical would add is the *sandbox pipe*
+between them under a real kernel. It is the one item of S23/S24 left to
+land.
+
+### What is left
+
+S25 is the rest of the text property cascade: the baselines
+(`dominant-baseline`, `alignment-baseline`, `baseline-shift`) and
+`text-decoration`. S26 is `<textPath>`. S27 is bidi and shaping — UAX#9
+reordering and OpenType `GSUB`/`GPOS`, neither of which `lib/fontface` has —
+so Arabic, Hebrew, and the Indic and CJK scripts are *skipped* like any
+other element this decoder cannot yet draw rather than half-drawn.
 
 ## Embedded images
 
@@ -677,15 +724,14 @@ it is the behaviour the desktop has today. Whether the drawable-element case
 should instead fail the document closed is recorded as an open item in
 `plans/ICONS.md`; it is a deliberate decision to make, not an oversight.
 
-While S23–S44 are outstanding the question is live rather than theoretical:
-skipping currently means a document with text draws no lettering, and an
-asset whose meaning *is* its lettering then renders as a wrong picture with
-no signal. That argues for distinguishing the two cases rather than choosing
-one globally — a missing decoration is safely skipped, where missing content
-is not — and the distinction is only worth encoding once there is something
-behind it. As each item lands the set shrinks; the answer should be taken
-against the set that remains, not the set that happens to be unimplemented
-today.
+Text answered half of it. Lettering nothing can furnish refuses the document
+(S23), because absent lettering is missing *content* rather than a missing
+decoration — which is the distinction the question was really about, now
+encoded in one place rather than chosen globally. What remains outstanding
+is the decoration half: an unsupported filter, an embedded image, or an
+animation still skips, and whether any of those should refuse instead should
+be taken against the set that remains rather than the set that happens to be
+unimplemented today.
 
 Patterns drew the distinction that answers part of the question: a reference
 naming a server the document does not define takes its fallback colour, while

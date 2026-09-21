@@ -20,7 +20,7 @@ tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # picture is turned without resampling it.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # Shared text rasterisation for the info panel and the status line.
-tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["svg"] }
 # The shared Reactive Alloy controls the viewer composes: the toolbar of icon
 # buttons, the two scrollbars, the zoom slider, and the info panel's fact
 # list. The viewer paints no control of its own.
@@ -60,7 +60,7 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # wrappers, and the shared worker-thread deferral desk the sandbox session
 # runs on.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
-tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt", "svg"] }
 # The memory-pressure band the font client's glyph cache obeys.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 # The bundle's own `Help/` tree, read through the capability-scoped seam for
@@ -73,7 +73,7 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features =
 [dev-dependencies]
 # The engine's host tests draw text, so they inject the shared solid test
 # transport rather than reaching a running `fontd`.
-tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util", "svg"] }
 
 [lints]
 workspace = true

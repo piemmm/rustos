@@ -90,7 +90,7 @@ fn char_count(text: &str) -> u64 {
 fn reference_width(client: &mut LocalClient, family: FamilyKey, text: &str) -> u32 {
     text.chars().fold(0u32, |width, scalar| {
         let advance = client
-            .with_glyph(scalar, family, HEIGHT, FontWeight::Regular, |glyph| {
+            .with_glyph(scalar, family, HEIGHT, FontWeight::REGULAR, |glyph| {
                 glyph.advance
             })
             .unwrap_or(0);
@@ -109,7 +109,7 @@ fn reference_truncate<'a>(
     let mut end = 0usize;
     for ch in text.chars() {
         let advance = client
-            .with_glyph(ch, family, HEIGHT, FontWeight::Regular, |glyph| {
+            .with_glyph(ch, family, HEIGHT, FontWeight::REGULAR, |glyph| {
                 glyph.advance
             })
             .unwrap_or(0);
@@ -434,29 +434,29 @@ fn an_empty_string_measures_to_nothing_and_an_unresolved_advance_is_reported() {
 
 #[test]
 fn a_measurement_key_separates_face_scale_weight_and_text() {
-    let base = measure::measure_key(NOTO, HEIGHT, FontWeight::Regular, "hello");
+    let base = measure::measure_key(NOTO, HEIGHT, FontWeight::REGULAR, "hello");
     assert_eq!(
         base,
-        measure::measure_key(NOTO, HEIGHT, FontWeight::Regular, "hello")
+        measure::measure_key(NOTO, HEIGHT, FontWeight::REGULAR, "hello")
     );
     assert_ne!(
         base,
-        measure::measure_key(INTER, HEIGHT, FontWeight::Regular, "hello")
+        measure::measure_key(INTER, HEIGHT, FontWeight::REGULAR, "hello")
     );
     assert_ne!(
         base,
-        measure::measure_key(NOTO, HEIGHT + 1, FontWeight::Regular, "hello")
+        measure::measure_key(NOTO, HEIGHT + 1, FontWeight::REGULAR, "hello")
     );
     assert_ne!(
         base,
-        measure::measure_key(NOTO, HEIGHT, FontWeight::Bold, "hello")
+        measure::measure_key(NOTO, HEIGHT, FontWeight::BOLD, "hello")
     );
     assert_ne!(
         base,
-        measure::measure_key(NOTO, HEIGHT, FontWeight::Regular, "hellp")
+        measure::measure_key(NOTO, HEIGHT, FontWeight::REGULAR, "hellp")
     );
     assert_ne!(
         base,
-        measure::measure_key(NOTO, HEIGHT, FontWeight::Regular, "hell")
+        measure::measure_key(NOTO, HEIGHT, FontWeight::REGULAR, "hell")
     );
 }

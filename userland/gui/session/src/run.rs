@@ -4266,7 +4266,13 @@ mod program {
 
     impl IconRasteriser for SandboxRasteriser {
         fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<alloc::vec::Vec<u8>> {
-            rasterise_icon(&mut self.sandbox.borrow_mut(), side, icon).ok()
+            rasterise_icon(
+                &mut self.sandbox.borrow_mut(),
+                side,
+                icon,
+                &mut tairix_font::ServiceFonts::new(),
+            )
+            .ok()
         }
     }
 
@@ -4280,7 +4286,13 @@ mod program {
 
     impl IconRasteriser for OwnedSandbox {
         fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<alloc::vec::Vec<u8>> {
-            rasterise_icon(&mut self.0, side, icon).ok()
+            rasterise_icon(
+                &mut self.0,
+                side,
+                icon,
+                &mut tairix_font::ServiceFonts::new(),
+            )
+            .ok()
         }
     }
 
@@ -6652,7 +6664,11 @@ mod program {
         );
         sets.into_iter()
             .map(|set| {
-                let theme = shell.session().load_cursors(&mut VfsFileReader, set);
+                let theme = shell.session().load_cursors(
+                    &mut VfsFileReader,
+                    set,
+                    &mut tairix_font::ServiceFonts::new(),
+                );
                 (set, theme)
             })
             .collect()

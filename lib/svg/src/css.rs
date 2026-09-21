@@ -22,6 +22,7 @@
 //! whose property *is* understood but whose value is malformed is still an
 //! error, exactly as a malformed presentation attribute is.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 use crate::error::SvgError;
@@ -244,19 +245,45 @@ pub struct Stylesheet<'a> {
     rules: Vec<Rule<'a>>,
 }
 
+/// The text of every `<style>` element in the tree that applies to a
+/// rendered asset, in document order.
+///
+/// Gathered ahead of [`Stylesheet::collect`] because a sheet split across
+/// several character-data runs (a CDATA section with indentation either
+/// side) must be joined before it is parsed, and the joined text has to
+/// outlive the rules that borrow from it. A sheet of one run is borrowed
+/// straight from the document, which is every stylesheet in practice.
+///
+/// A sheet whose `type` is neither absent nor `text/css`, or whose `media`
+/// names something other than every medium or the screen, is not for a
+/// rendered asset and is skipped.
+#[must_use]
+pub fn sheet_texts<'a>(root: &Element<'a>) -> Vec<Cow<'a, str>> {
+    let mut sheets = Vec::new();
+    gather_sheets(root, &mut sheets);
+    sheets
+}
+
+fn gather_sheets<'a>(node: &Element<'a>, sheets: &mut Vec<Cow<'a, str>>) {
+    if node.name == "style" && applies_to_screen(node) {
+        sheets.push(node.text());
+    }
+    for child in node.children() {
+        gather_sheets(child, sheets);
+    }
+}
+
 impl<'a> Stylesheet<'a> {
-    /// Parse every `<style>` element in the tree, in document order.
-    ///
-    /// A sheet whose `type` is neither absent nor `text/css`, or whose
-    /// `media` names something other than every medium or the screen, is not
-    /// for a rendered asset and is skipped.
+    /// Parse the document's gathered `<style>` texts, in document order.
     ///
     /// # Errors
     /// [`SvgError::TooComplex`] once the sheets exceed the rule or
     /// declaration bound.
-    pub fn collect(root: &'a Element<'a>) -> Result<Self, SvgError> {
+    pub fn collect(sheets: &'a [Cow<'a, str>]) -> Result<Self, SvgError> {
         let mut sheet = Self::default();
-        sheet.gather(root)?;
+        for text in sheets {
+            sheet.parse(text)?;
+        }
         Ok(sheet)
     }
 
@@ -265,16 +292,6 @@ impl<'a> Stylesheet<'a> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
-    }
-
-    fn gather(&mut self, node: &'a Element<'a>) -> Result<(), SvgError> {
-        if node.name == "style" && applies_to_screen(node) {
-            self.parse(&node.text)?;
-        }
-        for child in &node.children {
-            self.gather(child)?;
-        }
-        Ok(())
     }
 
     /// Parse one sheet's text into rules, dropping what the subset does not

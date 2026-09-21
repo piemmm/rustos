@@ -498,31 +498,77 @@ other vector asset in the tree fills through. Two consequences, both open:
 The work is its own change: the fitted-outline path needs a design and test
 pass of its own, and must keep grid fitting's whole-pixel stems intact.
 
-## 3.3 Open — the SVG text seam wants outlines, and the protocol serves coverage
+## 3.3 Done — the endpoint serves outlines as well as coverage
 
-`lib/fontface` now exposes `Face::glyph_outline`: a glyph as closed contours
-in font units with its quadratics intact, decoded by the same `glyf` walk the
-rasteriser uses (`plans/SVG.md` S22). `lib/svg` needs that rather than
-coverage, because its text is filled, stroked, clipped and transformed like a
-`<path>` and the picture it produces has no resolution.
+`FONT_ENDPOINT` now answers geometry: `FontRequest::Outlines` hands back a
+bounded run of glyphs as closed contours in the resolved face's own font
+units, decoded by the same `glyf` walk the rasteriser uses. `lib/svg`'s text
+(`plans/SVG.md` S23/S24) draws through it.
 
-`FONT_ENDPOINT` serves coverage bitmaps only, so the seam `plans/SVG.md` S23
-designs has a decision this plan should record rather than let S23 re-derive:
+**Handing the caller the face bytes was refused.** It would put an untrusted
+TrueType parser back into every consumer — the §19.5 defect this plan exists
+to remove — and re-duplicate a parse that already has one home (§2.2). The
+two objections this section raised against a contour reply both answered
+with measurement rather than a compromise:
 
-- **A contour reply kind on `FONT_ENDPOINT`** keeps the parser in the one
-  sandbox, which is the whole point of the service — but an outline is far
-  larger than a cell of coverage and varies per glyph, so the byte budget and
-  the batch shape (§2) both need restating for it, and a decoder asking per
-  glyph pays a round trip where the coverage path pays one per *run*.
-- **Handing the caller the face bytes** to outline in its own process would
-  put an untrusted TrueType parser back into every consumer — exactly the
-  §19.5 defect this plan exists to remove. It is not an option for a document
-  a user opened; it is arguable only for the system's own committed assets,
-  and even then it re-duplicates the parse.
+- **Byte budget.** A worst-case record is
+  `20 + 12·contours + 20·segments` with `contours + segments ≤
+  FONT_MAX_OUTLINE_POINTS` (8192), so `FONT_MAX_OUTLINE_REPLY` is 163,876 B —
+  under a third of the existing `FONT_MAX_GLYPH_REPLY` (524,312). No client
+  receive buffer grew and no existing bound moved (§24.4).
+- **Round trips.** The outline op is per **run**, reusing the coverage
+  path's prefix-batch rule verbatim: one round trip per run, not per glyph.
+  The fill rule itself is now factored out of `GlyphBatchWriter`, so the two
+  batch kinds cannot come to disagree about what a well-formed prefix reply
+  looks like.
 
-Whichever is chosen, the bounds `glyph_outline` charges (outline points and
-composite component records, both across the whole walk) are the service's
-existing fail-closed behaviour and need no protocol support.
+Load-bearing facts a future reader needs:
+
+- **No pixel height on the request.** A drawing has no resolution, so the
+  height field is the one that operation does not use and must be zero.
+  Coordinates are **26.6 fixed-point font units**, which makes NaN and
+  infinity unrepresentable rather than merely checked for.
+- **`units_per_em` and the synthesis travel per *record*.** A per-scalar
+  fallback crosses faces, and two faces of one family need share neither an
+  em nor a `wght` axis — which the coverage protocol hides by answering in
+  pixels and an outline protocol cannot. The batch *header* carries the
+  requested family's primary-face em, ascent, descent and line gap, which is
+  what a run's baseline and line box are measured in.
+- **`Synthesis` states what the face could not furnish**, so the caller
+  completes it exactly rather than being served an upright regular in
+  silence: an em-relative bold stroke width and an oblique shear (the shear
+  rather than the angle, because a shear is what a caller applies and an
+  angle is what every caller would then have to convert identically). The
+  bold figure comes from the *same* ramp `embolden` applies to coverage, so
+  a bold drawn as pixels and one drawn as geometry are the same weight.
+- **`FontWeight` is a number, not a keyword set.** Every variable face
+  carries `wght 100..900` and CSS writes `font-weight: 250`; rendering that
+  as 400 is a wrong picture. It is a validated newtype over `1..=1000` with
+  `REGULAR`/`MEDIUM`/`BOLD` associated constants — one type, one wire field.
+  `FontStyle` and `FontStretch` join it on the outline request alone: the
+  coverage path draws neither, so a frame carrying one there is refused.
+  `embolden`'s synthetic stroke is now a linear ramp in the axis distance
+  above Regular reaching em/24 at Bold, rather than a table of three.
+- **A generic family resolves at the service**, which is the thing that
+  knows the store: an installed family of that exact key first, then the
+  first family *claiming* that generic in its own `FontFamily` manifest
+  (`generic = serif` beside `kind`), then the first claiming `sans-serif`,
+  then the first selectable family at all. A concrete name the store does
+  not hold is **not** substituted, so a document can try the next family it
+  listed. A fallback-role family claiming a generic is a malformed manifest,
+  since a user never selects one.
+- **Client** (`lib/font`). `outline_run` is the fetch, memoised per
+  `(family, scalar, weight, style, stretch)` in an outline cache declared
+  beside the coverage one (§3.1's classification, its own budget from the
+  same RAM-derived ceiling) and trimmed by the same `trim_glyph_cache`.
+  `ServiceFonts` (feature `svg`) is the one adapter between `lib/svg`'s seam
+  and this endpoint; a face is selected by asking for one probe glyph, whose
+  reply header *is* the family's font-unit geometry.
+- **The build verifies icons through this same service.** `tools/xtask`'s
+  `host_fonts` drives the real `FontService` over the committed
+  `lib/font/assets/` tree through the `FontStore`/`FaceLoad` seams it
+  already has for host testing, so an icon the build admits is one the
+  running desktop can draw.
 
 ## 4. Cross-references
 
@@ -536,8 +582,9 @@ existing fail-closed behaviour and need no protocol support.
   readiness-condition on-demand activation, deleting the `login` start path.
 - `plans/DISPLAY.md`, `plans/COMPOSITOR-WORK.md`, `plans/GUI-CONTROLS-DESIGN.md`
   — the text-drawing consumers of the font client.
-- `plans/SVG.md` — S22 (the glyph-outline API, done) and S23 (the font seam
-  SVG text resolves a face through), the open interaction being §3.3.
+- `plans/SVG.md` — S22 (the glyph-outline API), S23 (the font seam SVG text
+  resolves a face through) and S24 (the layout), all done; §3.3 records the
+  protocol decision they rest on.
 - `lib/abi/src/{window,display,net}_ipc.rs` — the reserved-endpoint service
   protocol pattern `font_ipc.rs` follows.
 - `lib/font`, `lib/fontface`, `lib/fbcon`, `tools/xtask` `font-atlas` — the

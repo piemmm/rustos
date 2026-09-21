@@ -273,7 +273,12 @@ tairix-controls = { path = "../../lib/controls", version = "=0.0.0" }
 # the figure describes the proportional path a desktop actually runs.
 tairix-font = { path = "../../lib/font", version = "=0.0.0", features = [
     "test-util",
+    "svg",
 ] }
+# The font service itself, driven host-side over the committed
+# `lib/font/assets/` tree so the build-time icon verification resolves
+# faces and decodes outlines through exactly the code the desktop runs.
+tairix-fontd = { path = "../../userland/system/fontd", version = "=0.0.0" }
 tairix-fwcfg = { path = "../../lib/fwcfg", version = "=0.0.0" }
 # The program-library catalog engine: the encrypted-root fixture plants the
 # machine store at the engine's own canonical path, and the AW3 pointer

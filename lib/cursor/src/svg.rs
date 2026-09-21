@@ -8,6 +8,7 @@
 //! converter. An asset without a declared hotspot pins it to the design-grid
 //! origin.
 
+use tairix_svg::font::FontProvider;
 use tairix_svg::{SvgError, SvgImage};
 
 use crate::vector::VectorCursor;
@@ -32,11 +33,18 @@ impl VectorCursor {
 /// malformed or out-of-subset asset returns [`SvgError`] so the caller falls
 /// back to a built-in cursor rather than crashing the compositor.
 ///
+/// `fonts` is the seam a cursor carrying `<text>` resolves its faces
+/// through. Cursor artwork is drawn on the compositor's own path, so the
+/// desktop supplies [`tairix_svg::font::NoFonts`] there and such an asset
+/// falls back to the built-in cursor rather than reaching for a font
+/// service mid-frame.
+///
 /// # Errors
 /// Propagates the [`SvgError`] from [`tairix_svg::decode`].
-pub fn decode(bytes: &[u8]) -> Result<VectorCursor, SvgError> {
+pub fn decode(bytes: &[u8], fonts: &mut dyn FontProvider) -> Result<VectorCursor, SvgError> {
     Ok(VectorCursor::from_svg(&tairix_svg::decode(
         bytes,
         tairix_svg::Viewport::Square,
+        fonts,
     )?))
 }

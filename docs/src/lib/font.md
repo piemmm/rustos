@@ -100,6 +100,57 @@ and the pixels-per-em scale belong to the caller, because the rasteriser flips
 about a baseline row in a cell while `lib/svg` flips about the baseline in
 user units.
 
+### That geometry reaches a drawing over the same endpoint
+
+`lib/fontface` lives only in `fontd`, so a consumer drawing SVG text asks the
+service for geometry exactly as it asks for coverage:
+`FontRequest::Outlines` answers a bounded run of glyphs as contours in the
+resolved face's own font units, in 26.6 fixed point. There is deliberately
+**no pixel height** on that request — a drawing has no resolution, and baking
+a size in at this point would fix an accuracy the caller has not chosen yet;
+the field must be zero and a frame carrying one is refused.
+
+Two things travel per *record* rather than per batch, because a per-scalar
+fallback crosses faces:
+
+- the **resolved face's own em**, since a family's primary and its Chinese
+  companion need not share one; and
+- the **synthesis** that face could not furnish — an em-relative bold stroke
+  width and an oblique shear. A face carrying the `wght` axis renders the
+  weight its designer drew and reports nothing; one that does not says so, so
+  the caller strokes it with its own stroker rather than being served an
+  upright regular in silence. Width is never synthesised at all: stretching
+  letterforms is a distortion, not a width.
+
+The batch header carries the *requested family's primary* face geometry —
+its em, ascent, descent and line gap — which is what a run's baseline and
+line box are measured in whichever faces its scalars resolve to. A reply
+answers a **prefix** of the run under the same fill rule the coverage reply
+obeys, and the whole frame is comfortably smaller than the coverage one, so
+serving geometry moved no bound and grew no receive buffer.
+
+`outline_run` is the client entry point, memoising per
+`(family, scalar, weight, style, stretch)` in an outline cache declared
+beside the coverage one. `tairix_font::ServiceFonts` wraps it as the
+`lib/svg` font seam, so there is one adapter between the decoder and the
+endpoint rather than one per consumer.
+
+### A family may be asked for by kind
+
+A request names a family key, and a key spelling one of CSS's generic
+families — `serif`, `sans-serif`, `monospace`, `cursive`, `fantasy` —
+resolves through a ladder at the service, which is the thing that knows the
+store: an installed family of that exact key first, then the first family
+*claiming* that generic in its own `FontFamily` manifest, then the first
+claiming `sans-serif`, then the first selectable family at all. A store
+answers for a generic by declaring `generic = serif` beside its `kind`, so
+shipping a cursive family is dropping its directory in and nothing in the
+service, the kernel or the image builder names a family.
+
+A concrete name the store does not hold is **not** substituted: a document
+naming `Helvetica` is told so, which is what lets it try the next family it
+listed rather than being served something it did not ask for.
+
 ## Rendering goes through the sandboxed font service
 
 With the `render` feature, `BitmapFont` is a thin, cached client of `fontd`

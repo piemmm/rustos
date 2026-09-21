@@ -8,6 +8,7 @@ use tairix_theme::{
 };
 
 use crate::assets::{load_cursor_theme, load_icon_set, SessionFileReader};
+use tairix_svg::font::FontProvider;
 
 /// The desktop session: the shared theme registry plus the taskbar model.
 ///
@@ -135,11 +136,20 @@ impl DesktopSession {
     /// asset is missing, unreadable, or malformed keeps its built-in
     /// cursor, so a corrupt or absent store simply yields the built-in
     /// artwork under that set's name.
-    pub fn load_cursors<R>(&self, reader: &mut R, set: CursorSetId) -> CursorTheme
+    /// `fonts` is the seam a cursor asset carrying `<text>` resolves its
+    /// faces through: the session holds a font client, so its chrome is
+    /// decoded with the real one rather than refusing lettering the desktop
+    /// could have drawn.
+    pub fn load_cursors<R>(
+        &self,
+        reader: &mut R,
+        set: CursorSetId,
+        fonts: &mut dyn FontProvider,
+    ) -> CursorTheme
     where
         R: SessionFileReader + ?Sized,
     {
-        load_cursor_theme(reader, set, self.themes.active().cursors())
+        load_cursor_theme(reader, set, self.themes.active().cursors(), fonts)
     }
 
     /// Load the notification-icon set from the on-disk SVG assets under
@@ -148,11 +158,11 @@ impl DesktopSession {
     ///
     /// It cannot fail: a kind whose asset is missing, unreadable, or malformed
     /// falls back to its built-in glyph.
-    pub fn load_icons<R>(&self, reader: &mut R) -> IconSet
+    pub fn load_icons<R>(&self, reader: &mut R, fonts: &mut dyn FontProvider) -> IconSet
     where
         R: SessionFileReader + ?Sized,
     {
-        load_icon_set(reader)
+        load_icon_set(reader, fonts)
     }
 
     /// Re-derive the floating chrome theme from the now-active theme and hand it
