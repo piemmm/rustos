@@ -119,6 +119,7 @@ pub trait NetstackBind {
 pub struct NetBindState {
     bound: BTreeSet<u64>,
     next_index: u32,
+    deferred: bool,
 }
 
 impl NetBindState {
@@ -132,6 +133,15 @@ impl NetBindState {
     #[must_use]
     pub fn is_bound(&self, endpoint_id: u64) -> bool {
         self.bound.contains(&endpoint_id)
+    }
+
+    /// Whether the last pass left a discovered channel unbound.
+    ///
+    /// The stack becoming reachable is not a hardware-tree mutation, so a
+    /// caller that parks for one would never retry the hand-off.
+    #[must_use]
+    pub fn has_deferred_work(&self) -> bool {
+        self.deferred
     }
 }
 
@@ -186,15 +196,18 @@ fn netchan_node_location(netchan: &HwNode, nodes: &[HwNode]) -> u64 {
 /// stack through `netstack`, recording each success in `state`.
 ///
 /// An endpoint already in `state` is skipped (idempotent across generation
-/// bumps). A hand-off that the stack refuses is fail-soft: logged and left
-/// for the next bump to retry (the stack may not have bound its endpoint
-/// yet), never fatal to the observe loop.
+/// bumps). A hand-off that the stack refuses is fail-soft: logged and
+/// recorded on the state as deferred work, never fatal to the observe loop.
+/// The caller retries it under a bounded deadline — the stack binding its
+/// endpoint bumps no generation, so a caller waiting only for one would
+/// leave the NIC unattached for the life of the boot.
 pub fn bind_new_channels(
     nodes: &[HwNode],
     state: &mut NetBindState,
     netstack: &mut dyn NetstackBind,
     sink: &dyn Sink,
 ) {
+    state.deferred = false;
     for node in nodes {
         let Some(endpoint) = netchan_endpoint(node) else {
             continue;
@@ -228,6 +241,7 @@ pub fn bind_new_channels(
                 );
             }
             Err(err) => {
+                state.deferred = true;
                 audit(
                     sink,
                     events::NETSTACK_BIND_FAILED,
@@ -240,6 +254,22 @@ pub fn bind_new_channels(
             }
         }
     }
+}
+
+/// A `netchan` node carrying `endpoint`, for this crate's tests.
+///
+/// Shared so the observe loop's tests drive the same node shape
+/// [`bind_new_channels`] matches, rather than a second hand-built copy.
+#[cfg(test)]
+pub(crate) fn netchan_node(id: u32, endpoint: u64) -> HwNode {
+    use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HwResource, HW_NODE_ROOT};
+
+    let mut node = HwNode::new(id, HW_NODE_ROOT, HwDeviceClass::Network);
+    node.push_match_key(HwMatchKey::compatible(NETCHAN_NODE_COMPATIBLE).expect("key"))
+        .expect("push key");
+    node.push_resource(HwResource::endpoint(endpoint))
+        .expect("push resource");
+    node
 }
 
 /// The interface alias for channel index `n` (`net0`, `net1`, …):
@@ -382,15 +412,6 @@ mod tests {
     struct NullSink;
     impl Sink for NullSink {
         fn write_event(&self, _event: &Event<'_>) {}
-    }
-
-    fn netchan_node(id: u32, endpoint: u64) -> HwNode {
-        let mut node = HwNode::new(id, HW_NODE_ROOT, HwDeviceClass::Network);
-        node.push_match_key(HwMatchKey::compatible(NETCHAN_NODE_COMPATIBLE).expect("key"))
-            .expect("push key");
-        node.push_resource(HwResource::endpoint(endpoint))
-            .expect("push resource");
-        node
     }
 
     fn name(text: &str) -> [u8; IF_NAME_LEN] {

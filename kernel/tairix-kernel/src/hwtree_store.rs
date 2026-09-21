@@ -406,6 +406,24 @@ impl HwTreeStore {
 /// snapshotted by the autoload reader — the one store all three share.
 pub static HW_TREE: HwTreeStore = HwTreeStore::new();
 
+/// Serialises the host tests that read or mutate [`HW_TREE`].
+///
+/// The harness runs a crate's tests on several threads, so a test comparing
+/// two reads of the shared inventory races a sibling seeding or publishing
+/// into it between them. Every test touching `HW_TREE` holds this for its
+/// whole body.
+#[cfg(test)]
+static HW_TREE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`HW_TREE_TEST_LOCK`], recovering a poisoned lock so one panicking
+/// test cannot wedge every other.
+#[cfg(test)]
+pub(crate) fn lock_hw_tree_tests() -> std::sync::MutexGuard<'static, ()> {
+    HW_TREE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The [`HwTreeSource`] the boot path installs into the syscall dispatch
 /// hook (`BootInfo::with_hw_tree`), backing the `hw_tree_read` /
 /// `hw_tree_wait` syscalls with the authoritative [`HW_TREE`].
@@ -729,6 +747,9 @@ mod tests {
 
     #[test]
     fn the_static_source_forwards_to_the_global_store() {
+        // Each assertion reads the shared inventory twice, so a sibling
+        // mutating it in between would fail a forwarder that is correct.
+        let _serial = lock_hw_tree_tests();
         // The adapter is a pure forwarder: its generation and snapshot are
         // whatever the global `HW_TREE` currently holds.
         assert_eq!(HW_TREE_SOURCE.generation(), Ok(HW_TREE.generation()));

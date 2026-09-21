@@ -61,6 +61,7 @@ pub trait AudiodBind {
 #[derive(Default)]
 pub struct AudioBindState {
     bound: BTreeSet<u64>,
+    deferred: bool,
 }
 
 impl AudioBindState {
@@ -74,6 +75,15 @@ impl AudioBindState {
     #[must_use]
     pub fn is_bound(&self, endpoint_id: u64) -> bool {
         self.bound.contains(&endpoint_id)
+    }
+
+    /// Whether the last pass left a discovered channel unbound.
+    ///
+    /// The audio service becoming reachable is not a hardware-tree mutation,
+    /// so a caller that parks for one would never retry the hand-off.
+    #[must_use]
+    pub fn has_deferred_work(&self) -> bool {
+        self.deferred
     }
 }
 
@@ -103,15 +113,18 @@ pub fn audiochan_endpoint(node: &HwNode) -> Option<u64> {
 /// service through `audiod`, recording each success in `state`.
 ///
 /// An endpoint already in `state` is skipped (idempotent across generation
-/// bumps). A hand-off the service refuses is fail-soft: logged and left for
-/// the next bump to retry (the service may not have claimed its rendezvous
-/// yet), never fatal to the observe loop.
+/// bumps). A hand-off the service refuses is fail-soft: logged and recorded
+/// on the state as deferred work, never fatal to the observe loop. The caller
+/// retries it under a bounded deadline — the service claiming its rendezvous
+/// bumps no generation, so a caller waiting only for one would leave the
+/// sound card unattached for the life of the boot.
 pub fn bind_new_channels(
     nodes: &[HwNode],
     state: &mut AudioBindState,
     audiod: &mut dyn AudiodBind,
     sink: &dyn Sink,
 ) {
+    state.deferred = false;
     for node in nodes {
         let Some(endpoint) = audiochan_endpoint(node) else {
             continue;
@@ -131,14 +144,17 @@ pub fn bind_new_channels(
                     None,
                 );
             }
-            Err(err) => audit(
-                sink,
-                events::AUDIOD_BIND_FAILED,
-                Level::Warn,
-                "audiochan device-channel bind to audio service failed; will retry",
-                endpoint,
-                Some(err),
-            ),
+            Err(err) => {
+                state.deferred = true;
+                audit(
+                    sink,
+                    events::AUDIOD_BIND_FAILED,
+                    Level::Warn,
+                    "audiochan device-channel bind to audio service failed; will retry",
+                    endpoint,
+                    Some(err),
+                );
+            }
         }
     }
 }

@@ -62,6 +62,7 @@ pub trait NetworkConfigSource {
 #[derive(Default)]
 pub struct NetConfigState {
     delivered: Option<NetworkSettings>,
+    deferred: bool,
 }
 
 impl NetConfigState {
@@ -75,6 +76,15 @@ impl NetConfigState {
     #[must_use]
     pub fn is_delivered(&self) -> bool {
         self.delivered.is_some()
+    }
+
+    /// Whether the last pass left a readable policy undelivered.
+    ///
+    /// Neither the store becoming readable nor the stack coming up bumps a
+    /// generation, so a caller that parks for one would never retry.
+    #[must_use]
+    pub fn has_deferred_work(&self) -> bool {
+        self.deferred
     }
 }
 
@@ -93,6 +103,11 @@ pub fn deliver_network_settings(
     netstack: &mut dyn NetstackBind,
     sink: &dyn Sink,
 ) {
+    // Deferred means concrete work in hand that could not be completed, never
+    // "nothing to do yet": an absent store is the steady state on a machine
+    // that has no policy, and treating it as outstanding would wake the loop
+    // for the life of that machine.
+    state.deferred = false;
     let Some(settings) = source.load() else {
         // The store is not readable yet (the store service not reachable yet,
         // or an absent/failed read): the stack keeps its safe defaults and
@@ -103,30 +118,28 @@ pub fn deliver_network_settings(
     if state.delivered == Some(settings) {
         return;
     }
-    match netstack.apply_settings(settings) {
-        Ok(()) => {
-            state.delivered = Some(settings);
-            log_event(
-                sink,
-                &Event {
-                    level: Level::Info,
-                    id: events::NETWORK_SETTINGS_DELIVERED,
-                    message: "network settings delivered to the network stack",
-                    fields: &[],
-                },
-            );
-        }
-        Err(_) => {
-            log_event(
-                sink,
-                &Event {
-                    level: Level::Warn,
-                    id: events::NETWORK_SETTINGS_DELIVERY_FAILED,
-                    message: "network settings delivery to the network stack failed; will retry",
-                    fields: &[],
-                },
-            );
-        }
+    if netstack.apply_settings(settings).is_ok() {
+        state.delivered = Some(settings);
+        log_event(
+            sink,
+            &Event {
+                level: Level::Info,
+                id: events::NETWORK_SETTINGS_DELIVERED,
+                message: "network settings delivered to the network stack",
+                fields: &[],
+            },
+        );
+    } else {
+        state.deferred = true;
+        log_event(
+            sink,
+            &Event {
+                level: Level::Warn,
+                id: events::NETWORK_SETTINGS_DELIVERY_FAILED,
+                message: "network settings delivery to the network stack failed; will retry",
+                fields: &[],
+            },
+        );
     }
 }
 
@@ -162,6 +175,7 @@ pub struct NetIfConfigState {
     delivered: BTreeSet<[u8; IF_NAME_LEN]>,
     delivered_bonds: BTreeSet<[u8; IF_NAME_LEN]>,
     rejected_logged: bool,
+    deferred: bool,
 }
 
 impl NetIfConfigState {
@@ -169,6 +183,15 @@ impl NetIfConfigState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the last pass left a planned interface unconfigured.
+    ///
+    /// The stack accepting an interface it previously refused bumps no
+    /// generation, so a caller that parks for one would never retry.
+    #[must_use]
+    pub fn has_deferred_work(&self) -> bool {
+        self.deferred
     }
 
     /// Adopt what the source answered with this bump.
@@ -225,6 +248,7 @@ pub fn deliver_interface_configs(
 ) {
     // An unreadable store early in boot is the expected state, not an
     // anomaly, so it is not logged.
+    state.deferred = false;
     state.adopt(source.load());
     if state.plan.is_none() {
         return;
@@ -295,6 +319,7 @@ pub fn deliver_interface_configs(
                 // yet): the expected state, retried on a later pass or bump.
                 Err(Errno::NotFound) => {}
                 Err(_) => {
+                    state.deferred = true;
                     audit_iface(
                         sink,
                         events::NETWORK_IFCONFIG_DELIVERY_FAILED,
@@ -332,6 +357,7 @@ pub fn deliver_interface_configs(
                 }
                 Err(Errno::NotFound) => {}
                 Err(_) => {
+                    state.deferred = true;
                     audit_iface(
                         sink,
                         events::NETWORK_IFCONFIG_DELIVERY_FAILED,

@@ -27,6 +27,7 @@ request, and fails closed (§4, §5.4).
 | SVC-7 | Restart policy + reverse-dependency stop/shutdown ordering (engine core) | done |
 | SVC-8 | Control API, `servicectl`, audit, rlimits, docs/gate | in progress |
 | SVC-9 | Reclaiming an activated service when its last client dies | planned |
+| SVC-10 | Readiness as a wake source a client can wait on *beside* its own, so a client that must observe something else does not fall back to a deadline | planned |
 
 ## 1. What exists today (evolve, do not greenfield)
 
@@ -1003,6 +1004,32 @@ call endpoint and the process table, so it can retire a connection with its
 process — rather than a manager-side reaper, which would have to poll.
 Surfaced here rather than papered over with a heartbeat or a scan.
 
+### SVC-10 — Readiness as a wake source a client can combine with its own
+
+`connect` parks the caller until the service is ready, which is the whole
+answer for a client whose only job is that call. It is no answer for a client
+that must keep observing something else: `devmgr` owns the hardware tree, so
+it cannot park on a service.
+
+Its concrete case is the device-channel hand-off. A discovered `netchan` /
+`audiochan` node is handed to `netstack` / `audiod`, and a hand-off issued
+before that service has claimed its endpoint is refused. The service claiming
+it bumps no hardware-tree generation, so nothing wakes `devmgr` to retry — it
+therefore bounds its own `hw_tree_wait` deadline while a discovered channel is
+still unbound and re-reacts when it expires, reusing the bounded-deadline
+mechanism the driver-store catalogue already needed. That is the only
+mechanism available to it: `hw_tree_wait` is a dedicated blocking syscall and
+`WaitSourceKind` carries no hardware-tree source, so the two cannot be waited
+on together.
+
+The deadline is correct and self-limiting — a deferral records concrete work
+in hand, so a machine with no such device defers nothing and waits
+indefinitely — but it is a timer standing in for an event that now exists.
+The enabling piece is making the tree generation observable as a
+`WaitSourceKind`; `devmgr` then waits on tree ∪ readiness (readiness already
+has a wire form in `ReadyNotice`, and the wait-set already carries
+`SystemNotice`) and the deadline retires instead of being tuned.
+
 ## 7. Cross-references
 
 - `plans/SPAWN.md` — the `SPAWN` syscall, admit/parent-child wait link, and
@@ -1015,6 +1042,8 @@ Surfaced here rather than papered over with a heartbeat or a scan.
 - `plans/WATCHDOG.md` — the health-check/liveness source for restart policy.
 - `plans/DISPLAY.md` — seats / `display-present` readiness conditions.
 - `plans/NETWORK.md` — `netstack` and the `network-up` readiness condition.
+- `plans/SOUND.md` — `audiod` and the `audiochan-v1` device-channel hand-off
+  SVC-10's case is drawn from.
 - `kernel/tairix-kernel/src/system_files.rs`, `lib/abi` `SystemConfigFile` —
   the whitelisted `/System/Settings` read path the registration store reuses;
   `enumerate_driver_store` — the discovery walk reused for `/System/Services`.
