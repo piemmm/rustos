@@ -14,7 +14,7 @@
 //! build scripts that actually sign a bundle, not by every harness
 //! consumer.
 
-use ed25519_dalek::{Signer, SigningKey};
+use tairix_crypto::Ed25519SecretKey;
 
 use tairix_abi::{
     CapabilityId, DriverBindKey, DriverKind, DriverManifest, ABI_VERSION_CURRENT,
@@ -53,8 +53,8 @@ pub fn build_signed_driver_image(
     syscall_table_hash: [u8; 32],
     payload: &[u8],
 ) -> SignedDriverImage {
-    let signing_key = SigningKey::from_bytes(seed);
-    let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let signing_key = Ed25519SecretKey::from_seed(seed);
+    let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
 
     let mut manifest = DriverManifest {
         magic: DRIVER_MANIFEST_MAGIC,
@@ -83,7 +83,7 @@ pub fn build_signed_driver_image(
     signed_message.extend_from_slice(&cap_body);
     signed_message.extend_from_slice(&bind_body);
     signed_message.extend_from_slice(payload);
-    manifest.signature = signing_key.sign(&signed_message).to_bytes();
+    manifest.signature = *signing_key.sign(&signed_message).as_bytes();
 
     let mut image = Vec::new();
     image.extend_from_slice(&manifest.to_le_bytes());

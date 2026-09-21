@@ -24,12 +24,12 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
-use ed25519_dalek::{Signer, SigningKey};
 use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, DriverKind, DriverManifest,
     DRIVER_MANIFEST_MAGIC,
 };
 use tairix_crypto::Ed25519PublicKey;
+use tairix_crypto::Ed25519SecretKey;
 use tairix_drvhost::{
     DriverSpawner, Event as LogEvent, Field, ImageSource, Sink, SpawnContext, SpawnRegisterError,
 };
@@ -42,7 +42,7 @@ use tairix_drvhost::{
 /// `header[..WIRE_LEN-64] || cap_body || bind_table`, matching the
 /// verifier in `crate::host`.
 pub fn build_signed_image(
-    signing_key: &SigningKey,
+    signing_key: &Ed25519SecretKey,
     kind: DriverKind,
     syscall_table_hash: [u8; 32],
     caps: &[CapabilityId],
@@ -53,14 +53,14 @@ pub fn build_signed_image(
 
 /// [`build_signed_image`] with an explicit bind table between the capability body and the payload.
 pub fn build_signed_image_with_bind_keys(
-    signing_key: &SigningKey,
+    signing_key: &Ed25519SecretKey,
     kind: DriverKind,
     syscall_table_hash: [u8; 32],
     caps: &[CapabilityId],
     bind_keys: &[DriverBindKey],
     payload: &[u8],
 ) -> Vec<u8> {
-    let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
     let mut header_no_sig = Vec::with_capacity(DriverManifest::WIRE_LEN - 64);
     let count = u16::try_from(caps.len()).expect("caps fit in u16");
     let bind_key_count = u8::try_from(bind_keys.len()).expect("bind keys fit in u8");
@@ -96,7 +96,7 @@ pub fn build_signed_image_with_bind_keys(
     signed_message.extend_from_slice(&bind_table);
     signed_message.extend_from_slice(payload);
     let sig = signing_key.sign(&signed_message);
-    manifest.signature = sig.to_bytes();
+    manifest.signature = *sig.as_bytes();
     let mut out = Vec::with_capacity(
         DriverManifest::WIRE_LEN + cap_body.len() + bind_table.len() + payload.len(),
     );
@@ -114,24 +114,22 @@ pub const TEST_SEED: [u8; 32] = [
     0x73, 0xd6, 0xc0, 0x55, 0xe2, 0xb1, 0x47, 0x83, 0x18, 0x44, 0x91, 0x55, 0xee, 0x66, 0x9c, 0x0a,
 ];
 
-/// Build a [`SigningKey`] from `TEST_SEED`.
-pub fn test_signing_key() -> SigningKey {
-    SigningKey::from_bytes(&TEST_SEED)
+/// Build an [`Ed25519SecretKey`] from `TEST_SEED`.
+pub fn test_signing_key() -> Ed25519SecretKey {
+    Ed25519SecretKey::from_seed(&TEST_SEED)
 }
 
 /// Build a second, distinct signing key — used in tests that check the
 /// trust-anchor gate refuses a key that is not on the host's list.
-pub fn alternative_signing_key() -> SigningKey {
+pub fn alternative_signing_key() -> Ed25519SecretKey {
     let mut seed = TEST_SEED;
     seed[0] ^= 0xFF;
-    SigningKey::from_bytes(&seed)
+    Ed25519SecretKey::from_seed(&seed)
 }
 
-/// Convert a `SigningKey` into the `tairix_crypto::Ed25519PublicKey`
-/// the host stores on its trust anchor list.
-pub fn pubkey_of(sk: &SigningKey) -> Ed25519PublicKey {
-    let bytes = sk.verifying_key().to_bytes();
-    Ed25519PublicKey::from_bytes(&bytes).expect("verifying key bytes are well-formed")
+/// The public key the host stores on its trust-anchor list.
+pub fn pubkey_of(sk: &Ed25519SecretKey) -> Ed25519PublicKey {
+    sk.public_key()
 }
 
 /// In-memory image source. Maps a logical `&str` path to image bytes.

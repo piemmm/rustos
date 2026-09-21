@@ -19,7 +19,7 @@
 //! within its write cache (`docs/src/filesystem/arxfs-spec.md` §22).
 
 use tairix_abi::DriverError;
-use tairix_crypto::MacKey;
+use tairix_crypto::HmacSha256Key;
 
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 
@@ -117,7 +117,7 @@ impl TxnRoot {
         block: &mut [u8],
         fs_uuid: u128,
         phys: u64,
-        key: &MacKey,
+        key: &HmacSha256Key,
     ) -> Result<(), DriverError> {
         if block.len() < P_COMMIT_GENERATION + 8 {
             return Err(DriverError::DeviceFault);
@@ -163,7 +163,7 @@ impl TxnRoot {
         fs_uuid: u128,
         phys: u64,
         expect_generation: u64,
-        key: &MacKey,
+        key: &HmacSha256Key,
     ) -> Result<Self, DriverError> {
         let header = BlockHeader::decode_verify(block, BlockType::TxnRoot, fs_uuid, phys, key)?;
         let generation = rd_u64(block, P_GENERATION);
@@ -201,7 +201,7 @@ impl TxnRoot {
     /// Returns `None` for any block that is not a valid committed root at
     /// `phys` (corruption is surfaced as a skip, never panicked).
     #[must_use]
-    pub fn decode_any(block: &[u8], fs_uuid: u128, phys: u64, key: &MacKey) -> Option<Self> {
+    pub fn decode_any(block: &[u8], fs_uuid: u128, phys: u64, key: &HmacSha256Key) -> Option<Self> {
         let header = BlockHeader::try_decode(block, BlockType::TxnRoot, fs_uuid, phys, key)?;
         let generation = rd_u64(block, P_GENERATION);
         if generation != header.generation {

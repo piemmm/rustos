@@ -17,12 +17,12 @@
 //! Re-running `build.rs` produces byte-identical output for the same
 //! seed; the test is therefore deterministic.
 
-use ed25519_dalek::{Signer, SigningKey};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use tairix_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
+use tairix_crypto::Ed25519SecretKey;
 
 /// Deterministic signing seed so the trust anchor is stable across
 /// builds. Distinct from the `drvhost_qemu` fixture seed so the two
@@ -52,8 +52,8 @@ fn main() {
         println!("cargo:rustc-link-arg=-T{linker_script}");
     }
 
-    let signing_key = SigningKey::from_bytes(&TEST_SEED);
-    let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let signing_key = Ed25519SecretKey::from_seed(&TEST_SEED);
+    let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
 
     // The virtio-blk driver's `register` entry checks `CAP_DRV_LOAD`,
     // and the kernel virtio factory only mints a DMA host for a driver
@@ -81,7 +81,7 @@ fn main() {
         signed_message.extend_from_slice(&c.to_le_bytes());
     }
     let sig = signing_key.sign(&signed_message);
-    manifest.signature = sig.to_bytes();
+    manifest.signature = *sig.as_bytes();
 
     let mut image: Vec<u8> = Vec::new();
     image.extend_from_slice(&manifest.to_le_bytes());

@@ -254,32 +254,32 @@ fn emit_errno<S: Sink + ?Sized>(audit: &S, event: AuditEvent, err: Errno) {
 mod tests {
     use super::*;
     use crate::audit::RecordingSink;
-    use ed25519_dalek::{Signer, SigningKey};
     use tairix_abi::{
         manifest::MANIFEST_MAGIC, syscall::SYSCALL_TABLE_HASH_LEN, MANIFEST_MAX_CAPABILITIES,
     };
+    use tairix_crypto::Ed25519SecretKey;
 
-    fn signing_key() -> SigningKey {
-        SigningKey::from_bytes(&[0x42; 32])
+    fn signing_key() -> Ed25519SecretKey {
+        Ed25519SecretKey::from_seed(&[0x42; 32])
     }
 
-    fn authority_for(key: &SigningKey) -> Ed25519PublicKey {
-        Ed25519PublicKey::from_bytes(key.verifying_key().as_bytes()).expect("valid key")
+    fn authority_for(key: &Ed25519SecretKey) -> Ed25519PublicKey {
+        key.public_key()
     }
 
     /// Assemble a manifest (header + body) signed by `key` with the given
     /// capability list.
-    fn build(key: &SigningKey, caps: &[CapabilityId]) -> alloc::vec::Vec<u8> {
+    fn build(key: &Ed25519SecretKey, caps: &[CapabilityId]) -> alloc::vec::Vec<u8> {
         build_with(key, caps, ABI_VERSION_CURRENT, 0)
     }
 
     fn build_with(
-        key: &SigningKey,
+        key: &Ed25519SecretKey,
         caps: &[CapabilityId],
         abi_version: u32,
         flags: u32,
     ) -> alloc::vec::Vec<u8> {
-        let pub_bytes = *key.verifying_key().as_bytes();
+        let pub_bytes = *key.public_key().as_bytes();
         let mut header = ManifestHeader {
             magic: MANIFEST_MAGIC,
             abi_version,
@@ -302,7 +302,7 @@ mod tests {
         signing.extend_from_slice(&header_bytes[signed_range.clone()]);
         signing.extend_from_slice(&body);
         let sig = key.sign(&signing);
-        header.signature = sig.to_bytes();
+        header.signature = *sig.as_bytes();
         header_bytes = header.to_le_bytes();
 
         let mut out = alloc::vec::Vec::with_capacity(header_bytes.len() + body.len());
@@ -424,7 +424,7 @@ mod tests {
         // A manifest whose embedded signer_pubkey does not match the
         // kernel's authority is refused even if the signature itself
         // would verify against the embedded key.
-        let attacker = SigningKey::from_bytes(&[0x99; 32]);
+        let attacker = Ed25519SecretKey::from_seed(&[0x99; 32]);
         let bytes = build(&attacker, &[CapabilityId::FS_MOUNT]);
         let kernel_authority = authority_for(&signing_key());
         let sink = RecordingSink::new();

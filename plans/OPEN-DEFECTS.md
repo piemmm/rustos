@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 32 open, 107 closed, 139 total.
+table normalises all three to **closed**. 33 open, 107 closed, 140 total.
 
-### Open (32)
+### Open (33)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -60,6 +60,8 @@ table normalises all three to **closed**. 32 open, 107 closed, 139 total.
 | D141 | a per-inode ACL can be authored at provisioning but never changed or read back: there is no `fs_set_acl` and no `getfacl`/`setfacl` | noticed while designing `plans/SSH.md` §1.4; not absorbed. The rest of the §5.3 model is complete — `kernel/core/src/fs/perm.rs` enforces capability gate → ACL → mode, ARXFS persists the ACL, `tairix_users::policy` authors one at home provisioning — so the gap is only the userland write and read-back path: `fs_set_mode`/`fs_set_owner` exist and their ACL counterpart does not. Three consequences: a grant lives and dies with the inode its provisioner created, so a file a user deletes and recreates silently loses it; an account provisioned before a grant is introduced has no repair path short of recreating the home; and a user cannot inspect the non-mode authority over their own files, which for a security mechanism is the sharper one. Closing it is a syscall + ABI + VFS path + ARXFS write + a tool |
 
 | D142 | the network stack's admin surface carries no message that *retires* an interface | noticed while landing `configure`'s write side; not absorbed. An interface removed from `network.conf` keeps the addressing the stack was last given until the next boot — every other edit now applies live. `configure` and the device manager both state the limit rather than implying otherwise, so nothing reports a success it did not get. Closing it means a framed remove message beside `NetInterfaceConfigMsg`, `Netstack` tearing the interface down (addresses, routes, bond membership, resolver entries) and the two pushers sending it for an alias the document dropped |
+
+| D143 | no `rsa-sha2-*` SSH key support: the only pure-Rust RSA carries an unpatched advisory | noticed while landing `plans/SSH.md` S0a; the algorithm is absent rather than shipped weak. The `rsa` crate carries RUSTSEC-2023-0071 (Marvin timing attack) with `patched = []`, unfixed on 0.9.10 and the 0.10 release candidates as of 2026-09-12, and its own advisory text says to avoid it where an attacker can observe timing over the network — which is exactly SSH. §19.3 blocks the dependency and §2.12 forbids hand-rolling the alternative; verify-only does not help, because `cargo deny` flags the crate rather than the call. The cost is a user whose only key is `~/.ssh/id_rsa`, and the rare RSA-only host key; stock OpenSSH host keys are Ed25519 by default. **Re-check trigger:** whenever `lib/crypto`'s pins are audited or `plans/SSH.md` advances a stage, confirm whether the advisory has gained a `patched` version — if it has, `plans/SSH.md` S15 unblocks as an ordinary increment |
 
 ### D140 — the loaded notification-icon set is never installed
 

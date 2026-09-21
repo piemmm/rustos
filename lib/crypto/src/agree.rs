@@ -40,7 +40,7 @@ pub const X25519_SECRET_LEN: usize = 32;
 pub const X25519_PUBLIC_KEY_LEN: usize = 32;
 
 /// Length, in bytes, of an X25519 shared secret. Matches
-/// [`crate::mac::MAC_KEY_LEN`], so the agreement output keys the KDF directly.
+/// [`crate::mac::HMAC_SHA256_KEY_LEN`], so the agreement output keys the KDF directly.
 pub const X25519_SHARED_SECRET_LEN: usize = 32;
 
 /// Failure of a key agreement.

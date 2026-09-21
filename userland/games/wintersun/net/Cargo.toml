@@ -39,4 +39,3 @@ tairix-fuzzseed = { path = "../../../../tests/fuzzseed", version = "=0.0.0" }
 # enters this crate; the tests stand in for that holder with the same audited
 # crate `lib/crypto` verifies against. Already in the tree and source-pinned,
 # so this adds nothing to the audit surface.
-ed25519-dalek = { version = "=2.1.1", default-features = false }

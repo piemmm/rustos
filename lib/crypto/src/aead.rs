@@ -1,6 +1,14 @@
 //! Authenticated encryption with associated data (AEAD).
 //!
-//! The single AEAD exposed by TAIRiX is ChaCha20-Poly1305 (RFC 8439). It
+//! TAIRiX's own AEAD is ChaCha20-Poly1305 (RFC 8439), and it is what the
+//! unqualified [`seal`] and [`open`] below are: every first-party consumer
+//! that gets to choose — encrypted swap, ARXFS, the app-data vault, the
+//! realm session — uses it. AES-GCM is here for one reason only, and its
+//! entry points say so in their names: a foreign SSH peer may offer
+//! `aes{128,256}-gcm@openssh.com` and nothing else we accept. The two are
+//! not peers, and the naming is the distinction.
+//!
+//! ChaCha20-Poly1305
 //! backs the kernel's encrypted-swap layer: any page of
 //! anonymous, stack, or capability-bearing memory the kernel writes to a
 //! swap device is sealed here first, so a swap device read back off the
@@ -24,7 +32,8 @@
 //! monotonic counter that cannot repeat within the key's lifetime. See
 //! `kernel/mem`'s `swap` module for the swap-side discipline.
 
-use chacha20poly1305::aead::AeadInPlace;
+use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce as AesGcmNonceArray, Tag as AesGcmTagArray};
+use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, Tag};
 
 /// Length, in bytes, of a ChaCha20-Poly1305 key.
@@ -80,7 +89,7 @@ pub fn seal(
 ) -> Result<AeadTag, AeadError> {
     let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| AeadError::Authentication)?;
     let tag = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(nonce), aad, buffer)
+        .encrypt_inout_detached(&Nonce::from(*nonce), aad, buffer.into())
         .map_err(|_| AeadError::Authentication)?;
     let mut out = [0u8; AEAD_TAG_LEN];
     out.copy_from_slice(tag.as_slice());
@@ -107,110 +116,115 @@ pub fn open(
 ) -> Result<(), AeadError> {
     let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|_| AeadError::Authentication)?;
     cipher
-        .decrypt_in_place_detached(Nonce::from_slice(nonce), aad, buffer, Tag::from_slice(tag))
+        .decrypt_inout_detached(&Nonce::from(*nonce), aad, buffer.into(), &Tag::from(*tag))
         .map_err(|_| AeadError::Authentication)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Length, in bytes, of an AES-GCM nonce. RFC 5116 §5.1's 96-bit nonce is
+/// the only width AES-GCM accepts without an extra GHASH derivation step,
+/// and the one `aes*-gcm@openssh.com` (RFC 5647) uses.
+pub const AES_GCM_NONCE_LEN: usize = 12;
 
-    extern crate alloc;
-    use alloc::vec::Vec;
+/// Length, in bytes, of an AES-GCM authentication tag.
+pub const AES_GCM_TAG_LEN: usize = 16;
 
-    const KEY: AeadKey = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
-        0x1e, 0x1f,
-    ];
-    const NONCE: AeadNonce = [
-        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab,
-    ];
+/// An AES-GCM nonce as raw bytes.
+pub type AesGcmNonce = [u8; AES_GCM_NONCE_LEN];
 
-    #[test]
-    fn round_trip_recovers_plaintext() {
-        let plaintext = b"page bytes paged out to swap".to_vec();
-        let mut buf = plaintext.clone();
-        let tag = seal(&KEY, &NONCE, b"slot-7", &mut buf).expect("seal");
-        assert_ne!(buf, plaintext, "ciphertext must differ from plaintext");
-        open(&KEY, &NONCE, b"slot-7", &mut buf, &tag).expect("open");
-        assert_eq!(buf, plaintext);
-    }
+/// An AES-GCM authentication tag as raw bytes.
+pub type AesGcmTag = [u8; AES_GCM_TAG_LEN];
 
-    #[test]
-    fn empty_message_round_trips() {
-        let mut buf: Vec<u8> = Vec::new();
-        let tag = seal(&KEY, &NONCE, b"", &mut buf).expect("seal");
-        open(&KEY, &NONCE, b"", &mut buf, &tag).expect("open");
-        assert!(buf.is_empty());
-    }
+/// Emit the detached in-place seal and open for one AES-GCM key size.
+///
+/// The two sizes differ only in the underlying key schedule, so the wrapper
+/// is written once rather than twice.
+macro_rules! aes_gcm_variant {
+    ($cipher:ty, $spec:literal, $key_len:ident = $width:literal, $key_ty:ident, $seal:ident, $open:ident) => {
+        #[doc = concat!("Length, in bytes, of an ", $spec, " key.")]
+        pub const $key_len: usize = $width;
 
-    #[test]
-    fn tampered_ciphertext_is_rejected() {
-        let mut buf = b"secret".to_vec();
-        let tag = seal(&KEY, &NONCE, b"", &mut buf).expect("seal");
-        buf[0] ^= 0x01;
-        assert_eq!(
-            open(&KEY, &NONCE, b"", &mut buf, &tag),
-            Err(AeadError::Authentication)
-        );
-    }
+        #[doc = concat!("An ", $spec, " key as raw bytes.")]
+        pub type $key_ty = [u8; $key_len];
 
-    #[test]
-    fn tampered_tag_is_rejected() {
-        let mut buf = b"secret".to_vec();
-        let mut tag = seal(&KEY, &NONCE, b"", &mut buf).expect("seal");
-        tag[0] ^= 0x01;
-        assert_eq!(
-            open(&KEY, &NONCE, b"", &mut buf, &tag),
-            Err(AeadError::Authentication)
-        );
-    }
+        #[doc = concat!("Seal `buffer` in place with ", $spec, " under `key`")]
+        /// and `nonce`, binding `aad`.
+        ///
+        /// On return `buffer` holds the ciphertext and the returned tag
+        /// authenticates both it and `aad`.
+        ///
+        /// GCM fails catastrophically on `(key, nonce)` reuse — a repeat
+        /// leaks the GHASH authentication key and so the ability to forge
+        /// any message under that key. This wrapper generates no nonces;
+        /// RFC 5647 gives SSH a fixed field plus a monotonic invocation
+        /// counter, and the caller owns that discipline.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`AeadError::Authentication`] if the upstream cipher
+        /// refuses the inputs, which for AES-GCM means a message past its
+        /// `~64 GiB` per-nonce limit.
+        pub fn $seal(
+            key: &$key_ty,
+            nonce: &AesGcmNonce,
+            aad: &[u8],
+            buffer: &mut [u8],
+        ) -> Result<AesGcmTag, AeadError> {
+            let cipher = <$cipher>::new_from_slice(key).map_err(|_| AeadError::Authentication)?;
+            let tag = cipher
+                .encrypt_inout_detached(&AesGcmNonceArray::from(*nonce), aad, buffer.into())
+                .map_err(|_| AeadError::Authentication)?;
+            let mut out = [0u8; AES_GCM_TAG_LEN];
+            out.copy_from_slice(tag.as_slice());
+            Ok(out)
+        }
 
-    #[test]
-    fn wrong_associated_data_is_rejected() {
-        let mut buf = b"secret".to_vec();
-        let tag = seal(&KEY, &NONCE, b"slot-7", &mut buf).expect("seal");
-        assert_eq!(
-            open(&KEY, &NONCE, b"slot-8", &mut buf, &tag),
-            Err(AeadError::Authentication)
-        );
-    }
-
-    #[test]
-    fn wrong_nonce_is_rejected() {
-        let mut buf = b"secret".to_vec();
-        let tag = seal(&KEY, &NONCE, b"", &mut buf).expect("seal");
-        let mut other = NONCE;
-        other[0] ^= 0x01;
-        assert_eq!(
-            open(&KEY, &other, b"", &mut buf, &tag),
-            Err(AeadError::Authentication)
-        );
-    }
-
-    #[test]
-    fn rfc8439_test_vector() {
-        // RFC 8439 §2.8.2 worked example.
-        let key: AeadKey = [
-            0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d,
-            0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
-            0x9c, 0x9d, 0x9e, 0x9f,
-        ];
-        let nonce: AeadNonce = [
-            0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
-        ];
-        let aad = [
-            0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
-        ];
-        let mut buf = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.".to_vec();
-        let expected_tag: AeadTag = [
-            0x1a, 0xe1, 0x0b, 0x59, 0x4f, 0x09, 0xe2, 0x6a, 0x7e, 0x90, 0x2e, 0xcb, 0xd0, 0x60,
-            0x06, 0x91,
-        ];
-        let tag = seal(&key, &nonce, &aad, &mut buf).expect("seal");
-        assert_eq!(tag, expected_tag, "tag must match the RFC 8439 vector");
-        open(&key, &nonce, &aad, &mut buf, &tag).expect("open");
-        assert_eq!(&buf[..6], b"Ladies");
-    }
+        #[doc = concat!("Open `buffer` in place with ", $spec, " under `key`,")]
+        /// `nonce`, `aad`, and `tag`.
+        ///
+        /// The tag is checked *before* anything is decrypted, so a rejected
+        /// message leaves `buffer` holding the ciphertext it arrived as and
+        /// never the plaintext — the failure CVE-2023-42811 was.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`AeadError::Authentication`] if the tag does not verify.
+        pub fn $open(
+            key: &$key_ty,
+            nonce: &AesGcmNonce,
+            aad: &[u8],
+            buffer: &mut [u8],
+            tag: &AesGcmTag,
+        ) -> Result<(), AeadError> {
+            let cipher = <$cipher>::new_from_slice(key).map_err(|_| AeadError::Authentication)?;
+            cipher
+                .decrypt_inout_detached(
+                    &AesGcmNonceArray::from(*nonce),
+                    aad,
+                    buffer.into(),
+                    &AesGcmTagArray::from(*tag),
+                )
+                .map_err(|_| AeadError::Authentication)
+        }
+    };
 }
+
+aes_gcm_variant!(
+    Aes128Gcm,
+    "AES-128-GCM",
+    AES128_GCM_KEY_LEN = 16,
+    Aes128GcmKey,
+    aes128gcm_seal,
+    aes128gcm_open
+);
+aes_gcm_variant!(
+    Aes256Gcm,
+    "AES-256-GCM",
+    AES256_GCM_KEY_LEN = 32,
+    Aes256GcmKey,
+    aes256gcm_seal,
+    aes256gcm_open
+);
+
+#[cfg(test)]
+#[path = "aead_tests.rs"]
+mod tests;

@@ -16,12 +16,12 @@
 //! Re-running `build.rs` produces byte-identical output for the same
 //! seed; the test is therefore deterministic.
 
-use ed25519_dalek::{Signer, SigningKey};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use tairix_abi::{DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
+use tairix_crypto::Ed25519SecretKey;
 
 const TEST_SEED: [u8; 32] = [
     0x42, 0x6e, 0x47, 0x2c, 0x90, 0x12, 0xd1, 0x35, 0x99, 0xa0, 0x77, 0x80, 0x6a, 0xa3, 0x21, 0x18,
@@ -55,8 +55,8 @@ fn main() {
         println!("cargo:rustc-link-arg=-T{linker_script}");
     }
 
-    let signing_key = SigningKey::from_bytes(&TEST_SEED);
-    let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let signing_key = Ed25519SecretKey::from_seed(&TEST_SEED);
+    let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
 
     let caps: &[u16] = &[/* no capabilities requested */];
     let mut manifest = DriverManifest {
@@ -76,7 +76,7 @@ fn main() {
         signed_message.extend_from_slice(&c.to_le_bytes());
     }
     let sig = signing_key.sign(&signed_message);
-    manifest.signature = sig.to_bytes();
+    manifest.signature = *sig.as_bytes();
 
     let mut image: Vec<u8> = Vec::new();
     image.extend_from_slice(&manifest.to_le_bytes());

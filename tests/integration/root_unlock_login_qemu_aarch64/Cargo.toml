@@ -16,9 +16,9 @@ name = "tairix-test-root-unlock-login-qemu-aarch64"
 path = "src/main.rs"
 
 [build-dependencies]
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
 
 # The device-agnostic bring-up scaffolding (boot harness, DTB MMIO walk,
 # GICv2 + EL1 IRQ wiring, static DMA pool, signed-`.rxe` load) *and* the

@@ -26,11 +26,11 @@
 
 use std::collections::BTreeSet;
 
-use ed25519_dalek::{Signer, SigningKey};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use tairix_abi::{CapabilityId, Errno, ABI_VERSION_CURRENT};
 use tairix_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
+use tairix_crypto::Ed25519SecretKey;
 use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
 
 /// Sequences run once by a plain `cargo test` (no budget set).
@@ -175,12 +175,12 @@ fn capability_set_tracks_reference_model() {
 
 /// Fixed, deterministic authority key. Tests must not depend on RNG for the
 /// key material (the signing seed is the constant the unit tests use too).
-fn signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[42u8; 32])
+fn signing_key() -> Ed25519SecretKey {
+    Ed25519SecretKey::from_seed(&[42u8; 32])
 }
 
 fn authority_key() -> Ed25519PublicKey {
-    Ed25519PublicKey::from_bytes(signing_key().verifying_key().as_bytes()).expect("valid key")
+    Ed25519PublicKey::from_bytes(signing_key().public_key().as_bytes()).expect("valid key")
 }
 
 fn sign(subject: u64, epoch: RevocationEpoch, caps: &CapabilitySet) -> CapabilityToken {
@@ -191,7 +191,7 @@ fn sign(subject: u64, epoch: RevocationEpoch, caps: &CapabilitySet) -> Capabilit
         subject,
         epoch,
         caps: *caps,
-        signature: Ed25519Signature::from_bytes(sig.to_bytes()),
+        signature: Ed25519Signature::from_bytes(*sig.as_bytes()),
     }
 }
 

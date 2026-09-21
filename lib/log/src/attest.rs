@@ -28,7 +28,8 @@
 
 use tairix_abi::{BootId, Errno, BOOT_ID_LEN};
 use tairix_crypto::{
-    ct_eq, hmac_sha256_parts, sha256, MacKey, MacTag, Sha256Digest, MAC_KEY_LEN, SHA256_OUTPUT_LEN,
+    ct_eq, hmac_sha256_parts, sha256, HmacSha256Key, HmacSha256Tag, Sha256Digest,
+    HMAC_SHA256_KEY_LEN, SHA256_OUTPUT_LEN,
 };
 use zeroize::Zeroize;
 
@@ -98,8 +99,8 @@ pub fn stream_genesis(
 }
 
 /// Length, in bytes, of a [`LogAttestationKey`]'s raw key material (a 256-bit
-/// HMAC-SHA256 key; mirrors [`tairix_crypto::MAC_KEY_LEN`]).
-pub const LOG_ATTESTATION_KEY_LEN: usize = MAC_KEY_LEN;
+/// HMAC-SHA256 key; mirrors [`tairix_crypto::HMAC_SHA256_KEY_LEN`]).
+pub const LOG_ATTESTATION_KEY_LEN: usize = HMAC_SHA256_KEY_LEN;
 
 /// Magic identifying the on-disk log-attestation key file.
 const KEY_FILE_MAGIC: [u8; 4] = *b"RLAK"; // TAIRiX Log Attestation Key.
@@ -130,7 +131,7 @@ pub const LOG_ATTESTATION_KEY_FILE_LEN: usize = 8 + LOG_ATTESTATION_KEY_LEN;
 /// the journal/attestation principal exists, no service can read it, and no
 /// new capability is minted ahead of that holder.
 pub struct LogAttestationKey {
-    key: MacKey,
+    key: HmacSha256Key,
 }
 
 impl LogAttestationKey {
@@ -140,7 +141,7 @@ impl LogAttestationKey {
     /// weak key voids the integrity guarantee. This is the provisioning
     /// constructor (the installer / image builder), not a user-reachable path.
     #[must_use]
-    pub const fn from_key(key: MacKey) -> Self {
+    pub const fn from_key(key: HmacSha256Key) -> Self {
         Self { key }
     }
 
@@ -150,7 +151,7 @@ impl LogAttestationKey {
     /// the segment/anchor fields without allocating a contiguous buffer. The
     /// raw key never leaves the type.
     #[must_use]
-    pub fn seal(&self, parts: &[&[u8]]) -> MacTag {
+    pub fn seal(&self, parts: &[&[u8]]) -> HmacSha256Tag {
         hmac_sha256_parts(&self.key, parts)
     }
 
@@ -159,7 +160,7 @@ impl LogAttestationKey {
     /// The comparison goes through `lib/crypto`'s constant-time equality, so
     /// it never leaks through timing how much of a forged tag matched.
     #[must_use]
-    pub fn verify(&self, parts: &[&[u8]], tag: &MacTag) -> bool {
+    pub fn verify(&self, parts: &[&[u8]], tag: &HmacSha256Tag) -> bool {
         let expected = hmac_sha256_parts(&self.key, parts);
         ct_eq(&expected, tag)
     }

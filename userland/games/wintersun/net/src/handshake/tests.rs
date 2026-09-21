@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signer, SigningKey};
+use tairix_crypto::Ed25519SecretKey;
 
 use super::{
     client_auth_payload, realm_auth_payload, refuse, respond, transcript_of, Established,
@@ -14,15 +14,15 @@ const REALM_EPHEMERAL: [u8; 32] = [0x42; 32];
 const CLIENT_NONCE: [u8; 32] = [0x43; 32];
 const REALM_NONCE: [u8; 32] = [0x44; 32];
 
-fn realm_key() -> SigningKey {
-    SigningKey::from_bytes(&[0x51; 32])
+fn realm_key() -> Ed25519SecretKey {
+    Ed25519SecretKey::from_seed(&[0x51; 32])
 }
 
 /// The realm's identity signer. `lib/crypto` exposes verification only, so
 /// the secret lives with its holder and is handed in as a callback — here the
 /// test stands in for that holder.
-fn signer(key: &SigningKey) -> impl FnOnce(&[u8]) -> [u8; 64] + '_ {
-    move |payload: &[u8]| key.sign(payload).to_bytes()
+fn signer(key: &Ed25519SecretKey) -> impl FnOnce(&[u8]) -> [u8; 64] + '_ {
+    move |payload: &[u8]| *key.sign(payload).as_bytes()
 }
 
 /// What a realm answered: the outcome, and a copy of the bytes it would send.
@@ -56,7 +56,7 @@ fn answer(
     hello: &[u8],
     ephemeral: [u8; 32],
     nonce: [u8; 32],
-    key: &SigningKey,
+    key: &Ed25519SecretKey,
     identity: &[u8; 32],
 ) -> Answered {
     let response = respond(hello, ephemeral, nonce, identity, signer(key));
@@ -76,7 +76,7 @@ fn handshake_with(
     realm_ephemeral: [u8; 32],
 ) -> (Established, Established) {
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (initiator, hello) = Initiator::start(client_ephemeral, CLIENT_NONCE);
     let answered = answer(&hello, realm_ephemeral, REALM_NONCE, &key, &identity);
     let message = answered.bytes;
@@ -133,7 +133,7 @@ fn a_session_built_from_the_handshake_carries_traffic_both_ways() {
 #[test]
 fn each_message_is_its_own_fixed_length() {
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (_, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     assert_eq!(hello.len(), HELLO_LEN);
     let answered = answer(&hello, REALM_EPHEMERAL, REALM_NONCE, &key, &identity);
@@ -147,7 +147,7 @@ fn each_message_is_its_own_fixed_length() {
 #[test]
 fn a_first_connect_pins_the_realm_and_a_later_one_matches() {
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (initiator, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     let message = answer(&hello, REALM_EPHEMERAL, REALM_NONCE, &key, &identity).bytes;
     let first = initiator.finish(&message, None).expect("completes");
@@ -168,9 +168,9 @@ fn a_first_connect_pins_the_realm_and_a_later_one_matches() {
 
 #[test]
 fn a_substituted_realm_is_surfaced_not_accepted() {
-    let impostor = SigningKey::from_bytes(&[0x52; 32]);
-    let identity = impostor.verifying_key().to_bytes();
-    let pinned = realm_key().verifying_key().to_bytes();
+    let impostor = Ed25519SecretKey::from_seed(&[0x52; 32]);
+    let identity = *impostor.public_key().as_bytes();
+    let pinned = *realm_key().public_key().as_bytes();
     let (initiator, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     let message = answer(&hello, REALM_EPHEMERAL, REALM_NONCE, &impostor, &identity).bytes;
     // The impostor's signature is perfectly valid — for its own key. What
@@ -197,7 +197,7 @@ fn a_signature_over_another_transcript_does_not_verify() {
     // The realm answers one hello but signs the transcript of another: the
     // binding is what catches it.
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (initiator, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     let (_, other_hello) = Initiator::start([0x49; 32], [0x4A; 32]);
     let other = answer(&other_hello, REALM_EPHEMERAL, REALM_NONCE, &key, &identity).bytes;
@@ -213,7 +213,7 @@ fn a_signature_over_another_transcript_does_not_verify() {
 #[test]
 fn every_single_bit_flip_in_the_realm_answer_is_refused() {
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (_, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     let message = answer(&hello, REALM_EPHEMERAL, REALM_NONCE, &key, &identity).bytes;
     for byte in 0..SERVER_HELLO_LEN {
@@ -234,7 +234,7 @@ fn every_single_bit_flip_in_the_realm_answer_is_refused() {
 #[test]
 fn a_flipped_hello_gives_a_transcript_the_client_cannot_match() {
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (initiator, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     // A middle box alters the client's nonce on the way out. The realm signs
     // what it saw; the client verifies against what it sent, and they differ.
@@ -250,7 +250,7 @@ fn a_flipped_hello_gives_a_transcript_the_client_cannot_match() {
 #[test]
 fn a_malformed_hello_is_refused_with_a_message_that_says_why() {
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (_, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
 
     let cases: [&[u8]; 4] = [
@@ -276,7 +276,7 @@ fn a_malformed_hello_is_refused_with_a_message_that_says_why() {
 #[test]
 fn a_hello_naming_another_protocol_version_is_refused_as_such() {
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (_, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     let mut other = hello;
     other[4..6].copy_from_slice(&(PROTOCOL_VERSION + 1).to_le_bytes());
@@ -287,7 +287,7 @@ fn a_hello_naming_another_protocol_version_is_refused_as_such() {
 #[test]
 fn a_hello_with_the_wrong_magic_is_refused() {
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (_, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     let mut other = hello;
     other[..4].copy_from_slice(&(HANDSHAKE_MAGIC ^ 1).to_le_bytes());
@@ -322,7 +322,7 @@ fn an_oversize_realm_answer_is_refused_before_it_is_parsed() {
 #[test]
 fn every_truncation_of_the_realm_answer_is_refused() {
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (_, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     let message = answer(&hello, REALM_EPHEMERAL, REALM_NONCE, &key, &identity).bytes;
     for len in 0..SERVER_HELLO_LEN {
@@ -341,13 +341,13 @@ fn a_non_contributory_realm_key_is_refused() {
     // secret it chose. The signature over it is valid, so only the agreement
     // check catches it.
     let key = realm_key();
-    let identity = key.verifying_key().to_bytes();
+    let identity = *key.public_key().as_bytes();
     let (initiator, hello) = Initiator::start(CLIENT_EPHEMERAL, CLIENT_NONCE);
     let mut forged = answer(&hello, REALM_EPHEMERAL, REALM_NONCE, &key, &identity).bytes;
     forged[8..40].fill(0);
     // Re-sign, so the only thing wrong is the ephemeral key itself.
     let transcript = transcript_of(&hello, &forged[..SERVER_HELLO_LEN - 64]);
-    let signature = key.sign(&realm_auth_payload(&transcript)).to_bytes();
+    let signature = *key.sign(&realm_auth_payload(&transcript)).as_bytes();
     forged[SERVER_HELLO_LEN - 64..].copy_from_slice(&signature);
     assert_eq!(
         initiator.finish(&forged, None).err(),
@@ -396,16 +396,15 @@ fn an_account_proof_binds_to_its_own_session_and_no_other() {
 
 #[test]
 fn an_account_key_signing_its_transcript_verifies_and_a_stale_one_does_not() {
-    use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
+    use tairix_crypto::Ed25519Signature;
 
     let (_, first) = handshake();
     let (_, second) = handshake_with([0x63; 32], [0x64; 32]);
-    let account = SigningKey::from_bytes(&[0x71; 32]);
-    let public =
-        Ed25519PublicKey::from_bytes(&account.verifying_key().to_bytes()).expect("a valid key");
+    let account = Ed25519SecretKey::from_seed(&[0x71; 32]);
+    let public = account.public_key();
 
     let payload = client_auth_payload(&first.transcript);
-    let signature = Ed25519Signature::from_bytes(account.sign(&payload).to_bytes());
+    let signature = Ed25519Signature::from_bytes(*account.sign(&payload).as_bytes());
     assert!(public.verify(&payload, &signature).is_ok());
 
     // The same proof presented on a different session is checked against

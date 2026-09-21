@@ -27,7 +27,7 @@
 //! byte ranges of the encoded segment, so no streaming hash is needed.
 
 use tairix_abi::{BootId, Duration64, WallClockReading, BOOT_ID_LEN};
-use tairix_crypto::{sha256, MacTag, Sha256Digest, MAC_TAG_LEN, SHA256_OUTPUT_LEN};
+use tairix_crypto::{sha256, HmacSha256Tag, Sha256Digest, HMAC_SHA256_TAG_LEN, SHA256_OUTPUT_LEN};
 
 use crate::attest::LogAttestationKey;
 use crate::chain::{ChainedEntry, LogChain};
@@ -87,7 +87,7 @@ const FOOTER_SUMMARY_LEN: usize = 1   // tag
 pub const SEGMENT_FOOTER_LEN: usize = FOOTER_SUMMARY_LEN
     + SHA256_OUTPUT_LEN // segment_hash
     + 1                 // seal_present
-    + MAC_TAG_LEN       // seal_tag
+    + HMAC_SHA256_TAG_LEN       // seal_tag
     + SHA256_OUTPUT_LEN; // footer_checksum
 
 /// Why a segment operation failed. Every variant is a fail-closed refusal;
@@ -457,9 +457,9 @@ impl<'a> SegmentWriter<'a> {
         // header + records + footer summary are contiguous in `buf`.
         let segment_hash = sha256(&w.buf[..summary_end]);
         w.put(&segment_hash)?;
-        let (seal_present, seal_tag): (u8, MacTag) = match seal_key {
+        let (seal_present, seal_tag): (u8, HmacSha256Tag) = match seal_key {
             Some(key) => (1, key.seal(&[&segment_hash])),
-            None => (0, [0u8; MAC_TAG_LEN]),
+            None => (0, [0u8; HMAC_SHA256_TAG_LEN]),
         };
         w.put_u8(seal_present)?;
         w.put(&seal_tag)?;
@@ -799,8 +799,8 @@ pub fn verify_segment(
         1 => true,
         _ => return Err(SegmentError::BadField),
     };
-    let mut seal_tag = [0u8; MAC_TAG_LEN];
-    seal_tag.copy_from_slice(r.take(MAC_TAG_LEN)?);
+    let mut seal_tag = [0u8; HMAC_SHA256_TAG_LEN];
+    seal_tag.copy_from_slice(r.take(HMAC_SHA256_TAG_LEN)?);
     let stored_footer_checksum = r.digest()?;
 
     // Footer checksum covers the whole footer bar its own trailing digest.

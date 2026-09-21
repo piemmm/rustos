@@ -24,7 +24,7 @@
 //! is provided one layer up by [`crate::CsRng`] reseeding; this type only
 //! reseeds when asked.
 
-use tairix_crypto::{hmac_sha256, hmac_sha256_parts, MacKey, MacTag};
+use tairix_crypto::{hmac_sha256, hmac_sha256_parts, HmacSha256Key, HmacSha256Tag};
 use zeroize::Zeroize;
 
 /// Length, in bytes, of the DRBG's `Key` and `V` working-state words and of
@@ -54,8 +54,8 @@ pub enum DrbgError {
 /// Holds the `Key`/`V` working state and the reseed counter. The state is
 /// key material and is zeroed on drop.
 pub struct HmacDrbg {
-    key: MacKey,
-    v: MacTag,
+    key: HmacSha256Key,
+    v: HmacSha256Tag,
     reseed_counter: u64,
 }
 

@@ -5,25 +5,43 @@ hand-rolled primitives are allowed; this crate exposes thin wrappers
 over vetted RustCrypto and dalek-cryptography implementations so the
 audit footprint never exceeds a handful of crates.
 
-## What ships in Stage 1
+## What ships
 
-| Primitive | Wrapper                       | Upstream             |
-|-----------|-------------------------------|----------------------|
-| SHA-256   | `sha256(&[u8]) -> [u8; 32]`   | `sha2 = 0.10.9`      |
-| Ed25519 verification | `Ed25519PublicKey::verify` | `ed25519-dalek = 2.1.1` |
-| ChaCha20-Poly1305 AEAD | `aead::seal` / `aead::open` | `chacha20poly1305 = 0.10.1` |
-| ChaCha12 keystream | `stream::chacha12_keystream` | `chacha20 = 0.9.1` |
-| PBKDF2-HMAC-SHA256 | `pbkdf2_sha256` / `pbkdf2_sha256_verify` | `hmac = 0.12.1` + `sha2` |
+| Primitive | Module | Upstream |
+|---|---|---|
+| SHA-256 / SHA-384 / SHA-512, one-shot and streaming | `hash` | `sha2` |
+| HMAC-SHA256 / HMAC-SHA512 / HMAC-SHA1 | `mac` | `hmac` + `sha2` / `sha1` |
+| Poly1305 one-time authenticator | `mac` | `poly1305` |
+| ChaCha20-Poly1305 AEAD | `aead` | `chacha20poly1305` |
+| AES-128/256-GCM AEAD | `aead` | `aes-gcm` |
+| AES-128/192/256-CTR | `cipher` | `aes` + `ctr` |
+| ChaCha12 keystream, 64-bit-nonce ChaCha20 | `stream` | `chacha20` |
+| Ed25519 sign, verify, key derivation from a seed | `sign` | `ed25519-dalek` |
+| ECDSA and ECDH over P-256 / P-384 / P-521 | `nistp` | `p256` / `p384` / `p521` |
+| X25519 key agreement | `agree` | `x25519-dalek` |
+| Finite-field DH over the RFC 3526 groups | `ffdh` | `crypto-bigint` |
+| ML-KEM-768 (FIPS 203) | `kem` | `ml-kem` |
+| HKDF-Expand single block, PBKDF2-HMAC-SHA256, bcrypt-pbkdf | `kdf` | `hmac` / `bcrypt-pbkdf` |
+| Constant-time comparison | `constant_time` | first-party |
 
-Signing is **not** exposed. Signing keys live behind the local capability
-authority service introduced in later stages and are never linked into
-general-purpose callers. Test code in `lib/caps` exercises signing via a
-dev-only dependency on `ed25519-dalek`, keeping the audited build's
-attack surface to verification alone.
+**No other crate in the workspace names a cryptographic dependency** —
+not in a production path, a test, or a build script. Signing lives here
+too: build scripts that sign a fixture bundle and tests that mint a key
+go through `Ed25519SecretKey`, so `ed25519-dalek` is named once.
 
-A first-party constant-time comparison, `ct_eq(&[u8], &[u8]) -> bool`,
-also ships here (see below); it is the one sanctioned home for comparing
-secret byte strings.
+**Nothing here draws randomness.** Every secret — a signing seed, an
+agreement exponent, an ML-KEM encapsulation's `m` — is supplied by the
+caller, which is the only party that knows whether it must come from the
+kernel CSPRNG or from a fixture. Where a construction would normally
+consume an RNG, the deterministic form is used instead: Ed25519 and ECDSA
+derive their nonces from the key and message (RFC 8032, RFC 6979), and
+ML-KEM's key generation and encapsulation take the caller's bytes as
+FIPS 203 defines them.
+
+**One dependency generation.** Every upstream crate sits on one generation
+of the RustCrypto and dalek-cryptography stacks, so the tree holds a single
+copy of `digest`, `crypto-common`, `cipher`, and the curve arithmetic rather
+than two of each.
 
 ## Authenticated encryption (§4)
 
@@ -61,6 +79,64 @@ per-nonce capacity at compile time and the wrapper needs no fallible path.
 beneath `chacha20poly1305`, already source-pinned, and its `zeroize` feature
 was already enabled — naming it directly only makes the dependency explicit.
 
+The same module also exposes djb's original 64-bit-nonce, 64-bit-counter
+ChaCha20, which `chacha20-poly1305@openssh.com` uses: that cipher takes its
+Poly1305 key from block 0 and encrypts the payload from block 1 under one
+nonce, which RFC 8439's 96-bit-nonce layout cannot express. The start
+counter is therefore an explicit parameter, and a run that would carry the
+counter past its last block is refused rather than silently restarting — and
+so reusing — the keystream.
+
+## The NIST prime curves (`nistp`)
+
+ECDSA and ECDH over P-256, P-384, and P-521 live in one module rather than
+split across `sign` and `agree`, because they share their key material and
+their SEC1 point encoding; splitting them would mean two copies of that
+encoding. SSH still treats them as separate algorithms and never uses one
+key for both.
+
+Each curve pairs with exactly one hash, as RFC 5656 §6.2.1 assigns them
+(P-256/SHA-256, P-384/SHA-384, P-521/SHA-512). The pairing is not a
+parameter, so a caller cannot weaken a curve by choosing a shorter hash.
+A public key is validated when it is decoded — on the curve, not the
+identity — and these curves have cofactor 1, so that is the whole of point
+validation. Signature scalars are fixed-width big-endian field elements,
+which is what SSH's `mpint` encoder consumes; no DER is produced or parsed.
+High-`s` signatures verify, because ECDSA admits both `s` and `n - s`,
+foreign implementations emit either, and SSH imposes no malleability rule.
+
+## Finite-field Diffie-Hellman (`ffdh`)
+
+SSH's `diffie-hellman-group{14,16,18}-*` and its group exchange (RFC 4419)
+need `g^x mod p` over a safe-prime group, and no vetted pure-Rust FFDH crate
+exists. The group operation is therefore composed from the constant-time
+Montgomery exponentiation of `crypto-bigint`, which the NIST curve stack
+already depends on: a standard construction over an audited primitive, the
+same shape as PBKDF2 over the audited HMAC, rather than a hand-rolled one.
+
+A peer value is accepted only when `1 < y < p - 1`. For a safe-prime group
+whose private exponent is ephemeral and used once — every SSH key exchange —
+that is the partial validation NIST SP 800-56A Rev3 sanctions, and it
+excludes every small subgroup a safe prime has. Only the three RFC 3526
+groups are offered: an arbitrary caller-supplied modulus would need a
+primality test to validate and would make the cost unbounded (one
+exponentiation over the 8192-bit group already holds a sixteen-entry
+windowing table of full-width integers, about 16 KiB).
+
+## Key encapsulation (`kem`)
+
+ML-KEM-768 (FIPS 203) is the post-quantum half of `mlkem768x25519-sha256`,
+OpenSSH's current default key exchange. It is a *hybrid*: the shared secret
+is derived from this encapsulation and an X25519 agreement together, so
+breaking either alone does not break the session.
+
+Decapsulation is infallible by design. FIPS 203 §7.3 specifies implicit
+rejection, so a ciphertext that was not produced for the key yields a key
+derived from the seed's rejection secret rather than an error — which is
+what stops a chosen-ciphertext attacker learning anything from the
+distinction. A caller discovers a forgery when the session fails to
+authenticate, never from the decapsulation call.
+
 ## Password derivation (§5.1)
 
 `kdf::pbkdf2_sha256` derives a 32-byte password hash with PBKDF2-HMAC-SHA256
@@ -74,6 +150,14 @@ shape as `tairix-rng`'s HMAC-DRBG), not a hand-rolled primitive
 stored-hash comparison cannot leak through timing (`AGENTS.md` §19.1). The
 consumer is `lib/users`, which owns the salt, the accepted cost range, and
 the stored-record encoding.
+
+`kdf::bcrypt_pbkdf` is a *foreign* format's KDF and not TAIRiX's: the
+OpenSSH v1 private-key container wraps a passphrase-encrypted key with it,
+so reading an existing user key requires it exactly as specified. Its
+working scratch is the caller's buffer rather than one allocated here, for
+the same reason the keystream writes straight into the caller's
+destinations: the scratch ends the call holding derived key material, and
+the holder is the only party that can wipe it.
 
 ## Backend availability and the boot-time self-test (`backend`)
 
@@ -150,9 +234,38 @@ as a dedicated step.
 
 ## Test vectors
 
-* SHA-256: FIPS 180-4 §A.1 vectors for the empty message and `"abc"`.
-* Ed25519: RFC 8032 §7.1 test vector 1 (empty message); plus tampered
-  signature and tampered message rejections.
+Every known answer comes from a published specification or from an
+implementation outside this tree, never from the dependency under test.
+
+* SHA-256/384/512: FIPS 180-4 §A vectors for the empty message and `"abc"`,
+  plus a streaming-versus-one-shot agreement sweep across chunk boundaries.
+* HMAC-SHA256/512/SHA1: known answers from CPython's `hmac` over OpenSSL,
+  and — for the SHA-2 instantiations — an in-tree cross-check against the
+  textbook RFC 2104 construction built from this crate's own hash wrappers,
+  so a swapped digest fails twice over.
+* Poly1305: the RFC 8439 §2.5.2 vector, plus block-boundary and tamper
+  rejections.
+* AES-CTR: NIST SP 800-38A §F.5's CTR-AES{128,192,256} vectors, plus the
+  stateful-continuation property one connection depends on.
+* AES-GCM: the Wycheproof project's vectors, plus a regression test that a
+  rejected message leaves the buffer holding ciphertext and never the
+  plaintext — the failure CVE-2023-42811 was.
+* ChaCha20 (64-bit nonce): a keystream computed from djb's original round
+  function outside this tree, whose reference also reproduces the published
+  all-zero-key vector, so the state layout is pinned rather than guessed.
+* Ed25519: RFC 8032 §7.1 test vectors 1 and 2, signing and verifying, plus
+  determinism, seed round-trip, and tampered signature/message rejections.
+* ECDSA: RFC 6979 §A.2.5/§A.2.6/§A.2.7 deterministic `(r, s)` for all three
+  curves. These are what prove the signing path is RFC 6979 and not a
+  randomised nonce — a randomised signer could never match them.
+* ECDH: the Wycheproof raw-SEC1-point vectors for all three curves.
+* Finite-field DH: `g^x mod p` for all three RFC 3526 groups computed by
+  CPython's arbitrary-precision `pow`, plus refusal of every degenerate peer
+  value.
+* ML-KEM-768: NIST's own ACVP vectors for FIPS 203 key generation and
+  encapsulation, plus implicit-rejection behaviour on a forged ciphertext.
+* bcrypt-pbkdf: the golden vectors from the Go project's independent
+  implementation of the same OpenBSD construction.
 * ChaCha20-Poly1305: the RFC 8439 §2.8.2 worked example, plus round-trip
   and tampered-ciphertext / tag / nonce / associated-data rejections.
 * ChaCha12 keystream: the first 96 bytes under RFC 8439's test-vector key

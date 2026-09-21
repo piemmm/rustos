@@ -28,7 +28,7 @@ ordinary pre-release changes (§2.13).
 
 | # | Item | Status |
 |---|---|---|
-| S0a | `lib/crypto` extension: the algorithm set §4 admits, each with its §2.12 justification, exact pin, `deny.toml`/`supply-chain.toml`/SBOM entry, and §19.1 constant-time test | planned |
+| S0a | `lib/crypto` extension: the algorithm set §4 admits, each with its §2.12 justification, exact pin, `deny.toml`/`supply-chain.toml`/SBOM entry, and §19.1 constant-time test | done |
 | S0b | The `netstack` socket-quota defect: a derived total, a per-principal share of it, and a `net.*` administrative override — the fail-closed refusal unchanged | planned |
 | S0c | `lib/sandbox::session` — the duplex, long-lived worker seam beside the one-shot `host`/`worker` pair | planned |
 | S0d | `lib/compress` gains the DEFLATE **compressor** (RFC 1951) and the zlib envelope encoder (RFC 1950); the decoders already exist | planned |
@@ -46,6 +46,7 @@ ordinary pre-release changes (§2.13).
 | S12 | `ssh-keyscan`, `ssh-copy-id`, `sshd -t`/`-T`, `ssh -Q` | planned |
 | S13 | `tools/sshinterop` and the interop verticals, in both directions, against a pinned real OpenSSH | planned |
 | S14 | FIDO/U2F `sk-*` key types | blocked — needs a CTAP2-over-USB-HID path that does not exist (§8) |
+| S15 | `rsa-sha2-256` / `rsa-sha2-512` host and user keys | blocked — the only pure-Rust RSA carries an unpatched advisory (§8) |
 
 ---
 
@@ -520,8 +521,8 @@ to `sshd`, and `ssh` must connect to a stock OpenSSH server, without either side
 being configured specially.
 
 **Host keys and signatures:** `ssh-ed25519`, `ecdsa-sha2-nistp{256,384,521}`,
-`rsa-sha2-256`, `rsa-sha2-512`, and the `*-cert-v01@openssh.com` certificate
-form of each.
+and the `*-cert-v01@openssh.com` certificate form of each. `rsa-sha2-256`
+and `rsa-sha2-512` are **absent**, not deferred: see S15 and §8.
 
 **Key exchange:** `curve25519-sha256` (and the `@libssh.org` alias),
 `mlkem768x25519-sha256`, `ecdh-sha2-nistp{256,384,521}`,
@@ -553,18 +554,44 @@ so SHA-1 appears on the read path and an explicit opt-in write path only. This
 is documented in `docs/src/security/ssh.md` rather than left for a reader to
 discover.
 
-`lib/crypto`'s current surface is SHA-256, HMAC-SHA-256, ChaCha20-Poly1305
-(RFC 8439 AEAD), a ChaCha12 keystream, X25519, Ed25519 **verify only**, and
-PBKDF2-SHA256. S0a therefore adds: Ed25519 signing and key generation;
-SHA-384/512 and HMAC-SHA-512; a raw ChaCha20 keystream with an explicit 64-bit
-counter and a standalone Poly1305 (`chacha20-poly1305@openssh.com` uses two keys
-and a sequence-number nonce, so the packaged AEAD cannot serve it); AES-CTR and
-AES-GCM; ECDH and ECDSA over P-256/384/521; RSA PKCS#1 v1.5 verify and sign for
-`rsa-sha2-*`; finite-field DH with the RFC 3526 groups and RFC 4419 group
-exchange; ML-KEM-768; bcrypt-pbkdf; and HMAC-SHA1 for the one use above. Each
-arrives with its §2.12 justification, an exact `=x.y.z` pin, a `deny.toml`
-licence check, a `supply-chain.toml` source pin, an SBOM entry, and the §19.1
+`lib/crypto` now carries the whole of the above, and is the only crate in the
+workspace that names a cryptographic dependency — production path, test, or
+build script alike. S0a moved the existing pins and added the rest as **one
+generation** of the RustCrypto and dalek-cryptography stacks, so the tree holds
+a single copy of `digest`, `cipher`, and the curve arithmetic rather than two
+of each. What it added: Ed25519 signing and key derivation from a seed;
+SHA-384/512 and HMAC-SHA-512; a 64-bit-nonce ChaCha20 keystream with an
+explicit start counter and a standalone Poly1305 (`chacha20-poly1305@openssh.com`
+uses two keys and a sequence-number nonce, so the packaged AEAD cannot serve
+it); AES-CTR and AES-GCM; ECDH and ECDSA over P-256/384/521; finite-field DH
+over the RFC 3526 groups; ML-KEM-768; bcrypt-pbkdf; and HMAC-SHA1 for the one
+use above. Each arrived with its §2.12 justification, an exact `=x.y.z` pin, a
+`deny.toml` licence check, a `supply-chain.toml` source pin, an SBOM entry (the
+generator reads `Cargo.lock`, so it follows automatically), and the §19.1
 constant-time test under `-C opt-level=3`.
+
+Two constraints shaped it and are recorded so a later increment does not
+re-derive them:
+
+- **Nothing in `lib/crypto` draws randomness**, so every construction is
+  reached through its deterministic form: Ed25519 and ECDSA derive their
+  nonces from the key and message (RFC 8032, RFC 6979), and ML-KEM's key
+  generation and encapsulation take the caller's bytes as FIPS 203 defines
+  them. This is what forced the pin generation: on the older RustCrypto
+  generation `p521` implements no `DigestAlgorithm`, so its only signing path
+  was a randomised nonce through `OsRng` — unavailable bare-metal, and a
+  reused or biased `k` is immediate private-key recovery. Moving the whole
+  stack to one newer generation makes `ecdsa-sha2-nistp521` deterministic like
+  its siblings, and the RFC 6979 §A.2.7 vector in the unit tests is what
+  proves it.
+- **Group exchange (RFC 4419) has no primality test available.** `ffdh` offers
+  the three RFC 3526 groups and refuses an arbitrary caller-supplied modulus:
+  validating a server-offered group as a safe prime needs Miller-Rabin, and
+  the only pure-Rust option sits on a different `crypto-bigint` major version.
+  S2 must therefore decide the client's group-exchange posture — accept only
+  groups it can vouch for, or carry the primality test — rather than assuming
+  an arbitrary group is checkable. It is not reached against a stock OpenSSH
+  peer, whose proposal always contains curve25519 and the NIST curves first.
 
 ---
 
@@ -691,6 +718,8 @@ Each is stated and absent, never stubbed.
 
 - **`ssh-rsa`, `ssh-dss`, `diffie-hellman-group1-sha1`, CBC ciphers,
   `hmac-md5`/`hmac-sha1` MACs** — refused, per §4.
+- **`rsa-sha2-256` / `rsa-sha2-512`** — absent, not refused on merit: there is
+  no charter-legal implementation. See §8, S15.
 - **`sntrup761x25519-sha512@openssh.com`** — the only available implementations
   are bindings to C reference code, which §1 forbids. `mlkem768x25519-sha256`
   is pure Rust, standardised, and OpenSSH's own current default; it is the
@@ -776,6 +805,30 @@ This predates SSH. §1.4 is designed to need no write path, so nothing in this
 plan is blocked on it, and it is far too large to fold in — it is a syscall,
 an ABI addition, a VFS path, ARXFS persistence, and a tool. It is recorded as
 `plans/OPEN-DEFECTS.md` **D141**.
+
+**S15 — RSA host and user keys (`rsa-sha2-256`, `rsa-sha2-512`).** The only
+pure-Rust RSA is the `rsa` crate, which carries RUSTSEC-2023-0071 (the Marvin
+timing attack) with `patched = []` — unfixed on 0.9.10 and on the 0.10 release
+candidates as of 2026-09-12 — and whose own advisory text says to avoid it
+"in settings where attackers can observe timing, for example over the
+network". That is exactly SSH. §19.3 blocks an advisory-affected dependency
+and §2.12 forbids hand-rolling the alternative, so the algorithm is **absent**
+rather than shipped weak or stubbed. Verify-only would not help: `cargo deny`
+flags the crate, not the call.
+
+What this costs, stated rather than hidden: nothing for host keys against a
+stock OpenSSH peer, which has offered Ed25519 by default since 7.0 and always
+proposes it. What it does cost is a user whose only key is `~/.ssh/id_rsa`,
+and the rare server with an RSA-only host key — for those, `ssh-keygen -t
+ed25519` on the other side is the answer, and `sshd` says so when it refuses
+(§2.24).
+
+**This is queued for re-checking, not forgotten.** At every stage boundary
+this plan advances, and whenever `lib/crypto`'s pins are audited, confirm
+whether RUSTSEC-2023-0071 has gained a `patched` version; if it has, S15
+unblocks and is an ordinary increment. It is also tracked as
+`plans/OPEN-DEFECTS.md` **D143** so it is visible from the tree's single
+open-item ledger rather than only from this plan.
 
 **S14 — FIDO/U2F `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-*`.** These need a
 CTAP2-over-USB-HID path to a security key. `lib/hid` is boot-protocol decode

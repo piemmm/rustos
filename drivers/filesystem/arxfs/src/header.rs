@@ -29,7 +29,7 @@
 //! ([`crate::ARXFS::read_meta`]).
 
 use tairix_abi::DriverError;
-use tairix_crypto::{ct_eq, hmac_sha256, MacKey, MacTag, MAC_TAG_LEN};
+use tairix_crypto::{ct_eq, hmac_sha256, HmacSha256Key, HmacSha256Tag, HMAC_SHA256_TAG_LEN};
 
 use crate::{rd_u128, rd_u32, rd_u64, wr_u128, wr_u32, wr_u64};
 
@@ -212,7 +212,7 @@ const H_PAYLOAD_LEN: usize = 64;
 // 72..104; bytes 104..HEADER_LEN are reserved (zeroed).
 const H_RESERVED: usize = 68;
 const H_MAC: usize = 72;
-const H_MAC_END: usize = H_MAC + MAC_TAG_LEN;
+const H_MAC_END: usize = H_MAC + HMAC_SHA256_TAG_LEN;
 
 /// The HMAC-SHA256 keyed authenticator over every byte of `block` *except*
 /// the tag slot, computed through `lib/crypto`. Covers the identity *and* the
@@ -225,7 +225,7 @@ const H_MAC_END: usize = H_MAC + MAC_TAG_LEN;
 /// zeroes it before sealing and decoding recomputes against the same zeroed
 /// view.
 #[must_use]
-fn mac_tag(key: &MacKey, block: &[u8]) -> MacTag {
+fn mac_tag(key: &HmacSha256Key, block: &[u8]) -> HmacSha256Tag {
     let len = block.len().min(MAX_META_BLOCK);
     let mut scratch = [0u8; MAX_META_BLOCK];
     scratch[..len].copy_from_slice(&block[..len]);
@@ -247,7 +247,7 @@ impl BlockHeader {
     ///
     /// [`DriverError::DeviceFault`] if `block` is shorter than
     /// [`HEADER_LEN`] (a programming error, surfaced rather than panicked).
-    pub fn seal(&self, block: &mut [u8], key: &MacKey) -> Result<(), DriverError> {
+    pub fn seal(&self, block: &mut [u8], key: &HmacSha256Key) -> Result<(), DriverError> {
         if block.len() < HEADER_LEN {
             return Err(DriverError::DeviceFault);
         }
@@ -295,7 +295,7 @@ impl BlockHeader {
         expect_type: BlockType,
         expect_uuid: u128,
         expect_physical: u64,
-        key: &MacKey,
+        key: &HmacSha256Key,
     ) -> Result<Self, DriverError> {
         if block.len() < HEADER_LEN {
             return Err(DriverError::DeviceFault);
@@ -303,7 +303,7 @@ impl BlockHeader {
         if rd_u64(block, H_MAGIC) != HEADER_MAGIC || rd_u32(block, H_VERSION) != FORMAT_VERSION {
             return Err(DriverError::DeviceFault);
         }
-        let mut stored = [0u8; MAC_TAG_LEN];
+        let mut stored = [0u8; HMAC_SHA256_TAG_LEN];
         stored.copy_from_slice(&block[H_MAC..H_MAC_END]);
         let expected = mac_tag(key, block);
         if !ct_eq(&expected, &stored) {
@@ -345,7 +345,7 @@ impl BlockHeader {
         expect_type: BlockType,
         expect_uuid: u128,
         expect_physical: u64,
-        key: &MacKey,
+        key: &HmacSha256Key,
     ) -> Option<Self> {
         Self::decode_verify(block, expect_type, expect_uuid, expect_physical, key).ok()
     }
@@ -356,7 +356,7 @@ mod tests {
     use super::*;
 
     const UUID: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
-    const KEY: MacKey = [0x5au8; MAC_TAG_LEN];
+    const KEY: HmacSha256Key = [0x5au8; HMAC_SHA256_TAG_LEN];
 
     fn sealed() -> [u8; 512] {
         let mut block = [0u8; 512];
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn wrong_key_is_rejected() {
         let block = sealed();
-        let other: MacKey = [0x17u8; MAC_TAG_LEN];
+        let other: HmacSha256Key = [0x17u8; HMAC_SHA256_TAG_LEN];
         assert_eq!(
             BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &other),
             Err(DriverError::DeviceFault)

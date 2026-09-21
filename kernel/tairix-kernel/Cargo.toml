@@ -363,11 +363,9 @@ tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
 tairix-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
-# Deterministic Ed25519 signing of the baked driver manifests. The same
-# audited, version-pinned crate `lib/crypto` wraps and the `drvhost`
-# fixtures use; only build glue and test code
-# name it, never a production runtime path.
-ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+# Deterministic Ed25519 signing of the baked driver manifests, through the
+# one crate in the workspace that names a cryptographic dependency.
+tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # `src/build_support.rs` is compiled both here (the build script `#[path]`s it)
 # and as a kernel module, so its shared non-cryptographic hash is named in
 # both dependency sets.
@@ -429,8 +427,5 @@ tairix-test-encrypted-root-image = { path = "../../tests/integration/encrypted_r
 # planted account, proving the served database is usable (`plans/PI.md` P11).
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
 # The `virtio_boot` wiring test signs a synthetic `.rxe` manifest with a
-# known keypair so the live `drvhost::Host` accepts it. Pinned to the
-# same version `lib/crypto` audits and `drvhost`'s fixtures use; only
-# test code names `ed25519-dalek`, never production paths
-# (mirrors `userland/system/drvhost`).
-ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+# known keypair so the live `drvhost::Host` accepts it, through the same
+# wrapped Ed25519 the production verifier checks against.

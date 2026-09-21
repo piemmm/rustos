@@ -24,12 +24,12 @@
 //! differs). Re-running it produces byte-identical output, so the test
 //! is deterministic.
 
-use ed25519_dalek::{Signer, SigningKey};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use tairix_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
+use tairix_crypto::Ed25519SecretKey;
 
 /// Deterministic Ed25519 seed for the PS/2 fixture signer. Distinct
 /// from the `drvhost_qemu` seed so the two fixtures cannot be confused.
@@ -64,8 +64,8 @@ fn main() {
         println!("cargo:rustc-link-arg=-T{linker_script}");
     }
 
-    let signing_key = SigningKey::from_bytes(&TEST_SEED);
-    let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let signing_key = Ed25519SecretKey::from_seed(&TEST_SEED);
+    let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
 
     // The PS/2 driver's `register` gate consults the host-installed
     // capability bitmap for `CAP_DRV_LOAD`, which is the manifest's
@@ -89,7 +89,7 @@ fn main() {
         signed_message.extend_from_slice(&c.to_le_bytes());
     }
     let sig = signing_key.sign(&signed_message);
-    manifest.signature = sig.to_bytes();
+    manifest.signature = *sig.as_bytes();
 
     let mut image: Vec<u8> = Vec::new();
     image.extend_from_slice(&manifest.to_le_bytes());

@@ -20,7 +20,6 @@ tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 # Tests need a signing key to produce real Ed25519 tokens; production callers
 # never sign — they only verify via `tairix-crypto`. The dev-only dependency
 # keeps the signing surface out of the audited build.
-ed25519-dalek = { version = "=2.1.1", default-features = false }
 # The Bronze stateful model (`tests/proptest_model.rs`) drives the
 # capability-critical paths under randomised command sequences. Same pinned,
 # already-audited version `kernel/sec` uses; dev-only, so it never reaches

@@ -187,7 +187,6 @@ mod tests {
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use alloc::vec::Vec;
-    use ed25519_dalek::{Signer, SigningKey};
     use tairix_abi::driver::bus::{Bus, BusDevice};
     use tairix_abi::driver::msix::MsixBus;
     use tairix_abi::driver::virtio_pci::{
@@ -199,6 +198,7 @@ mod tests {
         MmioMapper, MsiMessage, DRIVER_MANIFEST_MAGIC,
     };
     use tairix_caps::CapabilitySet;
+    use tairix_crypto::Ed25519SecretKey;
     use tairix_drv_bus_virtio::transport_pci::common;
     use tairix_drvhost::{DriverSpawner, ImageSource, SpawnContext, SpawnRegisterError};
     use tairix_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
@@ -376,11 +376,11 @@ mod tests {
     /// Build a signed `.rxe` image requesting `caps`, matching the
     /// verifier in `drvhost::host`.
     fn build_signed_image(
-        signing_key: &SigningKey,
+        signing_key: &Ed25519SecretKey,
         syscall_table_hash: [u8; 32],
         caps: &[CapabilityId],
     ) -> Vec<u8> {
-        let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
+        let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
         let count = u16::try_from(caps.len()).expect("caps fit in u16");
         let mut manifest = DriverManifest {
             magic: DRIVER_MANIFEST_MAGIC,
@@ -400,7 +400,7 @@ mod tests {
         let mut signed = Vec::new();
         signed.extend_from_slice(&encoded[..DriverManifest::WIRE_LEN - 64]);
         signed.extend_from_slice(&cap_body);
-        manifest.signature = signing_key.sign(&signed).to_bytes();
+        manifest.signature = *signing_key.sign(&signed).as_bytes();
         let mut out = Vec::new();
         out.extend_from_slice(&manifest.to_le_bytes());
         out.extend_from_slice(&cap_body);
@@ -452,7 +452,7 @@ mod tests {
         let waiter = IdleWaiter;
 
         // --- drvhost trust + image.
-        let signing_key = SigningKey::from_bytes(&SEED);
+        let signing_key = Ed25519SecretKey::from_seed(&SEED);
         let pubkey = pubkey_of(&signing_key);
         let trusted = [pubkey];
         let syscall_hash = [0x5Au8; 32];
@@ -534,7 +534,7 @@ mod tests {
         let irq = IrqTable::new(31);
         let irq_handle = irq.bind(7, OWNER).expect("bind").handle;
         let waiter = IdleWaiter;
-        let signing_key = SigningKey::from_bytes(&SEED);
+        let signing_key = Ed25519SecretKey::from_seed(&SEED);
         let trusted = [pubkey_of(&signing_key)];
         let source = OneImage { image: Vec::new() };
         let spawner = ToVirtioRegister;
@@ -591,7 +591,7 @@ mod tests {
         let irq = IrqTable::new(31);
         let irq_handle = irq.bind(7, OWNER).expect("bind").handle;
         let waiter = IdleWaiter;
-        let signing_key = SigningKey::from_bytes(&SEED);
+        let signing_key = Ed25519SecretKey::from_seed(&SEED);
         let trusted = [pubkey_of(&signing_key)];
         let source = OneImage { image: Vec::new() };
         let spawner = ToVirtioRegister;
@@ -648,7 +648,7 @@ mod tests {
         }
     }
 
-    fn pubkey_of(sk: &SigningKey) -> Ed25519PublicKey {
-        Ed25519PublicKey::from_bytes(&sk.verifying_key().to_bytes()).expect("valid key")
+    fn pubkey_of(sk: &Ed25519SecretKey) -> Ed25519PublicKey {
+        Ed25519PublicKey::from_bytes(&sk.public_key().as_bytes()).expect("valid key")
     }
 }

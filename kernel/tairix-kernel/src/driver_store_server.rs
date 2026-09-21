@@ -570,7 +570,6 @@ mod tests {
 
     use core::cell::RefCell;
 
-    use ed25519_dalek::{Signer, SigningKey};
     use tairix_abi::driver_store::{
         decode_catalogue_reply, decode_load_reply, decode_unload_reply, reply_status, StoreRequest,
         LOAD_REQUEST_LEN, UNLOAD_REQUEST_LEN,
@@ -580,6 +579,7 @@ mod tests {
         CapabilityId, DriverBindKey, DriverKind, DriverManifest, HwDeviceClass, HwMatchKey, HwNode,
         ABI_VERSION_CURRENT, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS,
     };
+    use tairix_crypto::Ed25519SecretKey;
 
     use crate::system_files::SystemFileService;
     use crate::test_support::MockRootFs;
@@ -593,30 +593,30 @@ mod tests {
     /// distinct key models an untrusted signer.
     const TEST_SEED: [u8; 32] = *b"tairix-store-srv-test-signing/v1";
 
-    fn signing_key() -> SigningKey {
-        SigningKey::from_bytes(&TEST_SEED)
+    fn signing_key() -> Ed25519SecretKey {
+        Ed25519SecretKey::from_seed(&TEST_SEED)
     }
 
-    fn untrusted_key() -> SigningKey {
+    fn untrusted_key() -> Ed25519SecretKey {
         let mut seed = TEST_SEED;
         seed[0] ^= 0xFF;
-        SigningKey::from_bytes(&seed)
+        Ed25519SecretKey::from_seed(&seed)
     }
 
-    fn pubkey_of(sk: &SigningKey) -> Ed25519PublicKey {
-        Ed25519PublicKey::from_bytes(&sk.verifying_key().to_bytes()).expect("well-formed key")
+    fn pubkey_of(sk: &Ed25519SecretKey) -> Ed25519PublicKey {
+        sk.public_key()
     }
 
     /// Build a signed `kind = UserSpace` `.rxe` bundle exactly as the build
     /// glue does: the signature covers
     /// `header[..WIRE_LEN-64] || cap_body || bind_table || payload`.
     fn build_signed_bundle(
-        sk: &SigningKey,
+        sk: &Ed25519SecretKey,
         caps: &[CapabilityId],
         bind_keys: &[DriverBindKey],
         payload: &[u8],
     ) -> Vec<u8> {
-        let signer_pubkey: [u8; 32] = sk.verifying_key().to_bytes();
+        let signer_pubkey: [u8; 32] = *sk.public_key().as_bytes();
         let mut manifest = DriverManifest {
             magic: DRIVER_MANIFEST_MAGIC,
             abi_version: ABI_VERSION_CURRENT,
@@ -642,7 +642,7 @@ mod tests {
         message.extend_from_slice(&cap_body);
         message.extend_from_slice(&bind_body);
         message.extend_from_slice(payload);
-        manifest.signature = sk.sign(&message).to_bytes();
+        manifest.signature = *sk.sign(&message).as_bytes();
         let mut out = Vec::new();
         out.extend_from_slice(&manifest.to_le_bytes());
         out.extend_from_slice(&cap_body);

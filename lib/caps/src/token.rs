@@ -184,19 +184,17 @@ fn bytes_at<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
 mod tests {
     use super::{CapabilityToken, RevocationEpoch, TOKEN_BODY_LEN, TOKEN_WIRE_LEN};
     use crate::set::CapabilitySet;
-    use ed25519_dalek::{Signer, SigningKey};
     use tairix_abi::{CapabilityId, Errno, ABI_VERSION_CURRENT};
-    use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
+    use tairix_crypto::{Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature};
 
-    fn signing_key() -> SigningKey {
+    fn signing_key() -> Ed25519SecretKey {
         // Deterministic 32-byte seed. Tests must not depend on RNG.
         let seed = [42u8; 32];
-        SigningKey::from_bytes(&seed)
+        Ed25519SecretKey::from_seed(&seed)
     }
 
-    fn authority_key(signing: &SigningKey) -> Ed25519PublicKey {
-        let vk = signing.verifying_key();
-        Ed25519PublicKey::from_bytes(vk.as_bytes()).expect("valid key")
+    fn authority_key(signing: &Ed25519SecretKey) -> Ed25519PublicKey {
+        signing.public_key()
     }
 
     fn sample_caps() -> CapabilitySet {
@@ -221,7 +219,7 @@ mod tests {
             subject,
             epoch,
             caps: *caps,
-            signature: Ed25519Signature::from_bytes(sig.to_bytes()),
+            signature: Ed25519Signature::from_bytes(*sig.as_bytes()),
         }
     }
 

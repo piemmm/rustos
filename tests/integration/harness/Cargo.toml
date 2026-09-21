@@ -14,15 +14,15 @@ workspace = true
 # `driver-image` enables the signed `.rxe` driver-bundle composer
 # (`src/driver_image.rs`) and its Ed25519 dependency. It is opt-in so only the
 # build scripts that actually sign a bundle (the driver-spawn vertical, the
-# autoload-root image fixture) pull in the crypto crate, not every harness
+# autoload-root image fixture) pull in `lib/crypto`, not every harness
 # consumer.
 [features]
-driver-image = ["dep:ed25519-dalek"]
+driver-image = ["dep:tairix-crypto"]
 # `app-image` enables the signed application-bundle composer and the
 # `AppInfo.toml` manifest discovery (`src/app_image.rs`): Ed25519 signing
-# plus the `lib/crypto` SHA-256 the canonical bundle content hash uses.
-# Opt-in for the same reason as `driver-image`.
-app-image = ["dep:ed25519-dalek", "dep:tairix-crypto"]
+# plus the SHA-256 the canonical bundle content hash uses, both from
+# `lib/crypto`. Opt-in for the same reason as `driver-image`.
+app-image = ["dep:tairix-crypto"]
 
 [dependencies]
 # The single source of truth for the `rxe` load-image wire format, reused so
@@ -30,18 +30,14 @@ app-image = ["dep:ed25519-dalek", "dep:tairix-crypto"]
 # `tairix-abi` is `no_std` but builds on the host, which
 # is where this build-time helper runs.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# Ed25519 signing for the `driver-image` signed-bundle composer (host-only
-# build glue); pulled in only when that feature is enabled.
-ed25519-dalek = { version = "=2.1.1", default-features = false, features = [
-    "zeroize",
-], optional = true }
 # The QEMU runner's own per-arch defaults, so the `virt` tree a build script
 # dumps describes the same machine the runner starts (one definition of the
 # default guest RAM, not a copy in each).
 tairix-qemu = { path = "../../../tools/qemu", version = "=0.0.0" }
-# The audited `lib/crypto` SHA-256 the canonical bundle content hash is
-# computed with (`app-image` only), so the composer and every store-side
-# verifier hash through the same wrapped primitive.
+# The audited SHA-256 the canonical bundle content hash is computed with and
+# the Ed25519 signing the bundle composers use, so the composer and every
+# store-side verifier go through the same wrapped primitives. `lib/crypto` is
+# the one crate in the workspace that names a cryptographic dependency.
 tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0", optional = true }
 
 [dev-dependencies]

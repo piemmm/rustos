@@ -29,7 +29,6 @@ tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # Tests need to sign manifests and tokens with real Ed25519 keys. The
 # signing path lives outside the kernel — production callers only verify.
 # Matching the pinned version already audited by `lib/caps`/`lib/crypto`.
-ed25519-dalek = { version = "=2.1.1", default-features = false }
 proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
 # The model drives its programs through the shared seed/budget runner
 # (`tairix_fuzzseed::prop::drive`), so the seed selection, start-of-test

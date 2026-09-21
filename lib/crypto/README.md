@@ -2,12 +2,19 @@
 
 Stability tier: **experimental**.
 
-The single place TAIRiX calls cryptographic code. Per the charter, no
-cryptographic primitive is hand-rolled here: every function is a thin wrapper
-over a vetted upstream implementation (`sha2`, `hmac`, `chacha20poly1305`,
-`ed25519-dalek`), chosen so the audit footprint never exceeds a handful of
-crates. The wrappers expose a deliberately *narrower* API than upstream
-(fixed-size byte arrays, no upstream traits) to keep the boundary auditable.
+The single place TAIRiX calls cryptographic code, and the only crate in the
+workspace permitted to name a cryptographic dependency — not in a production
+path, a test, or a build script. Per the charter no cryptographic primitive is
+hand-rolled here: every function is a thin wrapper over a vetted upstream
+implementation, and every upstream crate sits on one generation of the
+RustCrypto and dalek-cryptography stacks, so the tree holds a single copy of
+`digest`, `cipher`, and the curve arithmetic rather than two of each. The
+wrappers expose a deliberately *narrower* API than upstream (fixed-size byte
+arrays, no upstream traits) to keep the boundary auditable.
+
+Nothing here draws randomness: every secret is supplied by the caller, and
+where a construction would normally consume an RNG the deterministic form is
+used instead (RFC 8032, RFC 6979, and FIPS 203's internal entry points).
 
 See `docs/src/lib/crypto.md` for the full primitive list, test vectors, and the
 constant-time-comparison guarantees.

@@ -16,11 +16,11 @@
 //! timestamp or random serial number is emitted — so it composes with the
 //! reproducible-build verification tracked as a later burn-down item.
 //!
-//! Signing the SBOM with the per-installation key is deliberately *not* done here: no private-key signing API
-//! exists yet (`lib/crypto` is verify-only and the local capability
-//! authority is a later stage). That step is tracked in `PLAN.md`
-//! alongside the other key-dependent work; this command emits
-//! the unsigned document the signer will wrap.
+//! Signing the SBOM with the per-installation key is deliberately *not*
+//! done here: `lib/crypto` can sign, but the per-installation key lives
+//! behind the local capability authority, which is a later stage. That step
+//! is tracked in `PLAN.md` alongside the other key-dependent work; this
+//! command emits the unsigned document the signer will wrap.
 
 use std::path::Path;
 

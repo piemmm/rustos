@@ -65,7 +65,7 @@ use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_collections::RangeKey;
-use tairix_crypto::{AeadKey, MacKey};
+use tairix_crypto::{AeadKey, HmacSha256Key};
 use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
 use tairix_reclaim::{CacheBudget, PinnedAccounting, PressureGauge};
 use zeroize::Zeroize;
@@ -770,7 +770,7 @@ fn epoch_clock() -> Time64 {
 pub struct ARXFS<B: Block> {
     block: B,
     fs_uuid: u128,
-    mac_key: MacKey,
+    mac_key: HmacSha256Key,
     /// AEAD key encrypting directory-entry names at rest (`crypto` module).
     filename_key: AeadKey,
     /// AEAD key encrypting file data at rest (`crypto` module).
@@ -2223,7 +2223,7 @@ impl<B: Block> ARXFS<B> {
         let fs = Self {
             block,
             fs_uuid: 0,
-            mac_key: [0u8; tairix_crypto::MAC_KEY_LEN],
+            mac_key: [0u8; tairix_crypto::HMAC_SHA256_KEY_LEN],
             filename_key: [0u8; tairix_crypto::AEAD_KEY_LEN],
             content_key: [0u8; tairix_crypto::AEAD_KEY_LEN],
             crypto_header: [0u8; CRYPTO_HEADER_LEN],

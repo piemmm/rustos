@@ -13,7 +13,7 @@
 //! cleanly *and* whose referenced root also decodes cleanly (`transaction`).
 
 use tairix_abi::DriverError;
-use tairix_crypto::MacKey;
+use tairix_crypto::HmacSha256Key;
 
 use crate::crypto::CRYPTO_HEADER_LEN;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
@@ -134,7 +134,7 @@ impl Superblock {
         block: &mut [u8],
         fs_uuid: u128,
         phys: u64,
-        key: &MacKey,
+        key: &HmacSha256Key,
         crypto_header: &[u8; CRYPTO_HEADER_LEN],
     ) -> Result<(), DriverError> {
         if block.len() < P_INCOMPAT + 8 {
@@ -188,7 +188,7 @@ impl Superblock {
         block: &[u8],
         expect_uuid: Option<u128>,
         phys: u64,
-        key: &MacKey,
+        key: &HmacSha256Key,
     ) -> Result<Option<(Self, u128)>, DriverError> {
         if block.len() < P_INCOMPAT + 8 {
             return Ok(None);

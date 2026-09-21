@@ -1364,8 +1364,8 @@ impl CapTable {
 mod tests {
     use super::*;
     use crate::audit::RecordingSink;
-    use ed25519_dalek::{Signer, SigningKey};
     use tairix_abi::{CapabilityId, ABI_VERSION_CURRENT};
+    use tairix_crypto::Ed25519SecretKey;
     use tairix_crypto::Ed25519Signature;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
@@ -1788,8 +1788,8 @@ mod tests {
 
     #[test]
     fn token_application_accepts_signed_subset() {
-        let signing = SigningKey::from_bytes(&[0x11; 32]);
-        let authority = Ed25519PublicKey::from_bytes(signing.verifying_key().as_bytes()).unwrap();
+        let signing = Ed25519SecretKey::from_seed(&[0x11; 32]);
+        let authority = Ed25519PublicKey::from_bytes(signing.public_key().as_bytes()).unwrap();
 
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::AUDIT_READ]);
         let sink = RecordingSink::new();
@@ -1806,7 +1806,7 @@ mod tests {
             subject: t.process().0,
             epoch,
             caps: narrowed,
-            signature: Ed25519Signature::from_bytes(sig.to_bytes()),
+            signature: Ed25519Signature::from_bytes(*sig.as_bytes()),
         };
         assert_eq!(t.apply_token(&token, &authority, epoch, &sink), Ok(()));
         assert!(t.has(CapabilityId::FS_MOUNT));
@@ -1866,8 +1866,8 @@ mod tests {
     fn apply_token_refuses_a_sandboxed_target() {
         // A correctly-signed, current-epoch token whose payload is even the
         // empty set is refused on a sandboxed record before verification.
-        let signing = SigningKey::from_bytes(&[0x44; 32]);
-        let authority = Ed25519PublicKey::from_bytes(signing.verifying_key().as_bytes()).unwrap();
+        let signing = Ed25519SecretKey::from_seed(&[0x44; 32]);
+        let authority = Ed25519PublicKey::from_bytes(signing.public_key().as_bytes()).unwrap();
         let sink = RecordingSink::new();
         let mut t = TaskCapabilities::derive(
             ProcessId(13),
@@ -1887,7 +1887,7 @@ mod tests {
             subject: t.process().0,
             epoch,
             caps: payload,
-            signature: Ed25519Signature::from_bytes(sig.to_bytes()),
+            signature: Ed25519Signature::from_bytes(*sig.as_bytes()),
         };
         assert_eq!(
             t.apply_token(&token, &authority, epoch, &sink),
@@ -1901,8 +1901,8 @@ mod tests {
         // A correctly-signed, current-epoch, subset token issued to a
         // *different* task must not apply here: binding to the subject
         // forecloses replaying a stolen token onto another principal. The effective set must be left untouched.
-        let signing = SigningKey::from_bytes(&[0x33; 32]);
-        let authority = Ed25519PublicKey::from_bytes(signing.verifying_key().as_bytes()).unwrap();
+        let signing = Ed25519SecretKey::from_seed(&[0x33; 32]);
+        let authority = Ed25519PublicKey::from_bytes(signing.public_key().as_bytes()).unwrap();
 
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::AUDIT_READ]);
         let sink = RecordingSink::new();
@@ -1921,7 +1921,7 @@ mod tests {
             subject: other_subject,
             epoch,
             caps: narrowed,
-            signature: Ed25519Signature::from_bytes(sig.to_bytes()),
+            signature: Ed25519Signature::from_bytes(*sig.as_bytes()),
         };
         assert_eq!(
             t.apply_token(&token, &authority, epoch, &sink),
@@ -1937,8 +1937,8 @@ mod tests {
 
     #[test]
     fn token_with_revoked_epoch_is_refused() {
-        let signing = SigningKey::from_bytes(&[0x22; 32]);
-        let authority = Ed25519PublicKey::from_bytes(signing.verifying_key().as_bytes()).unwrap();
+        let signing = Ed25519SecretKey::from_seed(&[0x22; 32]);
+        let authority = Ed25519PublicKey::from_bytes(signing.public_key().as_bytes()).unwrap();
 
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
@@ -1960,7 +1960,7 @@ mod tests {
             subject: t.process().0,
             epoch: issued_at,
             caps: user_grant,
-            signature: Ed25519Signature::from_bytes(sig.to_bytes()),
+            signature: Ed25519Signature::from_bytes(*sig.as_bytes()),
         };
         assert_eq!(
             t.apply_token(&token, &authority, current, &sink),

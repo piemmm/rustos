@@ -20,15 +20,16 @@
 //! ([`pbkdf2_sha256_verify`]) so a stored hash comparison cannot leak through
 //! timing.
 
+use core::fmt;
 use core::num::NonZeroU32;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit as _, Mac};
 use sha2::Sha256;
 
 use crate::constant_time::ct_eq;
-use crate::mac::{hmac_sha256, MacKey};
+use crate::mac::{hmac_sha256, HmacSha256Key};
 
-/// Length, in bytes, of a derived key. Matches both [`crate::mac::MAC_KEY_LEN`]
+/// Length, in bytes, of a derived key. Matches both [`crate::mac::HMAC_SHA256_KEY_LEN`]
 /// and [`crate::aead::AEAD_KEY_LEN`], so a derived key drops straight into
 /// either primitive without truncation or expansion.
 pub const DERIVED_KEY_LEN: usize = 32;
@@ -47,7 +48,7 @@ pub type DerivedKey = [u8; DERIVED_KEY_LEN];
 /// The output is uniformly random under the PRF assumption on HMAC-SHA256 and
 /// reveals nothing about `secret`.
 #[must_use]
-pub fn derive_key(secret: &MacKey, context: &[u8]) -> DerivedKey {
+pub fn derive_key(secret: &HmacSha256Key, context: &[u8]) -> DerivedKey {
     hmac_sha256(secret, context)
 }
 
@@ -106,102 +107,68 @@ pub fn pbkdf2_sha256_verify(
     ct_eq(&pbkdf2_sha256(password, salt, iterations), expected)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{derive_key, pbkdf2_sha256, pbkdf2_sha256_verify, PasswordHash, DERIVED_KEY_LEN};
+/// A `bcrypt-pbkdf` derivation was refused.
+///
+/// Opaque and single-variant, as elsewhere in this crate: a zero round
+/// count, an empty passphrase or salt, an output length outside what the
+/// construction defines, or a scratch buffer too small are all a malformed
+/// key file or a caller error rather than something to branch on.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct BcryptPbkdfError(());
 
-    use core::num::NonZeroU32;
-
-    const SECRET: [u8; 32] = [0x42; 32];
-
-    fn rounds(n: u32) -> NonZeroU32 {
-        NonZeroU32::new(n).expect("non-zero")
-    }
-
-    fn unhex(text: &str) -> PasswordHash {
-        let mut out = [0u8; 32];
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).expect("hex");
-        }
-        out
-    }
-
-    #[test]
-    fn pbkdf2_matches_the_published_sha256_vectors() {
-        // The de-facto standard PBKDF2-HMAC-SHA256 vectors (the SHA-256
-        // re-computation of the RFC 6070 inputs, as published in the
-        // RustCrypto and OpenSSL test suites).
-        assert_eq!(
-            pbkdf2_sha256(b"password", b"salt", rounds(1)),
-            unhex("120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"),
-        );
-        assert_eq!(
-            pbkdf2_sha256(b"password", b"salt", rounds(2)),
-            unhex("ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"),
-        );
-        assert_eq!(
-            pbkdf2_sha256(b"password", b"salt", rounds(4096)),
-            unhex("c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"),
-        );
-    }
-
-    #[test]
-    fn pbkdf2_inputs_are_all_load_bearing() {
-        let base = pbkdf2_sha256(b"password", b"salt", rounds(2));
-        assert_ne!(pbkdf2_sha256(b"passwore", b"salt", rounds(2)), base);
-        assert_ne!(pbkdf2_sha256(b"password", b"selt", rounds(2)), base);
-        assert_ne!(pbkdf2_sha256(b"password", b"salt", rounds(3)), base);
-    }
-
-    #[test]
-    fn pbkdf2_verify_accepts_genuine_and_rejects_tampered_hashes() {
-        let hash = pbkdf2_sha256(b"correct horse", b"battery staple", rounds(16));
-        assert!(pbkdf2_sha256_verify(
-            b"correct horse",
-            b"battery staple",
-            rounds(16),
-            &hash
-        ));
-        assert!(!pbkdf2_sha256_verify(
-            b"wrong horse",
-            b"battery staple",
-            rounds(16),
-            &hash
-        ));
-        let mut bad = hash;
-        bad[0] ^= 0x01;
-        assert!(!pbkdf2_sha256_verify(
-            b"correct horse",
-            b"battery staple",
-            rounds(16),
-            &bad
-        ));
-    }
-
-    #[test]
-    fn derivation_is_deterministic_and_full_width() {
-        let a = derive_key(&SECRET, b"arxfs/content");
-        let b = derive_key(&SECRET, b"arxfs/content");
-        assert_eq!(a, b);
-        assert_eq!(a.len(), DERIVED_KEY_LEN);
-    }
-
-    #[test]
-    fn distinct_contexts_yield_independent_keys() {
-        let content = derive_key(&SECRET, b"arxfs/content");
-        let filename = derive_key(&SECRET, b"arxfs/filename");
-        let meta = derive_key(&SECRET, b"arxfs/meta-mac");
-        assert_ne!(content, filename);
-        assert_ne!(content, meta);
-        assert_ne!(filename, meta);
-    }
-
-    #[test]
-    fn distinct_secrets_yield_independent_keys() {
-        let other = [0x43; 32];
-        assert_ne!(
-            derive_key(&SECRET, b"arxfs/content"),
-            derive_key(&other, b"arxfs/content")
-        );
+impl fmt::Display for BcryptPbkdfError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("bcrypt-pbkdf derivation refused")
     }
 }
+
+/// Block size, in bytes, the `bcrypt-pbkdf` stride is counted in.
+const BCRYPT_PBKDF_BLOCK_LEN: usize = 32;
+
+/// Longest output the construction defines.
+pub const BCRYPT_PBKDF_MAX_OUTPUT_LEN: usize = BCRYPT_PBKDF_BLOCK_LEN * BCRYPT_PBKDF_BLOCK_LEN;
+
+/// Scratch bytes a `bcrypt_pbkdf` of `output_len` bytes needs: the output
+/// length rounded up to the block.
+#[must_use]
+pub const fn bcrypt_pbkdf_scratch_len(output_len: usize) -> usize {
+    output_len.div_ceil(BCRYPT_PBKDF_BLOCK_LEN) * BCRYPT_PBKDF_BLOCK_LEN
+}
+
+/// Derive `output.len()` bytes from `passphrase` and `salt` with `rounds`
+/// of OpenBSD's `bcrypt_pbkdf`, using `scratch` as working space.
+///
+/// This is a *foreign* format's KDF, present for one reason: the OpenSSH v1
+/// private-key container wraps a passphrase-encrypted key with it, so
+/// reading a user's existing `id_ed25519` requires it exactly as specified.
+/// It is not TAIRiX's password KDF — [`pbkdf2_sha256`] is, and the users
+/// database uses that. The construction is deliberately memory-hard
+/// relative to plain PBKDF2: each round runs a Blowfish key schedule, which
+/// is what makes a stolen key file expensive to attack offline.
+///
+/// `scratch` is the caller's rather than a buffer allocated here, for the
+/// same reason the keystream in [`crate::stream`] writes straight into the
+/// caller's destinations: it ends the call holding derived key material,
+/// and the holder is the only party that can wipe it. It must be at least
+/// [`bcrypt_pbkdf_scratch_len`] bytes.
+///
+/// # Errors
+///
+/// Returns [`BcryptPbkdfError`] if `rounds` is zero, either input is empty,
+/// `output` is empty or longer than [`BCRYPT_PBKDF_MAX_OUTPUT_LEN`], or
+/// `scratch` is too small. Each is refused rather than silently derived
+/// from a truncated input.
+pub fn bcrypt_pbkdf(
+    passphrase: &[u8],
+    salt: &[u8],
+    rounds: u32,
+    output: &mut [u8],
+    scratch: &mut [u8],
+) -> Result<(), BcryptPbkdfError> {
+    bcrypt_pbkdf::bcrypt_pbkdf_with_memory(passphrase, salt, rounds, output, scratch)
+        .map_err(|_| BcryptPbkdfError(()))
+}
+
+#[cfg(test)]
+#[path = "kdf_tests.rs"]
+mod tests;

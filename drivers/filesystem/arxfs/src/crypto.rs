@@ -44,7 +44,7 @@
 
 use tairix_abi::driver::DriverError;
 use tairix_crypto::{
-    derive_key, open, seal, AeadError, AeadKey, AeadNonce, AeadTag, MacKey, AEAD_NONCE_LEN,
+    derive_key, open, seal, AeadError, AeadKey, AeadNonce, AeadTag, HmacSha256Key, AEAD_NONCE_LEN,
 };
 
 /// Length, in bytes, of a volume key — the caller-supplied key that unwraps a
@@ -110,7 +110,7 @@ const CTX_DEDUPE: &[u8] = b"arxfs/dedupe-domain";
 #[allow(clippy::struct_field_names)]
 pub struct VolumeKeys {
     /// Keyed authenticator for every metadata block (HMAC-SHA256).
-    pub mac_key: MacKey,
+    pub mac_key: HmacSha256Key,
     /// AEAD key encrypting directory-entry names at rest.
     pub filename_key: AeadKey,
     /// AEAD key encrypting file data at rest.

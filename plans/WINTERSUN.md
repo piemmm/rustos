@@ -90,7 +90,7 @@ discovered late.
 | P1 | The audio stack exists at all: the PCM vocabulary, `audio_ring`, `audio-v1`, `audiochan-v1`, the engine, one driver, `audiod` | `plans/SOUND.md` SND2–SND4 | WS14 |
 | P2 | `lib/sound`'s decoder registry and the sandboxed decode seam | `plans/SOUND.md` SND9 | WS14 |
 | P3 | Window **size states** — `Restored` / `Maximized` / `Fullscreen` — on the window channel, and the compositor promoting a scanout-sized fullscreen surface to a single layer | `plans/COMPOSITOR-WORK.md` Stage J | WS5 — **done** |
-| P4 | `lib/crypto` gains X25519 key agreement (`lib/crypto::agree`, over `x25519-dalek` 2.0.1 — pinned to the 2.x line so it shares the `curve25519-dalek` 4.x and `rand_core` 0.6 already beneath `ed25519-dalek`; its `zeroize` feature also pulls the compile-time `zeroize_derive`, so the footprint is that crate plus one proc macro rather than the single crate first estimated) | `lib/crypto` | WS1 — **done** |
+| P4 | `lib/crypto` gains X25519 key agreement (`lib/crypto::agree`, over the audited `x25519-dalek`, which shares the `curve25519-dalek` arithmetic already beneath `ed25519-dalek`) | `lib/crypto` | WS1 — **done** |
 | P5 | Durable storage: `lib/recdb` through its transactional and recovery items | `plans/RECDB.md` RD1–RD6 | WS7 |
 | P6 | The figure engine: shapes, rig, clips, blending, and the art harness | `plans/FIGURE.md` FG1–FG5 | WS6 |
 | P7 | The GPU seam with a live backend | `plans/GPU.md` GP1–GP6 | WS19 |

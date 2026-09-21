@@ -104,9 +104,9 @@ The ledger is empty today — no advisory affects a workspace dependency.
 ## What is not here yet
 
 `AGENTS.md` §19.3 also requires the SBOM to be **signed by the
-per-installation key** (§11). That step is deliberately deferred: no
-private-key signing API exists yet (`tairix-crypto` is verify-only, and
-the local capability authority is a later stage). This command emits the
+per-installation key** (§11). That step is deliberately deferred:
+`tairix-crypto` can sign, but the per-installation key lives behind the
+local capability authority, which is a later stage. This command emits the
 unsigned document the signer will later wrap. The remaining §19.3
 items — the `build --reproducible` verification and the
 no-post-install-network-fetch enforcement — are tracked in the `PLAN.md`

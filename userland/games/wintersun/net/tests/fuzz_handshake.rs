@@ -18,7 +18,7 @@
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a
 //! fresh, logged seed; `cargo xtask fuzz` extends it to a wall-clock budget.
 
-use ed25519_dalek::{Signer, SigningKey};
+use tairix_crypto::Ed25519SecretKey;
 
 use tairix_wintersun_net::bounds::{HANDSHAKE_MAGIC, PROTOCOL_VERSION};
 use tairix_wintersun_net::handshake::{
@@ -36,14 +36,14 @@ const SMOKE_ITERATIONS: u64 = 400;
 
 /// The realm's identity signer. `lib/crypto` verifies but never signs, so
 /// the secret stays with its holder and is handed in as a callback.
-fn sign_with(key: &SigningKey) -> impl FnOnce(&[u8]) -> [u8; 64] + '_ {
-    move |payload: &[u8]| key.sign(payload).to_bytes()
+fn sign_with(key: &Ed25519SecretKey) -> impl FnOnce(&[u8]) -> [u8; 64] + '_ {
+    move |payload: &[u8]| *key.sign(payload).as_bytes()
 }
 
 /// A realm answer to arbitrary bytes: it must not panic, and it must produce
 /// something to send whichever way it went.
-fn answer(hello: &[u8], key: &SigningKey, ephemeral: [u8; 32], nonce: [u8; 32]) -> Vec<u8> {
-    let identity = key.verifying_key().to_bytes();
+fn answer(hello: &[u8], key: &Ed25519SecretKey, ephemeral: [u8; 32], nonce: [u8; 32]) -> Vec<u8> {
+    let identity = *key.public_key().as_bytes();
     let response = respond(hello, ephemeral, nonce, &identity, sign_with(key));
     let sent = response.to_send().to_vec();
     match response.outcome {
@@ -88,7 +88,7 @@ fn read_answer(initiator: Initiator, bytes: &[u8], pinned: Option<&[u8; 32]>) {
 
 /// The parties of one exchange, drawn fresh so no two iterations share a key.
 struct Parties {
-    realm: SigningKey,
+    realm: Ed25519SecretKey,
     identity: [u8; 32],
     client_ephemeral: [u8; 32],
     realm_ephemeral: [u8; 32],
@@ -98,8 +98,8 @@ struct Parties {
 
 impl Parties {
     fn drawn(rng: &mut corpus::Lcg) -> Self {
-        let realm = SigningKey::from_bytes(&rng.bytes32());
-        let identity = realm.verifying_key().to_bytes();
+        let realm = Ed25519SecretKey::from_seed(&rng.bytes32());
+        let identity = *realm.public_key().as_bytes();
         Self {
             realm,
             identity,
@@ -159,8 +159,8 @@ fn tampered_exchanges(rng: &mut corpus::Lcg, parties: &Parties) {
 
     // A substituted realm: a valid signature under a key the client did not
     // pin. Only the pin refuses this one.
-    let impostor = SigningKey::from_bytes(&rng.bytes32());
-    if impostor.verifying_key().to_bytes() != parties.identity {
+    let impostor = Ed25519SecretKey::from_seed(&rng.bytes32());
+    if *impostor.public_key().as_bytes() != parties.identity {
         let (initiator, hello) = parties.start();
         let sent = answer(
             &hello,

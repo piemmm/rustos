@@ -41,7 +41,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use ed25519_dalek::{Signer, SigningKey};
 use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, LibraryCategory,
     ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR,
@@ -50,6 +49,7 @@ use tairix_abi::{
     LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
+use tairix_crypto::Ed25519SecretKey;
 
 /// File name of a program crate's manifest source, beside its `Cargo.toml`.
 pub const APP_MANIFEST_SOURCE: &str = "AppInfo.toml";
@@ -648,14 +648,16 @@ pub fn compose_signed_appinfo(
         .map_err(|e| AppImageError::new(ctx, format!("invalid bundle contents: {e:?}")))?;
     let content_hash = sha256(&framing);
 
-    let signing_key = SigningKey::from_bytes(seed);
-    let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let signing_key = Ed25519SecretKey::from_seed(seed);
+    let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
     let publisher_key = match publisher {
         PublisherSource::SelfPublished | PublisherSource::Certificate { .. } => None,
-        PublisherSource::Delegating(publisher_seed) => Some(SigningKey::from_bytes(publisher_seed)),
+        PublisherSource::Delegating(publisher_seed) => {
+            Some(Ed25519SecretKey::from_seed(publisher_seed))
+        }
     };
     let publisher_pubkey: [u8; 32] = match (&publisher_key, publisher) {
-        (Some(key), _) => key.verifying_key().to_bytes(),
+        (Some(key), _) => *key.public_key().as_bytes(),
         (None, PublisherSource::Certificate { pubkey, .. }) => pubkey,
         (None, _) => signer_pubkey,
     };
@@ -713,7 +715,7 @@ pub fn compose_signed_appinfo(
     let header = match publisher_key {
         None => header,
         Some(key) => AppInfoHeader {
-            publisher_cert: key.sign(&header.publisher_cert_message()).to_bytes(),
+            publisher_cert: *key.sign(&header.publisher_cert_message()).as_bytes(),
             ..header
         },
     };
@@ -744,7 +746,7 @@ pub fn compose_signed_appinfo(
     let mut signed = Vec::with_capacity(bytes.len() - 64);
     signed.extend_from_slice(&bytes[AppInfoHeader::signed_range()]);
     signed.extend_from_slice(&bytes[AppInfoHeader::WIRE_LEN..]);
-    let signature = signing_key.sign(&signed).to_bytes();
+    let signature = *signing_key.sign(&signed).as_bytes();
     bytes[AppInfoHeader::signed_range().end..AppInfoHeader::WIRE_LEN].copy_from_slice(&signature);
 
     Ok(ComposedAppInfo {
