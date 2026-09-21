@@ -27,7 +27,7 @@ seek slider.
 | SND9 | `lib/sound`: the registry, AU and WAV complete, the sandboxed decode seam, the fuzz target | planned |
 | SND10 | `userland/apps/play`, with and without the curses interface, backgroundable | planned |
 | SND11 | `drivers/audio/hda`: controller, CORB/RIRB, stream descriptors, the pure-graph codec walk; the QEMU `intel-hda` vertical | planned |
-| SND12 | `lib/sound`: FLAC, verified against its own STREAMINFO digest | planned |
+| SND12 | `lib/sound`: FLAC, decoder and feature-gated encoder, verified by round-trip and against each stream's own STREAMINFO digest | planned |
 | SND13 | Seat integration: leases, pause-and-resume across a fast user switch, the capture indicator, the notice topic; the two-session vertical | planned |
 | SND14 | `userland/apps/music` | planned |
 | SND15 | Desktop integration: the Settings pane, the taskbar volume control and recording indicator, Switchboard, sysinfo, the `audio:` resolver, media types and icons, `audioctl` | planned |
@@ -35,9 +35,15 @@ seek slider.
 | SND17 | `lib/sound`: Ogg container and Vorbis I | planned |
 | SND18 | `lib/sound`: Opus, verified against the RFC 6716 vectors | planned |
 | SND19 | `drivers/audio/rpi_hdmi` | blocked: needs a native VC6 HDMI encoder — the open decision below |
+| SND20 | `lib/soundtheme`: the `SoundEvent` vocabulary, the shipped theme catalog, the settings document and the cue client; the shipped masters and their build-time family contract in `tools/syshelp` | planned |
+| SND21 | `userland/system/soundd`: the cue authority, its two authority classes, resolution to silence, and the bounds; the sample-exact QEMU cue vertical | planned |
+| SND22 | The cue sites: session login/logout, machine startup/shutdown, hotplug attach/detach, the terminal's `Op::Bell`, and the notification area's own cues | planned |
 
-Each item is complete before the next begins and carries its own tests and
-documentation.
+The ledger is worked in dependency order: an item is complete before anything
+that depends on it begins, and each carries its own tests and documentation.
+Every item through SND19 depends on the one before it. SND20–SND22 depend on
+SND9's sandboxed decode seam and on SND12's FLAC codec, which is the shipped
+sound set's format, and on nothing later.
 
 **What SND4 guarantees.** The vertical passes on all three Tier-1 QEMU
 targets: boot, discovery, signed-bundle autoload of the driver into its own
@@ -160,7 +166,7 @@ TAIRiX's answers, stated as binding invariants:
 
 | Piece | Home |
 |---|---|
-| File decoders (AU, WAV, FLAC, Vorbis, Opus, MPEG audio) and their containers | `lib/sound` |
+| File decoders (AU, WAV, FLAC, Vorbis, Opus, MPEG audio), their containers, and the one encoder (FLAC, feature-gated) | `lib/sound` |
 | Mixing, format conversion, resampling, channel mapping, the clock model, routing policy, the client half | `lib/audio` |
 | The device-channel serve loop every audio driver runs | `lib/audiochan` |
 | Client stream ABI (`audio-v1`) | `lib/abi/src/audio.rs` |
@@ -173,6 +179,9 @@ TAIRiX's answers, stated as binding invariants:
 | Drivers | `drivers/audio/<leaf>/`, `drivers/dma/<leaf>/` |
 | The command player | `userland/apps/play` |
 | The desktop player | `userland/apps/music` |
+| The desktop sound vocabulary, shipped themes, settings and cue client | `lib/soundtheme` |
+| The cue authority | `userland/system/soundd` |
+| The shipped sound masters, planted | `/System/Audio/Sounds/<Theme>/` |
 
 The split between `lib/sound` and `lib/audio` is the tree's own precedent
 applied: `lib/image` decodes picture files and `lib/raster` draws pixels, so
@@ -187,7 +196,7 @@ serves; the mixer is the one client.
 
 ## The layers
 
-### `lib/sound` — the decoder registry
+### `lib/sound` — the decoder registry, and the one encoder
 
 Shaped exactly like `lib/image`, because it is the same job on a different
 medium: `SoundFormat` / `sniff` / `probe` / `open` dispatch, one private module
@@ -196,6 +205,15 @@ format-namespaced `DecodeError` variants, `no_std`, `forbid(unsafe_code)`,
 fallible allocation through `tairix_util::fallible`, checked arithmetic on
 every untrusted value, every test input synthesised in test code, and a
 structure-aware generator per format in one registered fuzz target.
+
+The synthesised-input rule has exactly one exception, and it is FLAC's, for a
+reason that does not generalise: a FLAC stream carries the digest of its own
+decoded samples, so a foreign-encoded fixture states its own expected output
+and needs no reference PCM beside it and no hash of ours to maintain. That is
+what the rule was protecting against, so a handful of such streams are
+committed as the conformance oracle no other approach gives that format
+(§Verification). Every other format synthesises, and a fixture that cannot
+verify itself is not an exception waiting to be granted.
 
 A decoder answers a **`PcmSource`**: declared rate, channel count and channel
 map, sample format, total frame count where the container states one, and
@@ -244,13 +262,19 @@ rather than guessed at. What "complete" means per format:
 
   FLAC is the one format that can **prove its own decode**: `STREAMINFO`
   carries the MD5 of the unencoded samples, so a full decode is verified
-  against the file's own claim rather than against a fixture we wrote. That
+  against the stream's own claim — which is independent of us exactly when the
+  stream was encoded elsewhere, the case that makes it a conformance oracle
+  rather than a consistency check (§Verification is careful about which). That
   needs an MD5 implementation, which `lib/crypto` deliberately does not carry
   because MD5 is broken as a cryptographic hash. This is not a cryptographic
   use — it is an integrity check on our own arithmetic — so it lands as a
   plainly-labelled interop digest inside `lib/sound`, not as a `lib/crypto`
   primitive, and nothing security-relevant may reach for it. A mismatch is a
   decoder defect, reported as a decode failure rather than passed off as audio.
+
+  FLAC is also the one format that is **encoded** here, behind an off-by-
+  default `encode` feature, so no shipped binary carries it (§The FLAC
+  encoder).
 - **MPEG audio** — MPEG-1, MPEG-2 and MPEG-2.5 Layers I, II and III. Layer III
   is what "MP3" means and is the reason the format is claimed; Layers I and II
   are the same framework's earlier members and fall out of the same header
@@ -292,6 +316,63 @@ rather than guessed at. What "complete" means per format:
 A format is one module unless it is genuinely more than one codec, which is
 `lib/image`'s rule: Ogg is `ogg` for the container plus `vorbis` and `opus` for
 the two bitstreams, and neither codec knows the container or the other.
+
+#### The FLAC encoder
+
+One format is encoded as well as decoded. It is the only one, it is off by
+default, and it earns its place three times over.
+
+**The test story needs it, and this is the argument that decides it.** The
+no-committed-fixtures rule means every test input is assembled in code, so a
+decoder's tests must *emit* the format. `lib/image` shows where that leads:
+613 lines of `png_fixture.rs`, `vp8_fixture.rs` and `vp8l_fixture.rs` — partial
+encoders in all but name — and `png_fixture`'s own docs record that it is
+shared rather than private precisely because a second consumer needed it. FLAC's
+bitstream is not PNG's chunk-and-CRC: emitting a valid frame means LPC
+subframes, Rice partitioning, wasted bits, stereo decorrelation, two CRCs and
+the stream digest. A `flac_fixture.rs` that could exercise the decoder's whole
+surface *is* an encoder, written somewhere it cannot be reused, documented or
+fuzzed. Writing it once, properly, is less code than the three ad-hoc emitters
+that would otherwise appear — the plan's own no-duplication rule reaching the
+same answer §27 does.
+
+Its three consumers:
+
+1. **Round-trip property tests.** Encode synthesised material, decode it,
+   assert identity — across every block size, bit depth, channel count,
+   subframe type and partition shape. This is a *breadth* oracle and is
+   honestly labelled as one: it proves the two halves agree, not that either
+   matches the specification. Spec conformance stays where it already is —
+   each stream's own `STREAMINFO` digest, and real files where a bug is
+   suspected. A round-trip that passed while both halves shared a
+   misreading is the failure mode, and is why it is the second oracle and
+   not the first.
+2. **The structure-aware fuzz generator** the charter requires per format.
+   A generator that emits well-formed streams and then perturbs them reaches
+   the decoder's interesting paths; one that emits random bytes tests the
+   sync scan and nothing beyond it.
+3. **The shipped sound assets** (§Default desktop sounds), converted from
+   their authored masters by `cargo xtask sound-encode`, as `c-header --write`
+   regenerates `include/`. No new tool crate: this is asset orchestration,
+   which is xtask's job.
+
+**Shape.** A controllable core under a chooser, because the test consumer and
+the asset consumer want opposite things. The tool wants "encode this well" and
+takes the chooser: predictor order search, Rice partition order search, stereo
+mode selection. The tests want "emit *this* construct" — a verbatim subframe, an
+escape partition, wasted bits — which a chooser would optimise away and never
+produce. So the core takes explicit per-frame decisions and the chooser is a
+thin layer that makes them; only the chooser is optional.
+
+Encoding and decoding share one format model — the constants, the CRC-8 and
+CRC-16, the digest, the bitstream reader and writer, the fixed predictors, the
+Rice coding — rather than growing a second, divergent one.
+
+**What it is not.** It is not a shipped library: the `encode` feature is off
+for every consumer that runs on the machine, so a player, the sandbox worker
+and the cue authority carry decode only, and §16.4's curated set is unchanged.
+It is not a general audio-encoding surface either — no other format gains one,
+and none should until something needs to write that format.
 
 ### `lib/audio` — the engine
 
@@ -608,6 +689,11 @@ And three things that deliberately are **not** capabilities:
   already exists. `audiod` reads it. Inventing `CAP_AUDIO_ADMIN` would be a
   third name for an authority already spelled.
 - **Monitoring** is the seat lease, as above.
+- **Cueing a desktop sound** is the seat lease for an application event and
+  the existing owner of the transition for a lifecycle one. A capability every
+  program would hold is not a boundary, and the authority that actually
+  matters — whether a program may imitate the machine — is expressed by the
+  event's class, not by a token.
 
 ## Drivers
 
@@ -912,6 +998,337 @@ the desktop's single-instance funnel, exactly as `view.app`'s does.
 wants, and nobody asked for one), an equaliser, a library database, and any
 form of editing. Peak and RMS meters are the whole of the visualisation.
 
+## Default desktop sounds
+
+Fourteen authored masters, one closed event vocabulary, one authority that
+plays them, and the same single path every other sample takes. The masters
+exist and are measured (below); what this section fixes is everything around
+them — who may make a sound, where the bytes live, what happens when an asset
+is missing, and why a cue is not a notice.
+
+### A cue is an occurrence, not a state edge
+
+The reflex is to reach for the system-notice mechanism, because
+`PowerConnected` looks exactly like a topic. It is the wrong mechanism and
+`plans/NOTICE.md` says so in its own terms: a notice keeps no history, so a
+subscriber that was not looking learns only the current value. That is right
+for the desktop's appearance and wrong for a sound. Two USB sticks arriving a
+second apart are two sounds, and a notification published while the machine was
+busy is not a notification that never happened.
+
+A cue is therefore an **IPC request** — an occurrence a recipient witnesses
+individually — which is exactly what that plan's own rule prescribes for a
+thing history must be kept for. The distinction is not pedantry: it decides
+whether the second stick is audible.
+
+The pairing is the useful half. Where the underlying fact *is* a state edge,
+the principal that publishes the edge is the principal that requests the cue.
+Nothing observes an edge twice, nothing sounds for a state that has not moved,
+and no component needs both mechanisms.
+
+### The vocabulary
+
+`SoundEvent`, a closed enum in `lib/soundtheme`, never a free-form string —
+for `GraphicsFamilyKind`'s reason: a consumer matches on the event, so adding
+one forces every reader to say what it means rather than silently ignoring a
+name it does not recognise.
+
+| Event | Shipped asset | Who may cue it, on what attested fact |
+|---|---|---|
+| `Startup` | `startup` | the service manager, at the point the machine is ready for a user |
+| `Shutdown` | `shutdown` | the shutdown authority (`CAP_SYSTEM_POWER`'s holder) |
+| `Login` | `login` | the session authority (`userland/session/login`) |
+| `Logout` | `logout` | the session authority |
+| `DeviceAttached` | `usb_connected` | the hotplug authority that publishes the arrival (`volmgr` for a volume) |
+| `DeviceDetached` | `usb_disconnected` | the same |
+| `Notification` | `notification_soft` | any principal whose session holds the seat lease on the sink |
+| `NotificationMessage` | `notification_message` | the same |
+| `NotificationReminder` | `notification_reminder` | the same |
+| `Error` | `error` | the same |
+| `Warning` | `warning` | the same |
+| `Info` | `info` | the same |
+| `Bell` | `notification_soft` | the same |
+
+Two authority classes, **no new capability**, each checked against a fact the
+kernel already attests:
+
+- **Lifecycle events** (the first six) are cued by the principal that already
+  owns the transition or the edge. This is `plans/NOTICE.md`'s publish-
+  authority rule applied unchanged — reach for an existing lease, ownership or
+  binding before considering a capability. A `CAP_SOUND_CUE` would fail the
+  capability-minimalism tests anyway: every program wants to beep, and a
+  capability every program holds is not a boundary.
+- **Application events** (the last seven) need what playback already needs — a
+  session holding the seat lease on the target sink, checked at open against
+  the kernel-attested caller. An unclaimed sink is the headless case and any
+  principal with a stream may cue on it, because a server beeping at a failure
+  has no session.
+
+That split is what forecloses the obvious spoof. Without it any program could
+play the login sound, or the shutdown sound, and a user has no way to tell a
+real transition from an application's imitation of one. With it, a sound that
+claims the machine did something can only have come from the principal that
+did it.
+
+The two halves come into force at different points, and the load-bearing one
+comes first. The lifecycle check is against the caller's kernel-attested
+identity and holds the moment `soundd` exists, so no application can imitate
+the machine from SND21 onward. The application half scopes a cue to a sink,
+and until SND13 leases sinks to seats no sink is claimed — the router's
+headless case — so any principal may cue on one. That is the degradation
+ordinary playback already has and no more, and it narrows for cues and for
+playback together when the leases land.
+
+`Bell` is the terminal's `^G`, and it is in the vocabulary because the consumer
+is already in the tree: `userland/apps/terminal`'s parser handles `Op::Bell`
+and records in a comment that no audible bell is wired. It maps to the soft
+notification asset rather than one of its own — a terminal bell should be
+unobtrusive, and an event-to-asset mapping is theme *data*, so two events
+sharing an asset cost one cache entry and no code.
+
+**`PowerConnected` and `PowerDisconnected` are authored and held back.** Both
+assets exist and nothing in the tree can cue them: there is no power-supply or
+battery interface at all, which `plans/NEW-DESKTOP-SETTINGS.md` §3 and
+`plans/NEW-SWITCHBOARD.md` each state as an absent interface. An enum variant
+with no cue site is speculative surface, so the two variants and their two
+assets land together with the power-supply interface (`plans/DEVICES.md`'s
+sensor work), not before. Twelve events ship; these two wait for a publisher,
+which is the discipline the two audio capabilities were already held to.
+
+### `lib/soundtheme` — vocabulary, shipped set, settings, client
+
+`lib/wallpaper`'s shape applied to sound, because it is the same job: a closed
+vocabulary, a shipped default set discovered at build time, a bounded settings
+document, and a client that asks an authority to act. `no_std`,
+`forbid(unsafe_code)`, no I/O, host-tested.
+
+- `event` — `SoundEvent` and its authority class.
+- `catalog` — the shipped themes and their assets, and the bounded listing
+  model a chooser draws. A theme is a directory; adding one is dropping it in.
+- `settings` — the closed registry of the sound document, read tolerantly and
+  merged strictly, the two readings the pinboard document already distinguishes.
+- `cue` — the client half: the request a program makes, over an injected
+  transport seam, so the whole surface is host-tested without a machine.
+
+It knows nothing about decoding (`lib/sound`) and nothing about mixing
+(`lib/audio`). It is the vocabulary and the policy, and the two crates it sits
+between stay ignorant of each other.
+
+### `soundd` — the cue authority
+
+`userland/system/soundd`, a `kind = "service"` bundle discovered from disk like
+any other. It receives cue requests, resolves the event to an asset, decodes it
+through the sandbox, and plays it as a `Notification`-role stream on the target
+sink. It is a third player alongside `play` and `music.app`, and it is a player
+rather than part of the mixer for two reasons that do not bend:
+
+- **`audiod` holds every stream in the system**, and untrusted bytes never
+  decode in a process holding a stream. A user's own chosen sound file is
+  untrusted input, and orchestrating its read and decode from the mixer would
+  put the one process that must never fall over downstream of a decoder.
+- **`audiod`'s per-period path allocates nothing, locks nothing and blocks on
+  nothing.** Cue resolution reads settings and files. Filesystem I/O on the
+  thread that owes a period is the defect §28 names for an interactive loop,
+  and a real-time mixer has less slack than a window does.
+
+It is not the session either, for a simpler reason: `Startup` precedes every
+session, `Shutdown` outlives them, and a headless machine has none. Only a
+machine-scoped service is present for the whole set.
+
+`soundd` holds **no capability of its own**. It plays through the ordinary
+`audio-v1` client surface with no more authority than any program that makes a
+sound, and it reads `/System/Audio` and the machine settings document. It never
+holds `CAP_APPDATA_ADMIN` and never reaches into a user's files.
+
+### Resolution, and what silence means
+
+Total, in one order: the active theme's asset for the event, then the shipped
+default theme's, then **silence**.
+
+Silence is a real answer, and this is the one place the desktop's asset rules
+diverge from artwork. An icon may never resolve to nothing, because a blank
+surface is a broken window, which is why §10 mandates a built-in vector glyph
+beneath every icon. A sound has no such floor: a system that stays quiet is a
+system that stays quiet, which is exactly what a user who disabled an event
+asked for. So there is no synthesised fallback beep — fabricating a tone
+because a file failed to decode would be inventing output, and a decode refusal
+is reported rather than covered up.
+
+A cue that resolves to silence still succeeds, and the caller is told the
+machine made no sound and why, so a component can record its own failure
+without the audio path having to guess whether the quiet was intended.
+
+### The settings, and how a user's choice reaches a machine service
+
+Two documents, layered, with no gap and no third place:
+
+- **The machine document** under `/System/Settings`, written through the
+  settings authority that already exists — where the default sink and
+  per-device gain live. It is the whole policy before login, on a headless
+  machine, and after the last session ends.
+- **The user's own choices**, layered over it while their session holds the
+  seat: a master enable, a per-event enable, a per-event gain, a per-event
+  asset override, and the theme.
+
+The interesting half is how the second reaches `soundd` without giving a
+machine service reach into a user's files. It does not fetch them: **the
+session pushes the resolved policy when it claims the seat**, exactly as the
+session is the only writer of the pinboard document. A user's own chosen file
+arrives as a **one-shot read descriptor** — the file-picker pattern §16.5
+already names — which `soundd` hands to the sandbox worker without ever holding
+a filesystem capability or interpreting a byte of it.
+
+A per-event gain defaults to unity and **the shipped theme is unity
+throughout**, which is what keeps the shipped cue path bit-exact and therefore
+testable against the asset itself.
+
+### The shipped set
+
+Fourteen masters authored as one family, all 48 kHz stereo 16-bit signed PCM,
+shipped losslessly as FLAC — roughly 0.75 MiB for the set, from 3.47 MiB of
+raw samples.
+
+| Event | Asset | Seconds | Peak |
+|---|---|---|---|
+| `Startup` | `startup` | 3.12 | −9.2 dBFS |
+| `Shutdown` | `shutdown` | 2.55 | −12.4 dBFS |
+| `Login` | `login` | 1.38 | −12.9 dBFS |
+| `Logout` | `logout` | 1.32 | −14.9 dBFS |
+| `DeviceAttached` | `usb_connected` | 0.76 | −14.4 dBFS |
+| `DeviceDetached` | `usb_disconnected` | 0.76 | −13.5 dBFS |
+| `Notification`, `Bell` | `notification_soft` | 0.98 | −18.7 dBFS |
+| `NotificationMessage` | `notification_message` | 1.22 | −15.7 dBFS |
+| `NotificationReminder` | `notification_reminder` | 1.60 | −15.7 dBFS |
+| `Error` | `error` | 1.08 | −10.5 dBFS |
+| `Warning` | `warning` | 1.18 | −14.7 dBFS |
+| `Info` | `info` | 0.95 | −17.6 dBFS |
+| held for its publisher | `power_connected` | 1.02 | −14.9 dBFS |
+| held for its publisher | `power_disconnected` | 1.02 | −15.5 dBFS |
+
+The rate is not incidental. 48 kHz is the rate `virtio_snd` reports and
+defaults to, and the native rate of an HDA or USB sink, so a shipped cue at
+unity gain engages **no resampler and no conversion** and reaches the device
+bit-exact. The authoring constraint and the engine's headline property are the
+same property, which is what lets the vertical below assert the captured bytes
+against the master's own samples. A sink that genuinely cannot take 48 kHz
+resamples like any other stream and simply forfeits that assertion, not the
+sound.
+
+The authoring contract, checked at build time, failing the build when broken:
+
+- 48 kHz, stereo, 16-bit — **decoded in full through `lib/sound` during
+  discovery**, so "the system can play this" is verified rather than inferred
+  from the extension.
+- The decoded samples match the stream's own `STREAMINFO` digest, so a
+  corrupted asset fails the build against its own claim.
+- First and last frame exactly zero, so a cue neither clicks in nor out. All
+  fourteen masters already satisfy this, with 7–20 ms of lead-in and a uniform
+  12 ms tail.
+- Within `MAX_SOUND_BYTES`, as a wallpaper is within its own bound.
+- A name resolving to a live `SoundEvent`. An orphan asset fails the build,
+  which is also what catches a stray `.DS_Store` swept into an asset directory.
+
+Decoding at build time is deliberately stronger than the graphics families'
+check, which validates a name, a byte bound and uniqueness. The asymmetry is
+the same one that makes silence a legal answer: a bad icon degrades to a
+visible fallback glyph, and a bad sound degrades to silence, which is
+indistinguishable from working. Where failure is invisible at runtime, the
+build must look harder.
+
+**They ship as FLAC, and the size was measured rather than assumed.** A
+fixed-predictor Rice estimate over the set puts FLAC at 22% of the bytes: 3.47
+MiB becomes roughly 0.75 MiB. That saving is in the repository as well as in
+every image, it compounds with each further theme the catalog is built to hold,
+and it is 2.7 MiB that a Pi's SD card and the `images/tairix-web/` bundle both
+pay for on every build. FLAC is lossless, so the content in the table above is
+exactly what is shipped and exactly what is played.
+
+Two properties decided it over WAV beyond the size:
+
+- **The asset verifies itself.** `STREAMINFO`'s digest covers the unencoded
+  samples, so the build-time contract check catches an asset corrupted in the
+  repository, in transit, or by a bad merge — against the file's own claim
+  rather than a hash we would otherwise have to maintain beside it. A WAV has
+  no such check and a flipped bit in one is simply a different sound.
+- **We encode it ourselves.** With the encoder above, the shipped artefact is
+  produced by first-party code from an authored master, deterministically and
+  auditably, rather than by a foreign binary whose output we would be
+  committing unexamined into a reproducible image.
+
+That second point is a preference rather than a prohibition, and it is worth
+saying why, because `lib/wallpaper` ships 35 MiB of externally-authored JPEG
+and is not a defect. A wallpaper is authored *content*: there is no in-tree
+master it derives from, nothing here could produce it, and `lib/image` has no
+encoder because nothing needs one. A sound asset differs on both counts — the
+format is lossless, so the shipped file and the master carry identical
+information, and the encoder exists anyway for the test story. The rule is the
+same in both places (prefer first-party where it is feasible); feasibility is
+what differs.
+
+The cost at runtime is nothing worth counting. A cue decodes once per boot per
+event into the reclaimable cache, and a second of 48 kHz stereo FLAC is a few
+milliseconds of LPC and Rice work against a sandbox round trip that both
+formats pay identically.
+
+The masters are `plans/tairix-desktop-audio/` today. They are converted by
+`cargo xtask sound-encode` into `lib/soundtheme/assets/TAIRiX/<event>.flac`
+in the change that creates the crate, and that directory is deleted with them:
+a plan directory is not an asset store, and keeping the WAV beside a lossless
+encoding of it would be two copies of one thing.
+
+**Loudness normalisation is not claimed.** The measured peaks span −18.7 to
+−9.2 dBFS, and peak is not loudness. A real loudness match needs an ITU-R
+BS.1770 meter, which nothing else in the tree wants, so the set is authored as
+a family, the build enforces a peak ceiling rather than a loudness target, and
+a user who finds one event too loud has a per-event gain. That is stated rather
+than left implied by a table of peaks.
+
+### What bounds it
+
+- **Concurrent cues are capped**, and the cap is a containment bound rather
+  than a capacity: it is what stops a cue storm opening unbounded streams in
+  the mixer. Past the cap a cue is **dropped and counted**, never queued — the
+  `Notification` role's own rule, for its own reason, since a sound arriving
+  after the thing it announces is noise.
+- **A repeat of one event by one principal inside a minimum retrigger interval
+  is coalesced** and counted. Two identical notification sounds 20 ms apart are
+  one notification and one bug.
+- **Per-principal cue rate is limited and fails closed**, so a misbehaving
+  application cannot hold the speakers.
+- **The decoded-PCM cache is reclaimable**, under `lib/reclaim`'s
+  `DisposableUi` budget beside the album-art cache. Nothing about a cue is
+  pinned: unlike a live stream's buffers, a cached cue re-decodes in
+  milliseconds and losing it under pressure costs nothing audible.
+- **A cue whose sink has no audio device is dropped and counted.** `Startup` in
+  particular is cued where the device may legitimately not have bound yet, and
+  a startup sound eight seconds late is worse than none.
+- **`Shutdown` drains on a bounded deadline** and then proceeds regardless. A
+  machine that will not power off because a sound is playing is a worse defect
+  than a truncated sound.
+
+### Verification
+
+- **Host.** The resolver over the cross-product of (event × theme × settings ×
+  asset present), including every path to silence; the settings document's
+  tolerant and strict readings against malformed input; the authority split,
+  asserting a lifecycle event is refused to an application principal; and the
+  rate limit, the retrigger coalescing and the concurrent cap, each asserting
+  the drop is *counted* rather than silently lost.
+- **Build.** The family contract above over the real shipped assets, through
+  the same `tools/syshelp` table and loop that already validates icons,
+  wallpapers and cursors.
+- **QEMU.** The strong one, and nearly free because `audio_virtio_qemu_*`
+  already exists: cue one event through `soundd` on a booted machine and assert
+  the host-side WAV capture is **sample-exact against the shipped master's own
+  decoded samples**. That single assertion covers the cue authority, the
+  resolver, the sandboxed decode, the client, the mixer, the device channel and
+  the driver — and it holds only because the asset is 48 kHz at unity gain,
+  which is the authoring contract earning itself. Because the comparison
+  decodes the master on the host and the guest decodes it independently, a
+  divergence between the two is caught here as well, on top of each side's own
+  digest check.
+- **Fuzz.** The cue request decoder, as every IPC endpoint's must be.
+
 ## Desktop integration
 
 Consumers of this subsystem, each owned by its own plan and named here so the
@@ -920,9 +1337,11 @@ work is not re-derived:
 - **Settings** — `plans/NEW-DESKTOP-SETTINGS.md` §3's `Sound` row states this
   subsystem's absence and names this file as its prerequisite; the row leaves
   §3 for a real pane when the subsystem lands. The pane is output and input
-  device selection, per-device volume and mute, the default-device policy, and
-  the live capture list — all of it typed intents to the authority holder, no
-  capability in the app.
+  device selection, per-device volume and mute, the default-device policy, the
+  live capture list, and the desktop sounds — theme, master and per-event
+  enable, per-event gain, and choosing a file of one's own, which the pane
+  hands over as the one-shot descriptor rather than a path. All of it typed
+  intents to the authority holder; no capability in the app.
 - **The taskbar** — a volume control in the notification area with a slider
   popup, and the recording indicator invariant 5 requires. Drawn by the
   session from `audiod`'s state, so no application can suppress it.
@@ -966,6 +1385,18 @@ work is not re-derived:
   tree, that would put the Pi's audio path behind closed firmware.
 - **MIDI, audio capture-to-file utilities, an equaliser, effects processors,
   and a sound-server protocol for foreign clients.** None has a consumer.
+- **A sound for every interaction.** Clicks, keystrokes, window opens and
+  focus changes get none. A cue marks something the user did not ask for and
+  must notice; feedback for an action they just took is what the screen is
+  for, and a desktop that chirps at every click is one whose sound gets
+  switched off entirely.
+- **An installable third-party sound pack.** A theme is a directory of assets
+  the build discovers and validates. An install format for untrusted sound
+  bundles is a packaging surface with no consumer, and a user who wants their
+  own sound sets it per event.
+- **A synthesised fallback tone.** Where an asset is missing or refuses to
+  decode, the answer is silence and a reported reason, never a fabricated
+  beep.
 
 ## Prerequisites and open decisions
 
@@ -1009,8 +1440,24 @@ the tests are chosen to check it rather than to check that nothing crashed.
   limits refused *before* allocation. Every input synthesised in test code.
 - **Numeric accuracy against external oracles**, not against our own opinion:
   MPEG audio against the ISO 11172-4 / 13818-4 compliance limits, Opus against
-  the RFC 6716 vectors, Vorbis against the published vectors, FLAC against each
-  file's own `STREAMINFO` digest.
+  the RFC 6716 vectors, Vorbis against the published vectors.
+- **FLAC's oracles, and what each actually proves.** Encoder/decoder
+  round-trip over synthesised material is the **breadth** check — every block
+  size, bit depth, channel count, subframe type and partition shape — and it
+  proves the two halves agree, which a shared misreading of the specification
+  would satisfy just as well. Checking a *synthesised* stream against its own
+  `STREAMINFO` digest proves no more than that, because our own encoder
+  computed the digest; treating it as conformance would be the weaker oracle
+  wearing the stronger one's clothes.
+
+  The digest is a genuine external oracle only over a stream some *other*
+  encoder produced — and there it is an unusually good one, because the file
+  states its own expected output, so the fixture needs no companion PCM and no
+  hash of ours to keep in step. That is exactly the case the
+  synthesise-every-input rule exists to avoid and does not cover, so FLAC is
+  the one format that also keeps a small set of committed foreign-encoded
+  streams: self-verifying, a few kibibytes, and worth more than any fixture we
+  could write ourselves.
 - The mixer's **bit-exactness property**: a 24-bit-or-narrower source at unity
   gain through the whole engine is byte-identical to its input. Property-tested
   across formats, rates, channel counts and block boundaries.

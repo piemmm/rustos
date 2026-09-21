@@ -9264,7 +9264,7 @@ submission naming another context's resource is refused rather than clamped; an
 overrunning submission loses its context while every other survives; and the
 accelerated path's gain is a recorded measurement, not a claim.
 
-## SOUND — the audio stack (`plans/SOUND.md`)  **[IN PROGRESS — SND1–SND3 done; SND4 onward planned]**
+## SOUND — the audio stack (`plans/SOUND.md`)  **[IN PROGRESS — SND1–SND4 done; SND5 onward planned]**
 
 **Dependencies:** Stage 4.HW (discovery and driver autoload) and Stage 6
 (userland services) for SND4 onward; nothing outside the tree for SND1–SND3.
@@ -9327,16 +9327,37 @@ here (§13).
   an alignment of one, and only working because a stack slot happened to be
   wide enough, gained the alignment they actually require.
 
-**What remains** is the plan's own ledger, SND4 onward: the device-channel
-serve loop, the first driver, the mixer service with `CAP_AUDIO_DEVICE` and
-`CAP_AUDIO_CAPTURE` (both landing with the holder and enforcement point that
-`plans/SOUND.md` explains they were deferred for), the DMA-engine and
-isochronous-transfer seams the plan owns, the decoders, the two players, and
-desktop integration.
+- **SND4 — the first working sink.** `lib/audiochan`'s serve loop,
+  `drivers/audio/virtio_snd`, `userland/system/audiod`, and the two
+  capabilities landing with the holder and enforcement point
+  `plans/SOUND.md` explains they were deferred for. Its vertical passes on
+  all three Tier-1 QEMU targets and asserts the host-side capture is
+  sample-exact, so the bit-exactness property is proved on a running machine
+  and not only in host tests.
 
-**The `README.md` feature-matrix row lands with SND4's first working sink.**
-SND2 and SND3 add no runnable feature on any target: there is nothing yet a
-matrix could mark per architecture.
+**What remains** is the plan's own ledger, SND5 onward: the DMA-engine and
+isochronous-transfer seams the plan owns, the remaining drivers, the
+decoders, the two players, desktop integration, and the default desktop
+sounds (SND20–SND22 — the `SoundEvent` vocabulary and shipped masters in
+`lib/soundtheme`, the `soundd` cue authority, and the cue sites). The sound
+set's authority model adds no capability: a lifecycle event is cued by the
+principal that already owns the transition, an application event by a session
+holding the seat lease, which is what stops a program imitating the machine.
+
+**`lib/sound` gains one encoder (FLAC, SND12, behind an off-by-default
+feature), and it is the only one.** Its decisive consumer is the decoder's own
+test story: the no-committed-fixtures rule makes every test input code that
+*emits* the format, which for FLAC's bitstream is an encoder however it is
+filed — `lib/image` already carries 613 lines of exactly that as `*_fixture.rs`.
+Writing it once as a real, controllable encoder is less code than the ad-hoc
+emitters the round-trip suite, the structure-aware fuzz generator and the
+shipped-asset conversion would each otherwise grow. No shipped binary links
+it, so §16.4's curated library set is unchanged.
+
+**The `README.md` feature-matrix row is `◐ virtio` on the three register
+targets and absent on `wasm32`**, whose sink is the host environment's own
+output and arrives with that port's bring-up. It widens as each further
+driver lands.
 
 ---
 
