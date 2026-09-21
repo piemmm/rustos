@@ -70,11 +70,43 @@ mirroring is the per-direction branch the body frame exists to avoid.
 | `joint` | `JointId`, the checked `Limit`/`Limits` intervals, and `Joint` — a parent, a rest transform, and how far it turns from it. |
 | `socket` | The closed socket set equipment hangs on, and where a rig mounts each one. |
 | `rig` | `Rig` and its validation, `Posture`, `Part`/`Fitted`, and the `Placement` a figure is projected and depth-sorted into. |
-| `humanoid` | The first-party humanoid: 17 joints, 21 parts, every socket, proportioned in percentages of `STANDING_HEIGHT`. |
+| `humanoid` | The first-party humanoid: 17 joints, 21 parts, every socket, proportioned in percentages of `STANDING_HEIGHT`, and the drive table binding the pose parameters to them. |
+| `pose` | `Param` — the 22 named scalars an animation is authored in — the `Pose` holding them, their `Range`, and the `Mask` a blend writes through. |
+| `rigging` | `Drive`/`Rigging`: which joint axis a parameter turns, and which way its `+1` points. |
+| `clip` | `Clip`: a keyed `Curve` per parameter with an `Easing` per segment, a duration, a `Loop` mode, and the named `Event`s at phases along it. |
+| `blend` | `Blend`: weighted accumulation of poses and clips, weighed per parameter so a mask means something. |
+| `transition` | `Transitions` — states, clips and per-edge cross-fades, validated at load — and the `Animator` that walks one. |
+
+## An animation is authored in parameters, not rotations
+
+A `Pose` is named scalars: how far an elbow is folded, how far a hip has
+swung. Each is a fraction of that joint's *own* documented travel, scaled into
+the interval by the rig's drive table, and three things follow.
+
+One clip plays on any rig declaring the same parameters, because the clip
+names no joint and no angle. An outward splay is handed once, in the drive
+table, rather than in every clip that lifts an arm. And **no value of any
+parameter can leave a limit**: a bent-backwards elbow is not a pose that gets
+rejected, it is one that cannot be spelled — the elbow's parameter runs from
+straight to fully folded and has no other end.
+
+That guarantee is structural, and three rules hold it up. `Rigging::new`
+refuses two drives on one joint axis, so no two parameters can sum past it.
+No easing overshoots, so an interpolated value stays between its keys.
+Blending is a weighted mean, so it stays between its inputs. A posture built
+from a pose therefore has no out-of-limit case at all, and the only clamping
+anywhere absorbs the last bit of floating-point rounding on a value already
+mathematically inside.
+
+Root motion is deliberately *not* a parameter. A jump's lift, the pelvis drop
+of a crouch and a dodge's displacement cannot be decided without the ground
+the feet are on, so they live with the terrain solve in FG4 rather than split
+across both.
 
 ## Bounds, and what they are not
 
-`MAX_JOINTS`, `MAX_PARTS` and `MAX_FITTED` bound *authored content*, not a
+`MAX_JOINTS`, `MAX_PARTS`, `MAX_FITTED` and `MAX_STATES` bound *authored
+content*, not a
 runtime capacity: a rig is first-party code rather than input, and the shipped
 rig's counts are held to them at build time. A figure wanting more joints than
 this is a different figure, not a bigger one. Runtime-loaded figure geometry
@@ -87,9 +119,13 @@ costs no allocation at all.
 
 ## What is not here
 
-Pose parameters, clips, blending and the transition machine are FG3; the
-procedural layers over them (gait phase from distance travelled, look-at,
-recoil, cloth sway, breathing, foot planting) are FG4; the contact-sheet art
-harness that makes quality a measured property is FG5; the species/build
-parameter space and the designer are FG6/FG7. This crate answers only what a
-figure *is*.
+The procedural layers over a clip are FG4: gait phase driven by distance
+travelled rather than a timer, look-at, recoil and follow-through, cloth and
+hair sway, breathing, each foot planted on its own terrain height, root
+motion, and the contact shadow. The contact-sheet art harness that makes
+quality a measured property is FG5; the species/build parameter space and the
+designer are FG6/FG7.
+
+Clips and machines are *code* here, assembled from borrowed static tables and
+checked once. Loading either from an untrusted source is a later item and
+will validate at its own boundary; nothing in this crate parses input.

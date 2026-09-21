@@ -29,12 +29,25 @@
 //! [`Posture::place`] has no out-of-limit case to handle and an animation
 //! that would bend an elbow backwards fails where it is authored.
 //!
+//! **An animation is authored in parameters, not in rotations.** A [`Pose`]
+//! is named scalars — how far an elbow is folded, how far a hip has swung —
+//! each a fraction of that joint's *own* documented travel. A clip keying
+//! them therefore plays on any rig that declares the same parameters, and no
+//! value of any parameter can leave a limit: the rotation it becomes is
+//! scaled into the interval, so a bent-backwards elbow is not a pose that is
+//! rejected, it is one that cannot be spelled.
+//!
 //! # What is not here
 //!
-//! Pose parameters, clips, blending and the transition machine are the next
-//! item; the procedural layers over them the one after. This crate answers
-//! only what a figure *is*.
+//! The procedural layers over a clip — gait phase from distance travelled,
+//! look-at, recoil, cloth and hair sway, breathing, planting each foot on
+//! its own ground height — are the next item, and so is everything that
+//! moves the figure's *root*: a jump's lift, the pelvis drop of a crouch, a
+//! dodge's displacement. Root motion cannot be decided without the ground
+//! the feet are standing on, so it lives with the terrain solve rather than
+//! split across both. A pose here is articulation only.
 //!
+//! [`Pose`]: pose::Pose
 //! [`Body`]: frame::Body
 //! [`JointId`]: joint::JointId
 //! [`Posture::set`]: rig::Posture::set
@@ -45,11 +58,16 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod blend;
+pub mod clip;
 pub mod error;
 pub mod frame;
 pub mod humanoid;
 pub mod joint;
+pub mod pose;
 pub mod rig;
+pub mod rigging;
 pub mod socket;
+pub mod transition;
 
 pub use error::FigureError;

@@ -27,7 +27,9 @@ use tairix_raster::shape::Shape;
 use crate::error::FigureError;
 use crate::frame::Body;
 use crate::joint::{Joint, JointId, Limit, Limits, MAX_JOINTS};
+use crate::pose::{Mask, Param};
 use crate::rig::{Part, Rig, MAX_PARTS};
+use crate::rigging::{Axis, Drive, Rigging};
 use crate::socket::{Mount, Side, Socket};
 
 /// How tall the figure stands, in the figure-local pixels the rig is authored
@@ -613,6 +615,152 @@ fn mount(
     mounts
         .try_push((socket, Mount::new(bone.joint(), at)))
         .map_err(|_| FigureError::DuplicateSocket)
+}
+
+/// How many drives bind the pose parameters to this rig.
+pub const DRIVE_COUNT: usize = 28;
+
+/// The parameters that move the trunk, the head and the arms.
+///
+/// The spine belongs here rather than with the legs, which is what lets a
+/// cast play over a walk: the upper body leans into the cast while the legs
+/// keep their own clip.
+pub const UPPER_BODY: Mask = Mask::NONE
+    .with(Param::SpineBend)
+    .with(Param::SpineTwist)
+    .with(Param::SpineTilt)
+    .with(Param::HeadTurn)
+    .with(Param::HeadNod)
+    .with(Param::HeadTilt)
+    .with(Param::ShoulderSwing(Side::Left))
+    .with(Param::ShoulderSwing(Side::Right))
+    .with(Param::ShoulderSplay(Side::Left))
+    .with(Param::ShoulderSplay(Side::Right))
+    .with(Param::ElbowBend(Side::Left))
+    .with(Param::ElbowBend(Side::Right))
+    .with(Param::WristAngle(Side::Left))
+    .with(Param::WristAngle(Side::Right));
+
+/// The parameters that move the legs.
+pub const LOWER_BODY: Mask = Mask::ALL.difference(UPPER_BODY);
+
+/// Which joint axis each pose parameter turns on this rig.
+///
+/// Every sense in this table is a fact about the body rather than a
+/// convention: a limb hangs below its joint, so it swings opposite to the
+/// joint's own top, and an outward splay is a different sign on each side.
+/// Stating both here once is what lets a clip say "swing the arm forward" or
+/// "lift it away from the body" and be right on both sides.
+pub const DRIVES: [Drive; DRIVE_COUNT] = [
+    Drive::new(Param::SpineBend, Bone::Waist.joint(), Axis::Pitch),
+    Drive::new(Param::SpineBend, Bone::Chest.joint(), Axis::Pitch),
+    Drive::new(Param::SpineTwist, Bone::Waist.joint(), Axis::Yaw),
+    Drive::new(Param::SpineTwist, Bone::Chest.joint(), Axis::Yaw),
+    Drive::new(Param::SpineTilt, Bone::Waist.joint(), Axis::Roll),
+    Drive::new(Param::SpineTilt, Bone::Chest.joint(), Axis::Roll),
+    Drive::new(Param::HeadNod, Bone::Neck.joint(), Axis::Pitch),
+    Drive::new(Param::HeadNod, Bone::Head.joint(), Axis::Pitch),
+    Drive::new(Param::HeadTurn, Bone::Neck.joint(), Axis::Yaw),
+    Drive::new(Param::HeadTurn, Bone::Head.joint(), Axis::Yaw),
+    Drive::new(Param::HeadTilt, Bone::Neck.joint(), Axis::Roll),
+    Drive::new(Param::HeadTilt, Bone::Head.joint(), Axis::Roll),
+    arm_swing(Side::Left),
+    arm_swing(Side::Right),
+    arm_splay(Side::Left),
+    arm_splay(Side::Right),
+    elbow(Side::Left),
+    elbow(Side::Right),
+    wrist(Side::Left),
+    wrist(Side::Right),
+    leg_swing(Side::Left),
+    leg_swing(Side::Right),
+    leg_splay(Side::Left),
+    leg_splay(Side::Right),
+    knee(Side::Left),
+    knee(Side::Right),
+    ankle(Side::Left),
+    ankle(Side::Right),
+];
+
+/// Forward is a negative pitch, because the arm hangs below the shoulder.
+const fn arm_swing(side: Side) -> Drive {
+    Drive::new(
+        Param::ShoulderSwing(side),
+        Bone::Shoulder(side).joint(),
+        Axis::Pitch,
+    )
+    .reversed()
+}
+
+/// Away from the body, which is a positive roll on the left and a negative
+/// one on the right.
+const fn arm_splay(side: Side) -> Drive {
+    let drive = Drive::new(
+        Param::ShoulderSplay(side),
+        Bone::Shoulder(side).joint(),
+        Axis::Roll,
+    );
+    match side {
+        Side::Left => drive,
+        Side::Right => drive.reversed(),
+    }
+}
+
+/// An elbow closes toward a negative pitch and cannot open past straight.
+const fn elbow(side: Side) -> Drive {
+    Drive::new(
+        Param::ElbowBend(side),
+        Bone::Elbow(side).joint(),
+        Axis::Pitch,
+    )
+    .reversed()
+}
+
+const fn wrist(side: Side) -> Drive {
+    Drive::new(
+        Param::WristAngle(side),
+        Bone::Wrist(side).joint(),
+        Axis::Pitch,
+    )
+}
+
+/// As the arm: forward is a negative pitch.
+const fn leg_swing(side: Side) -> Drive {
+    Drive::new(Param::HipSwing(side), Bone::Hip(side).joint(), Axis::Pitch).reversed()
+}
+
+/// As the arm: outward is handed.
+const fn leg_splay(side: Side) -> Drive {
+    let drive = Drive::new(Param::HipSplay(side), Bone::Hip(side).joint(), Axis::Roll);
+    match side {
+        Side::Left => drive,
+        Side::Right => drive.reversed(),
+    }
+}
+
+/// A knee folds toward a positive pitch, the heel rising behind.
+const fn knee(side: Side) -> Drive {
+    Drive::new(Param::KneeBend(side), Bone::Knee(side).joint(), Axis::Pitch)
+}
+
+const fn ankle(side: Side) -> Drive {
+    Drive::new(
+        Param::AnkleAngle(side),
+        Bone::Ankle(side).joint(),
+        Axis::Pitch,
+    )
+}
+
+/// `rig` with the humanoid pose parameters bound to its joints.
+///
+/// # Errors
+///
+/// As [`Rigging::new`]; cannot fail for a rig [`rig`] built, whose joints are
+/// exactly the ones [`DRIVES`] names.
+///
+/// [`rig`]: fn@rig
+pub fn rigging(rig: &Rig) -> Result<Rigging<'_>, FigureError> {
+    Rigging::new(rig, &DRIVES)
 }
 
 #[cfg(test)]

@@ -38,8 +38,8 @@ controls), `lib/raster` and `lib/util::mathf` rustdoc.
 | FG0 | This plan, the jump-sheet row, the §3 map entry, the `PLAN.md` section | done |
 | FG1 | `lib/raster::shape`: the six outline primitives, the tracer, the build-time vertex bounds, and `cinder` migrated onto them with its existing tests as the acceptance gate | done |
 | FG2 | `wintersun/figure`: the rig — skeleton, joint hierarchy with limits, named equipment sockets, draw order, and the one body frame that serves every heading | done |
-| FG3 | Pose parameters, clips (keyframed parameter curves with easing), clip blending, and the transition state machine | planned |
-| FG4 | Procedural layers over a clip: gait phase from velocity, look-at, recoil, cloth and hair sway, breathing, contact shadow | planned |
+| FG3 | Pose parameters, clips (keyframed parameter curves with easing), clip blending, and the transition state machine | done |
+| FG4 | Procedural layers over a clip: gait phase from distance travelled, look-at, recoil, cloth and hair sway, breathing, per-foot terrain planting, root motion and the figure's root placement, contact shadow | planned |
 | FG5 | `cargo xtask artsheet`: the contact-sheet renderer, the committed goldens, and the automated quality checks | planned |
 | FG6 | The parameter space: species and build parameters, the palette model, validated bounds, and the compact serialised form a character record stores | planned |
 | FG7 | The designer engine: the parameter model, live preview, presets, and randomised-but-plausible generation | planned |
@@ -178,13 +178,51 @@ from one pass. Nothing in the crate allocates.
 
 ## 3. FG3/FG4 — animation
 
-**Pose parameters are data, not code paths.** A pose is a named set of scalars
-— gait phase, crouch, lift, lean, head yaw and pitch, limb swing, tail sway,
-cloth sway, expression, eye state — and a figure is drawn from one pose. A
+**Pose parameters are data, not code paths.** A `Pose` is a closed set of
+named scalars — spine bend, twist and tilt, head turn, nod and tilt, and per
+side the shoulder swing and splay, elbow bend, wrist angle, hip swing and
+splay, knee bend and ankle angle — and a figure is drawn from one pose. A
 `Clip` is a keyframed curve per parameter with an easing per segment, a
 duration, and a loop mode. Blending is a weighted sum of poses with per-clip
 masks, so a cast animation can play on the upper body while the legs keep
 walking.
+
+**A parameter is a fraction of the joint's own travel, which is what makes a
+clip rig-independent and an illegal pose unspellable.** The rig's `Drive`
+table says which joint axis a parameter turns and which way its `+1` points,
+so the angle is scaled into that axis's documented interval. A clip names no
+joint and no angle and therefore plays on any rig declaring the same
+parameters; the handedness of an outward splay is stated once in that table
+rather than in every clip that lifts an arm; and a bent-backwards elbow is
+not a pose that gets rejected but one that cannot be written down, because
+the elbow's parameter runs from straight to fully folded and has no other
+end. Three rules keep that structural rather than checked: `Rigging::new`
+refuses two drives on one joint axis so no two parameters can sum past it, no
+easing overshoots so an interpolated value stays between its keys, and a
+blend is a weighted mean so it stays between its inputs. The only clamping
+anywhere absorbs floating-point rounding on a value already mathematically
+inside. Overshoot is not an omission: the snap of a recoil and the settle of
+a follow-through are damped layers below, where they can be bounded on their
+own terms rather than smuggled into a keyframe.
+
+**A pose is articulation only; everything that moves the root is FG4.** A
+jump's lift, the pelvis drop of a crouch and a dodge's displacement are
+translations of the figure's root, and none can be decided without the ground
+the feet are standing on. They therefore sit with the foot-planting and
+root-motion layers below rather than being split across both items, and a
+crouch is authored as hip, knee and ankle bend whose ground contact FG4
+resolves. The pelvis is left undriven by any parameter for the same reason:
+it is the root, and turning it tilts the whole figure, which is the slope
+response FG4 owns.
+
+**Blending weighs each parameter, not each pose.** A parameter is weighed
+only against the clips that had an opinion about it, which is what makes a
+mask mean anything, and a parameter nothing wrote resolves to rest. That
+fixes how partial animations compose: an overlay covering part of the body is
+layered *over* a base covering the rest — added to the same blend — rather
+than cross-faded against it, since cross-fading a full-body clip out from
+under a partial one would leave the uncovered half at rest as the base's
+weight reached zero.
 
 A `Transitions` state machine selects clips from the simulation's state
 (grounded, speed, action, stagger) with per-edge blend durations. The machine
@@ -364,11 +402,26 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
   elevation its doc claims, height is unforeshortened, depth is not the screen
   row, a yaw never turns an outline — not screenshots. `no_std` with no
   allocator, built on all four Tier-1 targets.
-- Clips: curve evaluation at known t; loop closure; blend weights sum to one;
-  a malformed clip or transition document is refused. Events fire once per
-  playback at their authored phase, survive a blended transition without
-  duplicating or being dropped, and a clip with an out-of-range or duplicated
-  event is refused at load.
+- Clips: curve evaluation at known keys and midpoints; loop closure, so a
+  wrapping clip reads the same value either side of the join; no easing
+  leaves the unit interval or goes backwards; a sampled value never leaves
+  its parameter's range under any loop mode. A cross-fade's two weights sum
+  to one, and a blend of values inside their ranges stays inside them — the
+  general guarantee, since weight is normalised per parameter rather than
+  required to sum to one. Malformed clips and machines are refused at load:
+  an empty or non-ascending curve, a key or event outside `0..=1`, a keyed
+  value outside its parameter's range, two curves on one parameter, a
+  duplicated event name, a non-positive duration or cross-fade, a repeated or
+  out-of-order edge, a state naming an absent clip, and a state nothing leads
+  to. Events fire exactly once as the phase passes them, report a lap's tail
+  before the next head in the order they happen, and survive a blended
+  transition without duplicating or being dropped.
+- Rigging: two drives on one joint axis are refused, so every parameter at
+  either extreme — singly and all at once — leaves every joint of the shipped
+  humanoid inside its limits; an elbow cannot be driven past straight at any
+  value; an outward splay is outward on both sides and equal in magnitude;
+  each half of a lopsided limit is scaled on its own, so rest stays rest.
+  `no_std` with no allocator, built on all four Tier-1 targets.
 - Layers: a walk of known distance plants a known number of steps with foot
   slide inside its bound; a figure standing and walking across a known slope
   has each foot at its own terrain height with the pelvis and knee absorbing

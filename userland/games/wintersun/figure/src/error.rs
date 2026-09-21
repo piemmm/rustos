@@ -50,6 +50,46 @@ pub enum FigureError {
     NoSuchSocket,
     /// A scale that is not a finite positive number.
     ScaleUnreal,
+    /// A pose value outside the range its parameter is authored in.
+    ParamOutsideRange,
+    /// Two drives on one joint axis, which could sum past its limit.
+    DriveCollision,
+    /// A curve with no keys, which has no value to sample.
+    CurveEmpty,
+    /// Keys that do not strictly ascend by phase.
+    KeysNotAscending,
+    /// A phase outside a clip's own `0..=1`.
+    PhaseOutsideClip,
+    /// A second curve on a parameter that already has one.
+    DuplicateCurve,
+    /// Clip events that do not ascend by phase, so a lap would report them
+    /// out of the order they happen in.
+    EventsNotAscending,
+    /// One event name used twice in a clip, so a consumer could not tell
+    /// which moment fired.
+    DuplicateEventName,
+    /// A clip duration that is not a finite positive number.
+    DurationUnreal,
+    /// An elapsed time or step that is not a finite non-negative number.
+    ElapsedUnreal,
+    /// A blend weight that is not a finite non-negative number.
+    WeightUnreal,
+    /// A transition machine with no states.
+    NoStates,
+    /// More states than a machine holds.
+    TooManyStates,
+    /// A state naming a clip the machine does not have.
+    NoSuchClip,
+    /// An initial state or edge end the machine does not have.
+    NoSuchState,
+    /// No edge from the current state to the one asked for.
+    NoSuchEdge,
+    /// A cross-fade that is not a finite positive number of seconds.
+    BlendNotPositive,
+    /// Edges out of order or repeated.
+    EdgesNotAscending,
+    /// A state nothing leads to, which a figure could never enter.
+    StateUnreachable,
 }
 
 impl fmt::Display for FigureError {
@@ -71,6 +111,25 @@ impl fmt::Display for FigureError {
             Self::GeometryUnreal => "geometry value not finite",
             Self::NoSuchSocket => "rig offers no such socket",
             Self::ScaleUnreal => "scale not a finite positive number",
+            Self::ParamOutsideRange => "pose value outside its parameter's range",
+            Self::DriveCollision => "two drives on one joint axis",
+            Self::CurveEmpty => "curve has no keys",
+            Self::KeysNotAscending => "curve keys do not ascend by phase",
+            Self::PhaseOutsideClip => "phase outside a clip's own range",
+            Self::DuplicateCurve => "parameter already has a curve",
+            Self::EventsNotAscending => "clip events do not ascend by phase",
+            Self::DuplicateEventName => "event name used twice in one clip",
+            Self::DurationUnreal => "clip duration not a finite positive number",
+            Self::ElapsedUnreal => "elapsed time not a finite non-negative number",
+            Self::WeightUnreal => "blend weight not a finite non-negative number",
+            Self::NoStates => "transition machine has no states",
+            Self::TooManyStates => "more states than a machine holds",
+            Self::NoSuchClip => "no such clip",
+            Self::NoSuchState => "no such state",
+            Self::NoSuchEdge => "no edge to the state asked for",
+            Self::BlendNotPositive => "cross-fade not a finite positive number of seconds",
+            Self::EdgesNotAscending => "edges out of order or repeated",
+            Self::StateUnreachable => "state unreachable from the initial one",
         };
         f.write_str(text)
     }

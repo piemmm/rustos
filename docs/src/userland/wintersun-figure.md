@@ -148,6 +148,89 @@ authored standing height, and it carries the offsets and the outlines
 together, so a figure drawn at half size is half the figure rather than a
 full-size arrangement of half-size shapes.
 
+## An animation is authored in parameters, not rotations
+
+A pose is a named set of scalars — how far an elbow is folded, how far a hip
+has swung, how far the spine has bent — and a clip keys those rather than
+joint angles. Each scalar is a fraction of that joint's *own* documented
+travel, scaled into the interval by the rig's drive table, and three things
+follow from that one decision.
+
+One clip plays on any rig declaring the same parameters, because the clip
+names no joint and no angle. The handedness of an outward splay is stated
+once, in the drive table, rather than in every clip that lifts an arm. And no
+value of any parameter can leave a limit: a bent-backwards elbow is not a
+pose that gets rejected, it is one that *cannot be spelled*, because the
+elbow's parameter runs from straight to fully folded and has no other end.
+
+That last guarantee is structural rather than checked, and three rules hold
+it up. A rigging refuses two drives on one joint axis, so no two parameters
+can sum past it. No easing overshoots, so an interpolated value stays between
+the two keys it lies between. Blending is a weighted mean, so it stays
+between its inputs. A posture built from a pose therefore has no
+out-of-limit case at all — the only clamping anywhere absorbs the last bit of
+floating-point rounding on a value already mathematically inside its range.
+
+Root motion is deliberately not a parameter. A jump's lift, the pelvis drop
+of a crouch and a dodge's displacement cannot be decided without the ground
+the feet are standing on, so they belong with the terrain solve rather than
+split across two items.
+
+## A clip is keyed against a phase, not a clock
+
+A clip keys each parameter against a phase in `0..=1` and carries its
+duration separately, so retiming it is one number and — more importantly —
+the phase can later be driven by *distance travelled* instead of by a clock
+without the curves knowing the difference. That is what stops a walk cycle
+sliding when the speed changes.
+
+Easings are the non-overshooting ones: linear, ease in, ease out, ease in and
+out, and a hold that steps at the next key. The omission is deliberate. An
+overshooting easing would break the in-range guarantee above, and the snap of
+a recoil and the settle of a follow-through are damped layers over the clip,
+where they can be bounded on their own terms rather than smuggled into a
+keyframe.
+
+A clip also carries **named events at phases** — a footstep, a hit frame, an
+arrow loosed — which is the seam the game's timing is built on: a hitbox
+opens on the frame the art shows it rather than on a timer that drifts from
+it. Asking a clip which events a phase step crossed is half-open, so an event
+fires exactly once as the phase passes it and never twice, and a step that
+laps reports the tail of the clip before the head of the next in the order
+they actually happen. The engine carries the name and the phase and learns
+nothing about what either means.
+
+## Blending is weighed per parameter
+
+Weight accumulates against each *parameter*, not against each pose, and that
+is the whole reason a mask means anything: a parameter is weighed only
+against the clips that had an opinion about it. A cast playing on the arms
+therefore does not drag the legs toward rest by the weight it was mixed in
+at.
+
+A parameter nothing wrote resolves to rest, which fixes how partial
+animations compose: an overlay covering part of the body is layered *over* a
+base covering the rest — added to the same blend — rather than cross-faded
+against it. Cross-fading a full-body clip out from under a partial one would
+leave the uncovered half at rest as the base's weight reached zero.
+
+## The transition machine is checked before it can strand anything
+
+States name clips, edges carry the seconds one state takes to become another,
+and the whole graph is checked once when it is assembled: every clip present,
+every cross-fade a positive number of seconds, every state reachable from the
+initial one. A machine that could strand a figure in a state nothing leads to
+is refused at load rather than discovered when it happens. Edges are held
+ascending, which makes a state's outgoing edges a contiguous run — so a
+lookup is a search rather than a scan, and a repeated edge cannot be spelled.
+
+Which state to be in is the simulation's business, not the engine's: a
+consumer maps its own notion of grounded, speed, action and stagger onto a
+state and asks for it, and asking for a state with no edge from where the
+figure is gets refused. At most two clips are live at once; asking for a
+state mid-fade replaces the outgoing clip rather than queueing a chain of
+fades that would take longer to settle than the input that caused them.
+
 ## Costs nothing to draw
 
 Nothing in the crate allocates. A rig holds fixed arrays; a posture is one
@@ -163,9 +246,10 @@ validated data, and those arrive with a later item.
 
 ## What comes next
 
-Pose parameters, keyframed clips, blending and the transition machine; then
-the procedural layers over them — gait phase driven by distance travelled
-rather than a timer, look-at, recoil, cloth sway, breathing, and feet planted
-on real slopes; then the contact-sheet harness that makes readability,
-palette conformance, joint limits, foot slide, motion continuity and loop
-closure measured, gated properties rather than opinions.
+The procedural layers over a clip — gait phase driven by distance travelled
+rather than a timer, look-at, recoil and follow-through, cloth and hair sway,
+breathing, root motion, a contact shadow, and each foot planted on its own
+terrain height rather than on the ground's average; then the contact-sheet
+harness that makes readability, palette conformance, joint limits, foot
+slide, motion continuity and loop closure measured, gated properties rather
+than opinions.
