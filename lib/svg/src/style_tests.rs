@@ -25,7 +25,7 @@ fn styled(tag: &str) -> Style {
 fn resolve(parent: &Style, tag: &str) -> Result<Style, SvgError> {
     let document = format!("<svg>{tag}</svg>");
     let root = xml::parse(&document).expect("a document");
-    let child = root.children.first().expect("a child element");
+    let child = root.children().next().expect("a child element");
     parent.apply(child, VIEWPORT, &[])
 }
 
@@ -53,13 +53,87 @@ fn an_inline_declaration_list_sets_each_property() {
     assert!((style.stroke_style.width - 3.0).abs() < 1e-9);
 }
 
-/// A document is full of editor metadata and text properties that have no
-/// bearing on the shapes drawn; refusing them would reject nearly every real
-/// asset.
+/// A document is full of editor metadata that has no bearing on the shapes
+/// drawn; refusing it would reject nearly every real asset.
 #[test]
 fn an_unknown_property_is_ignored_rather_than_refused() {
-    let style = styled(r#"<rect font-family="Serif" inkscape:label="x" style="font-size:12"/>"#);
+    let style = styled(
+        r#"<rect inkscape:label="x" sodipodi:nodetypes="cc" style="enable-background:new"/>"#,
+    );
     assert_eq!(style, Style::default());
+}
+
+#[test]
+fn the_text_properties_are_read_rather_than_ignored() {
+    let style = styled(
+        r#"<text font-family="Serif" font-weight="bold" font-style="italic"
+                 font-stretch="condensed" text-anchor="middle"
+                 style="font-size:12; letter-spacing:2; word-spacing:3"/>"#,
+    );
+    assert_eq!(style.font_family.as_deref(), Some("Serif"));
+    assert!((style.font_size - 12.0).abs() < 1e-9);
+    assert_eq!(style.font_weight, 700);
+    assert_eq!(style.font_style, crate::font::FontStyle::Italic);
+    assert_eq!(style.font_stretch, 7500);
+    assert_eq!(style.text_anchor, crate::style::TextAnchor::Middle);
+    assert!((style.letter_spacing - 2.0).abs() < 1e-9);
+    assert!((style.word_spacing - 3.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_font_relative_length_measures_the_size_the_element_is_set_in() {
+    // The font size is computed first, so the stroke reads the size this
+    // element ends up at rather than whichever was applied by then.
+    let style = styled(r#"<text stroke-width="0.5em" font-size="20"/>"#);
+    assert!((style.stroke_style.width - 10.0).abs() < 1e-9);
+
+    // An `ex` is half an em where the face's own x-height is unknown.
+    let ex = styled(r#"<text stroke-width="1ex" font-size="20"/>"#);
+    assert!((ex.stroke_style.width - 10.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_percentage_font_size_measures_the_inherited_one() {
+    let parent = styled(r#"<text font-size="20"/>"#);
+    let child = resolve(&parent, r#"<tspan font-size="50%"/>"#).expect("a child style");
+    assert!((child.font_size - 10.0).abs() < 1e-9);
+}
+
+#[test]
+fn bolder_and_lighter_step_the_axis_and_stop_at_its_ends() {
+    let base = styled(r#"<text font-weight="400"/>"#);
+    let bolder = resolve(&base, r#"<tspan font-weight="bolder"/>"#).expect("a style");
+    assert_eq!(bolder.font_weight, 700);
+    let lighter = resolve(&base, r#"<tspan font-weight="lighter"/>"#).expect("a style");
+    assert_eq!(lighter.font_weight, 100);
+    let floored = resolve(&lighter, r#"<tspan font-weight="lighter"/>"#).expect("a style");
+    assert_eq!(floored.font_weight, 1, "a keyword step lands on the end");
+}
+
+#[test]
+fn a_weight_off_the_axis_is_refused_rather_than_clamped() {
+    assert_eq!(
+        resolve(&Style::default(), r#"<text font-weight="1400"/>"#).err(),
+        Some(SvgError::InvalidNumber)
+    );
+    assert_eq!(
+        resolve(&Style::default(), r#"<text font-weight="0"/>"#).err(),
+        Some(SvgError::InvalidNumber)
+    );
+}
+
+#[test]
+fn an_arbitrary_weight_on_the_axis_is_kept_exactly() {
+    assert_eq!(styled(r#"<text font-weight="250"/>"#).font_weight, 250);
+}
+
+#[test]
+fn a_stretch_off_the_axis_is_refused() {
+    assert_eq!(styled(r#"<text font-stretch="62.5%"/>"#).font_stretch, 6250);
+    assert_eq!(
+        resolve(&Style::default(), r#"<text font-stretch="400%"/>"#).err(),
+        Some(SvgError::InvalidNumber)
+    );
 }
 
 /// A property it *does* understand but cannot read is a different matter: a

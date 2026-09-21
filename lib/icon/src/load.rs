@@ -142,10 +142,13 @@ impl IconSet {
     /// supported subset is left unset and falls back to its built-in glyph in
     /// [`icon`](Self::icon).
     #[must_use]
-    pub fn from_assets<S: IconAssetSource + ?Sized>(source: &S) -> Self {
+    pub fn from_assets<S: IconAssetSource + ?Sized>(
+        source: &S,
+        fonts: &mut dyn tairix_svg::font::FontProvider,
+    ) -> Self {
         let mut set = Self::builtin();
         for kind in ICON_KINDS {
-            set.icons[kind.index()] = decoded(source, kind);
+            set.icons[kind.index()] = decoded(source, kind, fonts);
         }
         set
     }
@@ -184,8 +187,12 @@ impl Default for IconSet {
 
 /// Decode the asset for `kind`, or `None` when the source has no asset for it
 /// or the bytes do not decode (so the built-in glyph is used).
-fn decoded<S: IconAssetSource + ?Sized>(source: &S, kind: IconKind) -> Option<VectorIcon> {
+fn decoded<S: IconAssetSource + ?Sized>(
+    source: &S,
+    kind: IconKind,
+    fonts: &mut dyn tairix_svg::font::FontProvider,
+) -> Option<VectorIcon> {
     source
         .asset(kind)
-        .and_then(|bytes| crate::svg::decode(bytes).ok())
+        .and_then(|bytes| crate::svg::decode(bytes, fonts).ok())
 }

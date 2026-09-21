@@ -68,7 +68,7 @@ tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
-tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["svg"] }
 # The window channel's client half. The program links its `WindowClient`, but
 # the panel's own repaint decision is the shared `Repaint`/`present_damage`
 # rule every windowed app presents through, so the crate is an ordinary
@@ -88,7 +88,7 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",
 ] }
-tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt", "svg"] }
 # The parser sandbox: the icon artwork every task row and consumer draws is a
 # file on a volume — untrusted input — so it is decoded in a kernel-branded,
 # capability-empty worker this binary re-enters itself as, never in the
@@ -109,4 +109,5 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features
 ] }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = [
     "test-util",
+    "svg",
 ] }

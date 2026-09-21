@@ -60,8 +60,12 @@
 //! let svg = br##"<svg viewBox="0 0 10 10">
 //!   <circle cx="5" cy="5" r="4" fill="#3070f0" stroke="black" stroke-width="1"/>
 //! </svg>"##;
-//! let image = tairix_svg::decode(svg, tairix_svg::Viewport::Square)
-//!     .expect("a stroked circle");
+//! let image = tairix_svg::decode(
+//!     svg,
+//!     tairix_svg::Viewport::Square,
+//!     &mut tairix_svg::font::NoFonts,
+//! )
+//! .expect("a stroked circle");
 //! // The fill, then the stroke over it: SVG's painting order.
 //! assert_eq!(image.nodes().len(), 2);
 //! ```
@@ -76,6 +80,7 @@ pub mod color;
 pub mod css;
 pub mod document;
 pub mod error;
+pub mod font;
 pub mod geom;
 pub mod marker;
 pub mod number;
@@ -84,6 +89,7 @@ pub mod pathdata;
 pub mod shape;
 pub mod stroke;
 pub mod style;
+mod text;
 pub mod transform;
 pub mod xml;
 

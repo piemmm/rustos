@@ -42,9 +42,12 @@ impl CursorTheme {
     /// Never fails: every kind always resolves to a cursor, so the returned theme is complete even from an empty or
     /// partly-broken source.
     #[must_use]
-    pub fn from_assets<S: CursorAssetSource + ?Sized>(source: &S) -> Self {
+    pub fn from_assets<S: CursorAssetSource + ?Sized>(
+        source: &S,
+        fonts: &mut dyn tairix_svg::font::FontProvider,
+    ) -> Self {
         let builtin = Self::builtin();
-        Self::from_cursors(|kind| resolve(source, kind, &builtin))
+        Self::from_cursors(|kind| resolve(source, kind, &builtin, fonts))
     }
 }
 
@@ -54,9 +57,10 @@ fn resolve<S: CursorAssetSource + ?Sized>(
     source: &S,
     kind: CursorKind,
     builtin: &CursorTheme,
+    fonts: &mut dyn tairix_svg::font::FontProvider,
 ) -> VectorCursor {
     source
         .asset(kind)
-        .and_then(|bytes| crate::svg::decode(bytes).ok())
+        .and_then(|bytes| crate::svg::decode(bytes, fonts).ok())
         .unwrap_or_else(|| builtin.cursor(kind).clone())
 }

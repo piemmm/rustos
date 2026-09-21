@@ -17,6 +17,7 @@
 
 use core::fmt::Write as _;
 
+use tairix_svg::font::NoFonts;
 use tairix_svg::{decode, SvgError, Viewport};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -148,6 +149,14 @@ const NUMBERS: &[&str] = &[
     "0", "1", "-1", ".5", "-.5", "7.", "1e2", "-3E-2", "1.5", "1000000", "-0", "0.0001",
 ];
 
+/// How many sweeps pass between generated-text documents.
+const TEXT_EVERY: u64 = 8;
+
+/// Font sizes a generated `<text>` draws from: every shape a size can take
+/// — zero, sub-unit, unitful, exponent, negative — at scales a drawing
+/// actually uses.
+const TEXT_SIZES: &[&str] = &["0", "1", ".5", "7.", "1.5e1", "-2", "12pt", "0.0001"];
+
 /// Selector spellings a generated sheet draws from, inside the subset and
 /// outside it.
 const SELECTORS: &[&str] = &[
@@ -206,8 +215,23 @@ const RENDER_SIDE: u32 = 16;
 /// or layers than the decoder's own bounds admit, and a tree the one renderer
 /// will actually draw rather than turn away.
 fn decode_never_panics(bytes: &[u8]) {
-    let square = decode(bytes, Viewport::Square);
-    let natural = decode(bytes, Viewport::Natural);
+    decode_never_panics_with(bytes, &mut NoFonts, &mut NoFonts);
+}
+
+/// The same, against a provider that does furnish glyphs.
+///
+/// Text is the one part of the decoder whose geometry comes from *outside*
+/// the document, so a provider that answers is what reaches the layout, the
+/// glyph flattening, and the bounds they are charged against at all. Two
+/// providers because a single one is consumed by the first decode's own
+/// face resolution and the two viewports are decoded independently.
+fn decode_never_panics_with(
+    bytes: &[u8],
+    square_fonts: &mut dyn tairix_svg::font::FontProvider,
+    natural_fonts: &mut dyn tairix_svg::font::FontProvider,
+) {
+    let square = decode(bytes, Viewport::Square, square_fonts);
+    let natural = decode(bytes, Viewport::Natural, natural_fonts);
     // A viewport chooses the shape a drawing is fitted to, never whether
     // the document is well formed. The one thing it may legitimately change
     // is how much geometry the fit produces, and so whether that geometry
@@ -215,7 +239,11 @@ fn decode_never_panics(bytes: &[u8]) {
     assert!(
         square.is_ok() == natural.is_ok()
             || square == Err(SvgError::TooComplex)
-            || natural == Err(SvgError::TooComplex),
+            || natural == Err(SvgError::TooComplex)
+            // A provider is consumed as it answers: one viewport may spend
+            // the last request the other still had.
+            || square == Err(SvgError::FontUnavailable)
+            || natural == Err(SvgError::FontUnavailable),
         "the viewports disagreed other than about complexity"
     );
     for image in [square, natural].into_iter().flatten() {
@@ -279,6 +307,99 @@ impl Tally {
             }
         }
     }
+}
+
+/// A provider whose glyphs are a square of half an em, so a fuzzed document
+/// reaches the layout and the glyph flattening with real geometry.
+struct FuzzFont;
+
+impl tairix_svg::font::FontProvider for FuzzFont {
+    fn select(
+        &mut self,
+        req: &tairix_svg::font::FaceRequest<'_>,
+    ) -> Result<tairix_svg::font::FaceMetrics, tairix_svg::font::FontUnavailable> {
+        // Only the generic answers, so the fuzzed documents drive the
+        // decoder's own family ladder rather than short-circuiting it.
+        if req.family != "sans-serif" {
+            return Err(tairix_svg::font::FontUnavailable);
+        }
+        Ok(tairix_svg::font::FaceMetrics {
+            id: tairix_svg::font::FaceId::new(0),
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: 200.0,
+            line_gap: 0.0,
+        })
+    }
+
+    fn outlines(
+        &mut self,
+        _face: tairix_svg::font::FaceId,
+        run: &[char],
+        out: &mut Vec<tairix_svg::font::GlyphOutline>,
+    ) -> Result<(), tairix_svg::font::FontUnavailable> {
+        use tairix_svg::font::{GlyphOutline, OutlineContour, OutlineSegment};
+        for _ in run {
+            out.push(GlyphOutline {
+                units_per_em: 1000.0,
+                advance: 500.0,
+                synthetic_bold: 1.0 / 24.0,
+                synthetic_shear: 0.25,
+                contours: vec![OutlineContour {
+                    start: (0.0, 0.0),
+                    segments: vec![
+                        OutlineSegment::Quadratic {
+                            control: (600.0, 350.0),
+                            to: (500.0, 700.0),
+                        },
+                        OutlineSegment::Line { to: (0.0, 700.0) },
+                        OutlineSegment::Line { to: (0.0, 0.0) },
+                    ],
+                }],
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One sweep's generated `<text>` document, decoded with a provider that
+/// answers and again with one that does not.
+fn generated_text(next: &mut impl FnMut() -> u64) {
+    let anchor = ["start", "middle", "end", "sideways"][bounded(next(), 3)];
+    let adjust = ["spacing", "spacingAndGlyphs", "neither"][bounded(next(), 2)];
+    let space = ["default", "preserve", "collapse"][bounded(next(), 2)];
+    let weight = ["normal", "bold", "bolder", "lighter", "250", "1400"][bounded(next(), 5)];
+    let posture = ["normal", "italic", "oblique", "sideways"][bounded(next(), 3)];
+    // The *positions* are drawn from the wild list, because placing a
+    // glyph anywhere costs the same. The *size* is not: a million-unit
+    // em subdivides one curve into the whole vertex budget before the
+    // budget refuses it, and the flattener's behaviour there is what
+    // the generated-path case above already fuzzes. Here the point is
+    // the layout.
+    let size = TEXT_SIZES[bounded(next(), TEXT_SIZES.len() - 1)];
+    let list = NUMBERS[bounded(next(), NUMBERS.len() - 1)];
+    // Short on purpose: what varies between iterations is the *shape*
+    // of the layout — the position lists, the anchor, the adjustment,
+    // the spacings — and one sweep should not cost more in glyphs than
+    // every other case put together.
+    let mut body = String::new();
+    for _ in 0..bounded(next(), 1) {
+        let _ = write!(
+            body,
+            r#"<tspan dx="{list}" rotate="{list} 30" font-size="{size}">c</tspan>"#
+        );
+    }
+    let text = alloc_document(&format!(
+        r##"<text x="{list} 2 3" y="4" xml:space="{space}" text-anchor="{anchor}"
+                  textLength="{list}" lengthAdjust="{adjust}" font-weight="{weight}"
+                  font-style="{posture}" letter-spacing="{list}" word-spacing="{size}"
+                  font-family="Nothing, sans-serif" fill="#345" stroke="#987"
+                  stroke-width="0.3">a{body}b</text>"##
+    ));
+    decode_never_panics_with(text.as_bytes(), &mut FuzzFont, &mut FuzzFont);
+    // The same document with nothing to draw it: text the decoder
+    // cannot furnish must refuse rather than draw a bare picture.
+    decode_never_panics(text.as_bytes());
 }
 
 /// One generated body inside a fixed, well-formed frame.
@@ -384,7 +505,25 @@ fn decode_never_panics_for_any_input() {
         ));
         decode_never_panics(styled.as_bytes());
 
-        // 5. Pure noise straight into the decoder.
+        // 5. Generated text, against a provider that answers: the only way
+        //    the layout, the glyph flattening, and the budgets text is
+        //    charged against are reached at all.
+        //
+        //    Sampled rather than run every sweep. A text document is an
+        //    order of magnitude dearer than the others here — every
+        //    character is a contour, stroked twice (the author's pen and
+        //    the synthetic bold), and a `textLength` that stretches the
+        //    glyphs subdivides each curve against the whole vertex budget
+        //    before the budget refuses it. Running it every sweep would
+        //    make this one case most of the harness's wall clock and buy
+        //    nothing the same inputs at a lower rate do not; the soak is
+        //    wall-clock bounded, so it covers text in the same proportion
+        //    over hours.
+        if iteration.is_multiple_of(TEXT_EVERY) {
+            generated_text(&mut next);
+        }
+
+        // 6. Pure noise straight into the decoder.
         let nlen = bounded(next(), MAX_NOISE);
         let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 29)).collect();
         decode_never_panics(&noise);

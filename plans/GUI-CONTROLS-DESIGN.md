@@ -1919,6 +1919,14 @@ rows sit on.
   read as one column rather than three indents. The footnote is where a setting
   needs a sentence of consequence — on the surface, not behind a tooltip a
   pointer has to find.
+- **A group's caption may carry a badge**, the state capsule (§11.33) naming
+  where the thing the group is about stands — a volume's health, or how many
+  of a settings plate's rows differ from what is in effect. The group places
+  it, because it is the only thing that can also take the room out of the
+  caption and out of the band's height. It is settable in place as well as at
+  construction, because a state that moves while the reader works must not
+  cost a rebuild of rows holding a caret and a selection; the capsule rides a
+  band of its own either way, so an owner that sets one re-measures.
 - **The owner places the choice popup.** An expanded list is drawn above every
   group, so a row cannot paint it — the group's later rows would cover it. The
   group names the row and slot to anchor it to; the owner places it within the

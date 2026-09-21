@@ -472,3 +472,166 @@ fn reach_bounds_every_shapes_own_outline() {
         }
     }
 }
+
+#[test]
+fn every_shape_reports_an_unreal_dimension() {
+    // The totality a caller validating authored geometry relies on: a NaN
+    // radius would otherwise trace vertices no pixel corresponds to.
+    for shape in [
+        Shape::Splat { radius: f64::NAN },
+        Shape::Superellipse {
+            rx: f64::NAN,
+            ry: 4.0,
+            square: 0.3,
+        },
+        Shape::Superellipse {
+            rx: 4.0,
+            ry: 4.0,
+            square: f64::INFINITY,
+        },
+        Shape::Taper {
+            length: 10.0,
+            top: f64::NEG_INFINITY,
+            foot: 2.0,
+        },
+        Shape::Wedge {
+            half_width: 3.0,
+            height: 8.0,
+            lean: f64::NAN,
+        },
+        Shape::ScallopedPanel {
+            rx: f64::NAN,
+            ry: 9.0,
+            folds: 3,
+        },
+        Shape::BevelledPanel {
+            rx: 6.0,
+            ry: 6.0,
+            bevel: f64::NAN,
+        },
+    ] {
+        assert!(!shape.is_real(), "{shape:?} carries an unreal dimension");
+    }
+}
+
+#[test]
+fn a_finite_shape_is_real() {
+    for shape in every_shape() {
+        assert!(shape.is_real(), "{shape:?} is finite and must read as real");
+    }
+}
+
+#[test]
+fn scaling_multiplies_every_length_and_leaves_the_ratios() {
+    // What lets an arrangement be authored once at a reference size: the
+    // lengths scale, and `square` and `folds` are shape-relative so they do
+    // not. Were `square` scaled, a doubled superellipse would also change
+    // how square it is.
+    let factor = 2.5;
+    assert_eq!(
+        Shape::Splat { radius: 4.0 }.scaled(factor),
+        Shape::Splat { radius: 10.0 }
+    );
+    assert_eq!(
+        Shape::Superellipse {
+            rx: 4.0,
+            ry: 6.0,
+            square: 0.3
+        }
+        .scaled(factor),
+        Shape::Superellipse {
+            rx: 10.0,
+            ry: 15.0,
+            square: 0.3
+        }
+    );
+    assert_eq!(
+        Shape::Taper {
+            length: 10.0,
+            top: 4.0,
+            foot: 2.0
+        }
+        .scaled(factor),
+        Shape::Taper {
+            length: 25.0,
+            top: 10.0,
+            foot: 5.0
+        }
+    );
+    assert_eq!(
+        Shape::Wedge {
+            half_width: 2.0,
+            height: 8.0,
+            lean: -1.2
+        }
+        .scaled(factor),
+        Shape::Wedge {
+            half_width: 5.0,
+            height: 20.0,
+            lean: -3.0
+        }
+    );
+    assert_eq!(
+        Shape::ScallopedPanel {
+            rx: 4.0,
+            ry: 8.0,
+            folds: 3
+        }
+        .scaled(factor),
+        Shape::ScallopedPanel {
+            rx: 10.0,
+            ry: 20.0,
+            folds: 3
+        }
+    );
+    assert_eq!(
+        Shape::BevelledPanel {
+            rx: 4.0,
+            ry: 4.0,
+            bevel: 1.0
+        }
+        .scaled(factor),
+        Shape::BevelledPanel {
+            rx: 10.0,
+            ry: 10.0,
+            bevel: 2.5
+        }
+    );
+}
+
+#[test]
+fn scaling_scales_the_outline_it_traces() {
+    // The property a caller actually depends on: scaling the shape is the
+    // same as scaling the vertices it would have produced.
+    let factor = 3.0;
+    for shape in every_shape() {
+        let direct = traced(shape.scaled(factor));
+        let base = traced(shape);
+        assert_eq!(direct.len(), base.len(), "{shape:?} changed vertex count");
+        for (scaled, (x, y)) in direct.iter().zip(base.iter()) {
+            assert!(
+                mathf::fabs(scaled.0 - x * factor) < 1e-9
+                    && mathf::fabs(scaled.1 - y * factor) < 1e-9,
+                "{shape:?} scaled to a different outline"
+            );
+        }
+    }
+}
+
+#[test]
+fn scaling_by_one_changes_nothing() {
+    for shape in every_shape() {
+        assert_eq!(shape.scaled(1.0), shape);
+    }
+}
+
+#[test]
+fn scaling_scales_the_reach() {
+    for shape in every_shape() {
+        let scaled = shape.scaled(4.0).reach();
+        assert!(
+            mathf::fabs(scaled - shape.reach() * 4.0) < 1e-9,
+            "{shape:?} reach did not scale"
+        );
+    }
+}

@@ -4,9 +4,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::engine::{MAX_COMPONENTS, MAX_OUTLINE_POINTS};
+use crate::engine::MAX_COMPONENTS;
 use crate::tests::asset;
 use crate::{AxisSetting, Contour, Face, OutlineSegment};
+use tairix_abi::font_ipc::FONT_MAX_OUTLINE_POINTS;
 
 /// Where a segment ends.
 fn end_of(segment: &OutlineSegment) -> (f64, f64) {
@@ -500,9 +501,9 @@ fn every_committed_glyph_clears_the_outline_bounds() {
     }
     assert!(most_contours > 1, "the sweep found no multi-contour glyph");
     assert!(
-        heaviest * 4 < MAX_OUTLINE_POINTS as usize,
+        heaviest * 4 < FONT_MAX_OUTLINE_POINTS as usize,
         "the heaviest committed glyph ({heaviest}) leaves too little headroom \
-         under the point bound ({MAX_OUTLINE_POINTS})"
+         under the point bound ({FONT_MAX_OUTLINE_POINTS})"
     );
 }
 
@@ -630,7 +631,7 @@ fn overlong_glyph() -> Vec<u8> {
     for word in [1i16, 0, 0, 0, 0] {
         entry.extend_from_slice(&word.to_be_bytes());
     }
-    let last = u16::try_from(MAX_OUTLINE_POINTS).expect("the bound fits a point index");
+    let last = u16::try_from(FONT_MAX_OUTLINE_POINTS).expect("the bound fits a point index");
     entry.extend_from_slice(&last.to_be_bytes());
     entry.extend_from_slice(&0u16.to_be_bytes());
     entry

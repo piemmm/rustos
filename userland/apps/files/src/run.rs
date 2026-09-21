@@ -1791,7 +1791,13 @@ mod program {
 
     impl ArtworkRasteriser for SandboxRasteriser {
         fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<alloc::vec::Vec<u8>> {
-            rasterise_icon(&mut self.sandbox, side, bytes).ok()
+            rasterise_icon(
+                &mut self.sandbox,
+                side,
+                bytes,
+                &mut tairix_font::ServiceFonts::new(),
+            )
+            .ok()
         }
     }
 

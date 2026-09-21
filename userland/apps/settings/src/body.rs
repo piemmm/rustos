@@ -1,14 +1,17 @@
 //! What the pane on show draws in the content column.
 //!
-//! Three shapes, and the registry decides which from the pane's own row: a
-//! stated absence, a form of settables, or read-only readings discovered at
-//! runtime. The Wallpaper pane is the one that carries two things at once —
-//! its rows fixed at the top of the column with the shipped pictures
-//! scrolling beneath them — and it is its own variant rather than a pair of
-//! options, so "a gallery with no form" is a state the shell cannot be in.
+//! Four shapes, and the registry decides which from the pane's own row: a
+//! stated absence, a form of settables, the mounted volumes, or a read-only
+//! column of machine readings. The Wallpaper pane is the one that carries
+//! two things at once — its rows fixed at the top of the column with the
+//! shipped pictures scrolling beneath them — and it is its own variant
+//! rather than a pair of options, so "a gallery with no form" is a state
+//! the shell cannot be in.
 //!
 //! The shell asks this what to measure, what to draw, and how it scrolls;
 //! it never asks which of two options happens to be set.
+
+use alloc::string::String;
 
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconArtwork;
@@ -17,9 +20,10 @@ use tairix_sysconfig::SystemConfig;
 use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
-use crate::facts::{Facts, MachineFacts, NetworkFacts};
+use crate::facts::{Facts, MachineFacts};
 use crate::form::{Documents, Form, FormPlace};
 use crate::gallery::Gallery;
+use crate::network::{IfaceSetting, NetworkFacts};
 use crate::registry::{PaneContent, PaneRow};
 use crate::statement;
 use crate::volumes::{Readings, VolumeReading};
@@ -46,15 +50,21 @@ pub(crate) struct Answered<'a> {
     pub(crate) machine: &'a MachineFacts,
     /// The network readings the caller took for the panes that state them.
     pub(crate) network: &'a NetworkFacts,
+    /// The per-interface edits a returning networking pane carries, which
+    /// is none for every other pane.
+    pub(crate) staged: &'a [(IfaceSetting, String)],
 }
 
 impl<'a> Answered<'a> {
     /// The stores a form's rows are built from.
-    const fn documents(&self) -> Documents<'a> {
+    fn documents(&self) -> Documents<'a> {
         Documents {
             settings: self.settings,
             cursor_sets: self.cursor_sets,
             config: self.config,
+            addressing: &self.network.addressing,
+            staged: self.staged,
+            resolvers: self.network.resolvers_slice(),
         }
     }
 }
@@ -97,8 +107,6 @@ impl Body {
             Some(PaneContent::Volumes) => Self::Volumes(Readings::new(answered.volumes)),
             Some(PaneContent::About) => Self::Facts(Facts::about(answered.machine)),
             Some(PaneContent::Clock) => Self::Facts(Facts::clock(answered.machine)),
-            Some(PaneContent::Dns) => Self::Facts(Facts::resolvers(answered.network)),
-            Some(PaneContent::Ethernet) => Self::Facts(Facts::addressing(answered.network)),
         }
     }
 
@@ -155,11 +163,23 @@ impl Body {
         matches!(self, Self::Statement)
     }
 
-    /// Whether this body stages a change to the machine's store, and so
-    /// needs that store read before its rows can show anything.
+    /// Whether this body stages a change to the machine's boot-time store,
+    /// and so needs that store read before its rows can show anything.
     pub(crate) fn stages_machine_settings(&self) -> bool {
-        self.form()
-            .is_some_and(|form| form.posture() == crate::form::Posture::Staged)
+        self.composition()
+            .is_some_and(crate::form::Composition::reads_machine)
+    }
+
+    /// Which settings this body composes, for a caller asking what it
+    /// reads rather than what it draws.
+    pub(crate) fn composition(&self) -> Option<crate::form::Composition> {
+        self.form().map(Form::composition)
+    }
+
+    /// The per-interface edits the body is holding, so a rebuilt pane
+    /// keeps a change the reader has staged but not yet applied.
+    pub(crate) fn staged(&self) -> &[(IfaceSetting, String)] {
+        self.form().map_or(&[], Form::staged)
     }
 
     /// Whether a choice list is open, which is modal: the list keeps the

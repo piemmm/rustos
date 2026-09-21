@@ -10,12 +10,13 @@ use core::fmt::Write;
 use tairix_raster::{Color, Paint};
 
 use crate::error::SvgError;
+use crate::font::NoFonts;
 use crate::{decode, SvgImage, Viewport, DESIGN_GRID};
 
 /// Fit a document to the square slot, which is what every gradient test
 /// here is about.
 fn decode_square(bytes: &[u8]) -> Result<SvgImage, SvgError> {
-    decode(bytes, Viewport::Square)
+    decode(bytes, Viewport::Square, &mut NoFonts)
 }
 
 /// Design units per user unit: every document here has an eight-unit view

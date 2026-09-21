@@ -66,6 +66,7 @@ use crate::{
     DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
     MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
+use tairix_svg::font::NoFonts;
 use tairix_window::WindowSizing;
 
 /// A valid SVG asset (a single filled triangle on a square grid) that decodes
@@ -392,7 +393,7 @@ fn loads_icon_assets_and_falls_back_per_kind() {
     let mut reader = MemoryAssets::default()
         .with("/System/Graphics/Icons/network.svg", VALID_SVG)
         .with("/System/Graphics/Icons/volume.svg", VALID_SVG);
-    let icons = load_icon_set(&mut reader);
+    let icons = load_icon_set(&mut reader, &mut NoFonts);
 
     assert!(icons.is_loaded(IconKind::Network));
     assert!(icons.is_loaded(IconKind::Volume));
@@ -404,14 +405,14 @@ fn loads_icon_assets_and_falls_back_per_kind() {
 
 #[test]
 fn empty_icon_source_is_the_builtin_set() {
-    let icons = load_icon_set(&mut MemoryAssets::default());
+    let icons = load_icon_set(&mut MemoryAssets::default(), &mut NoFonts);
     assert_eq!(icons, IconSet::builtin());
 }
 
 #[test]
 fn malformed_icon_asset_falls_back_to_builtin() {
     let mut reader = MemoryAssets::default().with("/System/Graphics/Icons/bell.svg", MALFORMED_SVG);
-    let icons = load_icon_set(&mut reader);
+    let icons = load_icon_set(&mut reader, &mut NoFonts);
     assert!(!icons.is_loaded(IconKind::Bell));
 }
 
@@ -427,7 +428,7 @@ fn loads_cursor_assets_for_the_active_theme_and_falls_back_per_kind() {
         "/System/Graphics/Cursors/High Visibility/cursor.arrow.svg",
         VALID_SVG,
     );
-    let cursors = session.load_cursors(&mut reader, test_set());
+    let cursors = session.load_cursors(&mut reader, test_set(), &mut NoFonts);
 
     let builtin = CursorTheme::builtin();
     // The arrow asset loaded, so its cursor differs from the built-in arrow.
@@ -449,7 +450,7 @@ fn loads_cursor_assets_for_the_active_theme_and_falls_back_per_kind() {
 #[test]
 fn empty_cursor_source_is_the_builtin_set() {
     let session = session();
-    let cursors = session.load_cursors(&mut MemoryAssets::default(), test_set());
+    let cursors = session.load_cursors(&mut MemoryAssets::default(), test_set(), &mut NoFonts);
 
     let builtin = CursorTheme::builtin();
     for kind in [
@@ -470,7 +471,7 @@ fn malformed_cursor_asset_falls_back_to_builtin() {
         "/System/Graphics/Cursors/High Visibility/cursor.arrow.svg",
         MALFORMED_SVG,
     );
-    let cursors = session.load_cursors(&mut reader, test_set());
+    let cursors = session.load_cursors(&mut reader, test_set(), &mut NoFonts);
     assert_eq!(
         cursors.cursor(CursorKind::Arrow),
         CursorTheme::builtin().cursor(CursorKind::Arrow)
@@ -2823,7 +2824,7 @@ fn set_icons_installs_a_loaded_set_and_the_bar_still_presents() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut reader = MemoryAssets::default().with("/System/Graphics/Icons/network.svg", VALID_SVG);
-    shell.set_icons(load_icon_set(&mut reader));
+    shell.set_icons(load_icon_set(&mut reader, &mut NoFonts));
 
     shell.present(&mut comp);
 
@@ -2905,7 +2906,9 @@ fn set_cursors_offers_the_loaded_sets_beside_the_builtin_one() {
         "/System/Graphics/Cursors/High Visibility/cursor.arrow.svg",
         VALID_SVG,
     );
-    let theme = shell.session().load_cursors(&mut reader, test_set());
+    let theme = shell
+        .session()
+        .load_cursors(&mut reader, test_set(), &mut NoFonts);
 
     shell.set_cursors(alloc::vec![(test_set(), theme)], &mut comp);
 
@@ -2932,7 +2935,9 @@ fn the_cursor_look_follows_the_document_and_falls_back_to_the_builtin() {
         "/System/Graphics/Cursors/High Visibility/cursor.arrow.svg",
         VALID_SVG,
     );
-    let theme = shell.session().load_cursors(&mut reader, test_set());
+    let theme = shell
+        .session()
+        .load_cursors(&mut reader, test_set(), &mut NoFonts);
     shell.set_cursors(alloc::vec![(test_set(), theme)], &mut comp);
     let native = comp.cursor_bounds().expect("a pointer is shown").width;
 

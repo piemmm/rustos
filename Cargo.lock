@@ -1427,6 +1427,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-rt",
  "tairix-sandbox",
+ "tairix-svg",
  "tairix-taskbar",
  "tairix-theme",
  "tairix-util",
@@ -2059,6 +2060,7 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-rt",
+ "tairix-svg",
  "tairix-theme",
  "tairix-vt",
 ]
@@ -6656,6 +6658,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-wintersun-figure"
+version = "0.0.0"
+dependencies = [
+ "tairix-inline",
+ "tairix-raster",
+ "tairix-util",
+ "tairix-wintersun-net",
+]
+
+[[package]]
 name = "tairix-wintersun-net"
 version = "0.0.0"
 dependencies = [
@@ -6753,6 +6765,7 @@ dependencies = [
  "tairix-drv-storage-volmgr",
  "tairix-drvhost",
  "tairix-font",
+ "tairix-fontd",
  "tairix-fontface",
  "tairix-fsmeta",
  "tairix-fuzzseed",

@@ -27,6 +27,7 @@ use super::{
 };
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
+use tairix_svg::font::NoFonts;
 
 /// A reader over an in-memory file table that counts every read, so a test
 /// can prove a second lookup for the same key served from the cache rather
@@ -735,7 +736,7 @@ fn every_shipped_asset_is_artwork_the_desktop_can_resolve_and_draw() {
         );
         if name.strip_suffix(VECTOR_SUFFIX).is_some() {
             let bytes = std::fs::read(entry.path()).expect("asset bytes");
-            let icon = crate::svg::decode(&bytes)
+            let icon = crate::svg::decode(&bytes, &mut NoFonts)
                 .unwrap_or_else(|err| panic!("shipped vector {name} is out of subset: {err:?}"));
             let image = icon.rasterise(64).expect("renderable");
             assert!(
@@ -758,7 +759,8 @@ fn every_shipped_asset_is_artwork_the_desktop_can_resolve_and_draw() {
 fn shipped_vector(name: &str) -> crate::vector::VectorIcon {
     let path = format!("{}/assets/{name}", env!("CARGO_MANIFEST_DIR"));
     let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("{name} should ship"));
-    crate::svg::decode(&bytes).unwrap_or_else(|err| panic!("{name} should decode: {err:?}"))
+    crate::svg::decode(&bytes, &mut NoFonts)
+        .unwrap_or_else(|err| panic!("{name} should decode: {err:?}"))
 }
 
 /// How many of `icon`'s layers are painted flat in `color`.

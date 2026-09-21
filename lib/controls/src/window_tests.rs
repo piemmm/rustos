@@ -2905,7 +2905,7 @@ fn a_plate_bands_title_is_set_at_the_same_size_as_the_rows_it_caps() {
         );
         assert_eq!(
             fonts.spec(TextRole::SectionHeader).weight,
-            tairix_theme::FontWeight::Bold,
+            tairix_theme::FontWeight::BOLD,
             "a plate band's title is bold"
         );
     }

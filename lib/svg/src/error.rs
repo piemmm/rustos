@@ -42,4 +42,12 @@ pub enum SvgError {
     /// layer, vertex, stop, or reference depth — so it is refused rather than
     /// allowed to exhaust memory or draw time.
     TooComplex,
+    /// A `<text>` named no family the font provider could furnish, and the
+    /// generic it falls through to was refused too.
+    ///
+    /// Text is refused rather than skipped because absent lettering is a
+    /// wrong picture, not a missing decoration: a caller falls back to the
+    /// tier below and shows something honest instead of a drawing with its
+    /// meaning silently removed.
+    FontUnavailable,
 }

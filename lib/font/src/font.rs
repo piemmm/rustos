@@ -154,7 +154,7 @@ impl BitmapFont {
         Self {
             family: FamilyKey::MONO,
             pixel_height: atlas::CELL_HEIGHT,
-            weight: FontWeight::Regular,
+            weight: FontWeight::REGULAR,
         }
     }
 
@@ -182,7 +182,7 @@ impl BitmapFont {
         Self {
             family,
             pixel_height,
-            weight: FontWeight::Regular,
+            weight: FontWeight::REGULAR,
         }
     }
 

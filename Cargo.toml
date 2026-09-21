@@ -276,6 +276,7 @@ members = [
     # enters the OS libraries (`cargo xtask deps-check` enforces it).
     "userland/games/wintersun/app",
     "userland/games/wintersun/art",
+    "userland/games/wintersun/figure",
     "userland/games/wintersun/net",
     "userland/games/wintersun/rules",
     "userland/games/wintersun/world",

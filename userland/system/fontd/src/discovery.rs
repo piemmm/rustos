@@ -138,6 +138,7 @@ pub fn discover<'a>(
             key,
             manifest.label().to_string(),
             manifest.selectable_kind(),
+            manifest.generic(),
             faces,
             manifest.fallback(),
         ));

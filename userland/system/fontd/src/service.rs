@@ -44,15 +44,20 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::font_ipc::{
-    encode_families_reply, encode_glyph_error_reply, encode_metrics_reply, FamilyEntry, FamilyKey,
-    FamilyKind, FontMetrics, FontRequest, FontWeight, GlyphBatchWriter, GlyphCoverage, GlyphRun,
-    FONT_FAMILY_KEY_LEN, FONT_METRICS_REPLY_LEN,
+    encode_batch_error_reply, encode_families_reply, encode_metrics_reply, ContourSource,
+    FamilyEntry, FamilyKey, FamilyKind, FontMetrics, FontRequest, FontStretch, FontStyle,
+    FontUnits, FontWeight, GlyphBatchWriter, GlyphCoverage, GlyphRun, GlyphSegment,
+    OutlineBatchWriter, OutlineSource, Synthesis, FONT_FAMILY_KEY_LEN, FONT_MAX_SYNTH_BOLD,
+    FONT_METRICS_REPLY_LEN, FONT_STRETCH_SCALE, FONT_SYNTH_BOLD_SCALE,
 };
 use tairix_abi::Errno;
 use tairix_font::{glyph_cache_budget, glyph_cache_candidate, CachedGlyph};
-use tairix_fontface::{lineart, AxisSetting, CellGeometry, Face};
+use tairix_fontface::{
+    lineart, AxisSetting, CellGeometry, Contour, Face, GenericFamily, OutlineSegment,
+};
 use tairix_hash::{BuildSipHash13, HashSeed};
 use tairix_log::Sink;
 use tairix_reclaim::{PressureGauge, ReclaimCache, ReclaimOwner};
@@ -162,22 +167,99 @@ pub fn glyph_cache(
     cache
 }
 
+/// The design-axis coordinate one request asks a face to be instanced at.
+///
+/// One key for every axis the protocol exposes, so a face is parsed once per
+/// *distinct* instance actually requested rather than once per axis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FaceInstance {
+    pub(crate) weight: FontWeight,
+    pub(crate) style: FontStyle,
+    pub(crate) stretch: FontStretch,
+}
+
+impl FaceInstance {
+    /// The instance a coverage request asks for: the desktop draws upright
+    /// text at its own width, so only the weight varies there.
+    const fn upright(weight: FontWeight) -> Self {
+        Self {
+            weight,
+            style: FontStyle::Normal,
+            stretch: FontStretch::NORMAL,
+        }
+    }
+
+    /// Whether this instance leaves every axis at the face's own default, so
+    /// the default parse already is it.
+    fn is_default(self) -> bool {
+        self.weight == FontWeight::REGULAR
+            && self.style == FontStyle::Normal
+            && self.stretch == FontStretch::NORMAL
+    }
+}
+
+/// Which variation axes a face declares, read once with its default parse.
+///
+/// A bit per axis rather than a field per axis: what the code asks is
+/// whether the face carries one, and the set grows with the protocol's axes
+/// rather than with a struct's field count.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FaceAxes(u8);
+
+impl FaceAxes {
+    /// The weight axis.
+    const WGHT: u8 = 1 << 0;
+    /// The width axis.
+    const WDTH: u8 = 1 << 1;
+    /// The designer's own italic axis.
+    const ITAL: u8 = 1 << 2;
+    /// The slant axis, in degrees counter-clockwise.
+    const SLNT: u8 = 1 << 3;
+
+    /// Whether the face declares the axis `bit` names.
+    const fn has(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+
+    /// Whether the face can render a weight by itself.
+    const fn wght(self) -> bool {
+        self.has(Self::WGHT)
+    }
+
+    /// Whether the face can lean by itself, through either axis that leans.
+    const fn can_slant(self) -> bool {
+        self.has(Self::ITAL) || self.has(Self::SLNT)
+    }
+}
+
+/// The oblique lean a synthetic slant applies, in degrees — CSS's own
+/// default for `font-style: oblique`, which is what a document asking for a
+/// posture the face cannot furnish means.
+const SYNTHETIC_OBLIQUE_DEGREES: f32 = 14.0;
+
+/// The same lean as the horizontal shear a caller applies, in the protocol's
+/// 2.14 fixed point: `tan(14°)`.
+///
+/// A constant rather than a computed `tan` because the angle is fixed policy
+/// and the service has no business carrying trigonometry for one number.
+const SYNTHETIC_OBLIQUE_SHEAR: i16 = 4085;
+
 /// One face's lazily-read bytes and its cached parsed instances.
 ///
 /// The face's bytes are read on first use ([`FaceLoad::load`]) and retained
 /// for the service's life. The default (unvaried) instance is parsed once
 /// and used for every codepoint lookup and as the geometry source, since a
 /// face's `cmap` and vertical metrics never change with variation in this
-/// engine. A face declaring a `wght` axis additionally caches one instanced
-/// [`Face`] per distinct [`FontWeight`] actually requested; a face with no
-/// such axis reuses the one default instance for every weight and relies on
-/// synthetic emboldening instead.
+/// engine. A face declaring an axis a request moves additionally caches one
+/// instanced [`Face`] per distinct [`FaceInstance`] actually asked for; a
+/// face declaring none of them reuses the one default instance and is
+/// completed by the caller-side synthesis the reply reports.
 pub(crate) struct FaceCache<'a> {
     loader: Box<dyn FaceLoad<'a> + 'a>,
     bytes: Option<&'a [u8]>,
     default: Option<Face<'a>>,
-    has_wght: bool,
-    weighted: Vec<(FontWeight, Face<'a>)>,
+    axes: FaceAxes,
+    instances: Vec<(FaceInstance, Face<'a>)>,
 }
 
 impl<'a> FaceCache<'a> {
@@ -187,8 +269,8 @@ impl<'a> FaceCache<'a> {
             loader,
             bytes: None,
             default: None,
-            has_wght: false,
-            weighted: Vec::new(),
+            axes: FaceAxes::default(),
+            instances: Vec::new(),
         }
     }
 
@@ -213,7 +295,15 @@ impl<'a> FaceCache<'a> {
         }
         let bytes = self.face_bytes()?;
         let face = Face::parse(bytes).map_err(|_| Errno::BadMagic)?;
-        self.has_wght = face.axes().iter().any(|axis| axis.tag == *b"wght");
+        let declared = |tag: &[u8; 4], bit: u8| {
+            u8::from(face.axes().iter().any(|axis| axis.tag == *tag)) * bit
+        };
+        self.axes = FaceAxes(
+            declared(b"wght", FaceAxes::WGHT)
+                | declared(b"wdth", FaceAxes::WDTH)
+                | declared(b"ital", FaceAxes::ITAL)
+                | declared(b"slnt", FaceAxes::SLNT),
+        );
         self.default = Some(face);
         Ok(())
     }
@@ -225,36 +315,112 @@ impl<'a> FaceCache<'a> {
         self.default.as_ref().ok_or(Errno::BadMagic)
     }
 
-    /// Whether this face declares a `wght` axis, so a heavier weight is a
-    /// real instance rather than synthetic emboldening.
-    fn has_wght(&mut self) -> Result<bool, Errno> {
+    /// Which variation axes this face declares.
+    fn axes(&mut self) -> Result<FaceAxes, Errno> {
         self.ensure_default()?;
-        Ok(self.has_wght)
+        Ok(self.axes)
     }
 
-    /// The instance to rasterise `weight` from: the cached `wght`-instanced
-    /// face when the face declares that axis, else the one default instance
-    /// (synthetic emboldening applies the weight afterwards, on the coverage
-    /// this instance rasterises).
-    fn instance_for(&mut self, weight: FontWeight) -> Result<&Face<'a>, Errno> {
-        self.ensure_default()?;
-        if !self.has_wght {
+    /// What `instance` asks for that this face cannot furnish, and the
+    /// caller must therefore complete on the geometry it is handed.
+    ///
+    /// A face declaring the axis renders the real thing and reports nothing,
+    /// even where the request lands outside the axis's own range: the
+    /// designer's widest weight is a better bold than a stroke over it.
+    /// Width is never synthesised at all — stretching letterforms is a
+    /// distortion, not a width — so an absent `wdth` axis is simply the
+    /// face's own width, which is what CSS says a UA must do.
+    fn synthesis_for(&mut self, instance: FaceInstance) -> Result<Synthesis, Errno> {
+        let axes = self.axes()?;
+        let bold = if axes.wght() {
+            0
+        } else {
+            synthetic_bold_em(instance.weight)
+        };
+        let shear = if instance.style == FontStyle::Normal || axes.can_slant() {
+            0
+        } else {
+            SYNTHETIC_OBLIQUE_SHEAR
+        };
+        Synthesis::new(bold, shear)
+    }
+
+    /// The instance to draw `instance` from: the cached instanced face when
+    /// this face declares any axis the request moves, else the one default
+    /// instance, which the reported [`Synthesis`] completes.
+    fn instance_for(&mut self, instance: FaceInstance) -> Result<&Face<'a>, Errno> {
+        let axes = self.ensure_default().and(Ok(self.axes))?;
+        let settings = instance_settings(instance, axes);
+        if settings.is_empty() {
             return self.default_face();
         }
-        if !self.weighted.iter().any(|&(w, _)| w == weight) {
+        if !self.instances.iter().any(|&(held, _)| held == instance) {
             let bytes = self.face_bytes()?;
-            let settings = [AxisSetting {
-                tag: *b"wght",
-                value: f32::from(weight.axis_value()),
-            }];
             let face = Face::parse_instance(bytes, &settings).map_err(|_| Errno::BadMagic)?;
-            self.weighted.push((weight, face));
+            self.instances.push((instance, face));
         }
-        self.weighted
+        self.instances
             .iter()
-            .find_map(|(w, face)| (*w == weight).then_some(face))
+            .find_map(|(held, face)| (*held == instance).then_some(face))
             .ok_or(Errno::BadMagic)
     }
+}
+
+/// The axis settings `instance` moves that `axes` actually declares.
+///
+/// Empty when the face can furnish none of them, or the request leaves every
+/// axis at its default — either way the default parse already *is* the
+/// instance, so nothing is parsed twice.
+fn instance_settings(instance: FaceInstance, axes: FaceAxes) -> Vec<AxisSetting> {
+    let mut settings = Vec::new();
+    if instance.is_default() {
+        return settings;
+    }
+    if axes.has(FaceAxes::WGHT) {
+        settings.push(AxisSetting {
+            tag: *b"wght",
+            value: f32::from(instance.weight.axis_value()),
+        });
+    }
+    if axes.has(FaceAxes::WDTH) {
+        settings.push(AxisSetting {
+            tag: *b"wdth",
+            value: f32::from(instance.stretch.hundredths()) / f32::from(FONT_STRETCH_SCALE),
+        });
+    }
+    if instance.style != FontStyle::Normal {
+        // A designer's own italic is the better answer where the face has
+        // one; `slnt` leans the upright letterforms, which is what oblique
+        // means and the nearest thing to an italic a face without `ital` can
+        // offer. `slnt` counts counter-clockwise, so a forward lean is
+        // negative.
+        if axes.has(FaceAxes::ITAL) && instance.style == FontStyle::Italic {
+            settings.push(AxisSetting {
+                tag: *b"ital",
+                value: 1.0,
+            });
+        } else if axes.has(FaceAxes::SLNT) {
+            settings.push(AxisSetting {
+                tag: *b"slnt",
+                value: -SYNTHETIC_OBLIQUE_DEGREES,
+            });
+        }
+    }
+    settings
+}
+
+/// The synthetic bold stroke `weight` asks for, as a fraction of the em in
+/// the protocol's own units.
+///
+/// The one ramp both sides of the service use: the coverage path applies it
+/// to the raster it already holds, and the outline path reports it for the
+/// caller to stroke with, so a bold drawn as pixels and one drawn as
+/// geometry are the same weight.
+fn synthetic_bold_em(weight: FontWeight) -> u16 {
+    let stroke = stroke_subpixels(FONT_SYNTH_BOLD_SCALE, weight);
+    u16::try_from(stroke)
+        .unwrap_or(u16::MAX)
+        .min(FONT_MAX_SYNTH_BOLD)
 }
 
 /// One discovered family: its manifest facts plus its lazily-loaded faces.
@@ -264,6 +430,9 @@ pub(crate) struct FamilyRuntime<'a> {
     /// How the family lays text out, or `None` for a fallback-role family a
     /// user never selects directly.
     kind: Option<FamilyKind>,
+    /// The CSS generic this family is the store's answer for, if it claims
+    /// one in its manifest.
+    generic: Option<GenericFamily>,
     /// The family's own faces, in manifest (resolution) order; index `0` is
     /// always the primary face.
     faces: Vec<FaceCache<'a>>,
@@ -276,6 +445,7 @@ impl<'a> FamilyRuntime<'a> {
         key: FamilyKey,
         label: String,
         kind: Option<FamilyKind>,
+        generic: Option<GenericFamily>,
         faces: Vec<FaceCache<'a>>,
         fallback: Option<FamilyKey>,
     ) -> Self {
@@ -283,6 +453,7 @@ impl<'a> FamilyRuntime<'a> {
             key,
             label,
             kind,
+            generic,
             faces,
             fallback,
         }
@@ -481,6 +652,57 @@ impl<'a> FontService<'a> {
             .find_map(|&(k, position)| (k == key).then_some(position))
     }
 
+    /// The family a request naming `key` is served from.
+    ///
+    /// An installed family of that exact key always wins, so a store may
+    /// name a family `serif` and mean it. Otherwise a key spelling one of
+    /// CSS's generic families walks the ladder: the first discovered family
+    /// claiming that generic in its own manifest, then the first claiming
+    /// `sans-serif` (the generic a desktop always has), then the first
+    /// selectable family at all — and, with a store of nothing but
+    /// coverage-only families, fails closed.
+    ///
+    /// A key that is neither installed nor generic is **not** substituted:
+    /// a document naming `Helvetica` is told the store does not hold it, so
+    /// it can try the next family it named rather than being served
+    /// something it did not ask for.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when no family answers.
+    fn resolve_family(&self, key: FamilyKey) -> Result<usize, Errno> {
+        if let Some(position) = self.index_of(key) {
+            return Ok(position);
+        }
+        let generic = GenericFamily::from_key(key).ok_or(Errno::NotFound)?;
+        self.claiming(generic)
+            .or_else(|| self.claiming(GenericFamily::SansSerif))
+            .or_else(|| {
+                self.families
+                    .iter()
+                    .position(|family| family.kind.is_some())
+            })
+            .ok_or(Errno::NotFound)
+    }
+
+    /// The label of the family a key resolves to, for a test asserting
+    /// which rung of the ladder answered.
+    #[cfg(test)]
+    pub(crate) fn family_for_key(&self, key: FamilyKey) -> Option<&str> {
+        let index = self.resolve_family(key).ok()?;
+        self.families.get(index).map(|family| family.label.as_str())
+    }
+
+    /// The first discovered family claiming `generic`.
+    ///
+    /// Discovery order is sorted by key, so two families claiming the same
+    /// generic resolve deterministically rather than by scan order.
+    fn claiming(&self, generic: GenericFamily) -> Option<usize> {
+        self.families
+            .iter()
+            .position(|family| family.generic == Some(generic))
+    }
+
     /// The first face in `family_index`'s own faces whose `cmap` maps
     /// `code`, as `(face index, glyph)`.
     fn resolve_within(&mut self, family_index: usize, code: u32) -> Option<(usize, u16)> {
@@ -611,7 +833,7 @@ impl<'a> FontService<'a> {
         pixel_height: u32,
         _weight: FontWeight,
     ) -> Result<FontMetrics, Errno> {
-        let family_index = self.index_of(family).ok_or(Errno::NotFound)?;
+        let family_index = self.resolve_family(family)?;
         let geometry = self.primary_geometry(family_index, pixel_height)?;
         Ok(FontMetrics {
             pixel_height: geometry.height,
@@ -649,7 +871,7 @@ impl<'a> FontService<'a> {
         weight: FontWeight,
         reply: &mut [u8],
     ) -> Result<usize, Errno> {
-        let family_index = self.index_of(family).ok_or(Errno::NotFound)?;
+        let family_index = self.resolve_family(family)?;
         // Resolved once for the whole run: the family and its line geometry
         // are what the run shares, so a per-scalar re-derivation would be
         // paid for nothing.
@@ -724,6 +946,102 @@ impl<'a> FontService<'a> {
         })
     }
 
+    /// The requested family's primary-face geometry in that face's own font
+    /// units — the frame of reference a whole run is laid out in, whichever
+    /// faces its individual scalars resolve to.
+    ///
+    /// Distinct from [`primary_geometry`](Self::primary_geometry), which
+    /// resolves the same face against a *pixel* height: an outline reply has
+    /// no resolution, so there is nothing to resolve it against.
+    fn primary_face_units(&mut self, family_index: usize) -> Result<FaceUnits, Errno> {
+        let family = self.families.get_mut(family_index).ok_or(Errno::NotFound)?;
+        let primary = family.faces.first_mut().ok_or(Errno::NotFound)?;
+        let face = primary.default_face()?;
+        let units_per_em = u32::try_from(face.units_per_em()).map_err(|_| Errno::BadMagic)?;
+        Ok(FaceUnits {
+            units_per_em,
+            ascent: face.ascent(),
+            descent: face.descent(),
+            line_gap: face.line_gap(),
+        })
+    }
+
+    /// Resolve and outline as many of `run` from `family` as the reply frame
+    /// holds, instanced at the requested axes.
+    ///
+    /// The batch answers a prefix and says how long it is, exactly as the
+    /// coverage reply does, so a client asks again for the remainder. It
+    /// stops at the first scalar the frame cannot hold or the faces cannot
+    /// yield; only a failure on the *first* scalar has nothing to report and
+    /// is refused outright.
+    fn outlines_reply(
+        &mut self,
+        family: FamilyKey,
+        run: &GlyphRun,
+        instance: FaceInstance,
+        reply: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let family_index = self.resolve_family(family)?;
+        let units = self.primary_face_units(family_index)?;
+        let mut writer = OutlineBatchWriter::new(
+            reply,
+            units.units_per_em,
+            units.ascent,
+            units.descent,
+            units.line_gap,
+        )?;
+        for &scalar in run.scalars() {
+            let pushed = self.push_outline(family_index, scalar, instance, &mut writer);
+            let fitted = match pushed {
+                Ok(fitted) => fitted,
+                Err(err) if writer.count() == 0 => return Err(err),
+                Err(_) => false,
+            };
+            if !fitted {
+                break;
+            }
+        }
+        writer.finish()
+    }
+
+    /// Append `scalar`'s outline record to `writer`, reporting whether it
+    /// fitted.
+    fn push_outline(
+        &mut self,
+        family_index: usize,
+        scalar: char,
+        instance: FaceInstance,
+        writer: &mut OutlineBatchWriter<'_>,
+    ) -> Result<bool, Errno> {
+        let source = self.resolve(family_index, scalar)?;
+        let face_cache = self
+            .families
+            .get_mut(source.resolved_family_index)
+            .and_then(|family| family.faces.get_mut(source.face_index))
+            .ok_or(Errno::NotFound)?;
+        let synth = face_cache.synthesis_for(instance)?;
+        let face = face_cache.instance_for(instance)?;
+        let units_per_em = u32::try_from(face.units_per_em()).map_err(|_| Errno::BadMagic)?;
+        let advance = FontUnits::from_f64(f64::from(face.advance(source.glyph).unwrap_or(0)))?;
+        let outline = face
+            .glyph_outline(source.glyph)
+            .map_err(|_| Errno::BadMagic)?;
+        let (contours, segments) = wire_contours(&outline)?;
+        let borrowed: Vec<ContourSource<'_>> = contours
+            .iter()
+            .map(|(start, range)| ContourSource {
+                start: *start,
+                segments: &segments[range.clone()],
+            })
+            .collect();
+        writer.push(&OutlineSource {
+            units_per_em,
+            advance,
+            synth,
+            contours: &borrowed,
+        })
+    }
+
     /// Handle one request frame, writing the reply into `reply` and
     /// returning its length.
     ///
@@ -761,6 +1079,23 @@ impl<'a> FontService<'a> {
                 Ok(len) => len,
                 Err(err) => error_frame(reply, err),
             },
+            Ok(FontRequest::Outlines {
+                family,
+                scalars,
+                weight,
+                style,
+                stretch,
+            }) => {
+                let instance = FaceInstance {
+                    weight,
+                    style,
+                    stretch,
+                };
+                match self.outlines_reply(family, &scalars, instance, reply) {
+                    Ok(len) => len,
+                    Err(err) => error_frame(reply, err),
+                }
+            }
             Err(err) => error_frame(reply, err),
         }
     }
@@ -791,8 +1126,10 @@ fn build_glyph(
         .get_mut(source.resolved_family_index)?
         .faces
         .get_mut(source.face_index)?;
-    let has_wght = face_cache.has_wght().ok()?;
-    let face = face_cache.instance_for(weight).ok()?;
+    let has_wght = face_cache.axes().ok()?.wght();
+    let face = face_cache
+        .instance_for(FaceInstance::upright(weight))
+        .ok()?;
     let drawn = match cell {
         Some(cell) => cell_glyph(face, source.glyph, geometry, cell)?,
         None => proportional_glyph(face, source.glyph, geometry)?,
@@ -814,6 +1151,52 @@ fn build_glyph(
         drawn.left,
         coverage,
     ))
+}
+
+/// One face's own vertical geometry, in its own font units.
+struct FaceUnits {
+    units_per_em: u32,
+    ascent: i32,
+    descent: i32,
+    line_gap: i32,
+}
+
+/// Convert an engine outline into the protocol's fixed-point segments.
+///
+/// The segments of every contour are collected into one run, each contour
+/// naming its own slice of it, so the wire form borrows rather than
+/// allocating a vector per contour. A coordinate the fixed-point form cannot
+/// represent refuses the glyph, which is how a corrupt outline fails closed
+/// instead of being saturated into a shape the face does not state.
+type WireContours = (
+    Vec<((FontUnits, FontUnits), Range<usize>)>,
+    Vec<GlyphSegment>,
+);
+
+fn wire_contours(outline: &[Contour]) -> Result<WireContours, Errno> {
+    let mut segments: Vec<GlyphSegment> = Vec::new();
+    let mut contours = Vec::with_capacity(outline.len());
+    for contour in outline {
+        let from = segments.len();
+        for segment in &contour.segments {
+            segments.push(match *segment {
+                OutlineSegment::Line { to } => GlyphSegment::Line {
+                    to: wire_point(to)?,
+                },
+                OutlineSegment::Quadratic { control, to } => GlyphSegment::Quadratic {
+                    control: wire_point(control)?,
+                    to: wire_point(to)?,
+                },
+            });
+        }
+        contours.push((wire_point(contour.start)?, from..segments.len()));
+    }
+    Ok((contours, segments))
+}
+
+/// One outline point in the protocol's fixed-point font units.
+fn wire_point(point: (f64, f64)) -> Result<(FontUnits, FontUnits), Errno> {
+    Ok((FontUnits::from_f64(point.0)?, FontUnits::from_f64(point.1)?))
 }
 
 /// One rasterised glyph before its coverage is widened and emboldened: the
@@ -880,7 +1263,7 @@ fn samples(coverage: &[u8]) -> Box<[u8]> {
 /// Frame a status-word error reply into `reply`, returning its length (`0`
 /// only if the buffer cannot hold even the 4-byte status word).
 fn error_frame(reply: &mut [u8], err: Errno) -> usize {
-    encode_glyph_error_reply(reply, err).unwrap_or(0)
+    encode_batch_error_reply(reply, err).unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -3,6 +3,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_abi::font_ipc::FONT_MAX_OUTLINE_POINTS;
+
 use crate::gridfit::{self, AlignZones, Axes, Zone};
 use crate::mathf;
 use crate::variations::{self, Axis, AxisSetting, Gvar, VarTables};
@@ -19,13 +21,6 @@ const SAMPLE_ROWS: u32 = 4;
 /// a bitmap and only a bitmap; [`Face::glyph_outline`] hands its curves on
 /// unflattened so a caller drawing at another size chooses its own accuracy.
 const QUAD_SEGMENTS: u32 = 8;
-
-/// The most outline points one glyph may decode, across every component of a
-/// composite.
-///
-/// A validation bound on a hostile face, not a capacity: the heaviest glyph
-/// in the committed faces is 584 points, in a 31k-glyph CJK face.
-pub(crate) const MAX_OUTLINE_POINTS: u32 = 8192;
 
 /// The most composite component records one glyph may decode, across every
 /// nesting level. Real composites are a handful; an accented letter is two.
@@ -1084,7 +1079,7 @@ impl<'a, 'f, S: OutlineSink> Outliner<'a, 'f, S> {
         Self {
             face,
             sink,
-            points_left: MAX_OUTLINE_POINTS,
+            points_left: FONT_MAX_OUTLINE_POINTS,
             components_left: MAX_COMPONENTS,
         }
     }

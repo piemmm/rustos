@@ -14,8 +14,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::{
-    decode_glyphs_reply, decode_metrics_reply, FamilyKey, FontRequest, FontWeight, GlyphRun,
-    FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN, FONT_MAX_PIXEL_HEIGHT, FONT_MIN_PIXEL_HEIGHT,
+    decode_glyphs_reply, decode_metrics_reply, decode_outlines_reply, FamilyKey, FontRequest,
+    FontStretch, FontStyle, FontWeight, GlyphRun, Synthesis, FONT_MAX_GLYPH_REPLY,
+    FONT_MAX_GLYPH_RUN, FONT_MAX_OUTLINE_REPLY, FONT_MAX_PIXEL_HEIGHT, FONT_MIN_PIXEL_HEIGHT,
 };
 use tairix_abi::Errno;
 use tairix_fontface::{AxisSetting, Face};
@@ -138,7 +139,7 @@ fn an_unknown_family_key_fails_closed() {
     let mut svc = discover_roomy(&mut store);
     let unknown = FamilyKey::new("nope").expect("a well-formed key");
     assert_eq!(
-        request_glyph(&mut svc, unknown, 'A', 28, FontWeight::Regular),
+        request_glyph(&mut svc, unknown, 'A', 28, FontWeight::REGULAR),
         Err(Errno::NotFound)
     );
 
@@ -147,7 +148,7 @@ fn an_unknown_family_key_fails_closed() {
         &FontRequest::Metrics {
             family: unknown,
             pixel_height: 28,
-            weight: FontWeight::Regular,
+            weight: FontWeight::REGULAR,
         }
         .to_le_bytes(),
         &mut reply,
@@ -184,7 +185,7 @@ fn proportional_and_monospace_families_report_distinct_metrics() {
         &FontRequest::Metrics {
             family: FamilyKey::new("mono").expect("key"),
             pixel_height: 28,
-            weight: FontWeight::Regular,
+            weight: FontWeight::REGULAR,
         }
         .to_le_bytes(),
         &mut reply,
@@ -199,7 +200,7 @@ fn proportional_and_monospace_families_report_distinct_metrics() {
         &FontRequest::Metrics {
             family: FamilyKey::new("inter").expect("key"),
             pixel_height: 28,
-            weight: FontWeight::Regular,
+            weight: FontWeight::REGULAR,
         }
         .to_le_bytes(),
         &mut reply,
@@ -231,8 +232,8 @@ fn most_weight_sensitive_scalar(bytes: &[u8]) -> char {
         )
         .expect("a variable face instances at a standard weight")
     };
-    let light = instance(FontWeight::Regular);
-    let heavy = instance(FontWeight::Bold);
+    let light = instance(FontWeight::REGULAR);
+    let heavy = instance(FontWeight::BOLD);
     (0x21..0x7F)
         .filter_map(|code| {
             let light_advance = light.advance(light.glyph_for(code)?).ok()?;
@@ -260,8 +261,8 @@ fn a_variable_faces_bold_advance_differs_from_its_regular_advance() {
     let key = FamilyKey::new("inter").expect("key");
     let scalar = most_weight_sensitive_scalar(&inter);
 
-    let regular = request_glyph(&mut svc, key, scalar, 32, FontWeight::Regular).expect("regular");
-    let bold = request_glyph(&mut svc, key, scalar, 32, FontWeight::Bold).expect("bold");
+    let regular = request_glyph(&mut svc, key, scalar, 32, FontWeight::REGULAR).expect("regular");
+    let bold = request_glyph(&mut svc, key, scalar, 32, FontWeight::BOLD).expect("bold");
 
     assert_ne!(
         regular.2, bold.2,
@@ -282,8 +283,8 @@ fn a_static_faces_synthetic_bold_leaves_the_advance_unchanged() {
     let mut svc = discover_roomy(&mut store);
     let key = FamilyKey::new("mono").expect("key");
 
-    let regular = request_glyph(&mut svc, key, 'H', 28, FontWeight::Regular).expect("regular");
-    let bold = request_glyph(&mut svc, key, 'H', 28, FontWeight::Bold).expect("bold");
+    let regular = request_glyph(&mut svc, key, 'H', 28, FontWeight::REGULAR).expect("regular");
+    let bold = request_glyph(&mut svc, key, 'H', 28, FontWeight::BOLD).expect("bold");
 
     assert_eq!(
         regular.2, bold.2,
@@ -306,8 +307,8 @@ fn a_glyph_request_is_served_from_cache_on_a_second_call() {
     let mut svc = discover_roomy(&mut store);
     let key = FamilyKey::new("mono").expect("key");
 
-    let first = request_glyph(&mut svc, key, 'g', 24, FontWeight::Regular).expect("first");
-    let second = request_glyph(&mut svc, key, 'g', 24, FontWeight::Regular).expect("second");
+    let first = request_glyph(&mut svc, key, 'g', 24, FontWeight::REGULAR).expect("first");
+    let second = request_glyph(&mut svc, key, 'g', 24, FontWeight::REGULAR).expect("second");
     assert_eq!(
         first, second,
         "a cache hit must serve the same bytes a miss did"
@@ -393,22 +394,22 @@ fn resolution_walks_primary_then_companion_then_fallback_then_replacement() {
     let key = FamilyKey::new("test-order").expect("key");
 
     assert!(
-        request_glyph(&mut svc, key, own_primary_scalar, 28, FontWeight::Regular).is_ok(),
+        request_glyph(&mut svc, key, own_primary_scalar, 28, FontWeight::REGULAR).is_ok(),
         "a scalar the primary face maps must resolve from it"
     );
     assert!(
-        request_glyph(&mut svc, key, own_companion_scalar, 28, FontWeight::Regular).is_ok(),
+        request_glyph(&mut svc, key, own_companion_scalar, 28, FontWeight::REGULAR).is_ok(),
         "a scalar only the companion face maps must still resolve within the family"
     );
     assert!(
-        request_glyph(&mut svc, key, fallback_only, 28, FontWeight::Regular).is_ok(),
+        request_glyph(&mut svc, key, fallback_only, 28, FontWeight::REGULAR).is_ok(),
         "a scalar only the fallback family maps must resolve through it"
     );
 
     // A scalar no face anywhere maps still renders — U+FFFD from the
     // primary — never a refusal for lack of coverage.
     let never_mapped = '\u{10FFFF}';
-    match request_glyph(&mut svc, key, never_mapped, 28, FontWeight::Regular) {
+    match request_glyph(&mut svc, key, never_mapped, 28, FontWeight::REGULAR) {
         Ok((_, _, _, _, coverage)) => {
             assert!(
                 coverage.iter().any(|&c| c > 0),
@@ -474,16 +475,16 @@ fn two_families_sharing_a_fallback_face_key_the_cache_separately() {
     let family_a = FamilyKey::new("family-a").expect("key");
     let family_b = FamilyKey::new("family-b").expect("key");
 
-    assert!(request_glyph(&mut svc, family_a, shared_scalar, 28, FontWeight::Regular).is_ok());
+    assert!(request_glyph(&mut svc, family_a, shared_scalar, 28, FontWeight::REGULAR).is_ok());
     assert_eq!(svc.cache.len(), 1);
-    assert!(request_glyph(&mut svc, family_b, shared_scalar, 28, FontWeight::Regular).is_ok());
+    assert!(request_glyph(&mut svc, family_b, shared_scalar, 28, FontWeight::REGULAR).is_ok());
     assert_eq!(
         svc.cache.len(),
         2,
         "the same physical glyph from two different requesting families must not collide"
     );
     // Repeating family A's request must hit the existing entry, not grow it.
-    assert!(request_glyph(&mut svc, family_a, shared_scalar, 28, FontWeight::Regular).is_ok());
+    assert!(request_glyph(&mut svc, family_a, shared_scalar, 28, FontWeight::REGULAR).is_ok());
     assert_eq!(svc.cache.len(), 2);
 }
 
@@ -505,7 +506,7 @@ fn a_size_outside_the_permitted_range_is_refused() {
                 family: key,
                 scalars: GlyphRun::new(&['A']).expect("a well-formed run"),
                 pixel_height: height,
-                weight: FontWeight::Regular,
+                weight: FontWeight::REGULAR,
             }
             .to_le_bytes(),
             &mut reply,
@@ -530,7 +531,7 @@ fn no_band_empties_the_atlas_below_its_reserve() {
     let mut svc = discover(&mut store, cache, &DiscardSink).expect("discovers");
     let key = FamilyKey::new("mono").expect("key");
 
-    assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::Regular).is_ok());
+    assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::REGULAR).is_ok());
     assert_eq!(svc.cache.len(), 1);
 
     for band in [
@@ -547,7 +548,7 @@ fn no_band_empties_the_atlas_below_its_reserve() {
     // And the reserve is fillable, not merely keepable: a glyph not seen
     // before is still rasterised *and* retained at the deepest band.
     assert!(
-        request_glyph(&mut svc, key, 'B', 28, FontWeight::Regular).is_ok(),
+        request_glyph(&mut svc, key, 'B', 28, FontWeight::REGULAR).is_ok(),
         "the service still rasterises"
     );
     assert_eq!(svc.cache.len(), 2, "the reserve still admits");
@@ -564,9 +565,9 @@ fn a_machine_that_answered_no_ram_reading_rasterises_every_glyph_uncached() {
     let mut svc = discover(&mut store, cache, &DiscardSink).expect("discovers");
     let key = FamilyKey::new("mono").expect("key");
 
-    assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::Regular).is_ok());
+    assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::REGULAR).is_ok());
     assert_eq!(svc.cache.len(), 0);
-    assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::Regular).is_ok());
+    assert!(request_glyph(&mut svc, key, 'A', 28, FontWeight::REGULAR).is_ok());
     assert_eq!(svc.cache.len(), 0);
     assert_eq!(svc.trim_cache(), 0);
 }
@@ -581,7 +582,7 @@ fn a_malformed_request_fails_closed_with_an_error_frame() {
         family: key,
         scalars: GlyphRun::new(&['A']).expect("a well-formed run"),
         pixel_height: 28,
-        weight: FontWeight::Regular,
+        weight: FontWeight::REGULAR,
     }
     .to_le_bytes();
     request[0] ^= 0xFF;
@@ -606,7 +607,7 @@ fn a_run_is_answered_whole_and_in_order_at_a_desktop_size() {
 
     let scalars: Vec<char> = ('A'..='Z').chain('0'..='5').collect();
     assert_eq!(scalars.len(), FONT_MAX_GLYPH_RUN);
-    let batch = request_glyphs(&mut svc, key, &scalars, 28, FontWeight::Regular).expect("a batch");
+    let batch = request_glyphs(&mut svc, key, &scalars, 28, FontWeight::REGULAR).expect("a batch");
     assert_eq!(
         batch.len(),
         FONT_MAX_GLYPH_RUN,
@@ -614,7 +615,7 @@ fn a_run_is_answered_whole_and_in_order_at_a_desktop_size() {
     );
     for (scalar, record) in scalars.iter().zip(&batch) {
         let alone =
-            request_glyph(&mut svc, key, *scalar, 28, FontWeight::Regular).expect("one glyph");
+            request_glyph(&mut svc, key, *scalar, 28, FontWeight::REGULAR).expect("one glyph");
         assert_eq!(
             *record, alone,
             "{scalar:?} must be the same glyph asked for in a run or alone"
@@ -639,7 +640,7 @@ fn a_run_too_large_for_one_frame_is_answered_as_a_prefix() {
         key,
         &scalars,
         FONT_MAX_PIXEL_HEIGHT,
-        FontWeight::Regular,
+        FontWeight::REGULAR,
     )
     .expect("a batch");
     assert!(!batch.is_empty(), "a successful batch answers at least one");
@@ -657,7 +658,7 @@ fn a_run_too_large_for_one_frame_is_answered_as_a_prefix() {
             key,
             *scalar,
             FONT_MAX_PIXEL_HEIGHT,
-            FontWeight::Regular,
+            FontWeight::REGULAR,
         )
         .expect("one glyph");
         assert_eq!(*record, alone, "{scalar:?} must be the run's own prefix");
@@ -672,7 +673,7 @@ fn cell_width(svc: &mut FontService<'_>, family: FamilyKey, pixel_height: u32) -
         &FontRequest::Metrics {
             family,
             pixel_height,
-            weight: FontWeight::Regular,
+            weight: FontWeight::REGULAR,
         }
         .to_le_bytes(),
         &mut reply,
@@ -698,7 +699,7 @@ fn a_monospace_family_is_drawn_into_its_character_cell() {
         assert!(cell > 0, "the monospace face reports a cell");
         for scalar in ['i', 'M', 'g', '.', ' '] {
             let (width, height, advance, left, coverage) =
-                request_glyph(&mut svc, key, scalar, pixel_height, FontWeight::Regular)
+                request_glyph(&mut svc, key, scalar, pixel_height, FontWeight::REGULAR)
                     .expect("a covered scalar");
             assert_eq!(
                 width, cell,
@@ -729,7 +730,7 @@ fn the_character_grid_is_sharp_at_the_terminal_size() {
     for code in 0x21..0x7F {
         let scalar = char::from_u32(code).expect("printable ASCII");
         let (.., coverage) =
-            request_glyph(&mut svc, key, scalar, 13, FontWeight::Regular).expect("covered");
+            request_glyph(&mut svc, key, scalar, 13, FontWeight::REGULAR).expect("covered");
         for sample in coverage {
             ink += usize::from(sample > 0);
             solid += usize::from(sample == u8::MAX);
@@ -756,7 +757,7 @@ fn a_border_character_is_pixel_exact_and_tiles() {
     let mut store = mono_only_store(&mono);
     let mut svc = discover_roomy(&mut store);
     let key = FamilyKey::new("mono").expect("key");
-    for weight in [FontWeight::Regular, FontWeight::Bold] {
+    for weight in [FontWeight::REGULAR, FontWeight::BOLD] {
         let (width, height, advance, left, rule) =
             request_glyph(&mut svc, key, '─', 13, weight).expect("a border rule");
         assert_eq!(advance, width, "a rule occupies exactly its cell");
@@ -796,8 +797,8 @@ fn a_proportional_family_is_still_drawn_tight_to_its_ink() {
     };
     let mut svc = discover_roomy(&mut store);
     let key = FamilyKey::new("inter").expect("key");
-    let narrow = request_glyph(&mut svc, key, 'i', 28, FontWeight::Regular).expect("i");
-    let wide = request_glyph(&mut svc, key, 'W', 28, FontWeight::Regular).expect("W");
+    let narrow = request_glyph(&mut svc, key, 'i', 28, FontWeight::REGULAR).expect("i");
+    let wide = request_glyph(&mut svc, key, 'W', 28, FontWeight::REGULAR).expect("W");
     assert!(
         narrow.0 < wide.0 && narrow.2 < wide.2,
         "a proportional family must keep each glyph's own width and advance"
@@ -816,11 +817,327 @@ fn a_wide_scalar_does_not_lend_its_two_cells_to_a_narrow_one() {
     let mut svc = discover_roomy(&mut store);
     let key = FamilyKey::new("mono").expect("key");
     let cell = cell_width(&mut svc, key, 16);
-    let wide = request_glyph(&mut svc, key, 'あ', 16, FontWeight::Regular).expect("uncovered");
+    let wide = request_glyph(&mut svc, key, 'あ', 16, FontWeight::REGULAR).expect("uncovered");
     assert_eq!(wide.0, cell * 2, "a double-width scalar reserves two cells");
     assert_eq!(wide.2, cell * 2);
-    let narrow = request_glyph(&mut svc, key, '\u{FFFD}', 16, FontWeight::Regular)
+    let narrow = request_glyph(&mut svc, key, '\u{FFFD}', 16, FontWeight::REGULAR)
         .expect("the replacement is covered");
     assert_eq!(narrow.0, cell, "the replacement itself is one cell wide");
     assert_eq!(narrow.2, cell);
+}
+
+// ---------------------------------------------------------------------
+// Outlines: the geometry a vector consumer draws text from
+// ---------------------------------------------------------------------
+
+/// Ask for a run's outlines and return the decoded batch's own facts:
+/// the header geometry and one `(em, advance, contours, segments, synth)`
+/// per glyph.
+type Outlined = (u32, f64, u32, u32, Synthesis);
+
+/// The requested family's own `(em, ascent, descent, line gap)`.
+type FamilyUnits = (u32, i32, i32, i32);
+
+fn request_outlines(
+    svc: &mut FontService<'_>,
+    family: FamilyKey,
+    scalars: &[char],
+    weight: FontWeight,
+    style: FontStyle,
+    stretch: FontStretch,
+) -> Result<(FamilyUnits, Vec<Outlined>), Errno> {
+    let mut reply = vec![0u8; FONT_MAX_OUTLINE_REPLY];
+    let n = svc.handle(
+        &FontRequest::Outlines {
+            family,
+            scalars: GlyphRun::new(scalars).expect("a well-formed run"),
+            weight,
+            style,
+            stretch,
+        }
+        .to_le_bytes(),
+        &mut reply,
+    );
+    decode_outlines_reply(&reply[..n]).map(|batch| {
+        (
+            (
+                batch.units_per_em,
+                batch.ascent,
+                batch.descent,
+                batch.line_gap,
+            ),
+            batch
+                .glyphs()
+                .iter()
+                .map(|g| {
+                    (
+                        g.units_per_em,
+                        g.advance.to_f64(),
+                        g.contours,
+                        g.segments,
+                        g.synth,
+                    )
+                })
+                .collect(),
+        )
+    })
+}
+
+/// A store holding the variable proportional face under two keys: one
+/// claiming the `sans-serif` generic, one claiming none.
+fn generic_store(inter: &[u8]) -> MemoryStore<'_> {
+    MemoryStore {
+        dirs: vec![
+            (
+                "inter",
+                MemoryFamily {
+                    manifest: "label = Inter\nkind = proportional\nface = Inter-Variable.ttf\n",
+                    faces: vec![("Inter-Variable.ttf", inter)],
+                },
+            ),
+            (
+                "noto-sans",
+                MemoryFamily {
+                    manifest: "label = Noto Sans\nkind = proportional\n\
+                               generic = sans-serif\nface = Inter-Variable.ttf\n",
+                    faces: vec![("Inter-Variable.ttf", inter)],
+                },
+            ),
+        ],
+    }
+}
+
+#[test]
+fn an_outline_reply_states_the_family_geometry_and_real_contours() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+
+    let (header, glyphs) = request_outlines(
+        &mut svc,
+        FamilyKey::new("mono").expect("a key"),
+        &['A', ' '],
+        FontWeight::REGULAR,
+        FontStyle::Normal,
+        FontStretch::NORMAL,
+    )
+    .expect("the run outlines");
+
+    assert!(header.0 >= 16, "the primary face states a real em");
+    assert!(header.1 > 0, "the primary face states an ascent");
+    assert_eq!(glyphs.len(), 2);
+
+    let (em, advance, contours, segments, synth) = glyphs[0];
+    assert_eq!(em, header.0, "one face, so the record's em is the family's");
+    assert!(advance > 0.0, "a letter advances the pen");
+    assert!(contours > 0 && segments > 0, "`A` has geometry");
+    // A static face cannot furnish a heavier weight, but Regular asks for
+    // none, so nothing is left for the caller to complete.
+    assert!(synth.is_none());
+
+    // A space is ink-less: no contours, and the pen still advances.
+    let (_, space_advance, space_contours, _, _) = glyphs[1];
+    assert_eq!(space_contours, 0);
+    assert!(space_advance > 0.0);
+}
+
+#[test]
+fn a_variable_face_renders_the_weight_rather_than_reporting_a_synthesis() {
+    let inter = asset("inter/Inter-Variable.ttf");
+    let mut store = MemoryStore {
+        dirs: vec![(
+            "inter",
+            MemoryFamily {
+                manifest: "label = Inter\nkind = proportional\nface = Inter-Variable.ttf\n",
+                faces: vec![("Inter-Variable.ttf", &inter)],
+            },
+        )],
+    };
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("inter").expect("a key");
+    let ask = |svc: &mut FontService<'_>, weight| {
+        request_outlines(
+            svc,
+            key,
+            &['n'],
+            weight,
+            FontStyle::Normal,
+            FontStretch::NORMAL,
+        )
+        .expect("the run outlines")
+        .1[0]
+    };
+
+    let regular = ask(&mut svc, FontWeight::REGULAR);
+    let bold = ask(&mut svc, FontWeight::BOLD);
+    let between = ask(&mut svc, FontWeight::new(550).expect("on the axis"));
+
+    assert!(regular.4.is_none(), "a `wght` face needs no synthetic bold");
+    assert!(bold.4.is_none());
+    assert!(
+        bold.1 > regular.1,
+        "the designer's bold advances wider than the regular"
+    );
+    assert!(
+        between.1 > regular.1 && between.1 < bold.1,
+        "a weight between the named ones renders between them, not snapped"
+    );
+}
+
+#[test]
+fn a_face_that_cannot_lean_reports_the_shear_for_the_caller_to_apply() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+
+    let (_, glyphs) = request_outlines(
+        &mut svc,
+        FamilyKey::new("mono").expect("a key"),
+        &['A'],
+        FontWeight::REGULAR,
+        FontStyle::Oblique,
+        FontStretch::NORMAL,
+    )
+    .expect("the run outlines");
+    let synth = glyphs[0].4;
+    assert!(
+        synth.shear() > 0.0,
+        "no committed face carries `slnt`, so the posture must be reported"
+    );
+    assert!(
+        synth.bold_fraction() < f64::EPSILON,
+        "an upright regular weight needs no stroke"
+    );
+}
+
+#[test]
+fn a_static_face_reports_the_bold_stroke_the_ramp_states() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("a key");
+    let ask = |svc: &mut FontService<'_>, weight| {
+        request_outlines(
+            svc,
+            key,
+            &['A'],
+            weight,
+            FontStyle::Normal,
+            FontStretch::NORMAL,
+        )
+        .expect("the run outlines")
+        .1[0]
+            .4
+    };
+
+    assert!(
+        ask(&mut svc, FontWeight::REGULAR).is_none(),
+        "Regular asks for no stroke at all, not merely a small one"
+    );
+    let bold = ask(&mut svc, FontWeight::BOLD).bold_fraction();
+    let half = ask(&mut svc, FontWeight::new(550).expect("on the axis")).bold_fraction();
+    // The one ramp both sides of the service use: em/24 at Bold, and
+    // linear in the axis distance above Regular.
+    assert!(
+        (bold - 1.0 / 24.0).abs() < 1e-3,
+        "{bold} is not about em/24"
+    );
+    assert!((half * 2.0 - bold).abs() < 1e-3);
+}
+
+#[test]
+fn a_generic_family_resolves_through_the_ladder_and_an_unknown_one_does_not() {
+    let inter = asset("inter/Inter-Variable.ttf");
+    let mut store = generic_store(&inter);
+    let mut svc = discover_roomy(&mut store);
+    let ask = |svc: &mut FontService<'_>, name: &str| {
+        request_outlines(
+            svc,
+            FamilyKey::new(name).expect("a key"),
+            &['a'],
+            FontWeight::REGULAR,
+            FontStyle::Normal,
+            FontStretch::NORMAL,
+        )
+    };
+
+    // A generic a family claims resolves to that family.
+    assert!(ask(&mut svc, "sans-serif").is_ok());
+    // A generic nothing claims falls through to `sans-serif`, then to the
+    // first selectable family — a document asking for a kind always gets a
+    // face.
+    assert!(ask(&mut svc, "serif").is_ok());
+    assert!(ask(&mut svc, "cursive").is_ok());
+    // A concrete name the store does not hold is *not* substituted, so a
+    // document can try the next family it listed.
+    assert_eq!(ask(&mut svc, "helvetica").err(), Some(Errno::NotFound));
+}
+
+#[test]
+fn an_installed_family_wins_over_the_generic_it_is_named_after() {
+    let inter = asset("inter/Inter-Variable.ttf");
+    let mut store = MemoryStore {
+        dirs: vec![
+            (
+                "serif",
+                MemoryFamily {
+                    manifest: "label = Serif\nkind = proportional\nface = Inter-Variable.ttf\n",
+                    faces: vec![("Inter-Variable.ttf", &inter)],
+                },
+            ),
+            (
+                "noto-sans",
+                MemoryFamily {
+                    manifest: "label = Noto Sans\nkind = proportional\n\
+                               generic = serif\nface = Inter-Variable.ttf\n",
+                    faces: vec![("Inter-Variable.ttf", &inter)],
+                },
+            ),
+        ],
+    };
+    let svc = discover_roomy(&mut store);
+    // Both could answer `serif`; the installed family of that exact key is
+    // the one that does.
+    assert_eq!(
+        svc.family_for_key(FamilyKey::new("serif").expect("a key")),
+        Some("Serif")
+    );
+}
+
+#[test]
+fn an_outline_request_for_an_unknown_family_is_an_error_frame() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    assert_eq!(
+        request_outlines(
+            &mut svc,
+            FamilyKey::new("nothing").expect("a key"),
+            &['A'],
+            FontWeight::REGULAR,
+            FontStyle::Normal,
+            FontStretch::NORMAL,
+        )
+        .err(),
+        Some(Errno::NotFound)
+    );
+}
+
+#[test]
+fn an_outline_batch_answers_a_prefix_of_a_long_run() {
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let run: Vec<char> = ('a'..='z').chain('A'..='F').collect();
+    assert_eq!(run.len(), FONT_MAX_GLYPH_RUN);
+    let (_, glyphs) = request_outlines(
+        &mut svc,
+        FamilyKey::new("mono").expect("a key"),
+        &run,
+        FontWeight::REGULAR,
+        FontStyle::Normal,
+        FontStretch::NORMAL,
+    )
+    .expect("the run outlines");
+    assert!(!glyphs.is_empty() && glyphs.len() <= run.len());
 }

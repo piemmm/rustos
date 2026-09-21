@@ -51,7 +51,7 @@ tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # the theme's font. The production font-service transport is a bare-metal-only
 # feature, added in the target section below, so the host view is the built-in
 # face and its metrics alone.
-tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["svg"] }
 # The shared pointer/keyboard vocabulary and the one double-click pairing rule
 # (`DoubleClickTracker`): the pure press-to-gesture decision in `src/gesture.rs`
 # is host-tested, so this is a host dependency rather than a bare-metal one.
@@ -120,7 +120,7 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features
 # above: the `Run` binary reaches the sandboxed font service over the runtime
 # `ipc_call` transport, which only exists on the bare-metal targets, so no
 # host build is affected.
-tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt", "svg"] }
 # The one shared command-help engine: the reserved `-h`/`-?` switches render
 # this bundle's own `Help/` tree through the same engine as every other
 # command's short help, never a second copy of the text.

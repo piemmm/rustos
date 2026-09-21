@@ -28,6 +28,7 @@ use tairix_raster::{Color, FillRule, MaskKind};
 use crate::color::{parse_color, ColorSpec};
 use crate::css::{self, Declaration};
 use crate::error::SvgError;
+use crate::font::FontStyle;
 use crate::geom::{LineCap, LineJoin, StrokeStyle};
 use crate::number::{opacity_to_alpha, parse_length, parse_number, parse_opacity};
 use crate::xml::Element;
@@ -42,6 +43,68 @@ enum Source {
     Attribute,
     /// A stylesheet rule or a `style` declaration.
     Declaration,
+}
+
+/// The lengths one property value may be written against: the viewport a
+/// percentage measures, and the font size an `em` does.
+///
+/// A presentation property is resolved *after* the element's font size is,
+/// so `stroke-width: 0.1em` means what it says. A geometry attribute is
+/// parsed before any style exists and keeps the viewport alone, which is
+/// where this crate's remaining relative-unit gap sits.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Lengths {
+    /// The length a percentage with no axis of its own resolves against.
+    pub viewport: f64,
+    /// The computed font size, which one `em` measures.
+    pub font_size: f64,
+}
+
+/// SVG's initial font size in user units, which is CSS's `medium`.
+pub const INITIAL_FONT_SIZE: f64 = 16.0;
+
+/// The x-height an `ex` is taken as, as a fraction of the em.
+///
+/// CSS's own fallback for a face whose x-height is unknown — and at cascade
+/// time it genuinely is, since the face is not resolved until the text is
+/// laid out.
+const EX_PER_EM: f64 = 0.5;
+
+/// Parse a length that may be written in font-relative units.
+///
+/// # Errors
+/// [`SvgError::InvalidNumber`] for a value outside the grammar, exactly as
+/// [`parse_length`] refuses one.
+pub fn parse_length_in(text: &str, lengths: Lengths) -> Result<f64, SvgError> {
+    let trimmed = text.trim();
+    let relative = |suffix: &str, per_em: f64| {
+        trimmed
+            .strip_suffix(suffix)
+            .map(|number| parse_number(number).map(|value| value * lengths.font_size * per_em))
+    };
+    match relative("em", 1.0).or_else(|| relative("ex", EX_PER_EM)) {
+        Some(scaled) => {
+            let scaled = scaled?;
+            if scaled.is_finite() {
+                Ok(scaled)
+            } else {
+                Err(SvgError::InvalidNumber)
+            }
+        }
+        None => parse_length(trimmed, lengths.viewport),
+    }
+}
+
+/// Where a chunk of text sits relative to the position that placed it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum TextAnchor {
+    /// The chunk begins at the position.
+    #[default]
+    Start,
+    /// The chunk is centred on it.
+    Middle,
+    /// The chunk ends at it.
+    End,
 }
 
 /// The most dash lengths accepted in one pattern.
@@ -179,6 +242,24 @@ pub struct Style {
     pub display: bool,
     /// Whether the element itself is drawn (its children may still be).
     pub visible: bool,
+    /// The `font-family` list as written, resolved where the text is laid
+    /// out rather than here: which name answers depends on the store, which
+    /// the cascade has no way to ask.
+    pub font_family: Option<String>,
+    /// The font size in user units.
+    pub font_size: f64,
+    /// The `wght` design-axis coordinate, `1..=1000`.
+    pub font_weight: u16,
+    /// The posture.
+    pub font_style: FontStyle,
+    /// The `wdth` design-axis coordinate, in hundredths of a percent.
+    pub font_stretch: u16,
+    /// Extra space added after every glyph, in user units.
+    pub letter_spacing: f64,
+    /// Extra space added after every space character, in user units.
+    pub word_spacing: f64,
+    /// Where a chunk sits relative to the position that placed it.
+    pub text_anchor: TextAnchor,
 }
 
 impl Default for Style {
@@ -205,6 +286,14 @@ impl Default for Style {
             mask_kind: MaskKind::Luminance,
             display: true,
             visible: true,
+            font_family: None,
+            font_size: INITIAL_FONT_SIZE,
+            font_weight: NORMAL_WEIGHT,
+            font_style: FontStyle::Normal,
+            font_stretch: NORMAL_STRETCH,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            text_anchor: TextAnchor::Start,
         }
     }
 }
@@ -248,8 +337,47 @@ impl Style {
         cascade: &[Declaration<'_>],
     ) -> Result<Self, SvgError> {
         let mut style = self.clone();
+        // The font size is computed first, in its own pass over the same
+        // cascade, because every other length may be written in `em` — which
+        // is what CSS does, and the only way `stroke-width: 0.1em` can mean
+        // the size this element ends up set in rather than whichever size
+        // happened to be applied by then. A percentage measures the
+        // *inherited* size, so the basis is the one this element started
+        // from.
+        let inherited = Lengths {
+            viewport,
+            font_size: self.font_size,
+        };
+        // The extra pass is paid only where a font size is actually
+        // declared, which almost no element in a drawing does: without one
+        // the inherited size already *is* this element's, so the single
+        // pass reads the same `em` the two would have.
+        let pass = if sets_font_size(element, cascade) {
+            style.walk_cascade(element, cascade, inherited, FontSizePass::Only)?;
+            FontSizePass::Rest
+        } else {
+            FontSizePass::Every
+        };
+        let lengths = Lengths {
+            viewport,
+            font_size: style.font_size,
+        };
+        style.walk_cascade(element, cascade, lengths, pass)?;
+        Ok(style)
+    }
+
+    /// Apply one pass of the cascade in precedence order.
+    fn walk_cascade(
+        &mut self,
+        element: &Element<'_>,
+        cascade: &[Declaration<'_>],
+        lengths: Lengths,
+        pass: FontSizePass,
+    ) -> Result<(), SvgError> {
         for (name, value) in &element.attrs {
-            style.set(name, value.as_ref(), viewport, Source::Attribute)?;
+            if pass.covers(name) {
+                self.set(name, value.as_ref(), lengths, Source::Attribute)?;
+            }
         }
         let inline = element.attr("style").unwrap_or("");
         for important in [false, true] {
@@ -257,13 +385,17 @@ impl Style {
                 .iter()
                 .filter(|declaration| declaration.important == important)
             {
-                style.set(rule.name, rule.value, viewport, Source::Declaration)?;
+                if pass.covers(rule.name) {
+                    self.set(rule.name, rule.value, lengths, Source::Declaration)?;
+                }
             }
             for own in css::declarations(inline).filter(|own| own.important == important) {
-                style.set(own.name, own.value, viewport, Source::Declaration)?;
+                if pass.covers(own.name) {
+                    self.set(own.name, own.value, lengths, Source::Declaration)?;
+                }
             }
         }
-        Ok(style)
+        Ok(())
     }
 
     /// Apply one property. An unknown name is ignored; a known name with an
@@ -272,7 +404,7 @@ impl Style {
         &mut self,
         name: &str,
         value: &str,
-        viewport: f64,
+        lengths: Lengths,
         source: Source,
     ) -> Result<(), SvgError> {
         let value = value.trim();
@@ -282,12 +414,12 @@ impl Style {
             "fill-opacity" => self.fill_opacity = parse_opacity(value)?,
             "stroke" => self.stroke = parse_paint(value)?,
             "stroke-opacity" => self.stroke_opacity = parse_opacity(value)?,
-            "stroke-width" => self.stroke_style.width = parse_length(value, viewport)?,
+            "stroke-width" => self.stroke_style.width = parse_length_in(value, lengths)?,
             "stroke-linecap" => self.stroke_style.cap = parse_cap(value)?,
             "stroke-linejoin" => self.stroke_style.join = parse_join(value)?,
             "stroke-miterlimit" => self.stroke_style.miter_limit = parse_miter_limit(value)?,
-            "stroke-dasharray" => self.stroke_style.dashes = parse_dashes(value, viewport)?,
-            "stroke-dashoffset" => self.stroke_style.dash_offset = parse_length(value, viewport)?,
+            "stroke-dasharray" => self.stroke_style.dashes = parse_dashes(value, lengths)?,
+            "stroke-dashoffset" => self.stroke_style.dash_offset = parse_length_in(value, lengths)?,
             "opacity" => self.opacity = parse_opacity(value)?,
             "clip-rule" => self.clip_rule = parse_fill_rule(value)?,
             // An invalid `paint-order` is a dropped declaration, so the
@@ -339,6 +471,16 @@ impl Style {
             }
             "display" => self.display = value != "none",
             "visibility" => self.visible = !matches!(value, "hidden" | "collapse"),
+            // The list is kept as written: which of its names answers is the
+            // font store's question, not the cascade's.
+            "font-family" => self.font_family = Some(value.to_string()),
+            "font-size" => self.font_size = parse_font_size(value, lengths)?,
+            "font-weight" => self.font_weight = parse_font_weight(value, self.font_weight)?,
+            "font-style" => self.font_style = parse_font_style(value)?,
+            "font-stretch" => self.font_stretch = parse_font_stretch(value)?,
+            "letter-spacing" => self.letter_spacing = parse_spacing(value, lengths)?,
+            "word-spacing" => self.word_spacing = parse_spacing(value, lengths)?,
+            "text-anchor" => self.text_anchor = parse_text_anchor(value)?,
             _ => {}
         }
         Ok(())
@@ -515,7 +657,7 @@ fn parse_miter_limit(value: &str) -> Result<f64, SvgError> {
 /// `none` and a pattern whose lengths sum to zero both mean a solid stroke; a
 /// negative length makes the whole pattern invalid, which SVG also draws
 /// solid.
-fn parse_dashes(value: &str, viewport: f64) -> Result<Vec<f64>, SvgError> {
+fn parse_dashes(value: &str, lengths: Lengths) -> Result<Vec<f64>, SvgError> {
     if value == "none" {
         return Ok(Vec::new());
     }
@@ -530,12 +672,201 @@ fn parse_dashes(value: &str, viewport: f64) -> Result<Vec<f64>, SvgError> {
         if dashes.len() == MAX_DASHES {
             return Err(SvgError::TooComplex);
         }
-        dashes.push(parse_length(token, viewport)?);
+        dashes.push(parse_length_in(token, lengths)?);
     }
     if dashes.iter().any(|length| *length < 0.0) || dashes.iter().sum::<f64>() <= 0.0 {
         dashes.clear();
     }
     Ok(dashes)
+}
+
+/// Whether anything in this element's cascade sets `font-size`.
+///
+/// A name comparison over the declarations the element already carries, so
+/// the check costs a fraction of the pass it decides against.
+fn sets_font_size(element: &Element<'_>, cascade: &[Declaration<'_>]) -> bool {
+    element.attrs.iter().any(|(name, _)| *name == FONT_SIZE)
+        || cascade.iter().any(|rule| rule.name == FONT_SIZE)
+        || css::declarations(element.attr("style").unwrap_or("")).any(|own| own.name == FONT_SIZE)
+}
+
+/// The one property whose value every other length may be written against.
+const FONT_SIZE: &str = "font-size";
+
+/// Which properties a pass of the cascade applies.
+///
+/// `font-size` runs first and alone — so every other length can be written
+/// against the size this element actually ends up set in — but only where
+/// one is declared at all.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum FontSizePass {
+    /// `font-size` and nothing else.
+    Only,
+    /// Everything but `font-size`, which an earlier pass applied.
+    Rest,
+    /// Everything, because no `font-size` is declared here.
+    Every,
+}
+
+impl FontSizePass {
+    /// Whether this pass applies the property `name`.
+    fn covers(self, name: &str) -> bool {
+        match self {
+            Self::Only => name == FONT_SIZE,
+            Self::Rest => name != FONT_SIZE,
+            Self::Every => true,
+        }
+    }
+}
+
+/// The `wght` axis coordinate `normal` names.
+const NORMAL_WEIGHT: u16 = 400;
+
+/// The `wght` axis coordinate `bold` names.
+const BOLD_WEIGHT: u16 = 700;
+
+/// Lightest and heaviest coordinate the `wght` axis is defined over.
+const WEIGHT_RANGE: (u16, u16) = (1, 1000);
+
+/// The step `bolder` and `lighter` move by.
+///
+/// CSS 2.1 defines them against a face's own weight ladder, which needs the
+/// resolved face; one named step of the numeric axis is the approximation
+/// every renderer makes, and it keeps the property a pure function of the
+/// cascade.
+const WEIGHT_STEP: u16 = 300;
+
+/// The `wdth` axis coordinate `normal` names, in hundredths of a percent.
+const NORMAL_STRETCH: u16 = 100 * STRETCH_SCALE;
+
+/// Hundredths of a percent per `font-stretch` step.
+const STRETCH_SCALE: u16 = 100;
+
+/// Narrowest and widest coordinate the `wdth` axis is defined over.
+const STRETCH_RANGE: (u16, u16) = (50 * STRETCH_SCALE, 200 * STRETCH_SCALE);
+
+/// Parse a `font-size`.
+///
+/// A percentage measures the inherited size rather than the viewport, which
+/// is what CSS means by a relative font size — so the basis is swapped for
+/// this one property.
+fn parse_font_size(value: &str, lengths: Lengths) -> Result<f64, SvgError> {
+    let against_parent = Lengths {
+        viewport: lengths.font_size,
+        ..lengths
+    };
+    let size = parse_length_in(value, against_parent)?;
+    if size.is_finite() && size >= 0.0 {
+        Ok(size)
+    } else {
+        Err(SvgError::InvalidNumber)
+    }
+}
+
+/// Parse a `font-weight`, given the weight this element inherited.
+fn parse_font_weight(value: &str, inherited: u16) -> Result<u16, SvgError> {
+    let axis = match value {
+        "normal" => NORMAL_WEIGHT,
+        "bold" => BOLD_WEIGHT,
+        "bolder" => inherited.saturating_add(WEIGHT_STEP),
+        "lighter" => inherited.saturating_sub(WEIGHT_STEP),
+        number => {
+            let parsed = parse_number(number)?;
+            if !parsed.is_finite() {
+                return Err(SvgError::InvalidNumber);
+            }
+            // The axis admits whole coordinates only, and the range check
+            // below refuses anything the field could not hold.
+            round_axis(parsed)?
+        }
+    };
+    if axis < WEIGHT_RANGE.0 || axis > WEIGHT_RANGE.1 {
+        // A keyword step that walked off the end lands on the end, as CSS
+        // says; a *written* weight outside the axis is a value no face has.
+        return match value {
+            "bolder" | "lighter" => Ok(axis.clamp(WEIGHT_RANGE.0, WEIGHT_RANGE.1)),
+            _ => Err(SvgError::InvalidNumber),
+        };
+    }
+    Ok(axis)
+}
+
+/// Parse a `font-style`.
+fn parse_font_style(value: &str) -> Result<FontStyle, SvgError> {
+    match value {
+        "normal" => Ok(FontStyle::Normal),
+        "italic" => Ok(FontStyle::Italic),
+        // SVG 1.1 admits an angle after `oblique`; the angle is the S25
+        // property cascade's, and the posture alone is what this resolves.
+        value if value == "oblique" || value.starts_with("oblique ") => Ok(FontStyle::Oblique),
+        _ => Err(SvgError::InvalidNumber),
+    }
+}
+
+/// Parse a `font-stretch` into hundredths of a percent.
+fn parse_font_stretch(value: &str) -> Result<u16, SvgError> {
+    let percent = match value {
+        "ultra-condensed" => 50 * STRETCH_SCALE,
+        "extra-condensed" => 625 * (STRETCH_SCALE / 10),
+        "condensed" => 75 * STRETCH_SCALE,
+        "semi-condensed" => 875 * (STRETCH_SCALE / 10),
+        "semi-expanded" => 1125 * (STRETCH_SCALE / 10),
+        "expanded" => 125 * STRETCH_SCALE,
+        "extra-expanded" => 150 * STRETCH_SCALE,
+        "ultra-expanded" => 200 * STRETCH_SCALE,
+        // `wider` and `narrower` are defined against the face's own width
+        // ladder, which the cascade cannot see; they resolve to the
+        // unstretched width like any other value this subset cannot follow.
+        "normal" | "wider" | "narrower" => NORMAL_STRETCH,
+        percent => {
+            let number = percent
+                .strip_suffix('%')
+                .ok_or(SvgError::InvalidNumber)
+                .and_then(parse_number)?;
+            let rounded = round_axis(number * f64::from(STRETCH_SCALE))?;
+            if rounded < STRETCH_RANGE.0 || rounded > STRETCH_RANGE.1 {
+                return Err(SvgError::InvalidNumber);
+            }
+            rounded
+        }
+    };
+    Ok(percent)
+}
+
+/// One design-axis coordinate as the nearest whole step.
+///
+/// # Errors
+/// [`SvgError::InvalidNumber`] for a non-finite value or one no axis field
+/// could hold.
+fn round_axis(value: f64) -> Result<u16, SvgError> {
+    if !value.is_finite() || value < 0.0 || value > f64::from(u16::MAX) {
+        return Err(SvgError::InvalidNumber);
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "held non-negative and within the u16 range on the line above, so \
+                  neither the truncation nor the sign loss the lints warn about can occur"
+    )]
+    Ok((value + 0.5) as u16)
+}
+
+/// Parse a `letter-spacing` or `word-spacing`.
+fn parse_spacing(value: &str, lengths: Lengths) -> Result<f64, SvgError> {
+    if value == "normal" {
+        return Ok(0.0);
+    }
+    parse_length_in(value, lengths)
+}
+
+/// Parse a `text-anchor`.
+fn parse_text_anchor(value: &str) -> Result<TextAnchor, SvgError> {
+    match value {
+        "start" => Ok(TextAnchor::Start),
+        "middle" => Ok(TextAnchor::Middle),
+        "end" => Ok(TextAnchor::End),
+        _ => Err(SvgError::InvalidNumber),
+    }
 }
 
 #[cfg(test)]

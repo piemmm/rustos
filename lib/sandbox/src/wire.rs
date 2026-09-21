@@ -55,6 +55,11 @@ impl Writer {
         self.out.extend_from_slice(&value.to_le_bytes());
     }
 
+    /// Append a little-endian `i32`, two's complement.
+    pub fn i32(&mut self, value: i32) {
+        self.u32(value.cast_unsigned());
+    }
+
     /// Append a little-endian `u64`.
     pub fn u64(&mut self, value: u64) {
         self.out.extend_from_slice(&value.to_le_bytes());
@@ -133,6 +138,15 @@ impl<'a> Reader<'a> {
     pub fn u32(&mut self) -> Result<u32, WireError> {
         let bytes = self.take(4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    /// Consume a little-endian `i32`, two's complement.
+    ///
+    /// # Errors
+    ///
+    /// [`WireError::Truncated`] when fewer than four bytes remain.
+    pub fn i32(&mut self) -> Result<i32, WireError> {
+        Ok(self.u32()?.cast_signed())
     }
 
     /// Consume a little-endian `u64`.

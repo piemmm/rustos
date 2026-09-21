@@ -25,6 +25,7 @@ mod font_store;
 mod fssoak;
 mod fuzz;
 mod help_lint;
+mod host_fonts;
 mod image_apps;
 mod image_drivers;
 mod linkcheck;

@@ -773,6 +773,19 @@ impl FieldGroup {
         self
     }
 
+    /// Put a capsule on this group's caption line, or take the one it has
+    /// off, leaving the rows alone.
+    ///
+    /// [`with_badge`](Self::with_badge) consumes the group, so restating a
+    /// state that moves while the reader works — which rows now differ from
+    /// what is in effect — would mean rebuilding rows that hold a caret and
+    /// a selection. The capsule rides a band of its own, so an owner that
+    /// puts one on or takes one off re-measures
+    /// ([`measured_height`](Self::measured_height) moves with it).
+    pub fn set_badge(&mut self, badge: Option<StatusPill>) {
+        self.badge = badge;
+    }
+
     /// The capsule on this group's caption line, if it carries one.
     #[must_use]
     pub fn badge(&self) -> Option<&StatusPill> {

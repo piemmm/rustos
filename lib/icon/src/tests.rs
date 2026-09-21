@@ -8,6 +8,7 @@ use tairix_raster::{Color, Paint};
 
 use crate::glyph::{builtin_icon, disk_icon, IconKind};
 use crate::vector::{IconLayer, VectorIcon};
+use tairix_svg::font::NoFonts;
 
 /// The colour a layer paints with. Every built-in glyph and every test asset
 /// here is a flat fill, so anything else is a broken expectation.
@@ -335,7 +336,7 @@ fn decodes_an_svg_icon_to_its_layers() {
         <rect width="16" height="16" fill="#102030"/>
         <polygon points="2,2 14,2 8,14" fill="#ffaa00"/>
     </svg>"##;
-    let icon = crate::decode_svg(svg).expect("valid svg icon");
+    let icon = crate::decode_svg(svg, &mut NoFonts).expect("valid svg icon");
     // Every decoded asset lands on the decoder's shared design grid, so a
     // sixteen-unit drawing is scaled by 128 on the way in.
     assert_eq!(icon.design(), tairix_svg::DESIGN_GRID);
@@ -352,7 +353,7 @@ fn decodes_an_svg_icon_to_its_layers() {
 fn decoded_svg_icon_rasterises() {
     let svg =
         br##"<svg viewBox="0 0 16 16"><polygon points="2,2 14,2 14,14 2,14" fill="#3cf"/></svg>"##;
-    let icon = crate::decode_svg(svg).expect("valid svg icon");
+    let icon = crate::decode_svg(svg, &mut NoFonts).expect("valid svg icon");
     let image = icon.rasterise(16).expect("renderable");
     assert!(image.pixels().iter().any(|p| p.a > 0));
 }
@@ -360,7 +361,7 @@ fn decoded_svg_icon_rasterises() {
 #[test]
 fn malformed_svg_icon_fails_closed() {
     // The caller substitutes a builtin glyph rather than crashing.
-    assert!(crate::decode_svg(b"<not-svg/>").is_err());
+    assert!(crate::decode_svg(b"<not-svg/>", &mut NoFonts).is_err());
 }
 
 /// A distinctive single-layer SVG icon whose authored fill (`#ffaa00`) no
@@ -397,7 +398,7 @@ impl crate::IconAssetSource for TestSource {
 
 #[test]
 fn icon_set_loads_every_kind_when_all_present() {
-    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&ALL_KINDS));
+    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&ALL_KINDS), &mut NoFonts);
     for kind in ALL_KINDS {
         assert!(set.is_loaded(kind), "{kind:?} should be loaded");
         assert_eq!(
@@ -410,7 +411,7 @@ fn icon_set_loads_every_kind_when_all_present() {
 
 #[test]
 fn icon_set_empty_source_falls_back_to_tinted_builtins() {
-    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&[]));
+    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&[]), &mut NoFonts);
     for kind in ALL_KINDS {
         assert!(!set.is_loaded(kind), "{kind:?} should fall back");
         assert_eq!(set.icon(kind, FG), builtin_icon(kind, FG));
@@ -419,7 +420,7 @@ fn icon_set_empty_source_falls_back_to_tinted_builtins() {
 
 #[test]
 fn icon_set_mixes_loaded_assets_and_builtin_fallbacks() {
-    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&[IconKind::Bell]));
+    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&[IconKind::Bell]), &mut NoFonts);
     assert!(set.is_loaded(IconKind::Bell));
     assert_eq!(solid(&fills(&set.icon(IconKind::Bell, FG))[0]), LOADED_FILL);
     assert!(!set.is_loaded(IconKind::Network));
@@ -437,7 +438,7 @@ fn icon_set_malformed_asset_falls_back_per_kind() {
         kinds: &[],
         other: Some(b"<not-svg/>"),
     };
-    let set = crate::IconSet::from_assets(&source);
+    let set = crate::IconSet::from_assets(&source, &mut NoFonts);
     for kind in ALL_KINDS {
         assert!(!set.is_loaded(kind));
         assert_eq!(set.icon(kind, FG), builtin_icon(kind, FG));
@@ -446,7 +447,8 @@ fn icon_set_malformed_asset_falls_back_per_kind() {
 
 #[test]
 fn icon_set_ignores_tint_for_loaded_asset() {
-    let set = crate::IconSet::from_assets(&TestSource::for_kinds(&[IconKind::Volume]));
+    let set =
+        crate::IconSet::from_assets(&TestSource::for_kinds(&[IconKind::Volume]), &mut NoFonts);
     let red = Color::rgb(255, 0, 0);
     // The authored asset keeps its own colours regardless of the tint.
     assert_eq!(
@@ -460,7 +462,7 @@ fn builtin_set_matches_an_empty_source_and_is_the_default() {
     // The const built-in set loads nothing, so every kind falls back to its
     // tinted built-in glyph — identical to building from an empty source.
     let builtin = crate::IconSet::builtin();
-    let empty = crate::IconSet::from_assets(&TestSource::for_kinds(&[]));
+    let empty = crate::IconSet::from_assets(&TestSource::for_kinds(&[]), &mut NoFonts);
     assert_eq!(builtin, empty);
     assert_eq!(builtin, crate::IconSet::default());
     for kind in ALL_KINDS {

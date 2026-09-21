@@ -39,6 +39,7 @@ use tairix_sandbox::imagerender::{
 use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::proto::Channel;
 use tairix_sandbox::timesync::{evaluate_datagram, TimeSyncService};
+use tairix_svg::font::NoFonts;
 use tairix_wallpaper::WallpaperFit;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -345,18 +346,18 @@ fn fuzz_icon_iteration(
         let pos = bounded(next(), svg.len() - 1);
         svg[pos] ^= low_byte(next() >> 17);
     }
-    let _ = rasterise_icon(honest_icon, side, &svg);
+    let _ = rasterise_icon(honest_icon, side, &svg, &mut NoFonts);
     let cut = bounded(next(), svg.len());
-    let _ = rasterise_icon(honest_icon, side, &svg[..cut]);
+    let _ = rasterise_icon(honest_icon, side, &svg[..cut], &mut NoFonts);
     let mut png = png_template();
     for _ in 0..bounded(next(), 6) {
         let pos = bounded(next(), png.len() - 1);
         png[pos] ^= low_byte(next() >> 17);
     }
-    let _ = rasterise_icon(honest_icon, side, &png);
+    let _ = rasterise_icon(honest_icon, side, &png, &mut NoFonts);
     let cut = bounded(next(), png.len());
-    let _ = rasterise_icon(honest_icon, side, &png[..cut]);
-    let _ = rasterise_icon(honest_icon, side, noise);
+    let _ = rasterise_icon(honest_icon, side, &png[..cut], &mut NoFonts);
+    let _ = rasterise_icon(honest_icon, side, noise, &mut NoFonts);
     side
 }
 
@@ -427,7 +428,7 @@ fn fuzz_view_iteration(
             continue;
         }
         let named = NAMED_FORMATS[bounded(next(), NAMED_FORMATS.len() - 1)];
-        let Ok(opened) = open_view(honest, named) else {
+        let Ok(opened) = open_view(honest, named, &mut NoFonts) else {
             continue;
         };
         let index = u32::try_from(bounded(next(), 4)).unwrap_or(0);
@@ -621,10 +622,10 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = manifest_summary(&mut hostile, &noise[..bounded(next(), noise.len())]);
         let _ = disassemble(&mut hostile, isa, 0, 0, 8, b"\x90\x90");
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
-        let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE);
+        let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE, &mut NoFonts);
         let _ = render_wallpaper(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
         if send_document(&mut hostile, &png_template()).is_ok() {
-            let _ = open_view(&mut hostile, None);
+            let _ = open_view(&mut hostile, None, &mut NoFonts);
             let _ = select_page(&mut hostile, 0);
             let _ = render_page(&mut hostile, (1, 1), whole(1, 1), &mut [0u8; 4]);
             let _ = close_view(&mut hostile);

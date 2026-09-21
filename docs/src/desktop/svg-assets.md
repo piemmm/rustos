@@ -345,8 +345,15 @@ colour written beside it, which is what a fallback is for; a paint server
 that is defined but paints nothing — a gradient with no stops, a pattern with
 no tile — is `none`, and takes no fallback.
 
+- **Text**: `<text>` and `<tspan>`, with the `x`/`y`/`dx`/`dy`/`rotate`
+  lists, `text-anchor`, white-space collapsing under `xml:space`,
+  `letter-spacing`/`word-spacing`, `textLength`/`lengthAdjust`, and the
+  `font-family`/`-size`/`-weight`/`-style`/`-stretch` properties. See
+  [A glyph arrives as geometry](#a-glyph-arrives-as-geometry).
+
 What it does **not yet** draw — staged as numbered items in `plans/SVG.md`,
-not declined: text (`<text>`, `<tspan>`, `<textPath>`), embedded images
+not declined: the remaining text surface (the baselines, `text-decoration`,
+`<textPath>`, bidi and shaping), embedded images
 (`<image>`), filters, SMIL animation, the CSS surface the cascade still drops,
 external references, the three remaining `vector-effect` values, and
 scripting — which runs only where a consumer asks for one, in its own
@@ -354,9 +361,53 @@ sandbox, under a fixed budget, and which the desktop's own chrome and icon
 paths never enable. `<foreignObject>` is deliberately undrawable, so a
 `<switch>` takes its fallback sibling. An element it cannot yet draw is
 skipped rather than refusing
-the document, so one unsupported decoration does not lose a whole asset — but
-while text is outstanding that also means an asset whose meaning is its
-lettering renders wrong with no signal, which is what keeps the open question
-about that choice (recorded in `plans/ICONS.md`) live. There is still exactly
+the document, so one unsupported decoration does not lose a whole asset.
+Text is the exception, and deliberately: lettering nothing can furnish
+**refuses the document**, because absent lettering is a wrong picture rather
+than a missing decoration, and a caller then falls back to the tier below
+(the open question about the general case is recorded in `plans/ICONS.md`).
+There is still exactly
 one rasterisation path (`AGENTS.md` §2.2), and pre-rasterised bitmap assets
 may exist as a cache or fallback but are never the only path.
+
+## A glyph arrives as geometry
+
+SVG text is filled, stroked, gradient-painted, clipped, masked and
+transformed exactly as a `<path>` is, and a decoded drawing has no
+resolution. So a glyph reaches the decoder as **contours in font units**,
+joins the one geometry currency, and is flattened by the single step every
+other curve takes — at the tolerance the *placement* resolves, so a letter
+subdivides exactly as a `<path>` of the same shape at the same size. A
+rasterised cell would fix a size at decode time and put text on a second
+rasterisation path.
+
+The decoder holds no font data and no authority to fetch any. It resolves
+text through an injected provider (`tairix_svg::font::FontProvider`), and
+what a caller supplies decides what it can draw:
+
+- **`NoFonts`** — the compositor's own asset paths. A drawing with text is
+  refused, and the caller shows its built-in glyph instead.
+- **`tairix_font::ServiceFonts`** — a process that already talks to the OS
+  font service. The desktop chrome loads its icons and cursors through this.
+- **The sandbox's two-phase exchange** — a document a user opened. The
+  parser sandbox holds no capabilities, so it cannot call the font service;
+  it decodes once against placeholder geometry to record exactly which
+  faces and scalars the document needs, the host fetches them, and it
+  decodes again. That terminates in two rounds by construction, because
+  glyph geometry cannot change which scalars a document holds.
+
+A run of one style becomes **one layer** whose contours fill together under
+the non-zero rule — the TrueType convention, so a counter is a contour wound
+against the one enclosing it rather than a shape in its own right. A weight
+or a posture the face cannot furnish is reported rather than substituted:
+the synthetic bold is the crate's own stroker at the reported width, and the
+synthetic oblique is one shear folded into the glyph's transform, so there
+is no second thickening or slanting implementation anywhere.
+
+Text is bounded like everything else here, and the bounds are fixed
+containment bounds: glyphs per document, `<tspan>` nesting, the resolved
+length of one `<text>`, the runs a document may emit, and — because a
+provider may be a live service across an IPC boundary — the *requests* one
+document may make of it. The outline points a glyph contributes are charged
+against the same total-vertex budget a `<path>` spends, so lettering and
+paths cannot outspend one another.

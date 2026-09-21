@@ -42,7 +42,7 @@ dropped is a category the surface then has to lie about.
 | **DS7** | Networking read — the stack-wide `net.*` options staged and applied live, the ungated resolver set stated, and the gated per-interface readings left where they may be taken | DS2, DS6 | DS7 | done |
 | **DS8a** | The elevated-read seam: an `ElevateRequest` whose reply carries the bounded output of the run, so an authenticated account can *show* a store no unprivileged caller may read — with `configure`'s per-interface **read** registry and the Ethernet pane that states it | DS6 | DS8a | done |
 | **DS8** | The network store's writer — `lib/netconfig`'s draft/commit mutation API, `configure`'s write side and its *unset* spelling, the live apply over the stack's admin surface, and the device manager's runtime re-read | DS6, DS7, DS8a | DS8 | done |
-| **DS8b** | Ethernet and DNS stage and apply through that writer — the addressing reading becomes a settable per-interface form, and Apply is the one elevated `configure` run | DS8 | DS8b | planned |
+| **DS8b** | Ethernet and DNS stage and apply through that writer — the addressing reading becomes a settable per-interface form, and Apply is the one elevated `configure` run | DS8 | DS8b | done |
 | **DS9** | Users & Groups — the ungated `GROUP_DIRECTORY` sibling, the caller's own record, the admin-authenticated read of every other account, and the user-admin operations the syscall carries but no tool spells | DS6, DS8a | DS9 | planned |
 | **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | planned |
 | **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | planned |
@@ -305,9 +305,9 @@ owner the change goes to; the last column is what a refusal looks like.
 | Lock Screen | session's lock policy document | session apply | apply refused, stated |
 | Screensaver | session's idle policy document | session apply | apply refused, stated |
 | Power | — | — (no policy interface, §3) | pane states absence |
-| Networking → Ethernet | nothing ungated exists: the live readings need `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL` and stay the Switchboard's, and `network.conf` carries the very identity and addressing those gates protect. The configured addressing is read by the admin-authenticated run (DS8a) | elevated `configure`, which writes the store and hands the changed interfaces to the running stack (DS8; the pane that drives it is DS8b) | pane states where the live readings live; a refused apply keeps the working copy and states why |
+| Networking → Ethernet | nothing ungated exists: the live readings need `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL` and stay the Switchboard's, and `network.conf` carries the very identity and addressing those gates protect. The configured addressing is read by the admin-authenticated run (DS8a) | elevated `configure`, which writes the store and hands the changed interfaces to the running stack (DS8) | pane states where the live readings live; a refused apply keeps the working copy and states why |
 | Networking → Wi-Fi | — | — | pane states absence (§3) |
-| Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` (DS8; the pane that drives it is DS8b) | reading renders unmeasured; a refused apply keeps the working copy and states why |
+| Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` over each interface's own `dns.servers` (DS8) | reading renders unmeasured; a refused apply keeps the working copy and states why |
 | Networking → TCP/IP | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which also hands the policy to the running stack | working copy stands, refusal stated; a stack that did not take it keeps the saved value for next boot and says so |
 | Bluetooth | — | — | pane states absence (§3) |
 | Sound | — | — | pane states absence (§3) |
@@ -1060,30 +1060,86 @@ admits cannot drift.
 
 ### DS8b — Ethernet and DNS stage and apply
 
-**Planned.** DS8a gives the Ethernet pane a *reading* of the configured
-addressing, and DS8 gives the system a writer; what remains is the pane that
+**Done.** DS8a gave the Ethernet pane a *reading* of the configured
+addressing and DS8 gave the system a writer; what remained was the pane that
 stages a change over that reading and applies it.
 
-The reading already arrives as one plate per interface. Making it settable
-means the rows become controls rather than statements: `lib/controls`'
-`TextField` for the address, gateway and MTU rows, and combos for the two
-method rows, whose choices come from `IfaceKey::shape()` rather than a copy
-of the value sets. DNS's per-interface `dns.servers` is the same shape.
+**Both networking panes are compositions now, not fact columns.** `Ethernet`
+and `Dns` are `Composition`s of `Posture::Staged`, so `PaneContent` lost its
+two read-only variants and `Facts` is the About/Date & Time pair alone. The
+DNS pane's live resolver plate is a group of reading rows *inside* the form,
+above the per-interface ones, rather than a second body shape: a form of
+readings is what the family is for, and `Facts + Form` would have been a
+fifth body to lay out and scroll.
 
-Two things distinguish this from the panes `crate::form` already draws, and
-they are the design work of the stage. Its groups are **discovered at
-runtime** from the captured listing rather than declared by a static
-`GroupSpec`, so `Owner` grows a variant naming the interface by its index in
-the form's own table and the composition builds its groups from the
-document. And its pending set spans a registry whose keys are not
-`'static` strings, so `Form::pending` answers owned `<key> <value>` pairs —
-which is exactly the argv the one elevated `configure` run already takes,
-with an unset spelled as the empty value.
+**Groups discovered, rows owned by an index.** A networking composition
+declares no `GroupSpec`: `network::interface_groups` builds one plate per
+interface of the **captured** document. `Owner` grew `Interface(IfaceSetting
+{ iface, key })`, naming the interface by its index there rather than by an
+owned alias, because the owner table beside a form's rows is `Copy` and sits
+alongside the two static stores' settables. The plates come from the capture
+and not from the working copy, so clearing an interface's last key cannot
+make its plate — and the rows the reader is typing in — vanish mid-edit.
 
-The pane is a small state machine: it opens stating that nothing has been
-read and offering *Show Addressing…*; the capture answers; only then is
-there a document to stage against. A refused or overrun capture leaves it
-stating that, with nothing to edit.
+**The working copy is the reader's edits, not an edited document.** This is
+the load-bearing decision. `ConfigDraft` checks a document whole because
+neither half of "drop `ipv4.address`" and "set `ipv4.method dhcp`" is a
+document the parser accepts, so a working `NetworkConfig` kept valid after
+every keystroke could never reach the change the pane exists to make. The
+form therefore holds `Vec<(IfaceSetting, String)>` — the changed keys and
+what each now says, the empty value being the registry's *remove* — and:
+
+- each value is checked against **its own key** as it is typed, through
+  `IfaceKey::admits` (new in `lib/netconfig`: `set_key` on a throwaway
+  interface, so a surface asks the parser rather than a second grammar).
+  A refused value marks the row `ValidationState::Invalid`, keeps exactly
+  what was typed, and blocks Apply — it is never dropped from the change;
+- the **whole** document is checked once, by `Form::proposal` (the capture's
+  own `edit()` + every staged pair + `commit()`), *before* a password is
+  asked for. An inconsistent document is refused in the band naming what is
+  wrong, rather than by a run the reader has just authenticated.
+
+`Form::pending` answers owned `(key, value)` pairs, which is exactly the argv
+`configure` takes, and a machine row's pair is spelled the same way.
+
+**The state machine, and the capture's lifetime.** Before a capture the band
+is the single **Show Addressing…** command; a landed capture makes it
+Revert + Apply. Leaving the pane drops the capture (`restate_body` clears it
+when the *location* is not a networking pane, before the next body is built),
+so a privileged reading never sits in this application while the reader is
+elsewhere — and moving between Ethernet and DNS keeps it, because both are
+discovered from the same document.
+
+**An applied change is recorded, not re-read and not forgotten.** The network
+store cannot be re-read without a second password, so a clean exit adopts the
+proposal as what is now in effect. That is an acknowledgement, not a reading:
+`configure` applies every named pair or none, and both sides render through
+the same engine. The pane claims only the keys it named, and the dropped
+capture is how a reader gets the document as it now stands.
+
+**Which keys are settable.** The addressing rows (`ipv4.*`, `ipv6.*`, `mtu`,
+`dns.servers`); `kind`, the two `match.*` keys and the `bond.*` keys stay
+readings — hardware identity and bond composition are not a settings-pane
+job. `dns.servers` is offered on both panes, from the one definition, exactly
+as Contrast is offered on Appearance and Accessibility. A closed key's
+choices come from `IfaceKey::shape()` with a leading *not set* entry, which
+is the one thing only the document can express. An unset **settable** still
+draws its control (an interface on DHCP must be reachable to give a static
+address to); an unset **reading** draws no row, because there is nothing to
+read.
+
+**Two defects this stage owns and fixed** (`AGENTS.md` §2.18). `Form::is_dirty`
+was dead public API and the per-row "which rows differ" the staged posture
+promises was never drawn: each plate now carries a `StatusPill` badge saying
+how many of its rows are staged, set in place (`FieldGroup::set_badge`, new)
+so a row holding a caret survives its plate learning it has changed, with the
+column re-measured only when a badge actually appeared or went. And the
+action band offered every reading pane an enabled **Revert** that did
+nothing, and said "0 changes not applied" beneath it: a band is now either
+`Footer::staged()` (Revert + Apply) or `Footer::command(label)` (one
+command), each button enabled by its own rule, and a command band says
+nothing until it has something to report and stays usable after it has been
+used.
 
 ### DS9 — Users & Groups
 

@@ -1,9 +1,13 @@
-//! The pane's action band: what a staged pane offers beneath its column,
-//! and what the last attempt came to.
+//! The pane's action band: what a pane offers beneath its column, and what
+//! the last attempt came to.
 //!
 //! An immediate pane has none — its effect is its feedback, and a stale
-//! Apply button is a trap. A staged pane has exactly this one: a line
-//! saying where the change stands, and the two commands that resolve it.
+//! Apply button is a trap. Every other pane has one of exactly two bands: a
+//! staged pane's Revert and Apply over its working copy, and the single
+//! named command a pane offers when it has no working copy at all — the
+//! application that owns its subject, or the authenticated reading its rows
+//! cannot exist without. A band offers Revert only where there is something
+//! to revert.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,13 +31,19 @@ pub(crate) enum FooterAction {
 /// What the band says about the change it is offering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Standing {
+    /// The band's one command is there to be used and nothing has been
+    /// attempted, so there is no change to count and nothing to say.
+    Offered,
     /// Nothing differs from what is in effect.
     Unchanged,
     /// Rows differ and have not been applied.
     Changed(usize),
+    /// Rows hold values their store would refuse, so there is nothing to
+    /// apply until they are corrected or reverted.
+    Refusing(usize),
     /// The last apply was made.
     Applied,
-    /// The last apply was refused, and why.
+    /// The last attempt was refused, and why.
     Refused(String),
 }
 
@@ -41,30 +51,50 @@ impl Standing {
     /// The line the band shows.
     fn line(&self) -> String {
         match self {
+            Self::Offered => String::new(),
             Self::Unchanged => String::from("No changes"),
             Self::Changed(1) => String::from("1 change not applied"),
             Self::Changed(n) => alloc::format!("{n} changes not applied"),
+            Self::Refusing(1) => String::from("1 value this cannot be saved with"),
+            Self::Refusing(n) => alloc::format!("{n} values this cannot be saved with"),
             Self::Applied => String::from("Applied"),
             Self::Refused(reason) => reason.clone(),
         }
     }
 
-    /// Whether the band's commands can act on anything.
-    const fn actionable(&self) -> bool {
-        matches!(self, Self::Changed(_) | Self::Refused(_))
+    /// Whether the band's acting command can act on anything.
+    ///
+    /// A refused value is not applied around: the change goes whole or not
+    /// at all, so the acting command waits until the rows agree.
+    const fn can_act(&self) -> bool {
+        matches!(self, Self::Offered | Self::Changed(_) | Self::Refused(_))
+    }
+
+    /// Whether the band's reverting command can act on anything, which a
+    /// refused value is exactly the case for.
+    const fn can_revert(&self) -> bool {
+        matches!(
+            self,
+            Self::Changed(_) | Self::Refusing(_) | Self::Refused(_)
+        )
+    }
+
+    /// Whether the line is a refusal, which is drawn in the danger role.
+    const fn is_refusal(&self) -> bool {
+        matches!(self, Self::Refused(_) | Self::Refusing(_))
     }
 }
 
-/// Index of the reverting command; leading, so the recommended one is
-/// trailing exactly as it is in a dialog's action band.
-const REVERT: usize = 0;
-/// Index of the applying command.
-const APPLY: usize = 1;
+/// The label every staged pane's acting command carries.
+const APPLY_LABEL: &str = "Apply";
 
-/// The action band beneath a staged pane's column.
+/// The action band beneath a pane's column.
 pub(crate) struct Footer {
     buttons: Vec<Button>,
     standing: Standing,
+    /// Whether the leading command reverts a working copy, which a band
+    /// offering one command alone has none of.
+    reverts: bool,
     /// Which command holds the keyboard, or `None` when the band does not.
     focus: Option<usize>,
     /// Where the pointer last was, so a press resolves against the command
@@ -73,29 +103,69 @@ pub(crate) struct Footer {
 }
 
 impl Footer {
-    /// A band offering `apply` under its own label, with nothing staged.
-    pub(crate) fn new(apply: &str) -> Self {
-        Self {
-            buttons: alloc::vec![
+    /// A staged pane's band: Revert, then Apply.
+    pub(crate) fn staged() -> Self {
+        Self::of(
+            alloc::vec![
                 Button::labelled("Revert"),
                 Button::new(
-                    tairix_controls::ButtonContent::Label(String::from(apply)),
+                    tairix_controls::ButtonContent::Label(String::from(APPLY_LABEL)),
                     ControlRole::Recommended,
                 ),
             ],
+            true,
+            Standing::Unchanged,
+        )
+    }
+
+    /// A band offering the one named command a pane has instead of a
+    /// working copy.
+    pub(crate) fn command(label: &'static str) -> Self {
+        Self::of(
+            alloc::vec![Button::new(
+                tairix_controls::ButtonContent::Label(String::from(label)),
+                ControlRole::Recommended,
+            )],
+            false,
+            Standing::Offered,
+        )
+    }
+
+    /// A band over `buttons`, stating `standing`.
+    fn of(buttons: Vec<Button>, reverts: bool, standing: Standing) -> Self {
+        let mut band = Self {
+            buttons,
             standing: Standing::Unchanged,
+            reverts,
             focus: None,
             pointer: Point::ORIGIN,
-        }
+        };
+        band.state(standing);
+        band
+    }
+
+    /// Say that whatever the band last asked for has settled.
+    ///
+    /// A staged band has nothing left to apply and says so; a band whose
+    /// one command is a reading or an application stays offered, because
+    /// having used it once is no reason it cannot be used again.
+    pub(crate) fn settled(&mut self) {
+        self.state(if self.reverts {
+            Standing::Applied
+        } else {
+            Standing::Offered
+        });
     }
 
     /// Say `standing`, and enable or disable the commands to match.
     pub(crate) fn state(&mut self, standing: Standing) {
-        let enabled = standing.actionable();
+        let acts = standing.can_act();
+        let reverts = self.reverts && standing.can_revert();
         self.standing = standing;
+        let last = self.buttons.len().saturating_sub(1);
         for (index, button) in self.buttons.iter_mut().enumerate() {
             let mut state = ControlState {
-                enabled,
+                enabled: if index == last { acts } else { reverts },
                 ..button.state()
             };
             state.focus = if self.focus == Some(index) {
@@ -107,10 +177,16 @@ impl Footer {
         }
     }
 
-    /// Put the keyboard on the applying command, or take it off the band.
+    /// Put the keyboard on the acting command, or take it off the band.
     pub(crate) fn set_focused(&mut self, focused: bool) {
-        self.focus = focused.then_some(APPLY);
+        self.focus = focused.then_some(self.acting());
         self.state(self.standing.clone());
+    }
+
+    /// Which command acts: always the trailing one, so the recommended
+    /// command keeps the trailing edge exactly as it does in a dialog.
+    const fn acting(&self) -> usize {
+        self.buttons.len().saturating_sub(1)
     }
 
     /// The height the band needs.
@@ -176,11 +252,19 @@ impl Footer {
             bounds.left().saturating_add(to_i32(gap)),
             baseline,
             fitted,
-            Color::from(match self.standing {
-                Standing::Refused(_) => palette.danger,
-                _ => palette.on_surface_muted,
+            Color::from(if self.standing.is_refusal() {
+                palette.danger
+            } else {
+                palette.on_surface_muted
             }),
         );
+    }
+
+    /// What the band is saying, for a test that asks what a reader would
+    /// read there.
+    #[cfg(test)]
+    pub(crate) fn line(&self) -> String {
+        self.standing.line()
     }
 
     /// Route one pointer event.
@@ -196,10 +280,11 @@ impl Footer {
             self.pointer = *to;
         }
         let rects = self.command_rects(bounds, scale, theme);
+        let acting = self.acting();
         let mut acted = None;
         for (index, (button, rect)) in self.buttons.iter_mut().zip(&rects).enumerate() {
             if button.on_pointer(event, *rect, damage) == Some(ButtonAction::Activated) {
-                acted = action_of(index);
+                acted = Some(action_of(index, acting));
             }
         }
         acted
@@ -208,26 +293,31 @@ impl Footer {
     /// Route one key press.
     pub(crate) fn on_key(&mut self, key: Key) -> Option<FooterAction> {
         if key == Key::Named(NamedKey::Left) || key == Key::Named(NamedKey::Right) {
-            let step = usize::from(key == Key::Named(NamedKey::Right));
-            self.focus = Some(if step == 1 { APPLY } else { REVERT });
+            self.focus = Some(if key == Key::Named(NamedKey::Right) {
+                self.acting()
+            } else {
+                0
+            });
             self.state(self.standing.clone());
             return None;
         }
+        let acting = self.acting();
         let mut acted = None;
         for (index, button) in self.buttons.iter_mut().enumerate() {
             if button.on_key(key) == Some(ButtonAction::Activated) {
-                acted = action_of(index);
+                acted = Some(action_of(index, acting));
             }
         }
         acted
     }
 }
 
-/// The command at `index`, or `None` for an index this band did not build.
-const fn action_of(index: usize) -> Option<FooterAction> {
-    match index {
-        REVERT => Some(FooterAction::Revert),
-        APPLY => Some(FooterAction::Apply),
-        _ => None,
+/// The command at `index`: the trailing one acts, and a leading one is the
+/// revert a staged band carries.
+const fn action_of(index: usize, acting: usize) -> FooterAction {
+    if index == acting {
+        FooterAction::Apply
+    } else {
+        FooterAction::Revert
     }
 }

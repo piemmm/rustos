@@ -9,13 +9,20 @@
 //! *is* — the label, the sentence beneath it, the choices it offers, and the
 //! key it writes all live here once.
 //!
-//! The settables span **two** stores, and a composition names which of them
-//! its rows write: the desktop's own document, which the session owns and
-//! adopts a change to at once, and the machine's `system.conf`, which
-//! `configure` owns and a staged change is applied to by re-running it as an
-//! account that may. One plate column serves both — a second would be two
-//! places to get focus, scrolling and hit-testing right (`crate::machine`
-//! holds the machine settables themselves).
+//! The settables span **three** stores, and a composition names which of
+//! them its rows write: the desktop's own document, which the session owns
+//! and adopts a change to at once; the machine's `system.conf`; and the
+//! network store, both of which `configure` owns and a staged change is
+//! applied to by re-running it as an account that may. One plate column
+//! serves all three — a second would be more places to get focus,
+//! scrolling and hit-testing right (`crate::machine` and `crate::network`
+//! hold those two stores' settables themselves).
+//!
+//! A composition's groups are usually declared here, in a static table. A
+//! networking one's are **discovered** instead, from a document only an
+//! authenticated run can answer, so its rows name an interface by its
+//! index in that document rather than by a name a static table could
+//! carry.
 //!
 //! A composition also names the **group of keys** its rows write, because
 //! the session merges an apply over what the desktop holds: a pane that
@@ -30,19 +37,24 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
+use tairix_abi::net_ipc::NetServerAddr;
 use tairix_controls::{
-    ComboBox, FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow,
+    ComboBox, ControlState, FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout,
+    FieldRow, StatusPill, TextAction, ValidationState,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_netconfig::{ConfigError, IfaceKey, NetworkConfig};
 use tairix_raster::Surface;
-use tairix_sysconfig::{Key as ConfigKey, SystemConfig};
-use tairix_theme::{CursorSetId, Theme};
+use tairix_sysconfig::SystemConfig;
+use tairix_theme::{CursorSetId, SignalRole, Theme};
+use tairix_util::conf::ValueShape;
 use tairix_wallpaper::{
     Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, Rgb, SettingsKey, WallpaperFit,
 };
 
 use crate::machine::MachineSetting;
+use crate::network::{self, Addressing, Choice, IfaceSetting};
 use crate::stack;
 
 /// The UI scales the surface offers, as percentages of the reference
@@ -441,7 +453,7 @@ fn backdrop_choices(current: Backdrop) -> (Vec<String>, usize) {
 
 /// Which store a row writes, and which settable of it.
 ///
-/// A row is one or the other and never both: the two documents have
+/// A row is exactly one of these and never two: the three documents have
 /// different owners, different write paths, and different apply postures,
 /// so a settable that could be either would be a settable with no owner.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -451,6 +463,9 @@ pub(crate) enum Owner {
     /// The machine's boot-time configuration store, which `configure`
     /// owns.
     Machine(MachineSetting),
+    /// One interface's entry in the network store, which `configure` owns
+    /// too but which this application may not read for itself.
+    Interface(IfaceSetting),
 }
 
 impl Owner {
@@ -459,6 +474,23 @@ impl Owner {
         match self {
             Self::Desktop(setting) => setting.label(),
             Self::Machine(setting) => setting.label(),
+            Self::Interface(setting) => network::label(setting.key),
+        }
+    }
+
+    /// The row this owner draws from what its own store currently holds.
+    fn row(self, documents: Documents<'_>) -> FieldRow {
+        match self {
+            Self::Desktop(setting) => setting.row(
+                documents.settings,
+                Offered {
+                    cursor_sets: documents.cursor_sets,
+                },
+            ),
+            Self::Machine(setting) => setting.row(documents.config),
+            Self::Interface(setting) => {
+                network::row_of(setting, documents.addressing.document(), documents.staged)
+            }
         }
     }
 }
@@ -585,6 +617,13 @@ pub enum Posture {
     Staged,
 }
 
+/// The per-interface keys the DNS pane stages: the resolver list alone.
+///
+/// The rest of an interface's entry is its addressing, which is the
+/// Ethernet pane's; a reader who came looking for name servers is offered
+/// the one key that decides them.
+const DNS_KEYS: [IfaceKey; 1] = [IfaceKey::DnsServers];
+
 /// Which settings a pane composes, in the order its groups list them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Composition {
@@ -600,10 +639,17 @@ pub enum Composition {
     Caching,
     /// The Networking → TCP/IP pane.
     TcpIp,
+    /// The Networking → Ethernet pane: one plate per configured interface,
+    /// discovered from the addressing capture.
+    Ethernet,
+    /// The Networking → DNS pane: the live resolver set the stack answered,
+    /// then each interface's own resolver list.
+    Dns,
 }
 
 impl Composition {
-    /// The groups this composition draws.
+    /// The groups this composition declares, which is none for one whose
+    /// plates are discovered from a document instead.
     const fn groups(self) -> &'static [GroupSpec] {
         match self {
             Self::Appearance => &APPEARANCE_GROUPS,
@@ -612,6 +658,7 @@ impl Composition {
             Self::LoginStartup => &LOGIN_GROUPS,
             Self::Caching => &CACHING_GROUPS,
             Self::TcpIp => &TCP_IP_GROUPS,
+            Self::Ethernet | Self::Dns => &[],
         }
     }
 
@@ -620,11 +667,33 @@ impl Composition {
     pub const fn posture(self) -> Posture {
         match self {
             Self::Appearance | Self::Accessibility | Self::Wallpaper => Posture::Immediate,
-            // Writing the machine's store is a re-authenticated run of the
-            // tool that owns it, which is not something to ask for per
-            // pointer sample.
-            Self::LoginStartup | Self::Caching | Self::TcpIp => Posture::Staged,
+            // Writing either of the machine's stores is a re-authenticated
+            // run of the tool that owns them, which is not something to ask
+            // for per pointer sample.
+            Self::LoginStartup | Self::Caching | Self::TcpIp | Self::Ethernet | Self::Dns => {
+                Posture::Staged
+            }
         }
+    }
+
+    /// Whether this composition's rows read the machine's boot-time store.
+    #[must_use]
+    pub(crate) const fn reads_machine(self) -> bool {
+        matches!(self, Self::LoginStartup | Self::Caching | Self::TcpIp)
+    }
+
+    /// Whether this composition's plates are discovered from the addressing
+    /// capture, and so exist only once an account has answered one.
+    #[must_use]
+    pub(crate) const fn reads_addressing(self) -> bool {
+        matches!(self, Self::Ethernet | Self::Dns)
+    }
+
+    /// Whether this composition states the live resolver set the stack
+    /// answered.
+    #[must_use]
+    pub(crate) const fn reads_resolvers(self) -> bool {
+        matches!(self, Self::Dns)
     }
 
     /// The registry keys an apply from this composition renders.
@@ -637,24 +706,48 @@ impl Composition {
         match self {
             Self::Appearance | Self::Accessibility => &SettingsKey::APPEARANCE,
             Self::Wallpaper => &SettingsKey::PINBOARD,
-            Self::LoginStartup | Self::Caching | Self::TcpIp => &[],
+            Self::LoginStartup | Self::Caching | Self::TcpIp | Self::Ethernet | Self::Dns => &[],
         }
     }
 
     /// Every setting label this composition shows, which is its whole
     /// contribution to the search index.
+    ///
+    /// A composition whose plates are discovered contributes the subject a
+    /// reader searches for rather than one term per interface: which
+    /// interfaces exist is what an authenticated run answers, and the index
+    /// is built before anyone has asked.
     #[must_use]
     pub fn labels(self) -> Vec<&'static str> {
-        self.groups()
-            .iter()
-            .flat_map(|group| group.settings.iter().map(|owner| owner.label()))
-            .collect()
+        match self {
+            Self::Ethernet => network::ADDRESSING_FACTS.to_vec(),
+            Self::Dns => network::RESOLVER_FACTS.to_vec(),
+            _ => self
+                .groups()
+                .iter()
+                .flat_map(|group| group.settings.iter().map(|owner| owner.label()))
+                .collect(),
+        }
     }
 
     /// The groups and the settable each of their rows carries, built from
     /// what each store currently holds and the choice spaces the desktop
     /// answered.
     fn build(self, documents: Documents<'_>) -> (Vec<FieldGroup>, Vec<Vec<Owner>>) {
+        match self {
+            Self::Ethernet => interfaces(documents, IfaceKey::ALL),
+            Self::Dns => {
+                let (mut groups, mut owners) = interfaces(documents, &DNS_KEYS);
+                groups.insert(0, network::resolver_group(documents.resolvers));
+                owners.insert(0, Vec::new());
+                (groups, owners)
+            }
+            _ => self.declared(documents),
+        }
+    }
+
+    /// The groups a composition that declares its own draws.
+    fn declared(self, documents: Documents<'_>) -> (Vec<FieldGroup>, Vec<Vec<Owner>>) {
         let mut groups = Vec::with_capacity(self.groups().len());
         let mut owners = Vec::with_capacity(self.groups().len());
         for spec in self.groups() {
@@ -662,15 +755,7 @@ impl Composition {
                 spec.caption,
                 spec.settings
                     .iter()
-                    .map(|owner| match owner {
-                        Owner::Desktop(setting) => setting.row(
-                            documents.settings,
-                            Offered {
-                                cursor_sets: documents.cursor_sets,
-                            },
-                        ),
-                        Owner::Machine(setting) => setting.row(documents.config),
-                    })
+                    .map(|owner| owner.row(documents))
                     .collect(),
             ));
             owners.push(spec.settings.to_vec());
@@ -679,22 +764,44 @@ impl Composition {
     }
 }
 
+/// The per-interface plates `documents` implies, with each row's owner.
+fn interfaces(documents: Documents<'_>, keys: &[IfaceKey]) -> (Vec<FieldGroup>, Vec<Vec<Owner>>) {
+    let (groups, settings) =
+        network::interface_groups(documents.addressing, documents.staged, keys);
+    (
+        groups,
+        settings
+            .into_iter()
+            .map(|rows| rows.into_iter().map(Owner::Interface).collect())
+            .collect(),
+    )
+}
+
 /// The stores a form's rows are built from.
 ///
-/// The machine's is an [`Option`] because it is *read*, and a reading that
-/// has not landed is not the same fact as a store of defaults: a row with
-/// no reading says so rather than showing a value the reader could not have
-/// set.
+/// The two the machine owns are [`Option`]s because they are *read*, and a
+/// reading that has not landed is not the same fact as a store of defaults:
+/// a row with no reading says so rather than showing a value the reader
+/// could not have set.
 #[derive(Copy, Clone, Debug)]
-pub struct Documents<'a> {
+pub(crate) struct Documents<'a> {
     /// The desktop's own settings document, which the caller always holds
     /// (an unpublished one means the documented defaults).
-    pub settings: &'a DesktopSettings,
+    pub(crate) settings: &'a DesktopSettings,
     /// The cursor sets the desktop answered with.
-    pub cursor_sets: &'a [CursorSetId],
+    pub(crate) cursor_sets: &'a [CursorSetId],
     /// The machine's boot-time configuration, or `None` while it has not
     /// been read.
-    pub config: Option<&'a SystemConfig>,
+    pub(crate) config: Option<&'a SystemConfig>,
+    /// What the addressing capture answered: the plates a networking
+    /// composition is discovered from, or what it says instead.
+    pub(crate) addressing: &'a Addressing,
+    /// What the reader has changed on the network store's rows since the
+    /// capture, which is what each of them now says.
+    pub(crate) staged: &'a [(IfaceSetting, String)],
+    /// The live resolver set the stack answered with, or `None` while the
+    /// reading has not landed.
+    pub(crate) resolvers: Option<&'a [NetServerAddr]>,
 }
 
 /// Which end of the group the cursor lands on when it steps into it.
@@ -762,10 +869,27 @@ pub struct Form {
     /// The working copy of the machine's store the staged rows edit, and
     /// `None` while it has not been read.
     config: Option<SystemConfig>,
-    /// What the machine's store actually holds, so a dirty row is the
+    /// What the machine's store actually holds, so a changed row is the
     /// difference between the two rather than a flag a revert could leave
     /// set.
     config_in_effect: Option<SystemConfig>,
+    /// What the addressing capture answered, which is both the document
+    /// every plate was discovered from and what a staged change to the
+    /// network store is measured against.
+    addressing: Addressing,
+    /// What the reader has changed on the network store's rows and what
+    /// each now says, with the empty value meaning the document no longer
+    /// declares that key.
+    ///
+    /// The edits rather than an edited document, because a document is only
+    /// ever checked whole: an interface cannot be moved from a static
+    /// address to DHCP by either half of that change alone, so a working
+    /// copy the engine would accept could not hold the reader's change half
+    /// made. The whole is checked once, when they apply it.
+    staged: Vec<(IfaceSetting, String)>,
+    /// The live resolver set the stack answered with, kept so a rebuild
+    /// restates it rather than dropping back to unmeasured.
+    resolvers: Option<Vec<NetServerAddr>>,
     /// The cursor sets the desktop answered with, kept so a rebuild offers
     /// the same choice space rather than collapsing to the built-in one.
     cursor_sets: Vec<CursorSetId>,
@@ -784,19 +908,23 @@ pub struct Form {
 impl Form {
     /// The form `composition` draws for the stores in `documents`.
     #[must_use]
-    pub fn new(composition: Composition, documents: Documents<'_>) -> Self {
-        let (groups, owners) = composition.build(documents);
-        Self {
+    pub(crate) fn new(composition: Composition, documents: Documents<'_>) -> Self {
+        let mut form = Self {
             composition,
-            groups,
-            owners,
+            groups: Vec::new(),
+            owners: Vec::new(),
             settings: documents.settings.clone(),
             config: documents.config.cloned(),
             config_in_effect: documents.config.cloned(),
+            addressing: documents.addressing.clone(),
+            staged: documents.staged.to_vec(),
+            resolvers: documents.resolvers.map(<[_]>::to_vec),
             cursor_sets: documents.cursor_sets.to_vec(),
             focus: 0,
             first: 0,
-        }
+        };
+        form.rebuild();
+        form
     }
 
     /// Rebuild every row from `settings`.
@@ -820,48 +948,156 @@ impl Form {
         self.rebuild();
     }
 
-    /// Put the working copy back to what the store holds.
+    /// Adopt the addressing an authenticated run answered.
+    ///
+    /// The staged edits go with it for the same reason the machine store's
+    /// working copy does: a change staged against a document that has
+    /// since been re-read is a change to a value that has moved.
+    pub(crate) fn adopt_addressing(&mut self, addressing: &Addressing) {
+        self.addressing = addressing.clone();
+        self.staged.clear();
+        self.rebuild();
+    }
+
+    /// Adopt the live resolver set the stack answered with.
+    pub(crate) fn adopt_resolvers(&mut self, resolvers: Option<&[NetServerAddr]>) {
+        self.resolvers = resolvers.map(<[_]>::to_vec);
+        self.rebuild();
+    }
+
+    /// Put the working copies back to what the stores hold.
     pub fn revert(&mut self) {
         self.config.clone_from(&self.config_in_effect);
+        self.staged.clear();
         self.rebuild();
+    }
+
+    /// The document the staged edits make of the capture.
+    ///
+    /// `None` where there is no capture to stage against; otherwise the
+    /// engine's own verdict on the whole document, which is the only level
+    /// at which it can be given — a change that moves an interface off a
+    /// static address is inconsistent until both of its halves are in.
+    pub(crate) fn proposal(&self) -> Option<Result<NetworkConfig, ConfigError>> {
+        let captured = self.addressing.document()?;
+        let mut draft = captured.edit();
+        for (setting, value) in &self.staged {
+            let Some(alias) = setting.alias(captured) else {
+                continue;
+            };
+            if value.is_empty() {
+                draft.unset(alias, setting.key);
+            } else if let Err(err) = draft.set(alias, setting.key, value) {
+                return Some(Err(err));
+            }
+        }
+        Some(draft.commit())
+    }
+
+    /// Take `written` as the document now in effect, after a run that
+    /// wrote it.
+    ///
+    /// Not a reading, and no substitute for one: `configure` applies every
+    /// named pair or none and both sides render through the same engine,
+    /// so a run that exited cleanly wrote exactly what was staged. What
+    /// the pane records is that acknowledgement, for the keys it named —
+    /// the only ones it claims to know. Leaving the pane drops the
+    /// capture, so a reader who wants the document as it now stands asks
+    /// for it again.
+    pub(crate) fn adopt_written(&mut self, written: NetworkConfig) {
+        self.addressing = Addressing::Listed(written);
+        self.staged.clear();
+        self.rebuild();
+    }
+
+    /// The addressing a returning reader would be shown, which an apply
+    /// moves on.
+    #[must_use]
+    pub(crate) const fn addressing(&self) -> &Addressing {
+        &self.addressing
+    }
+
+    /// Which settings this form composes.
+    #[must_use]
+    pub(crate) const fn composition(&self) -> Composition {
+        self.composition
+    }
+
+    /// The per-interface edits the reader has staged, so a pane rebuilt
+    /// around this form keeps them.
+    #[must_use]
+    pub(crate) fn staged(&self) -> &[(IfaceSetting, String)] {
+        &self.staged
     }
 
     /// The store settings this form's working copy differs from what is in
     /// effect on, each with the value it would be set to.
     ///
-    /// The whole of what an apply asks for, in registry order, so the one
-    /// elevated run writes every change together and the document is
-    /// rendered once.
+    /// The whole of what an apply asks for, as the `<key> <value>` pairs
+    /// the one elevated run takes, so every change is written together and
+    /// the document is rendered once. A key the reader cleared is spelled
+    /// as the empty value, which is how that registry says *remove this*.
     #[must_use]
-    pub fn pending(&self) -> Vec<(ConfigKey, &'static str)> {
-        let (Some(working), Some(effect)) = (self.config.as_ref(), self.config_in_effect.as_ref())
-        else {
-            return Vec::new();
-        };
+    pub fn pending(&self) -> Vec<(String, String)> {
         self.owners
             .iter()
             .flatten()
-            .filter_map(|owner| match owner {
-                Owner::Machine(setting) => {
-                    let value = setting.value(working);
-                    (value != setting.value(effect)).then_some((setting.key(), value))
-                }
-                Owner::Desktop(_) => None,
-            })
+            .filter_map(|owner| self.pending_for(*owner))
             .collect()
     }
 
-    /// Whether row `row` of group `group` differs from what is in effect.
-    #[must_use]
-    pub fn is_dirty(&self, group: usize, row: usize) -> bool {
-        let (Some(working), Some(effect)) = (self.config.as_ref(), self.config_in_effect.as_ref())
-        else {
-            return false;
-        };
-        match self.owners.get(group).and_then(|rows| rows.get(row)) {
-            Some(Owner::Machine(setting)) => setting.value(working) != setting.value(effect),
-            Some(Owner::Desktop(_)) | None => false,
+    /// What row `owner` would have written, or `None` where it matches
+    /// what is in effect.
+    fn pending_for(&self, owner: Owner) -> Option<(String, String)> {
+        match owner {
+            Owner::Desktop(_) => None,
+            Owner::Machine(setting) => {
+                let (working, effect) = (self.config.as_ref()?, self.config_in_effect.as_ref()?);
+                let value = setting.value(working);
+                (value != setting.value(effect))
+                    .then(|| (String::from(setting.key().name()), String::from(value)))
+            }
+            Owner::Interface(setting) => {
+                let captured = self.addressing.document()?;
+                let value = self.edited(setting)?;
+                if value == setting.held(captured).unwrap_or_default() {
+                    return None;
+                }
+                Some((setting.name(captured)?, value))
+            }
         }
+    }
+
+    /// What the reader has made `setting` say, or `None` where they have
+    /// not touched it.
+    fn edited(&self, setting: IfaceSetting) -> Option<String> {
+        self.staged
+            .iter()
+            .find(|(held, _)| *held == setting)
+            .map(|(_, value)| value.clone())
+    }
+
+    /// How many of group `group`'s rows differ from what is in effect.
+    fn changed_in(&self, group: usize) -> usize {
+        self.owners.get(group).map_or(0, |rows| {
+            rows.iter()
+                .filter(|owner| self.pending_for(**owner).is_some())
+                .count()
+        })
+    }
+
+    /// How many rows hold a value their store would refuse.
+    ///
+    /// What stops an apply: the reader is shown which, and corrects or
+    /// reverts it, rather than having part of their change silently
+    /// dropped by the tool that writes it.
+    #[must_use]
+    pub(crate) fn refused(&self) -> usize {
+        self.groups
+            .iter()
+            .flat_map(FieldGroup::rows)
+            .filter(|row| row.state().validation == ValidationState::Invalid)
+            .count()
     }
 
     /// Rebuild every row from the stores the form currently holds.
@@ -870,12 +1106,37 @@ impl Form {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
             config: self.config.as_ref(),
+            addressing: &self.addressing,
+            staged: &self.staged,
+            resolvers: self.resolvers.as_deref(),
         });
         self.groups = groups;
         self.owners = owners;
+        self.restate_badges();
         let last = self.groups.len().saturating_sub(1);
         self.focus = self.focus.min(last);
         self.first = self.first.min(last);
+    }
+
+    /// Say on each plate's own caption how many of its rows are staged, so
+    /// the band's count names a part of the pane rather than the whole.
+    ///
+    /// Set rather than rebuilt: a row holding a caret must survive its own
+    /// plate learning that it has changed.
+    pub(crate) fn restate_badges(&mut self) {
+        for index in 0..self.groups.len() {
+            let badge = match self.changed_in(index) {
+                0 => None,
+                1 => Some(StatusPill::new("1 change").with_tone(SignalRole::Warning)),
+                count => Some(
+                    StatusPill::new(alloc::format!("{count} changes"))
+                        .with_tone(SignalRole::Warning),
+                ),
+            };
+            if let Some(group) = self.groups.get_mut(index) {
+                group.set_badge(badge);
+            }
+        }
     }
 
     /// The physical height this form needs.
@@ -1043,11 +1304,6 @@ impl Form {
         let Some((group, action)) = acted else {
             return FormOutcome::Idle;
         };
-        let FieldAction::Selected { index } = action.action else {
-            // Every other action a slot can report is the list opening or
-            // closing, which changes the pixels and nothing else.
-            return FormOutcome::Changed;
-        };
         let Some(owner) = self
             .owners
             .get(group)
@@ -1056,6 +1312,24 @@ impl Form {
         else {
             return FormOutcome::Changed;
         };
+        match action.action {
+            FieldAction::Selected { index } => self.chose(owner, index),
+            // An entry reports every keystroke, and what it now holds is
+            // read straight back off the row: the working copy takes it
+            // where the store would, and says so on the row where it would
+            // not.
+            FieldAction::Text(TextAction::Edited | TextAction::Submitted) => {
+                self.typed(owner, group, action.row)
+            }
+            // Every other action a slot can report is a list opening or
+            // closing, or an entry dismissed, which changes the pixels and
+            // nothing else.
+            _ => FormOutcome::Changed,
+        }
+    }
+
+    /// Adopt the choice at `index` for `owner`.
+    fn chose(&mut self, owner: Owner, index: usize) -> FormOutcome {
         match owner {
             Owner::Desktop(setting) => {
                 let offered = Offered {
@@ -1085,6 +1359,67 @@ impl Form {
                 }
                 FormOutcome::Staged
             }
+            Owner::Interface(setting) => {
+                let ValueShape::Closed(values) = setting.key.shape() else {
+                    return FormOutcome::Changed;
+                };
+                // Fails closed on an index outside the list this very
+                // surface built, so a routing defect stages nothing.
+                let Some(chosen) = network::choice(values, index) else {
+                    return FormOutcome::Changed;
+                };
+                self.record(
+                    setting,
+                    match chosen {
+                        Choice::Undeclared => String::new(),
+                        Choice::Spelled(value) => String::from(value),
+                    },
+                );
+                FormOutcome::Staged
+            }
+        }
+    }
+
+    /// Adopt what the entry in row `row` of group `group` now holds.
+    ///
+    /// The row is left exactly as the reader typed it — the caret included
+    /// — and only its verdict moves: a value the key does not admit is
+    /// staged and marked refused rather than dropped, so the band can say
+    /// there is something to correct instead of quietly applying the rest.
+    fn typed(&mut self, owner: Owner, group: usize, row: usize) -> FormOutcome {
+        let Owner::Interface(setting) = owner else {
+            return FormOutcome::Changed;
+        };
+        let Some(FieldControl::Text(entry)) = self
+            .groups
+            .get(group)
+            .and_then(|held| held.rows().get(row))
+            .map(FieldRow::control)
+        else {
+            return FormOutcome::Changed;
+        };
+        let typed = String::from(entry.text());
+        let admits = network::admits(setting.key, &typed);
+        self.record(setting, typed);
+        if let Some(held) = self
+            .groups
+            .get_mut(group)
+            .and_then(|plate| plate.rows_mut().get_mut(row))
+        {
+            held.set_state(ControlState {
+                validation: network::verdict(admits),
+                ..held.state()
+            });
+        }
+        FormOutcome::Staged
+    }
+
+    /// Record what the reader has made `setting` say, replacing whatever
+    /// they last made it say.
+    fn record(&mut self, setting: IfaceSetting, value: String) {
+        match self.staged.iter_mut().find(|(held, _)| *held == setting) {
+            Some((_, held)) => *held = value,
+            None => self.staged.push((setting, value)),
         }
     }
 
@@ -1230,6 +1565,27 @@ impl Form {
     #[cfg(test)]
     pub(crate) fn groups(&self) -> &[FieldGroup] {
         &self.groups
+    }
+
+    /// Put `text` in group `group`'s row `row` and route the edit it
+    /// reports, through the same path a keystroke takes.
+    #[cfg(test)]
+    pub(crate) fn type_for_test(&mut self, group: usize, row: usize, text: &str) -> FormOutcome {
+        if let Some(FieldControl::Text(entry)) = self
+            .groups
+            .get_mut(group)
+            .and_then(|plate| plate.rows_mut().get_mut(row))
+            .map(FieldRow::control_mut)
+        {
+            entry.set_text(text);
+        }
+        self.acted(Some((
+            group,
+            tairix_controls::FieldGroupAction {
+                row,
+                action: FieldAction::Text(TextAction::Edited),
+            },
+        )))
     }
 
     /// Choose the value at `index` for group `group`'s row `row`, through

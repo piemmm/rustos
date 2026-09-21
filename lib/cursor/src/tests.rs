@@ -12,6 +12,7 @@ use crate::registry::{CursorRegistry, CursorRegistryError};
 use crate::store::CURSOR_BASE_SIDE_PX;
 use crate::theme::CursorTheme;
 use crate::vector::{Shape, VectorCursor};
+use tairix_svg::font::NoFonts;
 
 /// The side every built-in cursor here is rendered at: the reference side
 /// the desktop draws a pointer at before density and pointer size, which is
@@ -376,7 +377,7 @@ fn decodes_an_svg_cursor_with_its_hotspot() {
         <polygon points="1,1 1,17 5,13 9,21 12,19 8,12 14,12" fill="#000"/>
         <polygon points="2,3 2,14 5,11 8,17 9,16 6,10 11,10" fill="#fff"/>
     </svg>"##;
-    let cursor = crate::decode_svg(svg).expect("valid svg cursor");
+    let cursor = crate::decode_svg(svg, &mut NoFonts).expect("valid svg cursor");
     // The hotspot is scaled onto the decoder's shared design grid along with
     // the artwork, so it still points at the same place in the drawing.
     assert_eq!(cursor.design_size(), tairix_svg::DESIGN_GRID);
@@ -390,7 +391,7 @@ fn decodes_an_svg_cursor_with_its_hotspot() {
 #[test]
 fn decoded_svg_cursor_without_hotspot_pins_to_origin() {
     let svg = br##"<svg viewBox="0 0 16 16"><polygon points="0,0 0,12 4,9 7,15 9,8" fill="#fff"/></svg>"##;
-    let cursor = crate::decode_svg(svg).expect("valid svg cursor");
+    let cursor = crate::decode_svg(svg, &mut NoFonts).expect("valid svg cursor");
     assert_eq!(cursor.hotspot_x(), 0);
     assert_eq!(cursor.hotspot_y(), 0);
 }
@@ -398,7 +399,7 @@ fn decoded_svg_cursor_without_hotspot_pins_to_origin() {
 #[test]
 fn decoded_svg_cursor_rasterises() {
     let svg = br##"<svg viewBox="0 0 16 16"><polygon points="0,0 0,12 4,9 7,15 9,8" fill="#fff"/></svg>"##;
-    let cursor = crate::decode_svg(svg).expect("valid svg cursor");
+    let cursor = crate::decode_svg(svg, &mut NoFonts).expect("valid svg cursor");
     let image = cursor.rasterise(NATIVE).expect("renderable");
     assert!(image.surface().pixels().iter().any(|p| p.a > 0));
 }
@@ -406,7 +407,7 @@ fn decoded_svg_cursor_rasterises() {
 #[test]
 fn malformed_svg_cursor_fails_closed() {
     // The caller substitutes a built-in cursor rather than crashing.
-    assert!(crate::decode_svg(b"<svg></svg>").is_err());
+    assert!(crate::decode_svg(b"<svg></svg>", &mut NoFonts).is_err());
 }
 
 /// A distinctive SVG cursor (design grid 24, hotspot (1, 2)) so a loaded
@@ -447,7 +448,7 @@ fn is_loaded(cursor: &VectorCursor) -> bool {
 #[test]
 fn from_assets_loads_every_kind_when_all_present() {
     let source = TestSource::for_kinds(&CURSOR_KINDS);
-    let theme = CursorTheme::from_assets(&source);
+    let theme = CursorTheme::from_assets(&source, &mut NoFonts);
     for kind in CURSOR_KINDS {
         assert!(is_loaded(theme.cursor(kind)), "{kind:?} should be loaded");
     }
@@ -456,7 +457,7 @@ fn from_assets_loads_every_kind_when_all_present() {
 #[test]
 fn from_assets_empty_source_yields_builtin_set() {
     let source = TestSource::for_kinds(&[]);
-    let theme = CursorTheme::from_assets(&source);
+    let theme = CursorTheme::from_assets(&source, &mut NoFonts);
     assert_eq!(theme, CursorTheme::builtin());
     for kind in CURSOR_KINDS {
         assert!(!is_loaded(theme.cursor(kind)), "{kind:?} should fall back");
@@ -466,7 +467,7 @@ fn from_assets_empty_source_yields_builtin_set() {
 #[test]
 fn from_assets_mixes_loaded_and_builtin_fallbacks() {
     let source = TestSource::for_kinds(&[CursorKind::Arrow, CursorKind::Busy]);
-    let theme = CursorTheme::from_assets(&source);
+    let theme = CursorTheme::from_assets(&source, &mut NoFonts);
     let builtin = CursorTheme::builtin();
     assert!(is_loaded(theme.cursor(CursorKind::Arrow)));
     assert!(is_loaded(theme.cursor(CursorKind::Busy)));
@@ -497,7 +498,7 @@ fn from_assets_malformed_asset_falls_back_per_kind() {
         ],
         other: Some(b"<svg></svg>"),
     };
-    let theme = CursorTheme::from_assets(&source);
+    let theme = CursorTheme::from_assets(&source, &mut NoFonts);
     assert_eq!(
         theme.cursor(CursorKind::Arrow),
         CursorTheme::builtin().cursor(CursorKind::Arrow)
@@ -511,7 +512,7 @@ fn from_assets_set_registers_and_activates() {
     let mut registry = CursorRegistry::with_builtin();
     let id = set_id("On Disk");
     registry
-        .register(id, CursorTheme::from_assets(&source))
+        .register(id, CursorTheme::from_assets(&source, &mut NoFonts))
         .expect("fresh id");
     registry.set_active(id).expect("registered");
     assert!(is_loaded(registry.active_cursor(CursorKind::Arrow)));

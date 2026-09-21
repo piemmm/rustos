@@ -90,7 +90,9 @@ mod variations_tests;
 
 pub use engine::{CellGeometry, Contour, Face, GlyphRaster, OutlineSegment};
 pub use family::FontFamily;
-pub use store::{FamilyManifest, FamilyRole, FAMILY_MANIFEST, MAX_FACES, MAX_MANIFEST_BYTES};
+pub use store::{
+    FamilyManifest, FamilyRole, GenericFamily, FAMILY_MANIFEST, MAX_FACES, MAX_MANIFEST_BYTES,
+};
 pub use variations::{Axis, AxisSetting};
 
 /// The pixels-per-em the generated `lib/font` atlas is rasterised at.

@@ -1,10 +1,11 @@
 //! Synthetic emboldening: the coverage transform that turns the Regular
 //! outline the committed faces provide into the heavier weights a theme names.
 //!
-//! The four `/System/Fonts` faces ship one weight each, so a heavier run is
-//! rasterised from the *same* outline and then thickened here, exactly as a
-//! stroke-widening rasteriser would (`FreeType`'s `FT_Outline_Embolden` takes
-//! the equivalent approach on the outline). Thickening the 8-bit coverage
+//! A face declaring a `wght` axis is instanced at the requested weight and
+//! never reaches here. Only a face without one is rasterised from its single
+//! outline and then thickened, exactly as a stroke-widening rasteriser would
+//! (`FreeType`'s `FT_Outline_Embolden` takes the equivalent approach on the
+//! outline). Thickening the 8-bit coverage
 //! rather than the outline keeps the whole operation inside the sandbox that
 //! already owns the raster, needs no second rasterisation pass, and cannot
 //! move a control point.
@@ -20,39 +21,58 @@ use tairix_abi::font_ipc::FontWeight;
 /// Sub-pixel fixed-point unit the stroke width is carried in: 1/256 px.
 pub(crate) const SUBPIXEL: u32 = 256;
 
-/// The em divisor each weight's stroke is, or `0` for a weight that adds no
-/// stroke at all.
+/// The `wght` axis distance above Regular at which the stroke reaches its
+/// full [`BOLD_EM_DIVISOR`] strength.
+const BOLD_AXIS_SPAN: u32 = 300;
+
+/// The em fraction a fully bold synthetic stroke is: one twenty-fourth, the
+/// strength a stroke-widening rasteriser applies (`FreeType`'s
+/// `FT_GlyphSlot_Embolden` uses the same em/24).
+const BOLD_EM_DIVISOR: u32 = 24;
+
+/// Fixed-point denominator the em fraction below is carried in, chosen so the
+/// ramp resolves every axis step without floating point on a text path.
+const STROKE_EM_SCALE: u32 = 1 << 16;
+
+/// The synthetic stroke `weight` adds, as a fraction of the em scaled by
+/// [`STROKE_EM_SCALE`].
 ///
-/// `Bold` is one twenty-fourth of the em — the strength a stroke-widening
-/// rasteriser applies for a synthetic bold (`FreeType`'s
-/// `FT_GlyphSlot_Embolden` uses the same em/24) — and `Medium` is half of it,
-/// so the three weights read as an even progression rather than "regular and
-/// fat". `Regular` adds nothing, which is what keeps body text byte-for-byte
-/// what it was before weights existed.
-const fn stroke_em_divisor(weight: FontWeight) -> u32 {
-    match weight {
-        FontWeight::Regular => 0,
-        FontWeight::Medium => 48,
-        FontWeight::Bold => 24,
-    }
+/// The `wght` axis is continuous, so the stroke ramps linearly with the
+/// distance above Regular and reaches em/24 at Bold (700). Regular and
+/// anything lighter add nothing, which keeps body text byte-for-byte what it
+/// was. A weight past Bold goes on thickening, since a face without the axis
+/// has nothing else to render it with.
+fn stroke_em_numerator(weight: FontWeight) -> u32 {
+    let above = u32::from(
+        weight
+            .axis_value()
+            .saturating_sub(FontWeight::REGULAR.axis_value()),
+    );
+    // `above` is at most 600 and the scale a power of two well under 2^22, so
+    // the product cannot overflow.
+    above * (STROKE_EM_SCALE / BOLD_EM_DIVISOR) / BOLD_AXIS_SPAN
 }
 
-/// The stroke width, in 1/256 px, that `weight` adds to a glyph whose em is
-/// `em_subpixels` (also 1/256 px) tall as rendered.
+/// The stroke width `weight` adds to a glyph whose em measures `em` — in
+/// whatever unit `em` is given in, since the ramp is a pure fraction of the
+/// em. The coverage path passes the rendered em in 1/256 px; the outline
+/// path passes the protocol's em fraction, so a bold drawn as pixels and one
+/// drawn as geometry are the same weight.
 ///
 /// The arithmetic is integer throughout — a rendered em size is an exact
 /// rational of the cell height, so there is nothing for floating point to buy
 /// on a text path — and rounds to the nearest sub-pixel step, which keeps the
 /// thickening a smooth function of the rendered size: a heading and a caption
 /// in the same weight look like the same weight rather than one being
-/// disproportionately fat. The rounding term is added in a wider type so even
-/// an absurd em size yields a bounded stroke instead of wrapping.
-pub(crate) fn stroke_subpixels(em_subpixels: u32, weight: FontWeight) -> u32 {
-    let divisor = stroke_em_divisor(weight);
-    if divisor == 0 {
+/// disproportionately fat. The product is taken in a wider type so even an
+/// absurd em size yields a bounded stroke instead of wrapping.
+pub(crate) fn stroke_subpixels(em: u32, weight: FontWeight) -> u32 {
+    let numerator = stroke_em_numerator(weight);
+    if numerator == 0 {
         return 0;
     }
-    let rounded = (u64::from(em_subpixels) + u64::from(divisor) / 2) / u64::from(divisor);
+    let scale = u64::from(STROKE_EM_SCALE);
+    let rounded = (u64::from(em) * u64::from(numerator) + scale / 2) / scale;
     u32::try_from(rounded).unwrap_or(u32::MAX)
 }
 

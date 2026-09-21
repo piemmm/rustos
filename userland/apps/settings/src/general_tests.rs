@@ -83,9 +83,15 @@ fn press_command(shell: &mut Shell, index: usize) -> ShellOutcome {
     concluded
 }
 
-/// Press the band's applying command.
+/// Press the band's acting command, which is always its trailing one —
+/// a staged band's Apply, or the single command a pane with no working
+/// copy offers.
 fn press_action(shell: &mut Shell) -> ShellOutcome {
-    press_command(shell, 1)
+    let last = shell
+        .action_rects(WIDE, Scale::ONE, &theme())
+        .len()
+        .saturating_sub(1);
+    press_command(shell, last)
 }
 
 /// Type `text` into whichever field of the credential question holds the
@@ -130,7 +136,10 @@ fn a_staged_row_edits_a_working_copy_and_asks_for_nothing() {
     let form = shell.form_for_test().expect("a composed pane");
     assert_eq!(
         form.pending(),
-        alloc::vec![(tairix_sysconfig::Key::LoginType, "text")]
+        alloc::vec![(
+            tairix_sysconfig::Key::LoginType.name().to_string(),
+            "text".to_string()
+        )]
     );
 }
 

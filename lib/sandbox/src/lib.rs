@@ -66,6 +66,7 @@ pub mod loopback;
 pub mod proto;
 #[cfg(all(freestanding, feature = "program"))]
 pub mod rt;
+pub mod svgfonts;
 pub mod timesync;
 pub mod wire;
 pub mod worker;

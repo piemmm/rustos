@@ -104,7 +104,7 @@ impl<'a> PaintServers<'a> {
                 self.entries.push((id, node));
             }
         }
-        for child in &node.children {
+        for child in node.children() {
             self.walk(child);
         }
     }
@@ -311,7 +311,7 @@ impl<'a> PaintServers<'a> {
             content: chain
                 .iter()
                 .copied()
-                .find(|link| !link.children.is_empty())
+                .find(|link| link.has_children())
                 .unwrap_or(node),
         }))
     }
@@ -345,7 +345,7 @@ impl<'a> PaintServers<'a> {
     ) -> Result<Vec<GradientStop>, SvgError> {
         for node in chain {
             let mut stops: Vec<GradientStop> = Vec::new();
-            for child in node.children.iter().filter(|child| child.name == "stop") {
+            for child in node.children().filter(|child| child.name == "stop") {
                 if stops.len() == MAX_STOPS {
                     return Err(SvgError::TooComplex);
                 }

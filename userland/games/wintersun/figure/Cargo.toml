@@ -1,0 +1,28 @@
+[package]
+name = "tairix-wintersun-figure"
+description = "WinterSun's figure engine (plans/FIGURE.md FG2): the rig — a parent-relative joint hierarchy with per-axis rotation limits, parts bound to joints, named equipment sockets, the depth-sorted draw order, and the one body frame that serves every heading without per-direction artwork. no_std, no allocator, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The six outline primitives a part is drawn as, the one colour vocabulary,
+# and the `Placed` the scan converter fills. A rig places shapes; it does not
+# own a second outline or blend path.
+tairix-raster = { path = "../../../../lib/raster", version = "=0.0.0" }
+# `Facing` is the heading the simulation already speaks. A figure deriving its
+# own sense of which way round the world is would be a defect no single crate
+# could see.
+tairix-wintersun-net = { path = "../net", version = "=0.0.0" }
+# The `no_std` transcendentals the basis composition and the screen turn need,
+# shared so a rig rotates identically to everything else that rotates.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
+# Bounded storage for joints, parts and placed output, so the whole figure
+# path touches no allocator.
+tairix-inline = { path = "../../../../lib/inline", version = "=0.0.0" }
