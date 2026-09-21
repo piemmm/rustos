@@ -8,7 +8,14 @@ use tairix_wintersun_net::value::Facing;
 use super::{palette, rig, Bone, JOINT_COUNT, PART_COUNT, STANDING_HEIGHT};
 use crate::error::FigureError;
 use crate::frame::{Rotation, FORESHORTEN};
-use crate::rig::{Placement, Posture, Rig};
+use crate::rig::{Placement, Posture, Rig, Stance};
+
+/// A stance the placement cases share; what a stance refuses is `rig`'s own
+/// test, so these state only their own subject.
+#[track_caller]
+fn stance(facing: Facing, scale: f64, at: (f64, f64)) -> Stance {
+    Stance::new(facing, scale, at).expect("a real stance")
+}
 use crate::socket::{Side, Socket};
 
 const EAST: Facing = Facing(0);
@@ -120,7 +127,7 @@ fn a_swinging_limb_never_leaves_its_mass() {
     }
     let mut out = Placement::new();
     posture
-        .place(SOUTH, 1.0, (0.0, 0.0), &[], &mut out)
+        .place(&stance(SOUTH, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
 
     for bearing in [
@@ -196,7 +203,7 @@ fn the_foot_further_into_the_scene_draws_higher() {
     let rig = built();
     let mut out = Placement::new();
     Posture::rest(&rig)
-        .place(EAST, 1.0, (0.0, 0.0), &[], &mut out)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
 
     let row_of = |bone: Bone| {
@@ -332,7 +339,7 @@ fn the_figure_places_at_every_heading() {
     for step in 0..16u32 {
         let facing = Facing(u16::try_from(step * 4096).expect("inside a turn"));
         posture
-            .place(facing, 0.5, (40.0, 60.0), &[], &mut out)
+            .place(&stance(facing, 0.5, (40.0, 60.0)), &[], &mut out)
             .expect("places");
         assert_eq!(out.len(), PART_COUNT);
         for part in out.parts() {

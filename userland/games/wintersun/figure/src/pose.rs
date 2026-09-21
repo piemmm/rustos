@@ -282,6 +282,107 @@ impl Mask {
     }
 }
 
+/// Procedural deltas gathered over an articulated pose.
+///
+/// The layers above a clip — breathing, look-at, recoil — each state their
+/// effect as a signed delta per parameter rather than as a value, so they sum
+/// instead of overwriting one another and their order does not change the
+/// answer. The sum lands back inside the parameter's own range, which is what
+/// carries the in-limit guarantee through any number of layers: a delta is a
+/// further fraction of the joint's travel, and a fraction clamped to one is
+/// still the joint's own limit rather than past it.
+///
+/// A delta is not an angle. Parameter travel is scaled per side of rest, so a
+/// delta means "this much further toward that end of what the joint can do" —
+/// which is why a layer crowded out by a pose already at its extreme fades
+/// instead of fighting it.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Overlay {
+    delta: [f64; Param::COUNT],
+}
+
+impl Overlay {
+    /// No layer has written anything.
+    pub const NONE: Self = Self {
+        delta: [0.0; Param::COUNT],
+    };
+
+    /// Add `delta` to what `param` has gathered.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::ParamOutsideRange`] for a delta that is not finite.
+    /// A delta is unbounded otherwise: it is the sum that must land in range,
+    /// not each contribution, and two layers pulling opposite ways are
+    /// entitled to cancel.
+    pub fn add(&mut self, param: Param, delta: f64) -> Result<(), FigureError> {
+        if !delta.is_finite() {
+            return Err(FigureError::ParamOutsideRange);
+        }
+        self.delta[param.index()] += delta;
+        Ok(())
+    }
+
+    /// What `param` has gathered.
+    #[must_use]
+    pub fn get(&self, param: Param) -> f64 {
+        self.delta[param.index()]
+    }
+
+    /// The parameters some layer has moved.
+    #[must_use]
+    pub fn written(&self) -> Mask {
+        let mut mask = Mask::NONE;
+        for param in Param::ALL {
+            if self.delta[param.index()] != 0.0 {
+                mask = mask.with(param);
+            }
+        }
+        mask
+    }
+
+    /// Whether no layer has moved anything.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.written().is_empty()
+    }
+
+    /// Everything `other` gathered, added to this.
+    ///
+    /// Summing overlays rather than applying them one after another is what
+    /// keeps a layer's own effect independent of where it sits in the stack.
+    pub fn absorb(&mut self, other: &Self) {
+        for param in Param::ALL {
+            self.delta[param.index()] += other.delta[param.index()];
+        }
+    }
+
+    /// `pose` with every gathered delta added, each brought into range.
+    ///
+    /// # Errors
+    ///
+    /// Cannot fail for deltas this accumulator accepted: a finite sum brought
+    /// into a parameter's range is in it. The result is a `Result` because
+    /// [`Pose::set`] is the one gate on a value and the crate keeps no second
+    /// way past it.
+    pub fn applied(&self, pose: &Pose) -> Result<Pose, FigureError> {
+        let mut out = *pose;
+        for param in Param::ALL {
+            let delta = self.delta[param.index()];
+            if delta != 0.0 {
+                out.set(param, param.range().clamp(pose.get(param) + delta))?;
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl Default for Overlay {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 #[cfg(test)]
 #[path = "pose/tests.rs"]
 mod tests;

@@ -244,12 +244,144 @@ are held to them at build time. Runtime-loaded figure geometry from an
 untrusted source is refused by design; only a figure's *parameters* are
 validated data, and those arrive with a later item.
 
+## The layers over a clip
+
+A clip on its own looks keyframed. What sits above it is a short stack of
+pure functions of the pose, the state and the time, each with a property a
+host test holds it to rather than a screenshot a human squints at.
+
+Every layer but one states its effect as a signed **delta per parameter** — a
+`pose::Overlay` — rather than as a value. Deltas sum, so the order two layers
+run in cannot change the answer, and the sum is brought back inside each
+parameter's range on the way out. That is what carries the in-limit guarantee
+through the whole stack: a delta is a further fraction of the joint's travel,
+and a layer asking for more than is left fades rather than fighting the pose
+already there.
+
+The order is the contract. The animator picks clips and blending resolves a
+pose; breathing, look-at and recoil add their overlays; the planting solve
+consumes *that* pose and answers the final one, because it must re-aim legs
+the layers above have finished with; and the placement draws the result.
+
+### The gait is driven by distance, and its stride is measured
+
+A cycle advanced by a timer slides: change the speed and the feet keep their
+old cadence, so they skate, and a figure held still walks on the spot.
+`gait::Gait` advances the phase by the **distance travelled** instead, so a
+foot is planted as a function of position and cannot move while the ground
+under it does not. The same ground covered gives the same phase however it
+was divided into frames.
+
+That leaves the stride — how far one cycle carries the figure — and authored
+by hand it is a guess that puts the slide straight back. `Gait::fitted`
+measures it from the clip and the rig: it finds the span of the cycle the
+foot is on the ground for, and asks how far the foot travels backward through
+the body over it, which is exactly how far the body must travel forward for
+the foot to stay still. `Gait::slide` then reports the residual, so "the feet
+do not skate" is a bound rather than an opinion — on the walk the tests
+author by solving the leg, the fitted stride recovers the authored one and
+the planted foot moves under a hundredth of a stride over the ground.
+
+### Each foot on its own ground, not on the ground's average
+
+The world has real slopes, so a figure standing across a gradient has one
+foot higher than the other. Drawn from the root's height both sit level, and
+the camera looks straight down at the line where they meet the ground — the
+uphill foot floats and the downhill one sinks. This is a correctness
+requirement rather than polish: the error is worst exactly where the eye
+already is.
+
+`plant::Legs` solves it. A leg cannot stretch, so the lowest foot is the
+constraint: the root drops until that leg reaches its ground, and the other
+takes up the difference by folding. Each foot keeps the plan position the
+animation gave it and changes only its height, so a walk still swings its
+legs where the clip said — the hip is re-aimed and the knee re-folded to put
+the ankle at the new height, and the ankle turns back by as much as the leg
+above it turned, so a toe-off stays a toe-off.
+
+On flat ground every target *is* the ankle the animation already produced, so
+the whole solve is an identity and a figure on the level is drawn exactly as
+its clip authored it. That property is a test, and it is the one that stops
+the planter quietly redrawing every figure in the game.
+
+How much height difference the legs can absorb is the rig's own statement —
+the span between a straight leg and a fully folded one, which for the shipped
+humanoid is about thirty units against an eighteen-unit stance, a slope of
+fifty-nine degrees. Past that the figure leans into the hill instead, and
+what even the lean cannot reach is *reported* as a miss rather than fudged,
+because a figure standing somewhere no figure could stand is the simulation's
+defect to see.
+
+### The root is the placement's, not the pelvis joint's
+
+A lift, a crouch's drop and a slope's lean are a rigid transform of the whole
+body, carried on the `Stance` and seeded into the resolve as the frame the
+parentless joints hang in — so it costs the resolve nothing beyond the value
+it already inherits, and the projection and the screen turn pick it up with
+no second path.
+
+Rolling the pelvis *joint* instead was measured and rejected twice over. Its
+roll limit is 0.20 rad, which across an eighteen-unit stance absorbs 3.58
+units of height difference — a slope of 11.2 degrees, against the 59 the
+planting reach already handles. A fallback that saturates five times earlier
+than the thing it backs up is not one. Independently, a pelvis roll pivots
+about the pelvis and swings the feet sideways *through* the ground, where a
+whole-figure lean must pivot about the ground contact — which is the body
+frame's origin, and so the placement's.
+
+### One spring, solved rather than integrated
+
+Recoil, follow-through and the sway of a cloak are all a value pulled toward
+a target and resisted in proportion to its speed, so there is one
+`spring::Spring` and no second curve to drift from it. It steps by evaluating
+the oscillator's closed-form solution over the interval rather than
+integrating: a spring stepped by Euler gains energy when the frame is long
+against its own period, and the frame that arrives late is exactly the one on
+a loaded machine. The envelope here is at most one for any non-negative step,
+so a stall produces a settled figure rather than a detonated one, and
+stepping twice over half an interval gives the same answer as stepping once.
+
+A recoil is an **impulse**, not a displacement: the hand has not moved yet on
+the frame the blow lands, and it is the speed it picks up that reads as
+weight. Its target is the animation itself, so it vanishes completely once
+spent, and the overshoot on the way back — a damping ratio below one — is the
+follow-through whose absence makes an attack feel weightless. Sway is driven
+by the carrier's **acceleration** rather than its velocity, so a figure moving
+steadily has its cloak hanging straight behind it and one that starts, stops
+or turns throws it; wind adds to the same drive with no second path.
+
+### Look-at, breathing, root motion, and the shadow
+
+Look-at turns head and spine toward a target as a delta over whatever clip is
+playing, splitting the turn between the two so the shares always sum to the
+whole — the split decides how the figure looks doing it, not where it ends up
+looking. A target past the neck's travel is not refused: the figure turns as
+far as it can and the range clamp stops it there.
+
+Breathing is a slow cycle too small to read as an animation and impossible to
+miss when it stops, which is what keeps an idle figure from reading as a
+paused game.
+
+Root motion is the one thing a clip may say about *movement*, and it says only
+the pacing: a `clip::Travel` is the fraction of the move spent against the
+phase, running from none of it to all of it, and the simulation multiplies
+that by whatever displacement it actually authorised. A client cannot move
+itself by playing an animation, and the animation and the movement cannot
+disagree about how the move was paced.
+
+The contact shadow is a circle on the ground raked away from the light and
+then foreshortened on the way to the screen. Those are two different
+stretches, so the result is an ellipse whose axes are neither — taking the
+light's stretch as the screen's puts the long axis visibly wrong at every
+bearing but four. `shadow::Contact` composes the two maps and recovers the
+axes of what comes out, which is exact at every bearing for a handful of
+arithmetic. A rising figure's shadow stays on the ground and slides away from
+the light as it thins, which is the cue that reads as height rather than as
+the figure growing.
+
 ## What comes next
 
-The procedural layers over a clip — gait phase driven by distance travelled
-rather than a timer, look-at, recoil and follow-through, cloth and hair sway,
-breathing, root motion, a contact shadow, and each foot planted on its own
-terrain height rather than on the ground's average; then the contact-sheet
-harness that makes readability, palette conformance, joint limits, foot
-slide, motion continuity and loop closure measured, gated properties rather
-than opinions.
+The contact-sheet harness that makes readability, palette conformance, joint
+limits, foot slide, motion continuity and loop closure measured, gated
+properties rather than opinions; then the species and build parameter space,
+and the designer that drives it.

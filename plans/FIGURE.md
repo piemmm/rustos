@@ -39,7 +39,7 @@ controls), `lib/raster` and `lib/util::mathf` rustdoc.
 | FG1 | `lib/raster::shape`: the six outline primitives, the tracer, the build-time vertex bounds, and `cinder` migrated onto them with its existing tests as the acceptance gate | done |
 | FG2 | `wintersun/figure`: the rig — skeleton, joint hierarchy with limits, named equipment sockets, draw order, and the one body frame that serves every heading | done |
 | FG3 | Pose parameters, clips (keyframed parameter curves with easing), clip blending, and the transition state machine | done |
-| FG4 | Procedural layers over a clip: gait phase from distance travelled, look-at, recoil, cloth and hair sway, breathing, per-foot terrain planting, root motion and the figure's root placement, contact shadow | planned |
+| FG4 | Procedural layers over a clip: gait phase from distance travelled, look-at, recoil, cloth and hair sway, breathing, per-foot terrain planting, root motion and the figure's root placement, contact shadow | done |
 | FG5 | `cargo xtask artsheet`: the contact-sheet renderer, the committed goldens, and the automated quality checks | planned |
 | FG6 | The parameter space: species and build parameters, the palette model, validated bounds, and the compact serialised form a character record stores | planned |
 | FG7 | The designer engine: the parameter model, live preview, presets, and randomised-but-plausible generation | planned |
@@ -214,6 +214,23 @@ crouch is authored as hip, knee and ankle bend whose ground contact FG4
 resolves. The pelvis is left undriven by any parameter for the same reason:
 it is the root, and turning it tilts the whole figure, which is the slope
 response FG4 owns.
+
+**The root transform is the placement's, not the pelvis joint's.** FG4 carries
+the figure's root as a rigid transform of the whole body — a `Body` offset in
+figure-local units and a `Rotation` — held on the `Stance` that `Posture::place`
+takes, and seeded into the resolve as the frame the parentless joints hang in.
+Two measurements decide it against the alternative of rolling the pelvis joint.
+The pelvis's roll limit is +/-0.20 rad, which across the humanoid's 18-unit
+stance absorbs 3.58 units of height difference, a slope of 11.2 degrees; the
+planting reach the tilt exists to back up is the leg's own span travel, 29.9
+units, a slope of 59.0 degrees. A fallback that saturates five times earlier
+than the thing it backs up is no fallback. Independently, a pelvis roll pivots
+about the pelvis and swings the feet sideways through the ground, where a
+whole-figure tilt must pivot about the ground contact — which is the body
+frame's origin and so the placement's, not any joint's. Offsetting the surface
+ground point instead was rejected for a third reason: it is a second, unscaled
+convention beside the figure-local units every other authored length uses, and
+it drops the depth component a root displacement has.
 
 **Blending weighs each parameter, not each pose.** A parameter is weighed
 only against the clips that had an opinion about it, which is what makes a
@@ -422,13 +439,60 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
   value; an outward splay is outward on both sides and equal in magnitude;
   each half of a lopsided limit is scaled on its own, so rest stays rest.
   `no_std` with no allocator, built on all four Tier-1 targets.
-- Layers: a walk of known distance plants a known number of steps with foot
-  slide inside its bound; a figure standing and walking across a known slope
-  has each foot at its own terrain height with the pelvis and knee absorbing
-  the difference inside the joint limits, and a slope beyond the reach tilts
-  the figure rather than tearing the rig; root motion displaces by the clip's
-  own curve and never by more than the simulation authorised; look-at respects limits; springs are stable (no
-  divergence) for a bounded input; breathing is non-zero at idle.
+- Layers: the gait phase follows distance rather than frames, so the same
+  ground covered gives the same phase however it was divided and a figure
+  held still does not walk on the spot; a known distance completes a known
+  number of cycles, forward and backward, and the phase never leaves the
+  half-open cycle. The stride is *measured* — fitted from the clip and rig,
+  it recovers the one the test's walk was authored with to within a
+  twentieth, and the planted foot then slides under a hundredth of a stride;
+  a stride that is not the clip's own slides at least ten times further,
+  which is what makes the fitting earn its answer. A clip whose foot never
+  lifts has no stride and is refused rather than given an invented one, and
+  a walk authored from mid-stance measures the same as one from the head of
+  the cycle.
+- Planting: on flat ground the solve is an **identity** — every parameter
+  unchanged and no root at all — so a figure on the level is drawn exactly as
+  its clip authored it; off it, each foot lands on its own terrain height to
+  within a ten-thousandth, verified by resolving the solved pose rather than
+  by trusting the solver's own arithmetic. The root drops to the lowest foot
+  and never lifts; a slope inside the reach leaves the figure square and one
+  past it leans, handed by which foot is higher; ground no leg can reach is
+  reported as a miss rather than fudged. Every solved pose stays inside its
+  parameter ranges and is posturable, across both a rest and a striding pose
+  and the whole span of slopes. Reach and stance come from the rig's own
+  joint table, and a leg whose joints are not a chain is refused.
+- Root placement: a lift moves every part by exactly itself and a tilt turns
+  the figure about its ground contact rather than flinging a part outward;
+  an unreal scale, anchor, offset or tilt is refused where the stance is
+  built rather than where it is drawn.
+- Springs: no step of any length, over six damping ratios from undamped to
+  heavily overdamped, gains amplitude or leaves the numbers — the closed
+  form is path-independent, so splitting a step in two gives the same answer
+  as taking it whole. Every regime settles on its target; only an
+  underdamped one overshoots, which is the follow-through. A recoil moves
+  nothing until time passes, touches only what it struck, overshoots on the
+  way back, and settles onto the clip. A sway hangs straight under steady
+  motion, leans against an acceleration and with a wind, cannot be driven
+  past its limit by any input, and comes back to rest after a thirty-second
+  frame.
+- Look-at: a target straight ahead moves nothing and one on the head itself
+  is left alone; a reachable target is looked straight at; every target
+  leaves the head nearer to it than it started; one out of reach stops at
+  the limit with the pose still posturable; and the spine share moves work
+  between spine and neck without changing the total turn.
+- Root motion: the curve runs from none of the move to all of it or is
+  refused, values outside that are refused, and the distance is the
+  simulation's — so a move delivers exactly what was authorised however the
+  clip paced it, including an anticipation that draws back first.
+- Contact shadow: an overhead light lays the footprint flat and
+  foreshortened; the solved screen ellipse matches the ground ellipse swept
+  and projected the long way round, at every bearing; a lower light rakes it
+  out along its own bearing only, and one near the horizon stops raking
+  rather than running away; a rising figure's shadow slides away along the
+  light and thins, and a figure below its ground point casts as if on it.
+- Breathing is non-zero at idle, never exceeds its depth, moves chest and
+  shoulders together, and leaves an already-extreme pose inside its ranges.
 - `artsheet` verify mode fails on any drift and is part of `ci`; every §4 check
   runs over every sheet.
 - Parameter records: bounds enforced, malformed refused, round-trip exact,

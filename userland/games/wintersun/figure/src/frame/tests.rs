@@ -252,3 +252,32 @@ fn a_rotation_reports_an_unreal_angle() {
     assert!(!Rotation::new(f64::NAN, 0.0, 0.0).is_real());
     assert!(!Rotation::new(0.0, f64::INFINITY, 0.0).is_real());
 }
+
+/// A basis is orthonormal, so stating a direction in the frame it is held in
+/// and reading it back in the frame itself needs no solve — which is what
+/// lets a layer name a target in the body frame and hand a joint the
+/// direction in its parent's.
+#[test]
+fn a_basis_reads_a_held_direction_back_exactly() {
+    let basis = Basis::of(Rotation::new(0.31, -0.47, 0.19));
+    for local in [
+        Body::FORWARD,
+        Body::SIDE,
+        Body::UP,
+        Body::new(3.0, -7.5, 2.25),
+        Body::ORIGIN,
+    ] {
+        let held = basis.apply(local);
+        let back = basis.unapply(held);
+        for (a, b) in [
+            (back.forward, local.forward),
+            (back.side, local.side),
+            (back.up, local.up),
+        ] {
+            // A composed rotation is orthonormal to within its own
+            // transcendentals, so the round trip is exact to well under a
+            // pixel rather than to the last bit.
+            assert!(mathf::fabs(a - b) < 1e-9, "{a} against {b}");
+        }
+    }
+}

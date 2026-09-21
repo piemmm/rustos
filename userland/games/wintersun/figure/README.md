@@ -1,9 +1,12 @@
 # tairix-wintersun-figure
 
-WinterSun's figure engine: the rig a character exists as before anything
-animates it — a parent-relative joint hierarchy with per-axis rotation limits,
-parts bound to joints, named equipment sockets, the depth-sorted draw order,
-and the one body frame that serves every heading (`plans/FIGURE.md` FG2).
+WinterSun's figure engine: the rig a character exists as, the clips that move
+it, and the procedural layers that stop it looking keyframed — a
+parent-relative joint hierarchy with per-axis rotation limits, parts bound to
+joints, named equipment sockets, the depth-sorted draw order, the one body
+frame that serves every heading, and over all of it a gait driven by distance
+travelled, per-foot terrain planting, look-at, recoil, sway, breathing and a
+contact shadow (`plans/FIGURE.md` FG2–FG4).
 Stability tier: **experimental** — nothing has shipped, so a type changes in
 place until it does.
 
@@ -76,6 +79,14 @@ mirroring is the per-direction branch the body frame exists to avoid.
 | `clip` | `Clip`: a keyed `Curve` per parameter with an `Easing` per segment, a duration, a `Loop` mode, and the named `Event`s at phases along it. |
 | `blend` | `Blend`: weighted accumulation of poses and clips, weighed per parameter so a mask means something. |
 | `transition` | `Transitions` — states, clips and per-edge cross-fades, validated at load — and the `Animator` that walks one. |
+| `gait` | `Gait`: the cycle phase driven by distance travelled, and the stride *measured* from a clip and rig so the planted foot does not skate. |
+| `plant` | `Legs`/`Planted`: each foot solved onto its own terrain height, the root dropping to the lowest and leaning past the legs' reach. |
+| `spring` | The one damped spring — solved in closed form, so no frame length can make it diverge — that recoil and sway are both built from. |
+| `look` | `Look`: the head and spine turned toward a target, as a delta over whatever clip is playing. |
+| `recoil` | `Recoil`: impulses on parameters springing back to the clip, the overshoot being the follow-through. |
+| `sway` | `Sway`: cloth, hair and tails lagging the acceleration that carries them. |
+| `breath` | `Breath`: the small always-on cycle that stops an idle figure reading as a paused one. |
+| `shadow` | `Contact`/`Light`: the ground ellipse under the feet, solved through the projection rather than approximated. |
 
 ## An animation is authored in parameters, not rotations
 
@@ -100,8 +111,12 @@ mathematically inside.
 
 Root motion is deliberately *not* a parameter. A jump's lift, the pelvis drop
 of a crouch and a dodge's displacement cannot be decided without the ground
-the feet are on, so they live with the terrain solve in FG4 rather than split
-across both.
+the feet are on, so they live with the terrain solve rather than split across
+both — as the figure's whole-body root transform on the `Stance`, never as a
+joint. The procedural layers keep the guarantee too: each states its effect as
+a signed `Overlay` delta, the deltas sum, and the sum lands back inside the
+parameter's range, so a layer crowded out by a pose already at its extreme
+fades instead of fighting it.
 
 ## Bounds, and what they are not
 
@@ -117,14 +132,34 @@ Nothing here allocates. A `Rig` holds fixed arrays, and `Placement` is a
 caller-held buffer sized to the largest figure, so drawing a scene of figures
 costs no allocation at all.
 
+## The layer order
+
+One pass, and the order is the contract:
+
+1. The `Animator` picks clips and cross-fades them; `Blend` resolves a `Pose`.
+2. `Breath`, `Look` and `Recoil` each add an `Overlay`; the overlays sum and
+   `Overlay::applied` brings the result back into range.
+3. `Legs::plant` consumes that pose and answers the final one *plus* the root
+   transform — it runs last because it must re-aim legs the layers above have
+   finished with.
+4. `Rigging::posture` and `Posture::place` draw it in the `Stance` the root
+   transform went into. `Sway` turns the gear hung on its sockets, and the
+   `Contact` shadow is painted first, under everything.
+
+## Measured, not asserted
+
+Two numbers carry the parts that would otherwise be opinion. `Gait::fitted`
+derives the stride from the clip and the rig — the foot's backward travel
+through the body over the span it is on the ground — and `Gait::slide` reports
+what is left, so "the feet do not skate" is a bound a test holds rather than
+something a human squints at. `Planted::miss` reports how far a foot ended up
+from the ground it was asked for, so a figure standing somewhere no figure
+could stand is the simulation's defect to see rather than a fudged frame.
+
 ## What is not here
 
-The procedural layers over a clip are FG4: gait phase driven by distance
-travelled rather than a timer, look-at, recoil and follow-through, cloth and
-hair sway, breathing, each foot planted on its own terrain height, root
-motion, and the contact shadow. The contact-sheet art harness that makes
-quality a measured property is FG5; the species/build parameter space and the
-designer are FG6/FG7.
+The contact-sheet art harness that makes quality a measured property is FG5;
+the species/build parameter space and the designer are FG6/FG7.
 
 Clips and machines are *code* here, assembled from borrowed static tables and
 checked once. Loading either from an untrusted source is a later item and

@@ -294,6 +294,14 @@ pub fn acos(x: f64) -> f64 {
     atan2(sqrt(1.0 - c * c), c)
 }
 
+/// The arcsine of `x` in `-PI/2..=PI/2`, with the domain clamped to `-1..=1`
+/// so an out-of-range input answers an endpoint rather than a `NaN`.
+#[must_use]
+pub fn asin(x: f64) -> f64 {
+    let c = clamp(x, -1.0, 1.0);
+    atan2(c, sqrt(1.0 - c * c))
+}
+
 /// Largest argument [`exp`] evaluates; above it the true result exceeds a
 /// double and the answer saturates.
 const EXP_MAX_ARG: f64 = 709.0;

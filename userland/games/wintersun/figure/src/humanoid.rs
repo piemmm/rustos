@@ -27,6 +27,7 @@ use tairix_raster::shape::Shape;
 use crate::error::FigureError;
 use crate::frame::Body;
 use crate::joint::{Joint, JointId, Limit, Limits, MAX_JOINTS};
+use crate::plant::Leg;
 use crate::pose::{Mask, Param};
 use crate::rig::{Part, Rig, MAX_PARTS};
 use crate::rigging::{Axis, Drive, Rigging};
@@ -170,7 +171,7 @@ pub fn rig() -> Result<Rig, FigureError> {
 
     spine(&mut joints)?;
     arms(&mut joints)?;
-    legs(&mut joints)?;
+    leg_joints(&mut joints)?;
     trunk(&mut parts)?;
     limbs(&mut parts)?;
     sockets(&mut mounts)?;
@@ -265,7 +266,7 @@ fn arms(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
 }
 
 /// Both legs, mirrored from one pass.
-fn legs(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
+fn leg_joints(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
     for side in Side::BOTH {
         let across = side.across();
         push_joint(
@@ -749,6 +750,28 @@ const fn ankle(side: Side) -> Drive {
         Bone::Ankle(side).joint(),
         Axis::Pitch,
     )
+}
+
+/// The humanoid's two legs, for the planting solve.
+///
+/// Named here because a leg is the rig's own anatomy: the solve knows what a
+/// two-bone chain is without knowing what a humanoid is, so which joints
+/// those are is stated once, beside the skeleton that has them.
+#[must_use]
+pub fn legs() -> [Leg; 2] {
+    [leg(Side::Left), leg(Side::Right)]
+}
+
+const fn leg(side: Side) -> Leg {
+    Leg {
+        hip: Bone::Hip(side).joint(),
+        knee: Bone::Knee(side).joint(),
+        ankle: Bone::Ankle(side).joint(),
+        swing: Param::HipSwing(side),
+        splay: Param::HipSplay(side),
+        bend: Param::KneeBend(side),
+        flex: Param::AnkleAngle(side),
+    }
 }
 
 /// `rig` with the humanoid pose parameters bound to its joints.

@@ -242,6 +242,22 @@ impl Basis {
             .plus(self.up.scaled(local.up))
     }
 
+    /// `held`, which is stated in the frame this one is held in, expressed
+    /// in this frame.
+    ///
+    /// The inverse of [`Self::apply`]. A basis is orthonormal, so the inverse
+    /// is the transpose and needs no solve — which is what lets a layer state
+    /// a target in the body frame and hand a joint the direction in its
+    /// parent's.
+    #[must_use]
+    pub fn unapply(self, held: Body) -> Body {
+        Body::new(
+            self.forward.dot(held),
+            self.side.dot(held),
+            self.up.dot(held),
+        )
+    }
+
     /// `child`, which is stated in this frame, expressed in the frame this
     /// one is held in.
     #[must_use]

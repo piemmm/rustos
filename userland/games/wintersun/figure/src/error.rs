@@ -90,6 +90,28 @@ pub enum FigureError {
     EdgesNotAscending,
     /// A state nothing leads to, which a figure could never enter.
     StateUnreachable,
+    /// A springing value or velocity that is not finite.
+    MotionUnreal,
+    /// A spring rate or damping ratio that is not a real one.
+    SpringUnreal,
+    /// A gait stride that is not a finite positive distance.
+    StrideUnreal,
+    /// A travelled distance that is not finite.
+    DistanceUnreal,
+    /// Leg joints that are not a hip-knee-ankle chain, so no two-bone solve
+    /// could reach a foot along them.
+    LegNotAChain,
+    /// A terrain height that is not finite.
+    GroundUnreal,
+    /// A root-motion value outside the fraction of the move it must be.
+    TravelOutsideRange,
+    /// A root-motion curve that does not run from none of the move to all of
+    /// it, so playing the clip out would not deliver what was authorised.
+    TravelNotSpanning,
+    /// A light that is not a real bearing and elevation above the horizon.
+    LightUnreal,
+    /// Too few samples to measure a cycle over.
+    SamplesTooFew,
 }
 
 impl fmt::Display for FigureError {
@@ -130,6 +152,16 @@ impl fmt::Display for FigureError {
             Self::BlendNotPositive => "cross-fade not a finite positive number of seconds",
             Self::EdgesNotAscending => "edges out of order or repeated",
             Self::StateUnreachable => "state unreachable from the initial one",
+            Self::MotionUnreal => "springing value or velocity not finite",
+            Self::SpringUnreal => "spring rate or damping ratio not a real one",
+            Self::StrideUnreal => "gait stride not a finite positive distance",
+            Self::DistanceUnreal => "travelled distance not finite",
+            Self::LegNotAChain => "leg joints are not a hip-knee-ankle chain",
+            Self::GroundUnreal => "terrain height not finite",
+            Self::TravelOutsideRange => "root-motion value outside 0..=1",
+            Self::TravelNotSpanning => "root-motion curve does not span the move",
+            Self::LightUnreal => "light not a real bearing and elevation",
+            Self::SamplesTooFew => "too few samples to measure a cycle over",
         };
         f.write_str(text)
     }

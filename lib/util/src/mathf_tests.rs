@@ -8,8 +8,8 @@
 use core::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, SQRT_2};
 
 use super::{
-    acos, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, round, round_i32,
-    sin, sqrt, tan, trunc,
+    acos, asin, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, round,
+    round_i32, sin, sqrt, tan, trunc,
 };
 
 /// The accuracy every transcendental function is held to: far finer than the
@@ -175,6 +175,28 @@ fn arccosine_matches_the_reference_and_clamps_its_domain() {
     // endpoint is the honest answer there, never a `NaN`.
     close(acos(1.000_000_1), 0.0);
     close(acos(-1.000_000_1), PI);
+}
+
+#[test]
+fn arcsine_matches_the_reference_and_clamps_its_domain() {
+    close(asin(0.0), 0.0);
+    close(asin(1.0), FRAC_PI_2);
+    close(asin(-1.0), -FRAC_PI_2);
+    close(asin(0.5), PI / 6.0);
+    close(asin(-0.25), -0.252_680_255_142_078_64);
+    close(asin(1.000_000_1), FRAC_PI_2);
+    close(asin(-1.000_000_1), -FRAC_PI_2);
+}
+
+/// The two inverses answer the same triangle, so their sum is the right angle
+/// between the sides they each name.
+#[test]
+fn arcsine_and_arccosine_are_complementary() {
+    let mut x = -1.0;
+    while x <= 1.0 {
+        close(asin(x) + acos(x), FRAC_PI_2);
+        x += 0.05;
+    }
 }
 
 /// Round-tripping an angle through its own tangent is the sharpest check that

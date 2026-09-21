@@ -37,37 +37,78 @@
 //! scaled into the interval, so a bent-backwards elbow is not a pose that is
 //! rejected, it is one that cannot be spelled.
 //!
+//! **The layers above a clip are deltas, and planting has the last word.**
+//! Breathing, look-at and recoil each state their effect as a signed
+//! [`Overlay`] rather than as a value, so they sum instead of overwriting
+//! one another and the sum lands back inside each parameter's range — the
+//! in-limit guarantee survives any number of them. [`Legs::plant`] then runs
+//! *last*, because it must re-aim legs the layers above have finished with:
+//! it consumes their pose and answers the final one together with the
+//! figure's root transform. On flat ground that solve is an identity, so a
+//! figure on the level is drawn exactly as its clip authored it.
+//!
+//! **The root is the placement's, not a joint's.** A jump's lift, the pelvis
+//! drop of a crouch and a slope's lean are a rigid transform of the whole
+//! body, carried on the [`Stance`] and seeded into the resolve as the frame
+//! the parentless joints hang in. It pivots about the ground contact, which
+//! is where a figure leaning into a hill must turn and is no joint's origin;
+//! and a pelvis limit tight enough to keep a spine sane is nowhere near wide
+//! enough for terrain.
+//!
+//! # The order it runs in
+//!
+//! 1. [`Animator`] picks the clips, [`Blend`] resolves a [`Pose`].
+//! 2. [`Breath`], [`Look`] and [`Recoil`] add their overlays; the sum is
+//!    applied.
+//! 3. [`Legs::plant`] solves the feet onto the ground and answers the root.
+//! 4. [`Rigging::posture`] and [`Posture::place`] draw it; [`Sway`] turns the
+//!    gear, and [`Contact`] lays the shadow under it all.
+//!
 //! # What is not here
 //!
-//! The procedural layers over a clip — gait phase from distance travelled,
-//! look-at, recoil, cloth and hair sway, breathing, planting each foot on
-//! its own ground height — are the next item, and so is everything that
-//! moves the figure's *root*: a jump's lift, the pelvis drop of a crouch, a
-//! dodge's displacement. Root motion cannot be decided without the ground
-//! the feet are standing on, so it lives with the terrain solve rather than
-//! split across both. A pose here is articulation only.
+//! The contact-sheet harness that makes art quality a measured property, the
+//! species and build parameter space, and the designer are later items.
 //!
 //! [`Pose`]: pose::Pose
+//! [`Overlay`]: pose::Overlay
 //! [`Body`]: frame::Body
 //! [`JointId`]: joint::JointId
 //! [`Posture::set`]: rig::Posture::set
 //! [`Rig::new`]: rig::Rig::new
 //! [`Posture::place`]: rig::Posture::place
+//! [`Stance`]: rig::Stance
+//! [`Animator`]: transition::Animator
+//! [`Blend`]: blend::Blend
+//! [`Breath`]: breath::Breath
+//! [`Look`]: look::Look
+//! [`Recoil`]: recoil::Recoil
+//! [`Legs::plant`]: plant::Legs::plant
+//! [`Rigging::posture`]: rigging::Rigging::posture
+//! [`Sway`]: sway::Sway
+//! [`Contact`]: shadow::Contact
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod blend;
+pub mod breath;
 pub mod clip;
 pub mod error;
 pub mod frame;
+pub mod gait;
 pub mod humanoid;
 pub mod joint;
+pub mod look;
+pub mod plant;
 pub mod pose;
+pub mod recoil;
 pub mod rig;
 pub mod rigging;
+pub mod shadow;
 pub mod socket;
+pub mod spring;
+pub mod sway;
 pub mod transition;
 
 pub use error::FigureError;

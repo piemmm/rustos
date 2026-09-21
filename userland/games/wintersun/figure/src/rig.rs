@@ -71,10 +71,12 @@ pub struct Fitted {
     pub shape: Shape,
     /// Its colour.
     pub color: Color,
+    /// How far it leans from its socket's rest.
+    pub turn: Rotation,
 }
 
 impl Fitted {
-    /// A fitted shape on `socket` at `at`.
+    /// A fitted shape on `socket` at `at`, resting as the socket does.
     #[must_use]
     pub const fn new(socket: Socket, at: Body, shape: Shape, color: Color) -> Self {
         Self {
@@ -82,22 +84,100 @@ impl Fitted {
             at,
             shape,
             color,
+            turn: Rotation::REST,
+        }
+    }
+
+    /// The same shape turned `turn` from its socket's own rest.
+    ///
+    /// What a sway layer writes: a cloak trails the turn by leaning against
+    /// the socket rather than by the socket moving, so the rig's statement of
+    /// where gear rests stays the rig's.
+    #[must_use]
+    pub const fn turned(mut self, turn: Rotation) -> Self {
+        self.turn = turn;
+        self
+    }
+}
+
+/// A rigid frame: where something ended up and how it is turned.
+///
+/// One type for a resolved joint and for the figure's own root, because they
+/// are the same thing at different depths — the root is the frame the
+/// parentless joints hang in, so a whole-figure lift or tilt costs the resolve
+/// nothing beyond the value it already inherits.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Resolved {
+    /// Where it sits in the frame it is held in.
+    pub at: Body,
+    /// How it is turned there.
+    pub basis: Basis,
+}
+
+impl Resolved {
+    /// The origin, unturned.
+    pub const REST: Self = Self {
+        at: Body::ORIGIN,
+        basis: Basis::IDENTITY,
+    };
+
+    /// A root displaced by `offset` and tilted by `tilt`.
+    ///
+    /// The tilt pivots about the frame's origin, which for a figure's root is
+    /// the ground point its feet rest on — so a figure leaning into a slope
+    /// turns about its contact with it rather than swinging its feet through
+    /// it. No limit binds it: a slope is the world's angle, not a joint's.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::GeometryUnreal`] for an offset or an angle that is not
+    /// finite.
+    pub fn rooted(offset: Body, tilt: Rotation) -> Result<Self, FigureError> {
+        if !offset.is_real() || !tilt.is_real() {
+            return Err(FigureError::GeometryUnreal);
+        }
+        Ok(Self {
+            at: offset,
+            basis: Basis::of(tilt),
+        })
+    }
+}
+
+/// Every joint's resolved frame, for one posture in one root.
+///
+/// Held by the caller across frames like [`Placement`], so asking where a
+/// figure's feet ended up costs no allocation.
+#[derive(Clone, Debug)]
+pub struct Frames {
+    frames: [Resolved; MAX_JOINTS],
+    len: usize,
+}
+
+impl Frames {
+    /// Nothing resolved yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            frames: [Resolved::REST; MAX_JOINTS],
+            len: 0,
+        }
+    }
+
+    /// Where `joint` ended up, or `None` if the resolve did not cover it.
+    #[must_use]
+    pub fn get(&self, joint: JointId) -> Option<Resolved> {
+        if joint.index() < self.len {
+            Some(self.frames[joint.index()])
+        } else {
+            None
         }
     }
 }
 
-/// A resolved joint frame: where it ended up and how it is turned.
-#[derive(Copy, Clone, Debug)]
-struct Resolved {
-    at: Body,
-    basis: Basis,
-}
-
-impl Resolved {
-    const REST: Self = Self {
-        at: Body::ORIGIN,
-        basis: Basis::IDENTITY,
-    };
+impl Default for Frames {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A skeleton, its parts, and the sockets it offers.
@@ -247,12 +327,12 @@ impl Rig {
     /// The furthest a part's own extent reaches from the ground point, with
     /// every joint at rest.
     fn rest_reach(&self) -> f64 {
-        let mut frames = [Resolved::REST; MAX_JOINTS];
+        let mut frames = Frames::new();
         let rest = [Rotation::REST; MAX_JOINTS];
-        self.resolve(&rest[..self.joints.len()], &mut frames);
+        self.resolve(&rest[..self.joints.len()], Resolved::REST, &mut frames);
         let mut furthest = 0.0;
         for part in &self.parts {
-            let frame = frames[part.joint.index()];
+            let frame = frames.frames[part.joint.index()];
             let at = frame.at.plus(frame.basis.apply(part.at));
             furthest = mathf::fmax(furthest, at.length() + part.shape.reach());
         }
@@ -265,17 +345,18 @@ impl Rig {
     /// written when its child reads it. `rotations` comes only from a
     /// [`Posture`] built for this rig, so it is exactly as long as the joint
     /// table and the walk visits every joint.
-    fn resolve(&self, rotations: &[Rotation], frames: &mut [Resolved; MAX_JOINTS]) {
+    fn resolve(&self, rotations: &[Rotation], root: Resolved, out: &mut Frames) {
         for (index, (joint, rotation)) in self.joints.iter().zip(rotations).enumerate() {
             let carried = joint
                 .parent
-                .map_or(Resolved::REST, |parent| frames[parent.index()]);
+                .map_or(root, |parent| out.frames[parent.index()]);
             let local = Basis::of(joint.orientation).compose(Basis::of(*rotation));
-            frames[index] = Resolved {
+            out.frames[index] = Resolved {
                 at: carried.at.plus(carried.basis.apply(joint.at)),
                 basis: carried.basis.compose(local),
             };
         }
+        out.len = self.joints.len();
     }
 }
 
@@ -344,12 +425,22 @@ impl<'a> Posture<'a> {
         Ok(())
     }
 
-    /// Place the figure for a heading, a scale and a ground point.
+    /// Resolve every joint's frame for this posture, hanging in `root`.
     ///
-    /// `scale` converts the figure-local pixels the rig is authored in to
-    /// surface pixels — the figure's drawn height over [`Rig::reach`]'s own
-    /// units — and `at` is the surface column and row its feet rest on.
-    /// `fitted` is the equipment hung on its sockets.
+    /// What a layer that needs to know *where* the figure is reads — which
+    /// foot is forward, how far a hand has reached — before deciding
+    /// anything. Placing does the same resolve, so a caller that only paints
+    /// never pays for this one.
+    pub fn resolve(&self, root: Resolved, out: &mut Frames) {
+        self.rig.resolve(&self.rotations, root, out);
+    }
+
+    /// Place the figure for a stance.
+    ///
+    /// `stance` carries the heading, the figure-local-to-surface scale, the
+    /// surface point the figure's ground contact sits on, and the root
+    /// transform a lift, a crouch or a slope tilt is expressed as. `fitted`
+    /// is the equipment hung on its sockets.
     ///
     /// The result is sorted far-first, so painting it in order composites the
     /// figure correctly: a depth tie breaks on the rig's own part order, and
@@ -358,26 +449,18 @@ impl<'a> Posture<'a> {
     ///
     /// # Errors
     ///
-    /// [`FigureError::ScaleUnreal`] for a scale that is not finite and
-    /// positive, [`FigureError::GeometryUnreal`] for a ground point or a
-    /// fitted dimension that is not finite, [`FigureError::NoSuchSocket`] for
-    /// equipment naming a socket this rig does not offer, and
-    /// [`FigureError::TooMuchEquipment`] for more gear than a figure carries.
+    /// [`FigureError::GeometryUnreal`] for a fitted dimension that is not
+    /// finite, [`FigureError::NoSuchSocket`] for equipment naming a socket
+    /// this rig does not offer, and [`FigureError::TooMuchEquipment`] for
+    /// more gear than a figure carries. The stance's own values were checked
+    /// where it was built.
     pub fn place(
         &self,
-        facing: Facing,
-        scale: f64,
-        at: (f64, f64),
+        stance: &Stance,
         fitted: &[Fitted],
         out: &mut Placement,
     ) -> Result<(), FigureError> {
         out.len = 0;
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(FigureError::ScaleUnreal);
-        }
-        if !at.0.is_finite() || !at.1.is_finite() {
-            return Err(FigureError::GeometryUnreal);
-        }
         // The rig's own parts are bounded by `MAX_PARTS` and the buffer is
         // their sum with `MAX_FITTED`, so this one check is what makes every
         // slot below exist.
@@ -385,30 +468,106 @@ impl<'a> Posture<'a> {
             return Err(FigureError::TooMuchEquipment);
         }
 
-        self.rig.resolve(&self.rotations, &mut out.frames);
+        self.rig
+            .resolve(&self.rotations, stance.root, &mut out.frames);
 
         for part in &self.rig.parts {
-            let frame = out.frames[part.joint.index()];
-            out.push(facing, scale, at, frame, part.at, part.shape, part.color);
+            let frame = out.frames.frames[part.joint.index()];
+            out.push(stance, frame, part.at, part.shape, part.color);
         }
         for piece in fitted {
             let mount = self
                 .rig
                 .mount(piece.socket)
                 .ok_or(FigureError::NoSuchSocket)?;
-            if !piece.at.is_real() || !piece.shape.is_real() {
+            if !piece.at.is_real() || !piece.shape.is_real() || !piece.turn.is_real() {
                 return Err(FigureError::GeometryUnreal);
             }
-            let carried = out.frames[mount.joint.index()];
+            let carried = out.frames.frames[mount.joint.index()];
             let frame = Resolved {
                 at: carried.at.plus(carried.basis.apply(mount.at)),
-                basis: carried.basis.compose(Basis::of(mount.orientation)),
+                basis: carried
+                    .basis
+                    .compose(Basis::of(mount.orientation).compose(Basis::of(piece.turn))),
             };
-            out.push(facing, scale, at, frame, piece.at, piece.shape, piece.color);
+            out.push(stance, frame, piece.at, piece.shape, piece.color);
         }
 
         out.sort();
         Ok(())
+    }
+}
+
+/// Where a figure stands, and how its whole body is displaced there.
+///
+/// Gathers what turning a rig into surface pixels needs: the heading, the
+/// scale, the surface ground point, and the root transform. Validated once
+/// here, so placing has nothing left to check about it.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Stance {
+    facing: Facing,
+    scale: f64,
+    at: (f64, f64),
+    root: Resolved,
+}
+
+impl Stance {
+    /// A figure facing `facing`, drawn at `scale`, standing at `at`.
+    ///
+    /// `scale` converts the figure-local pixels the rig is authored in to
+    /// surface pixels — the figure's drawn height over [`Rig::reach`]'s own
+    /// units — and `at` is the surface column and row its feet rest on. The
+    /// root starts at rest; [`Self::rooted`] displaces it.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::ScaleUnreal`] for a scale that is not finite and
+    /// positive, and [`FigureError::GeometryUnreal`] for a ground point that
+    /// is not finite.
+    pub fn new(facing: Facing, scale: f64, at: (f64, f64)) -> Result<Self, FigureError> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(FigureError::ScaleUnreal);
+        }
+        if !at.0.is_finite() || !at.1.is_finite() {
+            return Err(FigureError::GeometryUnreal);
+        }
+        Ok(Self {
+            facing,
+            scale,
+            at,
+            root: Resolved::REST,
+        })
+    }
+
+    /// The same stance with the whole figure displaced and tilted by `root`.
+    #[must_use]
+    pub const fn rooted(mut self, root: Resolved) -> Self {
+        self.root = root;
+        self
+    }
+
+    /// The heading it faces.
+    #[must_use]
+    pub const fn facing(&self) -> Facing {
+        self.facing
+    }
+
+    /// Figure-local pixels to surface pixels.
+    #[must_use]
+    pub const fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    /// The surface point its ground contact sits on.
+    #[must_use]
+    pub const fn at(&self) -> (f64, f64) {
+        self.at
+    }
+
+    /// The root transform the whole figure hangs in.
+    #[must_use]
+    pub const fn root(&self) -> Resolved {
+        self.root
     }
 }
 
@@ -447,7 +606,7 @@ impl Entry {
 pub struct Placement {
     entries: [Entry; MAX_PLACED],
     len: usize,
-    frames: [Resolved; MAX_JOINTS],
+    frames: Frames,
 }
 
 impl Placement {
@@ -457,7 +616,7 @@ impl Placement {
         Self {
             entries: [Entry::BLANK; MAX_PLACED],
             len: 0,
-            frames: [Resolved::REST; MAX_JOINTS],
+            frames: Frames::new(),
         }
     }
 
@@ -483,25 +642,9 @@ impl Placement {
     ///
     /// The caller has already checked the whole figure fits, so the slot
     /// exists.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the projection's own inputs: heading, scale and ground \
-                  point from the caller, the carrying frame, and the shape's \
-                  offset, outline and colour — grouping them into a struct \
-                  would be a type with one use"
-    )]
-    fn push(
-        &mut self,
-        facing: Facing,
-        scale: f64,
-        at: (f64, f64),
-        frame: Resolved,
-        offset: Body,
-        shape: Shape,
-        color: Color,
-    ) {
+    fn push(&mut self, stance: &Stance, frame: Resolved, offset: Body, shape: Shape, color: Color) {
         let placed_at = frame.at.plus(frame.basis.apply(offset));
-        let projected = project(facing, placed_at);
+        let projected = project(stance.facing, placed_at);
         // The order is both the tie-break and the shape's identity, so a
         // splat's ripple is the same every frame.
         #[allow(
@@ -513,10 +656,10 @@ impl Placement {
             depth: projected.depth,
             order,
             placed: Placed {
-                x: at.0 + projected.dx * scale,
-                y: at.1 + projected.dy * scale,
-                turn: screen_turn(facing, frame.basis),
-                shape: shape.scaled(scale),
+                x: stance.at.0 + projected.dx * stance.scale,
+                y: stance.at.1 + projected.dy * stance.scale,
+                turn: screen_turn(stance.facing, frame.basis),
+                shape: shape.scaled(stance.scale),
                 color,
                 seed: order,
             },

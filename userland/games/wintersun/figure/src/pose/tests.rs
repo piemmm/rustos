@@ -1,6 +1,10 @@
 //! Tests for the pose parameter vocabulary.
 
+use tairix_util::mathf;
+
 use super::*;
+use crate::error::FigureError;
+use crate::socket::Side;
 
 #[test]
 fn every_parameter_has_its_own_slot() {
@@ -167,4 +171,111 @@ fn the_full_mask_leaves_no_bit_set_that_names_nothing() {
         .iter()
         .fold(Mask::NONE, |mask, param| mask.with(*param));
     assert_eq!(named, Mask::ALL);
+}
+
+/// A layer states how far it moves a parameter, not where it puts it, so two
+/// layers pulling on one parameter cooperate instead of the later one
+/// erasing the earlier.
+#[test]
+fn overlay_deltas_from_different_layers_add_up() {
+    let mut breath = Overlay::NONE;
+    breath.add(Param::SpineBend, 0.10).expect("a real delta");
+    let mut recoil = Overlay::NONE;
+    recoil.add(Param::SpineBend, -0.04).expect("a real delta");
+    recoil.add(Param::HeadNod, 0.2).expect("a real delta");
+
+    let mut stack = breath;
+    stack.absorb(&recoil);
+    assert!(mathf::fabs(stack.get(Param::SpineBend) - 0.06) < 1e-12);
+    assert!(mathf::fabs(stack.get(Param::HeadNod) - 0.2) < 1e-12);
+
+    // And the other way round, since summing cannot depend on the order.
+    let mut swapped = recoil;
+    swapped.absorb(&breath);
+    for param in Param::ALL {
+        assert!(mathf::fabs(swapped.get(param) - stack.get(param)) < 1e-12);
+    }
+}
+
+/// The delta itself is unbounded — two layers pulling opposite ways are
+/// entitled to cancel — and it is the *sum* that must land in range.
+#[test]
+fn an_overlay_brings_its_sum_into_range_rather_than_each_delta() {
+    let mut overlay = Overlay::NONE;
+    overlay
+        .add(Param::SpineBend, 5.0)
+        .expect("a big delta is fine");
+    overlay
+        .add(Param::SpineBend, -5.0)
+        .expect("and so is its opposite");
+    assert!(mathf::fabs(overlay.get(Param::SpineBend)) < 1e-12);
+
+    let mut crowded = Overlay::NONE;
+    crowded
+        .add(Param::KneeBend(Side::Left), 3.0)
+        .expect("a real delta");
+    let applied = crowded
+        .applied(&Pose::REST)
+        .expect("a sum is brought into range");
+    assert!(mathf::fabs(applied.get(Param::KneeBend(Side::Left)) - 1.0) < 1e-12);
+    for param in Param::ALL {
+        assert!(param.range().holds(applied.get(param)));
+    }
+}
+
+/// A knee at its own extreme cannot be pushed further, so a layer arriving
+/// late fades rather than fighting the pose already there.
+#[test]
+fn a_layer_fades_against_a_parameter_already_at_its_extreme() {
+    let folded = Pose::REST
+        .with(Param::KneeBend(Side::Left), 1.0)
+        .expect("a real pose");
+    let mut overlay = Overlay::NONE;
+    overlay
+        .add(Param::KneeBend(Side::Left), 0.5)
+        .expect("a real delta");
+    let applied = overlay.applied(&folded).expect("it applies");
+    assert!(mathf::fabs(applied.get(Param::KneeBend(Side::Left)) - 1.0) < 1e-12);
+}
+
+#[test]
+fn an_overlay_reports_only_what_a_layer_actually_moved() {
+    let mut overlay = Overlay::NONE;
+    assert!(overlay.is_empty() && overlay.written().is_empty());
+    overlay.add(Param::HeadTurn, 0.0).expect("a real delta");
+    assert!(overlay.is_empty(), "moving nothing is not writing");
+    overlay.add(Param::HeadTurn, 0.3).expect("a real delta");
+    assert!(!overlay.is_empty());
+    assert_eq!(overlay.written().len(), 1);
+    assert!(overlay.written().holds(Param::HeadTurn));
+    // A pose is left alone wherever nothing was written, which is the whole
+    // pose rather than a scan of it.
+    let applied = overlay.applied(&Pose::REST).expect("it applies");
+    let only_turned = Pose::REST.with(Param::HeadTurn, 0.3).expect("a real pose");
+    assert_eq!(
+        applied, only_turned,
+        "a layer touched what it did not write"
+    );
+}
+
+#[test]
+fn an_unreal_delta_is_refused() {
+    let mut overlay = Overlay::NONE;
+    for delta in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            overlay.add(Param::HeadNod, delta),
+            Err(FigureError::ParamOutsideRange),
+            "a delta of {delta} must be refused"
+        );
+    }
+    assert!(overlay.is_empty(), "a refusal writes nothing");
+}
+
+#[test]
+fn an_empty_overlay_is_the_default_and_changes_no_pose() {
+    let pose = Pose::REST
+        .with(Param::SpineTwist, -0.4)
+        .expect("a real pose");
+    assert_eq!(Overlay::default(), Overlay::NONE);
+    assert_eq!(Overlay::NONE.applied(&pose).expect("it applies"), pose);
 }

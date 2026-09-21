@@ -183,32 +183,124 @@ impl<'a> Curve<'a> {
     /// parameter's range.
     #[must_use]
     pub fn sample(self, phase: f64, repeat: Loop) -> f64 {
-        let keys = self.keys;
-        let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
-            return 0.0;
-        };
-        if keys.len() == 1 {
-            return first.value;
-        }
+        self.param.range().clamp(walk(self.keys, phase, repeat))
+    }
+}
 
-        let upper = keys.partition_point(|key| key.phase <= phase);
-        let value = if upper == 0 {
-            if repeat.joins() {
-                between(*last, *first, last.phase - 1.0, first.phase, phase)
-            } else {
-                first.value
-            }
-        } else if upper == keys.len() {
-            if repeat.joins() {
-                between(*last, *first, last.phase, first.phase + 1.0, phase)
-            } else {
-                last.value
-            }
+/// `keys` interpolated at `phase`, under `repeat`.
+///
+/// Shared by a parameter curve and a root-motion curve, which differ only in
+/// the interval they hold their values to — the walk between keys is one
+/// definition, so a wrapping join cannot behave differently for the two.
+fn walk(keys: &[Key], phase: f64, repeat: Loop) -> f64 {
+    let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
+        return 0.0;
+    };
+    if keys.len() == 1 {
+        return first.value;
+    }
+
+    let upper = keys.partition_point(|key| key.phase <= phase);
+    if upper == 0 {
+        if repeat.joins() {
+            between(*last, *first, last.phase - 1.0, first.phase, phase)
         } else {
-            let (from, to) = (keys[upper - 1], keys[upper]);
-            between(from, to, from.phase, to.phase, phase)
+            first.value
+        }
+    } else if upper == keys.len() {
+        if repeat.joins() {
+            between(*last, *first, last.phase, first.phase + 1.0, phase)
+        } else {
+            last.value
+        }
+    } else {
+        let (from, to) = (keys[upper - 1], keys[upper]);
+        between(from, to, from.phase, to.phase, phase)
+    }
+}
+
+/// How much of a clip's own displacement has been spent, against its phase.
+///
+/// The clip owns the *curve* a lunge or a dodge moves along and never the
+/// distance: the value is the fraction of the move spent so far, so the
+/// simulation multiplies it by whatever displacement it actually authorised.
+/// A client cannot move itself by playing an animation, and the animation
+/// and the movement cannot disagree about how the move was paced.
+///
+/// It runs from none of the move to all of it, so a clip played out delivers
+/// exactly what was authorised and never more — an anticipation that draws
+/// back before springing forward is free to do so in between, because it is
+/// the *ends* that are the contract.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Travel<'a> {
+    keys: &'a [Key],
+}
+
+impl<'a> Travel<'a> {
+    /// A root-motion curve through `keys`.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::CurveEmpty`] for no keys,
+    /// [`FigureError::KeysNotAscending`] for keys that do not strictly
+    /// ascend by phase, [`FigureError::PhaseOutsideClip`] for a phase
+    /// outside `0..=1`, [`FigureError::TravelOutsideRange`] for a value
+    /// outside `0..=1`, and [`FigureError::TravelNotSpanning`] where the
+    /// curve does not begin at none of the move and end at all of it.
+    #[allow(
+        clippy::float_cmp,
+        reason = "the ends are the contract and exactness is the point: a \
+                  curve finishing a rounding step short of the whole move \
+                  leaves the figure short of where it was authorised to go, \
+                  which is what this refuses"
+    )]
+    pub fn new(keys: &'a [Key]) -> Result<Self, FigureError> {
+        let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
+            return Err(FigureError::CurveEmpty);
         };
-        self.param.range().clamp(value)
+        for (index, key) in keys.iter().enumerate() {
+            if !key.phase.is_finite() || !(0.0..=1.0).contains(&key.phase) {
+                return Err(FigureError::PhaseOutsideClip);
+            }
+            if index > 0 && key.phase <= keys[index - 1].phase {
+                return Err(FigureError::KeysNotAscending);
+            }
+            if !key.value.is_finite() || !(0.0..=1.0).contains(&key.value) {
+                return Err(FigureError::TravelOutsideRange);
+            }
+        }
+        if first.phase != 0.0 || first.value != 0.0 || last.phase != 1.0 || last.value != 1.0 {
+            return Err(FigureError::TravelNotSpanning);
+        }
+        Ok(Self { keys })
+    }
+
+    /// Its keys, ascending by phase.
+    #[must_use]
+    pub const fn keys(self) -> &'a [Key] {
+        self.keys
+    }
+
+    /// How much of the move has been spent at `phase`.
+    #[must_use]
+    pub fn at(self, phase: f64) -> f64 {
+        // Never joins across the end: a move is spent once, and a curve that
+        // eased back to its start would un-move the figure.
+        mathf::clamp(walk(self.keys, phase, Loop::Hold), 0.0, 1.0)
+    }
+
+    /// How far a move of `distance` has gone at `phase`.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::GeometryUnreal`] for a distance that is not finite.
+    /// The distance is the simulation's, so this never bounds it — only the
+    /// fraction of it the clip has spent.
+    pub fn spent(self, phase: f64, distance: f64) -> Result<f64, FigureError> {
+        if !distance.is_finite() {
+            return Err(FigureError::GeometryUnreal);
+        }
+        Ok(distance * self.at(phase))
     }
 }
 
@@ -227,6 +319,7 @@ fn between(from: Key, to: Key, start: f64, end: f64, phase: f64) -> f64 {
 pub struct Clip<'a> {
     curves: &'a [Curve<'a>],
     events: &'a [Event],
+    travel: Option<Travel<'a>>,
     seconds: f64,
     repeat: Loop,
     mask: Mask,
@@ -277,10 +370,28 @@ impl<'a> Clip<'a> {
         Ok(Self {
             curves,
             events,
+            travel: None,
             seconds,
             repeat,
             mask,
         })
+    }
+
+    /// The same clip carrying the root-motion curve `travel`.
+    #[must_use]
+    pub const fn travelling(mut self, travel: Travel<'a>) -> Self {
+        self.travel = Some(travel);
+        self
+    }
+
+    /// Its root-motion curve, if it moves the figure at all.
+    ///
+    /// Most clips do not: a walk's displacement is the simulation's own, and
+    /// only a move the *animation* paces — a dodge, a lunge, a stagger —
+    /// carries one.
+    #[must_use]
+    pub const fn travel(self) -> Option<Travel<'a>> {
+        self.travel
     }
 
     /// How long one play of it lasts, in seconds.

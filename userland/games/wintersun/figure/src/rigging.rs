@@ -167,6 +167,65 @@ impl<'a> Rigging<'a> {
         self.driven
     }
 
+    /// The total angle `param` at `value` turns through on this rig.
+    ///
+    /// A parameter may drive several joints — a head turn is shared between
+    /// the neck and the atlas, a spine bend between the waist and the chest —
+    /// so the angle that matters to a layer aiming at something is the sum
+    /// over the chain, not any one joint's share.
+    ///
+    /// `None` if `param` drives nothing here, which is how a clip authored
+    /// for a richer skeleton still plays on a simpler one.
+    #[must_use]
+    pub fn angle_for(&self, param: Param, value: f64) -> Option<f64> {
+        let mut total = 0.0;
+        let mut driven = false;
+        for drive in self.drives.iter().filter(|d| d.param == param) {
+            let limits = self.rig.joints()[drive.joint.index()].limits;
+            total += scale(drive.axis.of(limits), value, drive.sense);
+            driven = true;
+        }
+        driven.then_some(total)
+    }
+
+    /// The value of `param` whose total turn is `angle`.
+    ///
+    /// The inverse of [`Self::angle_for`], so a layer that works in angles —
+    /// an inverse-kinematic solve aiming a limb at a point, a look-at turning
+    /// a head toward a target — hands its answer back in the parameter domain
+    /// rather than writing a rotation behind the pose's back.
+    ///
+    /// Deliberately *not* clamped: a target the chain cannot reach answers
+    /// past `1`, which is the caller's signal that it asked for more than the
+    /// body has and must report the shortfall rather than pretend.
+    ///
+    /// `None` if `param` drives nothing here, or if its travel does not go
+    /// the way `angle` asks — an axis that only folds one way has no value
+    /// that unfolds it.
+    #[must_use]
+    pub fn value_for(&self, param: Param, angle: f64) -> Option<f64> {
+        if !angle.is_finite() {
+            return None;
+        }
+        // Travel is scaled per side of rest, so the parameter is linear on
+        // each side and these two ends are the whole mapping. Which *sign* of
+        // value reaches a given angle is the drive's business, not the
+        // angle's: a reversed drive swings a limb forward on a positive
+        // value, so a negative angle comes from a positive value there.
+        let raised = self.angle_for(param, 1.0)?;
+        let lowered = self.angle_for(param, -1.0)?;
+        if angle == 0.0 {
+            return Some(0.0);
+        }
+        if raised != 0.0 && (angle > 0.0) == (raised > 0.0) {
+            return Some(angle / raised);
+        }
+        if lowered != 0.0 && (angle > 0.0) == (lowered > 0.0) {
+            return Some(-angle / lowered);
+        }
+        None
+    }
+
     /// Turn the rig to `pose`.
     ///
     /// # Errors

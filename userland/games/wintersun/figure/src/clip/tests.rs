@@ -2,7 +2,7 @@
 
 use tairix_util::mathf;
 
-use super::{Clip, Curve, Easing, Event, Key, Loop};
+use super::{Clip, Curve, Easing, Event, Key, Loop, Travel};
 use crate::error::FigureError;
 use crate::pose::{Param, Pose};
 use crate::socket::Side;
@@ -523,4 +523,119 @@ fn asking_for_events_outside_the_clip_is_refused() {
     assert!(clip.events_between(-0.1, 0.5).is_err());
     assert!(clip.events_between(0.5, 1.1).is_err());
     assert!(clip.events_between(f64::NAN, 0.5).is_err());
+}
+
+/// A move's curve must begin at none of it and end at all of it, or playing
+/// the clip out would deliver something other than what was authorised.
+#[test]
+fn a_root_motion_curve_that_does_not_span_the_move_is_refused() {
+    for keys in [
+        [Key::new(0.0, 0.2), Key::new(1.0, 1.0)],
+        [Key::new(0.0, 0.0), Key::new(1.0, 0.8)],
+        [Key::new(0.1, 0.0), Key::new(1.0, 1.0)],
+        [Key::new(0.0, 0.0), Key::new(0.9, 1.0)],
+    ] {
+        assert_eq!(
+            Travel::new(&keys).map(|_| ()),
+            Err(FigureError::TravelNotSpanning),
+            "{keys:?} must be refused"
+        );
+    }
+    assert_eq!(Travel::new(&[]).map(|_| ()), Err(FigureError::CurveEmpty));
+}
+
+/// The fraction is a fraction: a clip cannot ask for more of the move than
+/// the simulation authorised, nor for a negative amount of it.
+#[test]
+fn a_root_motion_value_outside_the_move_is_refused() {
+    for value in [-0.01, 1.01, f64::NAN] {
+        let keys = [Key::new(0.0, 0.0), Key::new(0.5, value), Key::new(1.0, 1.0)];
+        assert_eq!(
+            Travel::new(&keys).map(|_| ()),
+            Err(FigureError::TravelOutsideRange),
+            "a value of {value} must be refused"
+        );
+    }
+}
+
+#[test]
+fn a_root_motion_curve_out_of_order_is_refused() {
+    let keys = [
+        Key::new(0.0, 0.0),
+        Key::new(0.7, 0.5),
+        Key::new(0.7, 0.6),
+        Key::new(1.0, 1.0),
+    ];
+    assert_eq!(
+        Travel::new(&keys).map(|_| ()),
+        Err(FigureError::KeysNotAscending)
+    );
+    let outside = [Key::new(0.0, 0.0), Key::new(1.5, 0.5), Key::new(1.0, 1.0)];
+    assert_eq!(
+        Travel::new(&outside).map(|_| ()),
+        Err(FigureError::PhaseOutsideClip)
+    );
+}
+
+/// A clip owns the *pacing* of a move and never its distance, so the figure
+/// ends up exactly where the simulation authorised however the curve got
+/// there.
+#[test]
+fn a_move_delivers_exactly_what_was_authorised() {
+    // An anticipation: the figure draws back before it springs forward.
+    let keys = [
+        Key::new(0.0, 0.0),
+        Key::new(0.2, 0.0),
+        Key::new(0.45, 0.08).eased(Easing::EaseOut),
+        Key::new(0.8, 0.92),
+        Key::new(1.0, 1.0),
+    ];
+    let travel = Travel::new(&keys).expect("a real move");
+    assert!(close(travel.at(0.0), 0.0));
+    assert!(close(travel.at(1.0), 1.0));
+    assert!(close(
+        travel.spent(1.0, 30.0).expect("a real distance"),
+        30.0
+    ));
+    assert!(close(
+        travel.spent(0.0, 30.0).expect("a real distance"),
+        0.0
+    ));
+
+    let mut phase = 0.0;
+    while phase <= 1.0 {
+        let spent = travel.spent(phase, 30.0).expect("a real distance");
+        assert!(
+            (0.0..=30.0).contains(&spent),
+            "at {phase} the move had spent {spent} of 30"
+        );
+        phase += 1.0 / 256.0;
+    }
+    assert_eq!(
+        travel.spent(0.5, f64::NAN).map(|_| ()),
+        Err(FigureError::GeometryUnreal)
+    );
+}
+
+/// A move is spent once: past the end there is no more of it, and before the
+/// start none has been spent, whatever the clip's loop mode says.
+#[test]
+fn a_move_does_not_run_backward_across_the_join() {
+    let keys = [Key::new(0.0, 0.0), Key::new(1.0, 1.0)];
+    let travel = Travel::new(&keys).expect("a real move");
+    assert!(close(travel.at(-0.5), 0.0));
+    assert!(close(travel.at(1.5), 1.0));
+}
+
+/// Most clips move nothing; only one whose animation paces the move carries
+/// a curve, and the clip reads it back unchanged.
+#[test]
+fn a_clip_carries_its_move_or_none_at_all() {
+    let keys = [Key::new(0.0, 0.0), Key::new(1.0, 1.0)];
+    let travel = Travel::new(&keys).expect("a real move");
+    let plain = Clip::new(1.0, Loop::Hold, &[], &[]).expect("a real clip");
+    assert!(plain.travel().is_none());
+    let moving = plain.travelling(travel);
+    assert_eq!(moving.travel().map(Travel::keys), Some(&keys[..]));
+    assert!(close(moving.travel().expect("a move").at(0.5), 0.5));
 }

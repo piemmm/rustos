@@ -5,7 +5,7 @@ use tairix_raster::Color;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
-use super::{Fitted, Part, Placement, Posture, Rig, MAX_FITTED};
+use super::{Fitted, Part, Placement, Posture, Resolved, Rig, Stance, MAX_FITTED};
 use crate::error::FigureError;
 use crate::frame::{Body, Rotation};
 use crate::joint::{Joint, JointId, Limit, Limits};
@@ -14,6 +14,13 @@ use crate::socket::{Mount, Socket};
 const ROOT: JointId = JointId::new(0);
 const CHILD: JointId = JointId::new(1);
 const ABSENT: JointId = JointId::new(9);
+
+/// A stance the placement cases share. What a stance refuses is its own
+/// test below, so every other case states only its own subject.
+#[track_caller]
+fn stance(facing: Facing, scale: f64, at: (f64, f64)) -> Stance {
+    Stance::new(facing, scale, at).expect("a real stance")
+}
 
 const EAST: Facing = Facing(0);
 const SOUTH: Facing = Facing(0x4000);
@@ -321,7 +328,7 @@ fn placing_puts_every_part_on_the_surface() {
     let mut out = Placement::new();
     assert!(out.is_empty());
     posture
-        .place(SOUTH, 1.0, (100.0, 200.0), &[], &mut out)
+        .place(&stance(SOUTH, 1.0, (100.0, 200.0)), &[], &mut out)
         .expect("a rest posture places");
     assert_eq!(out.len(), 2);
     assert_eq!(out.parts().len(), 2);
@@ -335,7 +342,7 @@ fn placing_sorts_far_first() {
     let posture = Posture::rest(&rig);
     let mut out = Placement::new();
     posture
-        .place(SOUTH, 1.0, (0.0, 0.0), &[], &mut out)
+        .place(&stance(SOUTH, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
     let order: [u16; 2] = [
         out.parts().next().expect("first").seed,
@@ -353,10 +360,14 @@ fn the_same_arrangement_reverses_when_the_figure_turns_around() {
     let mut facing_camera = Placement::new();
     let mut facing_away = Placement::new();
     posture
-        .place(SOUTH, 1.0, (0.0, 0.0), &[], &mut facing_camera)
+        .place(&stance(SOUTH, 1.0, (0.0, 0.0)), &[], &mut facing_camera)
         .expect("places");
     posture
-        .place(Facing(0xC000), 1.0, (0.0, 0.0), &[], &mut facing_away)
+        .place(
+            &stance(Facing(0xC000), 1.0, (0.0, 0.0)),
+            &[],
+            &mut facing_away,
+        )
         .expect("places");
     assert_eq!(facing_camera.parts().next().expect("first").seed, 1);
     assert_eq!(facing_away.parts().next().expect("first").seed, 0);
@@ -379,7 +390,7 @@ fn a_depth_tie_paints_in_the_authored_order() {
     let posture = Posture::rest(&rig);
     let mut out = Placement::new();
     posture
-        .place(EAST, 1.0, (0.0, 0.0), &[], &mut out)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
     let seeds: [u16; 3] = [
         out.parts().next().expect("first").seed,
@@ -401,10 +412,10 @@ fn a_posed_joint_carries_what_hangs_below_it() {
     let mut resting = Placement::new();
     let mut moved = Placement::new();
     Posture::rest(&rig)
-        .place(EAST, 1.0, (0.0, 0.0), &[], &mut resting)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut resting)
         .expect("places");
     swung
-        .place(EAST, 1.0, (0.0, 0.0), &[], &mut moved)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut moved)
         .expect("places");
     let still = placed(&resting, 1);
     let shifted = placed(&moved, 1);
@@ -427,14 +438,14 @@ fn equipment_rides_the_joint_its_socket_hangs_on() {
     let mut resting = Placement::new();
     let mut moved = Placement::new();
     Posture::rest(&rig)
-        .place(EAST, 1.0, (0.0, 0.0), &[blade], &mut resting)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[blade], &mut resting)
         .expect("places");
     let mut swung = Posture::rest(&rig);
     swung
         .set(CHILD, Rotation::new(0.8, 0.0, 0.0))
         .expect("inside the hinge");
     swung
-        .place(EAST, 1.0, (0.0, 0.0), &[blade], &mut moved)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[blade], &mut moved)
         .expect("places");
     assert_eq!(resting.len(), 3, "the rig's parts plus the gear");
     let before = placed(&resting, 2);
@@ -453,7 +464,7 @@ fn equipment_on_an_unoffered_socket_is_refused() {
     let helm = Fitted::new(Socket::Head, Body::ORIGIN, mass(), TONE);
     let mut out = Placement::new();
     assert_eq!(
-        Posture::rest(&rig).place(EAST, 1.0, (0.0, 0.0), &[helm], &mut out),
+        Posture::rest(&rig).place(&stance(EAST, 1.0, (0.0, 0.0)), &[helm], &mut out),
         Err(FigureError::NoSuchSocket)
     );
 }
@@ -469,7 +480,7 @@ fn unreal_equipment_is_refused() {
     );
     let mut out = Placement::new();
     assert_eq!(
-        Posture::rest(&rig).place(EAST, 1.0, (0.0, 0.0), &[bad], &mut out),
+        Posture::rest(&rig).place(&stance(EAST, 1.0, (0.0, 0.0)), &[bad], &mut out),
         Err(FigureError::GeometryUnreal)
     );
 }
@@ -481,28 +492,111 @@ fn more_equipment_than_a_figure_carries_is_refused() {
     let too_much = [blade; MAX_FITTED + 1];
     let mut out = Placement::new();
     assert_eq!(
-        Posture::rest(&rig).place(EAST, 1.0, (0.0, 0.0), &too_much, &mut out),
+        Posture::rest(&rig).place(&stance(EAST, 1.0, (0.0, 0.0)), &too_much, &mut out),
         Err(FigureError::TooMuchEquipment)
     );
 }
 
 #[test]
 fn an_unreal_scale_or_anchor_is_refused() {
-    let rig = fixture();
-    let posture = Posture::rest(&rig);
-    let mut out = Placement::new();
     for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert_eq!(
-            posture.place(EAST, scale, (0.0, 0.0), &[], &mut out),
+            Stance::new(EAST, scale, (0.0, 0.0)).map(|_| ()),
             Err(FigureError::ScaleUnreal),
             "scale {scale} must be refused"
         );
     }
+    for at in [(f64::NAN, 0.0), (0.0, f64::INFINITY)] {
+        assert_eq!(
+            Stance::new(EAST, 1.0, at).map(|_| ()),
+            Err(FigureError::GeometryUnreal)
+        );
+    }
+}
+
+#[test]
+fn an_unreal_root_is_refused() {
+    for offset in [
+        Body::new(f64::NAN, 0.0, 0.0),
+        Body::new(0.0, 0.0, f64::INFINITY),
+    ] {
+        assert_eq!(
+            Resolved::rooted(offset, Rotation::REST).map(|_| ()),
+            Err(FigureError::GeometryUnreal)
+        );
+    }
     assert_eq!(
-        posture.place(EAST, 1.0, (f64::NAN, 0.0), &[], &mut out),
+        Resolved::rooted(Body::ORIGIN, Rotation::new(f64::NAN, 0.0, 0.0)).map(|_| ()),
         Err(FigureError::GeometryUnreal)
     );
-    assert!(out.is_empty(), "a refusal leaves nothing half-placed");
+}
+
+/// The root is the frame the parentless joints hang in, so a lift moves every
+/// part by exactly it and a tilt turns the figure about its ground contact
+/// rather than about any joint.
+#[test]
+fn the_root_displaces_the_whole_figure_from_its_ground_point() {
+    let rig = fixture();
+    let posture = Posture::rest(&rig);
+    let (mut flat, mut lifted) = (Placement::new(), Placement::new());
+    let base = stance(EAST, 1.0, (0.0, 0.0));
+    let lift = 7.0;
+    posture
+        .place(&base, &[], &mut flat)
+        .expect("the flat figure places");
+    posture
+        .place(
+            &base.rooted(
+                Resolved::rooted(Body::new(0.0, 0.0, lift), Rotation::REST).expect("a real root"),
+            ),
+            &[],
+            &mut lifted,
+        )
+        .expect("the lifted figure places");
+
+    for (before, after) in flat.parts().zip(lifted.parts()) {
+        close(after.x, before.x);
+        // Height is unforeshortened, so a lift is exactly its own rows up.
+        close(after.y, before.y - lift);
+        close(after.turn, before.turn);
+    }
+}
+
+/// A tilt pivots at the ground point, so the part sitting there does not move
+/// while everything above it swings — which is the whole reason the tilt is
+/// the placement's and not the pelvis joint's.
+#[test]
+fn a_root_tilt_turns_the_figure_about_its_ground_contact() {
+    let rig = fixture();
+    let posture = Posture::rest(&rig);
+    let (mut upright, mut leaning) = (Placement::new(), Placement::new());
+    let base = stance(EAST, 1.0, (0.0, 0.0));
+    posture
+        .place(&base, &[], &mut upright)
+        .expect("the upright figure places");
+    posture
+        .place(
+            &base.rooted(
+                Resolved::rooted(Body::ORIGIN, Rotation::new(0.0, 0.0, 0.40)).expect("a real root"),
+            ),
+            &[],
+            &mut leaning,
+        )
+        .expect("the leaning figure places");
+
+    let mut moved = false;
+    for (before, after) in upright.parts().zip(leaning.parts()) {
+        let travel = mathf::hypot(after.x - before.x, after.y - before.y);
+        // Everything stays within its own radius of the pivot: a rotation
+        // about the origin cannot move a point further than twice its
+        // distance from it.
+        assert!(
+            travel <= 2.0 * mathf::hypot(before.x, before.y) + 1e-9,
+            "a pivot at the ground point cannot fling a part outward"
+        );
+        moved |= travel > 1e-6;
+    }
+    assert!(moved, "a tilt must actually turn the figure");
 }
 
 #[test]
@@ -514,10 +608,10 @@ fn scaling_moves_the_offsets_and_the_outline_together() {
     let mut full = Placement::new();
     let mut half = Placement::new();
     posture
-        .place(EAST, 1.0, (0.0, 0.0), &[], &mut full)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut full)
         .expect("places");
     posture
-        .place(EAST, 0.5, (0.0, 0.0), &[], &mut half)
+        .place(&stance(EAST, 0.5, (0.0, 0.0)), &[], &mut half)
         .expect("places");
     for seed in 0..2u16 {
         let one = placed(&full, seed);
@@ -536,10 +630,10 @@ fn the_anchor_translates_the_whole_figure() {
     let mut origin = Placement::new();
     let mut shifted = Placement::new();
     posture
-        .place(EAST, 1.0, (0.0, 0.0), &[], &mut origin)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut origin)
         .expect("places");
     posture
-        .place(EAST, 1.0, (30.0, -12.0), &[], &mut shifted)
+        .place(&stance(EAST, 1.0, (30.0, -12.0)), &[], &mut shifted)
         .expect("places");
     for seed in 0..2u16 {
         assert!(close(
@@ -565,14 +659,14 @@ fn placing_the_same_posture_twice_gives_the_same_figure() {
     let mut once = Placement::new();
     let mut twice = Placement::new();
     posture
-        .place(SOUTH, 1.5, (7.0, 9.0), &[], &mut once)
+        .place(&stance(SOUTH, 1.5, (7.0, 9.0)), &[], &mut once)
         .expect("places");
     // Reuse a buffer that already holds a different figure.
     Posture::rest(&rig)
-        .place(EAST, 3.0, (0.0, 0.0), &[], &mut twice)
+        .place(&stance(EAST, 3.0, (0.0, 0.0)), &[], &mut twice)
         .expect("places");
     posture
-        .place(SOUTH, 1.5, (7.0, 9.0), &[], &mut twice)
+        .place(&stance(SOUTH, 1.5, (7.0, 9.0)), &[], &mut twice)
         .expect("places");
     assert_eq!(once.len(), twice.len());
     for (a, b) in once.parts().zip(twice.parts()) {
@@ -587,7 +681,7 @@ fn reach_bounds_every_part_at_rest() {
     let posture = Posture::rest(&rig);
     let mut out = Placement::new();
     posture
-        .place(EAST, 1.0, (0.0, 0.0), &[], &mut out)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
     for part in out.parts() {
         let distance = mathf::hypot(part.x, part.y) + part.shape.reach();
@@ -619,7 +713,7 @@ fn a_rest_orientation_turns_a_joint_without_a_posture() {
     .expect("consistent");
     let mut out = Placement::new();
     Posture::rest(&rig)
-        .place(EAST, 1.0, (0.0, 0.0), &[], &mut out)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
     assert!(
         !close(placed(&out, 1).turn, 0.0),

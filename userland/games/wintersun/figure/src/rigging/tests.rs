@@ -412,3 +412,78 @@ fn every_axis_has_its_own_slot() {
         assert_eq!(axis.index(), slot);
     }
 }
+
+/// A parameter may turn several joints, so the angle a layer aiming at
+/// something cares about is the whole chain's, not one joint's share.
+#[test]
+fn an_angle_is_summed_over_every_joint_a_parameter_turns() {
+    let rig = humanoid::rig().expect("the humanoid rig");
+    let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
+    let neck = rig.joints()[Bone::Neck.index()].limits.yaw.max();
+    let head = rig.joints()[Bone::Head.index()].limits.yaw.max();
+    assert!(close(
+        rigging
+            .angle_for(Param::HeadTurn, 1.0)
+            .expect("a driven turn"),
+        neck + head
+    ));
+}
+
+/// The regression this round-trip exists for: a reversed drive swings its
+/// limb *forward* on a positive value, so the value that produces a negative
+/// angle there is positive. Reading the sign off the angle instead silently
+/// answered "this parameter cannot go that way", and an inverse-kinematic
+/// layer that asked for a hip angle got nothing back and left the leg where
+/// it was.
+#[test]
+fn a_value_round_trips_through_its_angle_on_every_drive() {
+    let rig = humanoid::rig().expect("the humanoid rig");
+    let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
+
+    for param in Param::ALL {
+        let mut value = param.range().min();
+        while value <= 1.0 {
+            let angle = rigging.angle_for(param, value).expect("a driven parameter");
+            let back = rigging
+                .value_for(param, angle)
+                .expect("an angle its own parameter produced must invert");
+            assert!(
+                close(back, value),
+                "{param:?} at {value} turned {angle} and came back {back}"
+            );
+            value += 0.125;
+        }
+    }
+}
+
+/// A hip swings forward on a negative pitch, and that is exactly the case
+/// the sign bug got wrong.
+#[test]
+fn a_reversed_drive_inverts_a_negative_angle_to_a_positive_value() {
+    let rig = humanoid::rig().expect("the humanoid rig");
+    let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
+    let swing = Param::HipSwing(Side::Left);
+    let forward = rigging
+        .value_for(swing, -0.4239)
+        .expect("a hip must reach a forward swing");
+    assert!(forward > 0.0, "a forward swing is a positive value");
+    assert!(close(
+        rigging.angle_for(swing, forward).expect("a driven hip"),
+        -0.4239
+    ));
+}
+
+/// A joint that folds one way has no value that unfolds it, and an
+/// undriven parameter has no value at all.
+#[test]
+fn an_unreachable_angle_or_an_undriven_parameter_has_no_value() {
+    let rig = humanoid::rig().expect("the humanoid rig");
+    let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
+    let knee = Param::KneeBend(Side::Left);
+    assert_eq!(rigging.value_for(knee, -0.5), None, "a knee cannot unfold");
+    assert_eq!(rigging.value_for(knee, f64::NAN), None);
+
+    let bare = Rigging::new(&rig, &[]).expect("a rigging that drives nothing");
+    assert_eq!(bare.angle_for(knee, 1.0), None);
+    assert_eq!(bare.value_for(knee, 0.0), None);
+}
