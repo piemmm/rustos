@@ -37,7 +37,7 @@ controls), `lib/raster` and `lib/util::mathf` rustdoc.
 |---|---|---|
 | FG0 | This plan, the jump-sheet row, the §3 map entry, the `PLAN.md` section | done |
 | FG1 | `lib/raster::shape`: the six outline primitives, the tracer, the build-time vertex bounds, and `cinder` migrated onto them with its existing tests as the acceptance gate | done |
-| FG2 | `wintersun/figure`: the rig — skeleton, joint hierarchy with limits, named equipment sockets, draw order, and the one body frame that serves every heading | planned |
+| FG2 | `wintersun/figure`: the rig — skeleton, joint hierarchy with limits, named equipment sockets, draw order, and the one body frame that serves every heading | done |
 | FG3 | Pose parameters, clips (keyframed parameter curves with easing), clip blending, and the transition state machine | planned |
 | FG4 | Procedural layers over a clip: gait phase from velocity, look-at, recoil, cloth and hair sway, breathing, contact shadow | planned |
 | FG5 | `cargo xtask artsheet`: the contact-sheet renderer, the committed goldens, and the automated quality checks | planned |
@@ -149,15 +149,32 @@ Two rules carry most of the visual quality:
   the body were the defect this closes in `cinder`, and it generalises exactly.
 - **One body frame serves every heading.** A figure is not drawn from
   per-direction sprite sets. Its parts are placed in a body frame that is
-  rotated and foreshortened by the heading, with the depth component of
-  velocity scaling the frame — so walking away shrinks and walking toward the
-  camera enlarges, and eight or sixteen headings need no new artwork and no
-  `cfg`. This is `cinder`'s insight and it is the single largest saving in the
-  whole design.
+  rotated by the heading and whose depth axis is foreshortened by the figure's
+  own drawing elevation, and they paint far-first by projected depth — so
+  eight or sixteen headings need no new artwork and no `cfg`. This is
+  `cinder`'s insight and it is the single largest saving in the whole design.
+  A figure's **size does not vary with depth**: the world projection is
+  orthographic (`wintersun/app`'s `Camera`), so a figure whose scale tracked
+  its ground row would grow and shrink as the camera scrolled. The
+  foreshortening applies to the figure's own frame, not to its size.
 
 Equipment is parts on sockets with their own palette, so gear is visible,
 mixable, and costs no new art path. A helm is a `Plate` and a `Wedge`, not a
 redrawn head.
+
+What the built rig guarantees: the hierarchy is a parents-first forest, so no
+cycle can be spelled and a posture resolves in one forward pass; a joint that
+bears a child carries a part of its own, and no child's origin lies beyond
+everything its parent draws (one-sided — a shape's reach is an outer bound, so
+exceeding it proves a gap while clearing it does not prove a seam, which is
+FG5's measurement); and a `Posture` refuses a rotation outside its joint's
+limits, so an out-of-limit pose fails where it is authored rather than on the
+frame. Rotations are right-handed about the body axes with no sign flipped, so
+a part hanging below its joint turns opposite to the joint's own `forward` —
+which makes an outward splay a different sign on each side, and the humanoid's
+shoulder and hip roll limits handed. The shipped humanoid is 17 joints and 21
+parts authored in percentages of its standing height, with both sides mirrored
+from one pass. Nothing in the crate allocates.
 
 ## 3. FG3/FG4 — animation
 
@@ -270,6 +287,14 @@ Each rendered frame is measured, and a failing measurement is a failing test:
 
 ### The honest limit
 
+The readability check has a second consumer, which raises its stakes: the
+renderer's degradation floor is derived from it. `plans/WINTERSUN.md` §3 fixes
+the lowest detail level `auto` may shed to as the last one whose frames still
+clear the silhouette bounds here, computed by this harness at build time and
+compiled in. So a change that loosens these numbers does not merely admit a
+worse contact sheet — it lets the running game shed detail past the point a
+player can read it.
+
 These checks prove a figure is **consistent, readable, correctly animated, and
 on-palette**. They cannot prove it is beautiful. What they do is make every
 failure mode that can be stated as a number fail loudly, and leave a reviewable
@@ -328,8 +353,17 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
   a generator exceeding one fails the build.
 - `cinder`'s existing shape, paint, gait, roam, and vertical tests pass after
   the FG1 migration, with unchanged pixels where the shape is unchanged.
-- Rig: joint limits enforced; a limb's joint always carries its mass; draw
-  order is the skeleton's; every socket resolves.
+- Rig: joint limits enforced at the posture, so an out-of-limit rotation is
+  refused where it is authored; a bearing joint without a part of its own, and
+  a child beyond its parent's reach, are both refused at assembly; a limb's
+  joint always carries its mass, measured by placing a posed figure and
+  finding the cap and the limb at one point; draw order is the skeleton's, and
+  reverses on the turnaround rather than needing a second set of parts; every
+  socket resolves, and gear naming an unoffered one is refused rather than
+  dropped. The projection's properties are numbers — the foreshortening is the
+  elevation its doc claims, height is unforeshortened, depth is not the screen
+  row, a yaw never turns an outline — not screenshots. `no_std` with no
+  allocator, built on all four Tier-1 targets.
 - Clips: curve evaluation at known t; loop closure; blend weights sum to one;
   a malformed clip or transition document is refused. Events fire once per
   playback at their authored phase, survive a blended transition without

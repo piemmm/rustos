@@ -6273,6 +6273,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-wintersun-figure"
+version = "0.0.0"
+dependencies = [
+ "tairix-inline",
+ "tairix-raster",
+ "tairix-util",
+ "tairix-wintersun-net",
+]
+
+[[package]]
 name = "tairix-wintersun-net"
 version = "0.0.0"
 dependencies = [

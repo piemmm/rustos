@@ -52,7 +52,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS15 | Chat, moderation, and the audit trail | planned |
 | WS16 | The in-game console, `wintersunctl`, and the admin surface | planned |
 | WS17 | The character designer | planned |
-| WS18 | Accessibility, localisation, and the settings pane | planned |
+| WS18 | Accessibility, localisation, and the settings pane, including the detail-level control | planned |
 | WS19 | GPU offload behind `lib/gpu` | planned |
 
 Items are built in ledger order. An item is complete — tests, docs, and a green
@@ -182,8 +182,9 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    file read, no IPC round trip on the frame loop; a settings slider changes
    the in-memory model and repaints, and writes once when it settles; a paint
    reads nothing; a burst of pointer motion produces one frame. The character
-   designer is the surface most likely to violate this and is specified
-   against it explicitly (WS17).
+   designer and the detail-level slider are the two surfaces most likely to
+   violate this — the slider being the charter's own worked example — and both
+   are specified against it explicitly (WS17, WS18).
 10. **`abi-v1` is not frozen, and the game does not touch it anyway.** The
     game's wire protocol is the game's own, in `wintersun/net`, held to the
     `lib/abi` *discipline* — versioned, fixed-width, bounded decode, fail
@@ -641,14 +642,48 @@ same change, exactly like a failed test (§2.16).
 Concurrent budgets: ≤256 visible entities, of which ≤64 carry a full rig; the
 simulation runs on its own cadence and is **not** inside the frame budget.
 
-**Quality degrades in a stated order, and frame rate is never what gives
-way.** When a frame overruns, the renderer sheds in this sequence and no other:
-particle density → light-buffer resolution → detail-material octaves → shadow
-softness → render scale (with upscale to the window). The order is fixed so
-degradation is reproducible and reviewable rather than an emergent surprise,
-and the active step is observable for diagnosis. A machine with headroom scales
-*up* to the display's native resolution, capped at 2560×1440 for the software
-path.
+**Quality degrades in a stated order, and on `auto` the frame rate is never
+what gives way.** When a frame overruns, the renderer sheds in this sequence
+and no other: particle density → light-buffer resolution → detail-material
+octaves → shadow softness → render scale (with upscale to the window). The
+order is fixed so degradation is reproducible and reviewable rather than an
+emergent surprise, and the active step is observable for diagnosis. A machine
+with headroom scales *up* to the display's native resolution, capped at
+2560×1440 for the software path.
+
+**`auto` is the default, and it never sheds a detail the player needs to
+read.** The ladder has a floor, and the floor is the last notch whose frame
+still passes the readability checks `plans/FIGURE.md` FG5 defines — the
+silhouette coverage band, the landmark count, the contrast ratio — taken at the
+figure's drawn size. Two rungs are pinned by it concretely: a contact shadow
+stops at `Hard` and never reaches `Off`, because the shadow is what says where
+a figure stands and whether it is airborne; and the render scale stops at the
+coarsest fraction whose attack telegraphs and figure silhouettes still clear
+the checks. The floor is therefore measured off the art rather than chosen
+here, and it moves when the art does.
+
+It is measured **once, at build time**, by the FG5 contact-sheet harness that
+already renders every preset at every drawn size, and compiled in as the
+ladder's floor. Nothing measures readability on a frame: that would put the
+most expensive check in the project on the hot path to decide whether the
+frame is too expensive.
+
+Reaching the floor with the frame still over budget is **reported, not
+hidden**: the frame rate gives way, the diagnostic names the floor as the
+reason, and the player is told a forced level exists. A renderer that quietly
+crossed the floor to hold 60 Hz would be trading away precisely what the player
+needs to see in order to keep what they would not notice.
+
+**A forced level is the player's own choice and holds regardless of frame
+time** — that is the whole point of it — and it may go below the floor, because
+they asked for it. There the frame rate is what gives way, by their decision
+rather than the renderer's. The surface, its presets, and what the sliders
+offer are WS18.
+
+The frame digest folds a frame at each end of the ladder (`0` and
+`Ladder::MAX_STEP`), so neither the governor nor a player's setting can move
+the cross-target claim; adding a rung changes `MAX_STEP` and therefore the
+digest, which is the intended coupling rather than a nuisance.
 
 The honest risk: a 720p frame is 0.92 M pixels, and a terrain pixel touches
 several material samples. The budget above assumes SIMD kernels selected
@@ -1248,6 +1283,54 @@ player with no audio device needs anyway. UI scale independent of window size.
 All strings and the help tree are per-locale with the deterministic fallback to
 `en-US` that `lib/help` already defines.
 
+### The detail-level control (WS18)
+
+§3 states the mechanism: `auto` is the default, it sheds in a fixed order to
+hold the frame, and it will not cross the readability floor. This is the
+surface over it.
+
+**What WS5 already built, so this item does not re-plan it:** the ladder
+itself (`quality::Ladder` — the step space, the five rungs and their notches)
+and the governor that drives it from measured frame time
+(`budget::Governor`, with a run of overruns to shed and a longer run of
+comfortable frames to restore, the two thresholds far enough apart that they
+cannot chase each other). What remains is the **mode**, the **floor**, and the
+**surface**.
+
+**Two modes, and `auto` is the default.** A new install adapts; a player who
+wants a fixed picture says so. The mode and the chosen level are one setting,
+because "auto" and "level 3" are answers to the same question and holding them
+apart invites a stored level nobody is using.
+
+**The presets are the ladder's own rung boundaries, not a second table.**
+`Full`, then one stop per rung fully shed — so adding a rung adds a stop and
+the two cannot drift. The slider detents are exactly those stops: there is no
+free-running detail number, because a value between two rungs draws the same
+picture as one of them and would only produce settings files that cannot be
+compared. On `auto` the slider is disabled and reads back the live level, so a
+player can see what the machine settled on before deciding to pin it.
+
+**Choosing a level below the floor is allowed and is labelled.** The surface
+states what the choice costs — telegraphs and silhouettes stop being
+guaranteed readable — and then honours it. Preventing the choice would be
+deciding for a player who may be running on hardware this plan never
+anticipated; hiding the cost would be worse.
+
+**§28 binds this control, and it is the charter's own worked example.**
+Dragging the slider changes the level in memory and repaints; it opens no
+store, sends no request, and writes nothing. The durable write happens once,
+when the drag settles, and the repaint is scoped to what the level actually
+changed rather than re-deriving the frame. Switching mode writes once. The
+setting is the client's own per-app data (`plans/APPDATA.md`), never sent to
+the realm and never an input to the simulation or the digest.
+
+Verification: the floor is derived from FG5's checks rather than stated as a
+number, and a test drives the governor to the floor and asserts it stops
+there; a forced level survives a frame-time storm unchanged; the preset stops
+equal the rung boundaries by construction, asserted rather than listed; and a
+simulated drag produces exactly one durable write and one repaint per drained
+input burst.
+
 ## 11. Resource limits and the operating-conditions floor
 
 The game and the realm are held to §24 and §26 like any other subsystem.
@@ -1283,8 +1366,9 @@ feature a player sees.
   it, minutes. The intent log plus the seed replays the whole session, which is
   also the moderation audit trail.
 - **A frame's cost is attributable.** The per-pass budget (§3) is *measured* at
-  runtime, not just in tests: the client records per-pass timings and the
-  active degradation step, readable from the console. A budget nobody can
+  runtime, not just in tests: the client records per-pass timings, the
+  active degradation step, its mode, and whether it has reached the
+  readability floor, readable from the console. A budget nobody can
   observe in the running game is one that silently rots.
 - **Content reloads without a restart.** Spells, items, skill trees, loot
   tables and biome parameters are declarative documents, and the server
@@ -1303,7 +1387,7 @@ the criterion for abandoning the approach rather than sinking more into it.
 
 | Risk | Severity | Mitigation and kill criterion |
 |---|---|---|
-| **The software renderer misses the frame budget** at 1280×720 on the reference machine | High | The stated degradation order and render scaling absorb an overrun. Measured at M1, which exists for this. If 720p60 is unreachable after the SIMD and tiling work, the baseline drops to 960×540 and is **stated** rather than quietly missed; the renderer is not rescued by cutting the visual design. |
+| **The software renderer misses the frame budget** at 1280×720 on the reference machine | High | The stated degradation order and render scaling absorb an overrun down to the readability floor (§3); below it the frame rate gives way and the diagnostic says so, rather than the picture quietly becoming unreadable. Measured at M1, which exists for this. If 720p60 is unreachable after the SIMD and tiling work, the baseline drops to 960×540 and is **stated** rather than quietly missed; the renderer is not rescued by cutting the visual design. |
 | **Cross-target determinism breaks** | High | `lib/util::mathf` is FMA-free and intrinsic-free today, which is what makes the claim affordable; the M1 four-target hash vertical is the gate, and a change introducing `mul_add` into an authoritative path is a defect. Escape hatch if it proves unholdable: fixed-point arithmetic for the authoritative sim — costly, so it is a fallback, not a plan. |
 | **The audio stack (P1) slips** | Medium | WS14 sits late deliberately, so M1–M3 do not block on it. The game ships silent and says so; it does not grow a private audio path (§14). |
 | **The `cinder` migration regresses a shipped feature** | Medium | `cinder`'s existing shape, paint, gait and roam tests plus its QEMU vertical are the acceptance gate. If its pixels cannot be preserved, that is surfaced (§15.7), not absorbed. |

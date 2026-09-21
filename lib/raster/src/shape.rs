@@ -149,6 +149,77 @@ impl Shape {
         }
     }
 
+    /// Whether every dimension is a finite number.
+    ///
+    /// Total over the set, so a caller validating authored geometry does not
+    /// have to know which member carries which dimension — and cannot fall
+    /// out of step with the set when a member changes.
+    #[must_use]
+    pub fn is_real(self) -> bool {
+        match self {
+            Self::Splat { radius } => radius.is_finite(),
+            Self::Superellipse { rx, ry, square } => {
+                rx.is_finite() && ry.is_finite() && square.is_finite()
+            }
+            Self::Taper { length, top, foot } => {
+                length.is_finite() && top.is_finite() && foot.is_finite()
+            }
+            Self::Wedge {
+                half_width,
+                height,
+                lean,
+            } => half_width.is_finite() && height.is_finite() && lean.is_finite(),
+            Self::ScallopedPanel { rx, ry, .. } => rx.is_finite() && ry.is_finite(),
+            Self::BevelledPanel { rx, ry, bevel } => {
+                rx.is_finite() && ry.is_finite() && bevel.is_finite()
+            }
+        }
+    }
+
+    /// This shape with every length multiplied by `factor`.
+    ///
+    /// Lengths only: `square` is a fraction of the way to the bounding box
+    /// and `folds` a count of lobes, so both are shape-relative and a
+    /// uniform scale leaves them alone. This is what lets an arrangement be
+    /// authored once at a reference size and drawn at any other.
+    #[must_use]
+    pub fn scaled(self, factor: f64) -> Self {
+        match self {
+            Self::Splat { radius } => Self::Splat {
+                radius: radius * factor,
+            },
+            Self::Superellipse { rx, ry, square } => Self::Superellipse {
+                rx: rx * factor,
+                ry: ry * factor,
+                square,
+            },
+            Self::Taper { length, top, foot } => Self::Taper {
+                length: length * factor,
+                top: top * factor,
+                foot: foot * factor,
+            },
+            Self::Wedge {
+                half_width,
+                height,
+                lean,
+            } => Self::Wedge {
+                half_width: half_width * factor,
+                height: height * factor,
+                lean: lean * factor,
+            },
+            Self::ScallopedPanel { rx, ry, folds } => Self::ScallopedPanel {
+                rx: rx * factor,
+                ry: ry * factor,
+                folds,
+            },
+            Self::BevelledPanel { rx, ry, bevel } => Self::BevelledPanel {
+                rx: rx * factor,
+                ry: ry * factor,
+                bevel: bevel * factor,
+            },
+        }
+    }
+
     /// Trace the shape's closed outline in shape-local pixels into `out`,
     /// which is cleared first.
     ///
