@@ -3214,6 +3214,43 @@ fn opening_and_closing_the_library_popup_latches_the_popup_and_the_bar() {
 }
 
 #[test]
+fn the_library_announces_each_showing_once_and_never_while_closed() {
+    /// One present: whether it announced the popup.
+    fn present(bar: &mut Taskbar) -> bool {
+        let mut announced = false;
+        bar.library_mut().report_newly_shown(|| announced = true);
+        announced
+    }
+
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+
+    assert!(!present(&mut bar), "a closed popup announces nothing");
+
+    open_library(&mut input, &mut bar);
+    assert!(
+        present(&mut bar),
+        "the first frame carrying the popup announces it"
+    );
+    assert!(
+        !present(&mut bar),
+        "later frames of the same showing announce nothing"
+    );
+
+    // Dismissing and reopening is a second showing: a script gating a row
+    // click on the second open must not be released by the first's record.
+    let away = Point::new(500, 100);
+    assert_eq!(
+        press_at(&mut input, &mut bar, away.x, away.y),
+        TaskbarResponse::LibraryDismissed
+    );
+    assert!(!present(&mut bar), "a dismissed popup announces nothing");
+
+    open_library(&mut input, &mut bar);
+    assert!(present(&mut bar), "reopening announces the new showing");
+}
+
+#[test]
 fn click_away_dismisses_without_acting_on_what_it_hit() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");

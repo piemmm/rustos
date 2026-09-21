@@ -102,8 +102,7 @@ pub const APP_BAR_SLOT_SHOWN: tairix_log::EventId = tairix_log::EventId(20_009);
 pub const APP_BAR_SLOT_SHOWN_MESSAGE: &str = "icon-bar slot on screen";
 
 /// One-shot: a *revealed* desktop frame has reached the display carrying the
-/// application strip, every slot drawn with the picture it will keep. Id
-/// `20_014` is the next free slot.
+/// application strip, every slot drawn with the picture it will keep.
 ///
 /// Neither half of that is [`APP_BAR_SLOT_SHOWN`], and the difference is the
 /// whole reason this exists. A slot's own witness fires on the first frame
@@ -124,6 +123,23 @@ pub const APP_BAR_SETTLED: tairix_log::EventId = tairix_log::EventId(20_014);
 /// The exact message [`APP_BAR_SETTLED`] is emitted with. A log consumer keys
 /// on this constant rather than on a copy of its text.
 pub const APP_BAR_SETTLED_MESSAGE: &str = "icon-bar slots drawn on the revealed desktop";
+
+/// One-shot: a presented frame has carried the program-library popup. Id
+/// `20_016` is the next free slot.
+///
+/// The sibling of [`MENU_SHOWN`](crate::MENU_SHOWN) for the one surface it
+/// cannot speak for. The launcher is the bar's own popup — not a menu chain
+/// and not a served window — so neither of those witnesses says a word about
+/// it, and its rows are the only clickable surface on the desktop whose
+/// arrival was announced nowhere. Only the session sees a composed frame
+/// carrying it reach the display, which is what lets a user diagnosing a
+/// launcher that never opened, or a QEMU vertical deciding when a row is
+/// worth clicking, key on a fact instead of a delay.
+pub const LIBRARY_SHOWN: tairix_log::EventId = tairix_log::EventId(20_015);
+
+/// The exact message [`LIBRARY_SHOWN`] is emitted with. A log consumer keys
+/// on this constant rather than on a copy of its text.
+pub const LIBRARY_SHOWN_MESSAGE: &str = "program-library popup on screen";
 
 /// One application's icon-bar declaration, exactly as the window engine
 /// attested and bounded it.

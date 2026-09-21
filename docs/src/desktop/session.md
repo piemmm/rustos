@@ -1382,6 +1382,31 @@ never appeared can tell "never drawn" from "never asked". And the
 picker-delegation QEMU vertical gates its pick-click on it: any earlier gate
 races the frame the rows are in.
 
+### And the launcher's own witness
+
+`LIBRARY_SHOWN` ("program-library popup on screen") is the same announcement
+for the bar's launcher, and it needs its own because neither sibling covers
+it: the popup is not a served window, so `WINDOW_SHOWN` never speaks for it,
+and it is not a menu chain, so `MENU_SHOWN` does not either. Its rows were the
+one clickable surface on the desktop whose arrival was announced nowhere.
+
+Opening the launcher and clicking one of its rows are two gestures, and a
+waiter keyed on whatever let the *button* be pressed is keyed on a fact that
+was already true before the launcher existed. That does not misplace the
+click — the popup takes the pointer grab the moment it opens, from the model
+rather than from any frame, so a row press arriving before the first present
+is still hit-tested against the open popup. What it does is send the press
+into the busiest instant of the gesture: the popup is laid out, its visible
+rows' artwork resolved, and its labels rasterised through the font service
+between the two clicks, which is exactly the "busy desktop re-rendering while
+a click arrives" the input path names as when a press can be dropped
+outright. Keying on this record instead puts the press after that work, and
+lets a script state that the launcher was on screen rather than assume it.
+
+One announcement per open, not per session. A dismissed and reopened popup is
+one the user has not seen since, so it is announced again in its own right,
+and a waiter on the second showing is not released by the first's record.
+
 ### And its own release witness
 
 `CONTENT_RELEASED` ("window content released under memory pressure") is the

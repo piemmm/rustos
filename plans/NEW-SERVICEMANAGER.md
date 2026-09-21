@@ -342,7 +342,7 @@ a feature.
 
 Each stage leaves the whole-project §7 gate green before it is reported done.
 
-### SVC-1 — Kill the `MAX_SERVICES` cap; floor-sized fail-closed bound — DONE
+### SVC-1 — Kill the `MAX_SERVICES` cap; floor-sized fail-closed bound
 - `startup::MAX_SERVICES` is derived from `DEFAULT_CONFIG` by a `const fn`
   service-directive counter, so the floor sizes its own bound and a stale
   magic number can neither silently truncate a floor entry nor drift. (The
@@ -412,7 +412,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   The x86_64/riscv64 boot verticals and the full §7 gate share the same
   arch-neutral `init` source and are expected to follow; they run in CI.
 
-### SVC-2 — Lifecycle + readiness protocol (`lib/abi` + engine) — DONE
+### SVC-2 — Lifecycle + readiness protocol (`lib/abi` + engine)
 - `lib/abi/src/service.rs` (versioned/fail-closed, frozen on first release):
   the `ServiceState` lifecycle (`inactive → starting → ready → running →
   stopping → stopped | failed`) with `is_ready`/`is_terminal`; the closed
@@ -442,7 +442,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   through its engine seam; binding the readiness/control endpoint and mapping
   a kernel-attested sender to a service is SVC-4/SVC-8 work.
 
-### SVC-3 — Discovery + registration store under `/System/Settings` — DONE
+### SVC-3 — Discovery + registration store under `/System/Settings`
 - The enrolment engine is `userland/system/init/src/registry.rs` (pure,
   host-tested, `no_std`+alloc): `Enrolment` is the fail-closed parsed set of
   enabled service names for one scope (`startup.rs`-style line parser: `#`
@@ -485,7 +485,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   `DEFAULT_CONFIG` until the growable registered tier lands on the `lib/rt`
   heap (§3.10).
 
-### SVC-3b — Service unit-metadata record + discovery parser — DONE
+### SVC-3b — Service unit-metadata record + discovery parser
 - `lib/abi/src/service.rs` gains the `ServiceManifest`/`ServiceUnit` pair —
   the compact, versioned, fail-closed binary record of a service's unit
   metadata (`SERVICE_MANIFEST_MAGIC` = `"SUM1"`, `SERVICE_VERSION_V1`): the
@@ -518,7 +518,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   including which entries are `ondemand` — comes from the compiled-in boot
   description, which is the one place the floor has ever been described.
 
-### SVC-4 — On-demand endpoint activation + idle linger — DONE (engine core)
+### SVC-4 — On-demand endpoint activation + idle linger
 - `lib/abi/src/service.rs` gains `ActivationMode` (`Permanent` |
   `OnDemand { linger: Duration64 }`) — unit metadata carried in the signed
   manifest, IPC-protocol module so no `abi-check`/`c-header` change.
@@ -564,7 +564,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   through `next_deadline`/`expire_due`. The growable registered tier past the
   floor still waits on the `lib/rt` heap (§3.10).
 
-### SVC-5 — On-demand `fontd`; the `login`-starts-`fontd` hack deleted — DONE
+### SVC-5 — On-demand `fontd`; the `login`-starts-`fontd` hack deleted
 
 **The defect this closed, measured.** `ipc_call` to an unbound endpoint fails
 closed with `NotFound` — it does not park. `login::ensure_fontd` spawned the
@@ -675,7 +675,7 @@ the endpoint answers. A script that gated on the service first would have been
 testing its own ordering rather than the system's, so the enrolment pins that
 it does not.
 
-### SVC-6 — Per-user manager scope — DONE (engine core)
+### SVC-6 — Per-user manager scope
 - **Authority scope is a first-class engine value.** `init/src/scope.rs`
   defines `AuthorityScope` (`System` | `User { uid }`) with `permits_account`;
   `InitConfig` carries it, `Init` stores it, and `Init::scope()` exposes it.
@@ -707,7 +707,7 @@ it does not.
   never the service's authority (§3.2) — is live with SVC-5's activation
   broker.
 
-### SVC-7 — Restart policy + reverse-dependency stop/shutdown ordering — DONE (engine core)
+### SVC-7 — Restart policy + reverse-dependency stop/shutdown ordering
 - `lib/abi/src/service.rs` gains `RestartPolicy` (`never` | `on-failure` |
   `always`, default `never`) — unit metadata carried in the signed manifest,
   IPC-protocol module so no `abi-check`/`c-header` change. `never` is the
@@ -986,7 +986,7 @@ it does not.
 
 ---
 
-### SVC-9 — Reclaiming an activated service when its last client dies — PLANNED
+### SVC-9 — Reclaiming an activated service when its last client dies
 
 The idle-linger path is armed by an explicit `disconnect`, and a client that
 *dies* sends none: the manager is not the parent of a font client and has no

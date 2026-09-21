@@ -848,6 +848,28 @@ const WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
 /// [`APPBAR_LAUNCHED_SLOT`]-th after it.
 const APPBAR_SLOT_MARKER: &str = tairix_desktop_session::APP_BAR_SLOT_SHOWN_MESSAGE;
 
+/// Serial marker a vertical gates a click on a *program-library row* on: the
+/// session's own announcement that a frame carrying the popup reached the
+/// display. Imported from the session crate's own definition, so the emitter
+/// and this consumer cannot drift.
+///
+/// The popup is the bar's own surface rather than a menu chain or a served
+/// window, so neither [`MENU_SHOWN_MARKER`] nor [`WINDOW_SHOWN_MARKER`] says a
+/// word about it, and until this record existed a script had nothing to gate
+/// on but the gesture that opened it.
+///
+/// Gating the row click on whatever let the *button* be pressed gates it on a
+/// fact that was already true before the launcher existed. That does not
+/// misplace the press — the popup grabs the pointer the moment it opens, from
+/// the model rather than from any frame — but it issues the two clicks back to
+/// back, so the press arrives while the session is laying the popup out,
+/// resolving its rows' artwork and rasterising its labels through the font
+/// service: the busy re-render during which `lib/virtio_input` records that a
+/// press can be dropped outright. Waiting on the popup's own witness puts the
+/// press after that work, and lets the script state the launcher reached the
+/// screen rather than assume it.
+const LIBRARY_SHOWN_MARKER: &str = tairix_desktop_session::LIBRARY_SHOWN_MESSAGE;
+
 /// Serial marker a vertical gates a dump *of a slot's pixels* on: the session's
 /// own announcement that a fully-revealed frame carried the application strip
 /// with every slot drawn as the picture it keeps. Imported from the session
@@ -11151,14 +11173,15 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
     let sampled = tairix_test_framestats::SAMPLE_MESSAGE;
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
     pen.click(revealed, 1, MouseButton::Primary, library_button);
-    pen.click(revealed, 1, MouseButton::Primary, sample_row);
+    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, sample_row);
     // The first sample is in, so the bracketed window is open. Walk to the
     // leading end of the bar, then sweep it.
     pen.aim(sampled, 1, sweep_start);
     pen.hover(sampled, 1, sweep_end, SWEEP_MOVES);
-    // Close the window: the second sample is the verdict.
+    // Close the window: the second sample is the verdict. The launcher's
+    // witness is one-shot per open, so this second showing is its second.
     pen.click(sampled, 1, MouseButton::Primary, library_button);
-    pen.click(sampled, 1, MouseButton::Primary, sample_row);
+    pen.click(LIBRARY_SHOWN_MARKER, 2, MouseButton::Primary, sample_row);
     Ok(pen.steps())
 }
 
@@ -11791,7 +11814,7 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
     pen.click(revealed, 1, MouseButton::Primary, library_button);
-    pen.click(revealed, 1, MouseButton::Primary, entry_row);
+    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
     // The viewer is resident: its slot is drawn and clickable before it owns
     // any window, and the click is what makes it open one and ask to pick.
     pen.click(
@@ -12016,7 +12039,7 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let rest = pointer_rest();
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
-    pen.click(ready, 1, MouseButton::Primary, entry_row);
+    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
     // Off the bar before the frame that measures it. A dump taken with the
     // pointer left on the row it just clicked reads the cursor wherever the
     // popup happened to place that row — and the popup's rows move whenever
@@ -12070,7 +12093,7 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     let ready = APPBAR_SETTLED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
-    pen.click(ready, 1, MouseButton::Primary, entry_row);
+    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
     // The launch opened the first window, so each remaining one is a click on
     // the slot once its predecessor is on screen. The guest exits as soon as
     // the band has moved and one further window is served, so the tail of this
@@ -12247,7 +12270,7 @@ fn menu_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
     pen.click(ready, 1, MouseButton::Primary, library_button);
-    pen.click(ready, 1, MouseButton::Primary, entry_row);
+    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
     pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, press);
     pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, settings_row);
     Ok(pen.steps())
@@ -12639,11 +12662,12 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         // starts in a strictly later wake.
         step(AUTOLOAD_FILES_ACTIVATED_MARKER, 1, click),
         // --- The AW4 terminal stage, keyed on the handshake click's own
-        // delivery. Click the Library button — the program-library popup
-        // opens (a session-owned surface: no app-ward delivery and no
-        // window-frame map, so neither gate below can fire early) — then
-        // the popup's "Terminal" entry, spawning the terminal bundle from
-        // the on-disk store through the planted catalog.
+        // delivery. Click the Library button, then the popup's "Terminal"
+        // entry, spawning the terminal bundle from the on-disk store through
+        // the planted catalog. The row click waits on the popup's own
+        // on-screen witness: no app-ward delivery or window-frame map marks a
+        // session-owned surface's arrival, and the handshake that let the
+        // *button* be pressed would put the press mid-re-render.
         step(
             AUTOLOAD_FILES_HANDSHAKE_MARKER,
             1,
@@ -12651,11 +12675,11 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         ),
         step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, click),
         step(
-            AUTOLOAD_FILES_HANDSHAKE_MARKER,
+            LIBRARY_SHOWN_MARKER,
             1,
             move_by(library_button, terminal_entry),
         ),
-        step(AUTOLOAD_FILES_HANDSHAKE_MARKER, 1, click),
+        step(LIBRARY_SHOWN_MARKER, 1, click),
         // A frame carrying the terminal window reached the display, so click
         // its body. The second occurrence of the witness is that window's:
         // the files window's is the first, no other client opens one, and a

@@ -226,7 +226,8 @@ pub use apps::{
     picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail, AppBarBridge,
     AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex, Declaration,
     IconRasteriser, APP_BAR_RELAYED, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
-    APP_BAR_SLOT_SHOWN_MESSAGE, BUNDLE_RUN_SUFFIX, MAX_BAR_APPS,
+    APP_BAR_SLOT_SHOWN_MESSAGE, BUNDLE_RUN_SUFFIX, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE,
+    MAX_BAR_APPS,
 };
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};

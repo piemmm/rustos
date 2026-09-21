@@ -206,6 +206,9 @@ impl LibraryLayout {
 #[derive(Clone, Debug)]
 pub struct LibraryPopup {
     open: bool,
+    /// Whether a presented frame has carried this showing yet, so the
+    /// on-screen announcement fires once per open.
+    shown: bool,
     catalog: Catalog,
     /// Folders the user collapsed in this showing; every folder opens
     /// expanded, so one click (or `Enter`) reaches any entry.
@@ -238,6 +241,7 @@ impl LibraryPopup {
     pub fn new() -> Self {
         Self {
             open: false,
+            shown: false,
             catalog: Catalog::default(),
             collapsed: Vec::new(),
             search: SearchField::new().with_placeholder("Search programs"),
@@ -259,6 +263,25 @@ impl LibraryPopup {
     #[must_use]
     pub const fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Announce this showing if the frame just handed to the display is the
+    /// first to carry it.
+    ///
+    /// Called immediately after a present, which is what makes the claim
+    /// true: the popup is drawn into the frame the bar composites, so a frame
+    /// composited while it is up carries its rows. Once per open — a repaint,
+    /// a scroll, or a filter announces nothing more — and never for a closed
+    /// popup, so the record can never run ahead of the pixels.
+    ///
+    /// Takes a reporter rather than returning anything so an idle wake, which
+    /// is nearly every wake, costs a bool test.
+    pub fn report_newly_shown(&mut self, report: impl FnOnce()) {
+        if !self.open || self.shown {
+            return;
+        }
+        self.shown = true;
+        report();
     }
 
     /// The resolved catalog the popup lists.
@@ -392,6 +415,7 @@ impl LibraryPopup {
     /// opening state means the same catalog always presents the same way.
     pub(crate) fn open(&mut self) {
         self.open = true;
+        self.shown = false;
         self.search.set_text("");
         self.search.set_focused(true);
         self.collapsed.clear();

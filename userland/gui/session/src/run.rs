@@ -141,10 +141,10 @@ mod program {
         ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH,
         LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
         LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
-        LAYER_RETIRED_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
-        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SETTINGS_LABEL, SETTINGS_RUN_PATH,
-        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WINDOW_SHOWN,
-        WINDOW_SHOWN_MESSAGE,
+        LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
+        MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
+        SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, USAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -915,10 +915,9 @@ mod program {
     ///
     /// A frame that did reach the display is where the desktop's one-shot
     /// reveal witness is announced, so the record can only follow pixels
-    /// this session actually put on the screen. Each served window whose
-    /// first painted frame this one carried is announced there too, and the
-    /// menu chain and the trusted picker this one first carried, for the same
-    /// reason: until the frame lands, nobody has seen any of them.
+    /// this session actually put on the screen, and with it every other
+    /// surface this frame was the first to carry
+    /// ([`report_surfaces_shown`]).
     #[allow(clippy::too_many_arguments)] // Every surface a present may be the first showing of.
     fn present<S: tairix_browse::DirectorySource, F: FnMut() -> S>(
         shell: &mut DesktopShell,
@@ -936,79 +935,7 @@ mod program {
         match compositor.present(display) {
             Ok(()) => {
                 fade.presented(&LOG_SINK);
-                windows.report_newly_shown(|window| {
-                    log(
-                        &LOG_SINK,
-                        &LogEvent {
-                            level: LogLevel::Info,
-                            id: WINDOW_SHOWN,
-                            message: WINDOW_SHOWN_MESSAGE,
-                            fields: &[LogField {
-                                key: "window",
-                                value: LogFieldValue::UnsignedInt(window),
-                            }],
-                        },
-                    );
-                });
-                apps.report_newly_shown(|owner| {
-                    let mut hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
-                    log(
-                        &LOG_SINK,
-                        &LogEvent {
-                            level: LogLevel::Info,
-                            id: APP_BAR_SLOT_SHOWN,
-                            message: APP_BAR_SLOT_SHOWN_MESSAGE,
-                            fields: &[LogField {
-                                key: "app",
-                                value: LogFieldValue::Str(owner.write_hex(&mut hex)),
-                            }],
-                        },
-                    );
-                });
-                // After the reveal witness above, because that is the half of
-                // this fact the fade owns and this frame may be the one that
-                // gave it.
-                apps.report_settled(fade.revealed(), || {
-                    log(
-                        &LOG_SINK,
-                        &LogEvent {
-                            level: LogLevel::Info,
-                            id: APP_BAR_SETTLED,
-                            message: APP_BAR_SETTLED_MESSAGE,
-                            fields: &[],
-                        },
-                    );
-                });
-                menu.report_newly_shown(|owner| {
-                    let owner = match owner {
-                        ChainOwner::Window { .. } => "window",
-                        ChainOwner::Backdrop => "backdrop",
-                        ChainOwner::Bar(_) => "bar",
-                    };
-                    log(
-                        &LOG_SINK,
-                        &LogEvent {
-                            level: LogLevel::Info,
-                            id: MENU_SHOWN,
-                            message: MENU_SHOWN_MESSAGE,
-                            fields: &[LogField {
-                                key: "owner",
-                                value: LogFieldValue::Str(owner),
-                            }],
-                        },
-                    );
-                });
-                picker.report_newly_shown(|| {
-                    log(
-                        &LOG_SINK,
-                        &LogEvent {
-                            level: LogLevel::Info,
-                            id: PICKER_SHOWN,
-                            message: PICKER_SHOWN_MESSAGE,
-                            fields: &[],
-                        },
-                    );
-                });
+                report_surfaces_shown(shell, fade, windows, menu, picker, apps);
                 Ok(())
             }
             Err(DriverError::SeatRevoked | DriverError::PermissionDenied) => {
@@ -1023,6 +950,111 @@ mod program {
                 Err(fail(EXIT_PRESENT_FAILED, "display present refused"))
             }
         }
+    }
+
+    /// Announce every surface this frame was the first to carry: each served
+    /// window's first painted frame, a newly drawn icon-bar slot and the settled
+    /// strip, the menu chain, the trusted picker, and the program-library popup.
+    ///
+    /// Called only after a present reached the display, because until the frame
+    /// lands nobody has seen any of them. Each witness is one-shot in its own
+    /// owner, so an ordinary frame costs a bool test apiece.
+    fn report_surfaces_shown<S: tairix_browse::DirectorySource, F: FnMut() -> S>(
+        shell: &mut DesktopShell,
+        fade: &ScreenFade,
+        windows: &mut SessionWindows,
+        menu: &mut MenuChain,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarService,
+    ) {
+        windows.report_newly_shown(|window| {
+            log(
+                &LOG_SINK,
+                &LogEvent {
+                    level: LogLevel::Info,
+                    id: WINDOW_SHOWN,
+                    message: WINDOW_SHOWN_MESSAGE,
+                    fields: &[LogField {
+                        key: "window",
+                        value: LogFieldValue::UnsignedInt(window),
+                    }],
+                },
+            );
+        });
+        apps.report_newly_shown(|owner| {
+            let mut hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
+            log(
+                &LOG_SINK,
+                &LogEvent {
+                    level: LogLevel::Info,
+                    id: APP_BAR_SLOT_SHOWN,
+                    message: APP_BAR_SLOT_SHOWN_MESSAGE,
+                    fields: &[LogField {
+                        key: "app",
+                        value: LogFieldValue::Str(owner.write_hex(&mut hex)),
+                    }],
+                },
+            );
+        });
+        // After the reveal witness above, because that is the half of
+        // this fact the fade owns and this frame may be the one that
+        // gave it.
+        apps.report_settled(fade.revealed(), || {
+            log(
+                &LOG_SINK,
+                &LogEvent {
+                    level: LogLevel::Info,
+                    id: APP_BAR_SETTLED,
+                    message: APP_BAR_SETTLED_MESSAGE,
+                    fields: &[],
+                },
+            );
+        });
+        menu.report_newly_shown(|owner| {
+            let owner = match owner {
+                ChainOwner::Window { .. } => "window",
+                ChainOwner::Backdrop => "backdrop",
+                ChainOwner::Bar(_) => "bar",
+            };
+            log(
+                &LOG_SINK,
+                &LogEvent {
+                    level: LogLevel::Info,
+                    id: MENU_SHOWN,
+                    message: MENU_SHOWN_MESSAGE,
+                    fields: &[LogField {
+                        key: "owner",
+                        value: LogFieldValue::Str(owner),
+                    }],
+                },
+            );
+        });
+        picker.report_newly_shown(|| {
+            log(
+                &LOG_SINK,
+                &LogEvent {
+                    level: LogLevel::Info,
+                    id: PICKER_SHOWN,
+                    message: PICKER_SHOWN_MESSAGE,
+                    fields: &[],
+                },
+            );
+        });
+        shell
+            .session_mut()
+            .taskbar_mut()
+            .library_mut()
+            .report_newly_shown(|| {
+                log(
+                    &LOG_SINK,
+                    &LogEvent {
+                        level: LogLevel::Info,
+                        id: LIBRARY_SHOWN,
+                        message: LIBRARY_SHOWN_MESSAGE,
+                        fields: &[],
+                    },
+                );
+            });
     }
 
     /// Attest the producer of a pending notification call, decode the request
