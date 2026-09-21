@@ -19,9 +19,10 @@
 use tairix_util::mathf;
 
 use crate::error::FigureError;
-use crate::frame::FORESHORTEN;
+use crate::frame::{Body, FORESHORTEN};
 use tairix_raster::shape::{Placed, Shape};
 use tairix_raster::Color;
+use tairix_wintersun_net::value::Facing;
 
 /// How far a light may rake the shadow out before the stretch is capped.
 ///
@@ -69,10 +70,21 @@ impl Light {
         })
     }
 
-    /// Its elevation above the horizon, in radians.
+    /// The direction it travels, in the frame of a figure facing `facing`.
+    ///
+    /// The light is the scene's and the figure turns under it, so a surface
+    /// normal can only be judged against it once it is expressed in the
+    /// frame that normal is stated in.
     #[must_use]
-    pub const fn elevation(self) -> f64 {
-        self.elevation
+    pub fn toward(self, facing: Facing) -> Body {
+        let (east, south) = facing.unit_vector();
+        let flat = mathf::cos(self.elevation);
+        let (across, into) = (self.across * flat, self.into * flat);
+        Body::new(
+            across * east + into * south,
+            across * south - into * east,
+            -mathf::sin(self.elevation),
+        )
     }
 
     /// How much longer than wide the shadow it throws is.
@@ -104,12 +116,6 @@ impl Contact {
             return Err(FigureError::GeometryUnreal);
         }
         Ok(Self { radius, tone })
-    }
-
-    /// Its footprint radius, in figure-local units.
-    #[must_use]
-    pub const fn radius(self) -> f64 {
-        self.radius
     }
 
     /// The shadow a figure `lift` above its ground point throws, drawn at

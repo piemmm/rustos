@@ -249,9 +249,3 @@ fn scale_takes_the_whole_shadow_with_it() {
     assert!(close(half_wide, unit_wide * 0.5) && close(half_tall, unit_tall * 0.5));
     assert_eq!(half.color, unit.color, "scale is size, not opacity");
 }
-
-#[test]
-fn a_contact_reads_back_what_it_was_made_from() {
-    assert!(close(contact().radius(), 9.0));
-    assert!(close(overhead().elevation(), FRAC_PI_2));
-}

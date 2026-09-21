@@ -9040,9 +9040,14 @@ game, so a single definition is the charter's rule (§2.2, §6):
   converter that fills them; `cinder` migrates its `shape.rs` onto them in the
   same change, with its existing shape, paint, gait and roam tests as the
   acceptance gate, and keeps its own skeleton, gait and mind where they are.
-  Everything with character semantics — rigs, sockets, clips, blending, motion
-  layers, character parameters, the art harness — is **game code** and lives in
-  the games subtree. `lib/*` gets the geometry and nothing else. The `cinder`
+  A game *figure's own body* is not drawn from them: a flat outline cannot be
+  placed correctly under a three-axis rotation — measured, a thigh's drawn end
+  missed its knee by a third of the figure's height — so a part is a skinned
+  mesh carried by the joints and projected vertex by vertex, filled through
+  the same scan converter. Everything with character semantics — rigs,
+  meshes, sockets, clips, blending, motion layers, character parameters, the
+  art harness — is **game code** and lives in the games subtree. `lib/*` gets
+  the geometry and nothing else. The `cinder`
   migration is a deliberate, stated risk to a finished feature.
 - `lib/recdb` is the record store TAIRiX does not have. Structured state is
   persisted today either as a whole-file text rewrite (`lib/users`) or as an

@@ -91,18 +91,27 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(test)]
+extern crate alloc;
+
 pub mod blend;
 pub mod breath;
 pub mod clip;
+pub mod digest;
 pub mod error;
 pub mod frame;
 pub mod gait;
 pub mod humanoid;
 pub mod joint;
 pub mod look;
+pub mod mesh;
+pub mod motion;
+pub mod paint;
 pub mod plant;
 pub mod pose;
+pub mod quality;
 pub mod recoil;
+pub mod reference;
 pub mod rig;
 pub mod rigging;
 pub mod shadow;

@@ -172,10 +172,3 @@ fn a_settled_spring_stays_put() {
         .expect("it steps");
     assert_eq!(after, Motion::REST);
 }
-
-#[test]
-fn a_spring_reads_back_what_it_was_made_from() {
-    let spring = spring(6.5, 0.35);
-    assert!(close(spring.rate(), 6.5));
-    assert!(close(spring.damping(), 0.35));
-}

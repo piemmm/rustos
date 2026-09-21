@@ -6,7 +6,7 @@ use core::f64::consts::{FRAC_PI_2, PI};
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
-use super::{project, screen_turn, Basis, Body, Rotation, FORESHORTEN};
+use super::{project, toward_camera, Basis, Body, Rotation, FORESHORTEN};
 
 /// Facings in the sense `Facing` itself documents: zero east, advancing south.
 const EAST: Facing = Facing(0);
@@ -106,70 +106,6 @@ fn a_whole_turn_of_headings_needs_no_new_geometry() {
         let facing = Facing(u16::try_from(step * 4096).expect("inside a turn"));
         let there = project(facing, offset);
         assert!(there.dx.is_finite() && there.dy.is_finite() && there.depth.is_finite());
-    }
-}
-
-#[test]
-fn a_pitch_turns_the_outline_fully_in_profile() {
-    // Seen from the side, a fore-and-aft swing is a screen rotation of
-    // exactly the same angle. Positive pitch leans the top forward, which
-    // facing east is toward screen-right, which a placed outline calls
-    // positive.
-    let swing = 0.4;
-    let basis = Basis::of(Rotation::new(swing, 0.0, 0.0));
-    assert!(close(screen_turn(EAST, basis), swing));
-    // Seen from the other side the same swing leans the other way.
-    assert!(close(screen_turn(WEST, basis), -swing));
-}
-
-#[test]
-fn a_pitch_stops_turning_the_outline_in_depth() {
-    // Facing the camera the swing happens in depth, so the billboard
-    // correctly stops rotating rather than needing a branch on the heading.
-    let basis = Basis::of(Rotation::new(0.4, 0.0, 0.0));
-    assert!(close(screen_turn(SOUTH, basis), 0.0));
-    assert!(close(screen_turn(NORTH, basis), 0.0));
-}
-
-#[test]
-fn a_pitch_is_exact_at_a_large_angle() {
-    // Not a small-angle estimate: a raised arm turns as far as it went, so
-    // the rescale off the rotation's own angle is doing its job.
-    let swing = FRAC_PI_2 * 0.9;
-    let basis = Basis::of(Rotation::new(swing, 0.0, 0.0));
-    assert!(close(screen_turn(EAST, basis), swing));
-}
-
-#[test]
-fn yaw_never_turns_an_outline() {
-    // A ground-plane rotation projects to a shear, not a rotation, and every
-    // outline is symmetric about its vertical axis so the shear leaves it be.
-    for facing in [EAST, SOUTH, WEST, NORTH] {
-        for yaw in [-0.6, -0.2, 0.2, 0.6] {
-            let basis = Basis::of(Rotation::new(0.0, yaw, 0.0));
-            assert!(
-                close(screen_turn(facing, basis), 0.0),
-                "yaw {yaw} turned an outline"
-            );
-        }
-    }
-}
-
-#[test]
-fn a_roll_turns_the_outline_in_depth_and_not_in_profile() {
-    // Facing the camera, the figure's right is screen-left, so a positive
-    // roll — top toward its right — leans the outline anticlockwise.
-    let tilt = 0.3;
-    let basis = Basis::of(Rotation::new(0.0, 0.0, tilt));
-    assert!(close(screen_turn(SOUTH, basis), -tilt));
-    assert!(close(screen_turn(NORTH, basis), tilt));
-    assert!(close(screen_turn(EAST, basis), 0.0));
-}
-
-#[test]
-fn rest_turns_nothing() {
-    for facing in [EAST, SOUTH, WEST, NORTH] {
-        assert!(close(screen_turn(facing, Basis::IDENTITY), 0.0));
     }
 }
 
@@ -279,5 +215,23 @@ fn a_basis_reads_a_held_direction_back_exactly() {
             // pixel rather than to the last bit.
             assert!(mathf::fabs(a - b) < 1e-9, "{a} against {b}");
         }
+    }
+}
+
+/// The one direction a point may move along without moving on screen: what
+/// a surface's near side is judged against, so a silhouette is exact rather
+/// than an approximation of a rotation.
+#[test]
+fn the_camera_direction_moves_nothing_on_screen() {
+    for facing in [EAST, SOUTH, WEST, NORTH, Facing(0x1234)] {
+        let toward = toward_camera(facing);
+        assert!(close(toward.length(), 1.0), "it must be a direction");
+        let here = project(facing, Body::new(3.0, -2.0, 7.0));
+        let moved = project(facing, Body::new(3.0, -2.0, 7.0).plus(toward.scaled(5.0)));
+        assert!(
+            close(here.dx, moved.dx) && close(here.dy, moved.dy),
+            "{facing:?} moved the point on screen"
+        );
+        assert!(moved.depth > here.depth, "{facing:?} must come nearer");
     }
 }

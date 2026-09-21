@@ -1,20 +1,64 @@
 //! The humanoid's own consistency: its proportions, its hierarchy, and the
 //! rule that a joint bearing a limb carries its mass.
 
-use tairix_raster::shape::Outline;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
 use super::{palette, rig, Bone, JOINT_COUNT, PART_COUNT, STANDING_HEIGHT};
 use crate::error::FigureError;
 use crate::frame::{Rotation, FORESHORTEN};
+use tairix_raster::surface::SUBPIXEL;
+
+use crate::reference::Reference;
 use crate::rig::{Placement, Posture, Rig, Stance};
 
 /// A stance the placement cases share; what a stance refuses is `rig`'s own
 /// test, so these state only their own subject.
+/// Where surface `surface` ended up on screen, as the mean of every point
+/// its strips were walked through.
+#[track_caller]
+fn centre(out: &Placement, surface: u16) -> (f64, f64) {
+    let (mut x, mut y, mut count) = (0i64, 0i64, 0i64);
+    for strip in out.strips().filter(|strip| strip.surface == surface) {
+        for (px, py) in strip.near.iter().chain(strip.far) {
+            x += i64::from(*px);
+            y += i64::from(*py);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "surface {surface} was not placed");
+    let count = f64::from(u32::try_from(count).expect("a small point count"));
+    let unit = count * f64::from(SUBPIXEL);
+    let real = |sum: i64| f64::from(i32::try_from(sum).expect("inside the canvas"));
+    (real(x) / unit, real(y) / unit)
+}
+
+/// Whether two placed surfaces overlap on screen.
+///
+/// Boundary points are sampled at a few angles round each ring, so two
+/// surfaces that genuinely touch need not share one: what says they are
+/// still joined is that the region each covers meets the other's.
+#[track_caller]
+fn overlap(out: &Placement, one: u16, other: u16) -> bool {
+    let box_of = |surface: u16| {
+        let (mut lo, mut hi) = ((i32::MAX, i32::MAX), (i32::MIN, i32::MIN));
+        for strip in out.strips().filter(|strip| strip.surface == surface) {
+            for (x, y) in strip.near.iter().chain(strip.far) {
+                lo = (lo.0.min(*x), lo.1.min(*y));
+                hi = (hi.0.max(*x), hi.1.max(*y));
+            }
+        }
+        (lo, hi)
+    };
+    let (a_lo, a_hi) = box_of(one);
+    let (b_lo, b_hi) = box_of(other);
+    a_lo.0 <= b_hi.0 && b_lo.0 <= a_hi.0 && a_lo.1 <= b_hi.1 && b_lo.1 <= a_hi.1
+}
+
 #[track_caller]
 fn stance(facing: Facing, scale: f64, at: (f64, f64)) -> Stance {
-    Stance::new(facing, scale, at).expect("a real stance")
+    Stance::new(facing, scale, at, Reference::light().expect("a real light"))
+        .expect("a real stance")
 }
 use crate::socket::{Side, Socket};
 
@@ -144,10 +188,10 @@ fn a_swinging_limb_never_leaves_its_mass() {
             .map(|(index, _)| u16::try_from(index).expect("inside the bound"));
         let cap = seeds.next().expect("the cap");
         let limb = seeds.next().expect("the limb");
-        let cap = out.parts().find(|p| p.seed == cap).expect("placed");
-        let limb = out.parts().find(|p| p.seed == limb).expect("placed");
+        // The two surfaces ride one joint, so wherever the joint went they
+        // both went.
         assert!(
-            mathf::fabs(cap.x - limb.x) <= SLACK && mathf::fabs(cap.y - limb.y) <= SLACK,
+            overlap(&out, cap, limb),
             "{bearing:?} parted its mass from its limb"
         );
     }
@@ -157,10 +201,10 @@ fn a_swinging_limb_never_leaves_its_mass() {
 fn the_figure_stands_its_stated_height() {
     // `STANDING_HEIGHT` is what a caller's scale is computed against, so it
     // has to be the height the rig actually draws rather than a label.
-    // Measured in the figure's own frame, and off the traced outlines. Not
-    // off a shape's reach, which is a radial bound and over-states a tall
-    // shape's height by its own width; and not off the placed rows, whose
-    // spread includes the depth between the two feet.
+    // Measured in the figure's own frame, off the rings themselves. Not off
+    // a part's reach, which is a radial bound and over-states a tall part's
+    // height by its own width; and not off the placed rows, whose spread
+    // includes the depth between the two feet.
     let rig = built();
     let mut above = [0.0_f64; JOINT_COUNT];
     for (index, joint) in rig.joints().iter().enumerate() {
@@ -170,18 +214,24 @@ fn the_figure_stands_its_stated_height() {
         above[index] = carried + joint.at.up;
     }
 
-    let mut outline = Outline::new();
+    let mut frames = crate::rig::Frames::new();
+    Posture::rest(&rig).resolve(crate::rig::Resolved::REST, &mut frames);
     let mut crown = 0.0;
     let mut sole = 0.0;
     for part in rig.parts() {
-        part.shape.trace(&mut outline);
-        assert!(!outline.is_empty(), "the humanoid draws no untraced shape");
-        let base = above[part.joint.index()] + part.at.up;
-        for &(_, up) in &outline {
-            crown = mathf::fmax(crown, base + up);
-            sole = mathf::fmin(sole, base + up);
+        assert!(!part.rings.is_empty(), "the humanoid draws no empty part");
+        let own = frames.get(part.joint).expect("a resolved joint");
+        let hoops = crate::mesh::carry(part.rings, part.at, (own.at, own.basis), None, None)
+            .expect("the part carries");
+        for hoop in &hoops {
+            // A cross-section is an ellipse in space, so how tall it stands
+            // is the vertical reach of its two half-axes together.
+            let half = mathf::hypot(hoop.wide.up, hoop.deep.up);
+            crown = mathf::fmax(crown, hoop.at.up + half);
+            sole = mathf::fmin(sole, hoop.at.up - half);
         }
     }
+    let _ = above;
 
     let height = crown - sole;
     assert!(
@@ -213,10 +263,7 @@ fn the_foot_further_into_the_scene_draws_higher() {
             .position(|part| part.joint == bone.joint())
             .and_then(|index| u16::try_from(index).ok())
             .expect("the ankle carries a part");
-        out.parts()
-            .find(|part| part.seed == seed)
-            .expect("placed")
-            .y
+        centre(&out, seed).1
     };
 
     let far = row_of(Bone::Ankle(Side::Left));
@@ -342,8 +389,13 @@ fn the_figure_places_at_every_heading() {
             .place(&stance(facing, 0.5, (40.0, 60.0)), &[], &mut out)
             .expect("places");
         assert_eq!(out.len(), PART_COUNT);
-        for part in out.parts() {
-            assert!(part.x.is_finite() && part.y.is_finite() && part.turn.is_finite());
+        for strip in out.strips() {
+            for (x, y) in strip.near.iter().chain(strip.far) {
+                // Saturation is how a surface placed off the canvas stays
+                // off it, so nothing may ever reach the clamp.
+                assert!(*x > i32::MIN && *x < i32::MAX);
+                assert!(*y > i32::MIN && *y < i32::MAX);
+            }
         }
     }
 }
@@ -364,5 +416,26 @@ fn the_palette_is_distinct() {
         for other in &tones[index + 1..] {
             assert_ne!(tone, other, "two tones are the same colour");
         }
+    }
+}
+
+/// The declared tone list is the rig's own, so a part re-tinted above
+/// without the list moving fails here rather than escaping the conformance
+/// check that reads it.
+#[test]
+fn the_declared_palette_is_exactly_what_the_rig_draws_with() {
+    let rig = rig().expect("the humanoid rig");
+    for part in rig.parts() {
+        assert!(
+            palette::ALL.contains(&part.color),
+            "{:?} is drawn in a tone the palette does not list",
+            part.color
+        );
+    }
+    for tone in palette::ALL {
+        assert!(
+            rig.parts().iter().any(|part| part.color == tone),
+            "{tone:?} is listed but nothing is drawn in it"
+        );
     }
 }

@@ -3990,6 +3990,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-figure-determinism-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+ "tairix-wintersun-figure",
+]
+
+[[package]]
+name = "tairix-test-figure-determinism-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+ "tairix-wintersun-figure",
+]
+
+[[package]]
+name = "tairix-test-figure-determinism-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-wintersun-figure",
+]
+
+[[package]]
+name = "tairix-test-figure-determinism-wasm32"
+version = "0.0.0"
+dependencies = [
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-wintersun-figure",
+]
+
+[[package]]
 name = "tairix-test-file-map"
 version = "0.0.0"
 dependencies = [
@@ -6773,6 +6816,7 @@ dependencies = [
 name = "tairix-wintersun-figure"
 version = "0.0.0"
 dependencies = [
+ "tairix-hash",
  "tairix-inline",
  "tairix-raster",
  "tairix-util",
@@ -6935,6 +6979,7 @@ dependencies = [
  "tairix-view",
  "tairix-virtio-input",
  "tairix-wallpaper",
+ "tairix-wintersun-figure",
  "tairix-wm",
 ]
 

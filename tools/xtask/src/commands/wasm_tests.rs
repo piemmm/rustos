@@ -70,6 +70,18 @@ const VERTICALS: &[Vertical] = &[
         artifact: "tairix_test_rules_determinism_wasm32.wasm",
         harness: "tests/integration/rules_determinism_wasm32/web/harness.mjs",
     },
+    // WinterSun's figure engine under a real WebAssembly engine
+    // (`plans/FIGURE.md` FG5): the wasm32 leg of the cross-architecture
+    // determinism vertical whose bare-metal siblings run under QEMU. Its
+    // harness needs no browser — the subject is arithmetic over a posed
+    // figure — and wasm32 is the only Tier-1 target with a 32-bit `usize`,
+    // so a length that had quietly become part of an answer shows up here
+    // and nowhere else.
+    Vertical {
+        package: "tairix-test-figure-determinism-wasm32",
+        artifact: "tairix_test_figure_determinism_wasm32.wasm",
+        harness: "tests/integration/figure_determinism_wasm32/web/harness.mjs",
+    },
     // WinterSun's client frame under a real WebAssembly engine
     // (`plans/WINTERSUN.md` WS5): the wasm32 leg of the cross-target
     // rendering vertical whose bare-metal siblings run under QEMU. Its

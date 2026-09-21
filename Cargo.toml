@@ -532,6 +532,10 @@ members = [
 
     # WinterSun's world generator, on every Tier-1 target: the cross-
     # architecture determinism vertical (plans/WINTERSUN.md WS2).
+    "tests/integration/figure_determinism_qemu_aarch64",
+    "tests/integration/figure_determinism_qemu_riscv64",
+    "tests/integration/figure_determinism_qemu_x86_64",
+    "tests/integration/figure_determinism_wasm32",
     "tests/integration/rules_determinism_qemu_aarch64",
     "tests/integration/rules_determinism_qemu_riscv64",
     "tests/integration/rules_determinism_qemu_x86_64",

@@ -120,9 +120,3 @@ fn a_recoil_leaves_a_pose_inside_its_ranges() {
         }
     }
 }
-
-#[test]
-fn a_recoil_reads_back_the_spring_it_was_made_from() {
-    let spring = Spring::new(18.0, 0.4).expect("a real spring");
-    assert_eq!(Recoil::new(spring).spring(), spring);
-}

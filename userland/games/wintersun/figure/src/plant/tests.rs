@@ -126,28 +126,28 @@ fn the_reach_and_stance_are_the_rigs_own() {
     );
 }
 
-/// The property the whole solve rests on: asked for the ground the animation
-/// already stands on, it must hand back the animation untouched. Without
-/// this, every figure on flat ground is quietly redrawn by the planter.
+/// The property the whole solve rests on: on level ground it must hand back
+/// the animation untouched. Without this, every figure on flat ground is
+/// quietly redrawn by the planter.
+///
+/// It holds for *any* pose, not only one whose legs are already straight,
+/// because the root absorbs the crouch the clip is standing in — and the
+/// foot the clip planted comes out on the floor rather than hovering over
+/// it by the depth of that crouch.
 #[test]
 fn planting_on_flat_ground_changes_nothing() {
     let rig = rig();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+    let sole = legs
+        .standing(&resolved(&rigging, &Pose::REST))
+        .expect("both feet")[0]
+        .up;
 
     for pose in [Pose::REST, striding()] {
         let frames = resolved(&rigging, &pose);
-        let before = legs.standing(&frames).expect("both feet");
-        // The ground each foot is already standing on, which is its own
-        // ankle height less the height a sole rests at.
-        let sole = legs
-            .standing(&resolved(&rigging, &Pose::REST))
-            .expect("both feet")[0]
-            .up;
-        let ground = [before[0].up - sole, before[1].up - sole];
-
         let planted = legs
-            .plant(&rigging, &pose, &frames, ground)
+            .plant(&rigging, &pose, &frames, [0.0, 0.0])
             .expect("it plants");
         for param in Param::ALL {
             assert!(
@@ -162,7 +162,54 @@ fn planting_on_flat_ground_changes_nothing() {
             "missed by {}",
             planted.worst_miss()
         );
-        assert_eq!(planted.root(), Resolved::REST, "flat ground needs no root");
+        assert_eq!(
+            planted.root().basis,
+            crate::frame::Basis::IDENTITY,
+            "level ground needs no lean"
+        );
+        let landed = ankle_heights(&rigging, &planted.pose(), planted.root());
+        let lowest = mathf::fmin(landed[0], landed[1]);
+        assert!(
+            mathf::fabs(lowest - sole) < SLACK,
+            "the planted foot sits at {lowest}, not on the ground at {sole}"
+        );
+    }
+}
+
+/// The regression the crouch rule exists for: a foot the clip lifted must
+/// still be in the air afterwards. Asking every foot for the terrain
+/// flattens a walk's swing arc into a shuffle, and the top-down camera looks
+/// straight at it.
+#[test]
+fn a_foot_the_clip_lifted_keeps_its_clearance() {
+    let rig = rig();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+
+    // The right knee folded well past the left's, which is a leg mid-swing.
+    let pose = striding()
+        .with(Param::KneeBend(Side::Right), 0.55)
+        .expect("a real pose");
+    let frames = resolved(&rigging, &pose);
+    let before = legs.standing(&frames).expect("both feet");
+    let clearance = before[Side::Right as usize].up - before[Side::Left as usize].up;
+    assert!(clearance > 1.0, "the fixture must lift a foot at all");
+
+    for ground in [[0.0, 0.0], [2.0, 2.0], [1.5, -1.5], [-3.0, 0.5]] {
+        let planted = legs
+            .plant(&rigging, &pose, &frames, ground)
+            .expect("it plants");
+        let landed = ankle_heights(&rigging, &planted.pose(), planted.root());
+        let kept = landed[Side::Right as usize] - landed[Side::Left as usize];
+        assert!(
+            mathf::fabs(kept - (clearance + (ground[1] - ground[0]))) < 1e-4,
+            "ground {ground:?}: the swing foot kept {kept} of {clearance}"
+        );
+        assert!(
+            planted.worst_miss() < 1e-4,
+            "ground {ground:?} missed by {}",
+            planted.worst_miss()
+        );
     }
 }
 

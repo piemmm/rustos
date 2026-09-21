@@ -17,14 +17,15 @@
 //! higher without becoming further away, so sorting on the row would put it
 //! behind the body it belongs to.
 //!
-//! # Why every outline is symmetric about its own vertical axis
+//! # Why the projection is enough on its own
 //!
-//! A rotation about the frame's `up` axis lies in the ground plane, and this
-//! projection turns a ground-plane rotation into a shear rather than a screen
-//! rotation. An outline symmetric about its vertical axis is unchanged by
-//! that shear, which is what lets [`screen_turn`] ignore yaw entirely. An
-//! asymmetric outline would need mirroring, and mirroring is the
-//! per-direction branch the body frame exists to avoid.
+//! A figure's surfaces are carried through this projection vertex by vertex,
+//! so nothing anywhere needs a screen angle for a part: a limb's far end is
+//! wherever its child joint projects to, at whatever length the heading
+//! leaves it. The billboard this replaced had to approximate a three-axis
+//! rotation as one screen turn, and could not — measured against the shipped
+//! walk, a thigh's drawn end missed its knee by a third of the figure's
+//! height.
 
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
@@ -299,54 +300,20 @@ pub fn project(facing: Facing, offset: Body) -> Projected {
     }
 }
 
-/// How far on screen a joint whose frame is `basis` has turned, for a figure
-/// facing `facing`.
+/// The direction from a surface point toward the camera, in the frame of a
+/// figure facing `facing`.
 ///
-/// A flat outline cannot carry a rotation in three axes, so exactly the part
-/// of it the screen can show is taken: the joint's rotation vector, projected
-/// onto the two axes a screen rotation is visible about. A fore-and-aft swing
-/// shows in full seen from the side and not at all seen down the depth axis,
-/// where it happens in depth — so the billboard follows the projection with
-/// no branch on which way the figure points. A turn about the vertical shows
-/// not at all at any heading, which is what the symmetric-outline rule in
-/// this module's own docs buys.
-///
-/// This is a projection of the rotation rather than a re-derivation of the
-/// outline, deliberately: measuring instead the screen angle of the joint's
-/// projected up axis is exact, but flips through half a turn where that axis
-/// crosses the view direction, and a limb that pops is worse than one that
-/// turns a few degrees short.
+/// The one direction a point may move along without moving on screen, which
+/// is what makes it the axis a silhouette is taken against: a surface is on
+/// the near side exactly where its normal leans toward this.
 #[must_use]
-pub fn screen_turn(facing: Facing, basis: Basis) -> f64 {
-    // A rotation matrix's antisymmetric part is `sin a * n` and its trace
-    // gives `cos a`, so one `atan2` recovers the angle and the rescale below
-    // makes this `a * n` — the full turn a joint took, not a small-angle
-    // estimate of it.
-    let axis = Body::new(
-        (basis.side.up - basis.up.side) * 0.5,
-        (basis.up.forward - basis.forward.up) * 0.5,
-        (basis.forward.side - basis.side.forward) * 0.5,
-    );
-    let sin = axis.length();
-    let cos = (basis.forward.forward + basis.side.side + basis.up.up - 1.0) * 0.5;
-    // The ratio tends to one as the rotation tends to rest, which is the
-    // value to use where `sin a` is too small to divide by.
-    let full = if sin > REST_EPSILON {
-        mathf::atan2(sin, cos) / sin
-    } else {
-        1.0
-    };
+pub fn toward_camera(facing: Facing) -> Body {
     let (east, south) = facing.unit_vector();
-    // Clockwise-positive, matching a placed outline's own sense of turn: the
-    // fore-and-aft component shows as the heading faces across the screen,
-    // the splay component as it faces along the depth axis.
-    (axis.side * east - axis.forward * south) * full
+    let toward = Body::new(south, -east, FORESHORTEN);
+    // The ground part is a unit vector turned by the heading, so the length
+    // is the constant `hypot(1, FORESHORTEN)` and never zero.
+    toward.scaled(1.0 / toward.length())
 }
-
-/// Below this, a frame is within rounding of rest — or of the half turn where
-/// a rotation's axis is not recoverable from it at all, a figure folded onto
-/// itself that no rig reaches from rest.
-const REST_EPSILON: f64 = 1e-12;
 
 /// `offset`'s displacement across the screen and into the scene, before the
 /// depth axis is foreshortened.

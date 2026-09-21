@@ -13,14 +13,29 @@
 //! A leg cannot stretch, so the lowest foot is the constraint: the root drops
 //! until that leg can reach its ground, and every other leg then takes up the
 //! difference by bending. Each foot keeps the *plan* position the animation
-//! gave it and changes only its height, so a walk still swings its legs
-//! where the clip said — the solve re-aims the hip and re-folds the knee to
-//! put the ankle at the new height, and the ankle turns back by as much as
-//! the leg turned so the foot keeps the angle it was animated at.
+//! gave it and changes only its height — the solve re-aims the hip and
+//! re-folds the knee to put the ankle there, and the ankle turns back by as
+//! much as the leg turned so the foot keeps the angle it was animated at.
 //!
-//! On flat ground every target is the ankle the animation already produced,
-//! so the whole solve is an identity and a figure on the level is drawn
-//! exactly as its clip authored it.
+//! # The height a foot is asked for is the clip's own, not the ground
+//!
+//! A walk's swing foot is in the air, and putting *both* feet on the terrain
+//! would flatten its arc into a shuffle. The pelvis is also fixed at the
+//! rig's own height, so a foot cannot travel fore and aft along level ground
+//! without the whole figure sinking — which is why a walk is authored with
+//! its legs folded and the root has to answer for that fold.
+//!
+//! Both follow from one reading of the pose: a leg reaches no further than
+//! straight, so the height a clip puts an ankle at is always at or above a
+//! straight leg's, and the difference is how far that leg is folded. The
+//! *smaller* of the two is the crouch the figure is standing in, and the
+//! root sinks by it; what is left over is a foot the clip lifted, and it
+//! keeps that clearance over whatever terrain it lands on.
+//!
+//! On flat ground the articulation therefore comes back untouched for *any*
+//! pose — the root absorbs the whole of the clip's crouch — so a figure on
+//! the level is drawn exactly as its clip authored it, with the foot it
+//! planted on the floor.
 //!
 //! # When the legs run out
 //!
@@ -221,6 +236,10 @@ impl Legs {
     /// under each foot relative to the figure's own ground point — the
     /// heights a caller sampled at [`Self::standing`].
     ///
+    /// The root sinks by the crouch the pose is already standing in, and
+    /// each foot is asked for its terrain plus whatever clearance the clip
+    /// gave it over that crouch, so a swing foot stays in the air.
+    ///
     /// # Errors
     ///
     /// [`FigureError::GroundUnreal`] for a height that is not finite,
@@ -238,9 +257,17 @@ impl Legs {
         }
         let standing = self.standing(frames)?;
 
+        // A leg cannot reach further than straight, so a clip's ankle never
+        // sits below where a straight leg puts it: this clearance is how far
+        // the animation has folded the leg, and its smaller value is the
+        // crouch the whole figure is standing in.
+        let lift = [standing[0].up - self.sole, standing[1].up - self.sole];
+        let crouch = mathf::fmin(lift[0], lift[1]);
         // The lowest foot sets the drop, because its leg is the one that
-        // cannot stretch to meet the ground.
-        let drop = mathf::fmin(0.0, mathf::fmin(ground[0], ground[1]));
+        // cannot stretch to meet the ground — and the figure sinks by its
+        // own crouch on top of that, which is what puts a walk's stance foot
+        // on the floor instead of leaving the figure hovering over it.
+        let drop = mathf::fmin(0.0, mathf::fmin(ground[0], ground[1])) - crouch;
         // What the legs cannot absorb, the figure leans into. Positive roll
         // raises the left foot, which is the one to raise when it is higher.
         let difference = ground[0] - ground[1];
@@ -264,10 +291,14 @@ impl Legs {
             let hip = root.at.plus(root.basis.apply(carried));
             let parent = Self::parent_basis(rigging, leg, frames, root)?;
 
+            // The clearance the animation gave this foot over the crouch is
+            // its own, and it is carried onto whatever the terrain turns out
+            // to be — so a swing foot stays in the air and only the foot the
+            // clip actually planted is put on the ground.
             let target = Body::new(
                 standing[index].forward,
                 standing[index].side,
-                ground[index] + self.sole,
+                ground[index] + self.sole + (lift[index] - crouch),
             );
             let solved = self.aim(
                 rigging,

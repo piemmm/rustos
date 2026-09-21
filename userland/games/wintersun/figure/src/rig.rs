@@ -1,33 +1,37 @@
 //! The rig: a skeleton, the parts it carries, the sockets gear hangs on, and
-//! the pass that turns a posture into painted shapes.
+//! the pass that turns a posture into painted strips.
 
 use tairix_inline::ArrayVec;
-use tairix_raster::shape::{Placed, Shape};
+use tairix_raster::surface::SUBPIXEL;
 use tairix_raster::Color;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
 use crate::error::FigureError;
-use crate::frame::{project, screen_turn, Basis, Body, Rotation};
+use crate::frame::{project, toward_camera, Basis, Body, Rotation};
 use crate::joint::{Joint, JointId, MAX_JOINTS};
+use crate::mesh::{self, Ring, BANDS, EDGES, MAX_RINGS, STRIP};
+use crate::shadow::Light;
 use crate::socket::{Mount, Socket};
 
 /// How many parts one rig is built from.
 ///
 /// A bound on authored content, like the joint bound: the shipped rigs are
 /// held to it at build time, and a figure that wants more parts is a
-/// different figure rather than a bigger one.
-pub const MAX_PARTS: usize = 96;
+/// different figure rather than a bigger one. A part is a whole skinned
+/// surface rather than one flat outline, so a figure needs far fewer of
+/// them than a billboard one did.
+pub const MAX_PARTS: usize = 24;
 
-/// How many equipment parts one figure carries at once.
-pub const MAX_FITTED: usize = 24;
+/// How many equipment surfaces one figure carries at once.
+pub const MAX_FITTED: usize = 8;
 
-/// How many shapes one placed figure amounts to.
+/// How many surfaces one placed figure amounts to.
 pub const MAX_PLACED: usize = MAX_PARTS + MAX_FITTED;
 
 const _: () = assert!(MAX_PLACED <= u16::MAX as usize);
 
-/// One shape of the figure's own body, bound to the joint that carries it.
+/// One surface of the figure's own body, carried by the joint it rides.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Part {
     /// The joint it rides.
@@ -36,28 +40,78 @@ pub struct Part {
     /// joint-carries-mass rule: a shoulder cap and the arm that swings from
     /// it are the same joint's, so they cannot drift apart.
     pub joint: JointId,
-    /// Where it sits in that joint's frame.
+    /// The joint its far end is carried by, for a part that spans a bend.
+    ///
+    /// A thigh's lower rings ride the knee, so the surface bends through the
+    /// joint instead of two rigid tubes meeting at an angle. It must be a
+    /// direct child of [`Self::joint`], which is what lets a ring's position
+    /// in the far joint's frame be derived rather than authored twice.
+    pub end: Option<JointId>,
+    /// Where its own frame sits in that joint's.
     pub at: Body,
-    /// What it is drawn as.
-    pub shape: Shape,
-    /// Its colour.
+    /// The cross-sections it is built from, along its spine.
+    ///
+    /// Borrowed rather than owned, because a rig is first-party code rather
+    /// than input and a figure's whole buffer set has to sit on a boot
+    /// stack: rings held by value made a `Rig` three times the size for
+    /// nothing.
+    pub rings: &'static [Ring],
+    /// Its tone before the light reaches it.
     pub color: Color,
 }
 
 impl Part {
-    /// A part on `joint` at `at`.
-    #[must_use]
-    pub const fn new(joint: JointId, at: Body, shape: Shape, color: Color) -> Self {
-        Self {
-            joint,
-            at,
-            shape,
-            color,
+    /// A part on `joint` at `at`, spanning `rings`.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::TooManyParts`] for more rings than a part holds, and
+    /// [`FigureError::GeometryUnreal`] for a ring that is not real.
+    pub fn new(
+        joint: JointId,
+        at: Body,
+        rings: &'static [Ring],
+        color: Color,
+    ) -> Result<Self, FigureError> {
+        if rings.is_empty() || rings.iter().any(|ring| !ring.is_real()) {
+            return Err(FigureError::GeometryUnreal);
         }
+        if rings.len() > MAX_RINGS {
+            return Err(FigureError::TooManyParts);
+        }
+        Ok(Self {
+            joint,
+            end: None,
+            at,
+            rings,
+            color,
+        })
+    }
+
+    /// The same part with its far end carried by `end`.
+    #[must_use]
+    pub fn spanning(mut self, end: JointId) -> Self {
+        self.end = Some(end);
+        self
+    }
+
+    /// How far it reaches from the joint it rides.
+    #[must_use]
+    pub fn reach(self) -> f64 {
+        let mut furthest = 0.0;
+        for ring in self.rings {
+            furthest = mathf::fmax(furthest, self.at.plus(ring.at).length() + girth(*ring));
+        }
+        furthest
     }
 }
 
-/// One shape of a piece of equipment, hung on a socket.
+/// How far a ring bulges from its own centre.
+fn girth(ring: Ring) -> f64 {
+    mathf::fmax(ring.wide, ring.deep)
+}
+
+/// One surface of a piece of equipment, hung on a socket.
 ///
 /// Stated against a socket rather than a joint, so one helm fits every rig
 /// that offers a head and no gear knows a skeleton.
@@ -67,25 +121,34 @@ pub struct Fitted {
     pub socket: Socket,
     /// Where it sits in that socket's frame.
     pub at: Body,
-    /// What it is drawn as.
-    pub shape: Shape,
-    /// Its colour.
+    /// The cross-sections it is built from.
+    pub rings: &'static [Ring],
+    /// Its tone before the light reaches it.
     pub color: Color,
     /// How far it leans from its socket's rest.
     pub turn: Rotation,
 }
 
 impl Fitted {
-    /// A fitted shape on `socket` at `at`, resting as the socket does.
-    #[must_use]
-    pub const fn new(socket: Socket, at: Body, shape: Shape, color: Color) -> Self {
-        Self {
+    /// A fitted surface on `socket` at `at`, resting as the socket does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Part::new`].
+    pub fn new(
+        socket: Socket,
+        at: Body,
+        rings: &'static [Ring],
+        color: Color,
+    ) -> Result<Self, FigureError> {
+        let held = Part::new(JointId::new(0), at, rings, color)?;
+        Ok(Self {
             socket,
             at,
-            shape,
+            rings: held.rings,
             color,
             turn: Rotation::REST,
-        }
+        })
     }
 
     /// The same shape turned `turn` from its socket's own rest.
@@ -241,8 +304,20 @@ impl Rig {
             if part.joint.index() >= rig.joints.len() {
                 return Err(FigureError::NoSuchJoint);
             }
-            if !part.at.is_real() || !part.shape.is_real() {
+            if !part.at.is_real() || part.rings.iter().any(|ring| !ring.is_real()) {
                 return Err(FigureError::GeometryUnreal);
+            }
+            // A ring's position in the far joint's frame is derived from the
+            // rest transform between the two, which only exists where the
+            // far joint hangs directly from the near one.
+            if let Some(end) = part.end {
+                let child = rig
+                    .joints
+                    .get(end.index())
+                    .ok_or(FigureError::NoSuchJoint)?;
+                if child.parent != Some(part.joint) {
+                    return Err(FigureError::LegNotAChain);
+                }
             }
             rig.parts
                 .try_push(*part)
@@ -299,7 +374,7 @@ impl Rig {
     /// Every joint that bears a child carries a part of its own, and no
     /// child's origin lies outside everything its parent draws.
     ///
-    /// The second test is one-sided on purpose: a shape's reach is an outer
+    /// The second test is one-sided on purpose: a part's reach is an outer
     /// bound, so exceeding it proves a gap while clearing it does not prove a
     /// seam. Proving the seam is a measurement over rendered pixels, which
     /// the art harness makes; this catches the limb that is nowhere near its
@@ -310,7 +385,7 @@ impl Rig {
             let mut covered: Option<f64> = None;
             for part in &self.parts {
                 if part.joint == parent {
-                    let bound = part.at.length() + part.shape.reach();
+                    let bound = part.reach();
                     covered = Some(covered.map_or(bound, |best| mathf::fmax(best, bound)));
                 }
             }
@@ -333,8 +408,10 @@ impl Rig {
         let mut furthest = 0.0;
         for part in &self.parts {
             let frame = frames.frames[part.joint.index()];
-            let at = frame.at.plus(frame.basis.apply(part.at));
-            furthest = mathf::fmax(furthest, at.length() + part.shape.reach());
+            for ring in part.rings {
+                let at = frame.at.plus(frame.basis.apply(part.at.plus(ring.at)));
+                furthest = mathf::fmax(furthest, at.length() + girth(*ring));
+            }
         }
         furthest
     }
@@ -470,17 +547,31 @@ impl<'a> Posture<'a> {
 
         self.rig
             .resolve(&self.rotations, stance.root, &mut out.frames);
+        let seen = Seen {
+            view: toward_camera(stance.facing),
+            light: stance.light.toward(stance.facing),
+        };
 
         for part in &self.rig.parts {
-            let frame = out.frames.frames[part.joint.index()];
-            out.push(stance, frame, part.at, part.shape, part.color);
+            let own = out.frames.frames[part.joint.index()];
+            let end = part.end.map(|joint| out.frames.frames[joint.index()]);
+            let rest = part.end.map(|joint| {
+                let held = self.rig.joints[joint.index()];
+                (held.at, Basis::of(held.orientation))
+            });
+            out.push(
+                stance, seen, part.rings, part.at, own, end, rest, part.color,
+            )?;
         }
         for piece in fitted {
             let mount = self
                 .rig
                 .mount(piece.socket)
                 .ok_or(FigureError::NoSuchSocket)?;
-            if !piece.at.is_real() || !piece.shape.is_real() || !piece.turn.is_real() {
+            if !piece.at.is_real()
+                || !piece.turn.is_real()
+                || piece.rings.iter().any(|ring| !ring.is_real())
+            {
                 return Err(FigureError::GeometryUnreal);
             }
             let carried = out.frames.frames[mount.joint.index()];
@@ -490,7 +581,16 @@ impl<'a> Posture<'a> {
                     .basis
                     .compose(Basis::of(mount.orientation).compose(Basis::of(piece.turn))),
             };
-            out.push(stance, frame, piece.at, piece.shape, piece.color);
+            out.push(
+                stance,
+                seen,
+                piece.rings,
+                piece.at,
+                frame,
+                None,
+                None,
+                piece.color,
+            )?;
         }
 
         out.sort();
@@ -509,22 +609,40 @@ pub struct Stance {
     scale: f64,
     at: (f64, f64),
     root: Resolved,
+    light: Light,
+}
+
+/// How a figure is seen: the direction toward the camera and the direction
+/// the light travels, both in the figure's own frame.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Seen {
+    view: Body,
+    light: Body,
 }
 
 impl Stance {
-    /// A figure facing `facing`, drawn at `scale`, standing at `at`.
+    /// A figure facing `facing`, drawn at `scale`, standing at `at`, under
+    /// `light`.
     ///
     /// `scale` converts the figure-local pixels the rig is authored in to
     /// surface pixels — the figure's drawn height over [`Rig::reach`]'s own
     /// units — and `at` is the surface column and row its feet rest on. The
-    /// root starts at rest; [`Self::rooted`] displaces it.
+    /// light is the scene's, and is here because a surface cannot be shaded
+    /// without it and a figure turning under a fixed light is what makes it
+    /// read as solid. The root starts at rest; [`Self::rooted`] displaces
+    /// it.
     ///
     /// # Errors
     ///
     /// [`FigureError::ScaleUnreal`] for a scale that is not finite and
     /// positive, and [`FigureError::GeometryUnreal`] for a ground point that
     /// is not finite.
-    pub fn new(facing: Facing, scale: f64, at: (f64, f64)) -> Result<Self, FigureError> {
+    pub fn new(
+        facing: Facing,
+        scale: f64,
+        at: (f64, f64),
+        light: Light,
+    ) -> Result<Self, FigureError> {
         if !scale.is_finite() || scale <= 0.0 {
             return Err(FigureError::ScaleUnreal);
         }
@@ -536,6 +654,7 @@ impl Stance {
             scale,
             at,
             root: Resolved::REST,
+            light,
         })
     }
 
@@ -545,38 +664,44 @@ impl Stance {
         self.root = root;
         self
     }
-
-    /// The heading it faces.
-    #[must_use]
-    pub const fn facing(&self) -> Facing {
-        self.facing
-    }
-
-    /// Figure-local pixels to surface pixels.
-    #[must_use]
-    pub const fn scale(&self) -> f64 {
-        self.scale
-    }
-
-    /// The surface point its ground contact sits on.
-    #[must_use]
-    pub const fn at(&self) -> (f64, f64) {
-        self.at
-    }
-
-    /// The root transform the whole figure hangs in.
-    #[must_use]
-    pub const fn root(&self) -> Resolved {
-        self.root
-    }
 }
 
-/// One placed shape and the keys it sorts on.
+/// A surface coordinate in the scan converter's own sub-pixel units.
+///
+/// Saturating rather than wrapping: a figure placed far off the surface
+/// must stay off it, and a wrapped coordinate would fold it back across the
+/// canvas.
+fn subpixel(point: (f64, f64)) -> (i32, i32) {
+    let snap = |value: f64| {
+        let scaled = value * f64::from(SUBPIXEL);
+        if scaled <= f64::from(i32::MIN) {
+            i32::MIN
+        } else if scaled >= f64::from(i32::MAX) {
+            i32::MAX
+        } else {
+            mathf::round_i32(scaled)
+        }
+    };
+    (snap(point.0), snap(point.1))
+}
+
+/// One placed surface and the keys it sorts on.
 #[derive(Copy, Clone, Debug)]
 struct Entry {
     depth: f64,
     order: u16,
-    placed: Placed,
+    rings: u8,
+    /// Where each shaded strip's boundaries cross each ring, strip-major —
+    /// so one strip's two sides are two contiguous runs and a caller needs
+    /// no gather to fill it.
+    ///
+    /// In the scan converter's own sub-pixel units, which is both what the
+    /// painter hands it and half the memory a pair of reals would take. A
+    /// figure's buffer has to sit on a boot stack, and the finer placement
+    /// a real would carry is below what any fill can distinguish.
+    edge: [[(i32, i32); MAX_RINGS]; EDGES],
+    /// What each strip is filled with, light already applied.
+    tone: [Color; BANDS],
 }
 
 impl Entry {
@@ -584,24 +709,36 @@ impl Entry {
     const BLANK: Self = Self {
         depth: 0.0,
         order: 0,
-        placed: Placed {
-            x: 0.0,
-            y: 0.0,
-            turn: 0.0,
-            shape: Shape::Splat { radius: 0.0 },
-            color: Color::rgb(0, 0, 0),
-            seed: 0,
-        },
+        rings: 0,
+        edge: [[(0, 0); MAX_RINGS]; EDGES],
+        tone: [Color::rgb(0, 0, 0); BANDS],
     };
+}
+
+/// One shaded strip down a placed surface, ready to fill.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Strip<'a> {
+    /// Which surface it belongs to, by the order the rig authored them.
+    ///
+    /// The identity a caller sorts, names or folds a surface by, which the
+    /// depth order deliberately does not preserve.
+    pub surface: u16,
+    /// Its tone, with the light already in it.
+    pub color: Color,
+    /// The points down one boundary, in the scan converter's sub-pixel
+    /// units.
+    pub near: &'a [(i32, i32)],
+    /// The points down the other, which the fill walks back along.
+    pub far: &'a [(i32, i32)],
 }
 
 /// The buffers a figure is placed and sorted through.
 ///
 /// Held by the caller across frames: a figure amounts to at most
-/// [`MAX_PLACED`] shapes over [`MAX_JOINTS`] frames, both bounded, so drawing
-/// one costs no allocation however many figures a scene holds — and the slots
-/// are written rather than grown, so there is no capacity to run out of once
-/// the figure is known to fit.
+/// [`MAX_PLACED`] surfaces over [`MAX_JOINTS`] frames, both bounded, so
+/// drawing one costs no allocation however many figures a scene holds — and
+/// the slots are written rather than grown, so there is no capacity to run
+/// out of once the figure is known to fit.
 #[derive(Clone, Debug)]
 pub struct Placement {
     entries: [Entry; MAX_PLACED],
@@ -612,6 +749,14 @@ pub struct Placement {
 impl Placement {
     /// Empty buffers.
     #[must_use]
+    #[allow(
+        clippy::large_stack_arrays,
+        reason = "the buffer is the caller's, held across frames, and this \
+                  crate links no allocator to put it anywhere else. At a \
+                  little over twenty kibibytes it sits inside the boot stack \
+                  of every target this runs on, and the alternative the lint \
+                  suggests is the heap the figure path exists to avoid"
+    )]
     pub const fn new() -> Self {
         Self {
             entries: [Entry::BLANK; MAX_PLACED],
@@ -620,7 +765,7 @@ impl Placement {
         }
     }
 
-    /// How many shapes the figure amounts to.
+    /// How many surfaces the figure amounts to.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.len
@@ -632,47 +777,108 @@ impl Placement {
         self.len == 0
     }
 
-    /// The placed shapes, far-first.
-    #[must_use]
-    pub fn parts(&self) -> impl ExactSizeIterator<Item = Placed> + '_ {
-        self.entries[..self.len].iter().map(|entry| entry.placed)
+    /// Every shaded strip of every surface, far-first.
+    ///
+    /// The order is the contract: painting them as they come composites the
+    /// figure correctly, and a strip's own two boundaries never cross, so
+    /// nothing inside one surface needs sorting.
+    pub fn strips(&self) -> impl Iterator<Item = Strip<'_>> + '_ {
+        self.entries[..self.len].iter().flat_map(|entry| {
+            let rings = usize::from(entry.rings);
+            (0..BANDS).map(move |band| Strip {
+                surface: entry.order,
+                color: entry.tone[band],
+                near: &entry.edge[band][..rings],
+                far: &entry.edge[band + 1][..rings],
+            })
+        })
     }
 
-    /// Project one shape carried by `frame` into the next slot.
+    /// Carry one surface's rings through to the screen and store its strips.
     ///
     /// The caller has already checked the whole figure fits, so the slot
     /// exists.
-    fn push(&mut self, stance: &Stance, frame: Resolved, offset: Body, shape: Shape, color: Color) {
-        let placed_at = frame.at.plus(frame.basis.apply(offset));
-        let projected = project(stance.facing, placed_at);
-        // The order is both the tie-break and the shape's identity, so a
-        // splat's ripple is the same every frame.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one surface's whole placement: the frames that carry it, \
+                  the rest transform between them, how it is seen, and its \
+                  tone — splitting them would only move the list"
+    )]
+    fn push(
+        &mut self,
+        stance: &Stance,
+        seen: Seen,
+        rings: &[Ring],
+        at: Body,
+        own: Resolved,
+        end: Option<Resolved>,
+        rest: Option<(Body, Basis)>,
+        color: Color,
+    ) -> Result<(), FigureError> {
+        let hoops = mesh::carry(
+            rings,
+            at,
+            (own.at, own.basis),
+            end.map(|frame| (frame.at, frame.basis)),
+            rest,
+        )?;
+        let Some(middle) = hoops.get(hoops.len() / 2) else {
+            return Ok(());
+        };
+
+        let slot = &mut self.entries[self.len];
+        slot.rings = u8::try_from(hoops.len()).map_err(|_| FigureError::TooManyParts)?;
+        let mut depth = 0.0;
+        for (index, hoop) in hoops.iter().enumerate() {
+            let start = mesh::near(*hoop, seen.view);
+            depth += project(stance.facing, hoop.at).depth;
+            for (edge, row) in slot.edge.iter_mut().enumerate() {
+                // Bounded by `EDGES`, far below the mantissa's own range.
+                #[allow(clippy::cast_precision_loss, reason = "bounded by EDGES")]
+                let step = edge as f64;
+                let (point, _) = hoop.surface(start + STRIP * step);
+                let placed = project(stance.facing, point);
+                row[index] = subpixel((
+                    stance.at.0 + placed.dx * stance.scale,
+                    stance.at.1 + placed.dy * stance.scale,
+                ));
+            }
+        }
+
+        // The tone is taken once per strip, at the middle ring, because a
+        // strip is filled flat: reading it per ring would cost more and
+        // change nothing that reaches the surface.
+        let start = mesh::near(*middle, seen.view);
+        for (band, tone) in slot.tone.iter_mut().enumerate() {
+            // Bounded by `BANDS`, far below the mantissa's own range.
+            #[allow(clippy::cast_precision_loss, reason = "bounded by BANDS")]
+            let step = band as f64 + 0.5;
+            let (_, normal) = middle.surface(start + STRIP * step);
+            *tone = mesh::shaded(color, mesh::level(normal, seen.light));
+        }
+
+        // Bounded by `MAX_RINGS`, and a part with no rings returned above.
+        #[allow(clippy::cast_precision_loss, reason = "bounded by MAX_RINGS")]
+        let count = hoops.len() as f64;
+        slot.depth = depth / count;
+        // The order is the tie-break that keeps a caller's paint order
+        // identical from frame to frame.
         #[allow(
             clippy::cast_possible_truncation,
             reason = "MAX_PLACED is asserted to fit u16 and bounds this index"
         )]
         let order = self.len as u16;
-        self.entries[self.len] = Entry {
-            depth: projected.depth,
-            order,
-            placed: Placed {
-                x: stance.at.0 + projected.dx * stance.scale,
-                y: stance.at.1 + projected.dy * stance.scale,
-                turn: screen_turn(stance.facing, frame.basis),
-                shape: shape.scaled(stance.scale),
-                color,
-                seed: order,
-            },
-        };
+        slot.order = order;
         self.len += 1;
+        Ok(())
     }
 
     /// Order the entries far-first.
     fn sort(&mut self) {
         // `total_cmp` orders every float, so no comparison is indeterminate,
-        // and the order breaks a tie so two shapes at one depth paint as they
-        // were authored. The order is unique, so this total comparator leaves
-        // an unstable sort with nothing to be unstable about.
+        // and the order breaks a tie so two surfaces at one depth paint as
+        // they were authored. The order is unique, so this total comparator
+        // leaves an unstable sort with nothing to be unstable about.
         self.entries[..self.len].sort_unstable_by(|a, b| {
             a.depth
                 .total_cmp(&b.depth)

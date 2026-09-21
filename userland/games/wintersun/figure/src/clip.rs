@@ -275,12 +275,6 @@ impl<'a> Travel<'a> {
         Ok(Self { keys })
     }
 
-    /// Its keys, ascending by phase.
-    #[must_use]
-    pub const fn keys(self) -> &'a [Key] {
-        self.keys
-    }
-
     /// How much of the move has been spent at `phase`.
     #[must_use]
     pub fn at(self, phase: f64) -> f64 {
@@ -416,12 +410,6 @@ impl<'a> Clip<'a> {
     #[must_use]
     pub const fn curves(self) -> &'a [Curve<'a>] {
         self.curves
-    }
-
-    /// Its events, ascending by phase.
-    #[must_use]
-    pub const fn events(self) -> &'a [Event] {
-        self.events
     }
 
     /// The phase `elapsed` seconds into it, under its loop mode.

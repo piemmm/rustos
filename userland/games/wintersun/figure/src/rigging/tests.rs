@@ -1,6 +1,5 @@
 //! What a drive table refuses, and what a posture built from one guarantees.
 
-use tairix_raster::shape::Shape;
 use tairix_raster::Color;
 use tairix_util::mathf;
 
@@ -9,6 +8,7 @@ use crate::error::FigureError;
 use crate::frame::{Body, Rotation};
 use crate::humanoid::{self, Bone};
 use crate::joint::{Joint, JointId, Limits};
+use crate::mesh::Ring;
 use crate::pose::{Mask, Param, Pose};
 use crate::rig::{Part, Rig};
 use crate::socket::Side;
@@ -24,6 +24,18 @@ fn close(a: f64, b: f64) -> bool {
     mathf::fabs(a - b) <= SLACK
 }
 
+/// A mass wide enough to cover the joint below it, and the limb that hangs
+/// from it.
+const MASS: [Ring; 3] = [
+    Ring::new(Body::new(0.0, 0.0, 5.0), 6.0, 6.0),
+    Ring::new(Body::ORIGIN, 8.0, 8.0),
+    Ring::new(Body::new(0.0, 0.0, -5.0), 6.0, 6.0),
+];
+const LIMB: [Ring; 2] = [
+    Ring::new(Body::ORIGIN, 3.0, 3.0),
+    Ring::new(Body::new(0.0, 0.0, -10.0), 2.0, 2.0),
+];
+
 /// A two-joint rig: a mass carrying a limb.
 fn fixture() -> Rig {
     let hinge = Limits::hinge(1.0).expect("a radian either way is real");
@@ -33,26 +45,8 @@ fn fixture() -> Rig {
             Joint::new(Some(ROOT), Body::new(0.0, 0.0, -10.0), hinge),
         ],
         &[
-            Part::new(
-                ROOT,
-                Body::ORIGIN,
-                Shape::Superellipse {
-                    rx: 8.0,
-                    ry: 8.0,
-                    square: 0.3,
-                },
-                TONE,
-            ),
-            Part::new(
-                CHILD,
-                Body::ORIGIN,
-                Shape::Taper {
-                    length: 10.0,
-                    top: 3.0,
-                    foot: 2.0,
-                },
-                TONE,
-            ),
+            Part::new(ROOT, Body::ORIGIN, &MASS, TONE).expect("a real mass"),
+            Part::new(CHILD, Body::ORIGIN, &LIMB, TONE).expect("a real limb"),
         ],
         &[],
     )

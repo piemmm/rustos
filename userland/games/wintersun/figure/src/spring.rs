@@ -106,12 +106,6 @@ impl Spring {
         self.rate
     }
 
-    /// Its damping ratio.
-    #[must_use]
-    pub const fn damping(self) -> f64 {
-        self.damping
-    }
-
     /// `state` after `seconds` pulled toward `target`.
     ///
     /// # Errors

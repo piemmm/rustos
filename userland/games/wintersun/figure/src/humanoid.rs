@@ -22,11 +22,11 @@
 //! [`Rig::new`]: crate::rig::Rig::new
 
 use tairix_inline::ArrayVec;
-use tairix_raster::shape::Shape;
 
 use crate::error::FigureError;
 use crate::frame::Body;
 use crate::joint::{Joint, JointId, Limit, Limits, MAX_JOINTS};
+use crate::mesh::Ring;
 use crate::plant::Leg;
 use crate::pose::{Mask, Param};
 use crate::rig::{Part, Rig, MAX_PARTS};
@@ -149,6 +149,21 @@ pub mod palette {
     pub const CLOTH_SHADE: Color = Color::rgb(0x33, 0x3E, 0x4E);
     /// Boots and belt leather.
     pub const LEATHER: Color = Color::rgb(0x4A, 0x36, 0x24);
+
+    /// Every tone the figure is drawn in.
+    ///
+    /// The list a conformance check reads, so "on palette" is a membership
+    /// test rather than an eye. A test holds it against the rig's own parts,
+    /// so a tone added above and left out here fails rather than escaping
+    /// the check.
+    pub const ALL: [Color; 6] = [
+        SKIN_LIT,
+        SKIN_MID,
+        SKIN_SHADE,
+        CLOTH_LIT,
+        CLOTH_SHADE,
+        LEATHER,
+    ];
 }
 
 /// Assemble the humanoid rig.
@@ -177,16 +192,6 @@ pub fn rig() -> Result<Rig, FigureError> {
     sockets(&mut mounts)?;
 
     Rig::new(&joints, &parts, &mounts)
-}
-
-/// A rounded volume.
-fn mass(rx: f64, ry: f64, square: f64) -> Shape {
-    Shape::Superellipse { rx, ry, square }
-}
-
-/// A tapered segment hanging from its joint.
-fn limb(length: f64, top: f64, foot: f64) -> Shape {
-    Shape::Taper { length, top, foot }
 }
 
 /// The spine, bottom to top. Each joint's offset is the length of the
@@ -248,7 +253,7 @@ fn arms(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
             joints,
             Joint::new(
                 Some(Bone::Shoulder(side).joint()),
-                Body::new(0.0, 0.0, -UPPER_ARM),
+                Body::new(0.0, 0.0, -UPPER_ARM_LENGTH),
                 elbow_limits()?,
             ),
         )?;
@@ -256,7 +261,7 @@ fn arms(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
             joints,
             Joint::new(
                 Some(Bone::Elbow(side).joint()),
-                Body::new(0.0, 0.0, -FOREARM),
+                Body::new(0.0, 0.0, -FOREARM_LENGTH),
                 wrist_limits()?,
             ),
         )?;
@@ -281,7 +286,7 @@ fn leg_joints(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureErro
             joints,
             Joint::new(
                 Some(Bone::Hip(side).joint()),
-                Body::new(0.0, 0.0, -THIGH),
+                Body::new(0.0, 0.0, -THIGH_LENGTH),
                 knee_limits()?,
             ),
         )?;
@@ -289,7 +294,7 @@ fn leg_joints(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureErro
             joints,
             Joint::new(
                 Some(Bone::Knee(side).joint()),
-                Body::new(0.0, 0.0, -SHANK),
+                Body::new(0.0, 0.0, -SHANK_LENGTH),
                 ankle_limits()?,
             ),
         )?;
@@ -298,137 +303,241 @@ fn leg_joints(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureErro
     Ok(())
 }
 
-/// The trunk, in the order a depth tie paints it: the tunic first, then
-/// what shows above it.
+/// A ring at `up` above the part's origin, `wide` across and `deep`
+/// through.
+const fn hoop(up: f64, wide: f64, deep: f64) -> Ring {
+    Ring::new(Body::new(0.0, 0.0, up), wide, deep)
+}
+
+/// The trunk, bottom to top. Each part's upper rings are carried by the
+/// joint above it, so the torso bends through the waist and the chest
+/// rather than telescoping at them.
 fn trunk(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
+    const PELVIS: [Ring; 5] = [
+        hoop(-7.5, 4.0, 3.0),
+        hoop(-5.0, 9.4, 6.6),
+        hoop(0.0, 10.4, 7.2),
+        hoop(5.0, 10.0, 6.9).bound(0.35),
+        hoop(9.0, 9.6, 6.6).bound(1.00),
+    ];
+    const WAIST: [Ring; 3] = [
+        hoop(0.0, 9.6, 6.6),
+        hoop(6.0, 10.8, 7.1).bound(0.30),
+        hoop(13.0, 12.0, 7.6).bound(1.00),
+    ];
+    const CHEST: [Ring; 4] = [
+        hoop(0.0, 12.0, 7.6),
+        hoop(5.0, 12.4, 7.8),
+        hoop(9.0, 10.2, 6.8).bound(0.35),
+        hoop(11.5, 5.4, 4.4).bound(1.00),
+    ];
+    const NECK: [Ring; 2] = [hoop(0.0, 4.6, 4.4), hoop(4.0, 4.3, 4.1).bound(1.00)];
+    // Every free end is closed: a tube left open shows its own near rim as
+    // a crescent where the surface should have ended, which at the crown of
+    // a head reads as a notch cut out of it.
+    const SKULL: [Ring; 6] = [
+        hoop(-1.0, 2.6, 2.8),
+        hoop(1.5, 4.4, 4.8),
+        hoop(4.5, 5.0, 5.5),
+        hoop(8.0, 4.6, 5.2),
+        hoop(10.5, 3.2, 3.6),
+        hoop(12.0, 0.9, 1.0),
+    ];
+
     push_part(
         parts,
         Part::new(
             Bone::Pelvis.joint(),
             Body::ORIGIN,
-            mass(11.0, 9.0, 0.35),
+            &PELVIS,
             palette::CLOTH_SHADE,
-        ),
+        )?
+        .spanning(Bone::Waist.joint()),
     )?;
     push_part(
         parts,
         Part::new(
             Bone::Waist.joint(),
             Body::ORIGIN,
-            mass(10.0, 9.0, 0.30),
+            &WAIST,
             palette::CLOTH_LIT,
-        ),
+        )?
+        .spanning(Bone::Chest.joint()),
     )?;
     push_part(
         parts,
         Part::new(
             Bone::Chest.joint(),
-            Body::new(0.0, 0.0, 2.0),
-            mass(12.5, 11.0, 0.28),
+            Body::ORIGIN,
+            &CHEST,
             palette::CLOTH_LIT,
-        ),
+        )?
+        .spanning(Bone::Neck.joint()),
     )?;
     push_part(
         parts,
-        Part::new(
-            Bone::Neck.joint(),
-            Body::new(0.0, 0.0, 2.0),
-            mass(4.8, 4.5, 0.20),
-            palette::SKIN_SHADE,
-        ),
+        Part::new(Bone::Neck.joint(), Body::ORIGIN, &NECK, palette::SKIN_SHADE)?
+            .spanning(Bone::Head.joint()),
     )?;
     push_part(
         parts,
-        Part::new(
-            Bone::Head.joint(),
-            Body::new(0.0, 0.0, SKULL_RISE),
-            mass(4.7, 6.0, 0.22),
-            palette::SKIN_MID,
-        ),
+        Part::new(Bone::Head.joint(), Body::ORIGIN, &SKULL, palette::SKIN_MID)?,
     )?;
 
     Ok(())
 }
 
-/// The four limbs and what caps them, mirrored from one pass.
+/// The arms and the legs, each mirrored from one pass.
 fn limbs(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
+    arm_parts(parts)?;
+    leg_parts(parts)
+}
+
+/// Both arms, and the sleeve each swings out of.
+fn arm_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
+    // The sleeve belongs to the shoulder joint, not to the arm, so the arm
+    // can swing without opening a gap where it meets the trunk.
+    // The hem ends flush with the arm beneath it: a cap narrower than what
+    // it covers shows its own rim through the limb, which reads as a frill
+    // nobody authored.
+    const SLEEVE: [Ring; 5] = [
+        hoop(5.2, 1.8, 1.8),
+        hoop(3.5, 4.2, 4.2),
+        hoop(0.0, 4.9, 4.9),
+        hoop(-4.0, 4.6, 4.6),
+        hoop(-6.0, 3.85, 3.85),
+    ];
+    const UPPER_ARM: [Ring; 4] = [
+        hoop(-2.0, 3.6, 3.6),
+        hoop(-5.0, 3.9, 3.9),
+        hoop(-12.0, 3.4, 3.4).bound(0.30),
+        hoop(-UPPER_ARM_LENGTH, 3.0, 3.0).bound(1.00),
+    ];
+    const FOREARM: [Ring; 3] = [
+        hoop(0.0, 3.0, 3.0),
+        hoop(-8.0, 2.7, 2.7).bound(0.30),
+        hoop(-FOREARM_LENGTH, 2.4, 2.4).bound(1.00),
+    ];
+    const HAND: [Ring; 4] = [
+        hoop(0.0, 1.8, 1.4),
+        hoop(-2.5, 2.7, 2.0),
+        hoop(-5.5, 2.6, 1.9),
+        hoop(-7.8, 1.0, 0.8),
+    ];
     for side in Side::BOTH {
-        let across = side.across();
-        // The deltoid belongs to the shoulder joint, not to the arm, so the
-        // arm can swing without opening a gap where it meets the trunk.
         push_part(
             parts,
             Part::new(
                 Bone::Shoulder(side).joint(),
                 Body::ORIGIN,
-                mass(4.4, 4.6, 0.30),
+                &SLEEVE,
                 palette::CLOTH_LIT,
-            ),
+            )?,
         )?;
         push_part(
             parts,
             Part::new(
                 Bone::Shoulder(side).joint(),
                 Body::ORIGIN,
-                limb(UPPER_ARM, 3.6, 2.9),
+                &UPPER_ARM,
                 palette::SKIN_MID,
-            ),
+            )?
+            .spanning(Bone::Elbow(side).joint()),
         )?;
         push_part(
             parts,
             Part::new(
                 Bone::Elbow(side).joint(),
                 Body::ORIGIN,
-                limb(FOREARM, 2.9, 2.3),
+                &FOREARM,
                 palette::SKIN_MID,
-            ),
+            )?
+            .spanning(Bone::Wrist(side).joint()),
         )?;
         push_part(
             parts,
             Part::new(
                 Bone::Wrist(side).joint(),
-                Body::new(0.0, 0.0, -2.6),
-                mass(2.4, 3.0, 0.30),
+                Body::ORIGIN,
+                &HAND,
                 palette::SKIN_LIT,
-            ),
+            )?,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Both legs and their boots, mirrored from one pass.
+fn leg_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
+    const HAUNCH: [Ring; 4] = [
+        hoop(4.5, 2.6, 2.6),
+        hoop(2.5, 5.8, 5.8),
+        hoop(-2.0, 5.8, 5.8),
+        hoop(-5.0, 4.4, 4.4),
+    ];
+    const THIGH: [Ring; 4] = [
+        hoop(-1.0, 4.8, 4.8),
+        hoop(-5.0, 5.2, 5.2),
+        hoop(-13.0, 4.3, 4.3).bound(0.30),
+        hoop(-THIGH_LENGTH, 3.6, 3.6).bound(1.00),
+    ];
+    const SHANK: [Ring; 4] = [
+        hoop(0.0, 3.6, 3.6),
+        hoop(-8.0, 3.3, 3.3),
+        hoop(-17.0, 2.7, 2.7).bound(0.35),
+        hoop(-SHANK_LENGTH, 2.3, 2.3).bound(1.00),
+    ];
+    // A foot runs forward from its ankle rather than hanging below it, and
+    // is about a seventh of a person's height: drawn much shorter it stops
+    // reading as a foot at all at icon size.
+    const FOOT: [Ring; 5] = [
+        Ring::new(Body::new(-3.4, 0.0, 0.3), 1.2, 1.2),
+        Ring::new(Body::new(-2.0, 0.0, 0.0), 2.6, 2.3),
+        Ring::new(Body::new(2.5, 0.0, -0.4), 2.8, 2.4),
+        Ring::new(Body::new(6.8, 0.0, -0.8), 2.3, 1.9),
+        Ring::new(Body::new(9.4, 0.0, -1.0), 0.9, 0.8),
+    ];
+
+    for side in Side::BOTH {
+        let across = side.across();
+        push_part(
+            parts,
+            Part::new(
+                Bone::Hip(side).joint(),
+                Body::ORIGIN,
+                &HAUNCH,
+                palette::CLOTH_SHADE,
+            )?,
         )?;
         push_part(
             parts,
             Part::new(
                 Bone::Hip(side).joint(),
                 Body::ORIGIN,
-                mass(5.6, 5.9, 0.30),
+                &THIGH,
                 palette::CLOTH_SHADE,
-            ),
-        )?;
-        push_part(
-            parts,
-            Part::new(
-                Bone::Hip(side).joint(),
-                Body::ORIGIN,
-                limb(THIGH, 4.8, 3.4),
-                palette::CLOTH_SHADE,
-            ),
+            )?
+            .spanning(Bone::Knee(side).joint()),
         )?;
         push_part(
             parts,
             Part::new(
                 Bone::Knee(side).joint(),
                 Body::ORIGIN,
-                limb(SHANK, 3.4, 2.4),
+                &SHANK,
                 palette::CLOTH_SHADE,
-            ),
+            )?
+            .spanning(Bone::Ankle(side).joint()),
         )?;
-        // A billboard outline has no depth extent, so a foot points forward
-        // by sitting forward of its ankle rather than by reaching there.
         push_part(
             parts,
             Part::new(
                 Bone::Ankle(side).joint(),
-                Body::new(2.5, across * 0.2, -2.0),
-                mass(3.4, 2.2, 0.45),
+                Body::new(0.0, across * 0.3, -2.2),
+                &FOOT,
                 palette::LEATHER,
-            ),
+            )?,
         )?;
     }
 
@@ -488,16 +597,16 @@ const PELVIS_HEIGHT: f64 = 52.0;
 const SKULL_RISE: f64 = 6.0;
 
 /// Shoulder to elbow.
-const UPPER_ARM: f64 = 19.0;
+const UPPER_ARM_LENGTH: f64 = 19.0;
 
 /// Elbow to wrist.
-const FOREARM: f64 = 15.0;
+const FOREARM_LENGTH: f64 = 15.0;
 
 /// Hip to knee.
-const THIGH: f64 = 23.0;
+const THIGH_LENGTH: f64 = 23.0;
 
 /// Knee to ankle.
-const SHANK: f64 = 24.0;
+const SHANK_LENGTH: f64 = 24.0;
 
 /// A spine segment: a little of everything, and not much of any of it.
 fn spine_limits() -> Result<Limits, FigureError> {

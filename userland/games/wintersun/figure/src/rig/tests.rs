@@ -1,6 +1,6 @@
 //! What a rig refuses, and what placing one guarantees.
 
-use tairix_raster::shape::{Placed, Shape};
+use tairix_raster::surface::SUBPIXEL;
 use tairix_raster::Color;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
@@ -9,6 +9,8 @@ use super::{Fitted, Part, Placement, Posture, Resolved, Rig, Stance, MAX_FITTED}
 use crate::error::FigureError;
 use crate::frame::{Body, Rotation};
 use crate::joint::{Joint, JointId, Limit, Limits};
+use crate::mesh::Ring;
+use crate::shadow::Light;
 use crate::socket::{Mount, Socket};
 
 const ROOT: JointId = JointId::new(0);
@@ -19,7 +21,14 @@ const ABSENT: JointId = JointId::new(9);
 /// test below, so every other case states only its own subject.
 #[track_caller]
 fn stance(facing: Facing, scale: f64, at: (f64, f64)) -> Stance {
-    Stance::new(facing, scale, at).expect("a real stance")
+    Stance::new(facing, scale, at, light()).expect("a real stance")
+}
+
+/// A light every placement case shares; what it does to a tone is the mesh
+/// module's own test.
+#[track_caller]
+fn light() -> Light {
+    Light::new(-0.6, 0.8, 0.55).expect("a real light")
 }
 
 const EAST: Facing = Facing(0);
@@ -42,20 +51,21 @@ fn refuse(joints: &[Joint], parts: &[Part], mounts: &[(Socket, Mount)]) -> Figur
 }
 
 /// A mass wide enough to cover the child joint below it.
-fn mass() -> Shape {
-    Shape::Superellipse {
-        rx: 8.0,
-        ry: 8.0,
-        square: 0.3,
-    }
-}
+const MASS: [Ring; 3] = [
+    Ring::new(Body::new(0.0, 0.0, 5.0), 6.0, 6.0),
+    Ring::new(Body::ORIGIN, 8.0, 8.0),
+    Ring::new(Body::new(0.0, 0.0, -5.0), 6.0, 6.0),
+];
 
-fn limb() -> Shape {
-    Shape::Taper {
-        length: 10.0,
-        top: 3.0,
-        foot: 2.0,
-    }
+/// A limb hanging the whole way to the joint below it.
+const LIMB: [Ring; 2] = [
+    Ring::new(Body::ORIGIN, 3.0, 3.0),
+    Ring::new(Body::new(0.0, 0.0, -10.0), 2.0, 2.0),
+];
+
+#[track_caller]
+fn part(joint: JointId, at: Body, rings: &'static [Ring]) -> Part {
+    Part::new(joint, at, rings, TONE).expect("a real part")
 }
 
 fn hinge() -> Limits {
@@ -74,8 +84,8 @@ fn fixture() -> Rig {
     Rig::new(
         &joints(),
         &[
-            Part::new(ROOT, Body::ORIGIN, mass(), TONE),
-            Part::new(CHILD, Body::ORIGIN, limb(), TONE),
+            part(ROOT, Body::ORIGIN, &MASS),
+            part(CHILD, Body::ORIGIN, &LIMB),
         ],
         &[(
             Socket::MainHand,
@@ -91,18 +101,77 @@ fn fore_and_aft() -> Rig {
     Rig::new(
         &[Joint::new(None, Body::new(0.0, 0.0, 20.0), hinge())],
         &[
-            Part::new(ROOT, Body::new(6.0, 0.0, 0.0), mass(), TONE),
-            Part::new(ROOT, Body::new(-6.0, 0.0, 0.0), mass(), TONE),
+            part(ROOT, Body::new(6.0, 0.0, 0.0), &MASS),
+            part(ROOT, Body::new(-6.0, 0.0, 0.0), &MASS),
         ],
         &[],
     )
     .expect("one joint bears nothing, so it needs no mass")
 }
 
-fn placed(out: &Placement, seed: u16) -> Placed {
-    out.parts()
-        .find(|part| part.seed == seed)
-        .expect("every authored part is placed")
+/// Where surface `surface` ended up on screen: the mean of every point its
+/// strips were walked through.
+///
+/// A placed surface is a set of strips rather than one anchored outline, so
+/// "where it is" is its own centroid — which is what a test asking whether a
+/// part moved, turned or scaled actually means.
+#[track_caller]
+fn centre(out: &Placement, surface: u16) -> (f64, f64) {
+    let (mut x, mut y, mut count) = (0i64, 0i64, 0i64);
+    for strip in out.strips().filter(|strip| strip.surface == surface) {
+        for (px, py) in strip.near.iter().chain(strip.far) {
+            x += i64::from(*px);
+            y += i64::from(*py);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "surface {surface} was not placed");
+    let count = f64::from(u32::try_from(count).expect("a small point count"));
+    let unit = count * f64::from(SUBPIXEL);
+    let real = |sum: i64| f64::from(i32::try_from(sum).expect("inside the canvas"));
+    (real(x) / unit, real(y) / unit)
+}
+
+/// How far surface `surface` spans on screen, across and down.
+#[track_caller]
+fn extent(out: &Placement, surface: u16) -> (f64, f64) {
+    let (mut lo, mut hi) = ((i32::MAX, i32::MAX), (i32::MIN, i32::MIN));
+    for strip in out.strips().filter(|strip| strip.surface == surface) {
+        for (px, py) in strip.near.iter().chain(strip.far) {
+            lo = (lo.0.min(*px), lo.1.min(*py));
+            hi = (hi.0.max(*px), hi.1.max(*py));
+        }
+    }
+    let unit = f64::from(SUBPIXEL);
+    (f64::from(hi.0 - lo.0) / unit, f64::from(hi.1 - lo.1) / unit)
+}
+
+/// The points surface `surface` was walked through, in strip order.
+#[track_caller]
+fn points(out: &Placement, surface: u16) -> alloc::vec::Vec<(f64, f64)> {
+    let unit = f64::from(SUBPIXEL);
+    out.strips()
+        .filter(|strip| strip.surface == surface)
+        .flat_map(|strip| {
+            strip
+                .near
+                .iter()
+                .chain(strip.far)
+                .map(|(x, y)| (f64::from(*x) / unit, f64::from(*y) / unit))
+                .collect::<alloc::vec::Vec<_>>()
+        })
+        .collect()
+}
+
+/// The order the surfaces were painted in, far-first.
+fn order(out: &Placement) -> alloc::vec::Vec<u16> {
+    let mut seen: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
+    for strip in out.strips() {
+        if seen.last() != Some(&strip.surface) {
+            seen.push(strip.surface);
+        }
+    }
+    seen
 }
 
 #[test]
@@ -137,8 +206,8 @@ fn a_part_on_a_missing_joint_is_refused() {
         refuse(
             &joints(),
             &[
-                Part::new(ROOT, Body::ORIGIN, mass(), TONE),
-                Part::new(ABSENT, Body::ORIGIN, limb(), TONE),
+                part(ROOT, Body::ORIGIN, &MASS),
+                part(ABSENT, Body::ORIGIN, &LIMB),
             ],
             &[],
         ),
@@ -151,11 +220,7 @@ fn a_bearing_joint_that_draws_nothing_is_refused() {
     // The joint-carries-mass rule: without the root's mass the child's limb
     // grows out of thin air, which is the gap at the shoulder this closes.
     assert_eq!(
-        refuse(
-            &joints(),
-            &[Part::new(CHILD, Body::ORIGIN, limb(), TONE)],
-            &[],
-        ),
+        refuse(&joints(), &[part(CHILD, Body::ORIGIN, &LIMB)], &[],),
         FigureError::BearingJointWithoutMass
     );
 }
@@ -164,17 +229,13 @@ fn a_bearing_joint_that_draws_nothing_is_refused() {
 fn a_child_beyond_its_parents_reach_is_refused() {
     // A mass two pixels across cannot cover a joint ten pixels below it, so
     // whatever hangs there is detached however it is posed.
-    let pinhead = Shape::Superellipse {
-        rx: 1.0,
-        ry: 1.0,
-        square: 0.0,
-    };
+    const PINHEAD: [Ring; 1] = [Ring::new(Body::ORIGIN, 1.0, 1.0)];
     assert_eq!(
         refuse(
             &joints(),
             &[
-                Part::new(ROOT, Body::ORIGIN, pinhead, TONE),
-                Part::new(CHILD, Body::ORIGIN, limb(), TONE),
+                part(ROOT, Body::ORIGIN, &PINHEAD),
+                part(CHILD, Body::ORIGIN, &LIMB),
             ],
             &[],
         ),
@@ -186,16 +247,12 @@ fn a_child_beyond_its_parents_reach_is_refused() {
 fn a_parents_offset_part_counts_toward_its_reach() {
     // The cover need not be centred on the joint: a mass carried a little
     // below it reaches further down, which is exactly how a haunch works.
-    let stub = Shape::Superellipse {
-        rx: 3.0,
-        ry: 3.0,
-        square: 0.0,
-    };
+    const STUB: [Ring; 1] = [Ring::new(Body::ORIGIN, 3.0, 3.0)];
     let rig = Rig::new(
         &joints(),
         &[
-            Part::new(ROOT, Body::new(0.0, 0.0, -7.0), stub, TONE),
-            Part::new(CHILD, Body::ORIGIN, limb(), TONE),
+            part(ROOT, Body::new(0.0, 0.0, -7.0), &STUB),
+            part(CHILD, Body::ORIGIN, &LIMB),
         ],
         &[],
     );
@@ -208,8 +265,8 @@ fn a_second_mount_on_one_socket_is_refused() {
         refuse(
             &joints(),
             &[
-                Part::new(ROOT, Body::ORIGIN, mass(), TONE),
-                Part::new(CHILD, Body::ORIGIN, limb(), TONE),
+                part(ROOT, Body::ORIGIN, &MASS),
+                part(CHILD, Body::ORIGIN, &LIMB),
             ],
             &[
                 (Socket::MainHand, Mount::new(CHILD, Body::ORIGIN)),
@@ -226,8 +283,8 @@ fn a_mount_on_a_missing_joint_is_refused() {
         refuse(
             &joints(),
             &[
-                Part::new(ROOT, Body::ORIGIN, mass(), TONE),
-                Part::new(CHILD, Body::ORIGIN, limb(), TONE),
+                part(ROOT, Body::ORIGIN, &MASS),
+                part(CHILD, Body::ORIGIN, &LIMB),
             ],
             &[(Socket::Head, Mount::new(ABSENT, Body::ORIGIN))],
         ),
@@ -237,6 +294,7 @@ fn a_mount_on_a_missing_joint_is_refused() {
 
 #[test]
 fn unreal_geometry_is_refused_wherever_it_is_written() {
+    const UNREAL_RING: [Ring; 1] = [Ring::new(Body::ORIGIN, f64::INFINITY, 1.0)];
     let unreal = Body::new(f64::NAN, 0.0, 0.0);
     assert_eq!(
         refuse(&[Joint::new(None, unreal, hinge())], &[], &[]),
@@ -245,25 +303,13 @@ fn unreal_geometry_is_refused_wherever_it_is_written() {
     assert_eq!(
         refuse(
             &joints(),
-            &[
-                Part::new(ROOT, unreal, mass(), TONE),
-                Part::new(CHILD, Body::ORIGIN, limb(), TONE),
-            ],
+            &[part(ROOT, unreal, &MASS), part(CHILD, Body::ORIGIN, &LIMB),],
             &[],
         ),
         FigureError::GeometryUnreal
     );
-    let bad_shape = Shape::Superellipse {
-        rx: f64::INFINITY,
-        ry: 1.0,
-        square: 0.0,
-    };
     assert_eq!(
-        refuse(
-            &joints(),
-            &[Part::new(ROOT, Body::ORIGIN, bad_shape, TONE)],
-            &[],
-        ),
+        Part::new(ROOT, Body::ORIGIN, &UNREAL_RING, TONE).expect_err("an unreal ring"),
         FigureError::GeometryUnreal
     );
 }
@@ -331,7 +377,7 @@ fn placing_puts_every_part_on_the_surface() {
         .place(&stance(SOUTH, 1.0, (100.0, 200.0)), &[], &mut out)
         .expect("a rest posture places");
     assert_eq!(out.len(), 2);
-    assert_eq!(out.parts().len(), 2);
+    assert_eq!(order(&out).len(), 2);
 }
 
 #[test]
@@ -344,11 +390,7 @@ fn placing_sorts_far_first() {
     posture
         .place(&stance(SOUTH, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
-    let order: [u16; 2] = [
-        out.parts().next().expect("first").seed,
-        out.parts().nth(1).expect("second").seed,
-    ];
-    assert_eq!(order, [1, 0], "the part behind must paint first");
+    assert_eq!(order(&out), [1, 0], "the part behind must paint first");
 }
 
 #[test]
@@ -369,8 +411,8 @@ fn the_same_arrangement_reverses_when_the_figure_turns_around() {
             &mut facing_away,
         )
         .expect("places");
-    assert_eq!(facing_camera.parts().next().expect("first").seed, 1);
-    assert_eq!(facing_away.parts().next().expect("first").seed, 0);
+    assert_eq!(order(&facing_camera)[0], 1);
+    assert_eq!(order(&facing_away)[0], 0);
 }
 
 #[test]
@@ -380,9 +422,9 @@ fn a_depth_tie_paints_in_the_authored_order() {
     let rig = Rig::new(
         &[Joint::new(None, Body::new(0.0, 0.0, 20.0), hinge())],
         &[
-            Part::new(ROOT, Body::ORIGIN, mass(), TONE),
-            Part::new(ROOT, Body::ORIGIN, mass(), TONE),
-            Part::new(ROOT, Body::ORIGIN, mass(), TONE),
+            part(ROOT, Body::ORIGIN, &MASS),
+            part(ROOT, Body::ORIGIN, &MASS),
+            part(ROOT, Body::ORIGIN, &MASS),
         ],
         &[],
     )
@@ -392,12 +434,7 @@ fn a_depth_tie_paints_in_the_authored_order() {
     posture
         .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
-    let seeds: [u16; 3] = [
-        out.parts().next().expect("first").seed,
-        out.parts().nth(1).expect("second").seed,
-        out.parts().nth(2).expect("third").seed,
-    ];
-    assert_eq!(seeds, [0, 1, 2]);
+    assert_eq!(order(&out), [0, 1, 2]);
 }
 
 #[test]
@@ -417,41 +454,48 @@ fn a_posed_joint_carries_what_hangs_below_it() {
     swung
         .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut moved)
         .expect("places");
-    let still = placed(&resting, 1);
-    let shifted = placed(&moved, 1);
+    let limb = mathf::fabs(centre(&resting, 1).0 - centre(&moved, 1).0);
+    let mass = mathf::fabs(centre(&resting, 0).0 - centre(&moved, 0).0);
+    assert!(limb > 1.0, "the limb must follow the joint it hangs from");
+    // The mass turns in place, because the root's own part is centred on
+    // the joint that turned; the limb hangs below it and swings. The mass
+    // is not perfectly still because turning a surface turns which half of
+    // it faces the camera, and that is what its drawn points follow.
     assert!(
-        !close(still.x, shifted.x),
-        "the limb must follow the joint it hangs from"
+        mass * 4.0 < limb,
+        "the mass travelled {mass} against the limb's {limb}"
     );
-    assert!(
-        !close(still.turn, shifted.turn),
-        "and its outline must turn with it"
-    );
-    // The mass stays put, because the root's own part sits at its origin.
-    assert!(close(placed(&resting, 0).x, placed(&moved, 0).x));
 }
 
 #[test]
 fn equipment_rides_the_joint_its_socket_hangs_on() {
     let rig = fixture();
-    let blade = Fitted::new(Socket::MainHand, Body::ORIGIN, mass(), TONE);
+    let blade = Fitted::new(Socket::MainHand, Body::ORIGIN, &MASS, TONE).expect("real gear");
     let mut resting = Placement::new();
     let mut moved = Placement::new();
     Posture::rest(&rig)
-        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[blade], &mut resting)
+        .place(
+            &stance(EAST, 1.0, (0.0, 0.0)),
+            core::slice::from_ref(&blade),
+            &mut resting,
+        )
         .expect("places");
     let mut swung = Posture::rest(&rig);
     swung
         .set(CHILD, Rotation::new(0.8, 0.0, 0.0))
         .expect("inside the hinge");
     swung
-        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[blade], &mut moved)
+        .place(
+            &stance(EAST, 1.0, (0.0, 0.0)),
+            core::slice::from_ref(&blade),
+            &mut moved,
+        )
         .expect("places");
     assert_eq!(resting.len(), 3, "the rig's parts plus the gear");
-    let before = placed(&resting, 2);
-    let after = placed(&moved, 2);
+    let before = centre(&resting, 2);
+    let after = centre(&moved, 2);
     assert!(
-        !close(before.x, after.x),
+        !close(before.0, after.0),
         "gear must swing with the joint its socket is on"
     );
 }
@@ -461,10 +505,14 @@ fn equipment_on_an_unoffered_socket_is_refused() {
     // Refused rather than silently dropped: a helm that vanished would read
     // as a missing asset rather than as a rig that offers no head.
     let rig = fixture();
-    let helm = Fitted::new(Socket::Head, Body::ORIGIN, mass(), TONE);
+    let helm = Fitted::new(Socket::Head, Body::ORIGIN, &MASS, TONE).expect("real gear");
     let mut out = Placement::new();
     assert_eq!(
-        Posture::rest(&rig).place(&stance(EAST, 1.0, (0.0, 0.0)), &[helm], &mut out),
+        Posture::rest(&rig).place(
+            &stance(EAST, 1.0, (0.0, 0.0)),
+            core::slice::from_ref(&helm),
+            &mut out
+        ),
         Err(FigureError::NoSuchSocket)
     );
 }
@@ -472,15 +520,15 @@ fn equipment_on_an_unoffered_socket_is_refused() {
 #[test]
 fn unreal_equipment_is_refused() {
     let rig = fixture();
-    let bad = Fitted::new(
-        Socket::MainHand,
-        Body::new(0.0, f64::NAN, 0.0),
-        mass(),
-        TONE,
-    );
+    let bad = Fitted::new(Socket::MainHand, Body::new(0.0, f64::NAN, 0.0), &MASS, TONE)
+        .expect("an unreal offset is the placement's refusal, not the gear's");
     let mut out = Placement::new();
     assert_eq!(
-        Posture::rest(&rig).place(&stance(EAST, 1.0, (0.0, 0.0)), &[bad], &mut out),
+        Posture::rest(&rig).place(
+            &stance(EAST, 1.0, (0.0, 0.0)),
+            core::slice::from_ref(&bad),
+            &mut out
+        ),
         Err(FigureError::GeometryUnreal)
     );
 }
@@ -488,8 +536,8 @@ fn unreal_equipment_is_refused() {
 #[test]
 fn more_equipment_than_a_figure_carries_is_refused() {
     let rig = fixture();
-    let blade = Fitted::new(Socket::MainHand, Body::ORIGIN, mass(), TONE);
-    let too_much = [blade; MAX_FITTED + 1];
+    let blade = Fitted::new(Socket::MainHand, Body::ORIGIN, &MASS, TONE).expect("real gear");
+    let too_much = alloc::vec![blade; MAX_FITTED + 1];
     let mut out = Placement::new();
     assert_eq!(
         Posture::rest(&rig).place(&stance(EAST, 1.0, (0.0, 0.0)), &too_much, &mut out),
@@ -501,14 +549,14 @@ fn more_equipment_than_a_figure_carries_is_refused() {
 fn an_unreal_scale_or_anchor_is_refused() {
     for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert_eq!(
-            Stance::new(EAST, scale, (0.0, 0.0)).map(|_| ()),
+            Stance::new(EAST, scale, (0.0, 0.0), light()).map(|_| ()),
             Err(FigureError::ScaleUnreal),
             "scale {scale} must be refused"
         );
     }
     for at in [(f64::NAN, 0.0), (0.0, f64::INFINITY)] {
         assert_eq!(
-            Stance::new(EAST, 1.0, at).map(|_| ()),
+            Stance::new(EAST, 1.0, at, light()).map(|_| ()),
             Err(FigureError::GeometryUnreal)
         );
     }
@@ -554,11 +602,23 @@ fn the_root_displaces_the_whole_figure_from_its_ground_point() {
         )
         .expect("the lifted figure places");
 
-    for (before, after) in flat.parts().zip(lifted.parts()) {
-        close(after.x, before.x);
-        // Height is unforeshortened, so a lift is exactly its own rows up.
-        close(after.y, before.y - lift);
-        close(after.turn, before.turn);
+    // Paired by the surface each strip belongs to: the depth order is the
+    // paint order and a lift may change it, so walking the two placements
+    // side by side would compare different parts.
+    for surface in 0..2u16 {
+        for (one, other) in points(&flat, surface).iter().zip(points(&lifted, surface)) {
+            let grid = 1.0 / f64::from(SUBPIXEL);
+            assert!(
+                mathf::fabs(other.0 - one.0) <= grid,
+                "a lift moves nothing across"
+            );
+            // Height is unforeshortened, so a lift is exactly its own rows
+            // up, to the grid the points are snapped onto.
+            assert!(
+                mathf::fabs(other.1 - (one.1 - lift)) <= grid,
+                "a lift is its own rows up"
+            );
+        }
     }
 }
 
@@ -585,16 +645,19 @@ fn a_root_tilt_turns_the_figure_about_its_ground_contact() {
         .expect("the leaning figure places");
 
     let mut moved = false;
-    for (before, after) in upright.parts().zip(leaning.parts()) {
-        let travel = mathf::hypot(after.x - before.x, after.y - before.y);
-        // Everything stays within its own radius of the pivot: a rotation
-        // about the origin cannot move a point further than twice its
-        // distance from it.
-        assert!(
-            travel <= 2.0 * mathf::hypot(before.x, before.y) + 1e-9,
-            "a pivot at the ground point cannot fling a part outward"
-        );
-        moved |= travel > 1e-6;
+    for surface in 0..2u16 {
+        let (before, after) = (points(&upright, surface), points(&leaning, surface));
+        for (one, other) in before.iter().zip(&after) {
+            let travel = mathf::hypot(other.0 - one.0, other.1 - one.1);
+            // Everything stays within its own radius of the pivot: a
+            // rotation about the origin cannot move a point further than
+            // twice its distance from it.
+            assert!(
+                travel <= 2.0 * mathf::hypot(one.0, one.1) + 1e-9,
+                "a pivot at the ground point cannot fling a surface outward"
+            );
+            moved |= travel > 1e-6;
+        }
     }
     assert!(moved, "a tilt must actually turn the figure");
 }
@@ -613,13 +676,16 @@ fn scaling_moves_the_offsets_and_the_outline_together() {
     posture
         .place(&stance(EAST, 0.5, (0.0, 0.0)), &[], &mut half)
         .expect("places");
-    for seed in 0..2u16 {
-        let one = placed(&full, seed);
-        let other = placed(&half, seed);
-        assert!(close(other.x, one.x * 0.5));
-        assert!(close(other.y, one.y * 0.5));
-        assert!(close(other.shape.reach(), one.shape.reach() * 0.5));
-        assert!(close(other.turn, one.turn), "a scale is not a rotation");
+    // Every point is snapped to the converter's own sub-pixel grid, so the
+    // two agree to that rather than exactly.
+    let grid = 1.0 / f64::from(SUBPIXEL);
+    let near = |a: f64, b: f64| mathf::fabs(a - b) <= grid;
+    for surface in 0..2u16 {
+        let (one, other) = (centre(&full, surface), centre(&half, surface));
+        assert!(near(other.0, one.0 * 0.5) && near(other.1, one.1 * 0.5));
+        let (wide, tall) = extent(&full, surface);
+        let (half_wide, half_tall) = extent(&half, surface);
+        assert!(near(half_wide, wide * 0.5) && near(half_tall, tall * 0.5));
     }
 }
 
@@ -635,15 +701,11 @@ fn the_anchor_translates_the_whole_figure() {
     posture
         .place(&stance(EAST, 1.0, (30.0, -12.0)), &[], &mut shifted)
         .expect("places");
-    for seed in 0..2u16 {
-        assert!(close(
-            placed(&shifted, seed).x,
-            placed(&origin, seed).x + 30.0
-        ));
-        assert!(close(
-            placed(&shifted, seed).y,
-            placed(&origin, seed).y - 12.0
-        ));
+    let grid = 1.0 / f64::from(SUBPIXEL);
+    for surface in 0..2u16 {
+        let (there, here) = (centre(&shifted, surface), centre(&origin, surface));
+        assert!(mathf::fabs(there.0 - (here.0 + 30.0)) <= grid);
+        assert!(mathf::fabs(there.1 - (here.1 - 12.0)) <= grid);
     }
 }
 
@@ -669,7 +731,7 @@ fn placing_the_same_posture_twice_gives_the_same_figure() {
         .place(&stance(SOUTH, 1.5, (7.0, 9.0)), &[], &mut twice)
         .expect("places");
     assert_eq!(once.len(), twice.len());
-    for (a, b) in once.parts().zip(twice.parts()) {
+    for (a, b) in once.strips().zip(twice.strips()) {
         assert_eq!(a, b);
     }
 }
@@ -683,13 +745,16 @@ fn reach_bounds_every_part_at_rest() {
     posture
         .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
-    for part in out.parts() {
-        let distance = mathf::hypot(part.x, part.y) + part.shape.reach();
-        assert!(
-            distance <= rig.reach() + SLACK,
-            "a part reaches {distance} beyond the stated {}",
-            rig.reach()
-        );
+    let unit = f64::from(SUBPIXEL);
+    for strip in out.strips() {
+        for (x, y) in strip.near.iter().chain(strip.far) {
+            let distance = mathf::hypot(f64::from(*x) / unit, f64::from(*y) / unit);
+            assert!(
+                distance <= rig.reach() + SLACK,
+                "a surface reaches {distance} beyond the stated {}",
+                rig.reach()
+            );
+        }
     }
 }
 
@@ -705,8 +770,8 @@ fn a_rest_orientation_turns_a_joint_without_a_posture() {
     let rig = Rig::new(
         &splayed,
         &[
-            Part::new(ROOT, Body::ORIGIN, mass(), TONE),
-            Part::new(CHILD, Body::ORIGIN, limb(), TONE),
+            part(ROOT, Body::ORIGIN, &MASS),
+            part(CHILD, Body::ORIGIN, &LIMB),
         ],
         &[],
     )
@@ -715,9 +780,22 @@ fn a_rest_orientation_turns_a_joint_without_a_posture() {
     Posture::rest(&rig)
         .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut out)
         .expect("places");
+    let mut square = Placement::new();
+    let upright = Rig::new(
+        &joints(),
+        &[
+            part(ROOT, Body::ORIGIN, &MASS),
+            part(CHILD, Body::ORIGIN, &LIMB),
+        ],
+        &[],
+    )
+    .expect("consistent");
+    Posture::rest(&upright)
+        .place(&stance(EAST, 1.0, (0.0, 0.0)), &[], &mut square)
+        .expect("places");
     assert!(
-        !close(placed(&out, 1).turn, 0.0),
-        "the rest orientation must reach the outline"
+        !close(centre(&out, 1).0, centre(&square, 1).0),
+        "the rest orientation must reach the drawn surface"
     );
 }
 
@@ -733,7 +811,7 @@ fn a_limit_that_fixes_an_axis_admits_only_rest_on_it() {
                 Limit::FIXED,
             ),
         )],
-        &[Part::new(ROOT, Body::ORIGIN, mass(), TONE)],
+        &[part(ROOT, Body::ORIGIN, &MASS)],
         &[],
     )
     .expect("consistent");
@@ -742,5 +820,131 @@ fn a_limit_that_fixes_an_axis_admits_only_rest_on_it() {
     assert_eq!(
         posture.set(ROOT, Rotation::new(0.0, 0.0, 0.1)),
         Err(FigureError::RotationOutsideLimit)
+    );
+}
+
+/// The defect the whole mesh pipeline exists to make unspellable: two
+/// surfaces that meet at a joint are *rigidly* joined there, whatever the
+/// pose and whatever the heading.
+///
+/// The billboard this replaced could not manage it. It placed a flat outline
+/// from an origin, an approximated screen turn and the bone's own
+/// unforeshortened length, and all three are wrong off the degenerate
+/// headings — measured against the shipped walk, a thigh's drawn end missed
+/// its knee by a third of the figure's height. Here the parent's last ring
+/// and the child's first are carried by the same joint, so a gap would mean
+/// the skinning itself had come apart.
+#[test]
+fn surfaces_that_meet_at_a_joint_stay_met() {
+    use crate::frame::project;
+    use crate::humanoid;
+    use crate::mesh;
+    use crate::pose::{Param, Pose};
+    use crate::socket::Side;
+
+    let rig = humanoid::rig().expect("the humanoid rig");
+    let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
+    let mut frames = super::Frames::new();
+
+    // Which surfaces meet: a part that spans to a joint, and the part that
+    // starts at that joint's own origin. Discovered from the rig rather
+    // than listed, so a part added or moved is covered without a second
+    // table to keep in step.
+    let meeting: alloc::vec::Vec<(usize, usize)> = rig
+        .parts()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, part)| {
+            let end = part.end?;
+            let child = rig.parts().iter().position(|other| {
+                other.joint == end
+                    && other.end != Some(part.joint)
+                    && other
+                        .rings
+                        .first()
+                        .is_some_and(|ring| other.at.plus(ring.at).length() < 1e-12)
+            })?;
+            Some((index, child))
+        })
+        .collect();
+    assert!(
+        meeting.len() >= 6,
+        "the humanoid must have limbs that meet at joints, found {}",
+        meeting.len()
+    );
+
+    let carried = |part: &super::Part, frames: &super::Frames| {
+        let own = frames.get(part.joint).expect("a resolved joint");
+        let far = part.end.map(|end| {
+            let frame = frames.get(end).expect("a resolved joint");
+            (frame.at, frame.basis)
+        });
+        let rest = part.end.map(|end| {
+            let joint = rig.joints()[end.index()];
+            (joint.at, crate::frame::Basis::of(joint.orientation))
+        });
+        mesh::carry(part.rings, part.at, (own.at, own.basis), far, rest).expect("it carries")
+    };
+
+    // How the two surfaces sit relative to one another in the joint that
+    // carries them both. Rigid, so this is the same at every pose — which
+    // is the whole claim.
+    rigging
+        .posture(&Pose::REST)
+        .expect("a real posture")
+        .resolve(Resolved::REST, &mut frames);
+    let seam = |parent: usize, child: usize, frames: &super::Frames| {
+        let above = carried(&rig.parts()[parent], frames);
+        let below = carried(&rig.parts()[child], frames);
+        let (end, start) = (
+            above.last().expect("a part has rings").at,
+            below.first().expect("a part has rings").at,
+        );
+        let joint = rig.parts()[parent].end.expect("a spanning part");
+        let basis = frames.get(joint).expect("a resolved joint").basis;
+        (basis.unapply(end.plus(start.scaled(-1.0))), end, start)
+    };
+    let rest: alloc::vec::Vec<Body> = meeting
+        .iter()
+        .map(|(parent, child)| seam(*parent, *child, &frames).0)
+        .collect();
+
+    let mut worst = 0.0;
+    let mut apart = 0.0;
+    for turn in 0..8u16 {
+        let facing = Facing(turn * 0x2000);
+        for step in 0..6u32 {
+            let swing = f64::from(step) / 5.0;
+            let mut pose = Pose::REST;
+            for side in Side::BOTH {
+                pose.set(Param::HipSwing(side), swing * 0.8).expect("real");
+                pose.set(Param::KneeBend(side), swing).expect("real");
+                pose.set(Param::ShoulderSwing(side), -swing).expect("real");
+                pose.set(Param::ElbowBend(side), swing).expect("real");
+            }
+            rigging
+                .posture(&pose)
+                .expect("a real posture")
+                .resolve(Resolved::REST, &mut frames);
+
+            for (index, (parent, child)) in meeting.iter().enumerate() {
+                let (offset, end, start) = seam(*parent, *child, &frames);
+                let drift = offset.plus(rest[index].scaled(-1.0)).length();
+                worst = mathf::fmax(worst, drift);
+                let here = project(facing, end);
+                let there = project(facing, start);
+                apart = mathf::fmax(apart, mathf::hypot(here.dx - there.dx, here.dy - there.dy));
+            }
+        }
+    }
+    // A ten-thousandth of a figure-local unit on a hundred-tall figure:
+    // rounding, not motion.
+    assert!(worst < 1e-4, "a joined seam drifted {worst} between poses");
+    // And they are drawn in contact rather than merely linked: the widest
+    // ring either surface carries is under five units, so a separation the
+    // size of the figure's own limbs would be the gap the mesh replaced.
+    assert!(
+        apart < 5.0,
+        "two surfaces that meet at a joint drew {apart} apart"
     );
 }

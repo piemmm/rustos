@@ -400,6 +400,12 @@ tairix-cpuops = { path = "../../lib/cpuops", version = "=0.0.0" }
 # The scan-out channel order: the encode family times the one definition every
 # composited pixel is written to the frame through.
 tairix-display = { path = "../../lib/display", version = "=0.0.0" }
+# `artsheet` renders and measures WinterSun's shipped figure through the very
+# rig, clips, painter and quality measurements the game runs, so the ledger it
+# gates on describes the figure rather than a harness's copy of one
+# (plans/FIGURE.md FG5). A `userland/games/*` crate: xtask is host build glue
+# (`Tooling`, outside the product layering), so depending on it is permitted.
+tairix-wintersun-figure = { path = "../../userland/games/wintersun/figure", version = "=0.0.0" }
 
 [target.'cfg(unix)'.dependencies]
 # The pipeline's step timeout must be able to kill a hung step's whole

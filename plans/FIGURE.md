@@ -20,6 +20,11 @@ The primitive is shared under its geometric name and the anatomy stays with the
 consumer that means it — which is also why the shared names are `Taper` and
 `Splat` rather than `Limb` and `Fur`.
 
+A figure's own body is **not** drawn from those primitives — §2 says why, and
+the short version is that a flat outline cannot be placed correctly under a
+three-axis rotation. `lib/raster::shape` stays shared for what it is good at:
+`cinder`'s whole cat, and the ground ellipse a figure's contact shadow is.
+
 `cinder` therefore migrates only its **shape** code (FG1) and keeps its own
 skeleton, gait, pose model and mind exactly where they are. It never depends on
 the game: `userland/games/*` is a leaf subtree nothing outside may depend on
@@ -37,10 +42,10 @@ controls), `lib/raster` and `lib/util::mathf` rustdoc.
 |---|---|---|
 | FG0 | This plan, the jump-sheet row, the §3 map entry, the `PLAN.md` section | done |
 | FG1 | `lib/raster::shape`: the six outline primitives, the tracer, the build-time vertex bounds, and `cinder` migrated onto them with its existing tests as the acceptance gate | done |
-| FG2 | `wintersun/figure`: the rig — skeleton, joint hierarchy with limits, named equipment sockets, draw order, and the one body frame that serves every heading | done |
+| FG2 | `wintersun/figure`: the rig — skeleton, joint hierarchy with limits, named equipment sockets, draw order, the one body frame that serves every heading, and the skinned meshes a part is drawn as | done |
 | FG3 | Pose parameters, clips (keyframed parameter curves with easing), clip blending, and the transition state machine | done |
 | FG4 | Procedural layers over a clip: gait phase from distance travelled, look-at, recoil, cloth and hair sway, breathing, per-foot terrain planting, root motion and the figure's root placement, contact shadow | done |
-| FG5 | `cargo xtask artsheet`: the contact-sheet renderer, the committed goldens, and the automated quality checks | planned |
+| FG5 | `cargo xtask artsheet`: the shipped motion set, the painter, the contact-sheet renderer, the committed ledger, and the automated quality checks | done |
 | FG6 | The parameter space: species and build parameters, the palette model, validated bounds, and the compact serialised form a character record stores | planned |
 | FG7 | The designer engine: the parameter model, live preview, presets, and randomised-but-plausible generation | planned |
 
@@ -162,19 +167,72 @@ Equipment is parts on sockets with their own palette, so gear is visible,
 mixable, and costs no new art path. A helm is a `Plate` and a `Wedge`, not a
 redrawn head.
 
+### A part is a skinned mesh, not a billboard
+
+The rig first drew each part as one of the §1 outlines, placed from an
+origin, a screen angle and the bone's own length. That cannot work, and FG5's
+harness measured how badly: against the shipped walk a thigh's drawn end
+missed the knee it hangs from **by up to a third of the figure's height**.
+
+```
+facing east:  thigh drawn end (-12.07,-37.72)   knee at (+12.07,-37.72)
+facing south: thigh drawn end (  9.00,-28.00)   knee at (  9.00,-22.97)
+```
+
+Two independent defects, and neither is a bug to be fixed in place. The
+screen angle was a projection of a three-axis rotation vector onto the one
+axis a billboard can turn about, and its *sense* was inverted — every swung
+limb was drawn swinging the wrong way at every heading but the degenerate
+ones. And the outline was drawn at the bone's authored length while the
+projection shortens a limb pointing into the scene by twenty to thirty per
+cent. A flat outline placed from three numbers has no way to end where its
+child joint is.
+
+So a part is a **mesh**: a run of cross-section rings along a spine, each
+ring carried by the joint chain in three dimensions and then projected
+vertex by vertex. There is no placement left to get wrong — a limb's far end
+*is* its child joint, at whatever length and angle the heading leaves it,
+exactly, everywhere.
+
+- **Skinned, so a joint bends rather than creases.** A ring states how far
+  it is carried by the part's *end* joint rather than its own. The last ring
+  of a spanning part is carried wholly by the far joint, which is what puts
+  the surface's end exactly where that joint is; the rings before it take
+  the blend, which is what makes the bend smooth. A gated test holds every
+  seam rigid across eight headings and six poses.
+- **Drawn as shaded strips, so a limb reads as round.** The visible half of
+  each ring is split into four arcs and each becomes one closed strip down
+  the part, filled at the tone its own surface normal takes from the light.
+  The tone is rounded to a fixed ladder, so the whole figure stays drawable
+  in a small, exactly-known set of colours — which is what lets the harness
+  check the palette by equality and count separable regions at all.
+- **No new rasteriser and no depth buffer.** A strip is a closed contour
+  filled through `lib/raster`'s existing scan converter, and parts are
+  depth-sorted exactly as before. The shipped figure traces 688 outline
+  points against the billboard's 468, so it is not the dearer design.
+- **Still no allocator.** A part holds its rings in a fixed array and a
+  placement holds its strips in another; nothing on the path allocates.
+- **Every free end is closed.** An open tube shows its own near rim as a
+  crescent where the surface should have ended — at the crown of a head that
+  reads as a notch cut out of it, and at a shoulder as a wing. Capping is
+  data, not code: the first and last rings of an exposed end taper to a
+  point.
+
 What the built rig guarantees: the hierarchy is a parents-first forest, so no
 cycle can be spelled and a posture resolves in one forward pass; a joint that
 bears a child carries a part of its own, and no child's origin lies beyond
-everything its parent draws (one-sided — a shape's reach is an outer bound, so
-exceeding it proves a gap while clearing it does not prove a seam, which is
-FG5's measurement); and a `Posture` refuses a rotation outside its joint's
-limits, so an out-of-limit pose fails where it is authored rather than on the
-frame. Rotations are right-handed about the body axes with no sign flipped, so
-a part hanging below its joint turns opposite to the joint's own `forward` —
-which makes an outward splay a different sign on each side, and the humanoid's
-shoulder and hip roll limits handed. The shipped humanoid is 17 joints and 21
-parts authored in percentages of its standing height, with both sides mirrored
-from one pass. Nothing in the crate allocates.
+everything its parent draws (one-sided — a part's reach is an outer bound, so
+exceeding it proves a gap while clearing it does not prove a seam, which the
+mesh now makes structural rather than measured); a part that spans a bend
+names a far joint that is genuinely its own joint's child, so the rest
+transform between them exists; and a `Posture` refuses a rotation outside its
+joint's limits, so an out-of-limit pose fails where it is authored rather than
+on the frame. Rotations are right-handed about the body axes with no sign
+flipped, so a part hanging below its joint turns opposite to the joint's own
+`forward` — which makes an outward splay a different sign on each side, and
+the humanoid's shoulder and hip roll limits handed. The shipped humanoid is 17
+joints and 21 skinned parts authored in percentages of its standing height,
+with both sides mirrored from one pass. Nothing in the crate allocates.
 
 ## 3. FG3/FG4 — animation
 
@@ -289,72 +347,139 @@ keyframed:
 - **A contact shadow** at the ground point, squashed by the light direction and
   fading with height — the trick that makes a jump readable.
 
+**The height a foot is asked for is the clip's own, not the ground.** Two
+defects the art harness surfaced, both in how the planting solve reads a pose.
+Putting *both* feet on the terrain flattened a walk's swing arc into a
+shuffle; and because the pelvis sits at the rig's own fixed height, a foot
+cannot travel fore and aft along level ground without the whole figure
+sinking — so a walk authored with folded legs was left hovering over the floor
+by exactly that fold. Both follow from one reading of the pose: a leg reaches
+no further than straight, so the height a clip puts an ankle at is always at
+or above a straight leg's, and the difference is how far that leg is folded.
+The *smaller* of the two is the crouch the figure stands in and the root sinks
+by it; what is left over is a foot the clip lifted, and it keeps that
+clearance over whatever terrain it lands on. On flat ground the articulation
+therefore comes back untouched for *any* pose, with the planted foot on the
+floor.
+
+**Still open: a figure with neither foot down.** During a run's flight phase
+the rule above has no planted foot to read, so it takes the lesser lift and
+the figure dips where it should rise — measured at one unit in a hundred over
+a quarter of the shipped run's cycle. The honest fix is a clip-authored root
+height, which crosses the FG3 line that a pose is articulation only; it is
+recorded here rather than papered over, and is the next thing FG4 owes.
+
 Every layer is a pure function of (pose, state, time) and is host-tested
 against its stated property, not against a screenshot.
 
 ## 4. FG5 — making quality provable
 
-This is the heart of the plan. Three mechanisms, and none of them is optional.
+This is the heart of the plan, and it is done. Three mechanisms, and none of
+them is optional.
 
-### Contact sheets as committed goldens
+### The golden is a committed ledger; the sheets are on-demand output
 
-`cargo xtask artsheet` renders every figure preset × every clip × a fixed set of
-phases, at the fixed set of pixel sides the game draws, into PNG contact sheets
-committed to the tree. It runs in two modes, exactly as the existing
-`cargo xtask font-atlas` does for the glyph atlas: `--write` regenerates, and
-the bare form **verifies and fails closed on drift**, so it belongs in `ci`.
+`cargo xtask artsheet` walks the shared reference grid — every shipped motion,
+at eight phases, facing four ways, at the three pixel sides the desktop draws
+a figure at — renders each cell, measures it, and holds every number against a
+bound. `--write` regenerates, the bare form verifies and fails closed, and it
+runs in `ci` beside `font-atlas`.
 
-A change to the rig, a clip, a shape, or a palette therefore either produces
-identical sheets or fails the gate with the sheet that changed. A human reviews
-a picture; the machine notices the change. That is the only arrangement in
-which art does not rot.
+**The committed golden is text, not a picture.** A committed PNG reproduces
+§0's own objection one layer up: a reviewer cannot read a binary diff, so a
+regression stays invisible until somebody opens the file, and git carries the
+churn on every rig, clip, shape or palette change.
+`userland/games/wintersun/figure/artsheet.ledger` is one row per cell —
+identity, a pixel digest, and every measured number — so a change reads as
+`skate 0.002718 -> 0.014803` in the diff. `--sheets` renders the pictures on
+demand into the gitignored `images/artsheet/`, which is what makes the thing a
+human judges always current rather than as-of-last-regeneration.
 
-### Automated quality checks, per sheet
+The bare form does **both** halves: it regenerates the ledger and compares it
+byte for byte, *and* it checks the freshly measured numbers against their
+bounds. Drift alone would admit a regression somebody had regenerated; bounds
+alone would admit a change nobody noticed.
 
-Each rendered frame is measured, and a failing measurement is a failing test:
+### Automated quality checks, per cell
 
-- **Silhouette readability**, defined concretely enough to be a gate. At the
-  smallest drawn size the figure's coverage mask must satisfy three measured
-  bounds: the alpha-weighted **coverage ratio** falls inside a band (a figure
-  that fills its box reads as a blob; one that barely marks it reads as
-  nothing); the count of **connected components** in the thresholded mask is at
-  least the rig's declared silhouette landmarks, so the head and limbs remain
-  separable rather than merging into the trunk; and the **contrast ratio**
-  between the figure's mean luminance and each of the dark and light theme
-  backgrounds clears a stated minimum. "It becomes a blob at icon size" is the
-  symptom; these three numbers are what actually fails the build, because a
-  metric a reviewer has to eyeball is not a gate.
-- **Palette conformance.** Every colour resolves from the figure's declared
-  palette and the active `lib/theme` tokens. An off-palette pixel is a defect,
-  which is what stops incremental colour drift.
-- **Joint limits.** No frame of any clip drives a joint outside its documented
-  limit. This is the check that catches the elbow bending backwards.
-- **Foot slide.** During locomotion, a planted foot's world position moves less
-  than a stated bound per frame. This is the check that catches skating, and it
-  is the single most common animation defect.
-- **Motion continuity.** No parameter's second difference exceeds a bound
-  across a clip or across a blended transition, so nothing pops.
-- **Loop closure.** A looping clip's first and last pose match within a bound,
-  so a cycle does not hitch.
-- **Budget.** Vertex counts per figure and fill cost per frame stay within the
-  stated budget at the largest drawn size, so a figure cannot quietly become
-  the frame's cost centre (§2.16).
+Each measurement has a bound beside it — the pose-side ones in
+`figure::quality`, the pixel-side ones in the harness — and a bound is never
+widened to admit a change.
+
+- **Joint limits.** Every sampled pose is turned into a `Posture`, which
+  refuses an out-of-limit rotation, and the excursion is read back off the
+  rotations the posture actually holds. The bound is below one on purpose: a
+  clip pinned at a limit reads as a rig fighting itself and leaves the overlay
+  layers nowhere to go. Shipped worst: 0.79.
+- **Foot slide.** Consumed from `Gait::fitted`/`Gait::slide` and divided by the
+  stride, so the bound is dimensionless. Shipped worst: 0.009 of a stride,
+  about one pixel over a whole cycle at the largest drawn size.
+- **Motion continuity.** The largest second difference of any parameter across
+  a cycle, per unit of that parameter's range, taken cyclically for a clip that
+  joins. It separates a pop from a keyed curve's own faceting rather than
+  measuring how finely the curve was keyed. Shipped worst: 0.041.
+- **Loop closure.** How far a looping clip's last pose sits from its first. The
+  shipped tables are authored to join exactly, so the bound is rounding.
+- **Silhouette readability**, three measured numbers per cell: the
+  alpha-weighted **coverage ratio** inside a band; the count of **connected
+  tonal regions**; and the **contrast ratio** against both themes' desktops.
+- **Budget.** Outline points per figure and fill area per cell, so a rig
+  cannot quietly become the frame's cost centre.
 
 ### The honest limit
 
-The readability check has a second consumer, which raises its stakes: the
-renderer's degradation floor is derived from it. `plans/WINTERSUN.md` §3 fixes
-the lowest detail level `auto` may shed to as the last one whose frames still
-clear the silhouette bounds here, computed by this harness at build time and
-compiled in. So a change that loosens these numbers does not merely admit a
-worse contact sheet — it lets the running game shed detail past the point a
-player can read it.
+The readability check has a second consumer: `plans/WINTERSUN.md` §3 fixes the
+renderer's degradation floor as the last detail level whose frames still clear
+these bounds. That consumption — reading the ledger into `app::quality::Ladder`
+— is WS6's change, because there is no detail ladder in the figure crate to
+floor. So a change that loosens these numbers does not merely admit a worse
+contact sheet; it lets the running game shed detail past the point a player can
+read it.
 
-These checks prove a figure is **consistent, readable, correctly animated, and
-on-palette**. They cannot prove it is beautiful. What they do is make every
-failure mode that can be stated as a number fail loudly, and leave a reviewable
-picture for the judgement that cannot — which is the most that can be claimed
-truthfully, and considerably more than a sprite sheet offers.
+### What FG5 settled, and where it diverges from this plan as written
+
+- **A contact sheet is output, not a golden** (above). Recorded because the
+  original text said "PNG contact sheets committed to the tree".
+- **Palette conformance is checked source-side.** Every strip's colour is held
+  against the rig's own declared tones at the painter's own shading steps —
+  exact, cheap, and stronger than a pixel check, which would need an
+  antialiasing tolerance that could hide real drift. The *pixel* side classifies
+  each pixel by its nearest declared shade, which is what makes the region count
+  a count of separable masses rather than a colour search.
+- **The shipped motions carry no `clip::Travel`.** The original text said walk
+  and run would. They must not: a walk's displacement is the simulation's own
+  and the *gait* paces it, so a travel curve would be a second pacing of one
+  thing, and for a constant-speed cycle it is the identity ramp. `Travel` is for
+  a move the animation paces — a dodge, a lunge, a stagger — and those are
+  WinterSun content.
+- **The shipped motion set is three clips**, authored here because §4 requires
+  the harness to sheet "every clip" and every walk in the tree was a test
+  fixture. Idle, walk and run are the honest minimum that exercises every check.
+  Their leg curves are not authored by eye: each states a **foot path** — strike
+  distance, crouch depth, swing clearance, stance fraction — solved through the
+  same two-bone geometry the planting layer uses, and a test measures the stride
+  back out of the keys and checks it against the number the path was authored to
+  give.
+- **The figure gained a fourth cross-target digest.** `figure::digest` folds the
+  complete placed-strip stream, the planting roots and misses, the gait's own
+  phases and the quality numbers, over raw `f64::to_bits` with no quantisation.
+  One vertical per Tier-1 target, matching `world_determinism` and
+  `rules_determinism`.
+- **The accessor audit ran, and kept three the letter of it would have cut.**
+  Deleted for having no caller at all: `Clip::events`, `Travel::keys`,
+  `Spring::damping`, `Recoil::spring`, `Contact::radius`, `Light::elevation`,
+  and all four `Stance` readers — plus `frame::screen_turn`, which the mesh
+  left with nothing to do. Kept where the only caller is a test that
+  genuinely needs it: `Curve::keys` (the motion tests check the authored
+  tables are evenly spaced, which is what the half-turn mirror depends on,
+  and the alternative is enumerating the tables by name), `Breath::depth` and
+  `Spring::rate` (both bound an assertion against the value the object was
+  built with, rather than restating it). An accessor whose only caller is a
+  *tautology* test went; one whose caller is a real assertion stayed.
+- **The harness found two structural defects in FG2's placement and one in
+  FG4's planting**, all fixed: the billboard could not place a limb (§2), and
+  the planting solve both flattened a walk's swing foot and left a crouching
+  figure hovering over the ground (§3).
 
 ## 5. FG6/FG7 — the parameter space and the designer
 
@@ -417,8 +542,16 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
   socket resolves, and gear naming an unoffered one is refused rather than
   dropped. The projection's properties are numbers — the foreshortening is the
   elevation its doc claims, height is unforeshortened, depth is not the screen
-  row, a yaw never turns an outline — not screenshots. `no_std` with no
-  allocator, built on all four Tier-1 targets.
+  row, and the camera direction moves nothing on screen — not screenshots.
+  Meshes: a carried ring sits where its joint puts it with its cross-section
+  square to the surface; a ring bound to the far joint lands exactly where
+  that joint does and one bound partway moves partway; the near arc is the
+  half facing the camera and no point of it faces away; a flattened ring's
+  normals come out of its flat side; the shading ladder is a closed, climbing
+  set that a step past its end lands on rather than past. And the property the
+  whole mesh exists for: two surfaces meeting at a joint are **rigidly**
+  joined, over eight headings and six poses, to within rounding. `no_std` with
+  no allocator, built on all four Tier-1 targets.
 - Clips: curve evaluation at known keys and midpoints; loop closure, so a
   wrapping clip reads the same value either side of the join; no easing
   leaves the unit interval or goes backwards; a sampled value never leaves
@@ -493,16 +626,22 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
   light and thins, and a figure below its ground point casts as if on it.
 - Breathing is non-zero at idle, never exceeds its depth, moves chest and
   shoulders together, and leaves an already-extreme pose inside its ranges.
-- `artsheet` verify mode fails on any drift and is part of `ci`; every §4 check
-  runs over every sheet.
+- `artsheet` verify mode fails on any drift *and* on any breached bound, and
+  is part of `ci`'s static-gate group; every §4 check runs over every cell of
+  the grid, at every drawn size. Its PNG encoder is proven by round-tripping
+  what it writes through `lib/image`'s own decoder rather than by eye.
+- The figure digest is asserted by the host suite and by one vertical per
+  Tier-1 target (`tests/integration/figure_determinism_*`), so a backend that
+  lowered the same arithmetic differently would fail rather than diverge
+  quietly.
 - Parameter records: bounds enforced, malformed refused, round-trip exact,
   versioned decode total. Fuzz harness over the decoder, since it is
   attacker-reachable in the game (§19.6).
 - Designer: a simulated drag produces exactly one durable write and one repaint
   per drained input burst, and touches no state the changed parameter does not
   feed (§28.10, §28.11).
-- `miri`: `lib/raster` is enrolled if the `shape` module ever carries `unsafe`;
-  on the present design it carries none, since the tracer writes into
-  `lib/inline` fixed arrays through bounds-checked indices. `loom` is not
-  applicable to either half — neither holds shared mutable state — stated so
-  the absence is an answer rather than silence (§19.11).
+- `miri`: the figure crate forbids `unsafe` outright and the harness carries
+  none, so the UB oracle has nothing to interpret in either; re-test if either
+  ever gains any. `loom` is not applicable to either half — neither holds
+  shared mutable state, an atomic, or an ordering pairing — stated so the
+  absence is an answer rather than silence (§19.11).

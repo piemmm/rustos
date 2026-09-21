@@ -15,10 +15,10 @@ and equipment then cannot be mixed at all without redrawing it. Worse, a
 sprite sheet is unreviewable by a test: a regression in it stays invisible
 until a human looks, so it rots silently.
 
-So a figure is built from the six parametric outline primitives `lib/raster`
-owns, placed on a joint hierarchy, and drawn through the one anti-aliased scan
-converter. Every property that can be stated as a number is stated as one, and
-the ones that cannot are left for the art harness's contact sheets.
+So a figure is built from **skinned meshes** on a joint hierarchy, filled
+through `lib/raster`'s one anti-aliased scan converter. Every property that
+can be stated as a number is stated as one, and the ones that cannot are left
+for the art harness's contact sheets.
 
 ## One body frame serves every heading
 
@@ -64,14 +64,12 @@ and it is also why a figure does not change size with depth: the world
 projection is orthographic, so a figure whose size tracked its ground row
 would grow and shrink as the camera scrolled.
 
-### Why every outline is symmetric about its vertical axis
+### Why nothing needs a screen angle
 
-A rotation about the frame's `up` axis lies in the ground plane, and this
-projection turns a ground-plane rotation into a *shear* rather than a screen
-rotation. An outline symmetric about its own vertical axis is unchanged by
-that shear, so a head's turn needs no outline change at all. An asymmetric
-outline would need mirroring, and mirroring is exactly the per-direction
-branch the body frame exists to avoid.
+Every vertex of every surface goes through this projection itself, so a yaw, a
+pitch and a roll all reach the screen exactly, at every heading. There is no
+per-part angle to derive and therefore none to get wrong — which is the whole
+of the next section.
 
 ## A joint that bears a limb carries its mass
 
@@ -108,24 +106,66 @@ its left. An outward splay is therefore a different sign on each side, which
 is why the humanoid's shoulder and hip roll limits are handed — a shared limit
 would let one arm bend into the ribs.
 
-## What a screen turn can and cannot be
+## A part is a skinned mesh, not a billboard
 
-A flat outline cannot carry a rotation in three axes, so the placement takes
-exactly the part of it a screen can show: the joint's rotation vector,
-projected onto the two axes a screen rotation is visible about. A fore-and-aft
-swing shows in full seen from the side and not at all seen down the depth
-axis, where it happens in depth. The angle is recovered from the frame itself
-rather than estimated, so a raised arm turns as far as it actually went.
+A part is a run of **cross-section rings** along a spine. Every ring is
+carried by the joint chain in three dimensions and then projected vertex by
+vertex, so a limb's far end *is* its child joint, at whatever length and angle
+the heading leaves it — exactly, everywhere, with nothing approximated.
 
-The alternative — measuring the screen angle of the joint's projected up axis
-— is exact but flips through half a turn where that axis crosses the view
-direction, and a limb that pops is worse than one that turns a few degrees
-short. The projection of the rotation is the deliberate choice.
+The flat outline this replaced could not manage it, and the art harness
+measured how badly. A billboard has to be *placed*: an origin, a screen angle,
+and a length. The angle was a projection of a three-axis rotation onto the one
+axis a billboard can turn about, and its sense was inverted; the length was
+the bone's own while the projection shortens a limb pointing into the scene by
+twenty to thirty per cent. Against the shipped walk, a thigh's drawn end
+missed the knee it hangs from by up to a third of the figure's height:
+
+```
+facing east:  thigh drawn end (-12.07,-37.72)   knee at (+12.07,-37.72)
+facing south: thigh drawn end (  9.00,-28.00)   knee at (  9.00,-22.97)
+```
+
+### Skinned, so a joint bends rather than creases
+
+A ring states how far it is carried by the part's **end** joint rather than
+its own. The last ring of a spanning part is carried wholly by the far joint,
+which is what puts the surface's end exactly where that joint is; the rings
+before it take the blend, which is what makes the bend smooth rather than two
+rigid tubes meeting at an angle. A gated test holds every seam rigid across
+eight headings and six poses.
+
+### Drawn as shaded strips
+
+The visible half of each ring — solved in closed form from the camera
+direction rather than searched for — is split into four arcs, and each becomes
+one closed strip down the part, filled at the tone its own surface normal
+takes from the light. A cylinder then reads as a cylinder.
+
+The tone is rounded to a fixed ladder, so the whole figure stays drawable in a
+small, exactly-known set of colours. That is what lets the art harness check
+the palette by equality and count separable regions rather than search for
+them.
+
+### Every free end is closed
+
+An open tube shows its own near rim as a crescent where the surface should
+have ended: at the crown of a head that reads as a notch cut out of it, and at
+a shoulder as a wing. Capping is data rather than code — the first and last
+rings of an exposed end taper to a point.
+
+### What it costs
+
+Twenty-one surfaces, 688 outline points per figure against the billboard's
+468, filled through the existing scan converter with no depth buffer and no
+allocator. Strips are stored in the converter's own sub-pixel units, which is
+both half the memory of a pair of reals and exactly what the painter hands it;
+a figure's whole buffer set then fits on a boot stack, which is what the
+cross-target verticals need.
 
 ## Equipment is parts, not paint
 
-A helm is a bevelled panel and a wedge mounted on the head socket, not a
-redrawn head. Gear is stated against a *socket* rather than a joint, so one
+A helm is its own small mesh mounted on the head socket, not a redrawn head. Gear is stated against a *socket* rather than a joint, so one
 piece fits every rig offering that socket and no gear knows a skeleton; the
 rig states how gear rests at each mount, so a scabbard angled across the back
 is the rig's statement rather than the scabbard's. Gear naming a socket the
@@ -137,16 +177,17 @@ handed shoulder, hip and foot.
 
 ## The humanoid
 
-The first-party rig is seventeen joints and twenty-one parts, proportioned in
+The first-party rig is seventeen joints and twenty-one skinned surfaces,
+proportioned in
 percentages of its standing height so an offset reads directly as a fraction
 of the figure — a shoulder at 82, a knee at 28 — and a reviewer can check a
 proportion without converting anything. The two sides are mirrored from one
 pass, because two tables would be two things to keep in step.
 
 Scaling is one number: the factor is the height a caller wants over the rig's
-authored standing height, and it carries the offsets and the outlines
+authored standing height, and it carries the offsets and the surfaces
 together, so a figure drawn at half size is half the figure rather than a
-full-size arrangement of half-size shapes.
+full-size arrangement of half-size parts.
 
 ## An animation is authored in parameters, not rotations
 
@@ -317,8 +358,8 @@ defect to see.
 A lift, a crouch's drop and a slope's lean are a rigid transform of the whole
 body, carried on the `Stance` and seeded into the resolve as the frame the
 parentless joints hang in — so it costs the resolve nothing beyond the value
-it already inherits, and the projection and the screen turn pick it up with
-no second path.
+it already inherits, and every surface carried through that resolve picks it
+up with no second path.
 
 Rolling the pelvis *joint* instead was measured and rejected twice over. Its
 roll limit is 0.20 rad, which across an eighteen-unit stance absorbs 3.58
@@ -379,9 +420,58 @@ arithmetic. A rising figure's shadow stays on the ground and slides away from
 the light as it thins, which is the cue that reads as height rather than as
 the figure growing.
 
+## The art is measured, and the measurements are gated
+
+`cargo xtask artsheet` walks a reference grid — every shipped motion, at eight
+phases, facing four ways, at the three pixel sides the desktop draws a figure
+at — renders each cell and holds every number against a bound. It runs in
+`ci`, and it does two things at once: it regenerates
+`userland/games/wintersun/figure/artsheet.ledger` and compares it byte for
+byte, *and* it checks the freshly measured numbers. Drift alone would admit a
+regression somebody had regenerated; bounds alone would admit a change nobody
+noticed.
+
+The committed golden is **text**, not a picture. A committed PNG is
+unreviewable in a diff — the very objection a sprite sheet fails on — so the
+ledger carries one row per cell, and a change reads as
+`skate 0.002718 -> 0.014803`. `--sheets` renders the pictures on demand into
+the gitignored `images/artsheet/`, which is what keeps the thing a human
+judges current rather than as-of-last-regeneration.
+
+| Measured | Where its bound lives | Shipped worst |
+|---|---|---|
+| Joint-limit use, verified through `Posture::set` | `figure::quality` | 0.79 of a joint's travel |
+| Foot skate, as a fraction of the fitted stride | `figure::quality` | 0.009 |
+| Motion continuity, per unit of a parameter's range | `figure::quality` | 0.041 |
+| Loop closure | `figure::quality` | exact |
+| Coverage ratio, tonal regions, contrast against both themes | the harness | 0.091–0.178, ≥ 6 regions, ≥ 2.74 |
+| Outline points and fill area per cell | `figure::paint` + the harness | 688 points, 0.22 overdraw |
+
+The pose-side measurements live in the crate rather than the harness, so
+`cargo test` runs them on every Tier-1 target and a later figure preset is
+measured by exactly the code the shipped one was.
+
+## The cross-target claim
+
+A figure is `f64` throughout, over `lib/util::mathf`'s first-party
+transcendentals, so bit-identity *follows* from the language rather than from
+a convention. `figure::digest::REFERENCE_DIGEST` is the claim that it holds:
+the carried rings at full precision, their projections, the drawn strips, the
+planting roots and misses, the gait's own phases and the quality numbers, all
+folded over raw `f64::to_bits` with no quantisation and no tolerance. A
+tolerance would hide the one hazard that is real — a backend fusing a multiply
+and an add — which is exactly what the verticals exist to catch rather than
+assume.
+
+It is asserted by the host suite and by one vertical per Tier-1 target
+(`tests/integration/figure_determinism_*`), so no target can pass by having
+never run.
+
 ## What comes next
 
-The contact-sheet harness that makes readability, palette conformance, joint
-limits, foot slide, motion continuity and loop closure measured, gated
-properties rather than opinions; then the species and build parameter space,
-and the designer that drives it.
+The species and build parameter space, and the designer that drives it. One
+thing the planting layer still owes: a figure with **neither** foot down — a
+run's flight phase — has no planted foot for the root rule to read, so it dips
+by about one unit in a hundred where it should rise. The honest fix is a
+clip-authored root height, which crosses the line that a pose is articulation
+only.

@@ -13,6 +13,7 @@ use tairix_itest_harness::pie::PieArch;
 use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 
 mod abi_check;
+mod artsheet;
 mod bench;
 mod c_header;
 mod cfg_check;
@@ -59,6 +60,7 @@ pub enum Command {
     AbiCheck,
     CHeader,
     FontAtlas,
+    Artsheet,
     Devids,
     DepsCheck,
     CfgCheck,
@@ -95,6 +97,7 @@ impl Command {
         Command::AbiCheck,
         Command::CHeader,
         Command::FontAtlas,
+        Command::Artsheet,
         Command::Devids,
         Command::DepsCheck,
         Command::CfgCheck,
@@ -130,6 +133,7 @@ impl Command {
             "abi-check" => Command::AbiCheck,
             "c-header" => Command::CHeader,
             "font-atlas" => Command::FontAtlas,
+            "artsheet" => Command::Artsheet,
             "devids" => Command::Devids,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
@@ -167,6 +171,7 @@ impl Command {
             Command::AbiCheck => "abi-check",
             Command::CHeader => "c-header",
             Command::FontAtlas => "font-atlas",
+            Command::Artsheet => "artsheet",
             Command::Devids => "devids",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
@@ -210,6 +215,10 @@ impl Command {
             }
             Command::FontAtlas => {
                 "Generate/verify the system glyph atlas (`--write` to regenerate)."
+            }
+            Command::Artsheet => {
+                "Measure WinterSun's figure art against its bounds (`--write` to regenerate \
+                 the ledger, `--sheets` to render the contact sheets)."
             }
             Command::Devids => {
                 "Verify the vetted PCI/USB ID-database tables (`--write` to regenerate, \
@@ -274,6 +283,7 @@ impl Command {
             Command::AbiCheck => run_abi_check(ctx, args),
             Command::CHeader => run_c_header(ctx, args),
             Command::FontAtlas => run_font_atlas(ctx, args),
+            Command::Artsheet => run_artsheet(ctx, args),
             Command::Devids => devids::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
@@ -963,6 +973,39 @@ fn run_font_atlas(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     }
 }
 
+fn run_artsheet(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // The figure art gate. With no arguments this measures the shipped
+    // figure, holds every number against its bound, and verifies the
+    // committed ledger has not drifted — which is what `ci` runs. `--write`
+    // regenerates the ledger, reviewed by diff like the generated C header;
+    // `--sheets` renders the pictures a human judges.
+    let (mut write, mut sheets) = (false, false);
+    for arg in args {
+        match arg.to_str() {
+            Some("--write") => write = true,
+            Some("--sheets") => sheets = true,
+            _ => {
+                return Err(format!(
+                    "artsheet: unexpected argument {}; usage: cargo xtask artsheet \
+                     [--write] [--sheets]",
+                    arg.display()
+                ))
+            }
+        }
+    }
+    if write {
+        eprintln!("xtask: [artsheet --write] {}", artsheet::LEDGER_PATH);
+        artsheet::write(&ctx.workspace_root)?;
+    } else {
+        eprintln!("xtask: [artsheet] {}", artsheet::LEDGER_PATH);
+        artsheet::check(&ctx.workspace_root)?;
+    }
+    if sheets {
+        artsheet::sheets(&ctx.workspace_root)?;
+    }
+    Ok(())
+}
+
 fn run_deps_check(ctx: &Context) -> Result<(), String> {
     // walk the workspace dependency graph and reject any
     // layering violation, concrete-scheduler naming outside the sanctioned
@@ -1303,6 +1346,10 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // committed face in-process and compares byte-for-byte, no
         // workspace build.
         static_gate("font-atlas", ctx, |c| run_font_atlas(c, &[])),
+        // The figure art gate: the shipped rig, clips and palette measured
+        // against their bounds and the committed ledger, in-process with no
+        // workspace build (plans/FIGURE.md FG5).
+        static_gate("artsheet", ctx, |c| run_artsheet(c, &[])),
         // The vetted PCI/USB ID-database drift guard: recompiles the
         // committed snapshots in-process and compares byte-for-byte with
         // the committed tables, no workspace build and no network.

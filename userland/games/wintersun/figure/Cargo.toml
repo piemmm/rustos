@@ -26,3 +26,7 @@ tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
 # Bounded storage for joints, parts and placed output, so the whole figure
 # path touches no allocator.
 tairix-inline = { path = "../../../../lib/inline", version = "=0.0.0" }
+# The one non-cryptographic hasher the cross-target digests fold through, so
+# the figure's claim is made the same way the world's and the simulation's
+# are rather than through a second mixer.
+tairix-hash = { path = "../../../../lib/hash", version = "=0.0.0" }

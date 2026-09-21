@@ -41,12 +41,6 @@ impl Recoil {
         }
     }
 
-    /// The spring it settles on.
-    #[must_use]
-    pub const fn spring(&self) -> Spring {
-        self.spring
-    }
-
     /// Knock `param` off its path at `impulse` of its travel per second.
     ///
     /// # Errors

@@ -636,6 +636,6 @@ fn a_clip_carries_its_move_or_none_at_all() {
     let plain = Clip::new(1.0, Loop::Hold, &[], &[]).expect("a real clip");
     assert!(plain.travel().is_none());
     let moving = plain.travelling(travel);
-    assert_eq!(moving.travel().map(Travel::keys), Some(&keys[..]));
+    assert_eq!(moving.travel(), Some(travel));
     assert!(close(moving.travel().expect("a move").at(0.5), 0.5));
 }
