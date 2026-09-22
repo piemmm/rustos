@@ -1061,6 +1061,31 @@ what lets the desktop hold an app-ward event a full mailbox refused (a
 window resize, a file-picker conclusion) and deliver it when the app
 drains, instead of dropping it or polling for capacity.
 
+It accepts a `StreamRoom` member (`plans/SSH.md` §1.1), the **write**-side
+twin of the `Stream` member: `id` names a descriptor of the caller's own
+open table holding a stream end opened for *writing* — a pipe write end, a
+pty master, or a pty slave — and a read end, a path- or resource-backed
+descriptor, an unopened number, or another task's descriptor all refuse
+with the same oracle-free `NotFound` at add. The member is ready when a
+write would **not** be refused for want of room: the ring is below
+capacity, or the stream is broken, the latter so a writer parked on a
+departed reader wakes and its own write fails `BrokenPipe` rather than
+waiting forever on a stream nothing will drain. Readiness is a
+non-consuming, level-triggered peek — the woken owner's own write takes the
+room — so the owner disarms the member whenever it has nothing queued,
+exactly as for `PortRoom`. Both stream kinds register on the same pipe wake
+queue, under the ring side each waits on: a peer's drain releases the space
+a room member waits on exactly as an append releases the bytes a read
+member waits on, so neither disturbs an unrelated waiter.
+
+Without it a parent multiplexing a long-lived worker over a pipe pair has
+no wake to retry a refused write on — only reply readability ever reaches
+it, so a worker that consumes a burst and emits nothing leaves the parent's
+queued bytes stranded and polling for room is forbidden. This is what makes
+the duplex sandbox session (`lib/sandbox`'s `session` seam, the monitor↔
+worker flow control of `plans/SSH.md`) deadlock-free by construction: the
+worker may block on its pipe precisely because the parent never does.
+
 It accepts a `SystemNotice` member (`plans/NOTICE.md`): `id` is a
 `NoticeTopic` — the desktop's own state, the mount table's composition, the
 memory-pressure band — and the member is ready when that topic's generation

@@ -33,8 +33,34 @@ Stability tier: **experimental**.
   logged with a stable id (`EventId(6000)` crashed, `EventId(6001)`
   unavailable; the crate owns the `6000..7000` range). Dropping the seam
   disposes of its live worker.
-- **`loopback`** — the public in-process fake: each "worker" is a fresh
-  `Service` run inline, so a consumer's host tests drive the full
+- **`session`** — the **duplex, long-lived** seam beside that one-shot
+  pair, for a worker that serves a protocol rather than answering a
+  question. Three things differ and each is load-bearing: many frames are
+  in flight each way (one inbound frame may be answered with none or
+  several); the parent never blocks, driving every transport operation
+  from its own wait-set over the two descriptors the transport reports
+  (`Stream` on the reply end, `StreamRoom` on the request end), so one
+  session can never stall another; and a failed worker ends the session
+  rather than being replaced, because it held the connection's protocol
+  state. Containment is one path — dispose, log `EventId(6002)`, latch,
+  and refuse every later call without touching the transport. Both queues
+  are bounded by `SessionBounds` and committed at admission, so the
+  steady state allocates nothing and the cost of a session is known
+  before it is admitted; the send ceiling is derived from the outbound
+  bound, which is what makes `OutboundFull` provably transient (an
+  accepted payload always fits an empty queue) and `FrameTooLarge`
+  permanent. `wants_read` going false is total back-pressure: the owner
+  disarms, the pipe fills, and the kernel blocks the worker.
+  Deadlock-freedom is structural, not argued: the sandbox allow-list
+  leaves the pipe as the worker's only wake source, so the worker may use
+  the ordinary blocking `Channel` while the parent's two readiness legs
+  guarantee it is always woken. The worker side is `serve_session` over a
+  `SessionService`, emitting through `FrameOut` straight to the channel,
+  so fanning one frame out to many allocates nothing per frame.
+- **`loopback`** — the public in-process fakes: for the one-shot seam each
+  "worker" is a fresh `Service` run inline; `LoopbackSession` is the same
+  for the duplex one, running a `SessionService` behind a
+  `SessionTransport`. Either way a consumer's host tests drive the full
   parent-side path (framing, containment, typed decode) under plain
   `cargo test`, exactly as the `Fs`/`Tty` seams take fakes.
 - **`decode`** — the first consumers behind the seam: executable-container
@@ -64,7 +90,11 @@ Stability tier: **experimental**.
   `SpawnAttach::sandbox`, the shared `--parser-sandbox-worker` argv
   marker, and a blocking reap on disposal. The worker side
   (`worker_role` + `serve_stdio`) serves over fd 0/1 — exactly the
-  surface the kernel sandbox allow-list admits.
+  surface the kernel sandbox allow-list admits. `RtSessionChannel` is the
+  duplex transport over that same spawn (one shared pipe-pair-and-attach
+  path, `--sandbox-session-worker`), reporting its two descriptor numbers
+  so the owner can register them, and `session_worker_role` +
+  `serve_session_stdio` are its worker half.
 
 ## Security posture
 
@@ -79,11 +109,21 @@ never carry secrets or capability tokens.
 Unit tests cover the framing (round-trips, every truncation point,
 oversize both ways), the serve loop, the containment discipline (typed
 error, reap, replacement, logged events, frozen event ids, Drop
-disposal), and hostile-reply refusal. The `fuzz_sandbox` harness (in
+disposal), and hostile-reply refusal. The session seam adds its own:
+ordered duplex exchange, a frame split across reads, fan-out, both send
+refusals leaving the queue byte-identical, the readiness transitions in
+each direction, clean end-of-stream against mid-frame truncation, an
+oversize worker declaration refused before it is copied, containment
+(disposed, logged, latched, never replaced), and a ten-thousand-round-trip
+run asserting neither queue grows. The `fuzz_sandbox` harness (in
 `cargo xtask fuzz`) drives mutated containers, pure noise under every
-ISA, and a hostile worker framing noise as replies through the public
+ISA, a hostile worker framing noise as replies, and the session's inbound
+codec over the same noise a byte-run at a time — all through the public
 client path. The aarch64 QEMU vertical
 (`tests/integration/sandbox_program` + `sandbox_qemu_aarch64`) proves the
 whole seam over the real syscalls: sandboxed decode of valid and
-malformed inputs, real-process crash containment with a surviving
-caller, and the syscall wall probed from inside a live sandbox.
+malformed inputs, real-process crash containment with a surviving caller,
+the syscall wall probed from inside a live sandbox, and a duplex session
+driven entirely from a wait-set that pushes twice a pipe's worth of frames
+at a worker answering none of them — which completes only if the
+`StreamRoom` wake fires.

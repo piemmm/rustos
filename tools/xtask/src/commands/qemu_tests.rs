@@ -4397,16 +4397,20 @@ static TESTS: &[QemuTest] = &[
     // to end over the S8a kernel sandbox spawn mode on the aarch64 `virt`
     // board. The chassis installs the production `KernelDispatchHook`
     // (LiveMemMap for the `tairix-rt` heaps, a real `KernelProcessWait`, a
-    // `ProgramRegistry` carrying the fixture's three worker paths) and
-    // spawns the four-role fixture program's parent through the production
+    // `ProgramRegistry` carrying the fixture's four worker paths) and
+    // spawns the five-role fixture program's parent through the production
     // `InitSpawnCtx::spawn_driver_process` seam. The parent drives the
     // seam over the real syscalls: container + instruction decode of valid
     // and malformed inputs through a genuinely sandboxed decode worker
     // (its own binary spawned via `SpawnAttach::sandbox` over pipes), real
     // crash containment (a worker that exits without serving yields a
-    // typed error, a logged crash event, and a surviving caller), and the
+    // typed error, a logged crash event, and a surviving caller), the
     // syscall wall probed from inside a live sandbox (`fs_open`/`spawn`
-    // refused while the pipe reply crosses). PASS once the chassis reaps a
+    // refused while the pipe reply crosses), and the duplex session seam
+    // driven from a wait-set holding `Stream` on the reply descriptor and
+    // `StreamRoom` on the request one, pushing twice a pipe's worth of
+    // frames at a worker that answers none of them — which completes only
+    // if the room wake fires. PASS once the chassis reaps a
     // parent exit of 0; every failure site carries a distinct finisher
     // (the parent's diagnostic exit code is folded in). Single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work aarch64

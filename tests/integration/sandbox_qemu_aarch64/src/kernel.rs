@@ -8,7 +8,7 @@
 //! production user-fault resolver to the same slot, wires the production
 //! `LiveMemMap` producer (the `tairix-rt` heap's `mem_map` pair), a real
 //! `KernelProcessWait`, and a `ProgramRegistry` carrying the fixture's
-//! three worker paths. The parent role is spawned through the production
+//! four worker paths. The parent role is spawned through the production
 //! `InitSpawnCtx::spawn_driver_process` seam; it spawns each sandboxed
 //! worker itself, through the seam's production launcher (`pipe_create` +
 //! `SpawnAttach::sandbox` + `spawn` + `wait`), and drives:
@@ -18,7 +18,12 @@
 //! * real crash containment — a worker that exits without serving yields a
 //!   typed error, a logged crash event, and a surviving caller;
 //! * the syscall wall from the inside — a probe worker's `fs_open` and
-//!   `spawn` are refused inside the sandbox while its pipe reply crosses.
+//!   `spawn` are refused inside the sandbox while its pipe reply crosses;
+//! * the duplex session seam driven entirely from a wait-set holding
+//!   `Stream` on the reply descriptor and `StreamRoom` on the request one:
+//!   the parent pushes twice a pipe's worth of frames at a worker that
+//!   answers none of them, which can only complete if the write-room wake
+//!   fires.
 //!
 //! The chassis reaps the parent through the producer's non-blocking poll
 //! and PASSes only on a parent exit of 0.
@@ -78,12 +83,12 @@ const BOOT_CPU: CpuId = 0;
 const IDENTITY_GIB: usize = 2;
 
 /// Physical frames the production spawn producer draws from: the parent
-/// plus up to five sandboxed workers over the run (decode, dying,
-/// replacement, probe — image, stack, page tables, and the `tairix-rt`
-/// heap each), where the fixture links the whole decode stack
+/// plus up to six sandboxed workers over the run (decode, dying,
+/// replacement, probe, session — image, stack, page tables, and the
+/// `tairix-rt` heap each), where the fixture links the whole decode stack
 /// (`lib/sandbox` + `lib/binfmt` + `lib/disasm`). Sized from the observed
-/// per-process appetite with generous headroom (32 MiB).
-const FRAME_COUNT: usize = 8192;
+/// per-process appetite with generous headroom (40 MiB).
+const FRAME_COUNT: usize = 10240;
 
 /// Cooperative-loop watchdog: maximum `step` iterations before the test
 /// declares the workload deadlocked. Sized generously for QEMU TCG.
@@ -224,12 +229,12 @@ fn parent_caps() -> CapabilitySet {
 }
 
 /// The program registry the production `spawn` syscall resolves the
-/// seam's worker paths against: one `rxe` image, three rows. The roles
-/// ride on the *path* (`arg(0)`) — the seam's launcher always passes
-/// `[path, worker-marker]` as the startup vector, which replaces the
-/// registry defaults — so every row requests no capability and pins no
-/// arguments.
-static CHILD_PROGRAMS: [EmbeddedProgram; 3] = [
+/// seam's worker paths against: one `rxe` image, four rows. The roles
+/// ride on the *path* (`arg(0)`) and the marker (`arg(1)`) — the seam's
+/// launchers always pass `[path, role-marker]` as the startup vector,
+/// which replaces the registry defaults — so every row requests no
+/// capability and pins no arguments.
+static CHILD_PROGRAMS: [EmbeddedProgram; 4] = [
     EmbeddedProgram {
         path: b"/bin/sbx",
         rxe: PROGRAM_RXE,
@@ -244,6 +249,12 @@ static CHILD_PROGRAMS: [EmbeddedProgram; 3] = [
     },
     EmbeddedProgram {
         path: b"/bin/sbx-probe",
+        rxe: PROGRAM_RXE,
+        caps: &[],
+        args: &[],
+    },
+    EmbeddedProgram {
+        path: b"/bin/sbx-session",
         rxe: PROGRAM_RXE,
         caps: &[],
         args: &[],

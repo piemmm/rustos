@@ -2824,6 +2824,7 @@ const fn wait_source_macro_suffix(kind: WaitSourceKind) -> &'static str {
         WaitSourceKind::CallReply => "CALL_REPLY",
         WaitSourceKind::SystemNotice => "SYSTEM_NOTICE",
         WaitSourceKind::PortRoom => "PORT_ROOM",
+        WaitSourceKind::StreamRoom => "STREAM_ROOM",
     }
 }
 

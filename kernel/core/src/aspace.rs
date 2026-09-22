@@ -633,6 +633,19 @@ enum ReadStreamEnd<'a> {
     PtySlave(&'a PtySlaveEnd),
 }
 
+/// A writable stream end borrowed in place for the wait-set room peek: a
+/// pipe write end, a pty master, or a pty slave — the send-side twin of
+/// [`ReadStreamEnd`], so the `StreamRoom` member's resolution has a single
+/// definition across every stream kind.
+enum WriteStreamEnd<'a> {
+    /// A pipe write end.
+    Pipe(&'a PipeEnd),
+    /// A pty master end (feeds the input discipline).
+    PtyMaster(&'a PtyMasterEnd),
+    /// A pty slave end (cooks onto the output).
+    PtySlave(&'a PtySlaveEnd),
+}
+
 /// The state shared by every descriptor on one *open file description*: the
 /// sequential-stream position and the advisory-lock owner identity.
 ///
@@ -2429,6 +2442,73 @@ impl AddressSpaceRegistry {
         }
     }
 
+    /// Whether `task`'s open descriptor `fd` is a writable stream end — a
+    /// pipe write end, a pty master, or a pty slave, each opened for writing
+    /// — the wait-set `StreamRoom` member's add-time owner/descriptor check.
+    /// `false` covers an unopened number, a descriptor of a different task, a
+    /// path- or resource-backed descriptor, a pipe read end, and an entry
+    /// opened without write access (fail closed — the caller cannot
+    /// distinguish which). The `task` argument is the kernel-trusted caller
+    /// id. Borrows the entry in place — never a clone, so the peek can never
+    /// touch a stream's live-end counts.
+    #[must_use]
+    pub fn stream_write_member(&self, task: ProcessId, fd: u32) -> bool {
+        self.borrow_write_stream_end(task, fd).is_some()
+    }
+
+    /// Non-consuming readiness peek on `task`'s open descriptor `fd` for the
+    /// wait-set `StreamRoom` scan: `true` when the descriptor is a writable
+    /// stream end whose write would complete without parking for want of room
+    /// (free space, or a broken stream whose write fails closed instead).
+    /// Anything [`Self::stream_write_member`] refuses is simply not ready — a
+    /// member whose descriptor was closed or replaced mid-wait stops reporting
+    /// rather than erring. Borrows in place, so a scan of many members neither
+    /// clones an end nor touches a stream's live-end counts.
+    #[must_use]
+    pub fn stream_writable(&self, task: ProcessId, fd: u32) -> bool {
+        match self.borrow_write_stream_end(task, fd) {
+            Some(WriteStreamEnd::Pipe(end)) => end.writable(),
+            Some(WriteStreamEnd::PtyMaster(end)) => end.writable(),
+            Some(WriteStreamEnd::PtySlave(end)) => end.writable(),
+            None => false,
+        }
+    }
+
+    /// The wake identity a wait-set `StreamRoom` member on `task`'s descriptor
+    /// `fd` registers under: the *space* side of the ring that descriptor
+    /// fills, so a peer's drain (or its departure) releases this waiter and
+    /// traffic on any other stream does not. `None` for anything
+    /// [`Self::stream_write_member`] refuses — such a member can never become
+    /// ready either, so registering nothing is the same fail-closed answer.
+    #[must_use]
+    pub fn stream_write_wait_key(&self, task: ProcessId, fd: u32) -> Option<WakeKey> {
+        match self.borrow_write_stream_end(task, fd)? {
+            WriteStreamEnd::Pipe(end) => Some(end.waits().park()),
+            WriteStreamEnd::PtyMaster(end) => Some(end.write_waits().park()),
+            WriteStreamEnd::PtySlave(end) => Some(end.write_waits().park()),
+        }
+    }
+
+    /// Resolve `task`'s `fd` to its writable stream end **borrowed in
+    /// place**, only when the entry is opened for writing and backed by a
+    /// pipe write end, a pty master, or a pty slave — the one resolution
+    /// [`Self::stream_write_member`], [`Self::stream_writable`], and
+    /// [`Self::stream_write_wait_key`] share.
+    fn borrow_write_stream_end(&self, task: ProcessId, fd: u32) -> Option<WriteStreamEnd<'_>> {
+        let entry = self.open_files.get(&task)?.by_fd.get(&fd)?;
+        if !entry.flags.contains(OpenFlags::WRITE) {
+            return None;
+        }
+        match &entry.backing {
+            OpenBacking::Pipe(end) if end.role() == crate::pipe::PipeRole::Write => {
+                Some(WriteStreamEnd::Pipe(end))
+            }
+            OpenBacking::PtyMaster(end) => Some(WriteStreamEnd::PtyMaster(end)),
+            OpenBacking::PtySlave(end) => Some(WriteStreamEnd::PtySlave(end)),
+            _ => None,
+        }
+    }
+
     /// Resolve `task`'s open descriptor `fd` to the pseudo-terminal it is a
     /// **slave** end of, **borrowed in place**, or `None` when `fd` is not a
     /// pty-slave descriptor of `task` (`plans/PTY.md`).
@@ -2831,6 +2911,93 @@ mod tests {
         drop(slave);
         assert!(reg.close_file(ProcessId(2), slave_fd));
         assert!(reg.stream_readable(ProcessId(2), master_fd));
+    }
+
+    #[test]
+    fn stream_write_member_admits_only_the_owners_writable_stream_end() {
+        let mut reg = AddressSpaceRegistry::new();
+        let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pipe minted");
+        let file_fd = reg
+            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::WRITE)
+            .expect("file opened");
+        // Only the caller's own pipe write end qualifies.
+        assert!(reg.stream_write_member(ProcessId(2), write_fd));
+        // A read end, a path-backed descriptor, an unopened number, and
+        // another task's descriptor all refuse identically.
+        assert!(!reg.stream_write_member(ProcessId(2), read_fd));
+        assert!(!reg.stream_write_member(ProcessId(2), file_fd));
+        assert!(!reg.stream_write_member(ProcessId(2), 999));
+        assert!(!reg.stream_write_member(ProcessId(3), write_fd));
+        // Both pty ends are writable stream members (each is opened
+        // read/write), which keeps the room kind symmetric with `Stream`.
+        let size = tairix_abi::TerminalSize::new(24, 80).expect("valid grid");
+        let (master_fd, slave_fd) = reg.open_pty(ProcessId(2), size).expect("pty minted");
+        assert!(reg.stream_write_member(ProcessId(2), master_fd));
+        assert!(reg.stream_write_member(ProcessId(2), slave_fd));
+        assert!(!reg.stream_write_member(ProcessId(3), master_fd));
+        // A closed descriptor stops qualifying.
+        assert!(reg.close_file(ProcessId(2), write_fd));
+        assert!(!reg.stream_write_member(ProcessId(2), write_fd));
+    }
+
+    #[test]
+    fn stream_writable_peeks_room_and_a_broken_stream_without_consuming() {
+        let mut reg = AddressSpaceRegistry::new();
+        let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pipe minted");
+        // An empty ring has room, and the peek writes nothing.
+        assert!(reg.stream_writable(ProcessId(2), write_fd));
+        assert!(reg.stream_writable(ProcessId(2), write_fd));
+        // The read end is never room-ready; nor is a foreign task's number.
+        assert!(!reg.stream_writable(ProcessId(2), read_fd));
+        assert!(!reg.stream_writable(ProcessId(3), write_fd));
+        // Fill the ring: no room until a drain.
+        let end = reg
+            .open_file_entry(ProcessId(2), write_fd)
+            .and_then(|entry| entry.pipe().cloned())
+            .expect("write end resolves");
+        let chunk = alloc::vec![9u8; crate::pipe::PIPE_CAPACITY];
+        assert_eq!(
+            end.try_write(&chunk),
+            crate::pipe::WriteStep::Wrote(crate::pipe::PIPE_CAPACITY)
+        );
+        assert!(!reg.stream_writable(ProcessId(2), write_fd));
+        let read_end = reg
+            .open_file_entry(ProcessId(2), read_fd)
+            .and_then(|entry| entry.pipe().cloned())
+            .expect("read end resolves");
+        let mut out = alloc::vec![0u8; 32];
+        assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Read(32));
+        assert!(reg.stream_writable(ProcessId(2), write_fd));
+        // Every read end closed leaves the member ready so the woken writer
+        // fails `BrokenPipe` instead of waiting on a stream nothing drains.
+        drop(read_end);
+        assert!(reg.close_file(ProcessId(2), read_fd));
+        assert!(reg.stream_writable(ProcessId(2), write_fd));
+    }
+
+    #[test]
+    fn stream_write_wait_key_names_the_space_side_of_the_ring_it_fills() {
+        let mut reg = AddressSpaceRegistry::new();
+        let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pipe minted");
+        let write_end = reg
+            .open_file_entry(ProcessId(2), write_fd)
+            .and_then(|entry| entry.pipe().cloned())
+            .expect("write end resolves");
+        // The room member registers under the write side's own park key —
+        // the ring's space, which a reader's drain releases (the pairing
+        // itself is `crate::pipe`'s contract).
+        assert_eq!(
+            reg.stream_write_wait_key(ProcessId(2), write_fd),
+            Some(write_end.waits().park()),
+        );
+        // The read side of the same pipe parks elsewhere, and a refused
+        // descriptor registers nothing at all.
+        assert_ne!(
+            reg.stream_write_wait_key(ProcessId(2), write_fd),
+            reg.stream_read_wait_key(ProcessId(2), read_fd),
+        );
+        assert_eq!(reg.stream_write_wait_key(ProcessId(2), read_fd), None);
+        assert_eq!(reg.stream_write_wait_key(ProcessId(3), write_fd), None);
     }
 
     #[test]

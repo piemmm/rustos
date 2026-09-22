@@ -3171,6 +3171,14 @@ where
             // replaced mid-wait simply stops reporting.
             WaitSourceKind::Stream => u32::try_from(m.id)
                 .is_ok_and(|fd| self.aspaces.read().stream_readable(caller.process(), fd)),
+            // Free room (or a broken stream) on the caller's own write end
+            // — the woken owner's write takes the room, re-resolved against
+            // the open table so a descriptor closed mid-wait stops
+            // reporting. A broken stream reports ready so its writer wakes
+            // to a `BrokenPipe` rather than parking on a ring nothing will
+            // ever drain.
+            WaitSourceKind::StreamRoom => u32::try_from(m.id)
+                .is_ok_and(|fd| self.aspaces.read().stream_writable(caller.process(), fd)),
             // An observed termination-request signal pending undrained on
             // the caller's own intake — the woken owner drains through
             // `signal_intake(Take)`, so a still-pending intake re-reports
@@ -9479,6 +9487,24 @@ where
                             return Err(Errno::NotFound);
                         }
                     }
+                    WaitSourceKind::StreamRoom => {
+                        // The send-side twin of `Stream`, owner- and
+                        // descriptor-checked the same way: `id` must be a
+                        // descriptor number of the caller's **own** open
+                        // table holding a stream end opened for writing. A
+                        // read end, a path/resource-backed descriptor, an
+                        // unopened number, an id outside the descriptor
+                        // width, and another task's descriptor all collapse
+                        // to the same `NotFound` (no existence oracle).
+                        let owned = u32::try_from(id).is_ok_and(|fd| {
+                            self.aspaces
+                                .read()
+                                .stream_write_member(caller.process(), fd)
+                        });
+                        if !owned {
+                            return Err(Errno::NotFound);
+                        }
+                    }
                     WaitSourceKind::Signal => {
                         // A wait-set may observe only the caller's **own**
                         // signal intake: the id is always 0 (a process has
@@ -9642,11 +9668,15 @@ where
         // pointer-rate wakes a drag produces never touch an unrelated
         // waitset waiter.
         let observes_seat = members.iter().any(|m| m.kind == WaitSourceKind::SeatInput);
-        // `STREAM_WAITQ` is joined once per `Stream` member, under that
-        // descriptor's own readable-side key, so traffic on any other stream
-        // — every other pipe and pty on the machine — never wakes this
-        // waiter. A member whose descriptor no longer resolves registers
-        // nothing: it can never report ready either.
+        // `STREAM_WAITQ` is joined once per `Stream` or `StreamRoom` member,
+        // under that descriptor's own readable- or writable-side key, so
+        // traffic on any other stream — every other pipe and pty on the
+        // machine — never wakes this waiter. Both kinds register here
+        // because both sides of a ring are that one queue's keys: a peer's
+        // drain releases the space a room member waits on exactly as an
+        // append releases the bytes a read member waits on. A member whose
+        // descriptor no longer resolves registers nothing: it can never
+        // report ready either.
         //
         // The stream a member names is resolved *once*, here, so the wait
         // follows the object this descriptor held at entry. A sibling thread
@@ -9659,11 +9689,17 @@ where
             let aspaces = self.aspaces.read();
             members
                 .iter()
-                .filter(|m| m.kind == WaitSourceKind::Stream)
                 .filter_map(|m| {
-                    u32::try_from(m.id)
-                        .ok()
-                        .and_then(|fd| aspaces.stream_read_wait_key(caller.process(), fd))
+                    let fd = u32::try_from(m.id).ok()?;
+                    match m.kind {
+                        WaitSourceKind::Stream => {
+                            aspaces.stream_read_wait_key(caller.process(), fd)
+                        }
+                        WaitSourceKind::StreamRoom => {
+                            aspaces.stream_write_wait_key(caller.process(), fd)
+                        }
+                        _ => None,
+                    }
                 })
                 .collect()
         };
@@ -34944,6 +34980,7 @@ mod tests {
     const WS_KIND_CHILD: u32 = tairix_abi::WaitSourceKind::Child as u32;
     const WS_KIND_PORT: u32 = tairix_abi::WaitSourceKind::Port as u32;
     const WS_KIND_STREAM: u32 = tairix_abi::WaitSourceKind::Stream as u32;
+    const WS_KIND_STREAM_ROOM: u32 = tairix_abi::WaitSourceKind::StreamRoom as u32;
     const WS_KIND_SIGNAL: u32 = tairix_abi::WaitSourceKind::Signal as u32;
     const WS_KIND_NOTICE: u32 = tairix_abi::WaitSourceKind::SystemNotice as u32;
     /// The notice topics as wait-set member ids.
@@ -35077,10 +35114,10 @@ mod tests {
             h.waitset_ctl(&ctx, set, 7, WS_KIND_IRQ, line, 0),
             Err(Errno::OutOfRange)
         );
-        // Kind 11 is past the last defined `WaitSourceKind`
-        // (`PortRoom` = 10).
+        // Kind 12 is past the last defined `WaitSourceKind`
+        // (`StreamRoom` = 11).
         assert_eq!(
-            h.waitset_ctl(&ctx, set, WS_OP_ADD, 11, line, 0),
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, 12, line, 0),
             Err(Errno::OutOfRange)
         );
 
@@ -36547,6 +36584,206 @@ mod tests {
         // Cleanup: this test's own sets and tables only.
         assert_eq!(crate::waitset::release_owned_by(0x570D), 1);
         assert!(aspaces.write().withdraw(ProcessId(0x570D)));
+    }
+
+    /// Adding a `StreamRoom` member is owner- and descriptor-checked
+    /// against the caller's own open table exactly as `Stream` is, only on
+    /// the write side: a read end, a path-backed descriptor, an unopened
+    /// number, an over-wide id, and another task's descriptor all refuse
+    /// with the same oracle-free `NotFound` (`plans/SSH.md` §1.1).
+    #[test]
+    fn waitset_stream_room_member_requires_the_callers_writable_stream_end() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // A task id unique to this test: the wait-set registry is
+        // process-global and other tests assert the exact count of sets
+        // released for their own owner.
+        let caps = make_caps_record(0x5714, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5714),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // A foreign task's pipe first, so its write end's *number* lands on
+        // one of the caller's own entries — a member id can never reach
+        // another task's resource, only mis-name one of the caller's own.
+        let (_foreign_read_fd, foreign_write_fd) = aspaces
+            .write()
+            .open_pipe(ProcessId(0x5715))
+            .expect("foreign pipe minted");
+        let file_fd = aspaces
+            .write()
+            .open_file(
+                ProcessId(0x5714),
+                alloc::string::String::from("/Storage/x"),
+                OpenFlags::WRITE,
+            )
+            .expect("file opened");
+        let (read_fd, write_fd) = aspaces
+            .write()
+            .open_pipe(ProcessId(0x5714))
+            .expect("pipe minted");
+
+        let set = h.waitset_create(&ctx).expect("create");
+        for id in [
+            u64::from(read_fd),
+            u64::from(file_fd),
+            u64::from(foreign_write_fd),
+            999,
+            u64::from(u32::MAX) + 1,
+        ] {
+            assert_eq!(
+                h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_STREAM_ROOM, id, 0x41),
+                Err(Errno::NotFound)
+            );
+        }
+        h.waitset_ctl(
+            &ctx,
+            set,
+            WS_OP_ADD,
+            WS_KIND_STREAM_ROOM,
+            u64::from(write_fd),
+            0x43,
+        )
+        .expect("add own pipe write end");
+        // The two kinds are separate members of one set, so a duplex owner
+        // watches both directions of the same pipe pair at once.
+        h.waitset_ctl(
+            &ctx,
+            set,
+            WS_OP_ADD,
+            WS_KIND_STREAM,
+            u64::from(read_fd),
+            0x42,
+        )
+        .expect("add own pipe read end");
+
+        // Cleanup: this test's own sets and tables only.
+        assert_eq!(crate::waitset::release_owned_by(0x5714), 1);
+        assert!(aspaces.write().withdraw(ProcessId(0x5714)));
+        assert!(aspaces.write().withdraw(ProcessId(0x5715)));
+    }
+
+    /// A `StreamRoom` member reports room as a non-consuming peek, goes
+    /// quiet on a full ring, reports again once the peer drains, and
+    /// reports a broken stream so the woken writer fails `BrokenPipe`
+    /// rather than parking on a ring nothing will drain. Without this
+    /// member a parent holding queued bytes against a full pipe has no
+    /// wake at all — only reply readability ever reaches it (`plans/SSH.md`
+    /// §1.1).
+    #[test]
+    fn waitset_stream_room_member_tracks_room_drain_and_a_broken_stream() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(0x5716), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(0x5716, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(0x5716),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let (read_fd, write_fd) = aspaces
+            .write()
+            .open_pipe(ProcessId(0x5716))
+            .expect("pipe minted");
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(
+            &ctx,
+            set,
+            WS_OP_ADD,
+            WS_KIND_STREAM_ROOM,
+            u64::from(write_fd),
+            0x43,
+        )
+        .expect("add own pipe write end");
+
+        // An empty ring has room: the member reports its token, and the
+        // peek took none of it, so it reports again.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(ProcessId(0x5716))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x43
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+
+        // A full ring goes quiet: a zero-timeout wait expires.
+        let write_end = aspaces
+            .read()
+            .open_file_entry(ProcessId(0x5716), write_fd)
+            .and_then(|entry| entry.pipe().cloned())
+            .expect("write end resolves");
+        let chunk = alloc::vec![0xABu8; crate::pipe::PIPE_CAPACITY];
+        assert_eq!(
+            write_end.try_write(&chunk),
+            crate::pipe::WriteStep::Wrote(crate::pipe::PIPE_CAPACITY)
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // The peer's drain frees room and the member reports again — the
+        // edge a parent with queued bytes has no other way to hear about.
+        let read_end = aspaces
+            .read()
+            .open_file_entry(ProcessId(0x5716), read_fd)
+            .and_then(|entry| entry.pipe().cloned())
+            .expect("read end resolves");
+        let mut out = alloc::vec![0u8; 64];
+        assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Read(64));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+
+        // Refill, then close every read end: a broken stream reports ready
+        // so the woken writer fails closed instead of waiting forever.
+        assert_eq!(
+            write_end.try_write(&chunk),
+            crate::pipe::WriteStep::Wrote(64)
+        );
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+        drop(read_end);
+        assert!(aspaces.write().close_file(ProcessId(0x5716), read_fd));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        assert_eq!(write_end.try_write(b"x"), crate::pipe::WriteStep::Broken);
+
+        // A closed write descriptor simply stops reporting, never errs.
+        drop(write_end);
+        assert!(aspaces.write().close_file(ProcessId(0x5716), write_fd));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        // Cleanup: this test's own sets and tables only.
+        assert_eq!(crate::waitset::release_owned_by(0x5716), 1);
+        assert!(aspaces.write().withdraw(ProcessId(0x5716)));
     }
 
     /// Task-exit reclamation tears down every port the dead task bound:

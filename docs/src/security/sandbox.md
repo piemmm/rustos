@@ -129,12 +129,37 @@ sandboxes a parse imports it:
   (`EventId(6000)` worker crashed, `EventId(6001)` worker unavailable;
   the crate owns `6000..7000`). A parser crash never takes down the
   calling program.
+- **Duplex sessions** (`session`): the long-lived seam beside that
+  one-shot pair, for a worker that serves a *protocol* rather than
+  answering a question. `SandboxSession` never blocks — the owner drives
+  it from a wait-set over the two descriptors the transport reports, with
+  `Stream` on the reply end and `StreamRoom` on the request end — many
+  frames are in flight each way, and one inbound frame may be answered
+  with none or several. A failed worker is disposed of and **not**
+  replaced (`EventId(6002)`, session failed), because unlike a parse it
+  held the connection's protocol state, so a silent replacement would be
+  a correctness hole rather than resilience. Both queues are bounded and
+  committed at admission, so what one session costs is known before it is
+  admitted rather than discovered when the memory is gone; a refused send
+  is either permanently too large for the bound or transiently short of
+  room, and the two are distinct typed answers so an owner knows whether
+  to back off or give up. A frame the worker declares above the owner's
+  inbound bound, and a stream that ends part-way through one, are both
+  protocol violations that contain the session.
+  Deadlock-freedom is structural rather than argued: the allow-list gives
+  the worker no wait-set call, no clock, and no RNG, so its pipe is the
+  only thing that can ever wake it, and it may therefore use the ordinary
+  blocking channel — a worker blocked writing is freed by the parent's
+  read readiness, and one blocked reading by the parent's room readiness.
+  That second leg is why `StreamRoom` exists at all.
 - **Production transport** (`rt`, feature `program`, freestanding only):
   the parent spawns **its own binary** in a worker role — two fresh
   pipes wired to the child's fd 0/1 through `SpawnAttach::sandbox`, the
-  `--parser-sandbox-worker` argv marker, a blocking reap on disposal.
-  The worker serves over its standard streams, exactly the surface the
-  allow-list admits. "Its own binary" is named by the reserved
+  `--parser-sandbox-worker` argv marker (or `--sandbox-session-worker`
+  for the duplex seam, whose `RtSessionChannel` rides the same spawn
+  through one shared pipe-pair-and-attach path), a blocking reap on
+  disposal. The worker serves over its standard streams, exactly the
+  surface the allow-list admits. "Its own binary" is named by the reserved
   `SPAWN_SELF` (`@self`) path token, never by `argv[0]` (data the
   spawner chose, not a spawnable spelling): the kernel substitutes the
   exact path it admitted the *caller* from — the `spawn_path` attested

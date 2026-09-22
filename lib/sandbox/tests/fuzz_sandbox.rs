@@ -16,6 +16,10 @@
 //! * **Hostile workers** — a launcher whose "worker" frames pure noise as
 //!   its reply: the caller-side fail-closed reply decoders must refuse or
 //!   accept typed, never panic, and the seam must survive.
+//! * **Hostile session workers** — the duplex seam's inbound codec fed the
+//!   same noise a byte-run at a time through `on_readable`/`recv`: every
+//!   outcome must be a typed result, no frame may escape the session's own
+//!   inbound ceiling, and a contained session must stay contained.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG drives
 //! the mutations through the shared `tairix_fuzzseed` seam. A plain
@@ -36,8 +40,12 @@ use tairix_sandbox::imagerender::{
     close_view, open_view, rasterise_icon, render_page, render_wallpaper, select_page,
     send_document, ImageRenderService, ViewFormat, MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
 };
-use tairix_sandbox::loopback::LoopbackLauncher;
+use tairix_sandbox::loopback::{LoopbackLauncher, LoopbackSession};
 use tairix_sandbox::proto::Channel;
+use tairix_sandbox::session::{
+    FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionService, SessionStep,
+    SessionTransport, MIN_QUEUE_BYTES,
+};
 use tairix_sandbox::timesync::{evaluate_datagram, TimeSyncService};
 use tairix_svg::font::NoFonts;
 use tairix_wallpaper::WallpaperFit;
@@ -489,6 +497,141 @@ const NAMED_FORMATS: [Option<ViewFormat>; 5] = [
     Some(ViewFormat::Svg),
 ];
 
+/// A session "worker" whose whole reply stream is seeded noise, delivered
+/// `chunk` bytes at a time so the accumulator's partial-frame paths are
+/// reached as well as its whole-frame ones.
+struct HostileSession {
+    stream: Vec<u8>,
+    at: usize,
+    chunk: usize,
+}
+
+impl SessionTransport for HostileSession {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, tairix_abi::Errno> {
+        let take = buf.len().min(self.chunk).min(self.stream.len() - self.at);
+        buf[..take].copy_from_slice(&self.stream[self.at..self.at + take]);
+        self.at += take;
+        Ok(take)
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, tairix_abi::Errno> {
+        Ok(buf.len())
+    }
+
+    fn descriptors(&self) -> Option<SessionDescriptors> {
+        None
+    }
+
+    fn dispose(self) -> Option<i32> {
+        None
+    }
+}
+
+/// Answers each inbound frame with a random number of outbound ones, so
+/// the honest leg exercises the encoder, the fan-out, and the inbound
+/// accumulator's back-pressure together.
+struct FanService {
+    fan: usize,
+}
+
+impl SessionService for FanService {
+    fn handle(&mut self, request: &[u8], out: &mut dyn FrameOut) -> SessionStep {
+        for _ in 0..self.fan {
+            if out.frame(request).is_err() {
+                break;
+            }
+        }
+        SessionStep::Continue
+    }
+}
+
+/// One session fuzz iteration.
+///
+/// The hostile leg drives the inbound codec over pure noise: every frame
+/// that escapes must be one the session's own ceiling admits, and a
+/// contained session must refuse everything afterwards rather than
+/// half-working. The honest leg round-trips a random payload through the
+/// in-process fake, so the outbound encoder and the queue bounds are
+/// fuzzed alongside the decoder.
+fn fuzz_session_iteration(noise: &[u8], next: &mut impl FnMut() -> u64) {
+    let outbound = MIN_QUEUE_BYTES + bounded(next(), 512);
+    let inbound = MIN_QUEUE_BYTES + bounded(next(), 512);
+    let bounds = SessionBounds::new(outbound, inbound).expect("above the floor");
+    let chunk = 1 + bounded(next(), 63);
+
+    let mut hostile = SandboxSession::new(
+        HostileSession {
+            stream: noise.to_vec(),
+            at: 0,
+            chunk,
+        },
+        bounds,
+        SilentSink,
+    )
+    .expect("the bounds commit");
+    // A payload straddling the send ceiling: refused typed either way,
+    // and never half-queued.
+    let payload = vec![0xA5u8; bounded(next(), outbound + 16)];
+    let _ = hostile.send(&payload);
+    let _ = hostile.on_writable();
+    let mut contained = false;
+    // Exactly enough turns to consume the whole stream plus its end.
+    for _ in 0..noise.len() / chunk + 4 {
+        if hostile.on_readable().is_err() {
+            contained = true;
+            break;
+        }
+        loop {
+            match hostile.recv() {
+                Ok(Some(frame)) => assert!(
+                    frame.len() <= bounds.max_recv_payload(),
+                    "a frame above the inbound ceiling escaped the session"
+                ),
+                Ok(None) => break,
+                Err(_) => {
+                    contained = true;
+                    break;
+                }
+            }
+        }
+        if contained || hostile.peer_finished() {
+            break;
+        }
+    }
+    if contained {
+        // A contained session stays contained on every surface.
+        assert!(hostile.send(b"x").is_err());
+        assert!(hostile.recv().is_err());
+        assert!(!hostile.wants_read());
+        assert!(!hostile.wants_write());
+    }
+
+    let fan = 1 + bounded(next(), 3);
+    let mut honest =
+        SandboxSession::new(LoopbackSession::new(FanService { fan }), bounds, SilentSink)
+            .expect("the bounds commit");
+    let payload = vec![0x5Au8; bounded(next(), bounds.max_send_payload())];
+    if honest.send(&payload).is_ok() {
+        while honest.wants_write() && honest.on_writable().is_ok() {}
+        let mut seen = 0;
+        while honest.wants_read() && honest.on_readable().is_ok() {
+            let mut drained = false;
+            while let Ok(Some(frame)) = honest.recv() {
+                assert_eq!(frame, payload, "the honest round trip is byte-exact");
+                seen += 1;
+                drained = true;
+            }
+            if !drained {
+                break;
+            }
+        }
+        assert!(
+            seen <= fan,
+            "more frames came back than the service emitted"
+        );
+    }
+}
+
 /// Launches [`HostileChannel`] workers with fresh noise per launch.
 struct HostileLauncher {
     state: Rc<RefCell<u64>>,
@@ -608,6 +751,10 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let (wallpaper_w, wallpaper_h, fit) =
             fuzz_wallpaper_iteration(&mut honest_icon, &noise, &mut next);
         fuzz_view_iteration(&mut honest_icon, &noise, &mut next);
+
+        // 6b. The duplex session seam: its inbound codec over the same
+        //    noise, plus an honest round trip through the in-process fake.
+        fuzz_session_iteration(&noise, &mut next);
 
         // 7. NTP server replies through the honest worker, in its own helper
         //    to keep this loop's body a readable, bounded size. Returns the

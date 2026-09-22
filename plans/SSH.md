@@ -30,7 +30,7 @@ ordinary pre-release changes (§2.13).
 |---|---|---|
 | S0a | `lib/crypto` extension: the algorithm set §4 admits, each with its §2.12 justification, exact pin, `deny.toml`/`supply-chain.toml`/SBOM entry, and §19.1 constant-time test | done |
 | S0b | The `netstack` socket-quota defect: a derived socket-**memory** budget, a per-principal share of it, and a `net.*` administrative override — the fail-closed refusal unchanged, over an indexed socket table | done |
-| S0c | `lib/sandbox::session` — the duplex, long-lived worker seam beside the one-shot `host`/`worker` pair | planned |
+| S0c | `lib/sandbox::session` — the duplex, long-lived worker seam beside the one-shot `host`/`worker` pair, over the new `WaitSourceKind::StreamRoom` | done |
 | S0d | `lib/compress` gains the DEFLATE **compressor** (RFC 1951) and the zlib envelope encoder (RFC 1950); the decoders already exist | planned |
 | S1 | `lib/ssh` wire codec (RFC 4251 §5), version exchange, the binary packet protocol with every cipher/MAC framing, strict KEX, rekey thresholds | planned |
 | S2 | KEXINIT negotiation, the exchange hash, key derivation (RFC 4253 §7), the KEX methods of §4, RFC 8308 `ext-info`/`server-sig-algs` | planned |
@@ -543,13 +543,45 @@ first to feel. It is a second index's worth of design (a per-listener FIFO
 inside the `Proto::Listen` variant) rather than part of this conversion,
 so it is `plans/OPEN-DEFECTS.md` D145 with S5 as its re-check trigger.
 
-**S0c — `lib/sandbox` has no long-lived worker.** `host::ParserSandbox::request`
-is one-shot request→reply and `worker::serve` answers one frame at a time
-against a total `Service`. An SSH connection is a duplex session either side may
-originate on. A `session` module lands beside `host`/`worker` (§27 — complete
-the primitive, do not ship the caller's slice), reusing `proto`'s framing and
-`host`'s crash containment, and is reusable by any future long-lived protocol
-service.
+**S0c — `lib/sandbox` had no long-lived worker (done).**
+`host::ParserSandbox::request` is one-shot request→reply and `worker::serve`
+answers one frame at a time against a total `Service`. An SSH connection is a
+duplex session either side may originate on, so `lib/sandbox/src/session.rs`
+now carries that shape beside `host`/`worker`, reusing `proto`'s framing and
+`host`'s containment ids rather than forking them, and protocol-agnostic —
+`sshd` is its first consumer, not its shape.
+
+`SandboxSession` never blocks: the owner drives every transport operation from
+its own wait-set and one session can never stall another. A failed worker is
+disposed of and **not** replaced, because unlike a parse it held the
+connection's protocol state (`EVENT_SESSION_FAILED`, `EventId(6002)`). Both
+queues are bounded by `SessionBounds` and committed at admission, so a
+session's cost is known before it is admitted and the steady state allocates
+nothing; the send ceiling is *derived* from the outbound bound, which is what
+makes `OutboundFull` provably transient — an accepted payload always fits an
+empty queue — and `FrameTooLarge` permanent. `wants_read` going false is total
+back-pressure: the owner disarms, the pipe fills, the kernel blocks the worker.
+The worker stays a pure reactor over the blocking `Channel` (`serve_session`),
+which is what the sandbox allow-list already forces it to be.
+
+**The kernel prerequisite it needed: `WaitSourceKind::StreamRoom` (11).** §1.1
+fixes that both directions of the monitor↔worker pipe pair are driven from the
+owning shard's wait-set, and that a monitor which cannot write to a worker
+stops reading that connection's socket rather than blocking on the pipe. The
+kernel had no write-readiness source for a stream — `Stream` admits read ends
+only — so a parent holding queued bytes against a full pipe had no wake to
+retry on, and a worker that consumed a burst and emitted nothing stranded that
+residue forever. Polling is forbidden, so the room edge landed as a member kind:
+the exact twin of `PortRoom`, owner- and descriptor-checked against the
+caller's own table (a pipe write end, a pty master, or a pty slave), ready when
+a write would not be refused *for want of room* — free space, or a broken
+stream so its writer wakes and fails `BrokenPipe` rather than waiting on a ring
+nothing will drain. Level-triggered and non-consuming, so the owner disarms it
+whenever it has nothing queued. The wake machinery already existed: every ring
+carries a `space` key released by a reader's drain and by the last reader
+departing. Deadlock-freedom is therefore structural rather than argued — worker
+blocked writing ⇒ the parent's read readiness fires; worker blocked reading ⇒
+the parent's room readiness fires.
 
 **S0d — `lib/compress` has no DEFLATE compressor.** `inflate` (RFC 1951) and
 `zlib` (RFC 1950) already exist and are deliberately **decode-only**, because
@@ -682,8 +714,11 @@ on small and large discovered RAM, the per-principal share, the `CAP_NET_ADMIN`
 override, the ceilings sized from what the share and the whole budget have
 left, and the unchanged fail-closed refusal at either bound.
 
-**S0c** — `lib/sandbox::session`: the duplex seam, its crash containment, and a
-`loopback` fake so consumers' host tests run the full parent path.
+**S0c** — `lib/sandbox::session`: the duplex seam, its crash containment, the
+`WaitSourceKind::StreamRoom` prerequisite, and a `loopback` fake so consumers'
+host tests run the full parent path. The aarch64 sandbox vertical drives a real
+session from a wait-set and pushes twice a pipe's worth of frames at a worker
+that answers none of them, which completes only if the room wake fires.
 
 **S0d** — the DEFLATE and zlib encode direction, fuzzed round-trip against the
 existing decoders and against fixtures a foreign encoder produced.
@@ -833,7 +868,10 @@ S0a–S4 add none.
 
 **Oracles (§19.11).** `lib/ssh`, `lib/sftp`, and `lib/sshconfig` are
 `#![forbid(unsafe_code)]`, so miri has nothing new to interpret and no enrolment
-changes — stated rather than left silent. Loom **does** apply: S5's
+changes — stated rather than left silent. The same held for S0c: `lib/sandbox`
+forbids `unsafe`, the `StreamRoom` kernel arm added none, and the seam is
+single-threaded state owned by one thread with no atomic, lock, or ordering
+pairing of its own, so loom had nothing to model there either. Loom **does** apply: S5's
 listener→shard handoff and the monitor↔worker flow-control queue are the one
 place correctness depends on an ordering pairing, and a lost wake-up there is a
 hung connection that only shows up under load. S5 carries that model in

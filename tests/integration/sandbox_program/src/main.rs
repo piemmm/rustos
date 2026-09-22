@@ -1,26 +1,33 @@
 //! EL0 fixture program for the `lib/sandbox` parser-sandbox seam (the
 //! fstree S8b increment — `plans/APPS.md`).
 //!
-//! One binary, four roles, selected by the **registry path** it is spawned
-//! under (`arg(0)`) plus the seam's worker marker (`arg(1)`), because the
-//! production launcher (`tairix_sandbox::rt::RtLauncher`) always passes
-//! `[path, WORKER_ROLE_ARG]`:
+//! One binary, five roles, selected by the **registry path** it is spawned
+//! under (`arg(0)`) plus the seam's role marker (`arg(1)`), because the
+//! production launchers (`tairix_sandbox::rt::RtLauncher`,
+//! `tairix_sandbox::rt::RtSessionChannel`) always pass `[path, marker]`:
 //!
-//! * **parent** (`/bin/sbx`, no worker marker) — drives the whole seam over
-//!   the real syscalls and exits 0 only when every check passed;
-//! * **decode worker** (`/bin/sbx` + marker) — serves the
+//! * **parent** (`/bin/sbx`, no marker) — drives the whole seam over the
+//!   real syscalls and exits 0 only when every check passed;
+//! * **decode worker** (`/bin/sbx` + one-shot marker) — serves the
 //!   `tairix_sandbox::decode::DecodeService` over its wired fd 0/1 inside
 //!   the kernel sandbox spawn mode;
-//! * **dying worker** (`/bin/sbx-die` + marker) — exits immediately without
-//!   serving: the real-process stand-in for a crashed parser;
-//! * **probe worker** (`/bin/sbx-probe` + marker) — attempts syscalls the
-//!   sandbox allow-list forbids (`fs_open`, `spawn`) *from inside the
-//!   sandbox* and reports the denials over its reply pipe.
+//! * **dying worker** (`/bin/sbx-die` + one-shot marker) — exits
+//!   immediately without serving: the real-process stand-in for a crashed
+//!   parser;
+//! * **probe worker** (`/bin/sbx-probe` + one-shot marker) — attempts
+//!   syscalls the sandbox allow-list forbids (`fs_open`, `spawn`) *from
+//!   inside the sandbox* and reports the denials over its reply pipe;
+//! * **session worker** (`/bin/sbx-session` + session marker) — serves the
+//!   duplex seam, silently counting every frame it is sent and answering
+//!   only the final report, then closing the session itself.
 //!
 //! The parent proves, end to end over the production spawn/pipe/wait path:
 //! decode of valid and malformed inputs through a genuinely sandboxed
 //! worker; typed crash containment with a logged crash event and a
-//! surviving caller; and the syscall wall holding from the inside. Each
+//! surviving caller; the syscall wall holding from the inside; and the
+//! duplex session driven entirely from a wait-set, pushing far more than
+//! one pipe's worth of frames at a worker that answers nothing until the
+//! end — which can only complete if the write-room wake fires. Each
 //! failure site exits with a distinct diagnostic code the chassis folds
 //! into its failure finisher.
 //!
@@ -44,14 +51,22 @@ mod program {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use tairix_abi::{Errno, OpenFlags};
+    use tairix_abi::{Errno, OpenFlags, WaitSetOp, WaitSourceKind};
     use tairix_log::{Event, Sink};
     use tairix_sandbox::decode::{
         container_summary, disassemble, ContainerFormat, DecodeFailure, DecodeRefusal,
         DecodeService, Isa,
     };
-    use tairix_sandbox::host::{ParserSandbox, SandboxError, EVENT_WORKER_CRASHED};
-    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::host::{
+        log_unavailable, ParserSandbox, SandboxError, EVENT_WORKER_CRASHED,
+    };
+    use tairix_sandbox::rt::{
+        serve_session_stdio, serve_stdio, session_worker_role, worker_role, RtLauncher,
+        RtSessionChannel,
+    };
+    use tairix_sandbox::session::{
+        FrameOut, SandboxSession, SessionBounds, SessionError, SessionService, SessionStep,
+    };
     use tairix_sandbox::worker::{ServeEnd, Service};
 
     /// Registry path of the parent role — and of the decode worker the
@@ -62,6 +77,26 @@ mod program {
     const DIE_PATH: &[u8] = b"/bin/sbx-die";
     /// Registry path whose worker probes the sandbox syscall wall.
     const PROBE_PATH: &[u8] = b"/bin/sbx-probe";
+    /// Registry path whose worker serves the duplex session.
+    const SESSION_PATH: &[u8] = b"/bin/sbx-session";
+
+    /// Bytes each direction of the session may hold queued. Deliberately
+    /// far below the burst, so the parent must drain and refill.
+    const SESSION_QUEUE: usize = 8 * 1024;
+    /// Payload of one burst frame.
+    const SESSION_PAYLOAD: usize = 512;
+    /// Frames pushed at a worker that answers none of them. The framed
+    /// total (about 129 KiB) is twice a pipe's capacity, so the burst
+    /// cannot finish unless the write-room wake fires.
+    const SESSION_FRAMES: u32 = 256;
+    /// The one frame the session worker answers.
+    const SESSION_REPORT: &[u8] = b"report";
+    /// Wait-set tokens for the session's two directions.
+    const TOKEN_READ: u64 = 1;
+    const TOKEN_WRITE: u64 = 2;
+    /// Per-wait deadline: a wedged session fails loudly with its
+    /// diagnostic code rather than hanging out the harness budget.
+    const SESSION_TIMEOUT_NS: u64 = 30_000_000_000;
 
     /// A minimal valid wasm module with two empty function bodies: one
     /// `code` section region plus `func[0]` / `func[1]` code regions.
@@ -121,9 +156,169 @@ mod program {
     /// the worker's whole observable outcome.
     fn run_worker<S: Service>(service: &mut S) -> i32 {
         match serve_stdio(service) {
-            ServeEnd::Finished => 0,
+            ServeEnd::Finished | ServeEnd::Ended => 0,
             ServeEnd::Failed(_) => FAIL_SERVE,
         }
+    }
+
+    /// The session worker's service: swallow every burst frame, counting
+    /// it, and answer only the report — then close the session, so the
+    /// parent also observes a real worker ending cleanly.
+    struct CountingService {
+        seen: u32,
+    }
+
+    impl SessionService for CountingService {
+        fn handle(&mut self, request: &[u8], out: &mut dyn FrameOut) -> SessionStep {
+            if request == SESSION_REPORT {
+                let _ = out.frame(&self.seen.to_le_bytes());
+                return SessionStep::Finished;
+            }
+            self.seen = self.seen.saturating_add(1);
+            SessionStep::Continue
+        }
+    }
+
+    /// Serve the session over the wired standard streams.
+    fn run_session_worker() -> i32 {
+        match serve_session_stdio(&mut CountingService { seen: 0 }) {
+            ServeEnd::Finished | ServeEnd::Ended => 0,
+            ServeEnd::Failed(_) => FAIL_SERVE,
+        }
+    }
+
+    /// Add or remove one wait-set member so the armed set matches what the
+    /// session wants. Disarming is what keeps a level-triggered member —
+    /// write room, which is ready whenever the pipe is not full — from
+    /// waking a parent that has nothing to write.
+    fn arm(
+        set: u64,
+        kind: WaitSourceKind,
+        fd: u32,
+        token: u64,
+        want: bool,
+        armed: &mut bool,
+    ) -> bool {
+        if want == *armed {
+            return true;
+        }
+        let op = if want { WaitSetOp::Add } else { WaitSetOp::Del };
+        if tairix_rt::waitset_ctl(set, op, kind, u64::from(fd), token) < 0 {
+            return false;
+        }
+        *armed = want;
+        true
+    }
+
+    /// Drive a duplex session over a real sandboxed worker, entirely from
+    /// a wait-set: push far more frames than one pipe holds at a worker
+    /// that answers nothing, then ask it how many it saw.
+    fn session_leg() -> i32 {
+        // A session has no launcher of its own, so its owner logs a failed
+        // transport construction through the seam's one emitter of that id.
+        let transport = match RtSessionChannel::launch(SESSION_PATH) {
+            Ok(transport) => transport,
+            Err(errno) => {
+                log_unavailable(&CountingSink, errno);
+                return 40;
+            }
+        };
+        let Ok(bounds) = SessionBounds::new(SESSION_QUEUE, SESSION_QUEUE) else {
+            return 41;
+        };
+        let Ok(mut session) = SandboxSession::new(transport, bounds, CountingSink) else {
+            return 42;
+        };
+        let Some(fds) = session.descriptors() else {
+            return 43;
+        };
+        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
+            return 44;
+        };
+
+        let burst = vec![0xC3u8; SESSION_PAYLOAD];
+        let mut queued: u32 = 0;
+        let mut asked = false;
+        let mut reported: Option<u32> = None;
+        let (mut armed_read, mut armed_write) = (false, false);
+
+        while reported.is_none() {
+            // Refill the outbound queue: a full queue refuses transiently,
+            // and the room wake below is the only thing that lets the rest
+            // through.
+            while queued < SESSION_FRAMES {
+                match session.send(&burst) {
+                    Ok(()) => queued += 1,
+                    Err(SessionError::OutboundFull) => break,
+                    Err(_) => return 45,
+                }
+            }
+            if queued == SESSION_FRAMES && !asked {
+                match session.send(SESSION_REPORT) {
+                    Ok(()) => asked = true,
+                    Err(SessionError::OutboundFull) => {}
+                    Err(_) => return 45,
+                }
+            }
+            if !arm(
+                set,
+                WaitSourceKind::Stream,
+                fds.read_fd,
+                TOKEN_READ,
+                session.wants_read(),
+                &mut armed_read,
+            ) {
+                return 46;
+            }
+            if !arm(
+                set,
+                WaitSourceKind::StreamRoom,
+                fds.write_fd,
+                TOKEN_WRITE,
+                session.wants_write(),
+                &mut armed_write,
+            ) {
+                return 47;
+            }
+            if !armed_read && !armed_write {
+                // Nothing left to wait on and no answer: the session ended
+                // without reporting.
+                return 48;
+            }
+            let mut token = 0u64;
+            if tairix_rt::waitset_wait(set, SESSION_TIMEOUT_NS, &mut token) < 0 {
+                return 49;
+            }
+            let stepped = match token {
+                TOKEN_WRITE => session.on_writable(),
+                TOKEN_READ => session.on_readable(),
+                _ => return 50,
+            };
+            if stepped.is_err() {
+                return 51;
+            }
+            loop {
+                match session.recv() {
+                    Ok(Some(frame)) => {
+                        let Ok(count) = <[u8; 4]>::try_from(frame.as_slice()) else {
+                            return 52;
+                        };
+                        reported = Some(u32::from_le_bytes(count));
+                    }
+                    Ok(None) => break,
+                    Err(_) => return 53,
+                }
+            }
+        }
+
+        if reported != Some(SESSION_FRAMES) {
+            return 54;
+        }
+        // The worker closed the session itself and exits cleanly.
+        if session.end() != Some(0) {
+            return 55;
+        }
+        0
     }
 
     /// The parent role: every check distinct, fail-closed, in seam order.
@@ -196,14 +391,20 @@ mod program {
             }
             Err(_) => return 30,
         }
-        0
+
+        // 6. The duplex session, driven from a wait-set over both
+        //    directions of a real sandboxed worker's pipe pair.
+        session_leg()
     }
 
-    /// Program entry point: the worker marker (`arg(1)`) selects a worker
+    /// Program entry point: the role marker (`arg(1)`) selects a worker
     /// role, the registry path (`arg(0)`) selects which; otherwise this is
-    /// the parent. An unknown shape cannot occur — the launcher and the
+    /// the parent. An unknown shape cannot occur — the launchers and the
     /// registry rows are the only spawners.
     fn main() -> i32 {
+        if session_worker_role() {
+            return run_session_worker();
+        }
         if worker_role() {
             return match tairix_rt::arg(0) {
                 Some(path) if path == DIE_PATH => DIE_EXIT,

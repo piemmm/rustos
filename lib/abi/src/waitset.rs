@@ -239,6 +239,30 @@ pub enum WaitSourceKind {
     /// destination drains instead of dropping the event or polling for room
     /// (`plans/APPWIN.md`; the desktop's app-ward hold-back).
     PortRoom = 10,
+    /// Room in a writable stream of the caller's **own** open table (its
+    /// `id` is that descriptor number) — the send-side twin of
+    /// [`Stream`](Self::Stream). Adding the member is owner- and
+    /// descriptor-checked exactly as `Stream` is: the descriptor must be a
+    /// pipe end opened for writing, a pty master, or a pty slave. A pipe
+    /// read end, a path- or resource-backed descriptor, an unopened
+    /// number, and another task's descriptor all refuse with the same
+    /// oracle-free `NotFound` the other kinds use.
+    ///
+    /// Ready when a write would **not** be refused for want of room: the
+    /// ring is below capacity, **or** the stream is broken (every reader
+    /// gone), the latter so a writer parked on a departed reader wakes and
+    /// its own write fails `BrokenPipe` rather than waiting forever on a
+    /// stream that can never drain. Readiness is a non-consuming,
+    /// level-triggered peek: the woken owner's own write takes the room,
+    /// so a stream with room to spare reports again on the next wait.
+    ///
+    /// Without it a parent that multiplexes a long-lived worker over a pipe
+    /// pair has no wake to retry a refused write on — only the reply pipe's
+    /// readability ever wakes it, so a worker that consumes a burst and
+    /// emits nothing leaves the parent's queued bytes stranded. Polling for
+    /// room is forbidden, so the room edge is a source like any other
+    /// (`plans/SSH.md` §1.1 — the monitor↔worker flow control).
+    StreamRoom = 11,
 }
 
 impl WaitSourceKind {
@@ -267,6 +291,7 @@ impl WaitSourceKind {
             8 => Ok(Self::CallReply),
             9 => Ok(Self::SystemNotice),
             10 => Ok(Self::PortRoom),
+            11 => Ok(Self::StreamRoom),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -299,10 +324,11 @@ mod tests {
             WaitSourceKind::CallReply,
             WaitSourceKind::SystemNotice,
             WaitSourceKind::PortRoom,
+            WaitSourceKind::StreamRoom,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(11), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(12), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -321,6 +347,7 @@ mod tests {
         assert_eq!(WaitSourceKind::CallReply.as_u32(), 8);
         assert_eq!(WaitSourceKind::SystemNotice.as_u32(), 9);
         assert_eq!(WaitSourceKind::PortRoom.as_u32(), 10);
+        assert_eq!(WaitSourceKind::StreamRoom.as_u32(), 11);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
         assert_eq!(WAITSET_TIMEOUT_NONE, u64::MAX);
     }

@@ -351,6 +351,7 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_WAIT_SOURCE_CALL_REPLY 8u
 #define TAIRIX_WAIT_SOURCE_SYSTEM_NOTICE 9u
 #define TAIRIX_WAIT_SOURCE_PORT_ROOM 10u
+#define TAIRIX_WAIT_SOURCE_STREAM_ROOM 11u
 
 /* System notice topics (the `topic` argument of notice_read() and
 * notice_publish(), uint32_t) and each topic's exact payload length. A topic

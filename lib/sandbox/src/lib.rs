@@ -23,9 +23,18 @@
 //!   [`helpdoc::render_help`] re-parses the reply through the `tairix-vt`
 //!   streaming parser, admitting only the closed render-op set a help
 //!   render can legitimately contain.
-//! * [`loopback`] — the public in-process fake, so a consumer's host tests
+//! * [`session`] — the **duplex, long-lived** seam beside that one-shot
+//!   pair: [`session::SandboxSession`] never blocks (the owner drives it
+//!   from a wait-set over its two descriptors), many frames are in flight
+//!   each way, and a failed worker ends the session rather than being
+//!   replaced, because it held the protocol state
+//!   ([`session::EVENT_SESSION_FAILED`]). The worker side
+//!   ([`session::serve_session`]) stays a pure reactor, which is what the
+//!   kernel's sandbox allow-list already forces it to be.
+//! * [`loopback`] — the public in-process fakes, so a consumer's host tests
 //!   run the full parent path without processes (the `Fs`/`Tty` seam
-//!   pattern).
+//!   pattern) — [`loopback::LoopbackLauncher`] for the one-shot seam,
+//!   [`loopback::LoopbackSession`] for the duplex one.
 //! * [`decode`] — the first consumers behind the seam: executable-container
 //!   summaries (`tairix-binfmt`) and instruction windows (`tairix-disasm`),
 //!   with fail-closed reply validation (the worker is hostile once it has
@@ -66,6 +75,7 @@ pub mod loopback;
 pub mod proto;
 #[cfg(all(freestanding, feature = "program"))]
 pub mod rt;
+pub mod session;
 pub mod svgfonts;
 pub mod timesync;
 pub mod wire;
@@ -73,4 +83,8 @@ pub mod worker;
 
 pub use host::{Launcher, ParserSandbox, SandboxError};
 pub use proto::{Channel, ProtoError, MAX_FRAME};
+pub use session::{
+    serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionError,
+    SessionService, SessionStep, SessionTransport,
+};
 pub use worker::{serve, ServeEnd, Service};

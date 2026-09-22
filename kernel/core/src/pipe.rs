@@ -334,6 +334,22 @@ impl PipeEnd {
         state.buf.extend(&data[..n]);
         WriteStep::Wrote(n)
     }
+
+    /// Whether a write on this end would complete without parking *for want
+    /// of room*: the ring is below capacity, or every read end is closed (the
+    /// write observes broken-pipe). A **non-consuming peek** — nothing is
+    /// appended — so a wait-set scan can report room and leave the write to
+    /// the woken owner. On a read end it is always `false` (a read end can
+    /// never be written; fail closed, matching [`Self::try_write`]'s
+    /// direction guard).
+    #[must_use]
+    pub fn writable(&self) -> bool {
+        if self.role != PipeRole::Write {
+            return false;
+        }
+        let state = self.pipe.state.lock();
+        state.readers == 0 || state.buf.len() < PIPE_CAPACITY
+    }
 }
 
 impl Clone for PipeEnd {
@@ -538,6 +554,29 @@ mod tests {
         assert_eq!(write_b.try_write(b"x"), WriteStep::Wrote(1));
         assert!(!write_b.readable());
         assert!(read_b.readable());
+    }
+
+    #[test]
+    fn writable_peeks_room_without_consuming_and_reports_a_broken_stream() {
+        let (read, write) = Pipe::create();
+        // An empty ring has room, and the peek appends nothing.
+        assert!(write.writable());
+        assert!(write.writable());
+        let chunk = vec![7u8; PIPE_CAPACITY];
+        assert_eq!(write.try_write(&chunk), WriteStep::Wrote(PIPE_CAPACITY));
+        // Full with a live reader: a write would park, so no room.
+        assert!(!write.writable());
+        // A drain frees room again.
+        let mut out = vec![0u8; 16];
+        assert_eq!(read.try_read(&mut out), ReadStep::Read(16));
+        assert!(write.writable());
+        // A read end is never writable, room or not.
+        assert!(!read.writable());
+        // Every read end closed: writable (the write observes broken-pipe),
+        // so a parked writer wakes and fails rather than waiting forever.
+        drop(read);
+        assert!(write.writable());
+        assert_eq!(write.try_write(b"x"), WriteStep::Broken);
     }
 
     /// Each pipe carries its own ring identities and its two ends mirror each

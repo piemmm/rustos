@@ -6559,7 +6559,7 @@ mod program {
         if worker_role() {
             let mut service = ImageRenderService::default();
             return match serve_stdio(&mut service) {
-                ServeEnd::Finished => 0,
+                ServeEnd::Finished | ServeEnd::Ended => 0,
                 ServeEnd::Failed(_) => 1,
             };
         }

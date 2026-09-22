@@ -117,6 +117,24 @@ pub fn recv_frame<C: Channel>(chan: &mut C) -> Result<Option<Vec<u8>>, ProtoErro
     }
 }
 
+/// The payload length the frame at the head of `buffered` declares,
+/// complete or not, or `None` when even its header has not arrived.
+///
+/// For the buffering sides of the seam (the session accumulator, the
+/// in-process fakes), which see frames as a byte run rather than through
+/// [`recv_frame`]'s blocking reads.
+pub(crate) fn head_declared(buffered: &[u8]) -> Option<usize> {
+    let header = buffered.get(..FRAME_HEADER_LEN)?;
+    Some(u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize)
+}
+
+/// The payload length of the **complete** frame at the head of `buffered`,
+/// or `None` when those bytes do not yet form one.
+pub(crate) fn head_frame(buffered: &[u8]) -> Option<usize> {
+    let declared = head_declared(buffered)?;
+    (buffered.len() - FRAME_HEADER_LEN >= declared).then_some(declared)
+}
+
 /// Whether [`read_exact`] filled the buffer or hit end-of-stream before
 /// its first byte.
 enum ReadOutcome {

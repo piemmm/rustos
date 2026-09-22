@@ -9,16 +9,24 @@
 //! the typed decode helpers) runs unchanged, exactly as an `Fs`/`Tty` fake
 //! lets an app's state machine run unchanged on the host.
 //!
-//! This fake models a *healthy* worker. Containment paths are exercised by
-//! scripting a failing [`crate::proto::Channel`] directly (see
-//! `crate::host`'s tests); keeping failure injection out of this type keeps
-//! its behaviour identical to a correct production worker.
+//! [`LoopbackSession`] is the same idea for the duplex seam
+//! ([`crate::session`]): one [`crate::session::SessionService`] run inline
+//! behind a [`crate::session::SessionTransport`], so a consumer's host
+//! tests drive `send` / `on_writable` / `on_readable` / `recv` exactly as
+//! its production owner will.
+//!
+//! Both fakes model a *healthy* worker. Containment paths are exercised by
+//! scripting a failing [`crate::proto::Channel`] or
+//! [`crate::session::SessionTransport`] directly (see `crate::host`'s and
+//! `crate::session`'s tests); keeping failure injection out of these types
+//! keeps their behaviour identical to a correct production worker.
 
 use alloc::vec::Vec;
 use tairix_abi::Errno;
 
 use crate::host::Launcher;
-use crate::proto::{Channel, FRAME_HEADER_LEN, MAX_FRAME};
+use crate::proto::{head_frame, send_frame, Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
+use crate::session::{FrameOut, SessionDescriptors, SessionService, SessionStep, SessionTransport};
 use crate::worker::Service;
 
 /// Builds one fresh service per launched loopback worker.
@@ -83,22 +91,13 @@ impl<S: Service> LoopbackChannel<S> {
     /// Run the service over the buffered request bytes if they hold a
     /// complete, in-bound frame.
     fn pump(&mut self) {
-        if self.request.len() < FRAME_HEADER_LEN {
-            return;
-        }
-        let declared = u32::from_le_bytes([
-            self.request[0],
-            self.request[1],
-            self.request[2],
-            self.request[3],
-        ]) as usize;
         // An oversize declaration cannot come from the in-crate sender
         // (send_frame refuses it first); leaving it unconsumed mirrors a
         // worker that stops reading, and the parent's own bound already
         // failed the request.
-        if declared > MAX_FRAME || self.request.len() < FRAME_HEADER_LEN + declared {
+        let Some(declared) = head_frame(&self.request).filter(|&len| len <= MAX_FRAME) else {
             return;
-        }
+        };
         let payload: Vec<u8> = self
             .request
             .drain(..FRAME_HEADER_LEN + declared)
@@ -138,6 +137,125 @@ impl<S: Service> Channel for LoopbackChannel<S> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
         self.request.extend_from_slice(buf);
         Ok(buf.len())
+    }
+}
+
+/// In-process [`SessionTransport`]: one [`SessionService`] run inline.
+///
+/// The parent's writes accumulate until they form a complete frame, the
+/// service handles it and whatever it emits is framed into the reply
+/// buffer, and the parent's reads drain that. A read with nothing pending
+/// reports [`Errno::WouldBlock`] — "nothing right now" — which the session
+/// treats as the no-op it is, so a host test can drive `on_readable`
+/// freely without a wait-set to tell it when to.
+pub struct LoopbackSession<S: SessionService> {
+    service: S,
+    /// Parent→worker bytes not yet consumed as a complete frame.
+    request: Vec<u8>,
+    /// Worker→parent framed bytes, with the prefix the parent has read.
+    reply: Vec<u8>,
+    reply_at: usize,
+    /// Set once the service closed the session: reads then report
+    /// end-of-stream and writes broken-pipe, exactly as a real worker's
+    /// exit does.
+    finished: bool,
+}
+
+impl<S: SessionService> LoopbackSession<S> {
+    /// Build the fake over the service this session's worker runs.
+    pub fn new(service: S) -> Self {
+        Self {
+            service,
+            request: Vec::new(),
+            reply: Vec::new(),
+            reply_at: 0,
+            finished: false,
+        }
+    }
+
+    /// Run the service over every complete frame the parent has written.
+    fn pump(&mut self) {
+        // Reclaim what the parent has already read before producing more,
+        // so a long-lived session holds only the frames still in flight
+        // rather than every frame it has ever emitted.
+        self.reply.drain(..self.reply_at);
+        self.reply_at = 0;
+        while !self.finished {
+            // An oversize declaration cannot come from the session's own
+            // sender, which bounds every payload first.
+            let Some(declared) = head_frame(&self.request).filter(|&len| len <= MAX_FRAME) else {
+                return;
+            };
+            let payload: Vec<u8> = self
+                .request
+                .drain(..FRAME_HEADER_LEN + declared)
+                .skip(FRAME_HEADER_LEN)
+                .collect();
+            let Self { service, reply, .. } = self;
+            let mut out = ReplyFrames { reply };
+            if service.handle(&payload, &mut out) == SessionStep::Finished {
+                self.finished = true;
+            }
+        }
+    }
+}
+
+impl<S: SessionService> SessionTransport for LoopbackSession<S> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        if self.reply_at == self.reply.len() {
+            return if self.finished {
+                Ok(0)
+            } else {
+                Err(Errno::WouldBlock)
+            };
+        }
+        let take = buf.len().min(self.reply.len() - self.reply_at);
+        buf[..take].copy_from_slice(&self.reply[self.reply_at..self.reply_at + take]);
+        self.reply_at += take;
+        Ok(take)
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
+        if self.finished {
+            return Err(Errno::BrokenPipe);
+        }
+        self.request.extend_from_slice(buf);
+        self.pump();
+        Ok(buf.len())
+    }
+
+    fn descriptors(&self) -> Option<SessionDescriptors> {
+        // An in-process worker occupies no descriptor, so a host test's
+        // owner has nothing to register and drives the seam directly.
+        None
+    }
+
+    fn dispose(self) -> Option<i32> {
+        None
+    }
+}
+
+/// The loopback's reply buffer as a write-only channel, so the fake frames
+/// through [`send_frame`] rather than re-encoding the header.
+struct ReplyFrames<'a> {
+    reply: &'a mut Vec<u8>,
+}
+
+impl Channel for ReplyFrames<'_> {
+    fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Errno> {
+        // Write-only: the worker never reads its own output back.
+        Ok(0)
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
+        self.reply.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+}
+
+impl FrameOut for ReplyFrames<'_> {
+    fn frame(&mut self, payload: &[u8]) -> Result<(), ProtoError> {
+        send_frame(self, payload)
     }
 }
 

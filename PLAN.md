@@ -9437,9 +9437,17 @@ host key is identical on every machine flashed from it.
   reassembly set bounded in segments but not bytes, and `bind` silently
   moving a bound socket's port. The one path still scanning the table is
   `accept` (`plans/OPEN-DEFECTS.md` D145).
-- `lib/sandbox` has only a one-shot request→reply worker; an SSH connection is
-  a duplex session either side may originate on. A `session` seam lands beside
-  `host`/`worker` (§27), reusable by any future long-lived protocol service.
+- `lib/sandbox` had only a one-shot request→reply worker; an SSH connection is
+  a duplex session either side may originate on. The `session` seam now sits
+  beside `host`/`worker` (S0c, done), reusable by any future long-lived
+  protocol service: the parent never blocks, both queues are bounded and
+  committed at admission, and a failed worker ends the session rather than
+  being replaced, because it held the connection's protocol state. It needed a
+  kernel prerequisite — `WaitSourceKind::StreamRoom`, the write-side twin of
+  `Stream` — because a parent holding queued bytes against a full pipe had no
+  wake to retry on and polling is forbidden. That is also what makes the seam
+  deadlock-free by construction: the worker may block on its pipe precisely
+  because the parent never does.
 - `lib/compress` has DEFLATE/zlib **decode** only, deliberately, because
   nothing produced such a stream. `zlib@openssh.com` does, so the encode
   direction lands and the module's "no compressor exists" documentation is

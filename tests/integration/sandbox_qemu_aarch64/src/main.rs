@@ -20,7 +20,11 @@
 //!   typed `WorkerFailed`, a logged `EVENT_WORKER_CRASHED`, and a caller
 //!   that goes on decoding through its healthy worker;
 //! * the syscall wall from the inside — a probe worker's `fs_open` and
-//!   `spawn` are refused inside the sandbox while its pipe reply crosses.
+//!   `spawn` are refused inside the sandbox while its pipe reply crosses;
+//! * the duplex session seam driven from a wait-set over both directions
+//!   of a sandboxed worker's pipe pair, pushing twice a pipe's worth of
+//!   frames at a worker that answers none of them — which completes only
+//!   if the `StreamRoom` wake fires.
 //!
 //! The chassis reaps the parent through the wait producer's non-blocking poll;
 //! PASS fires only on a parent exit of 0. Any misbehaviour surfaces as a

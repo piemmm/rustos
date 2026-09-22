@@ -37,6 +37,10 @@ pub enum ServeEnd {
     /// The parent closed the request stream on a frame boundary: the
     /// conversation is over and the worker exits cleanly.
     Finished,
+    /// The **service** closed the session (`crate::session::SessionStep`).
+    /// Only [`crate::session::serve_session`] produces this; a one-shot
+    /// [`Service`] cannot end its own loop, so [`serve`] never does.
+    Ended,
     /// The transport failed. The worker can only exit; the
     /// parent-side seam observes the dead stream and contains it.
     Failed(ProtoError),

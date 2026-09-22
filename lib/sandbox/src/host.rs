@@ -161,7 +161,7 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
 
     /// Log a failed launch (initial or replacement).
     fn log_unavailable(&self, errno: Errno) {
-        log_unavailable_to(&self.sink, errno);
+        log_unavailable(&self.sink, errno);
     }
 }
 
@@ -175,8 +175,15 @@ impl<L: Launcher, S: Sink> Drop for ParserSandbox<L, S> {
     }
 }
 
-/// Emit the [`EVENT_WORKER_UNAVAILABLE`] event to `sink`.
-fn log_unavailable_to<S: Sink>(sink: &S, errno: Errno) {
+/// Emit [`EVENT_WORKER_UNAVAILABLE`]: a sandboxed worker could not be
+/// started.
+///
+/// The one emitter of that id. [`ParserSandbox`] logs its own failed
+/// launches through it, and a session's owner logs its transport
+/// constructor's — a session has no launcher of its own
+/// ([`crate::session`]), so the discipline stays written once rather than
+/// copied into each consumer.
+pub fn log_unavailable<S: Sink>(sink: &S, errno: Errno) {
     tairix_log::log(
         sink,
         &Event {

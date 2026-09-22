@@ -383,6 +383,19 @@ impl PtyMasterEnd {
         let state = self.pty.state.lock();
         !state.output.is_empty() || state.slaves == 0
     }
+
+    /// Whether a master write would complete without parking *for want of
+    /// room*: the input ring is below capacity, or every slave end is closed
+    /// (the write observes broken-pipe). A non-consuming peek.
+    ///
+    /// A cooked-mode job-control byte is consumed without needing room at
+    /// all, so a terminal delivering `^C` writes it directly rather than
+    /// waiting on this member.
+    #[must_use]
+    pub fn writable(&self) -> bool {
+        let state = self.pty.state.lock();
+        state.slaves == 0 || state.input.len() < PIPE_CAPACITY
+    }
 }
 
 impl PtySlaveEnd {
@@ -496,6 +509,15 @@ impl PtySlaveEnd {
     pub fn readable(&self) -> bool {
         let state = self.pty.state.lock();
         !state.input.is_empty() || state.masters == 0
+    }
+
+    /// Whether a slave write would complete without parking *for want of
+    /// room*: the output ring is below capacity, or every master end is
+    /// closed (the write observes broken-pipe). A non-consuming peek.
+    #[must_use]
+    pub fn writable(&self) -> bool {
+        let state = self.pty.state.lock();
+        state.masters == 0 || state.output.len() < PIPE_CAPACITY
     }
 }
 
@@ -945,6 +967,48 @@ mod tests {
         assert!(!m.readable());
         drop(s);
         assert!(m.readable());
+    }
+
+    #[test]
+    fn writable_peeks_room_on_both_ends_and_reports_a_broken_stream() {
+        let (m, s) = pty();
+        m.pty().set_input_mode(InputMode::Raw);
+        // Both rings start empty, and the peeks append nothing.
+        assert!(m.writable());
+        assert!(m.writable());
+        assert!(s.writable());
+        // Fill the input ring: the master has no room, the slave's own
+        // output ring is untouched.
+        let chunk = vec![b'k'; PIPE_CAPACITY];
+        assert_eq!(wrote(m.write(&chunk, true)).0, PIPE_CAPACITY);
+        assert!(!m.writable());
+        assert!(s.writable());
+        // The slave's read frees input room again, and refilling it takes
+        // exactly what was drained.
+        let mut out = [0u8; 8];
+        assert_eq!(s.read(&mut out), PtyReadStep::Read(8));
+        assert!(m.writable());
+        assert_eq!(wrote(m.write(&chunk, true)).0, 8);
+        assert!(!m.writable());
+        // Fill the output ring: now the slave has no room either.
+        assert_eq!(s.write(&chunk), PtyWriteStep::Wrote(PIPE_CAPACITY));
+        assert!(!s.writable());
+        // Every slave end closed: the master is writable so a parked
+        // writer wakes and fails rather than waiting forever.
+        drop(s);
+        assert!(m.writable());
+        assert_eq!(m.write(b"x", true), MasterWriteStep::Broken);
+    }
+
+    #[test]
+    fn a_slave_whose_masters_are_gone_is_writable_so_its_writer_wakes() {
+        let (m, s) = pty();
+        let chunk = vec![b'o'; PIPE_CAPACITY];
+        assert_eq!(s.write(&chunk), PtyWriteStep::Wrote(PIPE_CAPACITY));
+        assert!(!s.writable());
+        drop(m);
+        assert!(s.writable());
+        assert_eq!(s.write(b"x"), PtyWriteStep::Broken);
     }
 
     #[test]

@@ -6,10 +6,13 @@ Every parser of untrusted input runs in a minimum-capability sandbox
 process (`docs/src/security/sandbox.md`). The kernel primitive — the
 `SPAWN_FLAG_SANDBOX` spawn mode with its empty capability record and closed
 syscall allow-list — makes such a process *exist*; this crate is the one
-user-space seam that makes it *usable*: a typed request/reply path from a
-calling program to a sandboxed worker, with crash containment, worker
-replacement, and stable log events. Every program that sandboxes a parse
-imports this seam; a second per-app copy is forbidden.
+user-space seam that makes it *usable*: typed paths from a calling program
+to a sandboxed worker, with crash containment and stable log events. Two
+shapes, because a parse and a protocol are different jobs — a one-shot
+request/reply path whose worker is replaced after a crash, and a duplex
+long-lived session whose worker is not, because it held the connection's
+state. Every program that sandboxes untrusted work imports this seam; a
+second per-app copy is forbidden.
 
 ## What it provides
 
@@ -27,6 +30,25 @@ imports this seam; a second per-app copy is forbidden.
   receives a typed `SandboxError`, the worker is disposed of and replaced,
   and the event is logged with a stable `EventId` (this crate owns the
   `6000..7000` range). A parser crash never takes down the calling program.
+- **The duplex session seam** (`session`): the long-lived counterpart to
+  the one-shot pair above, for a worker that serves a *protocol* rather
+  than answering a question. `SandboxSession` never blocks: the owner
+  drives it from its own wait-set over the two descriptors the transport
+  reports — `Stream` on the reply end, `StreamRoom` on the request end —
+  so many frames are in flight each way, one inbound frame may be answered
+  with none or several, and one session can never stall another. A failed
+  worker is disposed of and **not** replaced (`EventId(6002)`), because it
+  held the connection's protocol state and a fresh worker could not
+  continue it. Both queues are bounded by `SessionBounds` and committed at
+  admission, so the steady state allocates nothing and the cost of a
+  session is known before it is admitted; the send ceiling is derived from
+  the outbound bound, which is what makes `OutboundFull` provably
+  transient and `FrameTooLarge` permanent. Deadlock-freedom is structural:
+  the kernel's allow-list leaves the pipe as the worker's only wake
+  source, so `serve_session` may use the ordinary blocking `Channel` while
+  the parent's two readiness legs guarantee it is always woken — which is
+  why `WaitSourceKind::StreamRoom` exists. `plans/SSH.md` §1.1 is the
+  first consumer; the seam is protocol-agnostic.
 - **The decode service** (`decode`): the first consumers behind the seam —
   executable-container summaries through `tairix-binfmt` and per-window
   instruction disassembly through `tairix-disasm`, with a bounded,
@@ -128,7 +150,10 @@ imports this seam; a second per-app copy is forbidden.
   the parent launches **its own binary** in a worker role via
   `SpawnAttach::sandbox` with two pipes wired to the worker's fd 0/1, and
   the worker serves over its standard streams — exactly the surface the
-  kernel sandbox allow-list admits.
+  kernel sandbox allow-list admits. `RtSessionChannel` is the duplex
+  transport over that same spawn, through one shared
+  pipe-pair-and-attach path, and reports the two descriptor numbers its
+  owner registers on a wait-set.
 
 ## Security posture
 
@@ -139,8 +164,9 @@ imports this seam; a second per-app copy is forbidden.
   parent wired at spawn; the kernel enforces the rest
   (`docs/src/security/sandbox.md`).
 - Fuzzed: `fuzz_sandbox` (the decode, helpdoc, and imagerender service
-  request decoders — icon and wallpaper alike — and the caller-side reply
-  decoders/validators) is enrolled in `cargo xtask fuzz`.
+  request decoders — icon and wallpaper alike — the caller-side reply
+  decoders/validators, and the session seam's inbound codec over a hostile
+  worker's byte stream) is enrolled in `cargo xtask fuzz`.
 
 ## Design
 
