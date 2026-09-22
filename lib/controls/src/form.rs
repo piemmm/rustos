@@ -42,9 +42,9 @@ use crate::combo::{ComboAction, ComboBox};
 use crate::damage;
 use crate::metric::StatusPill;
 use crate::paint::{
-    centred_text_y, foreground, grab_after, inset, paint_row, paint_run, paint_surface_plate,
-    plate_border, role_font, route_pointer, row_content_span, run_width, surface_rect,
-    text_plate_height, to_i32, ChromeLayer,
+    centred_text_y, foreground, grab_after, inset, line_budget, paint_row, paint_run,
+    paint_surface_plate, plate_border, role_font, route_pointer, row_content_span, surface_rect,
+    text_plate_height, to_i32, ChromeLayer, TextBlock,
 };
 use crate::selector::{SelectorAction, Toggle};
 use crate::state::{ControlState, PointerState, RenderInvariant, SelectionState};
@@ -171,6 +171,22 @@ impl FieldLayout {
     }
 }
 
+/// Test-only: the span a row laid out for `layout` gives its own words,
+/// which must be the span its group measured the row's height against.
+#[cfg(test)]
+pub(crate) fn debug_row_text_span(layout: FieldLayout, scale: Scale, theme: &Theme) -> u32 {
+    FieldRow::text_span(layout, scale, theme).map_or(0, |(_, span)| span)
+}
+
+/// The most lines a row's description takes. A setting's elaboration is a
+/// sentence about that setting; past three lines it belongs in the group's
+/// footnote or the app's help.
+const MAX_DESCRIPTION_LINES: usize = 3;
+
+/// The most lines a group's footnote takes — the consequence of the settings
+/// above it, not a document.
+const MAX_FOOTNOTE_LINES: usize = 3;
+
 /// The widest a slot may be within a row content span of `content`: half.
 ///
 /// A label the reader cannot read names a setting they cannot find, so it
@@ -180,6 +196,17 @@ impl FieldLayout {
 #[must_use]
 const fn slot_ceiling(content: u32) -> u32 {
     content / 2
+}
+
+/// What is left of a row `content` span once its slot `column` and the `gap`
+/// before it are served: the span the row's own words are laid out across.
+///
+/// One definition, read by the row that paints its label and description and
+/// by the group that measures the heights they need, so the column a row
+/// wraps into and the height reserved for it come from the same arithmetic.
+#[must_use]
+fn words_span(content: u32, column: u32, gap: u32) -> u32 {
+    content.saturating_sub(column.min(slot_ceiling(content)).saturating_add(gap))
 }
 
 /// A [`FieldRow`]'s one child: the control in its slot. The row routes a
@@ -459,21 +486,48 @@ impl FieldRow {
         )
     }
 
-    /// The height this row needs at `scale`: one standard control band, plus
-    /// one caption line when it carries a description.
+    /// The height this row needs at `scale` when its own text is laid out
+    /// across `span` pixels: one standard control band, plus its wrapped
+    /// description where it draws one.
     ///
     /// One definition shared by [`FieldGroup`]'s layout and by
     /// [`render`](Self::render), so a group stacking rows cannot disagree with
-    /// what a row actually draws.
+    /// what a row actually draws. The span is part of the question because a
+    /// description is prose: it wraps, so a narrow column needs a taller row
+    /// — and a row that reserved one line for it would cut the sentence off
+    /// at the column's edge.
+    ///
+    /// A row whose *label* does not fit the span whole draws no description
+    /// at all, and so measures the band alone: once the setting's own name
+    /// has had to be cut, an elaboration beneath it is noise.
     #[must_use]
-    pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
+    pub fn measured_height(&self, span: u32, scale: Scale, theme: &Theme) -> u32 {
         let band = text_plate_height(theme, scale, TextRole::Body);
-        match self.description {
-            Some(_) => {
-                band.saturating_add(role_font(theme, scale, TextRole::Caption).line_height())
-            }
+        match self.described(span, scale, theme) {
+            Some((description, block)) => band.saturating_add(block.height(description)),
             None => band,
         }
+    }
+
+    /// The description this row draws across `span`, and the block it is laid
+    /// out in — or [`None`] when it has none, or when the label itself had to
+    /// be cut to fit.
+    fn described(&self, span: u32, scale: Scale, theme: &Theme) -> Option<(&str, TextBlock)> {
+        let description = self.description.as_deref()?;
+        let label = role_font(theme, scale, TextRole::Body);
+        if label.text_width(&self.label) > span {
+            return None;
+        }
+        let font = role_font(theme, scale, TextRole::Caption);
+        Some((
+            description,
+            TextBlock::prose(
+                font,
+                span,
+                MAX_DESCRIPTION_LINES,
+                Color::from(theme.palette().on_surface_muted),
+            ),
+        ))
     }
 
     /// The width this row's slot wants, or [`None`] when its control takes
@@ -528,8 +582,7 @@ impl FieldRow {
         let (x, _, w, h) = surface_rect(layout.bounds)?;
         let (cx, cw) = row_content_span(scale, theme, x, w, h)?;
         let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-        let taken = layout.column.min(slot_ceiling(cw)).saturating_add(gap);
-        let span = cw.checked_sub(taken)?;
+        let span = words_span(cw, layout.column, gap);
         (span > 0).then_some((cx, span))
     }
 
@@ -554,7 +607,6 @@ impl FieldRow {
         };
         let fg = foreground(theme, self.state.disposition());
         if let Some((tx, tw)) = Self::text_span(layout, scale, theme) {
-            let palette = theme.palette();
             let label_font = role_font(theme, scale, TextRole::Body);
             let band = text_plate_height(theme, scale, TextRole::Body).min(ch);
 
@@ -568,23 +620,11 @@ impl FieldRow {
                 None,
             );
 
-            if let Some(description) = &self.description {
-                let font = role_font(theme, scale, TextRole::Caption);
+            if let Some((description, mut block)) = self.described(tw, scale, theme) {
                 let top = cy.saturating_add(band);
-                let run = font.elide_to_width(description, tw);
-                if !elided
-                    && top.saturating_add(font.line_height()) <= cy.saturating_add(ch)
-                    && run_width(font, run) > 0
-                {
-                    paint_run(
-                        surface,
-                        font,
-                        run,
-                        (to_i32(tx), to_i32(top)),
-                        Color::from(palette.on_surface_muted),
-                        None,
-                    );
-                }
+                let room = cy.saturating_add(ch).saturating_sub(top);
+                block.lines = block.lines.min(line_budget(block.font, room));
+                block.paint(surface, description, (tx, top));
             }
         }
 
@@ -878,17 +918,23 @@ impl FieldGroup {
     /// rows can actually seat.
     #[must_use]
     pub fn slot_column(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
-        let Some((x, _, w, h)) = surface_rect(bounds) else {
+        let Some((_, _, w, h)) = surface_rect(bounds) else {
             return 0;
         };
-        let border = plate_border(theme, scale);
-        let inner_x = x.saturating_add(border);
-        let inner_w = w.saturating_sub(border.saturating_mul(2));
-        let band = text_plate_height(theme, scale, TextRole::Body);
-        if inner_w == 0 || h < band {
+        if h < text_plate_height(theme, scale, TextRole::Body) {
             return 0;
         }
-        let Some((_, cw)) = row_content_span(scale, theme, inner_x, inner_w, band) else {
+        self.column_for(w, scale, theme)
+    }
+
+    /// [`slot_column`](Self::slot_column) for a plate `width` pixels wide,
+    /// which is all the column actually depends on.
+    ///
+    /// The span is measured against the *band* a row's control sits in rather
+    /// than the row's own height, so resolving the column cannot depend on the
+    /// heights the column itself decides.
+    fn column_for(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let Some(cw) = Self::content_span(width, scale, theme) else {
             return 0;
         };
         let ceiling = slot_ceiling(cw);
@@ -902,15 +948,48 @@ impl FieldGroup {
         widest.min(ceiling)
     }
 
-    /// The height this group needs at `scale` to draw its caption, every row,
-    /// and its footnote.
+    /// The content span a row of a plate `width` pixels wide is laid out
+    /// across, or [`None`] when the plate is too narrow to hold one.
+    fn content_span(width: u32, scale: Scale, theme: &Theme) -> Option<u32> {
+        let border = plate_border(theme, scale);
+        let inner_w = width.saturating_sub(border.saturating_mul(2));
+        if inner_w == 0 {
+            return None;
+        }
+        let band = text_plate_height(theme, scale, TextRole::Body);
+        row_content_span(scale, theme, border, inner_w, band).map(|(_, cw)| cw)
+    }
+
+    /// The span a row's own text is laid out across in a plate `width` pixels
+    /// wide: the content span less the shared slot column and one gap.
+    ///
+    /// This is what a row's description wraps into, so it is what
+    /// [`FieldRow::measured_height`] is asked about. An owner that stacks
+    /// rows itself reads it from the group rather than re-deriving the
+    /// column's arithmetic.
     #[must_use]
-    pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
+    pub fn row_text_span(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let Some(cw) = Self::content_span(width, scale, theme) else {
+            return 0;
+        };
+        let (_, gap) = Self::insets(scale, theme);
+        words_span(cw, self.column_for(width, scale, theme), gap)
+    }
+
+    /// The height this group needs at `scale` to draw its caption, every row,
+    /// and its footnote, in a plate `width` pixels wide.
+    ///
+    /// The width is part of the question because a row's description and the
+    /// group's footnote are prose: they wrap, so how tall a group has to be
+    /// depends on how wide it is given.
+    #[must_use]
+    pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
         let (pad, gap) = Self::insets(scale, theme);
+        let span = self.row_text_span(width, scale, theme);
         let rows = self
             .rows
             .iter()
-            .map(|row| row.measured_height(scale, theme))
+            .map(|row| row.measured_height(span, scale, theme))
             .fold(0u32, u32::saturating_add);
         plate_border(theme, scale)
             .saturating_mul(2)
@@ -918,7 +997,7 @@ impl FieldGroup {
             .saturating_add(self.caption_height(scale, theme))
             .saturating_add(gap)
             .saturating_add(rows)
-            .saturating_add(self.footnote_height(scale, theme))
+            .saturating_add(self.footnote_height(width, scale, theme))
     }
 
     /// The plate's content inset and the gap between its bands, in surface
@@ -950,12 +1029,30 @@ impl FieldGroup {
     }
 
     /// The height this group's footnote band occupies below its rows — the gap
-    /// that separates it plus its own line — or nothing when it has none.
-    fn footnote_height(&self, scale: Scale, theme: &Theme) -> u32 {
+    /// that separates it plus its own wrapped lines — or nothing when it has
+    /// none.
+    fn footnote_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
         let (_, gap) = Self::insets(scale, theme);
-        self.footnote.as_ref().map_or(0, |_| {
-            gap.saturating_add(role_font(theme, scale, TextRole::Caption).line_height())
-        })
+        let Some(footnote) = &self.footnote else {
+            return 0;
+        };
+        gap.saturating_add(Self::footnote_block(width, scale, theme).height(footnote))
+    }
+
+    /// The block the footnote is laid out in: caption-weight prose across the
+    /// same column a row's label begins at.
+    ///
+    /// A footnote is where a setting needs a sentence of consequence, so it
+    /// wraps — a consequence cut off at the plate's edge is one the reader
+    /// has to guess at.
+    fn footnote_block(width: u32, scale: Scale, theme: &Theme) -> TextBlock {
+        let font = role_font(theme, scale, TextRole::Caption);
+        TextBlock::prose(
+            font,
+            Self::content_span(width, scale, theme).unwrap_or(0),
+            MAX_FOOTNOTE_LINES,
+            Color::from(theme.palette().on_surface_muted),
+        )
     }
 
     /// The `(top, bottom)` the group's rows may occupy within `inner`: below
@@ -964,7 +1061,7 @@ impl FieldGroup {
     /// One definition for the layout and the paint, so the band a row is seated
     /// in and the band the footnote is drawn under cannot drift apart.
     fn rows_span(&self, inner: (u32, u32, u32, u32), scale: Scale, theme: &Theme) -> (u32, u32) {
-        let (_, iy, _, ih) = inner;
+        let (_, iy, iw, ih) = inner;
         let (pad, gap) = Self::insets(scale, theme);
         let top = iy
             .saturating_add(pad)
@@ -973,7 +1070,7 @@ impl FieldGroup {
         let bottom = iy
             .saturating_add(ih)
             .saturating_sub(pad)
-            .saturating_sub(self.footnote_height(scale, theme));
+            .saturating_sub(self.footnote_height(iw, scale, theme));
         (top, bottom)
     }
 
@@ -990,9 +1087,10 @@ impl FieldGroup {
         };
         let (inner_x, _, inner_w, _) = inner;
         let (mut top, bottom) = self.rows_span(inner, scale, theme);
+        let span = self.row_text_span(bounds.width, scale, theme);
         let mut rects = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
-            let row_h = row.measured_height(scale, theme);
+            let row_h = row.measured_height(span, scale, theme);
             if top.saturating_add(row_h) > bottom {
                 break;
             }
@@ -1167,20 +1265,13 @@ impl FieldGroup {
                 .0
                 .saturating_add(drawn)
                 .saturating_add(gap);
-            if top.saturating_add(font.line_height()) <= y.saturating_add(h) {
-                if let Some((text_x, text_w)) =
-                    row_content_span(scale, theme, inner_x, inner_w, font.line_height())
-                {
-                    let run = font.elide_to_width(footnote, text_w);
-                    paint_run(
-                        surface,
-                        font,
-                        run,
-                        (to_i32(text_x), to_i32(top)),
-                        Color::from(theme.palette().on_surface_muted),
-                        None,
-                    );
-                }
+            let room = y.saturating_add(h).saturating_sub(top);
+            if let Some((text_x, _)) =
+                row_content_span(scale, theme, inner_x, inner_w, font.line_height())
+            {
+                let mut block = Self::footnote_block(layout.bounds.width, scale, theme);
+                block.lines = block.lines.min(line_budget(font, room));
+                block.paint(surface, footnote, (text_x, top));
             }
         }
     }

@@ -20,7 +20,10 @@ a megapixel of blur to move one highlight. So the model reports the icon cells
 a gesture actually changed and the session repaints only those
 (`DesktopShell::present_desktop_area`); the whole layer is repainted only when
 the whole layer changed — bring-up, a new wallpaper, a theme switch, adopted
-settings, or a re-list that moved the icons. See
+settings, or a re-list that moved the icons. Icon artwork arriving from the
+decode desk is not one of those: a landed decode can only change the picture
+inside a tile, so `Desktop::mark_icons` reports the shown cells and a column
+with nothing in it costs no frame at all. See
 [the session's desktop layer](./session.md#the-desktop-layer-wallpaper-or-backdrop-then-icons).
 
 ## The pieces

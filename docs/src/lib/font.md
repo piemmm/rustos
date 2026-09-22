@@ -219,29 +219,61 @@ caller advancing a run cannot get a different layout with the shadow on, and
 both passes run under one client borrow — the ink pass reuses the glyphs the
 shadow pass just cached.
 
-## Fitting a label to its box
+## Fitting text to its box
 
-Two shared fitters sit on top of that measurement, so no text region writes
+Three shared fitters sit on top of that measurement, so no text region writes
 its own break loop. `elide_to_width` gives the longest prefix that fits *once
 room for the ellipsis mark is reserved*, plus whether the mark is needed; a
 box too narrow for even the mark draws nothing at all, since a mark that
-spills out of the box it exists to enforce is worse than an empty box.
-`wrap_to_width` lays a label over at most *n* lines: it breaks at whitespace
-so a word starts the next line rather than being split, breaks a word too
-long for the box mid-word on a `char` boundary (a run that cannot break must
-still advance), draws no leading or trailing whitespace, and elides only the
-last line, through `elide_to_width`. The mark itself has one definition,
-`tairix_font::ELLIPSIS`, so what is measured and what is drawn cannot
-disagree.
+spills out of the box it exists to enforce is worse than an empty box. The
+mark itself has one definition, `tairix_font::ELLIPSIS`, so what is measured
+and what is drawn cannot disagree.
 
-Wrapping is a **lazy iterator** of `TextLine { text, elided }` borrowing the
-label, never a `Vec`: a caller counts a clone of it to size the block
-vertically, then walks the original to draw, and a label re-laid out on every
-repaint costs no heap traffic. It centres a line by measuring
-`text_width(line.text)` plus, when the line is `elided`, `text_width(ELLIPSIS)`,
-and draws the mark at the pen `draw_text` returns. This is what an account
-tile on the graphical login screen lays a display name out with, instead of
-cutting `System Administrator` mid-word.
+`wrap_to_width` lays text over at most *n* lines **to draw**: it breaks at
+whitespace so a word starts the next line rather than being split, breaks a
+word too long for the box mid-word on a `char` boundary (a run that cannot
+break must still advance), treats a newline as a **forced** break so a
+paragraph ends where its author ended it and a blank line between two of them
+is drawn as a blank line, trims every line so no whitespace a break consumed
+is drawn, and elides only the last. A box too narrow for one glyph draws none
+of the text rather than a column of overflowing glyphs.
+
+`lines_to_width` is the same break rules laid out **to edit**, and it is what
+a multi-line entry ([`TextArea`](./controls.md#the-multi-line-text-box)) is
+built on. Nothing is trimmed, nothing is elided and no line is suppressed:
+the lines **tile** the text, so every byte belongs to exactly one line and a
+caret maps to a line and back. A line therefore runs from its first byte to
+the first byte of the next — the whitespace a soft break consumed and the
+newline a hard break consumed included — and an empty text is one empty line
+rather than none, because the caret still has a home. A box too narrow for a
+character takes one anyway: dropping it would drop the rest of the buffer
+with it, so the line overflows and the caller clips.
+
+Both are **lazy iterators** of `TextLine { text, start, elided }` borrowing
+the text, never a `Vec`: a caller counts a clone of one to size the block
+vertically, then walks the original to draw, and text re-laid out on every
+repaint costs no heap traffic. Drawing a viewport's worth of a long buffer
+therefore costs the lines up to the last one drawn, not the whole text.
+`start` locates a line in the text the caller handed over — not in a trimmed
+copy of it — so `&text[line.range()]` is the line. A caller centres a line by
+measuring `text_width(line.text)` plus, when the line is `elided`,
+`text_width(ELLIPSIS)`, and draws the mark at the pen `draw_text` returns.
+This is what an account tile on the graphical login screen lays a display
+name out with, instead of cutting `System Administrator` mid-word.
+
+### One measurement per wrap, not one per line
+
+A wrap is **linear in the text**. The obvious implementation — fit the width,
+then re-fit the remaining tail, then its tail — measures a fresh string per
+line, which for a proportional face is a per-character walk each time: a
+paragraph costs O(lines x text) and leaves one memo entry per line behind it.
+Instead the whole text is measured **once** and each line's break is a binary
+search over that one array of cumulative advances (`chars_within_from`, which
+subtracts the pen at the line's start — a constant over the line, so the
+differences stay monotonic and the search stays valid). The layout carries
+both coordinates a break needs, the byte offset that slices the text and the
+`char` index that indexes its measurement, because deriving either from the
+other costs a walk from the start.
 
 A family's line metrics — box height, baseline, line height, and the single
 advance a monospace family lays a grid out with — come from the service once

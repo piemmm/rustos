@@ -228,12 +228,13 @@ the two samples. This is the regression gate every later stage tightens.
   about first; the per-control damage under test is the same sink either way.
 - **Bounds, all derived from the screen extent** so they hold on any board:
   frames ≥ `MIN_SWEEP_FRAMES` (an empty difference must not pass by measuring
-  nothing), mean damage per frame ≤ `screen/8`, blends ≤ 4 per damaged pixel,
-  frost work ≤ one recomputed pixel per damaged pixel, no re-rendered
-  furniture, and presents ≤ rectangles + frames.
-- **Measured** (32-move sweep, `virt` board at 1024×768): delta frames 33,
-  damaged 1 248 257 px (mean 37 826 against a bound of 98 304), blended
-  1 384 927, blur 134 352, dirty rects 50, presents 33, chrome misses 0.
+  nothing), total damage ≤ `MAX_SWEEP_SCREENS` screens, blends ≤ 4 per damaged
+  pixel, frost work ≤ one recomputed pixel per damaged pixel, no re-rendered
+  furniture, and presents ≤ rectangles + frames. None divides by the frame
+  count, so none is met or missed by how many frames the host let through.
+- **Measured** (32-move sweep, `virt` board at 1024×768, five runs): delta
+  frames 37–40, damaged 520 713 – 788 713 px — 0.66 to 1.00 of a screen
+  against a bound of three.
 - **`PointerPen::hover`** emits the run of motion samples; the enrolled-script
   invariant test covers the new script unchanged, because it still ends on the
   click its guest exits on.
@@ -674,36 +675,37 @@ frame of the gesture recomposes a whole bar's worth of pixels and that the mean
 stays under an eighth of one. It fails on the tree before this change with
 `sample 0 recomposed 91840 px, a whole bar being 91680`.
 
-**A.4's guest bracket, same board, `virt` at 1024 × 768** (bar 40 560 px),
-before and after, both `held`:
+**A.4's guest bracket, same board, `virt` at 1024 × 768** (bar 48 672 px),
+measured over five runs of the settled gesture: delta frames 37–40, damaged
+520 713 – 788 713 px, blur 127 154, dirty rects 56–60, chrome misses 0. A
+sweep sample costs 1 798 px — the same figure the host sweep below measures,
+which is what says the guest and the host now agree about what a hover costs.
 
-| | before | after |
-|---|---|---|
-| delta frames | 34 | 33 |
-| damaged px | 1 386 975 | 1 248 257 |
-| mean px/frame | 40 793 | 37 826 |
-| blended px | 1 523 937 | 1 384 927 |
-| blur px | 134 352 | 134 352 |
-| dirty rects | 47 | 50 |
-| present calls | 34 | 33 |
-| chrome misses | 0 | 0 |
+**A.4's bound is a ceiling on the window's *total* damage, three screens, and
+never a per-frame mean.** The bracket is not a hover measurement: the two
+launches that bracket the sweep each open a launcher popup, click a row and
+close it, and that churn is most of what the window recomposes. Averaged over
+a frame count the host chooses, that fixed churn read as a small mean on a
+machine that composed many frames and a large one on a machine that coalesced
+them — the same load dependence the frost bound was reshaped away from. A
+total has no denominator: holding frames only coalesces damage, so a loaded
+host measures less, never more. Tightening the ceiling onto the honest 0.66–1.00
+would gate the launch path with the hover's cost lost inside it, so the
+per-control claim is gated where it is deterministic, host-side, and A.4 keeps
+its job of catching a gesture that starts repainting a window or the screen.
 
-**A.4's damage bound therefore stays at `screen/8`, and the earlier prediction
-that it would fall to about `screen/64` was wrong about what that bound
-measures.** The bracket is not a hover measurement: the two launches that
-bracket the sweep each open a launcher popup, click a row and close it, and
-that churn is most of the 1.25 M px the window recomposes. The gesture's own
-saving is the whole of the 138 718 px difference between the two columns —
-consistent with the host figure scaled by the smaller bar — but it moves the
-*mean* by 7%, because the churn it is averaged against did not change (the
-identical `blur_px` is the same fact from the other side: the frosts recomputed
-are the popups' own, one per showing, and never the bar's). Tightening the
-divisor onto 37 826 would gate the launch path with the hover's cost lost
-inside it, and would be load-dependent besides — the churn is fixed and the
-frame count is not — which is the defect the frost bound was reshaped to avoid.
-So the per-control claim is gated where it is deterministic, host-side, and
-A.4 keeps its job of catching a gesture that starts repainting a window or the
-screen.
+**What eroded it.** The embedder fires the library popup's one-shot "seen"
+witness after every published frame, and fired it through `Taskbar::library_mut`
+— a borrow that latches the whole bar and the whole popup, because the bar
+cannot see into a borrow. So every frame dirtied a full-width strip, the next
+frame recomposed it, published, and dirtied it again: a desktop that never
+settled, spending 48 672 px a frame for as long as the session was up, and
+turning a 1 798-px hover sample into 48 982. `Taskbar::report_library_shown` is
+the witness's own non-latching route, mirroring `library_routing_mut`. Landing
+with it: arriving icon artwork repainted the desktop layer **whole**, a screen
+per delivered batch, where a decode can only change the picture inside a tile —
+`Desktop::mark_icons` scopes it to the cells, and an empty column costs no frame
+at all.
 
 #### Tests
 

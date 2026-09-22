@@ -297,7 +297,7 @@ fn a_column_too_short_for_every_card_still_seats_one_and_scrolls_by_whole_cards(
     assert_eq!(readings.seated(short, Scale::ONE, &theme), 1);
     // And the height every card needs together is more than a short column,
     // which is what raises the scrollbar beside it.
-    assert!(readings.measured_height(Scale::ONE, &theme) > short.height);
+    assert!(readings.measured_height(short.width, Scale::ONE, &theme) > short.height);
 }
 
 #[test]

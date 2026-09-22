@@ -17,8 +17,8 @@ use tairix_controls::{
     BandCorner, Button, Card, Checkbox, ComboBox, Dialog, FieldAction, FieldControl, FieldGroup,
     FieldGroupAction, FieldLayout, HelpTip, IconButton, ListRow, Menu, Panel, Progress, Radio,
     ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider, SliderAction,
-    SplitButton, TableRow, Tabs, TabsAction, TextField, Toggle, Toolbar, ToolbarOutcome, Tooltip,
-    WindowControl,
+    SplitButton, TableRow, Tabs, TabsAction, TextArea, TextField, Toggle, Toolbar, ToolbarOutcome,
+    Tooltip, WindowControl,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::NoArtwork;
@@ -63,6 +63,7 @@ pub enum DemoWidget {
     Slider(Slider),
     Progress(Progress),
     TextField(TextField),
+    TextArea(TextArea),
     SearchField(SearchField),
     ComboBox(ComboBox),
     Menu(Menu),
@@ -164,6 +165,7 @@ impl DemoWidget {
             DemoWidget::Radio(w) => w.set_focused(focused),
             DemoWidget::Slider(w) => w.set_focused(focused),
             DemoWidget::TextField(w) => w.set_focused(focused),
+            DemoWidget::TextArea(w) => w.set_focused(focused),
             DemoWidget::SearchField(w) => w.set_focused(focused),
             DemoWidget::ComboBox(w) => w.set_focused(focused),
             DemoWidget::ListRow(w) => w.set_focused(focused),
@@ -208,6 +210,7 @@ impl DemoWidget {
             DemoWidget::Slider(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Progress(w) => w.render(surface, rect, scale, theme),
             DemoWidget::TextField(w) => w.render(surface, rect, scale, theme),
+            DemoWidget::TextArea(w) => w.render(surface, rect, scale, theme),
             DemoWidget::SearchField(w) => w.render(surface, rect, scale, theme),
             DemoWidget::ComboBox(w) => {
                 w.render(surface, rect, scale, theme);
@@ -280,6 +283,7 @@ impl DemoWidget {
             },
             DemoWidget::Progress(_) | DemoWidget::Tooltip(_) => false,
             DemoWidget::TextField(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
+            DemoWidget::TextArea(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::SearchField(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::ComboBox(w) => {
                 let popup = w.popup_rect(rect, viewport, scale, theme);
@@ -388,6 +392,9 @@ impl DemoWidget {
             },
             DemoWidget::Progress(_) | DemoWidget::Tooltip(_) => false,
             DemoWidget::TextField(w) => w.on_key(key, modifiers, rect, damage).is_some(),
+            DemoWidget::TextArea(w) => w
+                .on_key(key, modifiers, rect, scale, theme, damage)
+                .is_some(),
             DemoWidget::SearchField(w) => w.on_key(key, modifiers, rect, damage).is_some(),
             DemoWidget::ComboBox(w) => {
                 let popup = w.popup_rect(rect, viewport, scale, theme);

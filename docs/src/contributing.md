@@ -189,6 +189,25 @@ A test that depends on start order is a defect, not a configuration: fix the
 test so it owns what it reads, exercise the whole lifecycle in one test, or
 sequence the dependency explicitly — never by hoping for an order.
 
+## A test owns the ids it keys process-global state on
+
+Shuffling finds an order dependence; it cannot find a *parallel* one. Several
+registries the reclaim path scrubs are process-global and keyed on a task id —
+the call-endpoint registry by endpoint owner and by call poster, the wait-set
+table, the shared-region table — and `exit` reaches all of them, from tests
+that hold no registry guard and need none. A test that hand-picks an id a
+sibling reclaims therefore loses its own in-flight state mid-assert, at an
+interleaving far too rare for a re-run to reproduce
+(`plans/OPEN-DEFECTS.md` D147).
+
+A `kernel/core` test therefore draws every id it keys such state on from its
+own claim: `test_boot::claim_task` for the first principal and
+`test_boot::claim_peer_task` for each further one. The claim issues a block of
+ids from a range reserved far above every hand-written one, so the collision is
+unrepresentable rather than a note each new test has to remember — and the
+`registry_guard` helpers, which serialise a registry's *residents*, do not and
+cannot cover it.
+
 ## `clippy` lints every target, not just the host
 
 A host-only `cargo clippy --workspace --all-targets` lints almost none of the

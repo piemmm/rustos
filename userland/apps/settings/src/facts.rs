@@ -123,13 +123,17 @@ impl Facts {
         self.first = index.min(self.len().saturating_sub(1));
     }
 
-    /// The height the column needs.
-    pub(crate) fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
+    /// The height the column needs in a `width`-pixel column.
+    ///
+    /// The width is part of the question because a row's description wraps:
+    /// a narrower column needs a taller plate.
+    pub(crate) fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
         let gap = stack::gap(scale, theme);
+        let plate = stack::plate_width(width, scale, theme);
         self.groups
             .iter()
             .fold(gap.saturating_mul(2), |total, group| {
-                total.saturating_add(group.measured_height(scale, theme))
+                total.saturating_add(group.measured_height(plate, scale, theme))
             })
     }
 
@@ -140,10 +144,11 @@ impl Facts {
 
     /// Where each drawn plate sits.
     fn placed(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<(usize, Rect)> {
+        let plate = stack::plate_width(bounds.width, scale, theme);
         stack::place(bounds, self.first, self.len(), scale, theme, |index| {
             self.groups
                 .get(index)
-                .map_or(0, |group| group.measured_height(scale, theme))
+                .map_or(0, |group| group.measured_height(plate, scale, theme))
         })
     }
 

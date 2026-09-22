@@ -35,10 +35,12 @@ use tairix_util::secret::wipe;
 
 use crate::damage;
 use crate::paint::{
-    ground_fill, paint_bead, paint_filled_circle, paint_plate, plate_border, resolve_bead,
-    resolve_frame, role_font, surface_rect, text_plate_height, to_i32, withheld, ChromeLayer,
-    PlateStyle,
+    ground_fill, line_budget, paint_bead, paint_filled_circle, paint_plate, plate_border,
+    resolve_bead, resolve_frame, role_font, surface_rect, text_plate_height, to_i32, withheld,
+    ChromeLayer, PlateStyle, TextBlock,
 };
+use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
+use crate::scrollbar::{ScrollAction, ScrollBar};
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, ValidationState,
 };
@@ -496,9 +498,9 @@ fn field_geom(
     let message = {
         let below = h.saturating_sub(row_h);
         let glyph_h = font.glyph_height();
-        if below >= glyph_h.saturating_add(pad) {
+        let mw = w.saturating_sub(edge.saturating_mul(2));
+        if below >= glyph_h.saturating_add(pad) && mw > 0 {
             let my = y + row_h + pad;
-            let mw = w.saturating_sub(edge.saturating_mul(2));
             Some((x + edge, my, mw, below.saturating_sub(pad)))
         } else {
             None
@@ -513,41 +515,24 @@ fn field_geom(
     })
 }
 
-/// The pixel x of the `char` boundary at byte `idx` within `text`.
-fn caret_px(font: BitmapFont, text: &str, idx: usize) -> u32 {
-    font.text_width(&text[..idx.min(text.len())])
-}
-
 /// The horizontal text scroll (pixels hidden at the left) that keeps the caret
 /// visible: zero until the caret would pass the right edge, then just enough to
 /// pin the caret to that edge. Deterministic from the caret alone, so `render`
 /// needs no stored scroll state.
 fn text_scroll(font: BitmapFont, text: &str, caret: usize, avail_w: u32) -> u32 {
-    caret_px(font, text, caret).saturating_sub(avail_w)
+    font.width_to_offset(text, caret).saturating_sub(avail_w)
 }
 
 /// The byte index whose `char` boundary is nearest text-space x `rel` (pixels
 /// from the text start, i.e. pointer-x minus the text origin plus the scroll).
 fn byte_from_x(font: BitmapFont, text: &str, rel: i32) -> usize {
-    let rel = u32::try_from(rel.max(0)).unwrap_or(u32::MAX);
-    let mut best_byte = 0;
-    let mut best_dist = rel;
-    let mut end = 0;
-    for ch in text.chars() {
-        end += ch.len_utf8();
-        let dist = caret_px(font, text, end).abs_diff(rel);
-        if dist <= best_dist {
-            best_dist = dist;
-            best_byte = end;
-        }
-    }
-    best_byte
+    font.offset_at_width(text, u32::try_from(rel.max(0)).unwrap_or(u32::MAX))
 }
 
 // --- Secret-mode bead geometry ----------------------------------------------
 //
 // A masked field never lays a character's glyph, so it cannot measure a run
-// by glyph width the way `caret_px`/`text_scroll`/`byte_from_x` do above.
+// by glyph width the way `text_scroll`/`byte_from_x` do above.
 // Instead every `char` occupies one fixed-width cell, sized from the active
 // theme and scale rather than the font, and every position below is counted
 // in *cells* until it is finally converted to a pixel offset.
@@ -798,8 +783,8 @@ impl FieldCore {
             let scroll = text_scroll(font, text, self.editor.caret, avail_w);
             let base_x = -to_i32(scroll);
             if let Some((a, b)) = self.editor.selection() {
-                let sa = to_i32(caret_px(font, text, a)) + base_x;
-                let sb = to_i32(caret_px(font, text, b)) + base_x;
+                let sa = to_i32(font.width_to_offset(text, a)) + base_x;
+                let sb = to_i32(font.width_to_offset(text, b)) + base_x;
                 let clamped_a = sa.clamp(0, to_i32(avail_w));
                 let clamped_b = sb.clamp(0, to_i32(avail_w));
                 let sel_w = u32::try_from(clamped_b - clamped_a).unwrap_or(0);
@@ -828,7 +813,7 @@ impl FieldCore {
 
         if !self.editor.secret && self.show_caret() && self.editor.selection().is_none() {
             let scroll = text_scroll(font, text, self.editor.caret, avail_w);
-            let cx = to_i32(caret_px(font, text, self.editor.caret)) - to_i32(scroll);
+            let cx = to_i32(font.width_to_offset(text, self.editor.caret)) - to_i32(scroll);
             let caret_w = scale.scale_length(1).max(1);
             let cx = cx.clamp(0, to_i32(avail_w.saturating_sub(caret_w)));
             layer.fill_rect(
@@ -922,6 +907,11 @@ impl FieldCore {
 
     /// Paint the inline validation/help message below the field, coloured by
     /// the validation state (danger/warning), else a quiet hint.
+    ///
+    /// A message is prose — it says what is wrong and often what to do about
+    /// it — so it wraps across the field's own width over as many lines as
+    /// the band below the field holds, rather than being cut at the edge
+    /// halfway through the instruction.
     fn paint_message(
         &self,
         surface: &mut Surface,
@@ -932,20 +922,33 @@ impl FieldCore {
         let Some(message) = &self.message else {
             return;
         };
-        let Some((mx, my, mw, _)) = geom.message else {
+        let Some((mx, my, mw, mh)) = geom.message else {
             return;
         };
-        if mw == 0 {
-            return;
-        }
+        self.message_block(font, mw, line_budget(font, mh), theme)
+            .paint(surface, message, (mx, my));
+    }
+
+    /// The block an inline message is laid out in: prose in the tone its
+    /// validation state calls for — danger, warning, else a quiet hint.
+    ///
+    /// One definition for every member of the family, so a refused value
+    /// reads the same under a one-line field and a multi-line box, and the
+    /// height a box reserves for its message is the height it draws.
+    fn message_block(
+        &self,
+        font: BitmapFont,
+        width: u32,
+        lines: usize,
+        theme: &Theme,
+    ) -> TextBlock {
         let palette = theme.palette();
         let color = match self.state.validation {
             ValidationState::Invalid => Color::from(palette.danger),
             ValidationState::Warning => Color::from(palette.warning),
             _ => Color::from(palette.on_surface_muted),
         };
-        let fitted = font.truncate_to_width(message, mw);
-        font.draw_text(surface, to_i32(mx), to_i32(my), fitted, color);
+        TextBlock::prose(font, width, lines, color)
     }
 
     /// Apply `edit` to the editor, reporting `bounds` when it changed anything
@@ -1574,4 +1577,879 @@ impl SearchField {
     ) -> Option<TextAction> {
         self.core.on_key(key, modifiers, true, bounds, damage)
     }
+}
+
+// --- TextArea ---------------------------------------------------------------
+
+/// The most lines of wrapped message a multi-line entry reserves beneath
+/// itself: one sentence about the text above it, not a document.
+const AREA_MESSAGE_LINES: usize = 2;
+
+/// The resolved surface geometry of a [`TextArea`] within its bounds.
+struct AreaGeom {
+    /// The plate rectangle `(x, y, w, h)` in surface pixels.
+    plate: (u32, u32, u32, u32),
+    /// The text viewport inside the plate, past the scrollbar gutter.
+    text: (u32, u32, u32, u32),
+    /// How many whole wrapped lines the viewport shows.
+    rows: usize,
+    /// How many wrapped lines the text takes at the viewport's width.
+    lines: usize,
+    /// The scrollbar's rectangle, when the text does not fit the viewport.
+    bar: Option<Rect>,
+    /// The message band below the plate, where there is one and it fits.
+    message: Option<(u32, u32, u32, u32)>,
+}
+
+impl AreaGeom {
+    /// The scroll offset `want` clamped to what the viewport can show.
+    fn clamp_scroll(&self, want: usize) -> usize {
+        want.min(self.lines.saturating_sub(self.rows))
+    }
+}
+
+/// A multi-line text entry that wraps its text (spec §11.42).
+///
+/// A `TextArea` is the text-entry family's multi-line member: the same plate,
+/// caret, selection, read-only/denied/validation rendering and typed
+/// [`TextAction`] as a [`TextField`], over a text that **wraps at the box's
+/// own width** rather than scrolling sideways. That is the difference between
+/// the two, and it is why both exist: a single-line field holds a value and
+/// scrolls; a box that holds a paragraph wraps it, because a paragraph read
+/// through a one-line window is not read at all.
+///
+/// - **Wrapping is the behaviour, not an option.** There is no horizontal
+///   scroll and no wrap toggle: the text is laid out to the viewport's width
+///   through the one shared fitter, breaking at whitespace, and a newline the
+///   user typed is a forced break.
+/// - **The caret and selection work in *visual* lines.** Up and Down move
+///   between the lines the reader sees and keep the column they started from,
+///   Home and End go to the ends of the visual line, and Ctrl+Home/Ctrl+End
+///   to the ends of the text. A click lands on the character nearest the
+///   pointer on the line it fell on.
+/// - **Enter inserts a newline** and reports [`TextAction::Edited`]; it does
+///   not submit, because in a box that holds paragraphs Enter is a paragraph.
+///   Escape still reports [`TextAction::Cancelled`].
+/// - **It scrolls vertically, and shows that it does.** The caret is kept in
+///   view as it moves, the wheel and PageUp/PageDown scroll the viewport, and
+///   a text longer than the box grows the shared [`ScrollBar`] in a trailing
+///   gutter — so a reader can see there is more.
+/// - **There is no masked mode.** A credential is a single value, so masking
+///   belongs to [`TextField::secret`]; a multi-line masked box would be a
+///   credential no one could check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextArea {
+    core: FieldCore,
+    /// The first wrapped line the viewport shows.
+    scroll: usize,
+    /// The scrollbar drawn when the text outgrows the viewport. Its own
+    /// hover and drag state lives here; the offset it reports is applied to
+    /// [`scroll`](Self::scroll), which stays the one answer.
+    bar: ScrollBar,
+    /// The x a vertical caret move aims at, in pixels from the line's start.
+    /// Kept so walking Up and Down through a short line does not strand the
+    /// caret at that line's end — nothing drawn reads it.
+    goal_x: RenderInvariant<Option<u32>>,
+}
+
+impl Default for TextArea {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TextArea {
+    /// An empty, resting neutral text area.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            core: FieldCore::new(),
+            scroll: 0,
+            bar: ScrollBar::new(
+                ScrollOrientation::Vertical,
+                ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1),
+            ),
+            goal_x: RenderInvariant::new(None),
+        }
+    }
+
+    /// This area with a non-default role (e.g. destructive).
+    #[must_use]
+    pub fn with_role(mut self, role: ControlRole) -> Self {
+        self.core.role = role;
+        self
+    }
+
+    /// This area pre-filled with `text` (caret at the end).
+    #[must_use]
+    pub fn with_text(mut self, text: impl AsRef<str>) -> Self {
+        self.core.editor.set_text(text.as_ref());
+        self
+    }
+
+    /// This area with placeholder text shown while it is empty.
+    #[must_use]
+    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.core.placeholder = Some(placeholder.into());
+        self
+    }
+
+    /// This area limited to at most `max` characters (existing content is
+    /// truncated to fit).
+    #[must_use]
+    pub fn with_max_len(mut self, max: usize) -> Self {
+        self.core.editor.set_max_len(max);
+        self
+    }
+
+    /// This area marked read-only: legible and selectable, but not editable.
+    #[must_use]
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.core.read_only = read_only;
+        self
+    }
+
+    /// This area with an inline validation/help message shown below it.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.core.message = Some(message.into());
+        self
+    }
+
+    /// The area's current text.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.core.editor.text
+    }
+
+    /// Replace the area's text (caret to the end), e.g. after the owner
+    /// commits a change. The viewport returns to the top.
+    pub fn set_text(&mut self, text: impl AsRef<str>) {
+        self.core.editor.set_text(text.as_ref());
+        self.scroll = 0;
+        *self.goal_x = None;
+    }
+
+    /// Whether the area is read-only.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.core.read_only
+    }
+
+    /// The area's role.
+    #[must_use]
+    pub fn role(&self) -> ControlRole {
+        self.core.role
+    }
+
+    /// The area's composed state.
+    #[must_use]
+    pub fn state(&self) -> ControlState {
+        self.core.state
+    }
+
+    /// Replace the area's composed state (e.g. from a model update).
+    pub fn set_state(&mut self, state: ControlState) {
+        self.core.state = state;
+        self.bar.set_state(state);
+    }
+
+    /// Set the area's keyboard focus.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.core.state.focus.focused = focused;
+    }
+
+    /// Set the inline validation/help message (or clear it with `None`).
+    pub fn set_message(&mut self, message: Option<String>) {
+        self.core.message = message;
+    }
+
+    /// The first wrapped line the viewport shows.
+    #[must_use]
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll
+    }
+
+    /// The height an area showing `rows` whole lines of text needs, message
+    /// band included.
+    ///
+    /// An owner seats a box by how much of the text it wants visible, which
+    /// is the only figure it can sensibly choose: how *tall* that is depends
+    /// on the theme's type ladder and the DPI scale, and this is where that
+    /// arithmetic lives.
+    #[must_use]
+    pub fn measured_height(&self, rows: u32, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let pad = scale.scale_length(theme.metrics().control_inset);
+        let edge = plate_border(theme, scale).saturating_add(pad);
+        let plate = font
+            .line_height()
+            .saturating_mul(rows.max(1))
+            .saturating_add(edge.saturating_mul(2));
+        let message = self.core.message.as_ref().map_or(0, |message| {
+            let width = width.saturating_sub(edge.saturating_mul(2));
+            pad.saturating_add(
+                self.core
+                    .message_block(font, width, AREA_MESSAGE_LINES, theme)
+                    .height(message),
+            )
+        });
+        plate.saturating_add(message)
+    }
+}
+
+impl TextArea {
+    /// Resolve the area's geometry for `bounds`: the plate, the text
+    /// viewport, the scrollbar gutter, and the message band.
+    ///
+    /// The bar appears only when the text does not fit the rows the box has.
+    /// Reserving its gutter narrows the column, which can only *add* wrapped
+    /// lines, so a text that overflowed the full width still overflows the
+    /// narrowed one — the decision settles in one pass and cannot flicker.
+    fn geom(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Option<AreaGeom> {
+        let (x, y, w, h) = surface_rect(bounds)?;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let metrics = theme.metrics();
+        let pad = scale.scale_length(metrics.control_inset);
+        let edge = plate_border(theme, scale).saturating_add(pad);
+        let line = font.line_height().max(1);
+
+        let inner_w = w.saturating_sub(edge.saturating_mul(2));
+        // The message takes the lines it needs out of the bottom, but never
+        // out of the box itself: a note about the text is worth less than one
+        // line of the text.
+        let box_floor = edge.saturating_mul(2).saturating_add(line);
+        let message_h = self.core.message.as_ref().map_or(0, |message| {
+            let wanted = self
+                .core
+                .message_block(font, inner_w, AREA_MESSAGE_LINES, theme)
+                .height(message);
+            if wanted == 0 {
+                return 0;
+            }
+            pad.saturating_add(wanted)
+                .min(h.saturating_sub(box_floor.min(h)))
+        });
+        let plate_h = h.saturating_sub(message_h);
+        let (tx, ty, full_w, text_h) = (
+            x.saturating_add(edge),
+            y.saturating_add(edge),
+            inner_w,
+            plate_h.saturating_sub(edge.saturating_mul(2)),
+        );
+        let rows = (text_h / line) as usize;
+        if rows == 0 || full_w == 0 {
+            return None;
+        }
+
+        // The overflow test stops one line past the viewport, so a text that
+        // fits is never walked beyond what is drawn — and its line count is
+        // that same answer. Only a text that does outgrow the box pays for
+        // the full count, which is what its proportional thumb needs.
+        let breadth = scale.scale_length(metrics.scrollbar_breadth).max(1);
+        let probe = font
+            .lines_to_width(self.text(), full_w)
+            .take(rows.saturating_add(1))
+            .count();
+        let (text_w, bar) = if probe > rows && full_w > breadth.saturating_mul(2) {
+            (
+                full_w.saturating_sub(breadth),
+                Some(Rect::new(
+                    to_i32(tx.saturating_add(full_w).saturating_sub(breadth)),
+                    to_i32(ty),
+                    breadth,
+                    text_h,
+                )),
+            )
+        } else {
+            (full_w, None)
+        };
+        let lines = if probe > rows {
+            font.lines_to_width(self.text(), text_w).count()
+        } else {
+            probe
+        };
+
+        let message = self.core.message.as_ref().and_then(|_| {
+            (message_h > pad).then_some((
+                x.saturating_add(edge),
+                y.saturating_add(plate_h).saturating_add(pad),
+                inner_w,
+                message_h.saturating_sub(pad),
+            ))
+        });
+        Some(AreaGeom {
+            plate: (x, y, w, plate_h),
+            text: (tx, ty, text_w, text_h),
+            rows,
+            lines,
+            bar,
+            message,
+        })
+    }
+
+    /// The index of the wrapped line the caret sits on, and where that line
+    /// starts.
+    ///
+    /// The lines tile the text, so a caret inside it is on the line whose
+    /// span holds it; a caret at the very end is on the **last** line, which
+    /// is what puts it on the empty line a trailing newline opens rather than
+    /// back at the end of the line before it. Every position therefore
+    /// resolves, and to exactly one line.
+    fn caret_line(&self, font: BitmapFont, width: u32) -> (usize, usize) {
+        let caret = self.core.editor.caret;
+        let mut last = (0, 0);
+        for (index, line) in font.lines_to_width(self.text(), width).enumerate() {
+            last = (index, line.start);
+            if caret < line.end() {
+                return last;
+            }
+        }
+        last
+    }
+
+    /// The byte offset of the visible end of the wrapped line at `index`,
+    /// and its start — the two positions Home and End move the caret to.
+    fn line_bounds(&self, font: BitmapFont, width: u32, index: usize) -> Option<(usize, usize)> {
+        let line = font.lines_to_width(self.text(), width).nth(index)?;
+        Some((
+            line.start,
+            line.start.saturating_add(line.text.trim_end().len()),
+        ))
+    }
+
+    /// The byte offset nearest `x` pixels along the wrapped line at `index`,
+    /// clamped to the line's visible text so a click past the end of a line
+    /// does not land on the next one.
+    fn byte_at(&self, font: BitmapFont, width: u32, index: usize, x: i32) -> usize {
+        let Some(line) = font.lines_to_width(self.text(), width).nth(index) else {
+            return self.text().len();
+        };
+        let visible = line.text.trim_end();
+        line.start.saturating_add(byte_from_x(font, visible, x))
+    }
+
+    /// The caret's x offset along its own wrapped line, in pixels.
+    fn caret_x(&self, font: BitmapFont, width: u32) -> u32 {
+        let (_, start) = self.caret_line(font, width);
+        let line = self.text().get(start..).unwrap_or_default();
+        font.width_to_offset(line, self.core.editor.caret.saturating_sub(start))
+    }
+}
+
+impl TextArea {
+    /// Paint the area into `surface` at `bounds` for the active theme: the
+    /// plate, the wrapped text with its selection and caret, the scrollbar
+    /// when the text outgrows the box, and the inline message below it.
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
+        let font = role_font(theme, scale, TextRole::Body);
+        let Some(geom) = self.geom(bounds, scale, theme, font) else {
+            return;
+        };
+        let (x, y, w, h) = geom.plate;
+        let palette = theme.palette();
+        let metrics = theme.metrics();
+        let border = plate_border(theme, scale);
+        let radius = scale.scale_length(metrics.control_corner_radius).min(h / 2);
+        let disposition = self.core.state.disposition();
+        // A box the user may write in is a page, exactly as a one-line field
+        // is; a read-only one recesses onto the window ground so it reads as
+        // text shown rather than text entered.
+        let ground = if self.core.editable() {
+            Some(palette.document)
+        } else if self.core.read_only && disposition != ControlDisposition::DisabledByState {
+            Some(palette.surface)
+        } else {
+            None
+        };
+        let mut frame = resolve_frame(theme, self.core.role, self.core.state);
+        if let Some(ground) = ground {
+            frame = frame.grounded_on(Color::from(ground_fill(theme, ground, ChromeLayer::Plate)));
+        }
+        let rim = match disposition {
+            ControlDisposition::Interactive
+            | ControlDisposition::NeedsConfirmation
+            | ControlDisposition::PendingCheck => match self.core.state.validation {
+                ValidationState::Invalid => Color::from(palette.danger),
+                ValidationState::Warning => Color::from(palette.warning),
+                _ => frame.rim,
+            },
+            _ => frame.rim,
+        };
+        paint_plate(
+            surface,
+            (x, y, w, h),
+            &PlateStyle {
+                radius,
+                border,
+                plate: frame.plate,
+                rim,
+                focused: frame.focused,
+                ring: Color::from(palette.rim_active),
+            },
+        );
+
+        let (tx, ty, tw, th) = geom.text;
+        surface.with_clip(tx, ty, tw, th, |surface| {
+            self.paint_text(surface, &geom, scale, theme, font, frame.label);
+        });
+
+        if let Some(rect) = geom.bar {
+            let mut bar = self.bar;
+            bar.set_model(self.scroll_model(&geom));
+            bar.render(surface, rect, scale, theme);
+        }
+
+        if let Some((mx, my, mw, mh)) = geom.message {
+            if let Some(message) = &self.core.message {
+                self.core
+                    .message_block(font, mw, line_budget(font, mh), theme)
+                    .paint(surface, message, (mx, my));
+            }
+        }
+    }
+
+    /// The scroll model for `geom`: wrapped lines of content, the rows the
+    /// viewport shows, and where in them the viewport sits.
+    ///
+    /// The unit is the *wrapped line*, so one wheel tick and one arrow step
+    /// move the viewport by one line the reader can see rather than by a
+    /// pixel count that depends on the face.
+    fn scroll_model(&self, geom: &AreaGeom) -> ScrollModel {
+        let content = u64::try_from(geom.lines).unwrap_or(u64::MAX);
+        let viewport = u64::try_from(geom.rows).unwrap_or(u64::MAX);
+        let offset = u64::try_from(geom.clamp_scroll(self.scroll)).unwrap_or(0);
+        ScrollModel::new(
+            ScrollRange::new(content, viewport, offset),
+            1,
+            viewport.max(1),
+        )
+    }
+
+    /// Paint the wrapped text — or the placeholder — with its selection
+    /// highlight and caret, from the first visible line down.
+    ///
+    /// Only the lines the viewport shows are laid out: the layout is a lazy
+    /// walk, so a long note costs the lines above the viewport and the lines
+    /// in it, never the whole text.
+    fn paint_text(
+        &self,
+        surface: &mut Surface,
+        geom: &AreaGeom,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        label: Color,
+    ) {
+        let (tx, ty, tw, _) = geom.text;
+        let palette = theme.palette();
+        let line_h = font.line_height().max(1);
+        if self.text().is_empty() {
+            if let Some(placeholder) = &self.core.placeholder {
+                TextBlock::prose(font, tw, geom.rows, Color::from(palette.on_surface_muted)).paint(
+                    surface,
+                    placeholder,
+                    (tx, ty),
+                );
+            }
+        }
+        let selection = self.core.editor.selection();
+        let scroll = geom.clamp_scroll(self.scroll);
+        let caret_w = scale.scale_length(1).max(1);
+        // Resolved once: the caret is on one line, and asking each drawn line
+        // whether it holds it invites two of them to say yes.
+        let caret_row =
+            (self.core.show_caret() && selection.is_none()).then(|| self.caret_line(font, tw).0);
+        for (row, line) in font
+            .lines_to_width(self.text(), tw)
+            .enumerate()
+            .skip(scroll)
+            .take(geom.rows)
+        {
+            let top = ty.saturating_add(
+                u32::try_from(row - scroll)
+                    .unwrap_or(0)
+                    .saturating_mul(line_h),
+            );
+            let visible = line.text.trim_end();
+            let pen = to_i32(tx);
+            if let Some((a, b)) = selection {
+                // The highlight covers this line's share of the selection,
+                // which for a line wholly inside it is the whole line.
+                let from = a.clamp(line.start, line.end());
+                let to = b.clamp(line.start, line.end());
+                let sa = font.width_to_offset(visible, from.saturating_sub(line.start));
+                let sb = font.width_to_offset(visible, to.saturating_sub(line.start));
+                if sb > sa {
+                    surface.fill_rect(
+                        tx.saturating_add(sa),
+                        top,
+                        sb - sa,
+                        line_h,
+                        Color::from(palette.accent),
+                    );
+                }
+                let head = visible
+                    .get(..from.saturating_sub(line.start).min(visible.len()))
+                    .unwrap_or_default();
+                let body = visible
+                    .get(
+                        from.saturating_sub(line.start).min(visible.len())
+                            ..to.saturating_sub(line.start).min(visible.len()),
+                    )
+                    .unwrap_or_default();
+                let tail = visible
+                    .get(to.saturating_sub(line.start).min(visible.len())..)
+                    .unwrap_or_default();
+                font.draw_text(surface, pen, to_i32(top), head, label);
+                font.draw_text(
+                    surface,
+                    pen + to_i32(sa),
+                    to_i32(top),
+                    body,
+                    Color::from(palette.on_accent),
+                );
+                font.draw_text(surface, pen + to_i32(sb), to_i32(top), tail, label);
+            } else {
+                font.draw_text(surface, pen, to_i32(top), visible, label);
+            }
+            if caret_row == Some(row) {
+                let cx = font
+                    .width_to_offset(visible, self.core.editor.caret.saturating_sub(line.start));
+                surface.fill_rect(
+                    tx.saturating_add(cx.min(tw.saturating_sub(caret_w))),
+                    top,
+                    caret_w,
+                    line_h,
+                    Color::from(palette.on_surface),
+                );
+            }
+        }
+    }
+}
+
+impl TextArea {
+    /// Feed a pointer event: a primary press inside the text places the caret
+    /// on the line and character under the pointer and starts a selection,
+    /// motion while pressed extends it, release ends it, and the wheel
+    /// scrolls the viewport without moving the caret. A press on the
+    /// scrollbar is the bar's. A denied/disabled/pending area ignores it
+    /// (fail closed).
+    ///
+    /// The area reports `bounds` into `damage` when the event changed what it
+    /// draws — the caret, the selection, or the viewport's position.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<TextAction> {
+        if let InputEvent::PointerMoved { to } = event {
+            *self.core.pointer = *to;
+        }
+        let font = role_font(theme, scale, TextRole::Body);
+        let geom = self.geom(bounds, scale, theme, font)?;
+        let (tx, ty, tw, _) = geom.text;
+        let inside = bounds.contains(*self.core.pointer);
+        let hover_or_none = if inside {
+            PointerState::Hover
+        } else {
+            PointerState::None
+        };
+
+        // The bar owns the gutter and anything its drag is still holding, so
+        // a pointer that slid off the thumb keeps scrolling rather than
+        // placing a caret.
+        if let Some(rect) = geom.bar {
+            let on_bar = rect.contains(*self.core.pointer);
+            if on_bar
+                || matches!(event, InputEvent::PointerScrolled { .. })
+                || self.bar.is_pressing()
+            {
+                self.bar.set_model(self.scroll_model(&geom));
+                let scrolled = match event {
+                    InputEvent::PointerScrolled { dx, dy } if inside => {
+                        self.bar.wheel(*dx, *dy, rect, damage)
+                    }
+                    _ => self.bar.on_pointer(event, rect, scale, theme, damage),
+                };
+                if let Some(ScrollAction::ScrollTo { offset }) = scrolled {
+                    self.scroll_to(
+                        usize::try_from(offset).unwrap_or(usize::MAX),
+                        bounds,
+                        damage,
+                    );
+                }
+                if on_bar || self.bar.is_pressing() {
+                    return None;
+                }
+            }
+        }
+
+        match event {
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            } => {
+                if inside && self.core.actionable() {
+                    *self.core.selecting = true;
+                    damage::set(
+                        &mut self.core.state.pointer,
+                        PointerState::Pressed,
+                        bounds,
+                        damage,
+                    );
+                    self.place_at_pointer(&geom, font, (tx, ty, tw), false, bounds, damage);
+                }
+                None
+            }
+            InputEvent::PointerMoved { .. } => {
+                if *self.core.selecting {
+                    self.place_at_pointer(&geom, font, (tx, ty, tw), true, bounds, damage);
+                } else {
+                    damage::set(&mut self.core.state.pointer, hover_or_none, bounds, damage);
+                }
+                None
+            }
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            } => {
+                *self.core.selecting = false;
+                damage::set(&mut self.core.state.pointer, hover_or_none, bounds, damage);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Place the caret at the pointer, extending the selection when `select`.
+    fn place_at_pointer(
+        &mut self,
+        geom: &AreaGeom,
+        font: BitmapFont,
+        text: (u32, u32, u32),
+        select: bool,
+        bounds: Rect,
+        damage: &mut Region,
+    ) {
+        let (tx, ty, tw) = text;
+        let line_h = font.line_height().max(1);
+        let down = self.core.pointer.y.saturating_sub(to_i32(ty)).max(0);
+        let row = geom
+            .clamp_scroll(self.scroll)
+            .saturating_add((u32::try_from(down).unwrap_or(0) / line_h) as usize)
+            .min(geom.lines.saturating_sub(1));
+        let byte = self.byte_at(font, tw, row, self.core.pointer.x - to_i32(tx));
+        self.core.edit(bounds, damage, |editor| {
+            editor.place_caret(byte, select);
+            false
+        });
+        *self.goal_x = None;
+        self.reveal_caret(geom, font, bounds, damage);
+    }
+
+    /// Feed a key event.
+    ///
+    /// Printable keys insert (replacing any selection) and **Enter inserts a
+    /// newline**; Backspace/Delete remove; Left/Right move by character and
+    /// Up/Down by *visual* line, keeping the column they set out from;
+    /// Home/End go to the ends of the visual line and Ctrl+Home/Ctrl+End to
+    /// the ends of the text; PageUp/PageDown move by a viewport; Ctrl+A
+    /// selects all; Shift extends the selection with every one of those
+    /// moves; Escape reports [`TextAction::Cancelled`]. Editing keys need an
+    /// editable (not read-only, not denied) area.
+    ///
+    /// A key that edits the text or moves the caret or the viewport reports
+    /// `bounds`; one that moves a caret already at the end it moves toward
+    /// reports nothing.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<TextAction> {
+        if !self.core.state.focus.focused || !self.core.actionable() {
+            return None;
+        }
+        let font = role_font(theme, scale, TextRole::Body);
+        let geom = self.geom(bounds, scale, theme, font)?;
+        let width = geom.text.2;
+        let action = match key {
+            Key::Named(NamedKey::Enter) if self.core.editable() => self
+                .core
+                .edit(bounds, damage, |editor| editor.insert_char('\n'))
+                .then_some(TextAction::Edited),
+            Key::Named(NamedKey::Up | NamedKey::Down) => {
+                self.move_line(&geom, font, key, modifiers.shift, bounds, damage);
+                None
+            }
+            Key::Named(NamedKey::PageUp | NamedKey::PageDown) => {
+                self.move_page(&geom, font, key, modifiers.shift, bounds, damage);
+                None
+            }
+            Key::Named(NamedKey::Home | NamedKey::End) if !modifiers.ctrl => {
+                let (row, _) = self.caret_line(font, width);
+                let ends = self.line_bounds(font, width, row);
+                if let Some((start, end)) = ends {
+                    let to = if key == Key::Named(NamedKey::Home) {
+                        start
+                    } else {
+                        end
+                    };
+                    self.core.edit(bounds, damage, |editor| {
+                        editor.place_caret(to, modifiers.shift);
+                        false
+                    });
+                }
+                *self.goal_x = None;
+                None
+            }
+            _ => {
+                let action = self
+                    .core
+                    .on_key(key, modifiers, false, bounds, damage)
+                    .filter(|action| *action != TextAction::Submitted);
+                *self.goal_x = None;
+                action
+            }
+        };
+        self.reveal_caret(&geom, font, bounds, damage);
+        action
+    }
+
+    /// Move the caret one visual line up or down, keeping the column it set
+    /// out from so a walk through a short line does not strand it there.
+    fn move_line(
+        &mut self,
+        geom: &AreaGeom,
+        font: BitmapFont,
+        key: Key,
+        select: bool,
+        bounds: Rect,
+        damage: &mut Region,
+    ) {
+        let width = geom.text.2;
+        let goal = self.goal_x.unwrap_or_else(|| self.caret_x(font, width));
+        let (row, _) = self.caret_line(font, width);
+        let next = if key == Key::Named(NamedKey::Up) {
+            row.checked_sub(1)
+        } else {
+            (row + 1 < geom.lines).then_some(row + 1)
+        };
+        if let Some(next) = next {
+            let byte = self.byte_at(font, width, next, to_i32(goal));
+            self.core.edit(bounds, damage, |editor| {
+                editor.place_caret(byte, select);
+                false
+            });
+        }
+        *self.goal_x = Some(goal);
+    }
+
+    /// Move the caret a viewport's worth of lines, keeping its column.
+    fn move_page(
+        &mut self,
+        geom: &AreaGeom,
+        font: BitmapFont,
+        key: Key,
+        select: bool,
+        bounds: Rect,
+        damage: &mut Region,
+    ) {
+        let width = geom.text.2;
+        let goal = self.goal_x.unwrap_or_else(|| self.caret_x(font, width));
+        let (row, _) = self.caret_line(font, width);
+        let next = if key == Key::Named(NamedKey::PageUp) {
+            row.saturating_sub(geom.rows)
+        } else {
+            row.saturating_add(geom.rows)
+                .min(geom.lines.saturating_sub(1))
+        };
+        let byte = self.byte_at(font, width, next, to_i32(goal));
+        self.core.edit(bounds, damage, |editor| {
+            editor.place_caret(byte, select);
+            false
+        });
+        *self.goal_x = Some(goal);
+    }
+
+    /// Scroll so the caret's line is inside the viewport, reporting `bounds`
+    /// when the viewport actually moved.
+    ///
+    /// The viewport follows the caret rather than the caret being confined to
+    /// the viewport: typing at the end of a long note brings the end into
+    /// view, which is what makes the box usable at all.
+    fn reveal_caret(
+        &mut self,
+        geom: &AreaGeom,
+        font: BitmapFont,
+        bounds: Rect,
+        damage: &mut Region,
+    ) {
+        let (row, _) = self.caret_line(font, geom.text.2);
+        let first = geom.clamp_scroll(self.scroll);
+        let want = if row < first {
+            row
+        } else if row >= first.saturating_add(geom.rows) {
+            row.saturating_sub(geom.rows.saturating_sub(1))
+        } else {
+            first
+        };
+        self.set_scroll(geom.clamp_scroll(want), bounds, damage);
+    }
+
+    /// Scroll the viewport to `offset` wrapped lines, clamped to the text.
+    fn scroll_to(&mut self, offset: usize, bounds: Rect, damage: &mut Region) {
+        self.set_scroll(offset, bounds, damage);
+    }
+
+    /// Adopt `offset` as the viewport's position, reporting `bounds` when it
+    /// changed what is drawn.
+    fn set_scroll(&mut self, offset: usize, bounds: Rect, damage: &mut Region) {
+        if self.scroll != offset {
+            self.scroll = offset;
+            damage.add(bounds);
+        }
+    }
+}
+
+/// Test-only: a [`TextArea`]'s laid-out geometry for `bounds` — the text
+/// viewport, the scrollbar's rectangle where the text outgrew it, and the
+/// rows and wrapped lines behind that decision.
+///
+/// Taken from the exact layout [`TextArea::render`] draws and
+/// [`TextArea::on_pointer`] hit-tests through, so a test aiming a click at a
+/// line, or looking for the bar's gutter, cannot drift from where the box
+/// actually put them.
+#[cfg(test)]
+pub(crate) fn debug_area_layout(
+    area: &TextArea,
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<(Rect, Option<Rect>, usize, usize)> {
+    let font = role_font(theme, scale, TextRole::Body);
+    let geom = area.geom(bounds, scale, theme, font)?;
+    let (tx, ty, tw, th) = geom.text;
+    Some((
+        Rect::new(to_i32(tx), to_i32(ty), tw, th),
+        geom.bar,
+        geom.rows,
+        geom.lines,
+    ))
 }

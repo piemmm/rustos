@@ -15,7 +15,7 @@ use tairix_controls::{
     ControlState, Dialog, FieldControl, FieldGroup, FieldRow, HelpTip, IconButton, ListRow, Menu,
     MenuItem, Panel, Progress, ProgressValue, Radio, ScrollBar, ScrollModel, ScrollOrientation,
     ScrollRange, SearchField, SelectionState, Slider, SplitButton, Tab, TableCell, TableRow, Tabs,
-    TabsOrientation, TextField, Toggle, Toolbar, Tooltip, ValidationState, WindowControl,
+    TabsOrientation, TextArea, TextField, Toggle, Toolbar, Tooltip, ValidationState, WindowControl,
     WindowControlKind,
 };
 use tairix_icon::IconKind;
@@ -201,6 +201,25 @@ fn text() -> Vec<DemoItem> {
             "Search field",
             DemoWidget::SearchField(SearchField::new().with_placeholder("Search")),
             36,
+        ),
+        // The multi-line box, shown with more text than it has room for, so
+        // the gallery demonstrates the two things that make it a different
+        // control: the wrap, and the bar that says there is more.
+        DemoItem::new(
+            "Text area",
+            DemoWidget::TextArea(TextArea::new().with_text(
+                "This box wraps its text at its own width instead of \
+                 scrolling sideways, and Enter starts a new paragraph.\n\n\
+                 Up and Down walk the lines you can see.",
+            )),
+            96,
+        ),
+        DemoItem::new(
+            "Text area placeholder",
+            DemoWidget::TextArea(
+                TextArea::new().with_placeholder("Say what you like, at whatever length"),
+            ),
+            72,
         ),
     ]
 }

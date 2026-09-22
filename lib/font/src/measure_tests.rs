@@ -407,9 +407,9 @@ fn a_measurement_answers_its_queries_charges_its_bytes_and_wipes_them() {
     let (mut measured, resolved) = measure::measure("abc", |_| Some(4));
     assert!(resolved);
     assert_eq!(measured.width(), 12);
-    assert_eq!(measured.chars_within(0), 0);
-    assert_eq!(measured.chars_within(7), 1);
-    assert_eq!(measured.chars_within(u32::MAX), 3);
+    assert_eq!(measured.chars_within_from(0, 0), 0);
+    assert_eq!(measured.chars_within_from(0, 7), 1);
+    assert_eq!(measured.chars_within_from(0, u32::MAX), 3);
     assert_eq!(measured.payload_bytes(), 3 * size_of::<u32>() + 3);
     assert!(measured.is_of("abc"));
     assert!(!measured.is_of("abd"), "a clashing string would be served");
@@ -424,7 +424,7 @@ fn an_empty_string_measures_to_nothing_and_an_unresolved_advance_is_reported() {
     let (empty, resolved) = measure::measure("", |_| Some(4));
     assert!(resolved);
     assert_eq!(empty.width(), 0);
-    assert_eq!(empty.chars_within(0), 0);
+    assert_eq!(empty.chars_within_from(0, 0), 0);
     assert_eq!(empty.payload_bytes(), 0);
 
     let (partial, resolved) = measure::measure("ab", |ch| (ch == 'a').then_some(5));

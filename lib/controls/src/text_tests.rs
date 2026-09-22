@@ -935,6 +935,36 @@ fn an_empty_secret_field_still_shows_its_placeholder() {
 }
 
 #[test]
+fn a_plain_fields_caret_stands_at_the_measured_width_of_the_text_before_it() {
+    let theme = Theme::dark();
+    let font = font();
+    let caret = premul(theme.palette().on_surface);
+    let mut field = TextField::new().with_text("iMxW");
+    field.set_focused(true);
+    field.on_key(Key::Named(NamedKey::Home), NONE_MODS, bounds(), &mut sink());
+    // The text origin is where an empty field's caret stands, so the two
+    // together pin the caret against the face's own measurement rather than
+    // against a figure this test picked.
+    let surface = field_surface(&field, &theme);
+    let origin = (0..W)
+        .find(|&x| surface.get(x, 0) == Some(caret))
+        .expect("a focused field draws its caret");
+    for before in ["i", "iM", "iMx", "iMxW"] {
+        field.on_key(
+            Key::Named(NamedKey::Right),
+            NONE_MODS,
+            bounds(),
+            &mut sink(),
+        );
+        assert_eq!(
+            field_surface(&field, &theme).get(origin + font.text_width(before), 0),
+            Some(caret),
+            "the caret after {before:?} stands at that text's own width"
+        );
+    }
+}
+
+#[test]
 fn a_secret_fields_caret_stands_between_bead_cells() {
     let theme = Theme::dark();
     let (text_x0, advance) = cell_layout(&theme);

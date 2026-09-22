@@ -62,29 +62,38 @@ pub const SWEEP_MOVES: u32 = 32;
 /// empty difference.
 pub const MIN_SWEEP_FRAMES: u64 = 8;
 
-/// Reciprocal of the screen fraction one frame in the bracketed window may
-/// recompose, on average.
+/// The most screens' worth of pixels the **whole** bracketed window may
+/// recompose.
 ///
-/// An eighth of the screen sits above the measured baseline with room to
-/// spare and far below a window (this board's file-manager window is over a
-/// third of the screen) or the screen itself, so it catches a gesture that
-/// starts repainting either.
+/// A total rather than a per-frame mean, and that is the point. The window's
+/// cost is overwhelmingly *fixed* work — the two launcher popups opening,
+/// showing a row and closing — with the sweep's own per-control repaints a
+/// few per cent of it. Divided by a frame count the host chooses, that fixed
+/// cost reads as a small mean on a machine that composed many frames and a
+/// large one on a machine that coalesced them, so the bound was met or
+/// missed by how busy the host was rather than by what the desktop did. It
+/// is the same defect [`MAX_BLUR_PX_PER_DAMAGED_PX`] was reshaped away from,
+/// and a total has no denominator to be gamed by: holding frames can only
+/// *coalesce* damage, never multiply it, so a loaded host measures less.
 ///
-/// **It is deliberately not tightened onto the per-control cost, because this
-/// bracket does not measure one.** The two launches that bracket the sweep
-/// each open a launcher popup, click a row, and close it, and that churn is
-/// most of what the window recomposes: measured either side of the per-control
-/// chrome repaint, the mean moved 40 793 → 37 826 px per frame while the
-/// gesture's *own* saving was the whole of the 138 718 px difference. So a
-/// tighter divisor here would be a bound on the launch path with the hover's
-/// cost lost in it — and a load-dependent one, since the churn is fixed and
-/// the frame count is not (the recorded brackets run from 33 to 119 frames),
-/// which is precisely the defect [`MAX_BLUR_PX_PER_DAMAGED_PX`] was reshaped
-/// to avoid. The per-control claim is gated where it is deterministic: the
-/// host-side sweep in `userland/gui/session` asserts that no frame of the
-/// gesture recomposes a whole bar's worth of pixels and that the mean stays
-/// under an eighth of one (`plans/FIX-DESKTOP-SPEEDUP.md` C.7).
-pub const SWEEP_DAMAGE_DIVISOR: u64 = 8;
+/// Three screens, against a measured 0.66–1.00 over five runs of the settled
+/// gesture (520 713 – 788 713 px of a 786 432-px screen). One further whole
+/// screen is allowed on top of that, because a relist, an arriving ground,
+/// or a settings change legitimately repaints the desktop layer whole and
+/// can fall inside the window on a slow boot — so an honest run reaches at
+/// most about two. It refuses by a screen the regression it was re-derived
+/// against: a desktop that re-damaged its whole icon bar after every
+/// published frame spent 3.69–4.72 screens on the same gesture.
+///
+/// **It is deliberately not tightened onto the per-control cost, because
+/// this window does not measure one.** The launcher churn dominates it, so a
+/// tighter figure here would be a bound on the launch path with the hover's
+/// own cost lost inside it. The per-control claim is gated where it is
+/// deterministic: the host-side sweep in `userland/gui/session` asserts that
+/// no frame of the gesture recomposes a whole bar's worth of pixels and that
+/// the mean stays under an eighth of one
+/// (`plans/FIX-DESKTOP-SPEEDUP.md` C.7).
+pub const MAX_SWEEP_SCREENS: u64 = 3;
 
 /// Recomputed frost pixels one damaged pixel in the bracketed window may
 /// cost.
@@ -141,8 +150,8 @@ pub enum Verdict {
     ScreenExtent,
     /// The window composed too few frames to have carried the gesture.
     TooFewFrames,
-    /// The average frame recomposed more than its share of the screen.
-    DamagePerFrame,
+    /// The window recomposed more screens' worth of pixels than the bound.
+    DamageTotal,
     /// The average damaged pixel cost more layer contributions than the
     /// bound.
     Overdraw,
@@ -172,7 +181,7 @@ impl Verdict {
             Self::EpochBroken => "epoch-broken",
             Self::ScreenExtent => "screen-extent",
             Self::TooFewFrames => "too-few-frames",
-            Self::DamagePerFrame => "damage-per-frame",
+            Self::DamageTotal => "damage-total",
             Self::Overdraw => "overdraw",
             Self::FrostWork => "frost-work",
             Self::ChromeRerendered => "chrome-rerendered",
@@ -200,14 +209,11 @@ pub fn assess(before: &Sample, after: &Sample) -> Verdict {
 /// Judge an already-differenced window.
 #[must_use]
 pub fn judge(delta: &Delta) -> Verdict {
-    let Some(per_frame) = delta.damage_per_frame() else {
-        return Verdict::TooFewFrames;
-    };
     if delta.frames < MIN_SWEEP_FRAMES {
         return Verdict::TooFewFrames;
     }
-    if per_frame > delta.screen_px / SWEEP_DAMAGE_DIVISOR {
-        return Verdict::DamagePerFrame;
+    if delta.damaged_px > delta.screen_px.saturating_mul(MAX_SWEEP_SCREENS) {
+        return Verdict::DamageTotal;
     }
     if delta.blended_px > delta.damaged_px.saturating_mul(MAX_BLENDS_PER_DAMAGED_PX) {
         return Verdict::Overdraw;
@@ -228,7 +234,7 @@ pub fn judge(delta: &Delta) -> Verdict {
 mod tests {
     use super::{
         assess, judge, Verdict, EXPECTED_SCREEN_PX, MAX_BLENDS_PER_DAMAGED_PX,
-        MAX_BLUR_PX_PER_DAMAGED_PX, MIN_SWEEP_FRAMES, SWEEP_DAMAGE_DIVISOR, SWEEP_MOVES,
+        MAX_BLUR_PX_PER_DAMAGED_PX, MAX_SWEEP_SCREENS, MIN_SWEEP_FRAMES, SWEEP_MOVES,
     };
     use tairix_test_framestats::{Delta, Sample};
 
@@ -259,23 +265,85 @@ mod tests {
     fn a_sweep_that_repaints_the_screen_fails_the_damage_bound() {
         let mut screenful = hovering();
         screenful.damaged_px = screenful.frames * EXPECTED_SCREEN_PX;
-        assert_eq!(judge(&screenful), Verdict::DamagePerFrame);
+        assert_eq!(judge(&screenful), Verdict::DamageTotal);
     }
 
     #[test]
-    fn the_damage_bound_is_a_share_of_the_screen_and_binds_at_it() {
-        let share = EXPECTED_SCREEN_PX / SWEEP_DAMAGE_DIVISOR;
+    fn the_damage_bound_is_a_count_of_screens_and_binds_at_it() {
         let mut at_bound = hovering();
-        at_bound.damaged_px = at_bound.frames * share;
+        at_bound.damaged_px = EXPECTED_SCREEN_PX * MAX_SWEEP_SCREENS;
         assert_eq!(judge(&at_bound), Verdict::Held, "the bound itself passes");
 
         let mut over = at_bound;
         over.damaged_px += 1;
         assert_eq!(
             judge(&over),
-            Verdict::DamagePerFrame,
-            "one pixel past the bound fails, because the mean rounds up"
+            Verdict::DamageTotal,
+            "one pixel past it fails"
         );
+    }
+
+    /// The regression the bound was re-derived against: the desktop
+    /// re-damaged its whole icon bar after every published frame, so a
+    /// gesture that should cost one control a sample cost a full-width strip
+    /// instead.
+    ///
+    /// Measured on the running guest either side of the fix — 2 901 320 to
+    /// 3 711 067 px before, 520 713 to 788 713 after — and the figures are
+    /// entered here rather than described, so the bound cannot be loosened
+    /// past the defect, or tightened onto the honest cost, without this
+    /// failing.
+    #[test]
+    fn a_bar_re_damaged_every_frame_fails_however_many_frames_it_took() {
+        for (damaged, frames) in [(2_901_320u64, 39u64), (3_711_067, 39), (2_937_975, 36)] {
+            let mut regressed = hovering();
+            regressed.frames = frames;
+            regressed.damaged_px = damaged;
+            assert_eq!(
+                judge(&regressed),
+                Verdict::DamageTotal,
+                "{damaged} px over {frames} frames must fail"
+            );
+        }
+        for (damaged, frames) in [(520_713u64, 38u64), (586_950, 37), (788_713, 40)] {
+            let mut fixed = hovering();
+            fixed.frames = frames;
+            fixed.damaged_px = damaged;
+            assert_eq!(
+                judge(&fixed),
+                Verdict::Held,
+                "the measured cost after the fix must pass"
+            );
+        }
+    }
+
+    /// The load dependence the total replaces: the same work judged the same
+    /// however many frames the host let the desktop compose.
+    ///
+    /// A mean over the frame count read a fixed cost as small on a fast host
+    /// and large on one that coalesced, so the gate failed a desktop that had
+    /// done nothing wrong. Holding frames only merges damage, so the total
+    /// cannot rise with a busy host.
+    #[test]
+    fn the_damage_bound_does_not_move_with_the_windows_length() {
+        for frames in [MIN_SWEEP_FRAMES, 16, 37, 61, 119] {
+            let mut epoch = hovering();
+            epoch.frames = frames;
+            epoch.damaged_px = 788_713;
+            assert_eq!(
+                judge(&epoch),
+                Verdict::Held,
+                "the measured honest cost must hold at {frames} frames"
+            );
+
+            let mut regressed = epoch;
+            regressed.damaged_px = 3_711_067;
+            assert_eq!(
+                judge(&regressed),
+                Verdict::DamageTotal,
+                "and the regression must fail at {frames} frames"
+            );
+        }
     }
 
     #[test]
@@ -329,9 +397,11 @@ mod tests {
         for frames in [40u64, 61, 119, 296, 590] {
             let mut epoch = hovering();
             epoch.frames = frames;
-            // The rates the failing and passing runs both measured.
-            epoch.damaged_px = frames * 12_000;
-            epoch.blur_px = frames * 2_000;
+            // The ratio the failing and passing runs both measured, over a
+            // total the gesture can actually produce: what varies here is
+            // how many frames the host let that same work be spread over.
+            epoch.damaged_px = 788_713;
+            epoch.blur_px = epoch.damaged_px / 6;
             assert_eq!(
                 judge(&epoch),
                 Verdict::Held,
@@ -339,11 +409,11 @@ mod tests {
             );
 
             let mut rebuilt = epoch;
-            rebuilt.blur_px = frames * 40_560;
+            rebuilt.blur_px = rebuilt.damaged_px + 1;
             assert_eq!(
                 judge(&rebuilt),
                 Verdict::FrostWork,
-                "a per-frame rebuild must fail at {frames} frames"
+                "a frost rebuilt past the damage it serves must fail at {frames} frames"
             );
         }
     }
@@ -440,7 +510,7 @@ mod tests {
             Verdict::EpochBroken,
             Verdict::ScreenExtent,
             Verdict::TooFewFrames,
-            Verdict::DamagePerFrame,
+            Verdict::DamageTotal,
             Verdict::Overdraw,
             Verdict::FrostWork,
             Verdict::ChromeRerendered,

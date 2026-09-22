@@ -1532,17 +1532,19 @@ impl Form {
         }
     }
 
-    /// The physical height this form needs.
+    /// The physical height this form needs in a column `width` pixels wide.
     ///
-    /// No width: a row elides rather than wrapping, so a narrower column
-    /// costs a shorter label and never a taller pane.
+    /// The width is part of the question: a row's description and a group's
+    /// footnote are prose and wrap, so a narrower column costs a taller pane
+    /// rather than a cut sentence.
     #[must_use]
-    pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
+    pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
         let gap = stack::gap(scale, theme);
+        let column = stack::plate_width(width, scale, theme);
         let plates: u32 = self
             .groups
             .iter()
-            .map(|group| group.measured_height(scale, theme))
+            .map(|group| group.measured_height(column, scale, theme))
             .fold(0, u32::saturating_add);
         let gaps =
             gap.saturating_mul(u32::try_from(self.groups.len().saturating_add(1)).unwrap_or(1));
@@ -1891,10 +1893,11 @@ impl Form {
             .map(|group| group.slot_column(bounds, scale, theme))
             .max()
             .unwrap_or(0);
+        let across = stack::plate_width(bounds.width, scale, theme);
         stack::place(bounds, first, self.groups.len(), scale, theme, |index| {
             self.groups
                 .get(index)
-                .map_or(0, |group| group.measured_height(scale, theme))
+                .map_or(0, |group| group.measured_height(across, scale, theme))
         })
         .into_iter()
         .filter_map(|(index, rect)| {
@@ -1959,9 +1962,10 @@ impl Form {
             place.scale,
             place.theme,
             |at| {
-                self.groups
-                    .get(at)
-                    .map_or(0, |group| group.measured_height(place.scale, place.theme))
+                let across = stack::plate_width(place.bounds.width, place.scale, place.theme);
+                self.groups.get(at).map_or(0, |group| {
+                    group.measured_height(across, place.scale, place.theme)
+                })
             },
         )
     }

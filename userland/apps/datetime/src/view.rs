@@ -122,10 +122,21 @@ fn content_height(editor: &Editor, scale: Scale, theme: &Theme) -> u32 {
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     let groups = groups(editor);
     let gaps = gap.saturating_mul(u32::try_from(groups.len().saturating_sub(1)).unwrap_or(0));
+    let band = band_width(scale, theme);
     groups
         .iter()
-        .map(|group| group.measured_height(scale, theme))
+        .map(|group| group.measured_height(band, scale, theme))
         .fold(gaps, u32::saturating_add)
+}
+
+/// The width of the dialog's content band, which is what the groups are laid
+/// out across and so what their wrapped descriptions measure against.
+///
+/// Taken from the dialog itself rather than re-derived here, so a group is
+/// measured against exactly the band it is later drawn in.
+#[must_use]
+fn band_width(scale: Scale, theme: &Theme) -> u32 {
+    Dialog::content_width(scale.scale_length(WIN_WIDTH), scale, theme)
 }
 
 /// The window's own rectangle at `scale`, which is where its pixels start.
@@ -140,7 +151,7 @@ pub fn window_bounds(editor: &Editor, scale: Scale, theme: &Theme) -> Rect {
         0,
         0,
         scale.scale_length(WIN_WIDTH),
-        dialog(editor).height_for_content(content, scale, theme),
+        dialog(editor).height_for_content(content, scale.scale_length(WIN_WIDTH), scale, theme),
     )
 }
 
@@ -158,7 +169,7 @@ fn group_rects(editor: &Editor, bounds: Rect, scale: Scale, theme: &Theme) -> Ve
     let mut top = band.top();
     let mut rects = Vec::new();
     for group in groups(editor) {
-        let height = group.measured_height(scale, theme);
+        let height = group.measured_height(band.width, scale, theme);
         let bottom = top.saturating_add(i32::try_from(height).unwrap_or(i32::MAX));
         if bottom > band.bottom() {
             break;

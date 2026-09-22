@@ -571,7 +571,7 @@ fn paint_notifications_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surf
         let Some(note) = notifications.notification(placed.index) else {
             continue;
         };
-        card_control(note).render(surface, local_rect(placed.card, origin), scale, theme);
+        notification_card(note).render(surface, local_rect(placed.card, origin), scale, theme);
     }
 }
 
@@ -594,7 +594,7 @@ fn paint_readout_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
 /// warning shows the caution rail, and a critical notification reads as a
 /// destructive, invalid state. Built once here so the popover render (and any
 /// later hit-test) compose the identical control.
-fn card_control(note: &TransientNotification) -> Notification {
+pub(crate) fn notification_card(note: &TransientNotification) -> Notification {
     let (role, state) = match note.severity {
         NotifySeverity::Info => (ControlRole::Neutral, ControlState::idle()),
         NotifySeverity::Success => (

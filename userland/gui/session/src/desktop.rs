@@ -459,6 +459,24 @@ impl<S: DirectorySource> Desktop<S> {
         Self::mark_cell(layout, self.selected, damage);
     }
 
+    /// Add every shown icon's cell to `damage`.
+    ///
+    /// What arriving icon artwork invalidates, and the whole of it: a decode
+    /// that landed can only change the picture inside a tile, never the
+    /// backdrop colour or the wallpaper the tiles sit on. Repainting the
+    /// layer whole for one instead recomposited the screen, re-blurred every
+    /// frosted surface over it, and did so once per delivered batch — a
+    /// screenful of work to show a 48-pixel picture. A column showing nothing
+    /// damages nothing, which is the common case on a fresh account.
+    pub fn mark_icons(&self, layout: &GridView, damage: &mut Region) {
+        for index in layout.visible_range(0) {
+            if index >= self.entries.len() {
+                break;
+            }
+            Self::mark_cell(layout, Some(index), damage);
+        }
+    }
+
     /// Add the cell the icon at `index` occupies to `damage`.
     ///
     /// The one place an icon's footprint is spelled: a tile draws strictly

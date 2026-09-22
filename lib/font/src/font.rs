@@ -357,6 +357,81 @@ impl BitmapFont {
         (&text[..end], elided)
     }
 
+    /// The pen position at the `char` boundary `byte` bytes into `text`.
+    ///
+    /// This is where a caret sits, and where a selection's highlight starts
+    /// and stops. It reads the *whole* string's memoised measurement rather
+    /// than measuring the prefix as a string of its own: a caret walking
+    /// through a line would otherwise leave one memoised measurement per
+    /// position behind it, each one a walk of everything before it.
+    ///
+    /// A `byte` past the end, or off a `char` boundary, answers for the
+    /// boundary at or before it, so a caller that rounded cannot be handed a
+    /// position inside a scalar.
+    #[must_use]
+    pub fn width_to_offset(self, text: &str, byte: usize) -> u32 {
+        client::with_client(|client| self.width_to_offset_on(client, text, byte))
+    }
+
+    /// The `char` boundary in `text` whose pen position is nearest `x`.
+    ///
+    /// This is the pointer hit test every text region shares: a click lands
+    /// on the boundary it is closest to, so the caret appears where the
+    /// pointer pointed rather than always before the character under it. A
+    /// click past the end answers the end.
+    ///
+    /// One binary search over the string's one memoised measurement, so a
+    /// click costs a search rather than a measurement per character.
+    #[must_use]
+    pub fn offset_at_width(self, text: &str, x: u32) -> usize {
+        client::with_client(|client| self.offset_at_width_on(client, text, x))
+    }
+
+    /// [`width_to_offset`](Self::width_to_offset) against a client the caller
+    /// already holds.
+    fn width_to_offset_on(self, client: &mut impl FontClient, text: &str, byte: usize) -> u32 {
+        let mut end = byte.min(text.len());
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let head = &text[..end];
+        if self.monospace_advance_on(client).is_some() {
+            return self.width_on(client, head);
+        }
+        let chars = head.chars().count();
+        client.with_measurement(
+            text,
+            self.family,
+            self.pixel_height,
+            self.weight,
+            |measured| measured.pen_at(chars),
+        )
+    }
+
+    /// [`offset_at_width`](Self::offset_at_width) against a client the caller
+    /// already holds.
+    fn offset_at_width_on(self, client: &mut impl FontClient, text: &str, x: u32) -> usize {
+        // The last boundary at or before `x`, and the one after it: the pen
+        // never decreases, so the nearest boundary is one of those two.
+        let before = self.fitting_end_on(client, text, Cursor::START, x);
+        if before >= text.len() {
+            return text.len();
+        }
+        let after = text[before..]
+            .chars()
+            .next()
+            .map_or(before, |ch| before + ch.len_utf8());
+        let low = self.width_to_offset_on(client, text, before);
+        let high = self.width_to_offset_on(client, text, after);
+        // A tie takes the later boundary, so a click on the exact midpoint of
+        // a glyph lands after it rather than before.
+        if high.saturating_sub(x) <= x.saturating_sub(low) {
+            after
+        } else {
+            before
+        }
+    }
+
     /// The pen advance a fixed-pitch face gives `ch`: its shared `cell` once
     /// per terminal column the scalar reserves.
     fn cell_step(cell: u32, ch: char) -> u32 {
@@ -409,29 +484,52 @@ impl BitmapFont {
 
     /// The byte length of [`truncate_to_width`](Self::truncate_to_width)'s
     /// answer, against a client the caller already holds.
-    ///
-    /// Both branches cut on a `char` boundary: the monospace one through the
-    /// shared column truncation, the proportional one at the boundary after
-    /// the last character the memo says fits.
     pub(crate) fn fitting_bytes_on(
         self,
         client: &mut impl FontClient,
         text: &str,
         width: u32,
     ) -> usize {
+        self.fitting_end_on(client, text, Cursor::START, width)
+    }
+
+    /// Where the longest run of `text` that starts at `from` and fits
+    /// `width` ends, as a byte offset into the whole of `text`.
+    ///
+    /// Both branches cut on a `char` boundary: the monospace one through the
+    /// shared column truncation, the proportional one at the boundary after
+    /// the last character the memo says fits. The proportional branch
+    /// measures the **whole** string and asks the memo for a suffix's fit,
+    /// so laying a paragraph out line by line costs one measurement rather
+    /// than one per line — and the walk from `from` to the answer is the
+    /// same walk the next line's cursor continues from, keeping a whole
+    /// wrap linear in the text.
+    pub(crate) fn fitting_end_on(
+        self,
+        client: &mut impl FontClient,
+        text: &str,
+        from: Cursor,
+        width: u32,
+    ) -> usize {
+        let Some(rest) = text.get(from.byte..) else {
+            return text.len();
+        };
         if let Some(cell) = self.monospace_advance_on(client) {
-            return tairix_vt::truncate_to_width(text, (width / cell.max(1)) as usize).len();
+            let columns = (width / cell.max(1)) as usize;
+            return from
+                .byte
+                .saturating_add(tairix_vt::truncate_to_width(rest, columns).len());
         }
         let fitting = client.with_measurement(
             text,
             self.family,
             self.pixel_height,
             self.weight,
-            |measured| measured.chars_within(width),
+            |measured| measured.chars_within_from(from.chars, width),
         );
-        text.char_indices()
+        rest.char_indices()
             .nth(fitting)
-            .map_or(text.len(), |(offset, _)| offset)
+            .map_or(text.len(), |(offset, _)| from.byte.saturating_add(offset))
     }
 
     /// [`elide_to_width`](Self::elide_to_width) against a client the caller
@@ -442,37 +540,69 @@ impl BitmapFont {
         text: &str,
         width: u32,
     ) -> (usize, bool) {
-        if self.fitting_bytes_on(client, text, width) == text.len() {
-            return (text.len(), false);
+        self.elide_run_on(client, text, Cursor::START, text.len(), false, width)
+    }
+
+    /// Fit `text[from.byte..stop]` into `width`, reserving room for
+    /// [`ELLIPSIS`] and reporting it whenever anything at all is dropped:
+    /// text of the run that did not fit, or — when the caller says there is
+    /// `more` past `stop` — that.
+    ///
+    /// The one elision policy, shared by the single-line fitter and by a
+    /// wrap's last line, so a cut label and a cut paragraph mark what they
+    /// dropped identically. What lies beyond `stop` is the caller's question
+    /// rather than this one's: a wrap's `stop` is the end of the paragraph it
+    /// is laying out, which may or may not be the end of the text.
+    fn elide_run_on(
+        self,
+        client: &mut impl FontClient,
+        text: &str,
+        from: Cursor,
+        stop: usize,
+        more: bool,
+        width: u32,
+    ) -> (usize, bool) {
+        let fitted = self.fitting_end_on(client, text, from, width).min(stop);
+        if fitted == stop && !more {
+            return (fitted, false);
         }
         let Some(room) = width.checked_sub(self.width_on(client, ELLIPSIS)) else {
-            return (0, false);
+            return (from.byte, false);
         };
-        (self.fitting_bytes_on(client, text, room), true)
+        (
+            self.fitting_end_on(client, text, from, room).min(stop),
+            true,
+        )
     }
 
     /// Lay `text` out over at most `max_lines` lines of `width` pixels,
-    /// yielding one [`TextLine`] per line.
+    /// yielding one [`TextLine`] per line **to draw**.
     ///
-    /// This is the shared label fitter every text region too narrow for its
-    /// label uses — an account tile's display name, a desktop icon's caption
-    /// — so no consumer writes its own break loop. The iterator is lazy and
-    /// its lines borrow `text`, so a caller counts a `clone` of it to place
-    /// the block vertically and then walks it to draw, allocating nothing.
+    /// This is the shared fitter every text region too narrow for its text
+    /// uses — a desktop icon's caption, a dialog's message, a notification's
+    /// body — so no consumer writes its own break loop. The iterator is lazy
+    /// and its lines borrow `text`, so a caller counts a `clone` of it to
+    /// place the block vertically and then walks it to draw, allocating
+    /// nothing.
     ///
     /// A line breaks at whitespace wherever one is available, so a word
     /// starts the next line rather than being split; a word too long for
     /// `width` on its own is broken mid-word on a `char` boundary, since the
     /// alternatives are a line that overflows and a line that never
-    /// advances. Whitespace a break consumes is not drawn, and none of it is
-    /// a *forced* break: a newline is a break opportunity like any other
-    /// space.
+    /// advances. A **newline is a forced break**: a paragraph ends where its
+    /// author ended it, and a blank line between two of them is drawn as a
+    /// blank line rather than closed up.
     ///
-    /// The last permitted line carries everything left, elided through
-    /// [`elide_to_width`](Self::elide_to_width) when that does not fit — and
-    /// trimmed, so no gap opens between it and the mark. A `max_lines` of
-    /// `0`, a blank `text`, and a `width` too narrow for even one glyph all
-    /// yield nothing at all.
+    /// Every line is trimmed, so no whitespace a break consumed is drawn and
+    /// no gap opens before an elision mark. Leading and trailing whitespace
+    /// of the whole text is likewise not drawn and costs no line, so a text
+    /// ending in a newline does not end in a blank line and a text of
+    /// nothing but whitespace yields nothing at all.
+    ///
+    /// The last permitted line carries what is left of its own paragraph,
+    /// elided when anything at all is dropped — the rest of the line, or the
+    /// paragraphs after it. A `max_lines` of `0`, a blank `text`, and a
+    /// `width` too narrow for even one glyph all yield nothing at all.
     ///
     /// To draw a line centred in a `box_width`: measure
     /// [`text_width`](Self::text_width) of its text plus, when it is
@@ -480,11 +610,55 @@ impl BitmapFont {
     /// [`ELLIPSIS`] at the pen [`draw_text`](Self::draw_text) returned.
     #[must_use]
     pub fn wrap_to_width(self, text: &str, width: u32, max_lines: usize) -> TextWrap<'_> {
+        let content = text.trim();
+        let leading = &text[..text.len() - text.trim_start().len()];
         TextWrap {
+            lines: TextLines {
+                font: self,
+                text,
+                width,
+                at: Cursor::START.over(leading),
+                limit: leading.len().saturating_add(content.len()),
+                trailing: false,
+                done: false,
+            },
+            remaining: if content.is_empty() { 0 } else { max_lines },
+        }
+    }
+
+    /// Lay `text` out over lines of `width` pixels that **tile** it: every
+    /// byte belongs to exactly one line, in order, and one further empty line
+    /// holds the position after a final newline.
+    ///
+    /// This is the editing counterpart of
+    /// [`wrap_to_width`](Self::wrap_to_width) and shares its break rules —
+    /// whitespace where there is one, mid-word where there is not, forced at
+    /// a newline. What it does *not* share is the display policy: nothing is
+    /// trimmed, nothing is elided, and no line is suppressed, because a caret
+    /// has to be able to sit on every position of the buffer including the
+    /// spaces at a wrap point and the empty line after a trailing newline.
+    /// A line therefore runs from its first byte to the first byte of the
+    /// next, trailing whitespace and the newline that ended it included; a
+    /// caller draws [`str::trim_end`] of it and maps a caret through
+    /// [`TextLine::start`].
+    ///
+    /// An empty `text` is one empty line, not none: the caret still has a
+    /// home. A `width` too narrow for a character takes one anyway, so the
+    /// text stays covered rather than disappearing — the line overflows, and
+    /// the caller clips.
+    ///
+    /// The iterator is lazy and allocates nothing, so drawing a viewport's
+    /// worth of a long buffer costs only the lines up to the last one drawn.
+    #[must_use]
+    pub fn lines_to_width(self, text: &str, width: u32) -> TextLines<'_> {
+        TextLines {
             font: self,
-            rest: text,
+            text,
             width,
-            remaining: max_lines,
+            at: Cursor::START,
+            limit: text.len(),
+            trailing: text.is_empty(),
+            done: false,
         }
     }
 
@@ -593,37 +767,268 @@ impl BitmapFont {
     }
 }
 
-/// One laid-out line of a wrapped label: the text to draw, and whether
-/// [`ELLIPSIS`] follows it because the label ran out of lines.
+/// One laid-out line of wrapped text.
+///
+/// [`wrap_to_width`](BitmapFont::wrap_to_width) yields lines to **draw**:
+/// trimmed, and the last one marked when it dropped something.
+/// [`lines_to_width`](BitmapFont::lines_to_width) yields lines to **edit**:
+/// untrimmed and tiling the text, so [`start`](Self::start) and the line's
+/// own length locate it exactly within the buffer it came from.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TextLine<'a> {
-    /// The line's text, already free of the whitespace a break consumed.
+    /// The line's text.
     pub text: &'a str,
+    /// The byte offset of [`text`](Self::text) within the laid-out text.
+    pub start: usize,
     /// Whether [`ELLIPSIS`] is drawn after [`text`](Self::text).
     pub elided: bool,
 }
 
+impl TextLine<'_> {
+    /// The byte range of the laid-out text this line covers.
+    #[must_use]
+    pub fn range(&self) -> Range<usize> {
+        self.start..self.end()
+    }
+
+    /// The byte offset just past this line.
+    #[must_use]
+    pub fn end(&self) -> usize {
+        self.start.saturating_add(self.text.len())
+    }
+}
+
+/// What ended one laid-out line.
+///
+/// Deliberately not public: every one of these is an internal layout
+/// decision, and a consumer's needs — where a line sits, what to draw, where
+/// a caret goes — are answered by [`TextLine`] alone.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum LineBreak {
+    /// A newline ended the line and belongs to it.
+    Hard,
+    /// Whitespace at the wrap point ended the line and belongs to it.
+    Soft,
+    /// No break point fitted, so the line ends inside a word.
+    Word,
+    /// Not even the line's first character fitted the width, and was taken
+    /// regardless so the text stays covered.
+    Overflow,
+    /// The text ended.
+    End,
+}
+
+/// A position in a laid-out text, held as both coordinates a layout needs:
+/// the byte offset that slices the text and the `char` index that indexes its
+/// measurement.
+///
+/// Carrying both is what keeps a wrap linear in the text. Deriving either
+/// from the other costs a walk from the start, so a line-by-line layout that
+/// kept only one would pay that walk again for every line.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Cursor {
+    pub(crate) byte: usize,
+    pub(crate) chars: usize,
+}
+
+impl Cursor {
+    /// The start of a text.
+    pub(crate) const START: Self = Self { byte: 0, chars: 0 };
+
+    /// This cursor advanced over `run`, which begins at it.
+    fn over(self, run: &str) -> Self {
+        Self {
+            byte: self.byte.saturating_add(run.len()),
+            chars: self.chars.saturating_add(run.chars().count()),
+        }
+    }
+}
+
+/// The lazy iterator [`BitmapFont::lines_to_width`] returns.
+#[derive(Clone, Debug)]
+pub struct TextLines<'a> {
+    font: BitmapFont,
+    text: &'a str,
+    width: u32,
+    at: Cursor,
+    /// The byte past the last one laid out. A wrap for drawing stops at the
+    /// end of the text's own content, so its lines still report where they
+    /// sit in the string the caller handed over rather than in a trimmed
+    /// copy of it.
+    limit: usize,
+    /// Whether one further, empty line remains — the position after a final
+    /// newline, or the sole position of an empty text. A caret lives there,
+    /// so a layout that left it out could not place one.
+    trailing: bool,
+    done: bool,
+}
+
+impl<'a> TextLines<'a> {
+    /// The text being laid out.
+    #[must_use]
+    pub fn text(&self) -> &'a str {
+        self.text
+    }
+
+    /// Yield the line the cursor is on, and what ended it.
+    fn advance(&mut self) -> Option<(TextLine<'a>, LineBreak)> {
+        if self.done {
+            return None;
+        }
+        if self.at.byte >= self.limit {
+            self.done = true;
+            let trailing = self.trailing;
+            self.trailing = false;
+            return trailing.then_some((
+                TextLine {
+                    text: "",
+                    start: self.limit,
+                    elided: false,
+                },
+                LineBreak::End,
+            ));
+        }
+        let at = self.at;
+        let (end, ended_by) = client::with_client(|client| self.line_end_on(client, at));
+        let text = self.text.get(at.byte..end).unwrap_or_default();
+        self.at = at.over(text);
+        // A newline at the very end leaves a position no line covers.
+        self.trailing = ended_by == LineBreak::Hard && self.at.byte >= self.limit;
+        Some((
+            TextLine {
+                text,
+                start: at.byte,
+                elided: false,
+            },
+            ended_by,
+        ))
+    }
+
+    /// Where the line starting at `at` ends, and what ended it.
+    ///
+    /// The answer is the byte the *next* line starts at, so the lines tile
+    /// the text: the whitespace a soft break consumes and the newline a hard
+    /// break consumes both belong to the line they ended.
+    fn line_end_on(&self, client: &mut impl FontClient, at: Cursor) -> (usize, LineBreak) {
+        let end = self
+            .font
+            .fitting_end_on(client, self.text, at, self.width)
+            .min(self.limit);
+        let span = self.text.get(at.byte..end).unwrap_or_default();
+        // A newline inside the run, or one standing exactly where the run
+        // stopped fitting — it draws nothing, so its own advance must not be
+        // what pushes it onto the next line.
+        if let Some(offset) = span.find('\n') {
+            return (
+                at.byte.saturating_add(offset).saturating_add(1),
+                LineBreak::Hard,
+            );
+        }
+        if end >= self.limit {
+            return (self.limit, LineBreak::End);
+        }
+        if self.text.as_bytes().get(end) == Some(&b'\n') {
+            return (end.saturating_add(1), LineBreak::Hard);
+        }
+        // Break on the whitespace nearest the line's end: the run the text
+        // stopped fitting inside, else the last one within it.
+        let broken = if self.text[end..].starts_with(char::is_whitespace) {
+            Some(end)
+        } else {
+            span.rfind(char::is_whitespace).map(|o| at.byte + o)
+        };
+        match broken {
+            Some(from) => self.consume_break(from),
+            None if end > at.byte => (end, LineBreak::Word),
+            // Not one character fits. Take it regardless: a line that
+            // consumes nothing would never end, and dropping the character
+            // would drop the rest of the text with it.
+            None => (
+                self.text[at.byte..]
+                    .chars()
+                    .next()
+                    .map_or(self.limit, |ch| at.byte + ch.len_utf8()),
+                LineBreak::Overflow,
+            ),
+        }
+    }
+
+    /// Where the line whose break falls at `from` ends, and what ended it:
+    /// the whitespace run starting there belongs to it, and a newline within
+    /// that run ends it outright.
+    ///
+    /// Consuming the run is what keeps the lines tiling the text while
+    /// drawing no whitespace at a wrap point, and stopping at a newline is
+    /// what keeps a blank line between two paragraphs from being eaten by
+    /// the spaces before it.
+    fn consume_break(&self, from: usize) -> (usize, LineBreak) {
+        let mut end = from;
+        for ch in self.text[from..self.limit].chars() {
+            if ch == '\n' {
+                return (end.saturating_add(1), LineBreak::Hard);
+            }
+            if !ch.is_whitespace() {
+                break;
+            }
+            end = end.saturating_add(ch.len_utf8());
+        }
+        (end, LineBreak::Soft)
+    }
+}
+
+impl<'a> Iterator for TextLines<'a> {
+    type Item = TextLine<'a>;
+
+    fn next(&mut self) -> Option<TextLine<'a>> {
+        self.advance().map(|(line, _)| line)
+    }
+}
+
 /// The lazy iterator [`BitmapFont::wrap_to_width`] returns.
 ///
-/// It holds the font, the unconsumed tail of the label, and the line budget
-/// — nothing heap-allocated — so a caller counts a `clone` of it to size the
-/// block and then walks the original to draw, for the cost of measuring
-/// twice and no allocation at all. It is deliberately not `Copy`: a `for`
-/// loop over one would silently duplicate rather than consume it.
+/// It holds the line cursor and the line budget — nothing heap-allocated —
+/// so a caller counts a `clone` of it to size the block and then walks the
+/// original to draw, for the cost of measuring twice and no allocation at
+/// all. It is deliberately not `Copy`: a `for` loop over one would silently
+/// duplicate rather than consume it.
 #[derive(Clone, Debug)]
 pub struct TextWrap<'a> {
-    font: BitmapFont,
-    rest: &'a str,
-    width: u32,
+    lines: TextLines<'a>,
     remaining: usize,
 }
 
-impl TextWrap<'_> {
-    /// Yield nothing further: the line budget is spent, or the tail cannot
-    /// advance.
-    fn finish(&mut self) {
-        self.rest = "";
-        self.remaining = 0;
+impl<'a> TextWrap<'a> {
+    /// The last permitted line: what is left of the paragraph the cursor is
+    /// in, elided when anything at all is dropped.
+    ///
+    /// It stops at a newline rather than running the paragraphs together,
+    /// because a forced break is where its author ended the sentence — and
+    /// because a newline drawn as a glyph is a defect in the making.
+    fn last_line(&mut self) -> Option<TextLine<'a>> {
+        let lines = &mut self.lines;
+        let at = lines.at;
+        if at.byte >= lines.limit {
+            return None;
+        }
+        let stop = lines.text[at.byte..lines.limit]
+            .find('\n')
+            .map_or(lines.limit, |offset| at.byte + offset);
+        // Whatever follows this paragraph is dropped along with it, so the
+        // mark is owed even where the paragraph itself fits.
+        let more = stop < lines.limit;
+        let (end, elided) = client::with_client(|client| {
+            lines
+                .font
+                .elide_run_on(client, lines.text, at, stop, more, lines.width)
+        });
+        let run = lines.text.get(at.byte..end).unwrap_or_default();
+        let text = run.trim();
+        let start = at.byte + (run.len() - run.trim_start().len());
+        (!text.is_empty() || elided).then_some(TextLine {
+            text,
+            start,
+            elided,
+        })
     }
 }
 
@@ -631,63 +1036,28 @@ impl<'a> Iterator for TextWrap<'a> {
     type Item = TextLine<'a>;
 
     fn next(&mut self) -> Option<TextLine<'a>> {
-        // Leading whitespace belongs to the break that ended the previous
-        // line, and the tail's trailing whitespace is drawn on no line at
-        // all, so neither is measured against the width.
-        let rest = self.rest.trim();
-        if self.remaining == 0 || rest.is_empty() {
-            self.finish();
+        if self.remaining == 0 {
             return None;
         }
         if self.remaining == 1 {
-            let (text, elided) = self.font.elide_to_width(rest, self.width);
-            // A cut can land inside a run of spaces, and a gap before the
-            // mark would read as part of the missing text.
-            let text = text.trim_end();
-            self.finish();
-            return (!text.is_empty() || elided).then_some(TextLine { text, elided });
+            self.remaining = 0;
+            return self.last_line();
         }
-        let head = self.font.truncate_to_width(rest, self.width);
-        if head.len() == rest.len() {
-            self.finish();
-            return Some(TextLine {
-                text: rest,
-                elided: false,
-            });
-        }
-        let Some(split) = line_break(rest, head) else {
-            self.finish();
+        let (line, ended_by) = self.lines.advance()?;
+        // A box too narrow for a character draws none of the text rather
+        // than a column of overflowing glyphs.
+        if ended_by == LineBreak::Overflow {
+            self.remaining = 0;
             return None;
-        };
-        self.rest = &rest[split..];
+        }
         self.remaining -= 1;
+        let trimmed = line.text.trim();
         Some(TextLine {
-            text: rest[..split].trim_end(),
+            text: trimmed,
+            start: line.start + (line.text.len() - line.text.trim_start().len()),
             elided: false,
         })
     }
-}
-
-/// Where to break `rest`, given `head`: the longest prefix of it that fits
-/// the line, already known to be shorter than `rest` itself.
-///
-/// The break is the last whitespace inside `head`, so a word that would
-/// otherwise be split starts the next line instead. A run with no
-/// whitespace in it breaks where it stopped fitting — a `char` boundary,
-/// because that is what `head` ends on. `None` when not one glyph fits: no
-/// break could then make progress, and a line that consumes nothing would
-/// never end.
-///
-/// The offset is always at least one byte: `rest` is trimmed, so its first
-/// character is not whitespace and no break can land at zero.
-fn line_break(rest: &str, head: &str) -> Option<usize> {
-    if head.is_empty() {
-        return None;
-    }
-    if rest[head.len()..].starts_with(char::is_whitespace) {
-        return Some(head.len());
-    }
-    Some(head.rfind(char::is_whitespace).unwrap_or(head.len()))
 }
 
 /// Clamp a requested pixel height into

@@ -47,9 +47,10 @@ use tairix_theme::{Rgba, TextRole, Theme};
 use crate::chart::Chart;
 use crate::damage;
 use crate::paint::{
-    draw_outline, heavy_contrast, icon_slot_side, paint_bead, paint_chevron, paint_icon_slot,
-    plate_border, rail_thickness, role_font, seam_thickness, seam_width, surface_rect,
-    text_plate_height, to_i32, withheld, BeadShape, ChevronDir, FULL_COLOUR,
+    draw_outline, heavy_contrast, icon_slot_side, line_budget, paint_bead, paint_chevron,
+    paint_icon_slot, plate_border, rail_thickness, role_font, seam_thickness, seam_width,
+    surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir, TextBlock,
+    FULL_COLOUR,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlState, RenderInvariant, SelectionState,
@@ -1028,21 +1029,18 @@ impl Tabs {
         if avail == 0 || h < font.line_height() {
             return;
         }
-        let left = to_i32(x.saturating_add(pad));
         let muted = Color::from(theme.palette().on_surface_muted);
         paint_group_heading(surface, rect, scale, theme, absence.heading());
         let statement_top = y
             .saturating_add(heading_height(scale, theme))
             .saturating_add(gap);
-        if statement_top.saturating_add(font.line_height()) > y.saturating_add(h) {
-            return;
-        }
-        font.draw_text(
+        let room = y.saturating_add(h).saturating_sub(statement_top);
+        // A stated absence is a sentence about why a group is empty, so it
+        // wraps into the room the slot has rather than stopping mid-reason.
+        TextBlock::prose(font, avail, line_budget(font, room), muted).paint(
             surface,
-            left,
-            to_i32(statement_top),
-            font.truncate_to_width(absence.statement(), avail),
-            muted,
+            absence.statement(),
+            (x.saturating_add(pad), statement_top),
         );
     }
 

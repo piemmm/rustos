@@ -39,8 +39,8 @@ Switchboard is the flagship example because it exposes live task, job, recovery,
 
 Every control and every piece of window furniture named in this specification —
 buttons (Button, IconButton, SplitButton), boolean selectors (Toggle, Checkbox,
-Radio), value controls (Slider, Progress, Chart), text entry (TextField, SearchField),
-choice entry (ComboBox), navigation and command surfaces (Menu, MenuItem,
+Radio), value controls (Slider, Progress, Chart), text entry (TextField, SearchField,
+TextArea), choice entry (ComboBox), navigation and command surfaces (Menu, MenuItem,
 Toolbar, Tabs, Breadcrumb, ActionRail), collection controls (ListRow, TableRow,
 TableCell, TableHeader, Card, Panel, MetricTile, StatusPill), record lists
 (FactList, Timeline), decision surfaces
@@ -1952,6 +1952,89 @@ rows sit on.
   alone. A pointer crossing one row reports that row; motion within it is
   hit-testing input and reports nothing.
 
+### 11.42 TextArea
+
+A `TextArea` is the text-entry family's multi-line member: the same plate,
+page ground, caret, selection, disposition and validation rendering as a
+`TextField` (§11.8, §13), over text that **wraps at the box's own width**.
+That is the difference between the two and the reason both exist — a
+single-line field holds a value and scrolls sideways, and a box that holds a
+paragraph wraps it, because a paragraph read through a one-line window is not
+read at all.
+
+- **Wrapping is the behaviour, not an option.** There is no horizontal scroll
+  and no wrap toggle. The text is laid out to the viewport's width through the
+  one shared fitter, and a newline the user typed is a forced break.
+- **The caret and the selection work in the lines the reader sees.** Up and
+  Down move between visual lines and keep the column they set out from; Home
+  and End reach the ends of the visual line, Ctrl+Home and Ctrl+End the ends of
+  the text, PageUp and PageDown a viewport; Shift extends the selection with
+  every one of those. A click lands on the character nearest the pointer on the
+  line it fell on, clamped to that line's own visible text.
+- **Enter inserts a newline** and reports an edit; it never submits. Escape
+  still cancels.
+- **It scrolls vertically and says that it does.** The caret is kept in view as
+  it moves, the wheel and the page keys move the viewport without moving the
+  caret, and text longer than the box grows the shared ScrollBar (§11.28) in a
+  trailing gutter. The gutter is taken out of the text's column only when the
+  text overflows; narrowing the column can only add lines, so the decision
+  settles in one pass rather than flickering.
+- **There is no masked mode.** A credential is a single value, so masking is
+  `TextField`'s (§11.8); a multi-line masked box would be a credential nobody
+  could check.
+- **An owner seats it by rows, not pixels.** `measured_height(rows, width, ..)`
+  turns "show four lines of text" into an extent, because how tall that is
+  depends on the theme's type ladder and the DPI scale.
+
+---
+
+## 11A. Text that does not fit: wrap it or mark it
+
+Every control in §11 draws text, and this decides what it does when the text
+is wider than the room. The question is settled by what the text **is**, not
+by which control it sits in, and the answer is the same in every control — a
+second policy anywhere is a defect.
+
+- **Prose wraps.** A run of prose is laid out over the lines its box holds,
+  because a sentence cut at the box's edge is a sentence the reader has to
+  guess the end of. This binds: a Dialog's message and inline reason (§11.24),
+  a Notification's and a Card's body (§11.25, §11.15), a Tooltip and a
+  HelpTip's reason (§11.32), a FieldRow's description and a FieldGroup's
+  footnote (§11.41), a text control's inline validation message (§11.8), a
+  Tabs group's stated absence (§11.12), and an IconTile's caption (§11.34).
+- **An identifier does not.** A name in fixed-height chrome — a Button label,
+  a MenuItem, a Tab, a TableCell, a TitleBar title, a Breadcrumb crumb, a
+  ListRow title, a MetricTile reading — stays on one line and ends in the
+  shared ellipsis mark. Wrapping one would move everything laid out beside and
+  beneath it, and a name is scanned rather than read: the mark says the rest is
+  there, which is all the reader needs.
+- **A newline is a forced break, everywhere.** A paragraph ends where its
+  author ended it, and a blank line between two of them is drawn as a blank
+  line rather than closed up. A newline never reaches the glyph blitter.
+- **One fitter, one recipe.** The break rules are `lib/font`'s shared fitter
+  and the stacked-lines drawing is one recipe in `lib/controls` (the
+  multi-line sibling of the single-line one). No control writes a break loop,
+  and a hand-rolled one in an application is a review blocker — the one this
+  rule replaced measured every candidate line separately and allocated a
+  `Vec` of them on every repaint.
+- **Wrapping makes a height depend on a width, so the measurement takes one.**
+  A control that carries prose is asked for its height *at a width*, measures
+  through the very block its paint draws, and bounds that paint by the room it
+  was actually given — so a surface sized by the measurement draws exactly
+  what it reserved, and one given less elides rather than spilling. A surface
+  with no owner to ask (a Tooltip, a HelpTip) caps itself at the typographic
+  **prose measure** rather than growing a plate across the screen: a figure in
+  *characters* of the face's own column width, so it follows the scale and the
+  family instead of guessing a pixel count.
+- **Every prose block is bounded, and the bound is containment.** Each run
+  takes at most a stated number of lines and the excess is elided. A notice's
+  body is another program's text: no one notice may push every other one out
+  of a popover however much it has to say — a fixed bound, not a capacity.
+- **A box too narrow for one glyph draws no text**, rather than a column of
+  overflowing glyphs. The one exception is an *editable* layout, where the
+  text must stay covered so the caret can reach every position: there the
+  character is taken and the line overflows, and the control clips.
+
 ---
 
 ## 12. Reactive State Patterns
@@ -2295,6 +2378,8 @@ A control or control family is ready when the following are true:
 - ActionRail tests cover the shared button height and control gap, full-width items, a rail too short drawing only whole items with hit-testing agreeing, keyboard focus movement reporting the two item rectangles, a denied item keeping its Authority Mark, and the Edge Wake lighting only when asked.
 - Toolbar tests cover a wide strip seating every tool and reserving nothing, a narrow strip seating whole tools only inside its bounds, nothing outside the strip or on an affordance slot hit-testing to a tool, a chevron drawn only where there is something that way, a press stepping exactly one tool and a held press repeating until the offset reaches a bound, the wheel scrolling and a full strip ignoring it, keyboard focus scrolling a tool into view, a band too narrow for one tool showing and offering nothing, and the render-equivalence gate comparing the offset but not the press latch.
 - TableHeader tests cover a header and its rows resolving identical column spans across a row-state change, a reported sort never reordering or redrawing until `set_sort` commits one, a committed sort that differs from the request being what is drawn, an already-sorted column flipping order, a fixed column emitting nothing, and a denied column keeping its title and its layout.
+- Text-fitting tests (§11A) cover a newline forcing a break and a blank line between paragraphs surviving, a paragraph's last permitted line ending at its own break rather than running the next one into it, no laid-out line ever drawing a newline or overflowing its column, a wrapped line locating itself in the caller's own string, and a prose control's measured height at a width being exactly what its paint then draws.
+- TextArea tests cover the wrap itself, Enter inserting a newline and never submitting, read-only and denied boxes refusing every edit, Up and Down walking visual lines and keeping their column, Home/End on the visual line against Ctrl+Home/Ctrl+End on the text, a selection spanning a break being replaced whole, a click landing on the line it fell on and clamping to that line's visible text, the viewport following the caret while the wheel moves it alone, the scrollbar appearing exactly when the text outgrows the box, a wrapped placeholder and a wrapped message, and the render-equivalence gate comparing the viewport but not the goal column.
 
 ---
 

@@ -179,9 +179,10 @@ impl VolumeCard {
         }
     }
 
-    /// The height the whole card needs.
-    fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
-        let facts = self.facts.measured_height(scale, theme);
+    /// The height the whole card needs at `width`, which its facts' wrapped
+    /// descriptions depend on.
+    fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let facts = self.facts.measured_height(width, scale, theme);
         match &self.capacity {
             Some(tile) => facts
                 .saturating_add(stack::gap(scale, theme))
@@ -199,7 +200,7 @@ impl VolumeCard {
         theme: &Theme,
         artwork: &mut dyn IconArtwork,
     ) {
-        let facts_h = self.facts.measured_height(scale, theme);
+        let facts_h = self.facts.measured_height(bounds.width, scale, theme);
         let plate = Rect::new(bounds.left(), bounds.top(), bounds.width, facts_h);
         self.facts.render(
             surface,
@@ -299,14 +300,16 @@ impl Readings {
         self.first = index.min(self.cards.len().saturating_sub(1));
     }
 
-    /// The physical height every card needs, stacked.
+    /// The physical height every card needs, stacked in a column `width`
+    /// pixels wide.
     #[must_use]
-    pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
+    pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
         let gap = stack::gap(scale, theme);
+        let plate = stack::plate_width(width, scale, theme);
         let plates: u32 = self
             .cards
             .iter()
-            .map(|card| card.measured_height(scale, theme))
+            .map(|card| card.measured_height(plate, scale, theme))
             .fold(0, u32::saturating_add);
         let gaps =
             gap.saturating_mul(u32::try_from(self.cards.len().saturating_add(1)).unwrap_or(1));
@@ -344,9 +347,10 @@ impl Readings {
             scale,
             theme,
             |index| {
+                let plate = stack::plate_width(bounds.width, scale, theme);
                 self.cards
                     .get(index)
-                    .map_or(0, |card| card.measured_height(scale, theme))
+                    .map_or(0, |card| card.measured_height(plate, scale, theme))
             },
         )
     }

@@ -60,17 +60,34 @@ std::thread_local! {
     /// [`advance_clock`] so a concurrent test's ticks can never shorten or
     /// lengthen this one's deadlines.
     static CLOCK: Cell<u64> = const { Cell::new(0) };
+    /// How many further ids of this test's block [`claim_peer_task`] has
+    /// handed out.
+    static PEERS: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Serial number of the next claim, which both its CPU and its task id are
 /// derived from.
 static NEXT_CLAIM: AtomicU32 = AtomicU32::new(0);
 
+/// The first id of the first claim's block, and so the floor of the whole
+/// reserved range.
+///
 /// Task ids are issued far above every id the suite spells by hand or draws
 /// from a test scheduler, so a claimed task's entries in the process-wide
-/// signal kill gate and wait queues can neither be mistaken for nor cleared
-/// by another test's.
-const CLAIM_TASK_BASE: TaskId = 1 << 56;
+/// signal kill gate, wait queues, and the registries the reclaim path scrubs
+/// by id can neither be mistaken for nor cleared by another test's. An id
+/// below this floor is therefore one no claim ever answers.
+pub(crate) const CLAIM_TASK_BASE: TaskId = 1 << 56;
+
+/// How many task ids one claim owns.
+///
+/// A claim is a block rather than a single id because a test that models
+/// several principals — a service owner, its caller, a foreign reader —
+/// needs an id per principal, and hand-picking the extras is the very
+/// collision the reserved range exists to prevent. Sized for the widest
+/// such test with room to spare; exhausting it panics rather than wrapping
+/// into the neighbouring claim.
+const CLAIM_TASK_STRIDE: u32 = 16;
 
 /// This test's own task id.
 ///
@@ -84,6 +101,39 @@ const CLAIM_TASK_BASE: TaskId = 1 << 56;
 /// Idempotent: a second call returns the same id.
 pub(crate) fn claim_task() -> TaskId {
     claim().task
+}
+
+/// A further task id of this test's own claim, distinct from
+/// [`claim_task`]'s and from every id any other test can name.
+///
+/// A test that models more than one principal needs more than one such id,
+/// and one claimed id cannot serve as all of them. Hand-picking the extras
+/// is what the reserved range exists to prevent: several registries the
+/// reclaim path scrubs are process-global and keyed on a task id — the
+/// call-endpoint registry by endpoint owner and by call poster, the wait-set
+/// table, the shared-region table — and `exit` reaches all of them from
+/// sibling tests that hold no registry guard, so a shared id loses this
+/// test's in-flight state mid-assert.
+///
+/// Each call answers the next id of the block, so distinct principals come
+/// from distinct calls.
+///
+/// # Panics
+///
+/// Once the calling test has drawn the whole block, rather than wrap into
+/// the neighbouring claim's ids.
+pub(crate) fn claim_peer_task() -> TaskId {
+    let base = claim().task;
+    let index = PEERS.with(|peers| {
+        let next = peers.get() + 1;
+        assert!(
+            next < CLAIM_TASK_STRIDE,
+            "a test drew more ids than one claim owns"
+        );
+        peers.set(next);
+        next
+    });
+    base + TaskId::from(index)
 }
 
 /// Claim the wait hook for the calling test as well, and report the CPU and
@@ -111,7 +161,7 @@ fn claim() -> Claim {
         cpu: table
             .checked_add(serial)
             .expect("a claim per test stays inside the CPU id space"),
-        task: CLAIM_TASK_BASE + TaskId::from(serial),
+        task: CLAIM_TASK_BASE + TaskId::from(serial) * TaskId::from(CLAIM_TASK_STRIDE),
     };
     CLAIM.with(|c| c.set(Some(claim)));
     claim
@@ -153,7 +203,7 @@ impl WaitQueueArch for HostWaitArch {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_clock, claim_scheduler, claim_task, publish_hash_key};
+    use super::{advance_clock, claim_peer_task, claim_scheduler, claim_task, publish_hash_key};
 
     #[test]
     fn an_unclaimed_test_sees_no_wait_hook() {
@@ -181,6 +231,26 @@ mod tests {
             "reserved above every hand-written id"
         );
         assert!(crate::waitq::wait_arch().is_none());
+    }
+
+    /// A test that models several principals gets an id per principal, all
+    /// distinct, all inside its own reserved block.
+    #[test]
+    fn peer_task_ids_are_distinct_and_inside_this_claims_block() {
+        let own = claim_task();
+        let drawn = [own, claim_peer_task(), claim_peer_task()];
+        let distinct: std::collections::BTreeSet<_> = drawn.iter().collect();
+        assert_eq!(distinct.len(), drawn.len(), "one id per principal");
+        for id in drawn {
+            assert!(
+                id >= super::CLAIM_TASK_BASE,
+                "reserved above hand-written ids"
+            );
+            assert!(
+                id - own < u64::from(super::CLAIM_TASK_STRIDE),
+                "inside this claim's own block, so no other claim can name it"
+            );
+        }
     }
 
     #[test]

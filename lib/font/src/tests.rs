@@ -714,21 +714,30 @@ mod render {
     }
 
     /// A line drawn without the ellipsis mark.
-    fn line(text: &str) -> TextLine<'_> {
+    fn line(text: &str) -> (&str, bool) {
+        (text, false)
+    }
+
+    /// A whole line drawn without the mark, at a known offset in its text.
+    fn line_at(text: &str, start: usize) -> TextLine<'_> {
         TextLine {
             text,
+            start,
             elided: false,
         }
     }
 
-    /// The width `line` occupies once its mark, if any, is drawn.
-    fn drawn_width(font: BitmapFont, line: TextLine<'_>) -> u32 {
-        font.text_width(line.text)
-            + if line.elided {
-                font.text_width(ELLIPSIS)
-            } else {
-                0
-            }
+    /// What a laid-out line draws: its text and whether the mark follows.
+    /// The byte offsets are pinned by their own tests, so the layout ones
+    /// read as the lines a reader would see.
+    fn drawn(line: TextLine<'_>) -> (&str, bool) {
+        (line.text, line.elided)
+    }
+
+    /// The width a drawn run occupies once its mark, if any, is drawn.
+    fn drawn_width(font: BitmapFont, run: (&str, bool)) -> u32 {
+        let (text, elided) = run;
+        font.text_width(text) + if elided { font.text_width(ELLIPSIS) } else { 0 }
     }
 
     #[test]
@@ -751,7 +760,7 @@ mod render {
         assert_eq!(font.truncate_to_width("hello", 4 * cell), "hell");
         let (text, elided) = font.elide_to_width("hello", 4 * cell);
         assert_eq!((text, elided), ("hel", true));
-        assert!(drawn_width(font, TextLine { text, elided }) <= 4 * cell);
+        assert!(drawn_width(font, (text, elided)) <= 4 * cell);
     }
 
     #[test]
@@ -785,15 +794,79 @@ mod render {
         let (prefix, elided) = font.elide_to_width(text, full - 1);
         assert!(elided, "a string one pixel too wide needs the mark");
         assert!(text.starts_with(prefix));
-        assert!(
-            drawn_width(
-                font,
-                TextLine {
-                    text: prefix,
-                    elided
-                }
-            ) < full
-        );
+        assert!(drawn_width(font, (prefix, elided)) < full);
+    }
+
+    #[test]
+    fn a_carets_pen_and_a_clicks_boundary_are_the_same_layout_read_both_ways() {
+        install();
+        for font in [
+            BitmapFont::console(),
+            BitmapFont::new(proportional_family(), 18),
+        ] {
+            let text = "iMxW ééé 日本";
+            // Every boundary's pen is where a click on that pen lands back.
+            for (byte, _) in text
+                .char_indices()
+                .chain(core::iter::once((text.len(), ' ')))
+            {
+                let pen = font.width_to_offset(text, byte);
+                assert_eq!(
+                    font.offset_at_width(text, pen),
+                    byte,
+                    "a click on the caret's own pen must land on the caret"
+                );
+            }
+            // The pen is non-decreasing and ends at the whole width.
+            let mut last = 0;
+            for (byte, _) in text.char_indices() {
+                let pen = font.width_to_offset(text, byte);
+                assert!(pen >= last, "the pen went backwards at {byte}");
+                last = pen;
+            }
+            assert_eq!(
+                font.width_to_offset(text, text.len()),
+                font.text_width(text)
+            );
+            // Past the end, and off a boundary, answer for the boundary at or
+            // before — never a position inside a scalar.
+            assert_eq!(
+                font.width_to_offset(text, text.len() + 99),
+                font.text_width(text)
+            );
+            let inside = text.find('é').expect("a multi-byte scalar") + 1;
+            assert_eq!(
+                font.width_to_offset(text, inside),
+                font.width_to_offset(text, inside - 1)
+            );
+            // A click past the end is the end; one before the start is the
+            // start.
+            assert_eq!(font.offset_at_width(text, u32::MAX), text.len());
+            assert_eq!(font.offset_at_width(text, 0), 0);
+            assert_eq!(font.offset_at_width("", 40), 0);
+        }
+    }
+
+    #[test]
+    fn a_click_lands_on_the_nearest_boundary_not_the_one_before_it() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        // Just past the middle of the second cell rounds forward to the third
+        // boundary; just before it stays on the second.
+        assert_eq!(font.offset_at_width("abcd", cell + cell / 2 + 1), 2);
+        assert_eq!(font.offset_at_width("abcd", cell + cell / 2 - 1), 1);
+        // A wide scalar is not split: the boundary either side of it is what a
+        // click can land on.
+        let offsets: Vec<_> = (0..6 * cell)
+            .map(|x| font.offset_at_width("a日本", x))
+            .collect();
+        for offset in offsets {
+            assert!(
+                "a日本".is_char_boundary(offset),
+                "{offset} is inside a scalar"
+            );
+        }
     }
 
     #[test]
@@ -803,11 +876,15 @@ mod render {
         let cell = font.cell_width();
         let lines: Vec<_> = font
             .wrap_to_width("System Administrator", 13 * cell, 4)
+            .map(drawn)
             .collect();
         assert_eq!(lines, [line("System"), line("Administrator")]);
         // The break lands on the space even when the fitting prefix ends
         // exactly at one.
-        let lines: Vec<_> = font.wrap_to_width("abcd ef", 4 * cell, 3).collect();
+        let lines: Vec<_> = font
+            .wrap_to_width("abcd ef", 4 * cell, 3)
+            .map(drawn)
+            .collect();
         assert_eq!(lines, [line("abcd"), line("ef")]);
     }
 
@@ -816,7 +893,10 @@ mod render {
         install();
         let font = BitmapFont::console();
         let cell = font.cell_width();
-        let lines: Vec<_> = font.wrap_to_width("abcdefghij", 4 * cell, 9).collect();
+        let lines: Vec<_> = font
+            .wrap_to_width("abcdefghij", 4 * cell, 9)
+            .map(drawn)
+            .collect();
         assert_eq!(lines, [line("abcd"), line("efgh"), line("ij")]);
     }
 
@@ -829,10 +909,10 @@ mod render {
             .wrap_to_width("System Administrator", 7 * cell, 2)
             .collect();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], line("System"));
+        assert_eq!(drawn(lines[0]), line("System"));
         assert!(lines[1].elided, "the last line marks what it dropped");
         assert!("Administrator".starts_with(lines[1].text));
-        assert!(drawn_width(font, lines[1]) <= 7 * cell);
+        assert!(drawn_width(font, drawn(lines[1])) <= 7 * cell);
     }
 
     #[test]
@@ -852,20 +932,106 @@ mod render {
         install();
         let font = BitmapFont::console();
         let cell = font.cell_width();
-        let lines: Vec<_> = font.wrap_to_width("  ab   cd  ", 4 * cell, 4).collect();
+        let lines: Vec<_> = font
+            .wrap_to_width("  ab   cd  ", 4 * cell, 4)
+            .map(drawn)
+            .collect();
         assert_eq!(lines, [line("ab"), line("cd")]);
         assert_eq!(font.wrap_to_width("   ", 40 * cell, 3).count(), 0);
         assert_eq!(font.wrap_to_width("", 40 * cell, 3).count(), 0);
         // An elided last line drops the space it would otherwise draw
         // between its text and the mark.
-        let lines: Vec<_> = font.wrap_to_width("ab cdefgh", 4 * cell, 1).collect();
-        assert_eq!(
-            lines,
-            [TextLine {
-                text: "ab",
-                elided: true
-            }]
-        );
+        let lines: Vec<_> = font
+            .wrap_to_width("ab cdefgh", 4 * cell, 1)
+            .map(drawn)
+            .collect();
+        assert_eq!(lines, [("ab", true)]);
+    }
+
+    #[test]
+    fn wrap_forces_a_break_at_a_newline_and_keeps_a_blank_line_between_paragraphs() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        // Room for the whole text on one line: the author's break is still
+        // where the line ends, which is the whole point of a forced break.
+        let lines: Vec<_> = font
+            .wrap_to_width("one\ntwo", 40 * cell, 4)
+            .map(drawn)
+            .collect();
+        assert_eq!(lines, [line("one"), line("two")]);
+        // A blank line between paragraphs is content, not whitespace to
+        // close up.
+        let lines: Vec<_> = font
+            .wrap_to_width("one\n\ntwo", 40 * cell, 4)
+            .map(drawn)
+            .collect();
+        assert_eq!(lines, [line("one"), line(""), line("two")]);
+        // Trailing and leading breaks are whitespace of the whole text and
+        // cost no line at all.
+        let lines: Vec<_> = font
+            .wrap_to_width("\none\n", 40 * cell, 4)
+            .map(drawn)
+            .collect();
+        assert_eq!(lines, [line("one")]);
+        // The spaces before a break do not swallow it.
+        let lines: Vec<_> = font
+            .wrap_to_width("one   \n\ntwo", 40 * cell, 4)
+            .map(drawn)
+            .collect();
+        assert_eq!(lines, [line("one"), line(""), line("two")]);
+    }
+
+    #[test]
+    fn a_wraps_last_line_stops_at_a_paragraph_break_rather_than_running_them_together() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        // One line of budget and two paragraphs: the first paragraph is what
+        // the line carries, and the mark says the rest was dropped — a
+        // newline never reaches the glyph blitter.
+        let lines: Vec<_> = font.wrap_to_width("one\ntwo", 40 * cell, 1).collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "one");
+        assert!(lines[0].elided, "the second paragraph was dropped");
+    }
+
+    #[test]
+    fn a_last_line_marks_only_what_was_really_dropped() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        // Whitespace around the text is not text: a last line holding all of
+        // it has dropped nothing, and a mark would claim otherwise.
+        let lines: Vec<_> = font.wrap_to_width("  hello  ", 40 * cell, 1).collect();
+        assert_eq!(lines, [line_at("hello", 2)]);
+        // The same line one glyph short of the text does owe the mark.
+        let lines: Vec<_> = font.wrap_to_width("hello", 4 * cell, 1).collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].elided, "a cut line marks what it cut");
+        // And so does one that fits but has a paragraph behind it.
+        let lines: Vec<_> = font.wrap_to_width("hello\nagain", 40 * cell, 1).collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "hello");
+        assert!(lines[0].elided, "the paragraph behind it was dropped");
+    }
+
+    #[test]
+    fn a_wrapped_line_reports_where_it_starts_in_the_text() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let text = "  ab   cd";
+        let lines: Vec<_> = font.wrap_to_width(text, 4 * cell, 4).collect();
+        for laid in &lines {
+            assert_eq!(
+                &text[laid.range()],
+                laid.text,
+                "{laid:?} does not locate itself in {text:?}"
+            );
+        }
+        assert_eq!(lines[0].start, 2, "the leading whitespace is not drawn");
+        assert_eq!(lines[1].start, 7);
     }
 
     #[test]
@@ -878,28 +1044,35 @@ mod render {
         // the block vertically and then paints it, with no heap traffic and
         // no second layout call.
         assert_eq!(drawing.clone().count(), 2);
-        assert_eq!(drawing.next(), Some(line("System")));
-        assert_eq!(drawing.next(), Some(line("Administrator")));
+        assert_eq!(drawing.next().map(drawn), Some(line("System")));
+        assert_eq!(drawing.next().map(drawn), Some(line("Administrator")));
         assert_eq!(drawing.next(), None);
         assert_eq!(drawing.next(), None, "an exhausted wrap stays exhausted");
     }
+
+    /// The texts every layout property below is checked over: empty, blank,
+    /// unbreakable, multi-script, and every shape of newline.
+    const LAID_OUT_TEXTS: [&str; 12] = [
+        "",
+        "a",
+        "  spaced   out  ",
+        "System Administrator",
+        "supercalifragilisticexpialidocious",
+        "日本語 テスト です",
+        "ééé ààà ûûû",
+        "\n\ttabbed\nand newlined\n",
+        "\n",
+        "\n\n\n",
+        "one\n\ntwo",
+        "trailing space \n next",
+    ];
 
     #[test]
     fn every_wrapped_line_fits_its_width_and_the_line_budget() {
         install();
         let font = BitmapFont::console();
         let cell = font.cell_width();
-        let texts = [
-            "",
-            "a",
-            "  spaced   out  ",
-            "System Administrator",
-            "supercalifragilisticexpialidocious",
-            "日本語 テスト です",
-            "ééé ààà ûûû",
-            "\n\ttabbed\nand newlined\n",
-        ];
-        for text in texts {
+        for text in LAID_OUT_TEXTS {
             for cells in 1..=10 {
                 for max_lines in 0..=4 {
                     let width = cells * cell;
@@ -908,20 +1081,144 @@ mod render {
                     for (index, &laid) in lines.iter().enumerate() {
                         let last = index + 1 == lines.len();
                         assert!(
-                            drawn_width(font, laid) <= width,
+                            drawn_width(font, drawn(laid)) <= width,
                             "{laid:?} overflows {cells} cells of {text:?}"
                         );
                         assert_eq!(laid.text.trim(), laid.text, "{laid:?} draws whitespace");
                         assert!(!laid.elided || last, "{laid:?} elides before the last line");
                         assert!(
-                            !laid.text.is_empty() || laid.elided,
-                            "an empty line was yielded for {text:?}"
+                            !laid.text.contains('\n'),
+                            "{laid:?} would draw a newline as a glyph"
                         );
-                        assert!(text.contains(laid.text), "{laid:?} is not part of {text:?}");
+                        assert_eq!(
+                            &text[laid.range()],
+                            laid.text,
+                            "{laid:?} does not locate itself in {text:?}"
+                        );
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn laid_out_lines_tile_the_text_they_came_from() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        for text in LAID_OUT_TEXTS {
+            for cells in 1..=10 {
+                let width = cells * cell;
+                let lines: Vec<_> = font.lines_to_width(text, width).collect();
+                assert!(!lines.is_empty(), "{text:?} laid out to nothing");
+                let mut at = 0;
+                for laid in &lines {
+                    assert_eq!(laid.start, at, "{laid:?} leaves a hole in {text:?}");
+                    assert_eq!(&text[laid.range()], laid.text);
+                    assert!(!laid.elided, "an edited line never drops text");
+                    at = laid.end();
+                }
+                assert_eq!(at, text.len(), "{text:?} was not covered to its end");
+                // Every caret position has a line to sit on, including the
+                // one after a final newline.
+                let last = lines.last().copied().unwrap_or(TextLine {
+                    text: "",
+                    start: 0,
+                    elided: false,
+                });
+                assert_eq!(last.end(), text.len());
+                assert!(
+                    !text.ends_with('\n') || last.text.is_empty(),
+                    "{text:?} has no line for the caret after its last break"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_edited_line_keeps_the_whitespace_a_break_consumed() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        // The spaces at the wrap point stay on the line they ended, so a
+        // caret among them has somewhere to be and the text stays covered.
+        let lines: Vec<_> = font.lines_to_width("ab   cd", 4 * cell).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "ab   ");
+        assert_eq!(lines[1].text, "cd");
+        // The newline belongs to the line it ended, and the line after a
+        // trailing one is where the caret goes.
+        let lines: Vec<_> = font.lines_to_width("ab\n", 40 * cell).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "ab\n");
+        assert_eq!(
+            lines[1],
+            TextLine {
+                text: "",
+                start: 3,
+                elided: false
+            }
+        );
+        // An empty buffer is one empty line: the caret still has a home.
+        let lines: Vec<_> = font.lines_to_width("", 40 * cell).collect();
+        assert_eq!(
+            lines,
+            [TextLine {
+                text: "",
+                start: 0,
+                elided: false
+            }]
+        );
+    }
+
+    #[test]
+    fn a_box_too_narrow_for_a_character_still_covers_an_edited_text() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        // Drawing gives up rather than spilling a column of glyphs out of
+        // the box, but an editor must not lose the buffer: every character
+        // is still on a line, one per line, overflowing.
+        assert_eq!(font.wrap_to_width("abc", cell - 1, 4).count(), 0);
+        let lines: Vec<_> = font.lines_to_width("abc", cell - 1).collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[2],
+            TextLine {
+                text: "c",
+                start: 2,
+                elided: false
+            }
+        );
+    }
+
+    #[test]
+    fn one_measurement_serves_every_line_of_a_wrapped_paragraph() {
+        install();
+        // A proportional face has no cell width to multiply, so a wrap that
+        // measured each line's tail separately would be quadratic in the
+        // text and would fill the memo with one entry per line. The lines
+        // must come out the same as measuring each one alone says they
+        // should.
+        let font = BitmapFont::new(proportional_family(), 16);
+        let text = "the quick brown fox jumps over the lazy dog again and again";
+        let width = font.text_width("the quick brown fox");
+        for laid in font.lines_to_width(text, width) {
+            let run = laid.text.trim_end();
+            assert!(
+                font.text_width(run) <= width,
+                "{laid:?} is wider than the column it was laid into"
+            );
+        }
+        let lines: Vec<_> = font.lines_to_width(text, width).collect();
+        assert_eq!(
+            lines
+                .iter()
+                .map(|laid| laid.text)
+                .collect::<std::string::String>(),
+            text,
+            "the lines must still be exactly the text"
+        );
     }
 
     #[test]
@@ -936,7 +1233,7 @@ mod render {
         let tile = font.text_width("Administrator") + font.text_width(" ");
         assert!(font.text_width(name) > tile, "the name must not fit a line");
         assert!(font.text_width("System") <= tile, "its first word must fit");
-        let lines: Vec<_> = font.wrap_to_width(name, tile, 2).collect();
+        let lines: Vec<_> = font.wrap_to_width(name, tile, 2).map(drawn).collect();
         assert_eq!(lines, [line("System"), line("Administrator")]);
     }
 }

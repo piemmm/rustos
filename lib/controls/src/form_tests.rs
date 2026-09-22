@@ -26,7 +26,7 @@ use crate::form::{FieldAction, FieldControl, FieldGroup, FieldGroupAction, Field
 use crate::metric::StatusPill;
 use crate::selector::Toggle;
 use crate::state::{AuthorityState, ControlState, SelectionState, ValidationState};
-use crate::testkit::{control_font, high_contrast};
+use crate::testkit::{control_font, high_contrast, text_ladder};
 use crate::text::TextField;
 use crate::value::Slider;
 
@@ -900,6 +900,43 @@ fn a_pointer_crossing_a_row_reports_only_that_row() {
 }
 
 #[test]
+fn a_row_wraps_into_exactly_the_span_its_group_reserved_it_for() {
+    // The group measures a row's height against a span it derives from its
+    // own width; the row then lays its description out against a span it
+    // derives from the rectangle it was given. A description that wrapped
+    // into a different column than the one the height was reserved for would
+    // lose its last line, so the two must be the same figure.
+    for theme in [Theme::dark(), high_contrast(), text_ladder(22)] {
+        for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
+            for width in [120, W, 640] {
+                let group = FieldGroup::new(
+                    "A",
+                    vec![
+                        toggle_row("One", false).with_description(
+                            "A sentence long enough that it has to wrap in a narrow column.",
+                        ),
+                        toggle_row("Two", false),
+                    ],
+                );
+                let height = group.measured_height(width, scale, &theme);
+                let bounds = Rect::new(0, 0, width, height);
+                let column = group.slot_column(bounds, scale, &theme);
+                let Some(rect) = group.row_rect(0, bounds, scale, &theme) else {
+                    continue;
+                };
+                assert_eq!(
+                    crate::form::debug_row_text_span(FieldLayout::new(rect, column), scale, &theme),
+                    group.row_text_span(width, scale, &theme),
+                    "row and group disagree at {width}px under {} at {}%",
+                    theme.name(),
+                    scale.percent()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn a_groups_height_is_what_its_rows_actually_draw() {
     let theme = Theme::dark();
     let scale = Scale::ONE;
@@ -908,7 +945,7 @@ fn a_groups_height_is_what_its_rows_actually_draw() {
         toggle_row("Two", false).with_description("with a second line"),
     ];
     let group = FieldGroup::new("A", rows.clone());
-    let height = group.measured_height(scale, &theme);
+    let height = group.measured_height(W, scale, &theme);
     let bounds = Rect::new(0, 0, W, height);
     let drawn: u32 = (0..group.len())
         .map(|i| {
@@ -918,7 +955,11 @@ fn a_groups_height_is_what_its_rows_actually_draw() {
                 .height
         })
         .sum();
-    let wanted: u32 = rows.iter().map(|r| r.measured_height(scale, &theme)).sum();
+    let span = group.row_text_span(W, scale, &theme);
+    let wanted: u32 = rows
+        .iter()
+        .map(|r| r.measured_height(span, scale, &theme))
+        .sum();
     assert_eq!(drawn, wanted);
 }
 
@@ -934,12 +975,16 @@ fn a_plate_too_short_for_every_row_omits_the_ones_it_cannot_draw() {
             toggle_row("Three", false),
         ],
     );
-    let full = group.measured_height(scale, &theme);
+    let full = group.measured_height(W, scale, &theme);
     let short = Rect::new(
         0,
         0,
         W,
-        full - group.rows()[0].measured_height(scale, &theme),
+        full - group.rows()[0].measured_height(
+            group.row_text_span(W, scale, &theme),
+            scale,
+            &theme,
+        ),
     );
     assert!(group.row_rect(0, short, scale, &theme).is_some());
     assert_eq!(
@@ -994,7 +1039,7 @@ fn every_appearance_draws_the_family() {
             ],
         )
         .with_footnote("Applies to this account only.");
-        let height = group.measured_height(scale, &theme);
+        let height = group.measured_height(W, scale, &theme);
         let mut surface = Surface::new(W, height).expect("surface");
         let bounds = Rect::new(0, 0, W, height);
         group.render(
@@ -1073,12 +1118,12 @@ fn a_badged_caption_band_seats_the_capsule_above_the_first_row() {
     );
     assert!(bare.badge().is_none());
 
-    let grew = badged.measured_height(scale, &theme) - bare.measured_height(scale, &theme);
+    let grew = badged.measured_height(W, scale, &theme) - bare.measured_height(W, scale, &theme);
     let band = StatusPill::measured_height(scale, &theme)
         .saturating_sub(control_font(&theme, scale).line_height());
     assert_eq!(grew, band, "the caption band did not grow with its badge");
 
-    let bounds = Rect::new(0, 0, W, badged.measured_height(scale, &theme));
+    let bounds = Rect::new(0, 0, W, badged.measured_height(W, scale, &theme));
     let first = badged
         .row_rect(0, bounds, scale, &theme)
         .expect("the row fits its own measured height");
@@ -1105,12 +1150,12 @@ fn a_badge_set_in_place_matches_the_one_the_builder_puts_on() {
     set.set_badge(Some(badge));
     assert_eq!(set.badge(), built.badge());
     assert_eq!(
-        set.measured_height(scale, &theme),
-        built.measured_height(scale, &theme),
+        set.measured_height(W, scale, &theme),
+        built.measured_height(W, scale, &theme),
         "a badge put on in place has to be re-measured like any other"
     );
 
-    let height = built.measured_height(scale, &theme);
+    let height = built.measured_height(W, scale, &theme);
     let draw = |group: &FieldGroup| {
         let mut surface = Surface::new(W, height).expect("a surface");
         group.render(
@@ -1126,8 +1171,8 @@ fn a_badge_set_in_place_matches_the_one_the_builder_puts_on() {
     set.set_badge(None);
     assert!(set.badge().is_none());
     assert_eq!(
-        set.measured_height(scale, &theme),
-        bare.measured_height(scale, &theme)
+        set.measured_height(W, scale, &theme),
+        bare.measured_height(W, scale, &theme)
     );
 }
 
@@ -1141,7 +1186,7 @@ fn a_long_caption_is_cut_rather_than_drawn_under_its_badge() {
     let rows = vec![toggle_row("One", false)];
     let render = |caption: &str| {
         let group = FieldGroup::new(caption, rows.clone()).with_badge(badge.clone());
-        let height = group.measured_height(scale, &theme);
+        let height = group.measured_height(W, scale, &theme);
         let bounds = Rect::new(0, 0, W, height);
         let mut surface = Surface::new(W, height).expect("a surface");
         group.render(&mut surface, FieldLayout::new(bounds, 0), scale, &theme);

@@ -111,6 +111,7 @@ mod program {
         AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk, RtLinkReader,
     };
     use tairix_caps::CapabilitySet;
+    use tairix_controls::damage;
     use tairix_desktop_session::menu::{
         open_desktop_menu, ChainAction, ChainOutcome, ChainOwner, MenuChain,
     };
@@ -1040,21 +1041,17 @@ mod program {
                 },
             );
         });
-        shell
-            .session_mut()
-            .taskbar_mut()
-            .library_mut()
-            .report_newly_shown(|| {
-                log(
-                    &LOG_SINK,
-                    &LogEvent {
-                        level: LogLevel::Info,
-                        id: LIBRARY_SHOWN,
-                        message: LIBRARY_SHOWN_MESSAGE,
-                        fields: &[],
-                    },
-                );
-            });
+        shell.session_mut().taskbar_mut().report_library_shown(|| {
+            log(
+                &LOG_SINK,
+                &LogEvent {
+                    level: LogLevel::Info,
+                    id: LIBRARY_SHOWN,
+                    message: LIBRARY_SHOWN_MESSAGE,
+                    fields: &[],
+                },
+            );
+        });
     }
 
     /// Attest the producer of a pending notification call, decode the request
@@ -2747,8 +2744,21 @@ mod program {
                     );
                     shell.present_icon_artwork(&mut compositor);
                 }
-                if relisted || papered || arted || settings_landed {
+                // A re-list moved every icon, a new wallpaper replaced the
+                // ground, and a settings change re-laid the column: each of
+                // those is the whole layer. Arriving artwork is not — it
+                // changes the picture inside the tiles and nothing behind
+                // them — so it repaints the cells and leaves the ground
+                // alone.
+                if relisted || papered || settings_landed {
                     shell.present_desktop(&mut compositor, &desktop);
+                } else if arted {
+                    let layout = shell.desktop_layout(&compositor, &desktop);
+                    let mut icons = damage::sink();
+                    desktop.mark_icons(&layout, &mut icons);
+                    if !icons.is_empty() {
+                        shell.present_desktop_area(&mut compositor, &desktop, &icons);
+                    }
                 }
                 if let Some(concluded) = picker.resume(&mut shell, &mut compositor) {
                     conclude_pick(

@@ -239,6 +239,20 @@ impl Taskbar {
         &mut self.library
     }
 
+    /// Fire the program-library popup's one-shot "these rows have been seen"
+    /// witness ([`LibraryPopup::report_newly_shown`]).
+    ///
+    /// Its own route rather than [`library_mut`](Self::library_mut), because
+    /// the embedder calls it after **every** published frame and the witness
+    /// changes no pixel: taking the latching borrow for it marked the whole
+    /// bar and the whole popup dirty on each frame, so the next frame
+    /// recomposed them, published, and dirtied them again — a desktop that
+    /// never settled, recomposing a full-width bar per frame for as long as
+    /// the session was up.
+    pub fn report_library_shown(&mut self, report: impl FnOnce()) {
+        self.library.report_newly_shown(report);
+    }
+
     /// The program-library popup, mutably, for routing one input event into
     /// it.
     ///
@@ -659,11 +673,19 @@ impl Taskbar {
         Some(NotificationsLayout::compute(
             self.config.edge,
             &bar,
-            self.config.screen_width,
-            self.config.screen_height,
+            (self.config.screen_width, self.config.screen_height),
             scale,
             &self.theme,
             self.notifications.notification_count(),
+            |index, width| {
+                self.notifications.notification(index).map_or(0, |note| {
+                    crate::render::notification_card(note).measured_height(
+                        width,
+                        scale,
+                        &self.theme,
+                    )
+                })
+            },
         ))
     }
 

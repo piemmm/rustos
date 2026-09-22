@@ -3218,7 +3218,7 @@ fn the_library_announces_each_showing_once_and_never_while_closed() {
     /// One present: whether it announced the popup.
     fn present(bar: &mut Taskbar) -> bool {
         let mut announced = false;
-        bar.library_mut().report_newly_shown(|| announced = true);
+        bar.report_library_shown(|| announced = true);
         announced
     }
 
@@ -7295,6 +7295,37 @@ fn tasks_mut_latches_the_bar() {
         bar.take_repaint(),
         TaskbarRepaint::BAR,
         "task slots draw on the bar and nowhere else"
+    );
+}
+
+/// The reported defect: the embedder fires the popup's "seen" witness after
+/// every published frame, and firing it through the latching borrow marked
+/// the whole bar and the whole popup dirty each time — so the next frame
+/// recomposed a full-width strip, published, and dirtied it again. The
+/// desktop never settled: a running session recomposed 48 672 px per frame
+/// for as long as it was up, and a per-control hover measured 48 982 px
+/// instead of 1 798.
+#[test]
+fn announcing_a_showing_latches_nothing_to_repaint() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let _ = bar.take_repaint();
+
+    let mut announced = false;
+    bar.report_library_shown(|| announced = true);
+    assert!(announced, "the first frame carrying the popup announces it");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NONE,
+        "recording that a frame was seen changes no pixel"
+    );
+
+    bar.report_library_shown(|| unreachable!("announced twice"));
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NONE,
+        "and neither does a later frame of the same showing"
     );
 }
 

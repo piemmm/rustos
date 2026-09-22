@@ -343,6 +343,15 @@ they do not latch, because the router latches from the outcome the sub-model
 reports, which is what keeps a pointer sample over the open popup from
 repainting it.
 
+`Taskbar::report_library_shown` is that same opposite, for the one thing an
+embedder does on **every** published frame: firing the popup's one-shot
+"these rows have been seen" witness. Recording that a frame was seen changes
+no pixel, so it has its own non-latching route. Taken through `library_mut`
+instead it dirtied the whole bar and the whole popup each frame, so the next
+frame recomposed a full-width strip, published, and dirtied it again — a
+desktop that never settled, and a hover sample that cost a bar instead of a
+control.
+
 That leaves exactly one thing the embedder still owns: the desktop `Scale`,
 which the compositor passes per layout and render call rather than being bar
 state, so a scale change is the caller's own and it knows it dirtied

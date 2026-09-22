@@ -308,10 +308,6 @@ fn trailing_end(
 /// reference density.
 const NOTIF_POPUP_WIDTH: u32 = 300;
 
-/// Height of one notification card, in *logical* pixels at the reference
-/// density.
-const NOTIF_CARD_HEIGHT: u32 = 64;
-
 /// The most notification cards shown at once. Extra notifications are simply
 /// not drawn — the model orders by severity then recency, so the ones that
 /// matter most are the ones shown (this is a *display* cap on a transient
@@ -378,22 +374,26 @@ impl NotificationsLayout {
     pub(crate) fn compute(
         edge: Edge,
         bar: &BarLayout,
-        screen_width: u32,
-        screen_height: u32,
+        screen: (u32, u32),
         scale: Scale,
         theme: &Theme,
         count: usize,
+        card_height: impl Fn(usize, u32) -> u32,
     ) -> Self {
+        let (screen_width, screen_height) = screen;
         let metrics = theme.metrics();
         let corner_radius = scale.scale_length(metrics.window_corner_radius);
         let pad = scale.scale_length(metrics.control_gap);
-        let card_height = scale.scale_length(NOTIF_CARD_HEIGHT).max(1);
         let width = scale
             .scale_length(NOTIF_POPUP_WIDTH)
             .min(screen_width)
             .max(1);
 
         let chrome = probe_chrome(&notif_panel(Point::ORIGIN), width, scale, theme);
+        let inner_width = chrome
+            .content_width
+            .saturating_sub(pad.saturating_mul(2))
+            .max(1);
 
         // Space available for the panel on the popover's side of the bar.
         let available = match edge {
@@ -402,20 +402,31 @@ impl NotificationsLayout {
             Edge::Left | Edge::Right => screen_height,
         };
 
-        // How many cards fit: the model count, capped by the display maximum
-        // and by the vertical room (chrome overhead + a pad above the first
-        // card, then one card-plus-pad each).
-        let per_card = card_height.saturating_add(pad).max(1);
-        let fixed = chrome.overhead.saturating_add(pad);
-        let room = available.saturating_sub(fixed) / per_card;
-        let shown = count.min(NOTIF_MAX_CARDS).min(room as usize);
+        // Which cards fit: the model order, capped by the display maximum and
+        // by the vertical room (chrome overhead + a pad above the first card,
+        // then each card and the pad under it). Each card asks for the height
+        // its own wrapped message needs, so a notice with two lines to say
+        // says them instead of having the second cut off — and a long one
+        // takes its room from the notices below it rather than from its own
+        // message.
+        let mut room = available.saturating_sub(chrome.overhead.saturating_add(pad));
+        let mut heights = Vec::with_capacity(count.min(NOTIF_MAX_CARDS));
+        for index in 0..count.min(NOTIF_MAX_CARDS) {
+            let height = card_height(index, inner_width).max(1);
+            let Some(left) = room.checked_sub(height.saturating_add(pad)) else {
+                break;
+            };
+            room = left;
+            heights.push(height);
+        }
+        let shown = heights.len();
 
         let content_height = if shown == 0 {
             0
         } else {
-            to_u32(shown)
-                .saturating_mul(card_height)
-                .saturating_add(to_u32(shown + 1).saturating_mul(pad))
+            heights.iter().fold(pad, |total, height| {
+                total.saturating_add(height.saturating_add(pad))
+            })
         };
         let panel_height = chrome.overhead.saturating_add(content_height);
 
@@ -435,23 +446,17 @@ impl NotificationsLayout {
             .left()
             .saturating_add(chrome.content_left)
             .saturating_add(to_i32(pad));
-        let inner_width = chrome
-            .content_width
-            .saturating_sub(pad.saturating_mul(2))
-            .max(1);
         let mut cards = Vec::with_capacity(shown);
         let mut y = panel
             .top()
             .saturating_add(chrome.content_top)
             .saturating_add(to_i32(pad));
-        for index in 0..shown {
+        for (index, height) in heights.into_iter().enumerate() {
             cards.push(NotificationCard {
                 index,
-                card: Rect::new(inner_x, y, inner_width, card_height),
+                card: Rect::new(inner_x, y, inner_width, height),
             });
-            y = y
-                .saturating_add(to_i32(card_height))
-                .saturating_add(to_i32(pad));
+            y = y.saturating_add(to_i32(height)).saturating_add(to_i32(pad));
         }
 
         Self {

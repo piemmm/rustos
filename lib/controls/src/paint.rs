@@ -489,6 +489,147 @@ pub(crate) fn paint_text_line(
     y.saturating_add(line_h).saturating_add(gap)
 }
 
+/// The widest a line of prose is laid out when nothing else bounds it, in
+/// characters.
+///
+/// A popup that grows with its sentence ends up a one-pixel-tall band across
+/// the whole screen, and a line that long is hard to scan back along: the
+/// typographic measure for continuous prose is around 45 to 75 characters.
+/// The figure is in *characters* and resolved through the face's own column
+/// width, so it follows the DPI scale and the chosen family instead of
+/// guessing at a pixel count.
+pub(crate) const PROSE_MEASURE_COLUMNS: u32 = 56;
+
+/// The width [`PROSE_MEASURE_COLUMNS`] occupies in `font`.
+pub(crate) fn prose_measure(font: BitmapFont) -> u32 {
+    font.cell_width().saturating_mul(PROSE_MEASURE_COLUMNS)
+}
+
+/// How many whole lines of `font` a band `height` pixels tall holds.
+///
+/// The one conversion from room to a line budget, so the height a surface
+/// measures for a block of prose and the lines its paint actually draws come
+/// from the same arithmetic and can never disagree by a line.
+pub(crate) fn line_budget(font: BitmapFont, height: u32) -> usize {
+    let line = font.line_height().max(1);
+    (height / line) as usize
+}
+
+/// Where a wrapped line sits within the column it is laid into.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TextAlign {
+    /// Against the column's leading edge: prose, and every stacked anatomy.
+    Leading,
+    /// Centred in the column: a caption under a picture it belongs to.
+    Centre,
+}
+
+/// One block of wrapped text: the column it is laid into, the lines it may
+/// take, and how it is drawn.
+///
+/// This is the multi-line sibling of [`paint_text_line`], and the one place
+/// prose is laid out in this crate: a dialog's message, a notification's
+/// body, a field's description, a tooltip, an icon's caption. A block that
+/// runs out of lines marks the last one, so a reader is told text is missing
+/// rather than left to assume the sentence ended where it stopped.
+pub(crate) struct TextBlock {
+    /// The face the block is laid out and drawn in.
+    pub(crate) font: BitmapFont,
+    /// The column's width in pixels; a zero column draws nothing.
+    pub(crate) width: u32,
+    /// The most lines the block may take; a zero budget draws nothing.
+    pub(crate) lines: usize,
+    /// Where each line sits within the column.
+    pub(crate) align: TextAlign,
+    /// The ink every line is drawn in.
+    pub(crate) color: Color,
+    /// The shadow behind it, for a block drawn over ground its owner does
+    /// not control — a caption over a wallpaper.
+    pub(crate) shadow: Option<TextShadow>,
+}
+
+impl TextBlock {
+    /// A leading-aligned block of prose in `font`, unshadowed.
+    pub(crate) fn prose(font: BitmapFont, width: u32, lines: usize, color: Color) -> Self {
+        Self {
+            font,
+            width,
+            lines,
+            align: TextAlign::Leading,
+            color,
+            shadow: None,
+        }
+    }
+
+    /// How many lines `text` actually takes, which is never more than the
+    /// budget and is zero for text that draws nothing at all.
+    ///
+    /// Counting walks the same lazy layout the paint does and allocates
+    /// nothing, so a surface measures its own height and then draws from the
+    /// identical break decisions.
+    pub(crate) fn line_count(&self, text: &str) -> usize {
+        self.font
+            .wrap_to_width(text, self.width, self.lines)
+            .count()
+    }
+
+    /// The height `text` occupies when laid out in this block.
+    pub(crate) fn height(&self, text: &str) -> u32 {
+        let lines = u32::try_from(self.line_count(text)).unwrap_or(u32::MAX);
+        self.font.line_height().saturating_mul(lines)
+    }
+
+    /// The width `text` actually draws in: its widest line, mark included,
+    /// which is never more than the block's own column.
+    ///
+    /// A popup sized by this fits the text rather than the column it was
+    /// allowed, so a two-word tooltip stays a two-word tooltip.
+    pub(crate) fn measured_width(&self, text: &str) -> u32 {
+        self.font
+            .wrap_to_width(text, self.width, self.lines)
+            .map(|line| run_width(self.font, (line.text, line.elided)))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Draw `text` from `(x, top)` down, and answer the `y` just past the
+    /// last line — where a following line of an anatomy begins.
+    ///
+    /// **Empty text is no lines**: it draws nothing and advances nothing, so
+    /// an anatomy whose optional prose is absent closes up rather than
+    /// opening a gap.
+    pub(crate) fn paint(&self, surface: &mut Surface, text: &str, at: (u32, u32)) -> u32 {
+        let (x, top) = at;
+        let mut y = top;
+        for line in self.font.wrap_to_width(text, self.width, self.lines) {
+            let run = (line.text, line.elided);
+            let lx = match self.align {
+                TextAlign::Leading => x,
+                TextAlign::Centre => {
+                    centre_x(run_width(self.font, run), x, x.saturating_add(self.width))
+                }
+            };
+            paint_run(
+                surface,
+                self.font,
+                run,
+                (to_i32(lx), to_i32(y)),
+                self.color,
+                self.shadow,
+            );
+            y = y.saturating_add(self.font.line_height());
+        }
+        y
+    }
+}
+
+/// `width` centred between `left` and `right`, clamped to `left` when it is
+/// wider than the span.
+pub(crate) fn centre_x(width: u32, left: u32, right: u32) -> u32 {
+    let span = right.saturating_sub(left);
+    left.saturating_add(span.saturating_sub(width) / 2)
+}
+
 /// The side of the square icon slot a control reserves beside a line of text
 /// whose content height is `content_height`: the text line, never taller than
 /// the content.

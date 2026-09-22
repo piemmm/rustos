@@ -51,13 +51,15 @@ static CALL_ENDPOINTS: SpinLock<BTreeMap<EndpointId, Arc<CallEndpoint>>> =
     SpinLock::new(BTreeMap::new());
 
 /// Serialise a test that binds into or reads the process-global call-endpoint
-/// registry.
+/// registry, so no two tests hold the same endpoint id at once.
 ///
-/// Endpoints are torn down *by owner*, and a call's claimant is the caller's
-/// task — so two tests in the registry at once can cancel each other's
-/// in-flight calls, which surfaces as a reap answering "not found" for a
-/// ticket its own `call_post` had just minted. Distinct endpoint ids do not
-/// prevent it; only one test being in the registry at a time does.
+/// It does **not** keep a test's in-flight calls safe. Endpoints are torn
+/// down by owner and calls cancelled by poster, and both reach this registry
+/// from the `exit` path — which sibling tests drive holding no guard, so
+/// serialising the registry's residents cannot cover it. What does is a task
+/// id no other test can name: draw owner and poster ids from
+/// [`crate::test_boot::claim_task`] and
+/// [`crate::test_boot::claim_peer_task`].
 #[cfg(test)]
 pub(crate) fn registry_guard() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());

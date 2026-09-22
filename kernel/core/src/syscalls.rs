@@ -13473,18 +13473,19 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let task = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
         // Register a record so we can confirm `exit` evicts it even
         // though the scheduler half fails.
-        let record = make_caps_record(7, &[CapabilityId::FS_MOUNT], sink);
+        let record = make_caps_record(task, &[CapabilityId::FS_MOUNT], sink);
         table.write().insert(record);
         assert_eq!(table.read().len(), 1);
 
-        let caps = make_caps_record(7, &[CapabilityId::FS_MOUNT], sink);
+        let caps = make_caps_record(task, &[CapabilityId::FS_MOUNT], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(7),
+            task_id: SecTaskId(task),
             caps: &caps,
         };
 
@@ -13908,17 +13909,22 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let task = crate::test_boot::claim_task();
+        let peer = crate::test_boot::claim_peer_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
         // A producer task (7) holds a pipe pair and has fed it two bytes;
         // a peer (9) holds a cloned read end at its stdin, exactly as a
         // pipeline consumer is wired at spawn.
-        let (read_fd, write_fd) = aspaces.write().open_pipe(ProcessId(7)).expect("pair fits");
+        let (read_fd, write_fd) = aspaces
+            .write()
+            .open_pipe(ProcessId(task))
+            .expect("pair fits");
         {
             let reg = aspaces.read();
             let write = reg
-                .open_file_entry(ProcessId(7), write_fd)
+                .open_file_entry(ProcessId(task), write_fd)
                 .expect("write end");
             let OpenBacking::Pipe(end) = &write.backing else {
                 panic!("a pipe descriptor is pipe-backed");
@@ -13927,16 +13933,16 @@ mod tests {
         }
         let read = aspaces
             .read()
-            .open_file_entry(ProcessId(7), read_fd)
+            .open_file_entry(ProcessId(task), read_fd)
             .expect("read end");
         aspaces
             .write()
-            .install_std_entry(ProcessId(9), tairix_abi::STDIN, read)
+            .install_std_entry(ProcessId(peer), tairix_abi::STDIN, read)
             .expect("peer wired");
 
-        let caps = make_caps_record(7, &[], sink);
+        let caps = make_caps_record(task, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(7),
+            task_id: SecTaskId(task),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -13948,14 +13954,14 @@ mod tests {
         // streams, limits, and cwd with it)…
         assert!(aspaces
             .read()
-            .open_file_entry(ProcessId(7), write_fd)
+            .open_file_entry(ProcessId(task), write_fd)
             .is_none());
         // …and the peer drains the buffered bytes, then observes
         // end-of-stream: the dead producer's write end was dropped, so the
         // reader is never left waiting on a writer that no longer exists.
         let peer = aspaces
             .read()
-            .open_file_entry(ProcessId(9), tairix_abi::STDIN)
+            .open_file_entry(ProcessId(peer), tairix_abi::STDIN)
             .expect("peer entry");
         let OpenBacking::Pipe(end) = &peer.backing else {
             panic!("the peer's stdin is pipe-backed");
@@ -15612,11 +15618,12 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let task = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(9, &[CapabilityId::IRQ_BIND], sink);
+        let caps = make_caps_record(task, &[CapabilityId::IRQ_BIND], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(9),
+            task_id: SecTaskId(task),
             caps: &caps,
         };
 
@@ -21695,19 +21702,22 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let shell_task = crate::test_boot::claim_task();
+        let fg_task = crate::test_boot::claim_peer_task();
+        let second_child = crate::test_boot::claim_peer_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let shell_caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
+        let shell_caps = make_caps_record(shell_task, &[CapabilityId::CONSOLE_READ], sink);
         let shell = CallerContext {
-            task_id: SecTaskId(2),
+            task_id: SecTaskId(shell_task),
             caps: &shell_caps,
         };
-        let fg_caps = make_caps_record(9, &[], sink);
+        let fg_caps = make_caps_record(fg_task, &[], sink);
         let fg = CallerContext {
-            task_id: SecTaskId(9),
+            task_id: SecTaskId(fg_task),
             caps: &fg_caps,
         };
-        for task in [2u64, 9] {
+        for task in [shell_task, fg_task] {
             let (space, physmap) =
                 send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
             aspaces
@@ -21725,20 +21735,21 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9));
+        wait.register_child(ProcessId(shell_task), ProcessId(fg_task));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_consoles(consoles)
         .with_process_wait(wait);
-        for task in [2u64, 9] {
+        for task in [shell_task, fg_task] {
             aspaces
                 .write()
                 .set_streams(ProcessId(task), DescriptorTable::standard());
         }
 
         // The owner's own `exit` releases the ownership on the spot.
-        assert_eq!(h.console_foreground(&shell, STDIN, 9), Ok(0));
+        let fg_pid = i64::try_from(fg_task).expect("a claimed id fits a pid");
+        assert_eq!(h.console_foreground(&shell, STDIN, fg_pid), Ok(0));
         assert_eq!(h.exit(&fg, 0), Ok(0));
         assert_eq!(consoles[0].foreground(), None);
         assert_eq!(h.stream_read(&shell, STDIN, 0x1000, 16, 0), Ok(5));
@@ -21747,9 +21758,10 @@ mod tests {
         // its death behind the console's back (a kill that never ran the
         // exit handler), and the next refused reader proves it dead and
         // proceeds instead of being wedged.
-        wait.register_child(ProcessId(2), ProcessId(12));
-        assert_eq!(h.console_foreground(&shell, STDIN, 12), Ok(0));
-        wait.record_exit(ProcessId(12), 0);
+        wait.register_child(ProcessId(shell_task), ProcessId(second_child));
+        let second_pid = i64::try_from(second_child).expect("a claimed id fits a pid");
+        assert_eq!(h.console_foreground(&shell, STDIN, second_pid), Ok(0));
+        wait.record_exit(ProcessId(second_child), 0);
         assert_eq!(h.stream_read(&shell, STDIN, 0x1000, 16, 0), Ok(5));
         assert_eq!(consoles[0].foreground(), None);
     }
@@ -29146,11 +29158,12 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let task = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(7, &[], sink);
+        let caps = make_caps_record(task, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(7),
+            task_id: SecTaskId(task),
             caps: &caps,
         };
 
@@ -29167,7 +29180,7 @@ mod tests {
 
         assert_eq!(h.exit(&ctx, 42), Ok(0));
         // The producer saw this task's id and its exit code.
-        assert_eq!(*producer.last_exit.lock(), Some((7, 42)));
+        assert_eq!(*producer.last_exit.lock(), Some((task, 42)));
     }
 
     /// A **nonzero** `exit` additionally emits the stable
@@ -29184,11 +29197,12 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let task = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(9, &[], sink);
+        let caps = make_caps_record(task, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(9),
+            task_id: SecTaskId(task),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -29213,7 +29227,7 @@ mod tests {
         assert_eq!(exits[0].level, tairix_log::Level::Warn);
         assert!(exits[0]
             .fields
-            .contains(&(String::from("task"), String::from("9"))));
+            .contains(&(String::from("task"), alloc::format!("{task}"))));
         assert!(exits[0]
             .fields
             .contains(&(String::from("code"), String::from("81"))));
@@ -31184,17 +31198,21 @@ mod tests {
         );
         let limits =
             CpuFreqLimits::new(600_000_000, 1_500_000_000, 100_000_000).expect("a real range");
-        let driver = ProcessId(0x0C_B0);
+        let driver = ProcessId(crate::test_boot::claim_task());
         crate::cpufreq::with_mechanism_lock(|| {
             let _ = crate::cpufreq::release_process(driver);
             assert!(crate::cpufreq::bind(driver, limits, 1_000).is_ok());
             assert_eq!(
-                crate::cpufreq::bind(ProcessId(0x0C_B1), limits, 1_000),
+                crate::cpufreq::bind(
+                    ProcessId(crate::test_boot::claim_peer_task()),
+                    limits,
+                    1_000
+                ),
                 Err(Errno::AlreadyExists),
                 "the role is taken while the driver lives"
             );
             h.reclaim_process_resources(driver);
-            let replacement = ProcessId(0x0C_B2);
+            let replacement = ProcessId(crate::test_boot::claim_peer_task());
             assert!(
                 crate::cpufreq::bind(replacement, limits, 2_000).is_ok(),
                 "the reclaim must have freed the role"
@@ -32625,15 +32643,17 @@ mod tests {
         let (space, physmap) = call_aspace(b"ping");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let caller = crate::test_boot::claim_task();
+        let binder_task = crate::test_boot::claim_peer_task();
         aspaces
             .write()
-            .register(ProcessId(2), space, physmap)
+            .register(ProcessId(caller), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink); // lacks NET_RAW
+        let caps = make_caps_record(caller, &[], sink); // lacks NET_RAW
         let ctx = CallerContext {
-            task_id: SecTaskId(2),
+            task_id: SecTaskId(caller),
             caps: &caps,
         };
 
@@ -32641,7 +32661,7 @@ mod tests {
         // IPC_BIND_PRIVILEGED (required to bind a restricted endpoint).
         let id = 0xCA11_1003;
         let binder = make_caps_record(
-            1,
+            binder_task,
             &[CapabilityId::IPC_BIND_PRIVILEGED, CapabilityId::NET_RAW],
             sink,
         );
@@ -33213,15 +33233,16 @@ mod tests {
         let (space, physmap) = call_aspace(&one_cap_image(CapabilityId::IPC_ENDPOINT));
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let driver = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(9), space, physmap)
+            .register(ProcessId(driver), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(9, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        let caps = make_caps_record(driver, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(9),
+            task_id: SecTaskId(driver),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -33243,7 +33264,7 @@ mod tests {
         // Granted the duty discovery paired with that child, the same
         // driver binds it…
         aspaces.write().mint_grant(
-            ProcessId(9),
+            ProcessId(driver),
             tairix_abi::HwResource::bus_child(served, 0x68),
         );
         assert_eq!(
@@ -33403,11 +33424,9 @@ mod tests {
         let (space, physmap) = call_aspace(b"ping");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
-        // Owners unique to this test: the registry is process-global and this
-        // test tears endpoints down by owner.
-        let first_owner = 0x9E11_0001;
-        let second_owner = 0x9E11_0002;
-        let holder = 0x9E11_0003;
+        let first_owner = crate::test_boot::claim_task();
+        let second_owner = crate::test_boot::claim_peer_task();
+        let holder = crate::test_boot::claim_peer_task();
         aspaces
             .write()
             .register(ProcessId(holder), space, physmap)
@@ -33500,15 +33519,16 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let task = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(7), space, physmap)
+            .register(ProcessId(task), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(7, &[CapabilityId::SHM], sink);
+        let caps = make_caps_record(task, &[CapabilityId::SHM], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(7),
+            task_id: SecTaskId(task),
             caps: &caps,
         };
         let facility: &'static RecordingSharedFacility =
@@ -33527,7 +33547,11 @@ mod tests {
         );
         // The kernel-minted region id was written to `id_out` (page 2).
         let id_bytes = read_reply_page(
-            aspaces.read().resolve(ProcessId(7)).expect("registered").1,
+            aspaces
+                .read()
+                .resolve(ProcessId(task))
+                .expect("registered")
+                .1,
             8,
         );
         let id = u64::from_le_bytes(id_bytes.try_into().expect("8 bytes"));
@@ -33536,12 +33560,12 @@ mod tests {
         // not covered (the grant is scoped to one region).
         assert!(aspaces
             .read()
-            .grant_covers(ProcessId(7), &tairix_abi::HwResource::shared(id)));
+            .grant_covers(ProcessId(task), &tairix_abi::HwResource::shared(id)));
         assert!(!aspaces
             .read()
-            .grant_covers(ProcessId(7), &tairix_abi::HwResource::shared(id + 1)));
+            .grant_covers(ProcessId(task), &tairix_abi::HwResource::shared(id + 1)));
         // Cleanup so the global region registry does not leak across tests.
-        let _ = crate::sharedreg::unmap(facility, ProcessId(7), va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(task), va);
     }
 
     /// A mapping syscall publishes **its own region's** pages; it never
@@ -33578,11 +33602,13 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let mapper = crate::test_boot::claim_task();
+        let region_owner = crate::test_boot::claim_peer_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(21, &[CapabilityId::SHM], sink);
+        let caps = make_caps_record(mapper, &[CapabilityId::SHM], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(21),
+            task_id: SecTaskId(mapper),
             caps: &caps,
         };
 
@@ -33591,7 +33617,7 @@ mod tests {
         let (space, physmap) = frozen_call_aspace(b"");
         aspaces
             .write()
-            .register(ProcessId(21), space, physmap)
+            .register(ProcessId(mapper), space, physmap)
             .expect("registration succeeds");
 
         // Its live space: the same window, a large resident set, and the
@@ -33606,10 +33632,10 @@ mod tests {
         let facility: &'static RecordingSharedFacility =
             Box::leak(Box::new(RecordingSharedFacility { va: REGION_VA }));
         let (owner_va, id) =
-            crate::sharedreg::create(facility, ProcessId(22), 1).expect("region created");
+            crate::sharedreg::create(facility, ProcessId(region_owner), 1).expect("region created");
         let handle = aspaces
             .write()
-            .mint_grant(ProcessId(21), tairix_abi::HwResource::shared(id));
+            .mint_grant(ProcessId(mapper), tairix_abi::HwResource::shared(id));
 
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -33623,7 +33649,7 @@ mod tests {
         );
         let snapshot = || {
             let held = aspaces.read();
-            let (space, _) = held.resolve(ProcessId(21)).expect("registered");
+            let (space, _) = held.resolve(ProcessId(mapper)).expect("registered");
             (space.translate(region_page).is_some(), space.mapped_pages())
         };
         assert_eq!(
@@ -33649,7 +33675,7 @@ mod tests {
         );
 
         // Cleanup so the global region registry does not leak across tests.
-        let _ = crate::sharedreg::unmap(facility, ProcessId(22), owner_va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(region_owner), owner_va);
     }
 
     /// `shm_map` fails closed for a forged handle (`NotFound`) and for a grant
@@ -33707,15 +33733,17 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let mapper = crate::test_boot::claim_task();
+        let region_owner = crate::test_boot::claim_peer_task();
         aspaces
             .write()
-            .register(ProcessId(9), space, physmap)
+            .register(ProcessId(mapper), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(9, &[CapabilityId::SHM], sink);
+        let caps = make_caps_record(mapper, &[CapabilityId::SHM], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(9),
+            task_id: SecTaskId(mapper),
             caps: &caps,
         };
         let facility: &'static RecordingSharedFacility =
@@ -33727,24 +33755,28 @@ mod tests {
 
         // A two-page region another task created; the caller was granted it.
         let (owner_va, id) =
-            crate::sharedreg::create(facility, ProcessId(10), 2).expect("region created");
+            crate::sharedreg::create(facility, ProcessId(region_owner), 2).expect("region created");
         let handle = aspaces
             .write()
-            .mint_grant(ProcessId(9), tairix_abi::HwResource::shared(id));
+            .mint_grant(ProcessId(mapper), tairix_abi::HwResource::shared(id));
 
         let va = h.shm_map(&ctx, handle, 0x2000).expect("shm_map succeeds");
         assert_eq!(va, 0x2_0000_3000, "the mapped base flows back");
         // The region's byte length — two whole pages, the registry's own
         // record — was written to `len_out` (page 2).
         let len_bytes = read_reply_page(
-            aspaces.read().resolve(ProcessId(9)).expect("registered").1,
+            aspaces
+                .read()
+                .resolve(ProcessId(mapper))
+                .expect("registered")
+                .1,
             8,
         );
         let len = u64::from_le_bytes(len_bytes.try_into().expect("8 bytes"));
         assert_eq!(len, 2 * PAGE_SIZE as u64);
         // Cleanup so the global region registry does not leak across tests.
-        let _ = crate::sharedreg::unmap(facility, ProcessId(9), va);
-        let _ = crate::sharedreg::unmap(facility, ProcessId(10), owner_va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(mapper), va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(region_owner), owner_va);
     }
 
     /// `shm_grant` delegates a mapping right only for a region the caller
@@ -33762,11 +33794,14 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let holder = crate::test_boot::claim_task();
+        let server = crate::test_boot::claim_peer_task();
+        let stranger = crate::test_boot::claim_peer_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(7, &[CapabilityId::SHM], sink);
+        let caps = make_caps_record(holder, &[CapabilityId::SHM], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(7),
+            task_id: SecTaskId(holder),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -33782,12 +33817,12 @@ mod tests {
         // unknown: still refused, nothing minted.
         let _own = aspaces
             .write()
-            .mint_grant(ProcessId(7), tairix_abi::HwResource::shared(42));
+            .mint_grant(ProcessId(holder), tairix_abi::HwResource::shared(42));
         assert_eq!(h.shm_grant(&ctx, 42, 0xD15_2001), Err(Errno::NotFound));
 
         // A live endpoint owned by the service task: the grant lands on the
         // endpoint's *server*, resolved kernel-side at grant time.
-        let server_caps = make_caps_record(0x5707, &[], sink);
+        let server_caps = make_caps_record(server, &[], sink);
         let id = 0xD15_2001;
         let ep = Arc::new(
             CallEndpoint::create(
@@ -33808,12 +33843,12 @@ mod tests {
         let handle = h.shm_grant(&ctx, 42, id).expect("grant mints a handle");
         // The recipient resolves it to exactly the shared region…
         assert_eq!(
-            aspaces.read().grant(ProcessId(0x5707), handle),
+            aspaces.read().grant(ProcessId(server), handle),
             Some(tairix_abi::HwResource::shared(42))
         );
         // …and the handle is meaningless when presented by anyone else
         // (owner-checked at `shm_map`; the number is useless to a bystander).
-        assert_eq!(aspaces.read().grant(ProcessId(9), handle), None);
+        assert_eq!(aspaces.read().grant(ProcessId(stranger), handle), None);
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -33834,8 +33869,8 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x6A11_0007, &[CapabilityId::IPC_ENDPOINT], sink);
-        let donor = SecTaskId(0x6A11_0007);
+        let donor = SecTaskId(crate::test_boot::claim_task());
+        let caps = make_caps_record(donor.0, &[CapabilityId::IPC_ENDPOINT], sink);
         let ctx = CallerContext {
             task_id: donor,
             caps: &caps,
@@ -33861,7 +33896,7 @@ mod tests {
         // A live recipient endpoint owned by the composing service: the
         // grant lands on that endpoint's *server*, resolved kernel-side at
         // grant time rather than from a caller-supplied pid.
-        let composer = 0x6A11_C0FF;
+        let composer = crate::test_boot::claim_peer_task();
         let server_caps = make_caps_record(composer, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
@@ -34657,6 +34692,8 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let server = crate::test_boot::claim_peer_task();
+        let foreign = crate::test_boot::claim_peer_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
@@ -34665,7 +34702,7 @@ mod tests {
         let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
 
         let id = 0xCA11_5EA7;
-        let server_caps = make_caps_record(0x5708, &[], sink);
+        let server_caps = make_caps_record(server, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -34694,7 +34731,7 @@ mod tests {
             .expect("posted");
 
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5708),
+            task_id: SecTaskId(server),
             caps: &server_caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -34715,9 +34752,9 @@ mod tests {
 
         // A foreign reader (not the endpoint's owner) is denied before any
         // seat state is read.
-        let foreign_caps = make_caps_record(8, &[], sink);
+        let foreign_caps = make_caps_record(foreign, &[], sink);
         let foreign_ctx = CallerContext {
-            task_id: SecTaskId(8),
+            task_id: SecTaskId(foreign),
             caps: &foreign_caps,
         };
         assert_eq!(
@@ -34768,6 +34805,8 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        let other = crate::test_boot::claim_peer_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let queue: &'static crate::console::ConsoleInputQueue =
@@ -34776,9 +34815,9 @@ mod tests {
         // Task ids unique to this test: the wait-set registry is process-
         // global, and another test asserts the exact count of sets it
         // releases for its own task id.
-        let caps = make_caps_record(0x5709, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5709),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -34801,14 +34840,14 @@ mod tests {
             Err(Errno::NotFound)
         );
         // The live owner may observe its seat.
-        seat.acquire(SEAT_PRIMARY, SeatOwner(0x5709))
+        seat.acquire(SEAT_PRIMARY, SeatOwner(owner))
             .expect("seat acquired");
         assert_eq!(h.waitset_ctl(&ctx, ws, add, kind, SEAT_PRIMARY, 0xA), Ok(0));
         // A different task cannot observe someone else's seat, even knowing
         // its id — the same oracle-free refusal.
-        let other_caps = make_caps_record(0x570A, &[], sink);
+        let other_caps = make_caps_record(other, &[], sink);
         let other_ctx = CallerContext {
-            task_id: SecTaskId(0x570A),
+            task_id: SecTaskId(other),
             caps: &other_caps,
         };
         let other_set = h.waitset_create(&other_ctx).expect("wait-set minted");
@@ -34818,9 +34857,9 @@ mod tests {
         );
         // Cleanup: the wait-set registry is process-global, so this test
         // releases exactly the sets it minted, and the seat lease with them.
-        assert_eq!(crate::waitset::release_owned_by(0x5709), 1);
-        assert_eq!(crate::waitset::release_owned_by(0x570A), 1);
-        seat.release(SEAT_PRIMARY, SeatOwner(0x5709), ReleaseSurface::Text)
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+        assert_eq!(crate::waitset::release_owned_by(other), 1);
+        seat.release(SEAT_PRIMARY, SeatOwner(owner), ReleaseSurface::Text)
             .expect("seat released");
     }
 
@@ -34837,13 +34876,14 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         // Task id unique to this test: the wait-set registry and the
         // signal-intake map are process-global.
-        let caps = make_caps_record(0x570B, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x570B),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -34867,8 +34907,8 @@ mod tests {
             Ok(0)
         );
         // Cleanup: the registries are process-global.
-        assert_eq!(crate::waitset::release_owned_by(0x570B), 1);
-        crate::procsignal::clear_intake(0x570B);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+        crate::procsignal::clear_intake(owner);
     }
 
     /// A pending observed signal makes `waitset_wait` report the `Signal`
@@ -34885,15 +34925,16 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x570C), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x570C, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x570C),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -34915,12 +34956,12 @@ mod tests {
 
         // A delivery records the pending observation; the member reports
         // ready and its token is written out.
-        assert!(crate::procsignal::try_intake(0x570C, Signal::Interrupt));
+        assert!(crate::procsignal::try_intake(owner, Signal::Interrupt));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x570C))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -34938,8 +34979,8 @@ mod tests {
         // Drained: the next wait expires again.
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
         // Cleanup: the registries are process-global.
-        assert_eq!(crate::waitset::release_owned_by(0x570C), 1);
-        crate::procsignal::clear_intake(0x570C);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+        crate::procsignal::clear_intake(owner);
     }
 
     /// `shm_create` on a build with no shared-memory facility wired fails
@@ -35137,11 +35178,12 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5701, &[CapabilityId::IRQ_BIND], sink);
+        let caps = make_caps_record(owner, &[CapabilityId::IRQ_BIND], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5701),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -35153,7 +35195,7 @@ mod tests {
             .expect("add irq member");
         // The line has not fired: a zero-timeout wait expires without writing.
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
-        assert_eq!(crate::waitset::release_owned_by(0x5701), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// A fired IRQ member makes `waitset_wait` report that member's token and
@@ -35230,13 +35272,14 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         // No capability at all: learning that the machine is short of
         // memory is ungated, exactly like reading the load average.
-        let caps = make_caps_record(0x5901, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5901),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -35271,7 +35314,7 @@ mod tests {
                 Err(Errno::AlreadyExists)
             );
         }
-        assert_eq!(crate::waitset::release_owned_by(0x5901), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// A band change makes `waitset_wait` report the pressure member's
@@ -35293,15 +35336,16 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5902), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5902, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5902),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -35339,7 +35383,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x5902))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -35360,7 +35404,7 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
-        assert_eq!(crate::waitset::release_owned_by(0x5902), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// The desktop notice's authority *is* the seat's live display lease —
@@ -35552,16 +35596,17 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5A03), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5A03, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5A03),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -35616,7 +35661,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x5A03))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -35627,7 +35672,7 @@ mod tests {
         );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
-        assert_eq!(crate::waitset::release_owned_by(0x5A03), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// A pending request on a member endpoint makes `waitset_wait` report that
@@ -35645,22 +35690,24 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        let client = crate::test_boot::claim_peer_task();
         aspaces
             .write()
-            .register(ProcessId(0x5702), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5702, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5702),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
 
         // An unrestricted endpoint owned by the caller (task 7), with a posted
         // request waiting to be received (so `has_pending()` is true).
         let id = 0xCA11_5001;
-        let creator = make_caps_record(0x5702, &[], sink);
+        let creator = make_caps_record(owner, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -35677,8 +35724,8 @@ mod tests {
             .expect("endpoint"),
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
-        let poster = make_caps_record(99, &[], sink);
-        ep.post(&poster, 99, b"x", u64::MAX, sink)
+        let poster = make_caps_record(client, &[], sink);
+        ep.post(&poster, client, b"x", u64::MAX, sink)
             .expect("post a request");
 
         let h = KernelSyscallHandlers::new(
@@ -35694,7 +35741,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x5702))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -35710,7 +35757,7 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
         crate::callreg::unregister(EndpointId(id));
-        assert_eq!(crate::waitset::release_owned_by(0x5702), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// Two members ready at once are reported in turn, not by registration
@@ -35734,24 +35781,26 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        let client = crate::test_boot::claim_peer_task();
         aspaces
             .write()
-            .register(ProcessId(0x5F03), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5F03, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5F03),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
 
         // Two endpoints the caller owns, each left holding an undrained
         // request, so both members stay ready across every wait.
-        let poster = make_caps_record(99, &[], sink);
+        let poster = make_caps_record(client, &[], sink);
         let mut endpoints = Vec::new();
         for id in [0xCA11_6001_u64, 0xCA11_6002] {
-            let creator = make_caps_record(0x5F03, &[], sink);
+            let creator = make_caps_record(owner, &[], sink);
             let ep = Arc::new(
                 CallEndpoint::create(
                     EndpointId(id),
@@ -35768,7 +35817,7 @@ mod tests {
                 .expect("endpoint"),
             );
             crate::callreg::register(ep.clone(), sink).expect("registered");
-            ep.post(&poster, 99, b"x", u64::MAX, sink)
+            ep.post(&poster, client, b"x", u64::MAX, sink)
                 .expect("post a request");
             endpoints.push(ep);
         }
@@ -35787,7 +35836,7 @@ mod tests {
             let bytes = read_reply_page(
                 aspaces
                     .read()
-                    .resolve(ProcessId(0x5F03))
+                    .resolve(ProcessId(owner))
                     .expect("registered")
                     .1,
                 8,
@@ -35805,7 +35854,7 @@ mod tests {
             crate::callreg::unregister(EndpointId(id));
         }
         drop(endpoints);
-        assert_eq!(crate::waitset::release_owned_by(0x5F03), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// A `CallReply` wait-set member reports ready when the reply to a
@@ -35824,19 +35873,20 @@ mod tests {
         let (space, physmap) = call_aspace(b"ping");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5B09), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5B09, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5B09),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
 
-        // An unrestricted endpoint the client (task 0x5B09) may post to.
+        // An unrestricted endpoint the client may post to.
         let id = 0xCA11_5009;
         let ep = register_call_endpoint(id, sink);
         let h = KernelSyscallHandlers::new(
@@ -35848,7 +35898,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(ProcessId(0x5B09)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(owner)).expect("aspace present");
             read_ticket(physmap)
         };
         let set = h.waitset_create(&ctx).expect("create");
@@ -35872,7 +35922,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x5B09))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -35886,7 +35936,7 @@ mod tests {
         assert_eq!(h.call_reap(&ctx, id, ticket, 0x2000, 64), Ok(4));
 
         crate::callreg::unregister(EndpointId(id));
-        assert_eq!(crate::waitset::release_owned_by(0x5B09), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// A `CallReply` member also reports ready when its request's per-request
@@ -35906,15 +35956,16 @@ mod tests {
         let (space, physmap) = call_aspace(b"ping");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5B0A), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5B0A, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5B0A),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let id = 0xCA11_500A;
@@ -35927,7 +35978,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, 100), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(ProcessId(0x5B0A)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(owner)).expect("aspace present");
             read_ticket(physmap)
         };
         let set = h.waitset_create(&ctx).expect("create");
@@ -35949,7 +36000,7 @@ mod tests {
         );
 
         crate::callreg::unregister(EndpointId(id));
-        assert_eq!(crate::waitset::release_owned_by(0x5B0A), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// A `CallReply` member whose endpoint is torn down while a request is
@@ -35976,15 +36027,16 @@ mod tests {
         let (space, physmap) = call_aspace(b"ping");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5B0B), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5B0B, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5B0B),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let id = 0xCA11_500B;
@@ -35998,7 +36050,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(ProcessId(0x5B0B)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(owner)).expect("aspace present");
             read_ticket(physmap)
         };
         let set = h.waitset_create(&ctx).expect("create");
@@ -36023,7 +36075,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x5B0B))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -36039,7 +36091,7 @@ mod tests {
             Err(Errno::NotFound)
         );
 
-        assert_eq!(crate::waitset::release_owned_by(0x5B0B), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// `port_bind` binds a port owned by the kernel-trusted caller, refuses
@@ -36154,15 +36206,16 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5707), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5707, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5707),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -36197,7 +36250,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x5707))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -36212,9 +36265,9 @@ mod tests {
         assert_eq!(h.ipc_recv(&ctx, id, 0x1000, 64, 0x1800), Ok(4));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
-        ipc.write().teardown_owned_by(0x5707, sink);
+        ipc.write().teardown_owned_by(owner, sink);
         ipc.write().teardown_owned_by(0xF0F0, sink);
-        assert_eq!(crate::waitset::release_owned_by(0x5707), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// A `PortRoom` member is the send side of the same mailbox: quiet while
@@ -36232,15 +36285,16 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5710), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5710, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5710),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -36283,7 +36337,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x5710))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -36295,7 +36349,7 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
 
         ipc.write().teardown_owned_by(0xF0F2, sink);
-        assert_eq!(crate::waitset::release_owned_by(0x5710), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// Observing a port's room is admitted by the caller's *send* authority
@@ -36319,23 +36373,24 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5712), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5712, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5712),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         // The same task holding the capability the port demands of its
         // senders, so the add is authorised and the wait after it is not,
         // without changing the wait-set's owner.
-        let raw_caps = make_caps_record(0x5712, &[CapabilityId::NET_RAW], sink);
+        let raw_caps = make_caps_record(owner, &[CapabilityId::NET_RAW], sink);
         let raw = CallerContext {
-            task_id: SecTaskId(0x5712),
+            task_id: SecTaskId(owner),
             caps: &raw_caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -36400,7 +36455,7 @@ mod tests {
         ipc.write().teardown_owned_by(0xF0F3, sink);
         assert_eq!(h.waitset_wait(&raw, set, 0, 0x2000), Ok(0));
 
-        assert_eq!(crate::waitset::release_owned_by(0x5712), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// Adding a `Stream` wait-set member is owner- and descriptor-checked
@@ -36417,15 +36472,12 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        // Task ids unique to this test: the wait-set registry is process-
-        // global and another test asserts the exact count of sets it
-        // releases for its own task id, so this owner id must differ from
-        // every other test's (0x570B is the signal-intake test's).
-        let caps = make_caps_record(0x570E, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x570E),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -36444,7 +36496,7 @@ mod tests {
         let file_fd = aspaces
             .write()
             .open_file(
-                ProcessId(0x570E),
+                ProcessId(owner),
                 alloc::string::String::from("/Storage/x"),
                 OpenFlags::READ,
             )
@@ -36455,7 +36507,7 @@ mod tests {
         );
         let (read_fd, write_fd) = aspaces
             .write()
-            .open_pipe(ProcessId(0x570E))
+            .open_pipe(ProcessId(owner))
             .expect("pipe minted");
 
         let set = h.waitset_create(&ctx).expect("create");
@@ -36485,7 +36537,7 @@ mod tests {
         .expect("add own pipe read end");
 
         // Cleanup: this test's own sets and tables only.
-        assert_eq!(crate::waitset::release_owned_by(0x570E), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
         assert!(aspaces.write().withdraw(ProcessId(0x570C)));
     }
 
@@ -36504,15 +36556,16 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x570D), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x570D, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x570D),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -36521,7 +36574,7 @@ mod tests {
 
         let (read_fd, write_fd) = aspaces
             .write()
-            .open_pipe(ProcessId(0x570D))
+            .open_pipe(ProcessId(owner))
             .expect("pipe minted");
         let set = h.waitset_create(&ctx).expect("create");
         h.waitset_ctl(
@@ -36542,7 +36595,7 @@ mod tests {
         // drains it.
         let write_end = aspaces
             .read()
-            .open_file_entry(ProcessId(0x570D), write_fd)
+            .open_file_entry(ProcessId(owner), write_fd)
             .and_then(|entry| entry.pipe().cloned())
             .expect("write end resolves");
         assert_eq!(
@@ -36553,7 +36606,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x570D))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -36567,7 +36620,7 @@ mod tests {
         // The owner's read drains the bytes; the member goes quiet again.
         let read_end = aspaces
             .read()
-            .open_file_entry(ProcessId(0x570D), read_fd)
+            .open_file_entry(ProcessId(owner), read_fd)
             .and_then(|entry| entry.pipe().cloned())
             .expect("read end resolves");
         let mut out = [0u8; 8];
@@ -36577,13 +36630,13 @@ mod tests {
         // Closing every write end leaves the member ready for its EOF
         // read (the shell-exited wake), never parked forever.
         drop(write_end);
-        assert!(aspaces.write().close_file(ProcessId(0x570D), write_fd));
+        assert!(aspaces.write().close_file(ProcessId(owner), write_fd));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Eof);
 
         // Cleanup: this test's own sets and tables only.
-        assert_eq!(crate::waitset::release_owned_by(0x570D), 1);
-        assert!(aspaces.write().withdraw(ProcessId(0x570D)));
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+        assert!(aspaces.write().withdraw(ProcessId(owner)));
     }
 
     /// Adding a `StreamRoom` member is owner- and descriptor-checked
@@ -36601,14 +36654,15 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         // A task id unique to this test: the wait-set registry is
         // process-global and other tests assert the exact count of sets
         // released for their own owner.
-        let caps = make_caps_record(0x5714, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5714),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -36625,14 +36679,14 @@ mod tests {
         let file_fd = aspaces
             .write()
             .open_file(
-                ProcessId(0x5714),
+                ProcessId(owner),
                 alloc::string::String::from("/Storage/x"),
                 OpenFlags::WRITE,
             )
             .expect("file opened");
         let (read_fd, write_fd) = aspaces
             .write()
-            .open_pipe(ProcessId(0x5714))
+            .open_pipe(ProcessId(owner))
             .expect("pipe minted");
 
         let set = h.waitset_create(&ctx).expect("create");
@@ -36670,8 +36724,8 @@ mod tests {
         .expect("add own pipe read end");
 
         // Cleanup: this test's own sets and tables only.
-        assert_eq!(crate::waitset::release_owned_by(0x5714), 1);
-        assert!(aspaces.write().withdraw(ProcessId(0x5714)));
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+        assert!(aspaces.write().withdraw(ProcessId(owner)));
         assert!(aspaces.write().withdraw(ProcessId(0x5715)));
     }
 
@@ -36693,15 +36747,16 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5716), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5716, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5716),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -36710,7 +36765,7 @@ mod tests {
 
         let (read_fd, write_fd) = aspaces
             .write()
-            .open_pipe(ProcessId(0x5716))
+            .open_pipe(ProcessId(owner))
             .expect("pipe minted");
         let set = h.waitset_create(&ctx).expect("create");
         h.waitset_ctl(
@@ -36729,7 +36784,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x5716))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -36743,7 +36798,7 @@ mod tests {
         // A full ring goes quiet: a zero-timeout wait expires.
         let write_end = aspaces
             .read()
-            .open_file_entry(ProcessId(0x5716), write_fd)
+            .open_file_entry(ProcessId(owner), write_fd)
             .and_then(|entry| entry.pipe().cloned())
             .expect("write end resolves");
         let chunk = alloc::vec![0xABu8; crate::pipe::PIPE_CAPACITY];
@@ -36757,7 +36812,7 @@ mod tests {
         // edge a parent with queued bytes has no other way to hear about.
         let read_end = aspaces
             .read()
-            .open_file_entry(ProcessId(0x5716), read_fd)
+            .open_file_entry(ProcessId(owner), read_fd)
             .and_then(|entry| entry.pipe().cloned())
             .expect("read end resolves");
         let mut out = alloc::vec![0u8; 64];
@@ -36772,18 +36827,18 @@ mod tests {
         );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
         drop(read_end);
-        assert!(aspaces.write().close_file(ProcessId(0x5716), read_fd));
+        assert!(aspaces.write().close_file(ProcessId(owner), read_fd));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         assert_eq!(write_end.try_write(b"x"), crate::pipe::WriteStep::Broken);
 
         // A closed write descriptor simply stops reporting, never errs.
         drop(write_end);
-        assert!(aspaces.write().close_file(ProcessId(0x5716), write_fd));
+        assert!(aspaces.write().close_file(ProcessId(owner), write_fd));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
         // Cleanup: this test's own sets and tables only.
-        assert_eq!(crate::waitset::release_owned_by(0x5716), 1);
-        assert!(aspaces.write().withdraw(ProcessId(0x5716)));
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+        assert!(aspaces.write().withdraw(ProcessId(owner)));
     }
 
     /// Task-exit reclamation tears down every port the dead task bound:
@@ -36800,11 +36855,12 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let task = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5708, &[], sink);
+        let caps = make_caps_record(task, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5708),
+            task_id: SecTaskId(task),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -36816,7 +36872,7 @@ mod tests {
         // Another task's port survives the reclaim untouched.
         register_port_for(&ipc, 0x5EAD_0022, 0xF0F1, sink);
 
-        h.reclaim_process_resources(ProcessId(0x5708));
+        h.reclaim_process_resources(ProcessId(task));
         assert!(ipc.read().lookup(EndpointId(id)).is_none());
         assert!(ipc.read().lookup(EndpointId(0x5EAD_0022)).is_some());
 
@@ -36841,11 +36897,12 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5703, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5703),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
 
@@ -36862,7 +36919,7 @@ mod tests {
 
         // With the producer installed and child 21 registered to the caller.
         let pw = TableWait::leaked();
-        pw.register_child(ProcessId(0x5703), ProcessId(21));
+        pw.register_child(ProcessId(owner), ProcessId(21));
         pw.register_child(ProcessId(0x9999), ProcessId(22));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -36897,7 +36954,7 @@ mod tests {
             Ok(0)
         );
 
-        assert_eq!(crate::waitset::release_owned_by(0x5703), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// A reapable child makes `waitset_wait` report the `Child` member's
@@ -36915,19 +36972,20 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5704), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(0x5704, &[], sink);
+        let caps = make_caps_record(owner, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5704),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let pw = TableWait::leaked();
-        pw.register_child(ProcessId(0x5704), ProcessId(21));
+        pw.register_child(ProcessId(owner), ProcessId(21));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -36952,7 +37010,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(ProcessId(0x5704))
+                .resolve(ProcessId(owner))
                 .expect("registered")
                 .1,
             8,
@@ -36967,7 +37025,7 @@ mod tests {
         // the `wait` syscall's NONBLOCK form performs after the wake.
         assert_eq!(
             pw.poll(
-                ProcessId(0x5704),
+                ProcessId(owner),
                 tairix_abi::WAIT_PID_ANY,
                 WaitFlags::NONBLOCK
             ),
@@ -36978,7 +37036,7 @@ mod tests {
         );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
-        assert_eq!(crate::waitset::release_owned_by(0x5704), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// `call_recv` / `call_reply` against an unbound id fail closed with
@@ -37033,12 +37091,14 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let creator_task = crate::test_boot::claim_task();
+        let caller = crate::test_boot::claim_peer_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
         // The endpoint requires CAP_AUDIT_READ to serve; its creator holds it.
         let id = 0xCA11_3002;
-        let creator = make_caps_record(1, &[CapabilityId::AUDIT_READ], sink);
+        let creator = make_caps_record(creator_task, &[CapabilityId::AUDIT_READ], sink);
         let mut recv_caps = CapabilitySet::empty();
         recv_caps.insert(CapabilityId::AUDIT_READ);
         let ep = Arc::new(
@@ -37059,9 +37119,9 @@ mod tests {
         crate::callreg::register(ep, sink).expect("registered");
 
         // The caller (task 2) does not hold CAP_AUDIT_READ.
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(caller, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(2),
+            task_id: SecTaskId(caller),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -37089,20 +37149,22 @@ mod tests {
         let (space, physmap) = server_aspace(b"pong");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let server = crate::test_boot::claim_task();
+        let client = crate::test_boot::claim_peer_task();
         // The server task owns the endpoint, so the aspace and the owner id
         // are the same task. The id is unique to this test: the endpoint
         // registry is process-global, and an `exit` test for a shared id
         // running in parallel would tear this endpoint down mid-receive.
         aspaces
             .write()
-            .register(ProcessId(0x5705), space, physmap)
+            .register(ProcessId(server), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
         // Build the endpoint owned by the server task.
         let id = 0xCA11_3003;
-        let server_caps = make_caps_record(0x5705, &[], sink);
+        let server_caps = make_caps_record(server, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -37121,13 +37183,13 @@ mod tests {
         crate::callreg::register(ep.clone(), sink).expect("registered");
 
         // A client (task 7) posts a request, awaiting its reply.
-        let client_caps = make_caps_record(7, &[], sink);
+        let client_caps = make_caps_record(client, &[], sink);
         let ticket = ep
-            .post(&client_caps, 7, b"ping", u64::MAX, sink)
+            .post(&client_caps, client, b"ping", u64::MAX, sink)
             .expect("posted");
 
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5705),
+            task_id: SecTaskId(server),
             caps: &server_caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -37140,7 +37202,7 @@ mod tests {
             .expect("received");
         assert_eq!(got, 4);
         let guard = aspaces.read();
-        let (_space, physmap) = guard.resolve(ProcessId(0x5705)).expect("aspace present");
+        let (_space, physmap) = guard.resolve(ProcessId(server)).expect("aspace present");
         assert_eq!(read_server_page(physmap, 1, 4), b"ping");
         let ticket_bytes = read_server_page(physmap, 2, 8);
         let recv_ticket = u64::from_le_bytes(ticket_bytes.try_into().expect("8 bytes"));
@@ -37150,7 +37212,7 @@ mod tests {
         // `call_reply` sends page 3's payload back and completes the ticket.
         assert_eq!(h.call_reply(&ctx, id, recv_ticket, 0x3000, 4), Ok(0));
         // The client claims its reply exactly once.
-        match ep.take_reply(7, CallTicket(recv_ticket), 0, sink) {
+        match ep.take_reply(client, CallTicket(recv_ticket), 0, sink) {
             ReplyOutcome::Ready(bytes) => assert_eq!(bytes.as_bytes(), b"pong"),
             other => panic!("expected a ready reply, got {other:?}"),
         }
@@ -37172,16 +37234,18 @@ mod tests {
         let (space, physmap) = server_aspace(b"idle");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        let server = crate::test_boot::claim_task();
+        let client = crate::test_boot::claim_peer_task();
         // Unique server task + endpoint id (the registry is process-global).
         aspaces
             .write()
-            .register(ProcessId(0x5707), space, physmap)
+            .register(ProcessId(server), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
         let id = 0xCA11_5005;
-        let server_caps = make_caps_record(0x5707, &[], sink);
+        let server_caps = make_caps_record(server, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -37200,7 +37264,7 @@ mod tests {
         crate::callreg::register(ep.clone(), sink).expect("registered");
 
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5707),
+            task_id: SecTaskId(server),
             caps: &server_caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -37214,9 +37278,9 @@ mod tests {
         );
 
         // A queued request is still drained normally in the same mode.
-        let client_caps = make_caps_record(7, &[], sink);
+        let client_caps = make_caps_record(client, &[], sink);
         let _ = ep
-            .post(&client_caps, 7, b"ping", u64::MAX, sink)
+            .post(&client_caps, client, b"ping", u64::MAX, sink)
             .expect("posted");
         let got = h
             .call_recv(&ctx, id, 0x1000, 64, 0x2000, CallRecvFlags::NON_BLOCKING)
@@ -37244,17 +37308,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
-        // Unique server *owner* task id + endpoint id (the call-endpoint
-        // registry `crate::callreg` is process-global, so both must be
-        // unique across the whole test binary — see the client-id note
-        // below). The owner id in particular must not collide with any id a
-        // sibling test reclaims: `reclaim_process_resources` scrubs the global
-        // registry by owner (`callreg::teardown_owned_by`), so a sibling
-        // reclaiming a shared owner id (e.g. the widely-reused `0x5708`)
-        // would destroy this test's endpoint between the post and the
-        // assert. Hence a dedicated owner id no other test reclaims.
         let id = 0xCA11_6006;
-        let server_caps = make_caps_record(0x600D_6006, &[], sink);
+        let server_caps = make_caps_record(crate::test_boot::claim_task(), &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -37273,13 +37328,7 @@ mod tests {
         crate::callreg::register(ep.clone(), sink).expect("registered");
 
         // A client posts and is then killed before the server receives.
-        // The poster task id must be unique to this test, not a small
-        // shared constant: `reclaim_process_resources` scrubs the poster's
-        // calls across the *process-global* endpoint registry, so a
-        // sibling test reusing the same id and reclaiming it in parallel
-        // would cancel this call between the post and the assert. The
-        // endpoint id is already made unique for the same reason.
-        let client = 0x6009_1234;
+        let client = crate::test_boot::claim_peer_task();
         let client_caps = make_caps_record(client, &[], sink);
         let _ = ep
             .post(&client_caps, client, b"stale", u64::MAX, sink)
@@ -37313,19 +37362,21 @@ mod tests {
         let (space, physmap) = server_aspace(b"unused");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
-        // The server task owns both the aspace and the endpoint. The id is
-        // unique to this test: the endpoint registry is process-global, and
-        // an `exit` test for a shared id running in parallel would tear this
-        // endpoint down mid-receive.
+        // The server task owns both the aspace and the endpoint, and the
+        // client posts under its own id. All three are minted: the endpoint
+        // registry is process-global and an `exit` test reclaiming a
+        // hand-picked id in parallel would tear this endpoint down
+        // mid-receive or cancel the call between the receive and the assert.
+        let server = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(0x5706), space, physmap)
+            .register(ProcessId(server), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
 
         let id = 0xCA11_4004;
-        let server_caps = make_caps_record(0x5706, &[], sink);
+        let server_caps = make_caps_record(server, &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -37343,17 +37394,18 @@ mod tests {
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
 
-        // A client (task 7) with a minted process instance and a real
-        // capability posts a request.
-        let client_caps = make_caps_record(7, &[CapabilityId::SYSINFO_GLOBAL], sink)
+        // A client with a minted process instance and a real capability
+        // posts a request.
+        let client = crate::test_boot::claim_peer_task();
+        let client_caps = make_caps_record(client, &[CapabilityId::SYSINFO_GLOBAL], sink)
             .with_proc_id(ProcId::from_raw([0x71; 16]));
         let expected = client_caps.attest_origin();
         let ticket = ep
-            .post(&client_caps, 7, b"who-am-i", u64::MAX, sink)
+            .post(&client_caps, client, b"who-am-i", u64::MAX, sink)
             .expect("posted");
 
         let ctx = CallerContext {
-            task_id: SecTaskId(0x5706),
+            task_id: SecTaskId(server),
             caps: &server_caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -37375,11 +37427,12 @@ mod tests {
             .expect("received");
         assert_eq!(got, 8);
 
-        // A foreign reader (task 8, not the owner) is denied before any
-        // state is touched.
-        let foreign_caps = make_caps_record(8, &[], sink);
+        // A foreign reader (not the owner) is denied before any state is
+        // touched.
+        let foreign = crate::test_boot::claim_peer_task();
+        let foreign_caps = make_caps_record(foreign, &[], sink);
         let foreign_ctx = CallerContext {
-            task_id: SecTaskId(8),
+            task_id: SecTaskId(foreign),
             caps: &foreign_caps,
         };
         assert_eq!(
@@ -37406,7 +37459,7 @@ mod tests {
         assert_eq!(wrote, ORIGIN_WIRE_LEN as u64);
 
         let guard = aspaces.read();
-        let (_space, physmap) = guard.resolve(ProcessId(0x5706)).expect("aspace present");
+        let (_space, physmap) = guard.resolve(ProcessId(server)).expect("aspace present");
         let bytes = read_server_page(physmap, 1, ORIGIN_WIRE_LEN);
         let decoded = Origin::from_bytes(&bytes).expect("valid origin");
         drop(guard);
@@ -37416,11 +37469,119 @@ mod tests {
         assert_eq!(decoded, expected);
         assert_eq!(decoded.trust_domain(), TrustDomain::User);
         assert_eq!(decoded.uid(), 1000);
-        assert_eq!(decoded.pid(), 7);
+        assert_eq!(decoded.pid(), client);
         assert_eq!(decoded.proc_id(), ProcId::from_raw([0x71; 16]));
         assert!(decoded
             .capabilities()
             .holds_cap(CapabilityId::SYSINFO_GLOBAL));
+
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// Reclaim cancels an in-service call for its **own** poster and for no
+    /// one else: the server's ticket outlives every other process's exit.
+    ///
+    /// This is why the suite claims its task ids. The call registry is
+    /// process-global and `reclaim_process_resources` scrubs it *by* task id
+    /// — by endpoint owner and by call poster — from the `exit` path, which
+    /// sibling tests drive without holding the registry guard. A test that
+    /// named a poster id a sibling reclaims would lose its own in-service
+    /// call between the receive and the assert, so the guard cannot cover
+    /// this and a claimed id is the only thing that does.
+    #[test]
+    fn only_the_posters_own_reclaim_cancels_an_in_service_call() {
+        use tairix_abi::ORIGIN_WIRE_LEN;
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = server_aspace(b"unused");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        let id = 0xCA11_7007;
+        let server_caps = make_caps_record(owner, &[], sink);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &server_caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone(), sink).expect("registered");
+
+        let poster = crate::test_boot::claim_peer_task();
+        let client_caps = make_caps_record(poster, &[], sink);
+        let ticket = ep
+            .post(&client_caps, poster, b"who-am-i", u64::MAX, sink)
+            .expect("posted");
+
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &server_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        // Received, so the call is in service and its origin is readable.
+        assert_eq!(
+            h.call_recv(&ctx, id, 0x2000, 64, 0x3000, CallRecvFlags::empty()),
+            Ok(8)
+        );
+        assert_eq!(
+            h.call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN),
+            Ok(ORIGIN_WIRE_LEN as u64)
+        );
+
+        // A sample of the hand-written id space the claim reserves against
+        // — the small ids and the `0x5…` pattern this suite favoured, then
+        // the boundary immediately below the floor — none of which is this
+        // call's poster, so none may touch it. Reclaiming them is safe
+        // precisely because nothing keys process-global state below that
+        // floor any more, which is the property under test.
+        for other in [
+            2,
+            7,
+            8,
+            9,
+            12,
+            0x5708,
+            crate::test_boot::CLAIM_TASK_BASE - 1,
+        ] {
+            h.reclaim_process_resources(ProcessId(other));
+            assert_eq!(
+                h.call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN),
+                Ok(ORIGIN_WIRE_LEN as u64),
+                "reclaiming {other:#x} cancelled a call it did not post"
+            );
+        }
+
+        // The poster's own reclaim does cancel it, and the server learns so
+        // by a fail-closed refusal rather than a reply into a dead caller.
+        h.reclaim_process_resources(ProcessId(poster));
+        assert_eq!(
+            h.call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN),
+            Err(Errno::NotFound)
+        );
 
         crate::callreg::unregister(EndpointId(id));
     }

@@ -48,7 +48,7 @@ under the floor and are unchanged.
 | `chart` | `Chart` |
 | `metric` | `MetricTile`, `StatusPill`, `CompositionBar` |
 | `record` | `FactList`, `Timeline` |
-| `text` | `TextField`, `SearchField` |
+| `text` | `TextField`, `TextArea`, `SearchField` |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
@@ -795,6 +795,81 @@ live surface. The seam is drawn at the shared seam breadth in the active rim
 colour, doubled under heavy contrast like every other edge in the theme. A
 section whose items are cards has no wake: a card draws its own footer actions
 inside itself, so no anchored column stands beside the list.
+
+## Text that does not fit: wrap it or mark it
+
+Two things a control can do with text it has no room for, and which one is
+right is decided by what the text *is* — not by the control it sits in.
+
+**Prose wraps.** A sentence cut at the box's edge is a sentence the reader has
+to guess the end of, so every run of prose the desktop draws is laid out over
+the lines its box holds: a dialog's message and its inline reason, a
+notification's and a card's body, a tooltip and a help tip's reason, a
+setting row's description and its group's footnote, a field's validation
+message, a tab group's stated absence, and an icon's caption. All of them go
+through one recipe — `paint::TextBlock`, the multi-line sibling of
+`paint_text_line` — over the one shared fitter in `lib/font`
+([`wrap_to_width`](./font.md#fitting-text-to-its-box)), so no control writes a
+break loop and none can disagree about where a line ends.
+
+**An identifier does not.** A name in fixed-height chrome — a button's label,
+a menu row, a tab, a table cell, a window title, a breadcrumb, a list row's
+title, a metric's reading — stays on one line and ends in the shared ellipsis
+mark. Wrapping one would move everything laid out beside and beneath it, and
+a name is scanned rather than read: the mark says the rest is there, which is
+all the reader needs.
+
+**Wrapping makes a height depend on a width**, which is why the controls that
+carry prose ask for one: `Dialog::height_for_content(content, width, ..)`,
+`Card::measured_height(width, ..)`, `Notification::measured_height(width, ..)`,
+`FieldRow::measured_height(span, ..)` and `FieldGroup::measured_height(width,
+..)`. Each measures through the very block its paint draws, and the paint is
+bounded by the room it was actually given, so a surface sized by the
+measurement draws exactly what it reserved and a surface given less elides
+rather than spilling. A tooltip and a help tip have no owner to ask, so they
+cap themselves at the typographic **prose measure** (`PROSE_MEASURE_COLUMNS`,
+56 characters of the face's own column width) instead of growing a plate
+across the screen.
+
+**Every prose block is bounded.** A message, a body, a description, a footnote
+and a statement each take at most a stated number of lines, and the excess is
+elided. These are containment bounds, not capacities: a notice's body is
+another program's text, and no one notice may push every other one out of the
+popover however much it has to say.
+
+## The multi-line text box
+
+`TextArea` is the text-entry family's multi-line member. It shares
+`TextField`'s plate, page ground, caret, selection, read-only/denied/
+disabled/validation rendering and typed `TextAction`; what differs is that its
+text **wraps at the box's own width** rather than scrolling sideways. That is
+the whole reason both exist — a single-line field holds a value and scrolls,
+and a box that holds a paragraph wraps it, because a paragraph read through a
+one-line window is not read at all. There is no horizontal scroll and no wrap
+toggle.
+
+- The caret and the selection work in the lines a reader *sees*: Up and Down
+  move between visual lines and keep the column they set out from, Home and
+  End go to the ends of the visual line, Ctrl+Home and Ctrl+End to the ends of
+  the text, PageUp and PageDown by a viewport, and Shift extends the selection
+  with all of them. A click lands on the character nearest the pointer on the
+  line it fell on, clamped to that line's visible text so a click past the end
+  of a line does not land on the next one.
+- **Enter inserts a newline** and reports `Edited`; it does not submit,
+  because in a box that holds paragraphs Enter is a paragraph. Escape still
+  reports `Cancelled`.
+- It scrolls vertically and shows that it does: the caret is kept in view as
+  it moves, the wheel and the page keys move the viewport without moving the
+  caret, and a text longer than the box grows the shared `ScrollBar` in a
+  trailing gutter. The gutter is taken from the text's own column only when
+  the text overflows — and narrowing the column can only *add* lines, so the
+  decision settles in one pass and cannot flicker.
+- The layout is `lib/font`'s tiling one, so every caret position resolves to a
+  line and back with no "between lines" case to defend against, and only the
+  lines the viewport shows are laid out.
+- There is **no masked mode**. A credential is a single value, so masking
+  belongs to `TextField::secret`; a multi-line masked box would be a
+  credential nobody could check.
 
 ## Masked text entry
 

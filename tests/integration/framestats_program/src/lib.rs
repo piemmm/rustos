@@ -239,20 +239,6 @@ pub struct Delta {
     pub chrome_misses: u64,
 }
 
-impl Delta {
-    /// Screen pixels the average frame in this window recomposed, rounded up,
-    /// or `None` for a window that composed no frame.
-    ///
-    /// Rounded up so a bound is never met by a truncation.
-    #[must_use]
-    pub const fn damage_per_frame(&self) -> Option<u64> {
-        if self.frames == 0 {
-            return None;
-        }
-        Some(self.damaged_px.div_ceil(self.frames))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     extern crate alloc;
@@ -366,7 +352,6 @@ mod tests {
                 chrome_misses: 0,
             }
         );
-        assert_eq!(delta.damage_per_frame(), Some(5000));
     }
 
     #[test]
@@ -387,21 +372,10 @@ mod tests {
     }
 
     #[test]
-    fn a_window_with_no_frame_has_no_mean() {
+    fn a_window_that_composed_nothing_differences_to_nothing() {
         let first = Sample::from_totals(&totals());
         let delta = first.work_until(&first).expect("the same sample twice");
         assert_eq!(delta.frames, 0);
-        assert_eq!(delta.damage_per_frame(), None);
-    }
-
-    #[test]
-    fn the_mean_rounds_up_so_a_bound_is_never_met_by_truncation() {
-        let delta = Delta {
-            screen_px: 1024 * 768,
-            frames: 4,
-            damaged_px: 9,
-            ..Delta::default()
-        };
-        assert_eq!(delta.damage_per_frame(), Some(3));
+        assert_eq!(delta.damaged_px, 0);
     }
 }

@@ -481,10 +481,11 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) {
+        let column = pane_band(frame, viewport).width;
         let before = self
             .body
             .form()
-            .map_or(0, |form| form.measured_height(scale, theme));
+            .map_or(0, |form| form.measured_height(column, scale, theme));
         if let Some(form) = self.body.form_mut() {
             form.restate_badges();
         }
@@ -495,7 +496,7 @@ impl Shell {
         let after = self
             .body
             .form()
-            .map_or(0, |form| form.measured_height(scale, theme));
+            .map_or(0, |form| form.measured_height(column, scale, theme));
         if before != after {
             self.lay_out(viewport, scale, theme);
             damage.add(pane_band(frame, viewport));
@@ -912,10 +913,9 @@ impl Shell {
     /// still shows the rows.
     fn gallery_band(&self, frame: &ShellFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
         self.body.gallery()?;
-        let header = self
-            .body
-            .form()
-            .map_or(0, |form| form.measured_height(scale, theme));
+        let header = self.body.form().map_or(0, |form| {
+            form.measured_height(frame.content.width, scale, theme)
+        });
         let height = frame.content.height.checked_sub(header)?;
         Some(Rect::new(
             frame.content.left(),

@@ -39,11 +39,11 @@ use crate::button::{Button, ButtonAction};
 use crate::damage;
 use crate::paint::{
     bead_band, centred_text_y, dominant_color, draw_outline, foreground, grab_after,
-    heavy_contrast, icon_slot_side, inset, key_activation, paint_bead, paint_chevron,
+    heavy_contrast, icon_slot_side, inset, key_activation, line_budget, paint_bead, paint_chevron,
     paint_count_badge, paint_icon_slot, paint_row, paint_run, paint_surface_plate, plate_border,
     pointer_activation, press_latch, rail_thickness, resolve_bead, role_font, route_pointer,
     row_content_span, run_width, seam_thickness, seam_width, surface_rect, to_i32, withheld,
-    ChevronDir, ChromeLayer, FULL_COLOUR,
+    ChevronDir, ChromeLayer, TextAlign, TextBlock, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -1709,10 +1709,75 @@ impl Card {
         &mut self.footer
     }
 
+    /// The most lines of body text a card asks for when it measures itself.
+    ///
+    /// A card's body is often another program's text — a notification's
+    /// message — so this is a containment bound rather than a capacity: one
+    /// notice must not push every other one out of a popover however much it
+    /// has to say. Past it the body is elided, and the reader is told so.
+    const MAX_BODY_LINES: usize = 4;
+
     /// The inner plate rectangle (inside the rim) as surface pixels.
     fn inner(bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32, u32)> {
         let (x, y, w, h) = surface_rect(bounds)?;
         inset(x, y, w, h, plate_border(theme, scale))
+    }
+
+    /// The height this card needs in a column `width` pixels wide.
+    ///
+    /// The body is prose and wraps, so the height a card wants depends on how
+    /// wide it is given — an owner stacking cards asks this rather than
+    /// reserving a fixed band and cutting a sentence off at its edge. It is
+    /// the same layout the paint draws, read through the same block, and the
+    /// body stops at a bounded number of lines so one card cannot take a
+    /// whole surface however much its text has to say.
+    #[must_use]
+    pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let body = self.body.as_ref().map_or(0, |body| {
+            let width = Self::content_width(width, scale, theme);
+            let block = Self::body_block(font, width, usize::MAX, theme);
+            (pad / 2).saturating_add(block.height(body))
+        });
+        let footer = if self.footer.is_empty() {
+            0
+        } else {
+            scale
+                .scale_length(theme.metrics().control_height)
+                .max(1)
+                .saturating_add(pad)
+        };
+        plate_border(theme, scale)
+            .saturating_mul(2)
+            .saturating_add(pad)
+            .saturating_add(font.line_height())
+            .saturating_add(body)
+            .saturating_add(pad)
+            .saturating_add(footer)
+            .saturating_add(seam_thickness(theme, scale))
+    }
+
+    /// The width the card's own text is laid out across within an outer
+    /// `width`: inside the rim, past the leading state rail, and inset both
+    /// sides — the span [`render`](Self::render) hands its title and body.
+    fn content_width(width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        width
+            .saturating_sub(plate_border(theme, scale).saturating_mul(2))
+            .saturating_sub(rail_thickness(theme, scale))
+            .saturating_sub(pad.saturating_mul(2))
+    }
+
+    /// The block the card's body is laid out in: muted prose over at most
+    /// `room` lines, and never more than the card's own bound.
+    fn body_block(font: BitmapFont, width: u32, room: usize, theme: &Theme) -> TextBlock {
+        TextBlock::prose(
+            font,
+            width,
+            room.min(Self::MAX_BODY_LINES),
+            Color::from(theme.palette().on_surface_muted),
+        )
     }
 
     /// The footer button rectangles, laid out equal-width across the bottom of
@@ -1834,18 +1899,26 @@ impl Card {
             theme,
             font,
         );
+        let footer_rects = self.footer_rects(bounds, scale, theme);
+        // The body stops a pad short of whatever is below it — the footer
+        // where there is one, the progress seam where there is not — so a
+        // wrapped sentence can never run under an action.
+        let body_bottom = footer_rects
+            .iter()
+            .map(Rect::top)
+            .min()
+            .map_or(iy.saturating_add(ih).saturating_sub(seam_h), |top| {
+                u32::try_from(top).unwrap_or(0)
+            })
+            .saturating_sub(pad);
         self.paint_title(
             surface,
             (iy, content_left, title_right, content_right),
-            pad,
+            (pad, body_bottom),
             theme,
             font,
         );
-        for (button, rect) in self
-            .footer
-            .iter()
-            .zip(self.footer_rects(bounds, scale, theme))
-        {
+        for (button, rect) in self.footer.iter().zip(footer_rects) {
             button.render(surface, rect, scale, theme);
         }
     }
@@ -1901,36 +1974,55 @@ impl Card {
         content_right
     }
 
-    /// Paint the card title and its optional body line within the content
+    /// Paint the card title and its optional wrapped body within the content
     /// columns `(title_top, content_left, title_right, content_right)`,
-    /// leading-aligned at the content's left edge.
+    /// leading-aligned at the content's left edge and stopping at
+    /// `limits`'s bottom.
+    ///
+    /// The title is one line and elides: it names the card, and a name that
+    /// wrapped would move everything under it. The body is prose and wraps
+    /// over the room that is left, because a message cut off mid-sentence is
+    /// a message the reader has to guess at.
     fn paint_title(
         &self,
         surface: &mut Surface,
         cols: (u32, u32, u32, u32),
-        pad: u32,
+        limits: (u32, u32),
         theme: &Theme,
         font: BitmapFont,
     ) {
         let (title_top, content_left, title_right, content_right) = cols;
+        let (pad, bottom) = limits;
         let fg = foreground(theme, self.state.disposition());
-        let title_y = to_i32(title_top) + to_i32(pad);
+        let title_y = title_top.saturating_add(pad);
         if title_right > content_left {
-            let fitted = font.truncate_to_width(&self.title, title_right - content_left);
-            font.draw_text(surface, to_i32(content_left), title_y, fitted, fg);
+            let run = font.elide_to_width(&self.title, title_right - content_left);
+            paint_run(
+                surface,
+                font,
+                run,
+                (to_i32(content_left), to_i32(title_y)),
+                fg,
+                None,
+            );
         }
-        if let Some(body) = &self.body {
-            let body_y = title_y + to_i32(font.line_height()) + to_i32(pad) / 2;
-            if content_right > content_left {
-                let fitted = font.truncate_to_width(body, content_right - content_left);
-                font.draw_text(
-                    surface,
-                    to_i32(content_left),
-                    body_y,
-                    fitted,
-                    Color::from(theme.palette().on_surface_muted),
-                );
-            }
+        let Some(body) = &self.body else {
+            return;
+        };
+        let body_y = title_y
+            .saturating_add(font.line_height())
+            .saturating_add(pad / 2);
+        let Some(room) = bottom.checked_sub(body_y) else {
+            return;
+        };
+        if content_right > content_left {
+            Self::body_block(
+                font,
+                content_right - content_left,
+                line_budget(font, room),
+                theme,
+            )
+            .paint(surface, body, (content_left, body_y));
         }
     }
 
@@ -2280,20 +2372,15 @@ impl IconTile {
         let Some(band) = Self::label_band(bounds, scale, theme, font) else {
             return;
         };
-        let mut top = band.top;
-        for line in font.wrap_to_width(&self.label, band.right - band.left, band.lines) {
-            let run = (line.text, line.elided);
-            let x = to_i32(centre_x(run_width(font, run), band.left, band.right));
-            paint_run(
-                surface,
-                font,
-                run,
-                (x, to_i32(top)),
-                color,
-                self.label_shadow,
-            );
-            top = top.saturating_add(font.line_height());
+        TextBlock {
+            font,
+            width: band.right.saturating_sub(band.left),
+            lines: band.lines,
+            align: TextAlign::Centre,
+            color,
+            shadow: self.label_shadow,
         }
+        .paint(surface, &self.label, (band.left, band.top));
     }
 
     /// Paint the Signal Bead of an authority or recovery state in the tile's
@@ -2414,13 +2501,6 @@ impl IconTile {
             side,
         ))
     }
-}
-
-/// The x at which a run `width` pixels wide sits centred in the column
-/// `[left, right)`, pinned to `left` when it is wider than the column.
-fn centre_x(width: u32, left: u32, right: u32) -> u32 {
-    let avail = right.saturating_sub(left);
-    left.saturating_add((avail - width.min(avail)) / 2)
 }
 
 /// The band an [`IconTile`] draws its name in.

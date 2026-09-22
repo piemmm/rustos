@@ -168,6 +168,23 @@ impl Notification {
         )
     }
 
+    /// The height this notice needs in a popover `width` pixels wide: its
+    /// source caption where it has one, plus what its card needs.
+    ///
+    /// The width is part of the question because a notice's message is
+    /// another program's prose: it wraps, so how tall the notice is depends
+    /// on how wide the popover is. A surface stacking notices asks this
+    /// rather than reserving a fixed band and cutting the message off at it.
+    #[must_use]
+    pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let caption = self
+            .source
+            .as_ref()
+            .map_or(0, |_| Self::caption_height(scale, theme, font));
+        caption.saturating_add(self.card.measured_height(width, scale, theme))
+    }
+
     /// Paint the notification into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         if withheld(surface, bounds) {

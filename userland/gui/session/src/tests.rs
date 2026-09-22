@@ -9822,6 +9822,61 @@ fn moving_focus_between_a_window_and_the_desktop_repaints_one_icon() {
     assert_eq!(comp.window(window).map(Window::opacity), Some(128));
 }
 
+/// Icon artwork arriving from the decode desk repaints the icons, not the
+/// ground they sit on.
+///
+/// The reported defect: every delivered batch repainted the desktop layer
+/// whole, so a 48-pixel picture landing recomposited the screen and
+/// re-blurred every frosted surface over it — one screenful of work per
+/// batch, and during bring-up there are many. Only a tile's own pixels can
+/// change when a decode lands; the backdrop and the wallpaper cannot.
+#[test]
+fn arriving_icon_artwork_repaints_the_cells_and_not_the_ground() {
+    let (mut shell, mut comp) = headless_desktop();
+    let desktop = pinboard_desktop();
+    let window = frosted_window(&mut shell, &mut comp);
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    assert!(!comp.has_damage(), "the opening frames have been drained");
+
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let mut icons = tairix_controls::damage::sink();
+    desktop.mark_icons(&layout, &mut icons);
+    assert!(!icons.is_empty(), "the fixture column shows icons");
+    let cells = icons.bounds();
+
+    shell.present_desktop_area(&mut comp, &desktop, &icons);
+    let composed = comp.composite();
+    assert!(
+        layout
+            .cell_rect(0, 0)
+            .is_some_and(|cell| cells.intersection(&cell) == cell),
+        "every shown cell is inside what the artwork repaints"
+    );
+    assert!(
+        comp.frame_stats().damaged_px < 640 * 480 / 4,
+        "a landed decode must not cost a screen, got {}",
+        comp.frame_stats().damaged_px
+    );
+    assert!(
+        composed.bounds().intersection(&Rect::new(0, 0, 640, 480)) != Rect::new(0, 0, 640, 480),
+        "the ground outside the column is left alone"
+    );
+    assert_eq!(comp.window(window).map(Window::opacity), Some(128));
+}
+
+/// A desktop folder with nothing in it has no icon to redraw, so a landed
+/// decode costs no frame at all rather than a screenful.
+#[test]
+fn arriving_artwork_over_an_empty_column_repaints_nothing() {
+    let (shell, comp) = headless_desktop();
+    let desktop: Desktop<TreeSource> = Desktop::new(TreeSource::fixture(), Vec::new());
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let mut icons = tairix_controls::damage::sink();
+    desktop.mark_icons(&layout, &mut icons);
+    assert!(icons.is_empty(), "no icons, no cells, no repaint");
+}
+
 /// Repainting part of the desktop layer must produce the very pixels a whole
 /// repaint would have: the same backdrop, the same wallpaper over it, and the
 /// same icons over that.

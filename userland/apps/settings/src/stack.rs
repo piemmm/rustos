@@ -22,6 +22,16 @@ pub(crate) fn gap(scale: Scale, theme: &Theme) -> u32 {
     scale.scale_length(theme.metrics().control_gap).max(1)
 }
 
+/// The width a plate takes in a column `width` pixels wide: the column less
+/// the gap either side of it.
+///
+/// One definition, read by the placement below and by whatever measures a
+/// plate's height — a group's rows wrap into that width, so measuring
+/// against a different one would reserve the wrong height.
+pub(crate) fn plate_width(width: u32, scale: Scale, theme: &Theme) -> u32 {
+    width.saturating_sub(gap(scale, theme).saturating_mul(2))
+}
+
 /// Where each plate from `first` is drawn down `bounds`, given `count`
 /// plates whose heights `height` answers.
 ///
@@ -38,7 +48,7 @@ pub(crate) fn place(
     height: impl Fn(usize) -> u32,
 ) -> Vec<(usize, Rect)> {
     let gap = gap(scale, theme);
-    let width = bounds.width.saturating_sub(gap.saturating_mul(2));
+    let width = plate_width(bounds.width, scale, theme);
     let limit = bounds.bottom();
     let mut top = bounds.top().saturating_add(to_i32(gap));
     let mut placed = Vec::with_capacity(count.saturating_sub(first));

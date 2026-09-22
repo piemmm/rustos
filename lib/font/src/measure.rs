@@ -129,9 +129,34 @@ impl MeasuredText {
         self.advances.last().copied().unwrap_or(0)
     }
 
-    /// How many leading `char`s fit within `limit`.
-    pub(crate) fn chars_within(&self, limit: u32) -> usize {
-        self.advances.partition_point(|&advance| advance <= limit)
+    /// How many `char`s starting at `start` fit within `limit`.
+    ///
+    /// The advances are cumulative from the string's start, so a run's own
+    /// width is the difference from the pen before it — and since that pen
+    /// is a constant over the run, the differences stay non-decreasing and
+    /// the fit is still a binary search. This is what lets a whole wrapped
+    /// paragraph be laid out over **one** measurement of the whole text
+    /// instead of one measurement per line's tail.
+    pub(crate) fn chars_within_from(&self, start: usize, limit: u32) -> usize {
+        let base = self.pen_at(start);
+        let Some(rest) = self.advances.get(start..) else {
+            return 0;
+        };
+        rest.partition_point(|&advance| advance.saturating_sub(base) <= limit)
+    }
+
+    /// The pen position at `char` index `index` — equivalently, the pen after
+    /// the `index` `char`s before it. Zero at the start, and the whole width
+    /// at or past the end.
+    pub(crate) fn pen_at(&self, index: usize) -> u32 {
+        match index.checked_sub(1) {
+            None => 0,
+            Some(prior) => self
+                .advances
+                .get(prior)
+                .copied()
+                .unwrap_or_else(|| self.width()),
+        }
     }
 
     /// Whether this is a measurement of `text` rather than of a string that

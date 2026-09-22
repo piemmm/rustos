@@ -349,7 +349,7 @@ pub use state::{
     WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
 pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
-pub use text::{SearchField, TextAction, TextField};
+pub use text::{SearchField, TextAction, TextArea, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
 pub use value::{Progress, Slider, SliderAction};
 pub use window::{
@@ -396,6 +396,8 @@ mod state_tests;
 mod tabs_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_area_tests;
 #[cfg(test)]
 mod text_tests;
 #[cfg(test)]

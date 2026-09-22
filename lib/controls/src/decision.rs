@@ -21,10 +21,29 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::button::{Button, ButtonAction, ButtonContent};
 use crate::paint::{
-    foreground, grab_after, inset, paint_plate, plate_border, role_font, route_pointer,
-    surface_rect, text_plate_height, to_i32, withheld, PlateStyle,
+    foreground, grab_after, inset, line_budget, paint_plate, paint_run, plate_border,
+    prose_measure, role_font, route_pointer, surface_rect, text_plate_height, to_i32, withheld,
+    PlateStyle, TextBlock,
 };
 use crate::state::{ControlRole, RenderInvariant};
+
+/// The most lines a tooltip's hint takes. A tooltip explains an immediate
+/// affordance: past two lines it is an explanation, which is a help tip.
+const TOOLTIP_MAX_LINES: usize = 2;
+
+/// The most lines a help tip's reason takes — one refusal and what would
+/// change it, not a document.
+const HELPTIP_MAX_LINES: usize = 4;
+
+/// A placed band's top-left corner in the unsigned coordinates a block
+/// paints from. A band above the surface clamps to it, so a dialog scrolled
+/// partly off-screen draws what is on it rather than nothing.
+fn band_origin(band: Rect) -> (u32, u32) {
+    (
+        u32::try_from(band.left()).unwrap_or(0),
+        u32::try_from(band.top()).unwrap_or(0),
+    )
+}
 
 /// The natural width one action button needs: a labelled button fits its text
 /// plus horizontal padding; a glyph button is a square of the control height.
@@ -95,12 +114,14 @@ fn action_row_rects(
 struct Bands {
     /// The title line's baseline `y`.
     title_y: i32,
-    /// The message line's baseline `y`, where it has one.
-    message_y: Option<i32>,
+    /// The band the message is wrapped into, where it has one and there is
+    /// room for a line of it.
+    message: Option<Rect>,
     /// The band the owner draws its own content in.
     content: Rect,
-    /// The inline reason's baseline `y`, where it has one and it fits.
-    reason_y: Option<i32>,
+    /// The band the inline reason is wrapped into, where it has one and
+    /// there is room for a line of it.
+    reason: Option<Rect>,
     /// The `x` every band's text begins at.
     content_left: u32,
     /// The width every band's text is fitted to.
@@ -223,22 +244,37 @@ impl Dialog {
         inset(x, y, w, h, plate_border(theme, scale))
     }
 
+    /// The most lines of prose a dialog gives its message or its reason when
+    /// it measures itself.
+    ///
+    /// A dialog's sentences come from whichever program opened it, so this is
+    /// a containment bound rather than a capacity: no message may grow a
+    /// dialog past the screen it has to fit on. Past it the prose is elided
+    /// and the reader is told so.
+    const MAX_PROSE_LINES: usize = 8;
+
     /// How far below the plate's interior top the content band begins: the
-    /// title, the message where there is one, and the pads around them.
-    fn head_height(&self, pad: u32, line: u32) -> u32 {
-        let head = if self.message.is_some() {
-            line.saturating_mul(2).saturating_add(pad / 2)
+    /// title, the message wrapped over `message_lines` where it has one, and
+    /// the pads around them.
+    fn head_height(&self, pad: u32, line: u32, message_lines: usize) -> u32 {
+        let message = if self.message.is_some() {
+            line.saturating_mul(u32::try_from(message_lines).unwrap_or(u32::MAX))
+                .saturating_add(pad / 2)
         } else {
-            line
+            0
         };
-        pad.saturating_add(head).saturating_add(pad)
+        pad.saturating_add(line)
+            .saturating_add(message)
+            .saturating_add(pad)
     }
 
     /// How far above the plate's interior bottom the content band ends: the
-    /// action row, the inline reason where there is one, and the gap above.
-    fn tail_height(&self, pad: u32, line: u32, action_h: u32) -> u32 {
+    /// action row, the inline reason wrapped over `reason_lines` where it has
+    /// one, and the gap above.
+    fn tail_height(&self, pad: u32, line: u32, action_h: u32, reason_lines: usize) -> u32 {
         let reason = if self.reason.is_some() {
-            line.saturating_add(pad / 2)
+            line.saturating_mul(u32::try_from(reason_lines).unwrap_or(u32::MAX))
+                .saturating_add(pad / 2)
         } else {
             0
         };
@@ -246,27 +282,66 @@ impl Dialog {
     }
 
     /// The plate height that leaves a content band exactly `content` pixels
-    /// tall, for a dialog carrying this title, message, reason and actions.
+    /// tall, for a dialog `width` pixels wide carrying this title, message,
+    /// reason and actions.
     ///
     /// A dialog that carries a *form* rather than a sentence is sized by what
     /// the form measures, and this is what turns that figure into a window
     /// extent. It reads the same two spans the band is placed between, so a
     /// window sized by it seats its content exactly.
+    ///
+    /// The width is part of the question because the message and the reason
+    /// are prose: they wrap, so how tall a dialog has to be depends on how
+    /// wide it is. The prose is measured through the same block the paint
+    /// draws, so the two cannot disagree on where a sentence ends.
     #[must_use]
-    pub fn height_for_content(&self, content: u32, scale: Scale, theme: &Theme) -> u32 {
+    pub fn height_for_content(&self, content: u32, width: u32, scale: Scale, theme: &Theme) -> u32 {
         let font = role_font(theme, scale, TextRole::Body);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let line = font.line_height();
+        let content_w = Self::content_width(width, scale, theme);
         let action_h = if self.actions.is_empty() {
             0
         } else {
             text_plate_height(theme, scale, TextRole::Body)
         };
+        let wanted = |text: &Option<String>| {
+            text.as_ref().map_or(0, |text| {
+                Self::prose(font, content_w, Self::MAX_PROSE_LINES, theme).line_count(text)
+            })
+        };
         plate_border(theme, scale)
             .saturating_mul(2)
-            .saturating_add(self.head_height(pad, line))
+            .saturating_add(self.head_height(pad, line, wanted(&self.message)))
             .saturating_add(content)
-            .saturating_add(self.tail_height(pad, line, action_h))
+            .saturating_add(self.tail_height(pad, line, action_h, wanted(&self.reason)))
+    }
+
+    /// The span a dialog `width` pixels wide lays its own text and its
+    /// owner's content across.
+    ///
+    /// An owner sizing a dialog has to measure its content *before* it knows
+    /// the height — and therefore before [`content_rect`](Self::content_rect)
+    /// can answer — so this is the band's width from the outer width alone.
+    /// It is the same figure the band itself reports once the dialog is laid
+    /// out, so measuring against it and then drawing into the band cannot
+    /// disagree.
+    #[must_use]
+    pub fn content_width(width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        width
+            .saturating_sub(plate_border(theme, scale).saturating_mul(2))
+            .saturating_sub(pad.saturating_mul(2))
+    }
+
+    /// The block a dialog's prose is laid out in.
+    fn prose(font: BitmapFont, width: u32, lines: usize, theme: &Theme) -> TextBlock {
+        TextBlock::prose(
+            font,
+            width,
+            lines.min(Self::MAX_PROSE_LINES),
+            Color::from(theme.palette().on_surface_muted),
+        )
     }
 
     /// Where every band of the dialog sits for `bounds`: the title, the
@@ -288,10 +363,6 @@ impl Dialog {
         }
         let line = font.line_height();
         let title_y = to_i32(iy) + to_i32(pad);
-        let message_y = self
-            .message
-            .as_ref()
-            .map(|_| title_y + to_i32(line) + to_i32(pad) / 2);
         let actions = action_row_rects(&self.actions, (ix, iy, iw, ih), scale, theme, font);
         let action_h = actions
             .iter()
@@ -300,19 +371,47 @@ impl Dialog {
             .max()
             .unwrap_or(0);
         let action_top = actions.iter().filter(|r| r.height > 0).map(Rect::top).min();
-        let reason_y = self.reason.as_ref().and_then(|_| {
-            let bottom = action_top.unwrap_or(to_i32(iy + ih));
-            let y = bottom - to_i32(line) - to_i32(pad) / 2;
-            (y > title_y).then_some(y)
+
+        // The reason sits directly above the actions, and the message
+        // directly below the title, so each is given the room between what
+        // it is anchored to and the other's side of the plate: a paragraph
+        // grows into the space the dialog has, never over the actions a
+        // reader has to reach or the title that names them.
+        let reason_bottom = action_top.unwrap_or(to_i32(iy + ih)) - to_i32(pad) / 2;
+        let message_top = title_y + to_i32(line) + to_i32(pad) / 2;
+        let reason = self.reason.as_ref().and_then(|reason| {
+            let room = reason_bottom - message_top;
+            Self::wrapped_band(
+                font,
+                (to_i32(content_left), reason_bottom, content_w),
+                room,
+                reason,
+                theme,
+            )
+        });
+        let message = self.message.as_ref().and_then(|message| {
+            let floor = reason.map_or(reason_bottom, |band| band.top()) - to_i32(pad) / 2;
+            let room = floor - message_top;
+            let lines = u32::try_from(room.max(0)).unwrap_or(0);
+            let block = Self::prose(font, content_w, line_budget(font, lines), theme);
+            let height = block.height(message);
+            (height > 0).then(|| Rect::new(to_i32(content_left), message_top, content_w, height))
         });
 
         // The content band runs from below the head the dialog draws to above
         // its tail, both measured by the same spans `height_for_content`
         // inverts — so a window sized to a form seats that form exactly.
-        let top = to_i32(iy) + to_i32(self.head_height(pad, line));
-        let bottom = to_i32(iy)
-            .saturating_add(to_i32(ih))
-            .saturating_sub(to_i32(self.tail_height(pad, line, action_h)));
+        let lines_of = |band: Option<Rect>| band.map_or(0, |rect| line_budget(font, rect.height));
+        let top = to_i32(iy) + to_i32(self.head_height(pad, line, lines_of(message)));
+        let bottom =
+            to_i32(iy)
+                .saturating_add(to_i32(ih))
+                .saturating_sub(to_i32(self.tail_height(
+                    pad,
+                    line,
+                    action_h,
+                    lines_of(reason),
+                )));
         let content = Rect::new(
             to_i32(content_left),
             top,
@@ -321,13 +420,32 @@ impl Dialog {
         );
         Some(Bands {
             title_y,
-            message_y,
+            message,
             content,
-            reason_y,
+            reason,
             content_left,
             content_w,
             actions,
         })
+    }
+
+    /// The band `text` wraps into when it hangs *above* a fixed edge: the
+    /// lines it needs, laid out upward from `anchor`'s bottom and never
+    /// taller than `room`.
+    ///
+    /// An inline reason is anchored to the action row it explains, so it has
+    /// to grow away from it rather than push it down.
+    fn wrapped_band(
+        font: BitmapFont,
+        anchor: (i32, i32, u32),
+        room: i32,
+        text: &str,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let (x, bottom, width) = anchor;
+        let lines = u32::try_from(room.max(0)).unwrap_or(0);
+        let height = Self::prose(font, width, line_budget(font, lines), theme).height(text);
+        (height > 0).then(|| Rect::new(x, bottom - to_i32(height), width, height))
     }
 
     /// The band an owner draws its own content in — beneath the message,
@@ -383,33 +501,26 @@ impl Dialog {
             return;
         };
 
-        let fitted = font.truncate_to_width(&self.title, bands.content_w);
-        font.draw_text(
+        let run = font.elide_to_width(&self.title, bands.content_w);
+        paint_run(
             surface,
-            to_i32(bands.content_left),
-            bands.title_y,
-            fitted,
+            font,
+            run,
+            (to_i32(bands.content_left), bands.title_y),
             foreground(theme, crate::state::ControlDisposition::Interactive),
+            None,
         );
-        if let (Some(message), Some(message_y)) = (&self.message, bands.message_y) {
-            let fitted = font.truncate_to_width(message, bands.content_w);
-            font.draw_text(
+        if let (Some(message), Some(band)) = (&self.message, bands.message) {
+            Self::prose(font, band.width, line_budget(font, band.height), theme).paint(
                 surface,
-                to_i32(bands.content_left),
-                message_y,
-                fitted,
-                Color::from(palette.on_surface_muted),
+                message,
+                band_origin(band),
             );
         }
-        if let (Some(reason), Some(reason_y)) = (&self.reason, bands.reason_y) {
-            let fitted = font.truncate_to_width(reason, bands.content_w);
-            font.draw_text(
-                surface,
-                to_i32(bands.content_left),
-                reason_y,
-                fitted,
-                Color::from(palette.warning),
-            );
+        if let (Some(reason), Some(band)) = (&self.reason, bands.reason) {
+            let mut block = Self::prose(font, band.width, line_budget(font, band.height), theme);
+            block.color = Color::from(palette.warning);
+            block.paint(surface, reason, band_origin(band));
         }
         for (button, rect) in self.actions.iter().zip(bands.actions) {
             if rect.width > 0 {
@@ -513,21 +624,42 @@ impl Tooltip {
 
     /// The tooltip's preferred `(width, height)` in surface pixels, so the
     /// owner can size the popup surface it anchors the tooltip in.
+    ///
+    /// A hint longer than the prose measure wraps instead of growing a plate
+    /// across the screen, so the height is however many lines it takes and
+    /// the width is the widest of them — a short hint stays a short hint.
     #[must_use]
     pub fn preferred_size(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
         let font = role_font(theme, scale, TextRole::Body);
-        let border = plate_border(theme, scale);
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let margin = border.saturating_add(pad);
-        let w = font
-            .text_width(&self.text)
+        let margin = Self::margin(scale, theme);
+        let block = Self::block(font, prose_measure(font), theme);
+        let w = block
+            .measured_width(&self.text)
             .saturating_add(margin.saturating_mul(2))
             .max(1);
-        let h = font
-            .line_height()
+        let h = block
+            .height(&self.text)
+            .max(font.line_height())
             .saturating_add(margin.saturating_mul(2))
             .max(1);
         (w, h)
+    }
+
+    /// The inset between the plate's edge and its text.
+    fn margin(scale: Scale, theme: &Theme) -> u32 {
+        plate_border(theme, scale)
+            .saturating_add(scale.scale_length(theme.metrics().control_inset).max(1))
+    }
+
+    /// The block the hint is laid out in: prose in the ordinary foreground,
+    /// over as many lines as the measure needs.
+    fn block(font: BitmapFont, width: u32, theme: &Theme) -> TextBlock {
+        TextBlock::prose(
+            font,
+            width,
+            TOOLTIP_MAX_LINES,
+            foreground(theme, crate::state::ControlDisposition::Interactive),
+        )
     }
 
     /// Paint the tooltip into `surface` at `bounds` for the active theme.
@@ -560,18 +692,13 @@ impl Tooltip {
                 ring: Color::from(palette.rim_active),
             },
         );
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let margin = border.saturating_add(pad);
+        let margin = Self::margin(scale, theme);
         let text_w = w.saturating_sub(margin.saturating_mul(2));
+        let room = h.saturating_sub(margin.saturating_mul(2));
         if text_w > 0 {
-            let fitted = font.truncate_to_width(&self.text, text_w);
-            font.draw_text(
-                surface,
-                to_i32(x + margin),
-                to_i32(y + margin),
-                fitted,
-                foreground(theme, crate::state::ControlDisposition::Interactive),
-            );
+            let mut block = Self::block(font, text_w, theme);
+            block.lines = block.lines.min(line_budget(font, room));
+            block.paint(surface, &self.text, (x + margin, y + margin));
         }
     }
 }
@@ -649,13 +776,17 @@ impl HelpTip {
     }
 
     /// The help tip's preferred `(width, height)` in surface pixels.
+    ///
+    /// The reason is prose and wraps at the prose measure, so an explanation
+    /// of a refusal is a paragraph the reader can read rather than a line cut
+    /// off before it says what to do.
     #[must_use]
     pub fn preferred_size(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
         let font = role_font(theme, scale, TextRole::Body);
-        let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let margin = border.saturating_add(pad);
-        let mut text_w = font.text_width(&self.reason);
+        let margin = plate_border(theme, scale).saturating_add(pad);
+        let block = self.block(font, prose_measure(font), theme);
+        let mut text_w = block.measured_width(&self.reason);
         let step_h = self
             .step
             .as_ref()
@@ -664,12 +795,19 @@ impl HelpTip {
             text_w = text_w.max(button_width(step, scale, theme, font));
         }
         let w = text_w.saturating_add(margin.saturating_mul(2)).max(1);
-        let h = font
-            .line_height()
+        let h = block
+            .height(&self.reason)
+            .max(font.line_height())
             .saturating_add(step_h)
             .saturating_add(margin.saturating_mul(2))
             .max(1);
         (w, h)
+    }
+
+    /// The block the reason is laid out in: prose in the tint its role calls
+    /// for, over as many lines as the measure needs.
+    fn block(&self, font: BitmapFont, width: u32, theme: &Theme) -> TextBlock {
+        TextBlock::prose(font, width, HELPTIP_MAX_LINES, self.reason_color(theme))
     }
 
     /// The inner content rectangle (inside the rim) as surface pixels.
@@ -730,22 +868,25 @@ impl HelpTip {
                 ring: Color::from(palette.rim_active),
             },
         );
-        let Some((ix, iy, iw, _)) = Self::inner(bounds, scale, theme) else {
+        let Some((ix, iy, iw, ih)) = Self::inner(bounds, scale, theme) else {
             return;
         };
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let text_w = iw.saturating_sub(pad.saturating_mul(2));
+        let step_rect = self.step_rect(bounds, scale, theme, font);
         if text_w > 0 {
-            let fitted = font.truncate_to_width(&self.reason, text_w);
-            font.draw_text(
-                surface,
-                to_i32(ix + pad),
-                to_i32(iy + pad),
-                fitted,
-                self.reason_color(theme),
-            );
+            // The reason stops a pad short of the next step it explains, so
+            // a long refusal never runs under the button that answers it.
+            let floor = step_rect
+                .map_or(ih, |rect| {
+                    u32::try_from(rect.top()).unwrap_or(0).saturating_sub(iy)
+                })
+                .saturating_sub(pad.saturating_mul(2));
+            let mut block = self.block(font, text_w, theme);
+            block.lines = block.lines.min(line_budget(font, floor));
+            block.paint(surface, &self.reason, (ix + pad, iy + pad));
         }
-        if let (Some(step), Some(rect)) = (&self.step, self.step_rect(bounds, scale, theme, font)) {
+        if let (Some(step), Some(rect)) = (&self.step, step_rect) {
             step.render(surface, rect, scale, theme);
         }
     }

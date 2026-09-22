@@ -11,9 +11,7 @@
 //! compose. A pane that *does* compose controls has no statement to make and
 //! draws its form instead.
 
-use alloc::vec::Vec;
-
-use tairix_font::BitmapFont;
+use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -38,6 +36,10 @@ struct Statement<'a> {
 const NEEDS_LABEL: &str = "WHAT WOULD BE NEEDED";
 /// The label above a tail that names where the setting is reached today.
 const ELSEWHERE_LABEL: &str = "WHERE IT IS SET";
+
+/// The most lines one of a statement's two paragraphs takes. A pane states
+/// an absence in a sentence or two; past this the pane is a document.
+const MAX_PARAGRAPH_LINES: usize = 6;
 
 impl<'a> Statement<'a> {
     /// The statement `pane` makes, or `None` for a pane that composes
@@ -178,25 +180,32 @@ impl Metrics {
         if self.text_w == 0 {
             return 0;
         }
-        let body_lines = self.wrap(statement.body).len();
-        let tail_lines = self.wrap(statement.tail).len();
-        let lines = self
-            .heading
+        self.heading
             .line_height()
             .saturating_add(self.gap)
-            .saturating_add(
-                self.body
-                    .line_height()
-                    .saturating_mul(u32::try_from(body_lines).unwrap_or(1)),
-            )
+            .saturating_add(self.paragraph_height(statement.body))
             .saturating_add(self.gap)
             .saturating_add(self.caption.line_height())
-            .saturating_add(
-                self.body
-                    .line_height()
-                    .saturating_mul(u32::try_from(tail_lines).unwrap_or(1)),
-            );
-        lines.saturating_add(self.pad.saturating_mul(2))
+            .saturating_add(self.paragraph_height(statement.tail))
+            .saturating_add(self.pad.saturating_mul(2))
+    }
+
+    /// The height one wrapped paragraph takes in this column.
+    fn paragraph_height(&self, text: &str) -> u32 {
+        self.body
+            .line_height()
+            .saturating_mul(u32::try_from(self.lines(text)).unwrap_or(1))
+    }
+
+    /// How many lines `text` wraps into in this column.
+    ///
+    /// The shared fitter's answer, counted from the same lazy layout the
+    /// paint draws, so the height the shell scrolls over is the height the
+    /// pane puts on screen.
+    fn lines(&self, text: &str) -> usize {
+        self.body
+            .wrap_to_width(text, self.text_w, MAX_PARAGRAPH_LINES)
+            .count()
     }
 
     /// Draw `text` wrapped to the column, answering the y it ended at.
@@ -204,57 +213,21 @@ impl Metrics {
         &self,
         surface: &mut Surface,
         x: i32,
-        mut y: i32,
+        y: i32,
         text: &str,
         color: Color,
     ) -> i32 {
-        for line in self.wrap(text) {
-            self.body.draw_text(surface, x, y, line, color);
-            y = y.saturating_add(to_i32(self.body.line_height()));
-        }
-        y
-    }
-
-    /// `text` broken into lines that fit the column, on word boundaries.
-    ///
-    /// A single word longer than the column is drawn elided rather than split
-    /// mid-word: the statement is prose, and a hyphenless break reads as a
-    /// different word.
-    fn wrap<'t>(&self, text: &'t str) -> Vec<&'t str> {
-        let mut lines = Vec::new();
-        let mut rest = text;
-        while !rest.is_empty() {
-            let take = self.line_break(rest);
-            let (line, tail) = rest.split_at(take);
-            lines.push(line.trim_end());
-            rest = tail.trim_start();
-        }
-        if lines.is_empty() {
-            lines.push("");
-        }
-        lines
-    }
-
-    /// How many bytes of `text` fit on one line: the longest run of whole
-    /// words within the column, or the whole first word when even that is too
-    /// wide.
-    fn line_break(&self, text: &str) -> usize {
-        if self.body.text_width(text) <= self.text_w {
-            return text.len();
-        }
-        let mut fits = 0;
-        for (offset, _) in text.char_indices().filter(|(_, c)| *c == ' ') {
-            if self.body.text_width(&text[..offset]) > self.text_w {
-                break;
+        let mut pen = y;
+        for line in self
+            .body
+            .wrap_to_width(text, self.text_w, MAX_PARAGRAPH_LINES)
+        {
+            let drawn = self.body.draw_text(surface, x, pen, line.text, color);
+            if line.elided {
+                self.body.draw_text(surface, drawn, pen, ELLIPSIS, color);
             }
-            fits = offset;
+            pen = pen.saturating_add(to_i32(self.body.line_height()));
         }
-        if fits == 0 {
-            text.char_indices()
-                .find(|(_, c)| *c == ' ')
-                .map_or(text.len(), |(offset, _)| offset)
-        } else {
-            fits
-        }
+        pen
     }
 }

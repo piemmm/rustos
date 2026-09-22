@@ -289,7 +289,7 @@ fn dialog_height_for_content_round_trips_through_the_band_it_sizes() {
                 for theme in [Theme::dark(), high_contrast(), text_ladder(22)] {
                     for scale in [Scale::ONE, scale2()] {
                         let want = 137;
-                        let height = dialog.height_for_content(want, scale, &theme);
+                        let height = dialog.height_for_content(want, DW, scale, &theme);
                         let bounds = Rect::new(0, 0, DW, height);
                         assert_eq!(
                             dialog

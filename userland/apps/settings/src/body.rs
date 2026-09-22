@@ -214,9 +214,11 @@ impl Body {
     ) -> u32 {
         match self {
             Self::Statement => statement::measured_height(pane, width, scale, theme),
-            Self::Form(form) | Self::Pictures { form, .. } => form.measured_height(scale, theme),
-            Self::Volumes(readings) => readings.measured_height(scale, theme),
-            Self::Facts(facts) => facts.measured_height(scale, theme),
+            Self::Form(form) | Self::Pictures { form, .. } => {
+                form.measured_height(width, scale, theme)
+            }
+            Self::Volumes(readings) => readings.measured_height(width, scale, theme),
+            Self::Facts(facts) => facts.measured_height(width, scale, theme),
         }
     }
 
