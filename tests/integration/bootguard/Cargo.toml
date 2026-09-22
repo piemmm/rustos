@@ -1,0 +1,22 @@
+[package]
+name = "tairix-itest-bootguard"
+description = "Shared on-target checks for the boot-stack poison guard: the linker reservation, the boot stub's fill, and the port handle that names them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The per-port `bootguard_qemu_*` verticals differ only in their boot glue
+# and their exit mechanism; the checks themselves are the same questions of
+# the same HAL surface, so they live here once rather than in three copies.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-memguard = { path = "../../../lib/memguard", version = "=0.0.0" }

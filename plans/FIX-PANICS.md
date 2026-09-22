@@ -40,6 +40,20 @@ behind the guard it abandoned. It reuses the existing cross-CPU stop protocol
 than a new HAL slice — see `plans/OPEN-DEFECTS.md` D13 for that decision and
 for why `MachineTakeover` is not the mechanism.
 
+The report also says whether the **boot stack overran**. That stack is in
+use before the MMU is on, so no page below it can be unmapped and an
+overrun cannot be made to fault; the linker reserves a poison guard
+beneath it, the boot stub fills it (after the `.bss` clear that spans it,
+before any Rust frame exists above it, with `lib/memguard`'s sentinel
+handed in as a `global_asm!` const operand), and the slice reports it as
+`CpuStateCapture::boot_stack_guard`. The verdict tests the stack pointer
+before reading a byte — a frame larger than the guard steps over it
+undisturbed, and a stack pointer inside it means those bytes are live
+frames — so the record carries `sp_below_stack` with the extent, or
+`intact`/`disturbed` from the canary. `kernel/arch/api` owns the judgement
+(host-tested); the per-port `bootguard_qemu_*` verticals prove the
+reservation, the fill and the handle on real hardware.
+
 Design note (divergence from the original sketch below, per the "redo it
 correctly" mandate): the arch slice exposes register `capture()` plus a
 pure `FrameLayout` (saved-fp / return-addr offsets) and `boot_stack()`,

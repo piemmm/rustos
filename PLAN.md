@@ -98,8 +98,11 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `lib/memguard`: the guard-region sentinel (`GUARD_BYTE`) and the canary
   window a hot path verifies it through. **Done** — hoisted out of the two
   private copies `kernel/mem`'s slab guard and `kernel/core`'s kthread stack
-  guard each carried, so the guards cannot drift onto different poison bytes;
-  the boot-stack guard (`plans/OPEN-DEFECTS.md` D150) is its third consumer.
+  guard each carried, so the guards cannot drift onto different poison bytes.
+  Its third consumer is the boot-stack guard: the linker reserves a page
+  below each port's boot stack, the boot stub fills it with the sentinel
+  handed in as a `global_asm!` const operand, and the panic path reads it
+  back through `CpuStateCapture::boot_stack_guard`.
 - `lib/util`: only items used by ≥ 2 crates.
 
 **Tests**

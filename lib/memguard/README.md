@@ -17,6 +17,9 @@ that case by necessity, being in use before the MMU is on.
 - `GUARD_BYTE` — the poison sentinel (`0xCC`, x86 `int3`).
 - `CANARY_BYTES` — the width of the O(1) window immediately below the guarded
   region, which a downward overrun crosses first.
+- `canary_window` — that window of a given guard. A guard shorter than the
+  window yields the whole guard, so a short one is still checked over every
+  byte it has.
 - `canary_intact` — whether that window still holds the sentinel. An empty
   window answers `false`: a guard that reserved no bytes cannot vouch for the
   region above it, and fail-closed is the answer that surfaces the

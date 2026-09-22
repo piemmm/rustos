@@ -30,11 +30,16 @@
 //! because the linker reservation is a fact only the port holds.
 
 use tairix_arch_api::{
-    Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, KernelStackRegion, RegisterSnapshot,
+    Backtrace, BacktraceProfile, BootStackGuardRegion, CpuStateCapture, FrameLayout,
+    KernelStackRegion, RegisterSnapshot,
 };
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 extern "C" {
+    /// Lowest address of the poison guard reserved immediately below
+    /// the boot stack (see the linker script). The guard runs up to
+    /// [`__boot_stack_bottom`], padding included.
+    static __boot_stack_guard_bottom: u8;
     /// Lowest address of the boot-hart boot stack (see the linker script).
     static __boot_stack_bottom: u8;
     /// Exclusive top of the boot-hart boot stack (see the linker script).
@@ -167,6 +172,25 @@ impl CpuStateCapture for Backtracer {
 
     #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
     fn boot_stack(&self) -> Option<KernelStackRegion> {
+        None
+    }
+
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    fn boot_stack_guard(&self) -> Option<BootStackGuardRegion> {
+        // SAFETY: taking the address of the extern guard symbols is a
+        // link-time constant; we never dereference them here.
+        let low = core::ptr::addr_of!(__boot_stack_guard_bottom) as u64;
+        let high = core::ptr::addr_of!(__boot_stack_bottom) as u64;
+        // SAFETY: the linker script reserves `[__boot_stack_guard_bottom,
+        // __boot_stack_bottom)` as the boot-hart boot stack's guard and nothing else
+        // claims those bytes, so they stay mapped for the life of the
+        // kernel. `boot.s` poisons them once, before any Rust frame
+        // exists on the stack above.
+        unsafe { BootStackGuardRegion::at_address(low, high) }
+    }
+
+    #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+    fn boot_stack_guard(&self) -> Option<BootStackGuardRegion> {
         None
     }
 

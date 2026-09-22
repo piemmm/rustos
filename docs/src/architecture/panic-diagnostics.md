@@ -286,6 +286,34 @@ mapped. The walker is fuzzed
 (`kernel/arch/api/tests/fuzz_backtrace.rs`): it must always terminate and
 never read outside the bounds it was given, for any adversarial input.
 
+## The boot stack's guard
+
+The boot stack is in use before the MMU is on, so no page below it can be
+unmapped and an overrun cannot be turned into a fault. The linker reserves
+a guard immediately beneath it instead, the boot stub fills that guard with
+`tairix_memguard`'s sentinel — the same byte the slab and kthread-stack
+guards use — and the report reads it back through
+`CpuStateCapture::boot_stack_guard`, emitting a `boot_stack_guard` field.
+The stub does the fill because it must happen after the `.bss` clear that
+spans the guard and before any Rust frame exists on the stack above it; the
+sentinel reaches the assembly as a `global_asm!` const operand, so the
+poison written and the poison checked for are one definition.
+
+The verdict tests the stack pointer before it reads a byte, for two
+reasons. A frame larger than the guard steps over it without disturbing it,
+so only the stack pointer catches that case; and a stack pointer that has
+descended into the guard means those bytes are live frames, which the check
+must not read as though they were poison. So a stack pointer below the
+stack's lowest byte reports `sp_below_stack` with the overrun's extent, and
+only a stack pointer above it is judged on the canary — `intact`, or
+`disturbed` when something wrote through.
+
+Without this a fault whose real cause was an overrun reads as an
+unexplained corruption of whatever happened to sit below the stack, which
+is exactly how the defect that motivated the guard presented: the boot hart
+ran off its stack into `.bss`, clobbered the console's frame header, and
+the machine went silent instead of naming a cause.
+
 ## Address-leak policy
 
 Panic dumps print **kernel** addresses deliberately: the event is fatal,

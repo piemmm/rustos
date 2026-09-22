@@ -48,7 +48,7 @@ use tairix_arch_api::backtrace::{
     MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
 use tairix_arch_api::quiesce_stop_others_best_effort;
-use tairix_arch_api::{CpuId, KernelStackRegion};
+use tairix_arch_api::{BootStackGuard, CpuId, KernelStackRegion};
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
 
 use crate::audit::AuditEvent;
@@ -313,13 +313,21 @@ fn walk_region(bt: &dyn CpuStateCapture, cpu: CpuId, sp: u64) -> Option<KernelSt
 }
 
 /// Capture the register snapshot and walk the backtrace into `bufs`,
-/// returning `(n_regs, n_frames)`.
+/// returning `(n_regs, n_frames, boot-stack-guard verdict)`.
 ///
 /// Allocation-free, and reads stack memory only through the rooted,
 /// bounds-checked [`RawStackReader`], so the walk never faults on a corrupt
 /// chain.
-fn capture_into(bt: &dyn CpuStateCapture, cpu: CpuId, bufs: &mut CaptureBufs) -> (usize, usize) {
+fn capture_into(
+    bt: &dyn CpuStateCapture,
+    cpu: CpuId,
+    bufs: &mut CaptureBufs,
+) -> (usize, usize, Option<BootStackGuard>) {
     let snap = bt.capture();
+
+    // Judged from the same snapshot the registers are reported from, so the
+    // stack pointer the verdict rests on is the one the record shows.
+    let guard = bt.boot_stack_guard().map(|region| region.assess(snap.sp));
 
     // Explicit unwinder-critical registers first, then the named GP
     // registers the port captured.
@@ -364,7 +372,7 @@ fn capture_into(bt: &dyn CpuStateCapture, cpu: CpuId, bufs: &mut CaptureBufs) ->
         bufs.frame_key_lens[i] = format_frame_key(i, &mut bufs.frame_keys[i]);
     }
 
-    (n_regs, n_frames)
+    (n_regs, n_frames, guard)
 }
 
 /// Audit-and-halt path shared by [`handle_panic`] and the host-side
@@ -817,9 +825,16 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     // A port that published no post-mortem handle gets the base record
     // rather than a faked backtrace.
     let mut capture = CaptureBufs::new();
-    let (n_regs, n_frames) = match ctx.backtrace {
+    let (n_regs, n_frames, guard) = match ctx.backtrace {
         Some(bt) => capture_into(bt, cpu, &mut capture),
-        None => (0, 0),
+        None => (0, 0, None),
+    };
+    let mut overrun_buf = [0u8; 18];
+    let overrun_str = match guard {
+        Some(BootStackGuard::BelowStack { bytes, .. }) => {
+            Some(format_hex_u64(bytes, &mut overrun_buf))
+        }
+        _ => None,
     };
 
     // Assemble the one record. Every buffer the fields borrow is a local
@@ -833,6 +848,15 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     fields.push("peers_stopped", stopped_str);
     if let Some(peer) = unresponsive_str {
         fields.push("peer_unresponsive", peer);
+    }
+    // The boot stack's guard, where the port reserves one. Without it a
+    // fault whose real cause was an overrun reads as an unexplained
+    // corruption of whatever happened to sit below the stack.
+    if let Some(verdict) = guard {
+        fields.push("boot_stack_guard", verdict.label());
+    }
+    if let Some(bytes) = overrun_str {
+        fields.push("boot_stack_overrun_bytes", bytes);
     }
     for i in 0..n_regs {
         fields.push(
@@ -946,6 +970,7 @@ fn format_desc_key(index: usize, buf: &mut [u8; 16]) -> usize {
 mod tests {
     use super::*;
     use core::ptr::NonNull;
+    use tairix_arch_api::BootStackGuardRegion;
 
     /// The process-wide quiesce liveness tables the stop-request tests
     /// publish. Set-once per process, so one shared pair — not a per-test
@@ -1822,6 +1847,114 @@ mod tests {
             "the descriptor walk must run after the stop"
         );
         reset_panic_guard();
+    }
+
+    /// A port that reserves a boot-stack guard has its verdict carried into
+    /// the record, so a fault whose real cause was an overrun says so
+    /// instead of reading as an unexplained corruption below the stack.
+    #[test]
+    fn a_report_carries_the_boot_stack_guard_verdict() {
+        /// A capture handle whose guard is a byte array this test owns.
+        ///
+        /// `sp` is reported as the port captured it, so the fixture can put
+        /// the stack pointer above the guard (judged on the canary) or
+        /// below it (an overrun the canary cannot see).
+        struct Guarded {
+            guard: BootStackGuardRegion,
+            sp: u64,
+        }
+
+        impl CpuStateCapture for Guarded {
+            fn profile(&self) -> BacktraceProfile {
+                BacktraceProfile {
+                    register_capture: Backtrace::Supported,
+                    frame_unwind: Backtrace::Unsupported("no chain in this fixture"),
+                }
+            }
+            fn capture(&self) -> RegisterSnapshot {
+                RegisterSnapshot::new(0, self.sp, 0)
+            }
+            fn frame_layout(&self) -> Option<FrameLayout> {
+                None
+            }
+            fn boot_stack(&self) -> Option<KernelStackRegion> {
+                None
+            }
+            fn boot_stack_guard(&self) -> Option<BootStackGuardRegion> {
+                Some(self.guard)
+            }
+        }
+
+        /// Drive one report over a guard the caller has poisoned (or not)
+        /// and a chosen stack pointer, returning its guard fields.
+        fn verdict_of(
+            bytes: &mut [u8],
+            sp_below_bottom: u64,
+        ) -> (Option<std::string::String>, Option<std::string::String>) {
+            let len = bytes.len();
+            let base = NonNull::from(&mut *bytes).cast::<u8>();
+            // SAFETY: `bytes` is a live host allocation of exactly `len`
+            // bytes that the caller holds for as long as the region is used.
+            let guard = unsafe { BootStackGuardRegion::from_root(base, len) };
+            let bottom = guard.stack_bottom_addr();
+            let handle: &dyn CpuStateCapture = &Guarded {
+                guard,
+                sp: bottom - sp_below_bottom,
+            };
+
+            let _serial = TEST_SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            reset_panic_guard();
+            let arch = TestArch::with_cpus(1);
+            let sink = &TestSink::new();
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let ctx = PanicContext::new(&arch, sink).with_backtrace(handle);
+                panic_dump(None, &ctx);
+            }));
+            assert!(result.is_err());
+            let ev = &sink.snapshot()[0];
+            let field = |key: &str| {
+                ev.fields
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.clone())
+            };
+            let out = (field("boot_stack_guard"), field("boot_stack_overrun_bytes"));
+            reset_panic_guard();
+            out
+        }
+
+        let mut guard = [tairix_memguard::GUARD_BYTE; tairix_memguard::CANARY_BYTES * 2];
+
+        // Poisoned, stack pointer above the guard: nothing to report but
+        // that the stack stayed inside itself.
+        assert_eq!(
+            verdict_of(&mut guard, 0),
+            (Some("intact".into()), None),
+            "an untouched guard must read as intact"
+        );
+
+        // The stack pointer alone is decisive, and carries the extent —
+        // this is the overrun a frame larger than the guard leaves behind
+        // without disturbing a byte of it.
+        assert_eq!(
+            verdict_of(&mut guard, 0x20),
+            (
+                Some("sp_below_stack".into()),
+                Some("0x0000000000000020".into())
+            ),
+            "a stack pointer below the stack must be reported with its extent"
+        );
+
+        // A write through the canary, with the stack pointer recovered
+        // above the stack's bottom: only the poison still says so.
+        guard[tairix_memguard::CANARY_BYTES * 2 - 1] = 0;
+        assert_eq!(
+            verdict_of(&mut guard, 0),
+            (Some("disturbed".into()), None),
+            "a disturbed canary must reach the record"
+        );
     }
 
     /// With no peers to stop, the record still states so rather than leaving

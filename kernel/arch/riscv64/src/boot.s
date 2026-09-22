@@ -43,6 +43,21 @@ _start:
     j       1b
 2:
 
+    # Poison the guard the linker reserved below the stack, so a later
+    # overrun is a disturbed sentinel the panic path can name rather than
+    # a silent clobber of the statics under it. After the loop above,
+    # which spans the guard and would otherwise erase it. `a0`/`a1` carry
+    # the SBI hand-off and are left alone.
+    la      t0, __boot_stack_guard_bottom
+    la      t1, __boot_stack_bottom
+    li      t2, {GUARD_BYTE}
+.Lpoison_guard:
+    bgeu    t0, t1, .Lpoison_guard_done
+    sb      t2, 0(t0)
+    addi    t0, t0, 1
+    j       .Lpoison_guard
+.Lpoison_guard_done:
+
     # Record the boot hartid in `tp` so `smp::current_hartid` recovers
     # this hart's identity from a per-CPU register, exactly as the
     # secondary stub (`smp.s`) does for every other hart. `a0` still

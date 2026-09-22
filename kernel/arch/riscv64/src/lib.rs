@@ -89,8 +89,14 @@ extern crate std;
 
 // The S-mode entry trampoline is only meaningful on the bare-metal
 // target; host `cargo test` omits it so the crate builds on the host.
+// The boot-stack guard's sentinel is passed in rather than spelled in the
+// assembly, so the poison the stub writes and the poison the panic path
+// checks for are the one definition.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-core::arch::global_asm!(include_str!("boot.s"));
+core::arch::global_asm!(
+    include_str!("boot.s"),
+    GUARD_BYTE = const tairix_memguard::GUARD_BYTE,
+);
 
 // The context-switch primitive's body is assembly defined only on the
 // bare-metal target; host `cargo test` exercises the layout/`prepare`

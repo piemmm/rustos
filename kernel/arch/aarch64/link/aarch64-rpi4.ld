@@ -37,6 +37,12 @@ ENTRY(_start)
  * `virt` script's test-workload allowance. */
 BOOT_STACK_BYTES = 64K;
 
+/* Poison guard reserved immediately below the boot stack, for the same
+ * reason as the `virt` script: with the MMU off an overrun cannot be
+ * caught by unmapping a page, so the stub fills this gap with the shared
+ * sentinel and the panic path reads it back. */
+BOOT_STACK_GUARD_BYTES = 4K;
+
 SECTIONS
 {
     . = 0x00080000;
@@ -70,6 +76,12 @@ SECTIONS
          * the MMU off an overrun has no guard page, so it must run into
          * zeroed statics rather than off the bottom into `.rodata`/
          * `.text`. */
+        . = ALIGN(4K);
+        __boot_stack_guard_bottom = .;
+        . += BOOT_STACK_GUARD_BYTES;
+        /* The guard is every byte up to `__boot_stack_bottom`, alignment
+         * padding included, so the stub fills exactly what the panic path
+         * checks and no third symbol can drift between them. */
         . = ALIGN(16);
         __boot_stack_bottom = .;
         . += BOOT_STACK_BYTES;

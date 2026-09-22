@@ -37,6 +37,10 @@ test-harness = []
 # parser, the `RiscvArch` struct, and the PLIC register driver build on
 # the host so their unit tests run under `cargo test`.
 [dependencies]
+# The shared guard-region sentinel: the boot stub's poison fill takes its
+# byte from here (passed into the trampoline as a `global_asm!` const) and
+# the panic path checks for the same one, so the two cannot drift.
+tairix-memguard = { path = "../../../lib/memguard", version = "=0.0.0" }
 tairix-arch-api = { path = "../api", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # `tairix-abi` provides the frozen `SYSCALL_MAX_ARGS = 6` constant the

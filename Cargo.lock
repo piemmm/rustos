@@ -994,6 +994,7 @@ dependencies = [
  "tairix-fdt",
  "tairix-fwcfg",
  "tairix-log",
+ "tairix-memguard",
  "tairix-rng",
  "tairix-sync",
  "tairix-vcmailbox",
@@ -1006,6 +1007,7 @@ dependencies = [
  "tairix-abi",
  "tairix-fdt",
  "tairix-fuzzseed",
+ "tairix-memguard",
  "tairix-rng",
  "tairix-sync",
 ]
@@ -1019,6 +1021,7 @@ dependencies = [
  "tairix-conout",
  "tairix-fdt",
  "tairix-log",
+ "tairix-memguard",
  "tairix-rng",
  "tairix-sync",
 ]
@@ -1044,6 +1047,7 @@ dependencies = [
  "tairix-conout",
  "tairix-kernel-mem",
  "tairix-log",
+ "tairix-memguard",
  "tairix-multiboot2",
  "tairix-rng",
  "tairix-sync",
@@ -2336,6 +2340,14 @@ dependencies = [
 [[package]]
 name = "tairix-installer"
 version = "0.0.0"
+
+[[package]]
+name = "tairix-itest-bootguard"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-api",
+ "tairix-memguard",
+]
 
 [[package]]
 name = "tairix-itest-finisher"
@@ -3645,6 +3657,36 @@ dependencies = [
  "tairix-kernel-syscall",
  "tairix-log",
  "tairix-sync",
+]
+
+[[package]]
+name = "tairix-test-bootguard-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-itest-bootguard",
+ "tairix-itest-harness",
+]
+
+[[package]]
+name = "tairix-test-bootguard-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-api",
+ "tairix-arch-riscv64",
+ "tairix-itest-bootguard",
+ "tairix-itest-harness",
+]
+
+[[package]]
+name = "tairix-test-bootguard-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-api",
+ "tairix-arch-x86_64",
+ "tairix-itest-bootguard",
+ "tairix-itest-harness",
 ]
 
 [[package]]

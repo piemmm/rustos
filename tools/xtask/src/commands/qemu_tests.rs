@@ -1666,6 +1666,72 @@ static TESTS: &[QemuTest] = &[
     // and probes one address space on the boot hart); the 60-second budget
     // matches `memory_isolation`'s — a strictly bring-up test with no
     // workload.
+    // The boot stack's poison guard, on each port. Only a real boot shows
+    // that the linker reserved the guard, that the stub's fill survived the
+    // `.bss` clear that spans it, and that the port's post-mortem handle
+    // names that same reservation; the judgement itself is host-tested in
+    // `kernel/arch/api`. Boot-and-check only, so the budget matches the
+    // other strictly bring-up verticals.
+    QemuTest {
+        package: "tairix-test-bootguard-qemu-riscv64",
+        binary: "tairix-test-bootguard-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
+    QemuTest {
+        package: "tairix-test-bootguard-qemu-aarch64",
+        binary: "tairix-test-bootguard-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
+    QemuTest {
+        package: "tairix-test-bootguard-qemu-x86_64",
+        binary: "tairix-test-bootguard-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     QemuTest {
         package: "tairix-test-accessed-bit-qemu-riscv64",
         binary: "tairix-test-accessed-bit-qemu-riscv64",

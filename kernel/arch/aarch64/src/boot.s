@@ -169,6 +169,23 @@ _start:
     b       1b
 2:
 
+    // Poison the guard the linker reserved below the stack, so a later
+    // overrun is a disturbed sentinel the panic path can name rather than
+    // a silent clobber of the statics under it. After the loop above,
+    // which spans the guard and would otherwise erase it. x19 (the DTB)
+    // is untouched.
+    adrp    x0, __boot_stack_guard_bottom
+    add     x0, x0, :lo12:__boot_stack_guard_bottom
+    adrp    x1, __boot_stack_bottom
+    add     x1, x1, :lo12:__boot_stack_bottom
+    mov     w2, #{GUARD_BYTE}
+.Lpoison_guard:
+    cmp     x0, x1
+    b.hs    .Lpoison_guard_done
+    strb    w2, [x0], #1
+    b       .Lpoison_guard
+.Lpoison_guard_done:
+
     // Hand the DTB pointer to the Rust entry. It does not return.
     mov     x0, x19
     bl      tairix_arch_aarch64_main

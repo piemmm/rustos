@@ -42,8 +42,15 @@
 // The boot trampoline is only meaningful on the bare-metal target. When
 // `cargo test` runs the host-target unit tests in this crate the
 // assembly is omitted so the file builds on x86_64-linux too.
+// The boot-stack guard's sentinel is passed in rather than spelled in the
+// assembly, so the poison the stub writes and the poison the panic path
+// checks for are the one definition.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-core::arch::global_asm!(include_str!("boot.s"), options(att_syntax));
+core::arch::global_asm!(
+    include_str!("boot.s"),
+    GUARD_BYTE = const tairix_memguard::GUARD_BYTE,
+    options(att_syntax),
+);
 
 // AP startup trampoline (Stage 3a (b)). Embedded as a dedicated
 // `.ap_trampoline` section of the kernel image; the BSP-side installer

@@ -167,6 +167,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Capability gate guards an inode's name, not only its content (§5.3) | Unlinking or renaming a gated directory aside and planting an ungated replacement | ✓ | ✓ | ✓ | ✓ |
 | Speculation barriers on syscall / context switch (§19.1) | Spectre / MDS / L1TF / MMIO stale data | ✓ | ✓ | ✓ | ✓ host |
 | Stack + slab guard pages, hardware fault (§4) | Stack/heap overrun into adjacent memory | ✓ | ✓ | ✓ | — |
+| Boot-stack poison guard, read back by the post-mortem (§4, §19.2) | Early-boot stack overrun corrupting `.bss` silently, before the MMU exists to fault on it | ✓ | ✓ | ✓ | — |
 | Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA/MMIO (§4, §18.1) | Malicious-device DMA, unbounded device memory | ✓ | ✓ | ✓ | — |
 | Continuous fuzzing of parsers/ABI/IPC/syscalls (§19.6) | Input-handling memory-safety bugs | ✓ | ✓ | ✓ | ✓ |

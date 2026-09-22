@@ -87,6 +87,10 @@ SECTIONS
      * this script is the one definition of KERNEL_VMA_BASE. */
     boot_stack_bottom_high = boot_stack_bottom + KERNEL_VMA_BASE;
     boot_stack_top_high = boot_stack_top + KERNEL_VMA_BASE;
+    /* The stack's poison guard (reserved in `boot.s`), aliased through the
+     * same window: the panic path reads it long after the trampoline has
+     * left the identity map behind. */
+    boot_stack_guard_bottom_high = boot_stack_guard_bottom + KERNEL_VMA_BASE;
 
     /* Switch the location counter (VMA) into the higher half. Each section
      * below maps its LMA back to the contiguous low physical image with an

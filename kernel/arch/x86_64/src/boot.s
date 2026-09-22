@@ -154,6 +154,20 @@ boot_common:
     movl $boot_stack_top, %esp
     xorl %ebp, %ebp
 
+    // Poison the guard reserved below the stack, before anything descends
+    // it, so a later overrun is a disturbed sentinel the panic path can
+    // name rather than a silent clobber of the boot page tables under it.
+    // %edi/%esi carry the boot hand-off into long mode and are left alone;
+    // %ecx is dead until the page-table loop below resets it.
+    movl $boot_stack_guard_bottom, %ecx
+.Lpoison_guard:
+    cmpl $boot_stack_bottom, %ecx
+    jae  .Lpoison_guard_done
+    movb ${GUARD_BYTE}, (%ecx)
+    incl %ecx
+    jmp  .Lpoison_guard
+.Lpoison_guard_done:
+
     // PML4[0] -> PDPT
     movl $boot_pdpt, %eax
     orl  $0x3, %eax                                 // P|RW
@@ -342,6 +356,17 @@ boot_pds:
 // and keeps an overflow from silently corrupting the adjacent
 // `boot_pds` page tables. `KERNEL_STACK_BYTES` in `tairix-kernel`
 // tracks this value (its static assert pins the lower bound).
+// Poison guard immediately below the stack. Paging is off when the BSP
+// first descends this stack, so an overrun cannot be caught by unmapping
+// a page; `boot_common` fills this gap with the shared sentinel and the
+// panic path reads it back, turning a silent clobber of the page tables
+// below into a named overrun. The guard is every byte up to
+// `boot_stack_bottom`, so the fill and the check share one pair of
+// symbols and no padding can drift between them.
+.align 4096
+.global boot_stack_guard_bottom
+boot_stack_guard_bottom:
+    .skip 4096
 .align 16
 .global boot_stack_bottom
 boot_stack_bottom:

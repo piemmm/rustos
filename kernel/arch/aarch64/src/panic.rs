@@ -19,6 +19,8 @@
 use core::fmt::Write as _;
 use core::panic::PanicInfo;
 
+use tairix_arch_api::CpuStateCapture as _;
+
 use crate::kernel_arch::halt_current_cpu;
 use crate::serial::ConsoleWriter;
 
@@ -49,6 +51,17 @@ pub fn handle_panic_via_serial(info: &PanicInfo<'_>) -> ! {
         "\n==================== TAIRiX KERNEL PANIC ===================="
     );
     let _ = writeln!(w, "[tairix-kernel] aarch64 panic on CPU {cpu}: {info}");
+
+    // Whether the boot stack ran off its bottom. Without this a fault
+    // whose real cause was an overrun reads as an unexplained corruption
+    // of whatever sat below the stack — the failure that motivated the
+    // guard. The verdict rests on the stack pointer captured here, so it
+    // is taken from the same handle that reports it.
+    let bt = crate::backtrace::Backtracer::new();
+    let sp = bt.capture().sp;
+    if let Some(verdict) = bt.boot_stack_guard().map(|guard| guard.assess(sp)) {
+        let _ = writeln!(w, "boot-stack guard: {verdict}");
+    }
     let _ = writeln!(
         w,
         "CPU {cpu} halted; the kernel is non-recoverable in production."

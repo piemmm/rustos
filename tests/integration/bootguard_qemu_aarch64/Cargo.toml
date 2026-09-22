@@ -1,0 +1,37 @@
+[package]
+name = "tairix-test-bootguard-qemu-aarch64"
+description = "QEMU integration test: the aarch64 boot stack's poison guard is reserved by the linker, filled by the boot stub after the .bss clear, named correctly by the port's post-mortem handle, and detects a write through its canary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# A freestanding kernel booted on the QEMU `virt` board. The boot stack runs with
+# the MMU off, so an overrun cannot be caught by unmapping a page below it;
+# the guard is poison instead, and only a real boot can show that the
+# linker reserved it, that the stub's fill survived the `.bss` clear that
+# spans it, and that the port's handle names that same reservation. The
+# judgement itself is `kernel/arch/api`'s and is unit-tested on the host.
+#
+# Because the binary is freestanding it is built **only** for
+# `aarch64-unknown-none`. On the host target the crate has no test source; the
+# orchestrator that runs the QEMU binary is `cargo xtask test --qemu`.
+
+[[bin]]
+name = "tairix-test-bootguard-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+# The post-mortem surface the guard is reached through, and the shared
+# checks every port's vertical asks of it.
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-itest-bootguard = { path = "../bootguard", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

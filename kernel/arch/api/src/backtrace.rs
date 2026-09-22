@@ -14,8 +14,14 @@
 //! * [`CpuStateCapture`] — the per-port handle the panic path reaches
 //!   through. It [captures](CpuStateCapture::capture) the registers, states
 //!   the port's [frame layout](CpuStateCapture::frame_layout), reports the
-//!   calling CPU's [rooted boot stack](CpuStateCapture::boot_stack),
-//!   and declares its honest [profile](CpuStateCapture::profile).
+//!   calling CPU's [rooted boot stack](CpuStateCapture::boot_stack) and
+//!   [its poison guard](CpuStateCapture::boot_stack_guard), and declares
+//!   its honest [profile](CpuStateCapture::profile).
+//! * [`BootStackGuardRegion`] / [`BootStackGuard`] — the guard below the
+//!   boot stack and the verdict read off it. The boot stack is in use
+//!   before the MMU is on, so an overrun cannot be caught by a hole in the
+//!   address space; the sentinel and the window checked for it are
+//!   `lib/memguard`'s, shared with every other guarded region.
 //! * [`RegisterSnapshot`] / [`NamedReg`] — the architecture-neutral,
 //!   allocation-free register-file snapshot. `pc`/`sp`/`fp` are explicit
 //!   because the neutral unwinder needs them; the rest are named pairs.
@@ -32,6 +38,8 @@
 //! * [`walk`] — the arch-neutral frame-pointer unwinder every port shares.
 //! * [`conformance`] — the conformance vertical every port runs against
 //!   its handle.
+
+use core::ptr::NonNull;
 
 use crate::context::KernelStackRegion;
 
@@ -225,6 +233,163 @@ impl From<KernelStackRegion> for StackBounds {
     }
 }
 
+/// What a boot stack's poison guard says after a fatal fault.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BootStackGuard {
+    /// The canary below the stack still holds the sentinel: nothing wrote
+    /// through the guard.
+    Intact,
+    /// The canary is disturbed, so the stack overran and whatever lies
+    /// below it may already be corrupt.
+    Disturbed,
+    /// The stack pointer is below the stack's lowest byte: an overrun still
+    /// in progress, which a frame larger than the guard may have cleared
+    /// without disturbing a byte of it.
+    BelowStack {
+        /// The captured stack pointer.
+        sp: u64,
+        /// How far below the stack's lowest byte it points.
+        bytes: u64,
+    },
+}
+
+impl BootStackGuard {
+    /// Stable one-word verdict for a post-mortem record.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Intact => "intact",
+            Self::Disturbed => "disturbed",
+            Self::BelowStack { .. } => "sp_below_stack",
+        }
+    }
+}
+
+/// The verdict as a post-mortem reads it, for the report paths that write
+/// prose rather than a field list.
+impl core::fmt::Display for BootStackGuard {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Intact => f.write_str("intact"),
+            Self::Disturbed => f.write_str(
+                "DISTURBED - the boot stack overran into it, so the statics below it are suspect",
+            ),
+            Self::BelowStack { sp, bytes } => write!(
+                f,
+                "OVERRUN - sp {sp:#x} is {bytes:#x} bytes below the boot stack's lowest byte"
+            ),
+        }
+    }
+}
+
+/// A boot stack's poison guard: the bytes the port's linker reserved
+/// immediately below the stack, which its boot stub filled with
+/// [`tairix_memguard::GUARD_BYTE`].
+///
+/// The MMU is off while the boot stack is in use, so nothing can be
+/// unmapped below it and the guard has to be poison rather than a hole.
+/// Like [`KernelStackRegion`] the region carries the pointer its bytes are
+/// read *through*: it exists because the linker reserved it, which is a
+/// fact only the port holds.
+#[derive(Copy, Clone, Debug)]
+pub struct BootStackGuardRegion {
+    /// Lowest byte of the guard.
+    base: NonNull<u8>,
+    /// Guard bytes above [`Self::base`]. The byte one past them is the boot
+    /// stack's lowest.
+    len: usize,
+}
+
+// SAFETY: as `KernelStackRegion` — the descriptor is immutable and hands out
+// no exclusive access of its own, so sharing one grants nothing the bare
+// `(address, length)` pair it replaced did not.
+unsafe impl Send for BootStackGuardRegion {}
+// SAFETY: as `Send` above.
+unsafe impl Sync for BootStackGuardRegion {}
+
+impl BootStackGuardRegion {
+    /// Name the guard `[low, high)` a port's linker reserved, where `high`
+    /// is the boot stack's lowest byte.
+    ///
+    /// # Safety
+    ///
+    /// `[low, high)` must be that reservation: mapped, and claimed by
+    /// nothing else for as long as the region is used.
+    #[must_use]
+    pub unsafe fn at_address(low: u64, high: u64) -> Option<Self> {
+        let (addr, len) = Self::span(low, high)?;
+        // The one int-to-pointer step, stated where the fact that these
+        // bytes exist is known rather than re-derived per read.
+        let base = NonNull::new(core::ptr::with_exposed_provenance_mut::<u8>(addr))?;
+        Some(Self { base, len })
+    }
+
+    /// The address and length [`Self::at_address`] resolves `[low, high)`
+    /// to, or `None` on the refusals it makes.
+    ///
+    /// Split out for the reason [`KernelStackRegion::enclosing`]'s is:
+    /// minting a pointer from an address is a step no interpreter can
+    /// follow, so the rule is tested without taking the crate's
+    /// undefined-behaviour stage down with it.
+    fn span(low: u64, high: u64) -> Option<(usize, usize)> {
+        // A region holding address zero would make a null pointer one of its
+        // bytes, which its `NonNull` root cannot name.
+        if low == 0 || low >= high {
+            return None;
+        }
+        let addr = usize::try_from(low).ok()?;
+        let len = usize::try_from(high - low).ok()?;
+        Some((addr, len))
+    }
+
+    /// Describe a guard over memory the caller already holds a pointer to,
+    /// so a host test can judge one with no port under it.
+    ///
+    /// # Safety
+    ///
+    /// `base` must be valid for reads across `len` bytes for as long as the
+    /// region is used.
+    #[cfg(any(test, feature = "host-tests"))]
+    #[must_use]
+    pub const unsafe fn from_root(base: NonNull<u8>, len: usize) -> Self {
+        Self { base, len }
+    }
+
+    /// The boot stack's lowest byte — one past the guard's last.
+    #[must_use]
+    pub fn stack_bottom_addr(self) -> u64 {
+        self.base.addr().get() as u64 + self.len as u64
+    }
+
+    /// What the guard says about a CPU whose captured stack pointer is `sp`.
+    ///
+    /// The stack pointer is tested first and is decisive on its own: it
+    /// catches an overrun whose frame was larger than the guard and so
+    /// stepped over it without writing a byte, and it keeps the canary read
+    /// off bytes that are currently live frames. A port that cannot capture
+    /// registers reports `sp` as `0`, which names no stack and is judged on
+    /// the canary alone.
+    #[must_use]
+    pub fn assess(self, sp: u64) -> BootStackGuard {
+        let bottom = self.stack_bottom_addr();
+        if sp != 0 && sp < bottom {
+            return BootStackGuard::BelowStack {
+                sp,
+                bytes: bottom - sp,
+            };
+        }
+        // SAFETY: the constructor vouched that these bytes are the port's
+        // reserved guard, and `sp` is above them, so nothing live is read.
+        let guard =
+            unsafe { core::slice::from_raw_parts(self.base.as_ptr().cast_const(), self.len) };
+        if tairix_memguard::canary_intact(tairix_memguard::canary_window(guard)) {
+            BootStackGuard::Intact
+        } else {
+            BootStackGuard::Disturbed
+        }
+    }
+}
+
 /// One backtrace-capability feature's status on a given port.
 ///
 /// Mirrors [`super::memtag::Tagging`] / [`super::sidechannel::Mitigation`]:
@@ -413,6 +578,20 @@ pub trait CpuStateCapture: Send + Sync {
     /// captured `pc` rather than reading memory nothing vouches for (fail
     /// closed).
     fn boot_stack(&self) -> Option<KernelStackRegion>;
+
+    /// The calling CPU's boot-stack poison guard, rooted, or `None` when
+    /// the port reserves none.
+    ///
+    /// Answered from the port's own linker reservation, exactly as
+    /// [`Self::boot_stack`] is. The boot stack runs with the MMU off, so an
+    /// overrun cannot be caught by unmapping a page below it; the guard is
+    /// poison instead, and reading it is how a report says whether the
+    /// statics beneath the stack are trustworthy. A port without a guard
+    /// answers `None` and its report carries no verdict — never a
+    /// fabricated one.
+    fn boot_stack_guard(&self) -> Option<BootStackGuardRegion> {
+        None
+    }
 
     /// The active translation root, when the port can name it.
     ///
@@ -830,6 +1009,133 @@ mod tests {
         saved_fp_offset: -16,
         return_addr_offset: -8,
     };
+
+    /// A guard the test owns, poisoned as a boot stub would leave it.
+    ///
+    /// Wider than the canary window so a disturbance below the window is
+    /// distinguishable from one inside it.
+    struct TestGuard {
+        bytes: std::boxed::Box<[u8]>,
+    }
+
+    impl TestGuard {
+        fn poisoned() -> Self {
+            Self {
+                bytes: std::vec![tairix_memguard::GUARD_BYTE; tairix_memguard::CANARY_BYTES * 4]
+                    .into_boxed_slice(),
+            }
+        }
+
+        fn region(&mut self) -> BootStackGuardRegion {
+            let len = self.bytes.len();
+            let base = NonNull::new(self.bytes.as_mut_ptr()).expect("a boxed slice is non-null");
+            // SAFETY: `base` is this test's own allocation and stays valid
+            // and unaliased while the region is used.
+            unsafe { BootStackGuardRegion::from_root(base, len) }
+        }
+
+        /// The stack bottom the region reports — one past the guard's last
+        /// byte, which is where a stack pointer that has *not* overrun sits
+        /// at or above.
+        fn stack_bottom(&mut self) -> u64 {
+            self.region().stack_bottom_addr()
+        }
+    }
+
+    #[test]
+    fn a_freshly_poisoned_guard_reads_as_intact() {
+        let mut guard = TestGuard::poisoned();
+        let sp = guard.stack_bottom();
+        assert_eq!(guard.region().assess(sp), BootStackGuard::Intact);
+    }
+
+    #[test]
+    fn a_write_through_the_canary_is_an_overrun() {
+        let mut guard = TestGuard::poisoned();
+        let sp = guard.stack_bottom();
+        let top = guard.bytes.len() - 1;
+        guard.bytes[top] = 0;
+        assert_eq!(guard.region().assess(sp), BootStackGuard::Disturbed);
+    }
+
+    #[test]
+    fn a_disturbance_below_the_canary_window_is_absorption_not_detection() {
+        let mut guard = TestGuard::poisoned();
+        let sp = guard.stack_bottom();
+        guard.bytes[0] = 0;
+        assert_eq!(guard.region().assess(sp), BootStackGuard::Intact);
+    }
+
+    #[test]
+    fn a_stack_pointer_below_the_stack_is_an_overrun_however_intact_the_canary() {
+        // The case a guard-sized frame produces: the stack ran off its
+        // bottom without writing a byte of the guard, so only `sp` says so.
+        let mut guard = TestGuard::poisoned();
+        let bottom = guard.stack_bottom();
+        let sp = bottom - 8;
+        assert_eq!(
+            guard.region().assess(sp),
+            BootStackGuard::BelowStack { sp, bytes: 8 }
+        );
+    }
+
+    #[test]
+    fn a_stack_pointer_that_cleared_the_guard_entirely_is_still_caught() {
+        let mut guard = TestGuard::poisoned();
+        let bottom = guard.stack_bottom();
+        let len = guard.bytes.len() as u64;
+        let sp = bottom - len - 64;
+        assert_eq!(
+            guard.region().assess(sp),
+            BootStackGuard::BelowStack {
+                sp,
+                bytes: len + 64
+            }
+        );
+    }
+
+    #[test]
+    fn an_unreported_stack_pointer_is_judged_on_the_canary_alone() {
+        // A port with no register capture reports `sp` as 0; that names no
+        // stack, so it must not read as an overrun of the whole address
+        // space.
+        let mut guard = TestGuard::poisoned();
+        assert_eq!(guard.region().assess(0), BootStackGuard::Intact);
+        let top = guard.bytes.len() - 1;
+        guard.bytes[top] = 0;
+        assert_eq!(guard.region().assess(0), BootStackGuard::Disturbed);
+    }
+
+    #[test]
+    fn a_never_poisoned_guard_does_not_read_as_intact() {
+        // `.bss` is zeroed before the stub poisons the guard, so a stub
+        // that never ran must not vouch for the stack.
+        let mut guard = TestGuard::poisoned();
+        let sp = guard.stack_bottom();
+        guard.bytes.fill(0);
+        assert_eq!(guard.region().assess(sp), BootStackGuard::Disturbed);
+    }
+
+    #[test]
+    fn a_guard_span_is_refused_when_it_names_no_bytes_or_holds_address_zero() {
+        assert_eq!(BootStackGuardRegion::span(0, 0x1000), None);
+        assert_eq!(BootStackGuardRegion::span(0x2000, 0x2000), None);
+        assert_eq!(BootStackGuardRegion::span(0x3000, 0x2000), None);
+        assert_eq!(
+            BootStackGuardRegion::span(0x2000, 0x3000),
+            Some((0x2000, 0x1000))
+        );
+    }
+
+    #[test]
+    fn every_verdict_has_a_distinct_label() {
+        assert_eq!(BootStackGuard::Intact.label(), "intact");
+        assert_eq!(BootStackGuard::Disturbed.label(), "disturbed");
+        assert_eq!(
+            BootStackGuard::BelowStack { sp: 1, bytes: 2 }.label(),
+            "sp_below_stack"
+        );
+    }
 
     /// A dense host stack image addressed from `base`.
     struct Mem {

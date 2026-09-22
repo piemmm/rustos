@@ -38,6 +38,12 @@ ENTRY(_start)
  * ceiling. The Pi 4 script keeps the smaller boot-pipeline figure. */
 BOOT_STACK_BYTES = 256K;
 
+/* Poison guard reserved immediately below the boot stack. The MMU is off
+ * on the boot CPU, so an overrun cannot be caught by unmapping a page:
+ * the stub fills this gap with the shared sentinel instead and the panic
+ * path reads it back. Sized per image like the stack above it. */
+BOOT_STACK_GUARD_BYTES = 4K;
+
 SECTIONS
 {
     . = 0x40200000;
@@ -73,6 +79,12 @@ SECTIONS
          * where corrupting a vtable slot turns into a branch to data and
          * a silent hang. Growing down into the zeroed statics above
          * `__bss_start` keeps an overrun off the code. */
+        . = ALIGN(4K);
+        __boot_stack_guard_bottom = .;
+        . += BOOT_STACK_GUARD_BYTES;
+        /* The guard is every byte up to `__boot_stack_bottom`, alignment
+         * padding included, so the stub fills exactly what the panic path
+         * checks and no third symbol can drift between them. */
         . = ALIGN(16);
         __boot_stack_bottom = .;
         . += BOOT_STACK_BYTES;

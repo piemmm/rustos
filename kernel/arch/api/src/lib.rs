@@ -152,8 +152,9 @@ pub mod xtlb;
 
 pub use backtrace::{
     conformance as backtrace_conformance, walk as backtrace_walk, Backtrace, BacktraceEntry,
-    BacktraceProfile, CpuStateCapture, FrameLayout, NamedReg, RegisterSnapshot, StackBounds,
-    StackReader, Translation, MAX_FRAMES as BACKTRACE_MAX_FRAMES, MAX_NAMED_REGS, MAX_TABLE_LEVELS,
+    BacktraceProfile, BootStackGuard, BootStackGuardRegion, CpuStateCapture, FrameLayout, NamedReg,
+    RegisterSnapshot, StackBounds, StackReader, Translation, MAX_FRAMES as BACKTRACE_MAX_FRAMES,
+    MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
 
 pub use sidechannel::{

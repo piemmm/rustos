@@ -34,6 +34,13 @@ path = "src/lib.rs"
 #   shares rather than re-defining the trait. The layering permits the edge
 #   `kernel/arch/api -> lib/rng`.
 #
+# - `tairix-memguard` is a `lib/*` crate (no_std, `forbid(unsafe_code)`).
+#   It is named here so the boot-stack guard is judged by the same sentinel
+#   and canary window every other guarded region in the kernel uses, rather
+#   than a second poison definition that could drift from the slab's and the
+#   kthread stack's. The layering permits the edge
+#   `kernel/arch/api -> lib/memguard`.
+#
 # - `tairix-sync` is a `lib/*` crate (no_std). It is named here so the
 #   guarded-copy slot holds its published routine in the shared `FnCell`
 #   every port's callback seam uses, rather than re-deriving the
@@ -50,6 +57,7 @@ host-tests = []
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-memguard = { path = "../../../lib/memguard", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 # The device-tree reader and its bus-aware `reg` decoder: the generic
