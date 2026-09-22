@@ -59,7 +59,7 @@ use alloc::vec::Vec;
 use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily, MAX_RESOLVER_SERVERS};
 use tairix_abi::Errno;
 use tairix_net::addr::IpAddr;
-use tairix_net::dns::{self, DnsError, DnsTransport, Name, RecordType, Resolution, ResolveStatus};
+use tairix_net::dns::{self, DnsError, DnsTransport, LookupType, Name, Resolution, ResolveStatus};
 use tairix_procinfo::{for_each_resolver_server, CallError, ListError, Transport, WalkStep};
 
 #[cfg(all(feature = "program", target_os = "none"))]
@@ -159,7 +159,7 @@ pub fn configured_servers(sysinfo: &dyn Transport) -> Result<Vec<IpAddr>, Errno>
 /// difference between "does not exist" and "could not reach a server".
 pub fn resolve_name(
     name: &str,
-    record_type: RecordType,
+    record_type: LookupType,
     sysinfo: &dyn Transport,
     udp: &mut dyn DnsTransport,
     rng: &mut dyn FnMut() -> u32,
@@ -184,14 +184,14 @@ pub fn resolve_pointer(
     udp: &mut dyn DnsTransport,
     rng: &mut dyn FnMut() -> u32,
 ) -> Result<Resolution, ResolveError> {
-    query(&Name::reverse(address), RecordType::Ptr, sysinfo, udp, rng)
+    query(&Name::reverse(address), LookupType::Ptr, sysinfo, udp, rng)
 }
 
 /// The shared "fetch the servers, then drive the engine" step both the
 /// forward and the reverse entry point run.
 fn query(
     name: &Name,
-    record_type: RecordType,
+    record_type: LookupType,
     sysinfo: &dyn Transport,
     udp: &mut dyn DnsTransport,
     rng: &mut dyn FnMut() -> u32,
@@ -209,11 +209,11 @@ fn query(
 /// IPv4. A forced family asks for that family alone, so `-4 <v6-only name>`
 /// finds nothing rather than quietly connecting over the other family.
 #[must_use]
-pub const fn wanted_records(family: Option<NetAddrFamily>) -> &'static [RecordType] {
+pub const fn wanted_records(family: Option<NetAddrFamily>) -> &'static [LookupType] {
     match family {
-        Some(NetAddrFamily::V4) => &[RecordType::A],
-        Some(NetAddrFamily::V6) => &[RecordType::Aaaa],
-        None => &[RecordType::Aaaa, RecordType::A],
+        Some(NetAddrFamily::V4) => &[LookupType::A],
+        Some(NetAddrFamily::V6) => &[LookupType::Aaaa],
+        None => &[LookupType::Aaaa, LookupType::A],
     }
 }
 
@@ -244,7 +244,7 @@ pub fn literal_address(host: &str, family: Option<NetAddrFamily>) -> Option<IpAd
 pub fn resolve_host(
     host: &str,
     family: Option<NetAddrFamily>,
-    query: &mut dyn FnMut(&str, RecordType) -> Option<Resolution>,
+    query: &mut dyn FnMut(&str, LookupType) -> Option<Resolution>,
 ) -> Option<IpAddr> {
     if let Some(address) = literal_address(host, family) {
         return Some(address);

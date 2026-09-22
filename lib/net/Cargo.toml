@@ -17,6 +17,11 @@ tairix-collections = { path = "../collections", version = "=0.0.0" }
 # taken with (a remote peer chooses the tuple), and the fast unkeyed one the
 # address-set revision counter folds with.
 tairix-hash = { path = "../hash", version = "=0.0.0" }
+# The allocation-free containers the bounded, attacker-fed multicast-DNS
+# state is built from: the fixed-capacity vectors, the 256-bit set an NSEC
+# type bitmap is, and the intrusive lists the record cache's recency and
+# per-source chains thread through its slots.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 
 [lints]
 workspace = true

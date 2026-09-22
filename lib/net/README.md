@@ -12,7 +12,7 @@ tests, and fuzz harnesses (`fuzz_net_eth`, `fuzz_net_addr`,
 `fuzz_net_stack`, `fuzz_net_udp`, `fuzz_net_tcp` (segment codec, the
 connection state machine, and the listener + SYN-cookie driver),
 `fuzz_net_igmp`, `fuzz_net_mld`, `fuzz_net_dhcp`, `fuzz_net_dhcpv6`,
-`fuzz_net_dns`)
+`fuzz_net_dns`, `fuzz_net_mdns`, `fuzz_net_ntp`)
 exercise.
 
 ## Contents
@@ -48,7 +48,9 @@ exercise.
   carries the family difference): checksum-verified `IcmpMessage`,
   echo (`IcmpEcho`), errors (`IcmpError`, incl. the RFC 1191 v4
   packet-too-big mapping), the RFC 4443 §2.4(e) generation gate
-  (`error_allowed`), and the §2.4(f) token-bucket `ErrorRateLimiter`.
+  (`error_allowed`), and the §2.4(f) budget, which is `rate::TokenBucket`
+  — one token bucket for every rate this crate must bound, not one per
+  protocol that needs one.
 - `nd` — Neighbour Discovery (RFC 4861): RS/RA/NS/NA/redirect codecs
   with hop-limit-255/code-0 enforcement and bounded options; host-side
   emit only (RS/NS/NA); apply-helpers that drive the one `neigh` table.
@@ -159,7 +161,8 @@ exercise.
   engine is host-tested and fuzzed.
 - `dns` — the pure DNS stub resolver (RFC 1035 / RFC 5452, `plans/DNS.md`
   DNS1), a sibling of `dhcp`, not a protocol baked into a socket. The
-  message codec: `Name` (a bounded, case-folded canonical wire encoding —
+  message codec: `Name` (a bounded, uncompressed wire encoding that
+  *preserves* case and compares without it, per RFC 4343 —
   `Name::encode` parses a dotted host name with the label/length rules, and
   the internal reader expands RFC 1035 §4.1.4 compression pointers with a
   strictly-backwards follow rule so a crafted pointer loop cannot hang the
@@ -195,6 +198,26 @@ exercise.
   `NET_RESOLVER_SERVERS` System Information query
   (`state:net/resolver/servers`, the resolv.conf analogue) — one source of
   truth for a resolver client and an operator alike (`plans/DNS.md` DNS2).
+- `mdns` — the pure per-interface multicast DNS responder and querier
+  (RFC 6762) and the records service discovery carries over it (RFC 6763),
+  `plans/ZEROCONF.md` Z1. mDNS is DNS on the wire, so it reuses `dns`'s
+  `Name`, `RecordType`, and readers rather than defining a second codec;
+  what it adds is the multicast reading of the two class top bits (`QU` on
+  a question, cache-flush on a record), the service-discovery record
+  vocabulary, a writer with RFC 1035 name compression (and the RFC 3597 §4
+  rule that never compresses a name inside a post-1035 type's rdata), the
+  bounded per-interface `RecordCache`, and the `MdnsEngine` responder /
+  querier state machine: probe, announce, conflict-rename, goodbye,
+  known-answer and duplicate-question/answer suppression, and the RFC 6762
+  §5.2 continuous-query backoff with cache refresh. Everything hostile
+  about the protocol is answered structurally — a malformed datagram is
+  dropped whole, the cache index is keyed with the per-boot secret so a
+  peer cannot choose a colliding name set, the cache bounds are fixed
+  security bounds with per-source fairness inside the global one, renaming
+  after a conflict is bounded and then fails closed to *not published*, a
+  record is multicast at most once a second, unicast replies are budgeted
+  per peer and per interface, and a query from off-link is never answered.
+  Tickless: one folded `next_deadline` covers every timer the protocol has.
 - `igmp`, `mld` — the IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2,
   RFC 3810) multicast group-membership message codecs, total and
   fail-closed; `mld` decodes queries and encodes reports only (a host

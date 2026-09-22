@@ -247,6 +247,63 @@ impl RateMeter {
     }
 }
 
+/// A token bucket: at most `burst` events at once, refilled at
+/// `per_second`.
+///
+/// One definition for every rate a protocol engine in this crate must
+/// bound — ICMP/`ICMPv6` error generation (RFC 4443 §2.4(f)) and the
+/// per-peer multicast-DNS response budget (RFC 6762 §6) alike. Pure and
+/// `now`-driven like every stateful engine here: the caller asks
+/// [`Self::allow`] before emitting and drops the message (silently —
+/// suppression is the defence) when refused.
+#[derive(Clone, Debug)]
+pub struct TokenBucket {
+    /// Tokens scaled by [`NANOS_PER_SEC`], so refill needs no division.
+    tokens: u64,
+    /// Bucket capacity in scaled tokens.
+    capacity: u64,
+    /// Refill rate in scaled tokens per second (= events per second).
+    per_second: u64,
+    /// Monotonic nanoseconds of the last refill.
+    last: u128,
+}
+
+/// One scaled token: the cost of one event.
+const TOKEN: u64 = NANOS_PER_SEC as u64;
+
+impl TokenBucket {
+    /// A bucket allowing bursts of `burst` events, refilled at
+    /// `per_second` events per second. Zero values fail closed: a zero
+    /// burst or rate allows nothing.
+    #[must_use]
+    pub fn new(burst: u32, per_second: u32) -> Self {
+        Self {
+            tokens: u64::from(burst).saturating_mul(TOKEN),
+            capacity: u64::from(burst).saturating_mul(TOKEN),
+            per_second: u64::from(per_second),
+            last: 0,
+        }
+    }
+
+    /// Take one event's worth of budget at time `now`; `false` means the
+    /// event must be suppressed.
+    pub fn allow(&mut self, now: Duration64) -> bool {
+        let now = nanos(now);
+        let elapsed = now.saturating_sub(self.last);
+        self.last = now;
+        let refill = u64::try_from(elapsed)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(self.per_second);
+        self.tokens = core::cmp::min(self.capacity, self.tokens.saturating_add(refill));
+        if self.tokens >= TOKEN {
+            self.tokens -= TOKEN;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "rate_tests.rs"]
 mod tests;

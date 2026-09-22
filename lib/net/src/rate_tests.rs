@@ -1,7 +1,8 @@
 //! Unit tests for the windowed-rate meter.
 
 use super::{
-    RateCounters, RateMeter, RateSelector, HISTORY, MAX_WINDOW_NANOS, MIN_SAMPLE_GAP_NANOS,
+    RateCounters, RateMeter, RateSelector, TokenBucket, HISTORY, MAX_WINDOW_NANOS,
+    MIN_SAMPLE_GAP_NANOS,
 };
 use tairix_abi::time::Duration64;
 
@@ -188,4 +189,46 @@ fn a_non_advancing_record_never_corrupts_the_baseline() {
     // Baseline stays the 1 s-old (100-packet) snapshot: 1000 packets / 1 s.
     assert_eq!(reading.value, 1000);
     assert_eq!(reading.window, Duration64::from_secs(1));
+}
+
+#[test]
+fn rate_limiter_allows_burst_then_refuses() {
+    let mut limiter = TokenBucket::new(3, 1);
+    let now = Duration64::from_secs(10);
+    assert!(limiter.allow(now));
+    assert!(limiter.allow(now));
+    assert!(limiter.allow(now));
+    assert!(!limiter.allow(now));
+}
+
+#[test]
+fn rate_limiter_refills_over_time() {
+    let mut limiter = TokenBucket::new(1, 2);
+    let start = Duration64::from_secs(100);
+    assert!(limiter.allow(start));
+    assert!(!limiter.allow(start));
+    // Two tokens per second: half a second refills one.
+    let half = Duration64::new(100, 500_000_000).expect("valid");
+    assert!(limiter.allow(half));
+    assert!(!limiter.allow(half));
+}
+
+#[test]
+fn rate_limiter_caps_at_capacity() {
+    let mut limiter = TokenBucket::new(2, 10);
+    assert!(limiter.allow(Duration64::from_secs(0)));
+    // A long quiet period refills to the cap, never beyond it.
+    let later = Duration64::from_secs(1_000);
+    assert!(limiter.allow(later));
+    assert!(limiter.allow(later));
+    assert!(!limiter.allow(later));
+}
+
+#[test]
+fn rate_limiter_zero_configuration_fails_closed() {
+    let mut zero_burst = TokenBucket::new(0, 10);
+    assert!(!zero_burst.allow(Duration64::from_secs(1)));
+    let mut zero_rate = TokenBucket::new(1, 0);
+    assert!(zero_rate.allow(Duration64::from_secs(1)));
+    assert!(!zero_rate.allow(Duration64::from_secs(1_000_000)));
 }

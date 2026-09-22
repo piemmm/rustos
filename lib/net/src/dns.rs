@@ -26,11 +26,15 @@
 //!
 //! # Forward and reverse
 //!
-//! [`RecordType::A`] / [`RecordType::Aaaa`] resolve a name to addresses;
-//! [`RecordType::Ptr`] resolves the other way, querying the `in-addr.arpa` /
+//! [`LookupType::A`] / [`LookupType::Aaaa`] resolve a name to addresses;
+//! [`LookupType::Ptr`] resolves the other way, querying the `in-addr.arpa` /
 //! `ip6.arpa` name [`Name::reverse`] builds from an address. Both directions
 //! run through the same codec, the same acceptance test, and the same
 //! retry/failover state machine — there is no second resolver.
+//!
+//! [`RecordType`] is the wider wire vocabulary the codec decodes, including
+//! the service-discovery types [`crate::mdns`] carries; [`LookupType`] is
+//! the subset a stub lookup can ask for and this module can answer.
 
 use core::fmt::{self, Write};
 
@@ -81,13 +85,22 @@ const FLAG_RCODE_MASK: u16 = 0x000F;
 /// queries or accepts.
 const CLASS_IN: u16 = 1;
 
-// Resource-record TYPE values (RFC 1035 §3.2.2, RFC 3596 §2.1).
+// Resource-record TYPE values (RFC 1035 §3.2.2, RFC 3596 §2.1, RFC 2782
+// §2, RFC 4034 §4 as RFC 6762 §6.1 reads it).
 const TYPE_A: u16 = 1;
 const TYPE_CNAME: u16 = 5;
 const TYPE_PTR: u16 = 12;
+const TYPE_TXT: u16 = 16;
 const TYPE_AAAA: u16 = 28;
+const TYPE_SRV: u16 = 33;
+const TYPE_NSEC: u16 = 47;
 
-/// A record type this stub resolver can query for.
+/// A resource-record type this crate has a decoder for.
+///
+/// The wire vocabulary, shared by every consumer of the DNS codec: the
+/// stub resolver asks for the [`LookupType`] subset it can interpret, and
+/// the multicast responder ([`crate::mdns`]) carries the service-discovery
+/// types as well.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum RecordType {
     /// An IPv4 host address (RFC 1035 `A`).
@@ -95,8 +108,19 @@ pub enum RecordType {
     /// An IPv6 host address (RFC 3596 `AAAA`).
     Aaaa,
     /// The domain name an address maps back to (RFC 1035 `PTR`), queried
-    /// under [`Name::reverse`]'s `in-addr.arpa` / `ip6.arpa` spelling.
+    /// under [`Name::reverse`]'s `in-addr.arpa` / `ip6.arpa` spelling, and
+    /// the type → instance mapping of DNS-SD (RFC 6763 §4.1).
     Ptr,
+    /// The host, port, priority, and weight a service instance is reached
+    /// at (RFC 2782).
+    Srv,
+    /// A service instance's key/value attributes (RFC 1035 §3.3.14, given
+    /// its key/value reading by RFC 6763 §6).
+    Txt,
+    /// The types an owner name does *not* have, in the multicast reading
+    /// of RFC 6762 §6.1 — a negative assertion, not DNSSEC's chain-of-trust
+    /// `NSEC`.
+    Nsec,
 }
 
 impl RecordType {
@@ -107,18 +131,77 @@ impl RecordType {
             Self::A => TYPE_A,
             Self::Aaaa => TYPE_AAAA,
             Self::Ptr => TYPE_PTR,
+            Self::Srv => TYPE_SRV,
+            Self::Txt => TYPE_TXT,
+            Self::Nsec => TYPE_NSEC,
         }
     }
 
-    /// The presentation spelling (`A`, `AAAA`, `PTR`) a diagnostic or a
-    /// `-t` option names the type by.
+    /// The type a wire TYPE value names, or `None` for one this crate has
+    /// no decoder for (a record a receiver skips rather than guesses at).
+    #[must_use]
+    pub const fn from_value(value: u16) -> Option<Self> {
+        match value {
+            TYPE_A => Some(Self::A),
+            TYPE_AAAA => Some(Self::Aaaa),
+            TYPE_PTR => Some(Self::Ptr),
+            TYPE_SRV => Some(Self::Srv),
+            TYPE_TXT => Some(Self::Txt),
+            TYPE_NSEC => Some(Self::Nsec),
+            _ => None,
+        }
+    }
+
+    /// The presentation spelling a diagnostic or a `-t` option names the
+    /// type by.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::A => "A",
             Self::Aaaa => "AAAA",
             Self::Ptr => "PTR",
+            Self::Srv => "SRV",
+            Self::Txt => "TXT",
+            Self::Nsec => "NSEC",
         }
+    }
+}
+
+/// The record types a stub *lookup* can ask for and this module can
+/// represent an [`Answer`] to.
+///
+/// A refinement of [`RecordType`], not a second vocabulary: the wire type
+/// set is wider than the set a stub resolver interprets, and spelling the
+/// difference in the type system is what keeps an `SRV` query from
+/// reaching a resolver whose answer shape has nowhere to put one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum LookupType {
+    /// Resolve a name to IPv4 addresses.
+    A,
+    /// Resolve a name to IPv6 addresses.
+    Aaaa,
+    /// Resolve an address back to a name.
+    Ptr,
+}
+
+impl LookupType {
+    /// Every lookup type, in the order a diagnostic lists them.
+    pub const ALL: [Self; 3] = [Self::A, Self::Aaaa, Self::Ptr];
+
+    /// The wire record type this lookup asks for.
+    #[must_use]
+    pub const fn record(self) -> RecordType {
+        match self {
+            Self::A => RecordType::A,
+            Self::Aaaa => RecordType::Aaaa,
+            Self::Ptr => RecordType::Ptr,
+        }
+    }
+
+    /// The presentation spelling (`A`, `AAAA`, `PTR`).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        self.record().label()
     }
 }
 
@@ -240,19 +323,70 @@ fn write_presentation_byte(f: &mut fmt::Formatter<'_>, byte: u8) -> fmt::Result 
     }
 }
 
-/// A domain name in its canonical wire encoding: a sequence of
-/// length-prefixed labels ended by a zero-length root label, with every
-/// ASCII letter folded to lower case so two names compare equal iff they
-/// are equal under RFC 4343 case-insensitivity.
+/// A domain name in its uncompressed wire encoding: a sequence of
+/// length-prefixed labels ended by a zero-length root label.
+///
+/// Case is **preserved** and compared case-insensitively, which is what
+/// RFC 4343 requires of every DNS implementation and what a DNS-SD service
+/// instance name needs: `Hall Printer._ipp._tcp.local` is displayed as its
+/// owner spelled it while still matching a query that spelled it
+/// differently. [`PartialEq`], [`Eq`], and [`Hash`] therefore fold ASCII
+/// case, so a name is usable as a map key without the folding and the
+/// equality ever disagreeing.
 ///
 /// The encoding is never compressed (compression pointers only ever appear
 /// *inside a message*; the internal reader expands them), and is bounded by
 /// [`MAX_NAME_LEN`], so a `Name` is a fixed-size value that allocates
 /// nothing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug)]
 pub struct Name {
     wire: [u8; MAX_NAME_LEN],
     len: usize,
+}
+
+/// Case-insensitive, per RFC 4343: the octets compare folded, so two
+/// spellings of one name are one name.
+impl PartialEq for Name {
+    fn eq(&self, other: &Self) -> bool {
+        let (a, b) = (self.as_wire(), other.as_wire());
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(&x, &y)| ascii_lower(x) == ascii_lower(y))
+    }
+}
+
+impl Eq for Name {}
+
+/// Hashes the case-folded octets, so equal names hash equally.
+impl core::hash::Hash for Name {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        for &byte in self.as_wire() {
+            state.write_u8(ascii_lower(byte));
+        }
+    }
+}
+
+/// Canonical (RFC 4034 §6.1) ordering of the case-folded octets: the
+/// deterministic total order the multicast tiebreak of RFC 6762 §8.2
+/// needs when two hosts probe for one name at the same instant.
+impl Ord for Name {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        let (a, b) = (self.as_wire(), other.as_wire());
+        for (&x, &y) in a.iter().zip(b) {
+            match ascii_lower(x).cmp(&ascii_lower(y)) {
+                core::cmp::Ordering::Equal => {}
+                unequal => return unequal,
+            }
+        }
+        a.len().cmp(&b.len())
+    }
+}
+
+impl PartialOrd for Name {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Name {
@@ -265,7 +399,7 @@ impl Name {
     }
 
     /// Encode a dotted domain name (e.g. `"www.example.com"`) into its
-    /// canonical wire form.
+    /// wire form, preserving the case it was spelled in.
     ///
     /// A single trailing dot (the fully-qualified form) is accepted; an
     /// empty string or a lone `"."` is the root. Each label must be
@@ -304,7 +438,7 @@ impl Name {
                     if !(0x21..=0x7e).contains(&b) {
                         return Err(DnsError::InvalidLabel);
                     }
-                    wire[len] = ascii_lower(b);
+                    wire[len] = b;
                     len += 1;
                 }
             }
@@ -313,6 +447,53 @@ impl Name {
         wire[len] = 0;
         len += 1;
         Ok(Self { wire, len })
+    }
+
+    /// Build a name from raw label octets, in order; the terminating root
+    /// label is added here.
+    ///
+    /// Unlike [`Name::encode`] this places no restriction on label
+    /// *content*: the wire permits any octet in a label (RFC 2181 §11) and
+    /// a DNS-SD service instance name is free-form UTF-8 that may hold
+    /// spaces and punctuation (RFC 6763 §4.1.1), so a responder able only
+    /// to spell host names could not publish one. The structural bounds
+    /// still hold: an empty or over-long label, or a name past
+    /// [`MAX_NAME_LEN`], is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`DnsError::InvalidLabel`] for an empty or over-long label,
+    /// [`DnsError::NameTooLong`] when the encoding would exceed
+    /// [`MAX_NAME_LEN`].
+    pub fn from_labels(labels: &[&[u8]]) -> Result<Self, DnsError> {
+        let mut wire = [0u8; MAX_NAME_LEN];
+        let mut len = 0usize;
+        for label in labels {
+            if label.is_empty() || label.len() > MAX_LABEL_LEN {
+                return Err(DnsError::InvalidLabel);
+            }
+            if len + 1 + label.len() + 1 > MAX_NAME_LEN {
+                return Err(DnsError::NameTooLong);
+            }
+            wire[len] = u8::try_from(label.len()).map_err(|_| DnsError::InvalidLabel)?;
+            len += 1;
+            wire[len..len + label.len()].copy_from_slice(label);
+            len += label.len();
+        }
+        wire[len] = 0;
+        len += 1;
+        Ok(Self { wire, len })
+    }
+
+    /// The name's labels, outermost first, without the terminating root
+    /// label — the form a DNS-SD instance/type/domain split reads and a
+    /// conflict rename rewrites.
+    #[must_use]
+    pub fn labels(&self) -> Labels<'_> {
+        Labels {
+            wire: self.as_wire(),
+            pos: 0,
+        }
     }
 
     /// The reverse-lookup name of `addr`: `d.c.b.a.in-addr.arpa` for IPv4
@@ -370,7 +551,7 @@ impl Name {
     /// bounded by [`MAX_NAME_LEN`]. Returns `None` (fail closed) on any
     /// out-of-range offset, reserved label-type, over-length name, or a
     /// pointer that does not point backwards.
-    fn read(msg: &[u8], start: usize) -> Option<(Self, usize)> {
+    pub(crate) fn read(msg: &[u8], start: usize) -> Option<(Self, usize)> {
         let mut wire = [0u8; MAX_NAME_LEN];
         let mut len = 0usize;
         let mut pos = start;
@@ -400,10 +581,8 @@ impl Name {
                     }
                     wire[len] = first;
                     len += 1;
-                    for &b in label {
-                        wire[len] = ascii_lower(b);
-                        len += 1;
-                    }
+                    wire[len..len + label_len].copy_from_slice(label);
+                    len += label_len;
                     pos += 1 + label_len;
                 }
                 0xC0 => {
@@ -462,6 +641,29 @@ impl fmt::Display for Name {
     }
 }
 
+/// The labels of a [`Name`], outermost first, yielded as raw octets.
+#[derive(Clone, Debug)]
+pub struct Labels<'a> {
+    wire: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Iterator for Labels<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let len = usize::from(*self.wire.get(self.pos)?);
+        if len == 0 {
+            return None;
+        }
+        let label = self.wire.get(self.pos + 1..self.pos + 1 + len)?;
+        self.pos += 1 + len;
+        Some(label)
+    }
+}
+
+impl core::iter::FusedIterator for Labels<'_> {}
+
 /// The 4-bit RCODE field extracted from the flags word (RFC 1035 §4.1.1).
 fn rcode_bits(flags: u16) -> u8 {
     // The mask keeps the value in 0..=15, so the narrowing is lossless.
@@ -469,13 +671,13 @@ fn rcode_bits(flags: u16) -> u8 {
 }
 
 /// Read a big-endian `u16` at `off`, or `None` if out of range.
-fn read_u16(msg: &[u8], off: usize) -> Option<u16> {
+pub(crate) fn read_u16(msg: &[u8], off: usize) -> Option<u16> {
     let b = msg.get(off..off + 2)?;
     Some(u16::from_be_bytes([b[0], b[1]]))
 }
 
 /// Read a big-endian `u32` at `off`, or `None` if out of range.
-fn read_u32(msg: &[u8], off: usize) -> Option<u32> {
+pub(crate) fn read_u32(msg: &[u8], off: usize) -> Option<u32> {
     let b = msg.get(off..off + 4)?;
     Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
@@ -489,7 +691,7 @@ pub struct QuerySpec {
     /// The name being resolved.
     pub name: Name,
     /// The record type being resolved.
-    pub record_type: RecordType,
+    pub record_type: LookupType,
     /// Whether the RD (recursion desired) bit is set (a stub resolver
     /// always sets it, querying a recursive server).
     pub recursion_desired: bool,
@@ -518,7 +720,7 @@ pub fn write_query(spec: &QuerySpec, out: &mut [u8]) -> Result<usize, DnsError> 
     let mut pos = HEADER_LEN;
     out[pos..pos + name.len()].copy_from_slice(name);
     pos += name.len();
-    out[pos..pos + 2].copy_from_slice(&spec.record_type.value().to_be_bytes());
+    out[pos..pos + 2].copy_from_slice(&spec.record_type.record().value().to_be_bytes());
     out[pos + 2..pos + 4].copy_from_slice(&CLASS_IN.to_be_bytes());
     Ok(total)
 }
@@ -612,10 +814,10 @@ impl Answer {
     /// The empty answer to a query of `record_type`: what a negative,
     /// timed-out, or not-yet-started resolution carries.
     #[must_use]
-    pub fn empty(record_type: RecordType) -> Self {
+    pub fn empty(record_type: LookupType) -> Self {
         match record_type {
-            RecordType::A | RecordType::Aaaa => Self::Addresses(AddrList::default()),
-            RecordType::Ptr => Self::Pointer(None),
+            LookupType::A | LookupType::Aaaa => Self::Addresses(AddrList::default()),
+            LookupType::Ptr => Self::Pointer(None),
         }
     }
 
@@ -710,8 +912,9 @@ impl DnsResponse {
         let qtype = read_u16(bytes, pos)?;
         let qclass = read_u16(bytes, pos + 2)?;
         pos += 4;
+        let wanted = query.record_type.record().value();
         // The echoed question must match the outstanding query exactly.
-        if qname != query.name || qtype != query.record_type.value() || qclass != CLASS_IN {
+        if qname != query.name || qtype != wanted || qclass != CLASS_IN {
             return None;
         }
 
@@ -721,7 +924,6 @@ impl DnsResponse {
         // The owner name we are currently resolving; a CNAME record retargets
         // it so the alias chain is followed within this one response.
         let mut target = query.name;
-        let wanted = query.record_type.value();
 
         for _ in 0..ancount {
             let (owner, after_name) = Name::read(bytes, pos)?;
@@ -767,20 +969,20 @@ impl DnsResponse {
 /// octets of RDATA is malformed, not an IPv6 address.
 fn fold_rdata(
     answer: &mut Answer,
-    record_type: RecordType,
+    record_type: LookupType,
     msg: &[u8],
     start: usize,
     rdlength: usize,
 ) -> bool {
     match (record_type, answer) {
-        (RecordType::A, Answer::Addresses(list)) if rdlength == 4 => {
+        (LookupType::A, Answer::Addresses(list)) if rdlength == 4 => {
             let Some(b) = msg.get(start..start + 4) else {
                 return false;
             };
             list.push(IpAddr::V4(Ipv4Addr::new(b[0], b[1], b[2], b[3])));
             true
         }
-        (RecordType::Aaaa, Answer::Addresses(list)) if rdlength == 16 => {
+        (LookupType::Aaaa, Answer::Addresses(list)) if rdlength == 16 => {
             let Some(b) = msg.get(start..start + 16) else {
                 return false;
             };
@@ -791,7 +993,7 @@ fn fold_rdata(
         }
         // The RDATA is one (possibly compressed) domain name that must span
         // exactly the declared length; only the first record answers.
-        (RecordType::Ptr, Answer::Pointer(slot @ None)) => {
+        (LookupType::Ptr, Answer::Pointer(slot @ None)) => {
             let Some((name, end)) = Name::read(msg, start) else {
                 return false;
             };
@@ -935,7 +1137,7 @@ enum Phase {
 #[derive(Clone, Debug)]
 pub struct DnsResolver {
     name: Name,
-    record_type: RecordType,
+    record_type: LookupType,
     servers: ServerList,
     phase: Phase,
     server_idx: usize,
@@ -951,7 +1153,7 @@ impl DnsResolver {
     /// [`DnsResolver::poll`] begins the query; an empty server list finishes
     /// immediately as [`ResolveStatus::Timeout`].
     #[must_use]
-    pub fn new(name: Name, record_type: RecordType, servers: &[IpAddr]) -> Self {
+    pub fn new(name: Name, record_type: LookupType, servers: &[IpAddr]) -> Self {
         Self {
             name,
             record_type,
@@ -967,7 +1169,7 @@ impl DnsResolver {
 
     /// The record type being resolved.
     #[must_use]
-    pub fn record_type(&self) -> RecordType {
+    pub fn record_type(&self) -> LookupType {
         self.record_type
     }
 
@@ -1211,7 +1413,7 @@ pub trait DnsTransport {
 /// than reported as a spurious answer.
 pub fn resolve<T: DnsTransport + ?Sized>(
     name: Name,
-    record_type: RecordType,
+    record_type: LookupType,
     servers: &[IpAddr],
     transport: &mut T,
     rng: &mut dyn FnMut() -> u32,

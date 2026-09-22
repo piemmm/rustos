@@ -36,7 +36,7 @@ mod program {
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
     use tairix_host::{parse, run, Command, Output, Resolver, USAGE};
-    use tairix_net::dns::{RecordType, Resolution};
+    use tairix_net::dns::{LookupType, Resolution};
     use tairix_resolver::{ResolveError, RtDnsTransport};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
@@ -72,7 +72,7 @@ mod program {
         fn resolve(
             &mut self,
             name: &str,
-            record_type: RecordType,
+            record_type: LookupType,
         ) -> Result<Resolution, ResolveError> {
             self.udp.resolve(name, record_type)
         }
@@ -87,7 +87,7 @@ mod program {
         fn resolve(
             &mut self,
             _name: &str,
-            _record_type: RecordType,
+            _record_type: LookupType,
         ) -> Result<Resolution, ResolveError> {
             Err(ResolveError::NoServers)
         }

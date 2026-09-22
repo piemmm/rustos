@@ -66,7 +66,7 @@ use core::fmt;
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_net::addr::IpAddr;
-use tairix_net::dns::{Name, RecordType, Resolution, ResolveStatus};
+use tairix_net::dns::{LookupType, Name, Resolution, ResolveStatus};
 use tairix_resolver::ResolveError;
 
 /// The one-line usage banner, printed on a usage error and as the fallback
@@ -93,7 +93,7 @@ pub trait Resolver {
     /// invalid name, no configured server, a failed server-set query, or a
     /// transport failure). A negative or timed-out lookup is **not** an
     /// error; it is a [`Resolution`].
-    fn resolve(&mut self, name: &str, record_type: RecordType) -> Result<Resolution, ResolveError>;
+    fn resolve(&mut self, name: &str, record_type: LookupType) -> Result<Resolution, ResolveError>;
 }
 
 /// The text output seam: standard output for answers, standard error for
@@ -126,7 +126,7 @@ pub struct Lookup {
     /// The record types to query, in order. With no `-t` this is `A` then
     /// `AAAA` for a name and `PTR` for an address; with `-t <type>` it is
     /// the single requested type.
-    pub types: Vec<RecordType>,
+    pub types: Vec<LookupType>,
 }
 
 /// Why an argument vector was not understood.
@@ -164,18 +164,15 @@ impl fmt::Display for ParseError {
 /// Parse the record type named by `-t`/`--type`, case-insensitively. Only the
 /// records the stub resolver can look up are accepted; any other type (`MX`,
 /// `TXT`, …) is rejected honestly rather than silently treated as `A`.
-fn parse_record_type(value: &str) -> Option<RecordType> {
+fn parse_record_type(value: &str) -> Option<LookupType> {
     let wanted = value.to_ascii_uppercase();
     // Matched against the type's own spelling, so the accepted set and the
     // one diagnostics print can never drift apart.
-    SUPPORTED_TYPES
+    LookupType::ALL
         .iter()
         .copied()
         .find(|record| record.label() == wanted)
 }
-
-/// The record types the stub resolver looks up, in the order `-t` names them.
-const SUPPORTED_TYPES: [RecordType; 3] = [RecordType::A, RecordType::Aaaa, RecordType::Ptr];
 
 /// Parse a `host` argument vector.
 ///
@@ -191,7 +188,7 @@ const SUPPORTED_TYPES: [RecordType; 3] = [RecordType::A, RecordType::Aaaa, Recor
 ///
 /// A [`ParseError`] describing the first malformed argument.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
-    let mut record_type: Option<RecordType> = None;
+    let mut record_type: Option<LookupType> = None;
     let mut name: Option<String> = None;
     let mut options_ended = false;
     let mut want_help = false;
@@ -245,8 +242,8 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     };
     let types = match (record_type, address) {
         (Some(ty), _) => alloc::vec![ty],
-        (None, Some(_)) => alloc::vec![RecordType::Ptr],
-        (None, None) => alloc::vec![RecordType::A, RecordType::Aaaa],
+        (None, Some(_)) => alloc::vec![LookupType::Ptr],
+        (None, None) => alloc::vec![LookupType::A, LookupType::Aaaa],
     };
     Ok(Command::Lookup(Lookup { name, types }))
 }
@@ -330,7 +327,7 @@ pub fn run(
 /// yielded at least one address.
 fn render_resolution(
     name: &str,
-    record_type: RecordType,
+    record_type: LookupType,
     resolution: &Resolution,
     out: &dyn Output,
     err: &dyn Output,
@@ -344,8 +341,8 @@ fn render_resolution(
             }
             for addr in resolution.addresses() {
                 let line = match record_type {
-                    RecordType::Aaaa => format!("{name} has IPv6 address {addr}\n"),
-                    RecordType::A | RecordType::Ptr => format!("{name} has address {addr}\n"),
+                    LookupType::Aaaa => format!("{name} has IPv6 address {addr}\n"),
+                    LookupType::A | LookupType::Ptr => format!("{name} has address {addr}\n"),
                 };
                 out.write_all(line.as_bytes())?;
             }

@@ -94,7 +94,7 @@ fn ok_response(
     })
 }
 
-fn query_spec(id: u16, name: &str, rt: RecordType) -> QuerySpec {
+fn query_spec(id: u16, name: &str, rt: LookupType) -> QuerySpec {
     QuerySpec {
         id,
         name: Name::encode(name).unwrap(),
@@ -129,10 +129,17 @@ const SERVERS: [IpAddr; 2] = [
 // -- Name encoding / decoding --------------------------------------------
 
 #[test]
-fn name_encode_round_trips_and_folds_case() {
+fn name_encode_preserves_case_and_compares_without_it() {
     let a = Name::encode("WWW.Example.COM").unwrap();
     let b = Name::encode("www.example.com").unwrap();
     assert_eq!(a, b, "names compare case-insensitively");
+    assert_eq!(
+        alloc::format!("{a}"),
+        "WWW.Example.COM",
+        "and render as they were spelled: a service instance name is \
+         displayed to a user, not normalised for them"
+    );
+    assert_ne!(a.as_wire(), b.as_wire(), "the octets are not folded");
     // Wire form: 3www7example3com0
     assert_eq!(
         b.as_wire(),
@@ -219,7 +226,7 @@ fn name_read_rejects_reserved_label_type() {
 
 #[test]
 fn write_query_emits_header_and_question() {
-    let spec = query_spec(0xABCD, "example.com", RecordType::A);
+    let spec = query_spec(0xABCD, "example.com", LookupType::A);
     let mut buf = [0u8; MAX_QUERY_LEN];
     let n = write_query(&spec, &mut buf).unwrap();
     assert_eq!(&buf[0..2], &[0xAB, 0xCD]);
@@ -236,7 +243,7 @@ fn write_query_emits_header_and_question() {
 
 #[test]
 fn write_query_rejects_small_buffer() {
-    let spec = query_spec(1, "example.com", RecordType::A);
+    let spec = query_spec(1, "example.com", LookupType::A);
     let mut buf = [0u8; 8];
     assert_eq!(write_query(&spec, &mut buf), Err(DnsError::BufferTooSmall));
 }
@@ -245,7 +252,7 @@ fn write_query_rejects_small_buffer() {
 
 #[test]
 fn parse_success_a_record() {
-    let spec = query_spec(0x1111, "example.com", RecordType::A);
+    let spec = query_spec(0x1111, "example.com", LookupType::A);
     let resp = ok_response(
         0x1111,
         "example.com",
@@ -271,7 +278,7 @@ fn parse_success_a_record() {
 
 #[test]
 fn parse_success_aaaa_record() {
-    let spec = query_spec(0x2222, "example.com", RecordType::Aaaa);
+    let spec = query_spec(0x2222, "example.com", LookupType::Aaaa);
     let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
     let resp = ok_response(
         0x2222,
@@ -295,14 +302,14 @@ fn parse_success_aaaa_record() {
 
 #[test]
 fn parse_rejects_id_mismatch() {
-    let spec = query_spec(0x1111, "example.com", RecordType::A);
+    let spec = query_spec(0x1111, "example.com", LookupType::A);
     let resp = ok_response(0x9999, "example.com", TYPE_A, &[]);
     assert!(DnsResponse::parse(&resp, &spec).is_none());
 }
 
 #[test]
 fn parse_rejects_question_mismatch() {
-    let spec = query_spec(0x1111, "example.com", RecordType::A);
+    let spec = query_spec(0x1111, "example.com", LookupType::A);
     // Wrong name.
     let wrong_name = ok_response(0x1111, "evil.com", TYPE_A, &[]);
     assert!(DnsResponse::parse(&wrong_name, &spec).is_none());
@@ -313,7 +320,7 @@ fn parse_rejects_question_mismatch() {
 
 #[test]
 fn parse_rejects_non_response_and_bad_opcode() {
-    let spec = query_spec(0x1111, "example.com", RecordType::A);
+    let spec = query_spec(0x1111, "example.com", LookupType::A);
     let as_query = build_response(&RespOpts {
         id: 0x1111,
         qname: "example.com",
@@ -342,7 +349,7 @@ fn parse_rejects_non_response_and_bad_opcode() {
 
 #[test]
 fn parse_rejects_wrong_question_count() {
-    let spec = query_spec(0x1111, "example.com", RecordType::A);
+    let spec = query_spec(0x1111, "example.com", LookupType::A);
     let no_question = build_response(&RespOpts {
         id: 0x1111,
         qname: "example.com",
@@ -359,7 +366,7 @@ fn parse_rejects_wrong_question_count() {
 
 #[test]
 fn parse_follows_cname_chain() {
-    let spec = query_spec(0x3333, "www.example.com", RecordType::A);
+    let spec = query_spec(0x3333, "www.example.com", LookupType::A);
     let cname_rdata = Name::encode("example.com").unwrap().as_wire().to_vec();
     let resp = ok_response(
         0x3333,
@@ -383,7 +390,7 @@ fn parse_follows_cname_chain() {
 
 #[test]
 fn parse_nodata_is_empty_success() {
-    let spec = query_spec(0x4444, "example.com", RecordType::A);
+    let spec = query_spec(0x4444, "example.com", LookupType::A);
     let resp = ok_response(0x4444, "example.com", TYPE_A, &[]);
     let parsed = DnsResponse::parse(&resp, &spec).unwrap();
     assert_eq!(parsed.rcode, Rcode::NoError);
@@ -393,7 +400,7 @@ fn parse_nodata_is_empty_success() {
 
 #[test]
 fn parse_surfaces_nxdomain_and_truncation() {
-    let spec = query_spec(0x5555, "example.com", RecordType::A);
+    let spec = query_spec(0x5555, "example.com", LookupType::A);
     let nx = build_response(&RespOpts {
         id: 0x5555,
         qname: "example.com",
@@ -425,7 +432,7 @@ fn parse_surfaces_nxdomain_and_truncation() {
 
 #[test]
 fn parse_ignores_wrong_class_and_wrong_length_records() {
-    let spec = query_spec(0x6666, "example.com", RecordType::A);
+    let spec = query_spec(0x6666, "example.com", LookupType::A);
     let resp = ok_response(
         0x6666,
         "example.com",
@@ -452,7 +459,7 @@ fn parse_ignores_wrong_class_and_wrong_length_records() {
 
 #[test]
 fn parse_caps_address_list() {
-    let spec = query_spec(0x7777, "example.com", RecordType::A);
+    let spec = query_spec(0x7777, "example.com", LookupType::A);
     let mut answers: Vec<(&str, u16, u16, u32, Vec<u8>)> = Vec::new();
     for i in 0..(MAX_ADDRESSES + 3) {
         answers.push((
@@ -470,7 +477,7 @@ fn parse_caps_address_list() {
 
 #[test]
 fn parse_rejects_truncated_bytes() {
-    let spec = query_spec(0x8888, "example.com", RecordType::A);
+    let spec = query_spec(0x8888, "example.com", LookupType::A);
     let full = ok_response(
         0x8888,
         "example.com",
@@ -497,7 +504,7 @@ fn resolver_success_first_server() {
     let mut rng = counter();
     let mut r = DnsResolver::new(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
     );
     let (q, server) = send_parts(&r.poll(secs(0), &mut rng).unwrap());
@@ -530,7 +537,7 @@ fn resolver_retransmits_then_fails_over_then_times_out() {
     let mut rng = counter();
     let mut r = DnsResolver::new(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
     );
     let (q0, s0) = send_parts(&r.poll(secs(0), &mut rng).unwrap());
@@ -560,7 +567,7 @@ fn resolver_fails_over_on_servfail() {
     let mut rng = counter();
     let mut r = DnsResolver::new(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
     );
     let (q0, _) = send_parts(&r.poll(secs(0), &mut rng).unwrap());
@@ -585,7 +592,7 @@ fn resolver_fails_over_on_truncation() {
     let mut rng = counter();
     let mut r = DnsResolver::new(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
     );
     let (q0, _) = send_parts(&r.poll(secs(0), &mut rng).unwrap());
@@ -609,7 +616,7 @@ fn resolver_surfaces_nxdomain() {
     let mut rng = counter();
     let mut r = DnsResolver::new(
         Name::encode("nope.example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
     );
     let (q0, _) = send_parts(&r.poll(secs(0), &mut rng).unwrap());
@@ -634,7 +641,7 @@ fn resolver_ignores_unmatched_datagram() {
     let mut rng = counter();
     let mut r = DnsResolver::new(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
     );
     let _ = send_parts(&r.poll(secs(0), &mut rng).unwrap());
@@ -648,7 +655,7 @@ fn resolver_ignores_unmatched_datagram() {
 #[test]
 fn resolver_with_no_servers_times_out_immediately() {
     let mut rng = counter();
-    let mut r = DnsResolver::new(Name::encode("example.com").unwrap(), RecordType::A, &[]);
+    let mut r = DnsResolver::new(Name::encode("example.com").unwrap(), LookupType::A, &[]);
     let res = finished(&r.poll(secs(0), &mut rng).unwrap());
     assert_eq!(res.status, ResolveStatus::Timeout);
     assert!(r.is_done());
@@ -738,7 +745,7 @@ fn driver_resolves_on_first_server() {
     });
     let res = resolve(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
         &mut transport,
         &mut rng,
@@ -762,7 +769,7 @@ fn driver_retransmits_and_fails_over() {
     });
     let res = resolve(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
         &mut transport,
         &mut rng,
@@ -794,7 +801,7 @@ fn driver_drops_spoofed_datagram_then_accepts_real_answer() {
     });
     let res = resolve(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
         &mut transport,
         &mut rng,
@@ -811,7 +818,7 @@ fn driver_times_out_with_no_servers() {
     let mut transport = MockTransport::new(|_server, _q| Vec::new());
     let res = resolve(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &[],
         &mut transport,
         &mut rng,
@@ -828,7 +835,7 @@ fn driver_aborts_fail_closed_on_transport_send_error() {
     transport.send_err = Some(Errno::NetworkUnreachable);
     let err = resolve(
         Name::encode("example.com").unwrap(),
-        RecordType::A,
+        LookupType::A,
         &SERVERS,
         &mut transport,
         &mut rng,
@@ -881,7 +888,7 @@ fn reverse_name_v6_spells_every_hex_digit() {
 
 #[test]
 fn ptr_query_carries_the_ptr_type() {
-    let spec = query_spec(0x4242, "133.2.0.192.in-addr.arpa", RecordType::Ptr);
+    let spec = query_spec(0x4242, "133.2.0.192.in-addr.arpa", LookupType::Ptr);
     let mut buf = [0u8; MAX_QUERY_LEN];
     let n = write_query(&spec, &mut buf).unwrap();
     let qtype = u16::from_be_bytes([buf[n - 4], buf[n - 3]]);
@@ -890,7 +897,7 @@ fn ptr_query_carries_the_ptr_type() {
 
 #[test]
 fn ptr_answer_surfaces_the_pointed_at_name() {
-    let spec = query_spec(0x0BAD, "1.2.0.192.in-addr.arpa", RecordType::Ptr);
+    let spec = query_spec(0x0BAD, "1.2.0.192.in-addr.arpa", LookupType::Ptr);
     let msg = ok_response(
         0x0BAD,
         "1.2.0.192.in-addr.arpa",
@@ -917,7 +924,7 @@ fn ptr_answer_surfaces_the_pointed_at_name() {
 fn ptr_answer_follows_a_cname_delegation() {
     // The RFC 2317 classless-delegation shape: the reverse name is a CNAME
     // into the delegated zone, whose PTR carries the answer.
-    let spec = query_spec(0x0C0C, "7.0.113.203.in-addr.arpa", RecordType::Ptr);
+    let spec = query_spec(0x0C0C, "7.0.113.203.in-addr.arpa", LookupType::Ptr);
     let msg = ok_response(
         0x0C0C,
         "7.0.113.203.in-addr.arpa",
@@ -948,7 +955,7 @@ fn ptr_answer_follows_a_cname_delegation() {
 
 #[test]
 fn ptr_answer_keeps_only_the_first_record() {
-    let spec = query_spec(0x0D0D, "1.2.0.192.in-addr.arpa", RecordType::Ptr);
+    let spec = query_spec(0x0D0D, "1.2.0.192.in-addr.arpa", LookupType::Ptr);
     let msg = ok_response(
         0x0D0D,
         "1.2.0.192.in-addr.arpa",
@@ -984,7 +991,7 @@ fn ptr_rdata_shorter_than_the_name_is_rejected() {
     // fewer octets than the name occupies is malformed and is not used.
     let mut rdata = ptr_rdata("host.example.com");
     rdata.push(0); // one octet past the name's root label
-    let spec = query_spec(0x0E0E, "1.2.0.192.in-addr.arpa", RecordType::Ptr);
+    let spec = query_spec(0x0E0E, "1.2.0.192.in-addr.arpa", LookupType::Ptr);
     let msg = ok_response(
         0x0E0E,
         "1.2.0.192.in-addr.arpa",
@@ -1003,7 +1010,7 @@ fn ptr_rdata_shorter_than_the_name_is_rejected() {
 fn a_record_with_a_sixteen_octet_rdata_is_not_read_as_ipv6() {
     // A hostile server answering an `A` query with a 16-octet record must
     // not have it accepted as an IPv6 address.
-    let spec = query_spec(0x0F0F, "example.com", RecordType::A);
+    let spec = query_spec(0x0F0F, "example.com", LookupType::A);
     let msg = ok_response(
         0x0F0F,
         "example.com",
@@ -1019,7 +1026,7 @@ fn reverse_resolution_finishes_with_the_name() {
     let mut rng = counter();
     let mut resolver = DnsResolver::new(
         Name::reverse(v4(192, 0, 2, 1)),
-        RecordType::Ptr,
+        LookupType::Ptr,
         &SERVERS[..1],
     );
     let action = resolver.poll(secs(0), &mut rng).unwrap();
@@ -1050,7 +1057,7 @@ fn reverse_resolution_with_no_ptr_record_is_nodata() {
     let mut rng = counter();
     let mut resolver = DnsResolver::new(
         Name::reverse(v4(192, 0, 2, 1)),
-        RecordType::Ptr,
+        LookupType::Ptr,
         &SERVERS[..1],
     );
     let action = resolver.poll(secs(0), &mut rng).unwrap();
@@ -1067,7 +1074,7 @@ fn reverse_timeout_carries_an_empty_pointer_answer() {
     let mut transport = MockTransport::new(|_server, _q| Vec::new());
     let res = resolve(
         Name::reverse(v4(198, 51, 100, 9)),
-        RecordType::Ptr,
+        LookupType::Ptr,
         &SERVERS,
         &mut transport,
         &mut rng,
@@ -1099,6 +1106,7 @@ fn name_rendering_escapes_bytes_a_terminal_could_act_on() {
     };
     let (name, end) = Name::read(&msg, 0).expect("a bounded name of any octets decodes");
     assert_eq!(end, msg.len());
-    // Case is folded on decode (RFC 4343), so the `J` reads back as `j`.
-    assert_eq!(alloc::format!("{name}"), "\\027[2j.a\\.\\\\");
+    // Case is preserved on decode (RFC 4343) and folded only on
+    // comparison, so the `J` reads back as it was sent.
+    assert_eq!(alloc::format!("{name}"), "\\027[2J.a\\.\\\\");
 }

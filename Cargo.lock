@@ -2789,6 +2789,7 @@ dependencies = [
  "tairix-collections",
  "tairix-fuzzseed",
  "tairix-hash",
+ "tairix-inline",
 ]
 
 [[package]]

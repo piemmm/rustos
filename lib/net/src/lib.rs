@@ -65,6 +65,14 @@
 //!   CNAME chain), driven by injected monotonic time and caller-supplied
 //!   CSPRNG values (the query id and jitter) — a sibling of [`dhcp`], not a
 //!   protocol baked into a socket.
+//! - [`mdns`] — the pure per-interface multicast DNS engine (RFC 6762) and
+//!   the records service discovery carries over it (RFC 6763): the message
+//!   codec over [`dns`]'s own `Name` and `RecordType` (never a second
+//!   codec), the bounded keyed-index record cache, and the responder /
+//!   querier state machine — probe, announce, bounded conflict renaming,
+//!   goodbye, known-answer suppression, and the continuous-query backoff —
+//!   driven by injected time and caller-supplied CSPRNG jitter, with one
+//!   folded one-shot deadline. A query from off-link is never answered.
 //! - [`igmp`] — the IGMPv2 codec (RFC 2236) and [`mld`] the MLDv2 codec
 //!   (RFC 3810): the IPv4 and IPv6 multicast group-membership message
 //!   framings.
@@ -85,7 +93,9 @@
 //! - [`rate`] — the pure, tickless windowed-throughput meter that turns
 //!   an interface's byte/packet counters into the live `rx.pps`/`tx.bps`
 //!   rates the observability surface (`stats:net/<iface>/…`, plan §5)
-//!   reports, averaged over the window that actually elapsed.
+//!   reports, averaged over the window that actually elapsed, and
+//!   [`rate::TokenBucket`], the one definition of a rate *limit* every
+//!   engine here bounds itself with.
 //!
 //! - [`tcp`] — the TCP segment codec (RFC 9293): the header, the
 //!   control flags, the recognised options (MSS, window scale,
@@ -149,6 +159,7 @@ pub mod igmp;
 pub mod ipv4;
 pub mod ipv6;
 pub mod mcast;
+pub mod mdns;
 pub mod mld;
 pub mod nd;
 pub mod neigh;
