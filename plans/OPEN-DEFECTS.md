@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 35 open, 107 closed, 142 total.
+table normalises all three to **closed**. 36 open, 107 closed, 143 total.
 
-### Open (35)
+### Open (36)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -66,6 +66,8 @@ table normalises all three to **closed**. 35 open, 107 closed, 142 total.
 
 
 | D145 | `netstack`'s `accept` scans the whole socket table to find the next unaccepted child, and a spurious `accept` scans it all | noticed while converting the socket bound to measured bytes (`plans/SSH.md` S0b); not absorbed, because it is a second index's worth of design rather than part of that conversion. Every other owned-handle lookup is O(1) through a keyed index; this one is `sockets.iter().position(...)` over the entire table, so a server accepting *n* connections pays O(n²), and the common `WouldBlock` — an `accept` with nothing ready — pays a **full** scan. Remote peers decide how many connections there are to accept, so it is the same "cost follows the table" class the indices were added to remove, reached by a path the owner drives. It is not a correctness or containment defect: the bound still holds and no authority leaks. The fix is not a fifth index but a per-listener FIFO of unaccepted child ids living *inside* the `Proto::Listen` variant, so it is created, drained, and dropped with the listener that owns it and needs no reservation of its own; `accept` then pops a handle and resolves it through `by_id` in constant time. Touches `Proto::Listen`'s shape and every listener site (`to_record`, `defence_counters`, `close`, `listen`, `accept_socket`, `drive_listener`, `advance_listener`, `drain_listener_accepts`, `stream_next_deadline`, `committed_of`, the invariant check). **Re-check trigger:** `plans/SSH.md` S5, whose `sshd` is the tree's first real `accept` consumer and the first workload that would feel it |
+| D146 | a CPU fault in a minimal QEMU integration kernel is a silent hang: no vector table is installed and no fault handler is registered, so nothing reports the syndrome | found while diagnosing the `figure-determinism-qemu-aarch64` boot-stack overflow, which presented only as a 90 s silence with the transcript's last line being the step *before* the fault. These bins supply their own `kernel_main` and call at most `enable_fp_el1`; `tairix_arch_aarch64::exceptions::init_vectors` is never called, so `VBAR_EL1` stays 0 and a synchronous fault vectors to physical `0x200`, executes zeros as `UDF`, and re-faults forever — the guest is wedged rather than dead, so the harness can only kill it on the inactivity budget. The real syndrome (`Prefetch Abort, ESR 0x21/0x86000000, FAR/ELR 0x3ff0000000000000` — a branch to the f64 `1.0` from a corrupted vtable slot) was recoverable only by re-running the bin by hand under `qemu -d int`. Installing vectors alone is **not** the fix: `exceptions::fatal_exception` offers the trap to `fault::fault_handler()` and, finding none registered, falls through to `halt_current_cpu()` — still silent. The fix is a shared guest-side itest kernel helper (there is none today: `tests/integration/harness` is host-side build glue and `finisher` only provides `fail_point!`) that installs the vector table and registers a handler printing `ESR`/`FAR`/`ELR` through the serial sink before exiting with a failure code, wired into the itest bins on both bare-metal ports. riscv64 has the same gap by the same route. Until it lands, any fault in these bins costs a manual `-d int` re-run to diagnose |
+
 
 ### D140 — the loaded notification-icon set is never installed
 

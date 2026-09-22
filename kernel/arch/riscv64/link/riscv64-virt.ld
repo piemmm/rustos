@@ -27,6 +27,12 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
+/* Boot-stack size for images built against this script. Sized by the
+ * image, not by the shared trampoline: these images run the determinism
+ * verticals, whose figure reference grid measured above 64 KiB and below
+ * 128 KiB, so this is roughly twice the measured ceiling. */
+BOOT_STACK_BYTES = 256K;
+
 SECTIONS
 {
     . = 0x80200000;
@@ -57,6 +63,15 @@ SECTIONS
         *(.sbss .sbss.*)
         *(.bss .bss.*)
         *(COMMON)
+        /* Last in `.bss` on purpose. The MMU is off here, so no guard
+         * page can catch an overrun; placing the stack anywhere lower
+         * lets one run off the bottom of `.bss` into `.rodata`/`.text`.
+         * Growing down into the zeroed statics above `__bss_start` keeps
+         * an overrun off the code. */
+        . = ALIGN(16);
+        __boot_stack_bottom = .;
+        . += BOOT_STACK_BYTES;
+        __boot_stack_top = .;
         . = ALIGN(8);
         __bss_end = .;
     }

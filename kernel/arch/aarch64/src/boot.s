@@ -233,12 +233,8 @@ _el2_establish_and_drop:
     msr     elr_el2, x20
     eret
 
-// Boot stack. Reserved in `.bss` (zeroed by the loop above); 64 KiB is
-// generous headroom for the single-CPU boot pipeline.
-.section .bss.boot_stack, "aw", %nobits
-.balign 16
-.global __boot_stack_bottom
-__boot_stack_bottom:
-    .skip 65536
-.global __boot_stack_top
-__boot_stack_top:
+// The boot stack is reserved by the active linker script, which sizes it
+// per image (`BOOT_STACK_BYTES`) and places it last in `.bss` so an
+// overrun cannot reach `.rodata`/`.text`. A size fixed here instead would
+// be one constant for every board, and a workload heavier than the boot
+// pipeline silently outgrew it.

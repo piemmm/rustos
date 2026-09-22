@@ -160,8 +160,11 @@ Twenty-one surfaces, 688 outline points per figure against the billboard's
 468, filled through the existing scan converter with no depth buffer and no
 allocator. Strips are stored in the converter's own sub-pixel units, which is
 both half the memory of a pair of reals and exactly what the painter hands it;
-a figure's whole buffer set then fits on a boot stack, which is what the
-cross-target verticals need.
+a figure's whole buffer set is then stack-resident, which is what the
+cross-target verticals need. It measures above 64 KiB, so the QEMU images
+size their boot stack for it (`BOOT_STACK_BYTES` in the per-image linker
+script) rather than relying on the allowance the boot pipeline sizes for
+itself.
 
 ## Equipment is parts, not paint
 

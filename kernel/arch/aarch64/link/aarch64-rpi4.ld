@@ -32,6 +32,11 @@
 OUTPUT_ARCH(aarch64)
 ENTRY(_start)
 
+/* Boot-stack size for this image: the single-CPU boot pipeline is all
+ * that ever runs on it, so it keeps the smaller figure rather than the
+ * `virt` script's test-workload allowance. */
+BOOT_STACK_BYTES = 64K;
+
 SECTIONS
 {
     . = 0x00080000;
@@ -61,6 +66,14 @@ SECTIONS
         __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
+        /* Last in `.bss`, for the same reason as the `virt` script: with
+         * the MMU off an overrun has no guard page, so it must run into
+         * zeroed statics rather than off the bottom into `.rodata`/
+         * `.text`. */
+        . = ALIGN(16);
+        __boot_stack_bottom = .;
+        . += BOOT_STACK_BYTES;
+        __boot_stack_top = .;
         . = ALIGN(16);
         __bss_end = .;
     }
