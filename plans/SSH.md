@@ -31,7 +31,7 @@ ordinary pre-release changes (§2.13).
 | S0a | `lib/crypto` extension: the algorithm set §4 admits, each with its §2.12 justification, exact pin, `deny.toml`/`supply-chain.toml`/SBOM entry, and §19.1 constant-time test | done |
 | S0b | The `netstack` socket-quota defect: a derived socket-**memory** budget, a per-principal share of it, and a `net.*` administrative override — the fail-closed refusal unchanged, over an indexed socket table | done |
 | S0c | `lib/sandbox::session` — the duplex, long-lived worker seam beside the one-shot `host`/`worker` pair, over the new `WaitSourceKind::StreamRoom` | done |
-| S0d | `lib/compress` gains the DEFLATE **compressor** (RFC 1951) and the zlib envelope encoder (RFC 1950); the decoders already exist | planned |
+| S0d | `lib/compress` gains the RFC 1951/1950 codec in *both* directions as resumable streams — one state per direction, flushed per packet — with the existing whole-buffer entry points kept | done |
 | S1 | `lib/ssh` wire codec (RFC 4251 §5), version exchange, the binary packet protocol with every cipher/MAC framing, strict KEX, rekey thresholds | planned |
 | S2 | KEXINIT negotiation, the exchange hash, key derivation (RFC 4253 §7), the KEX methods of §4, RFC 8308 `ext-info`/`server-sig-algs` | planned |
 | S3 | Keys: blobs, the OpenSSH v1 private-key format with bcrypt-pbkdf, armour, fingerprints and randart, the `authorized_keys` and `known_hosts` grammars, OpenSSH certificates | planned |
@@ -583,12 +583,31 @@ departing. Deadlock-freedom is therefore structural rather than argued — worke
 blocked writing ⇒ the parent's read readiness fires; worker blocked reading ⇒
 the parent's room readiness fires.
 
-**S0d — `lib/compress` has no DEFLATE compressor.** `inflate` (RFC 1951) and
-`zlib` (RFC 1950) already exist and are deliberately **decode-only**, because
-nothing in the tree produced a DEFLATE stream. `zlib@openssh.com` does, so the
-encode direction lands with the same total, `unsafe`-free, bounded discipline —
-and the crate's module documentation, which currently states that no compressor
-exists and why, is corrected rather than left to mislead (§2.14).
+**S0d — `lib/compress` speaks DEFLATE both ways, as a stream.** The crate's
+`inflate`/`zlib` decoders were whole-buffer and there was no compressor at all,
+because nothing in the tree produced a DEFLATE stream. `zlib@openssh.com` needs
+more than the encoder that gap implies: it keeps **one zlib stream per
+direction for the whole session** and flushes it at each packet boundary, so
+packet ten still back-references packet three, and a fragment of that stream is
+not a stream — it has no final block and its back-references point behind its
+own first byte. An encoder alone would have handed S10 half a mechanism.
+
+The crate therefore carries both directions as caller-owned stream state —
+`deflate::Deflate`, `inflate::Inflater`, and the `zlib::Encoder`/`Decoder` pair
+over them — with `Flush::Sync` making everything fed so far readable and
+`Flush::Finish` ending the stream. The decoder resumes at an arbitrary *bit*,
+which a peer flushing with zlib's `Z_PARTIAL_FLUSH` requires, and absorbs every
+byte handed to it, so S10 needs no carry buffer between packets. The
+whole-buffer entry points remain for `lib/image`'s PNG path and run the same
+machine, so there is one implementation per direction rather than two (§2.2).
+
+Two consequences S10 inherits. The encoder writes straight into the caller's
+slice and cannot rewind, so a caller sizes its destination with
+`bound(input_len)` — the discipline `max_compressed_len` already set — and a
+short destination is refused before any state changes. And the state is large
+by nature (a decoder ~34 KiB for its window, an encoder ~220 KiB with the match
+finder), so it is a value S10 heap-owns per connection and per direction; there
+is deliberately no one-shot *encode* function that would put it on a stack.
 
 ---
 
@@ -602,7 +621,8 @@ lib/ssh/                    # the pure engine: wire, ident, packet, kex, key,
 lib/sftp/                   # the SFTP protocol (v3 + the OpenSSH extensions)
 lib/sshconfig/              # the sshd.conf / client-config store engine
 lib/sandbox/src/session.rs  # the duplex long-lived worker seam
-lib/compress/               # + the RFC 1951/1950 encode direction
+lib/compress/               # + the RFC 1951/1950 codec, both directions,
+                            #   streaming as well as whole-buffer
 userland/system/sshd/       # the monitor; its own binary re-invoked as worker
 userland/apps/{ssh,ssh-keygen,ssh-add,ssh-agent,ssh-keyscan,ssh-copy-id,
                sftp,scp,sftp-server}/
@@ -720,8 +740,18 @@ host tests run the full parent path. The aarch64 sandbox vertical drives a real
 session from a wait-set and pushes twice a pipe's worth of frames at a worker
 that answers none of them, which completes only if the room wake fires.
 
-**S0d** — the DEFLATE and zlib encode direction, fuzzed round-trip against the
-existing decoders and against fixtures a foreign encoder produced.
+**S0d** — done. The RFC 1951/1950 codec in both directions, whole-buffer and
+resumable, as §2 describes. Each block is emitted stored, fixed-Huffman, or
+dynamic-Huffman — whichever is smallest — so incompressible input costs a
+header per block rather than the eighth a Huffman-only encoder would add, and
+the ratio sits within a fraction of a percent of zlib's own default level.
+Correctness is pinned to the real thing rather than to itself: the decode tests
+carry streams a real zlib produced (fixed, dynamic, stored, a 20 KiB-distance
+match, and an OpenSSH-shaped `Z_PARTIAL_FLUSH` frame sequence), and the encode
+direction was verified by inflating its output under a real zlib. Three fuzz
+harnesses cover the round trip and both decoders — `fuzz_inflate` and
+`fuzz_zlib` closed a standing §19.6 gap, since the decoders had none at all
+while already reading untrusted PNG bytes.
 
 **S1** — `lib/ssh` wire codec (RFC 4251 §5 `string`/`mpint`/`name-list`/
 `boolean`), version exchange with its banner rules, the binary packet protocol
@@ -871,7 +901,9 @@ S0a–S4 add none.
 changes — stated rather than left silent. The same held for S0c: `lib/sandbox`
 forbids `unsafe`, the `StreamRoom` kernel arm added none, and the seam is
 single-threaded state owned by one thread with no atomic, lock, or ordering
-pairing of its own, so loom had nothing to model there either. Loom **does** apply: S5's
+pairing of its own, so loom had nothing to model there either. S0d likewise:
+`lib/compress` forbids `unsafe`, and a codec stream is single-owner state
+carrying no atomic, lock, or ordering pairing. Loom **does** apply: S5's
 listener→shard handoff and the monitor↔worker flow-control queue are the one
 place correctness depends on an ordering pairing, and a lost wake-up there is a
 hung connection that only shows up under load. S5 carries that model in

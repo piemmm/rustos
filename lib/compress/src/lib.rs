@@ -43,25 +43,38 @@
 //! before allocation; malformed compressed data returns an error, never
 //! panic*).
 //!
-//! # Foreign-format interoperability: [`inflate`] and [`zlib`]
+//! # Foreign-format interoperability: [`deflate`], [`inflate`], and [`zlib`]
 //!
-//! The codec above is TAIRiX's own, and stays the crate's only *compressor*.
-//! [`inflate`] (RFC 1951 DEFLATE) and [`zlib`] (RFC 1950, DEFLATE's usual
-//! envelope) are **decode-only**: they exist so `lib/image`'s PNG decoder
-//! can read the `IDAT` streams a foreign PNG encoder produced, which are
-//! always zlib-wrapped DEFLATE. There is deliberately no DEFLATE
-//! *compressor* here — nothing in the tree produces a DEFLATE stream, only
-//! foreign encoders do — so only the decode direction is implemented, and
-//! it carries the same total, `unsafe`-free, fail-closed discipline as the
-//! RLZ codec: see the [`inflate`] and [`zlib`] module documentation for
-//! their own bounds and error taxonomies.
+//! The codec above is TAIRiX's own, and is what TAIRiX-native storage uses.
+//! [`deflate`]/[`inflate`] (RFC 1951) and [`zlib`] (RFC 1950, DEFLATE's
+//! usual envelope) are the *foreign* format, both directions: `lib/image`'s
+//! PNG decoder reads the `IDAT` stream a foreign encoder produced, and
+//! `zlib@openssh.com` needs TAIRiX to produce one a foreign decoder reads.
+//! Neither replaces the RLZ codec; they exist so TAIRiX can speak to
+//! software that was never going to speak anything else.
+//!
+//! Each direction has two shapes. A whole stream, present in one buffer,
+//! goes through a plain function ([`inflate::inflate_into`],
+//! [`zlib::decompress_into`]). A stream that arrives or leaves in pieces —
+//! one protocol packet at a time, each still back-referencing the ones
+//! before it — goes through a caller-owned state value ([`deflate::Deflate`],
+//! [`inflate::Inflater`], [`zlib::Encoder`], [`zlib::Decoder`]). Those carry
+//! a full 32 KiB window and, on the encode side, a match finder, so they are
+//! tens to hundreds of kilobytes: heap-own one, do not put it on a stack.
+//!
+//! All of it keeps the same total, `unsafe`-free, fail-closed discipline as
+//! the RLZ codec, and allocates nothing of its own: see the module
+//! documentation of each for its bounds and error taxonomy.
 
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod deflate;
 pub mod inflate;
 pub mod zlib;
+
+mod format;
 
 #[cfg(test)]
 mod tests;

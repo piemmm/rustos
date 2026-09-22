@@ -267,6 +267,18 @@ pub const TARGETS: &[Target] = &[
         description: "first-party LZ decode (untrusted compressed-record bytes)",
     },
     Target {
+        package: "tairix-compress",
+        test: "fuzz_inflate",
+        description:
+            "DEFLATE decode (untrusted foreign streams: blocks, huffman tables, back-references) + encoder round trip",
+    },
+    Target {
+        package: "tairix-compress",
+        test: "fuzz_zlib",
+        description:
+            "zlib envelope decode (untrusted header, body, and Adler-32 trailer) + streaming round trip",
+    },
+    Target {
         package: "tairix-crc32c",
         test: "fuzz_crc32c",
         description: "CRC-32C accelerated candidates vs the portable reference (bit-identity)",
@@ -893,6 +905,16 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-compress");
+    }
+
+    #[test]
+    fn deflate_harnesses_are_registered() {
+        for target in ["fuzz_inflate", "fuzz_zlib"] {
+            let opts = parse(&argv(&["--target", target])).expect("flag parses");
+            let chosen = selected(&opts).expect("known target");
+            assert_eq!(chosen.len(), 1);
+            assert_eq!(chosen[0].package, "tairix-compress");
+        }
     }
 
     #[test]

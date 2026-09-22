@@ -593,7 +593,8 @@ tairix/
 │   │                    #   hash, indexed, ordered, and concurrent tiers. The
 │   │                    #   allocation-free ones are `lib/inline`.
 │   ├── complete/        # Shared filename-completion engine.
-│   ├── compress/        # First-party LZ codec.
+│   ├── compress/        # First-party LZ codec + the RFC 1951/1950 DEFLATE
+│   │                    #   and zlib codec foreign formats need.
 │   ├── conout/          # Shared kernel console-output engine (framed queue).
 │   ├── controls/        # Shared Reactive Alloy GUI control behaviour.
 │   ├── cpuops/          # Self-optimising CPU-dispatch framework.

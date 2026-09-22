@@ -1,22 +1,15 @@
 //! A deterministic 8-bit RGBA PNG encoder, for the contact sheets.
 //!
-//! Host tool code. `lib/image` decodes PNG and deliberately exposes no
-//! encoder — §16.4's curated class is *decoding*, and the OS gains nothing
-//! from an encoder a build tool wanted — so the few dozen lines a sheet
-//! needs live here instead of widening a shipped library.
-//!
-//! Deliberately the simplest stream the format admits: one `IDAT`, and a
-//! zlib wrapper around stored (uncompressed) deflate blocks. A contact
-//! sheet is written to a gitignored directory and looked at, never
-//! committed or transmitted, so paying a compressor's complexity to make it
-//! smaller would buy nothing. Every byte is a function of the pixels, so two
-//! runs over the same frame produce the same file.
+//! Host tool code: only the PNG framing lives here. `lib/image` decodes PNG
+//! and deliberately exposes no encoder, but the compressed stream inside an
+//! `IDAT` is an ordinary zlib stream, so it comes from `lib/compress` rather
+//! than from a second copy of a compressor here. Every byte is a function of
+//! the pixels, so two runs over the same frame produce the same file.
 //!
 //! It is proven rather than eyeballed: the tests round-trip what it writes
 //! through `lib/image`'s own decoder, which is the decoder the desktop uses.
 
-/// The most bytes one stored deflate block may carry.
-const BLOCK: usize = 0xFFFF;
+use tairix_compress::zlib::{Encoder, Flush};
 
 /// Encode `rgba` — row-major, straight alpha, exactly `width * height * 4`
 /// bytes — as a PNG.
@@ -49,8 +42,9 @@ pub fn encode(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     header.extend_from_slice(&[8, 6, 0, 0, 0]);
     chunk(&mut out, *b"IHDR", &header);
 
-    // Each row is prefixed with its filter type. Zero — "None" — because a
-    // stored stream gains nothing from a predictor.
+    // Each row is prefixed with its filter type. Zero — "None": a contact
+    // sheet is looked at once and regenerated, so choosing a predictor per
+    // row would cost more than the bytes it saves.
     let stride = usize::try_from(width)
         .unwrap_or(usize::MAX)
         .saturating_mul(4);
@@ -59,7 +53,7 @@ pub fn encode(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
         raw.push(0);
         raw.extend_from_slice(row);
     }
-    chunk(&mut out, *b"IDAT", &deflate_stored(&raw));
+    chunk(&mut out, *b"IDAT", &zlib_stream(&raw)?);
     chunk(&mut out, *b"IEND", &[]);
     Ok(out)
 }
@@ -76,37 +70,18 @@ fn chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc.finish().to_be_bytes());
 }
 
-/// `data` in a zlib stream of stored deflate blocks.
-fn deflate_stored(data: &[u8]) -> Vec<u8> {
-    // Deflate, 32 KiB window, no preset dictionary, fastest level. The
-    // second byte carries the check bits that make the pair a multiple of
-    // thirty-one.
-    let mut out = vec![0x78, 0x01];
-    let mut blocks = data.chunks(BLOCK).peekable();
-    if blocks.peek().is_none() {
-        out.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
-    }
-    while let Some(block) = blocks.next() {
-        let length = u16::try_from(block.len()).unwrap_or(u16::MAX);
-        out.push(u8::from(blocks.peek().is_none()));
-        out.extend_from_slice(&length.to_le_bytes());
-        out.extend_from_slice(&(!length).to_le_bytes());
-        out.extend_from_slice(block);
-    }
-    out.extend_from_slice(&adler32(data).to_be_bytes());
-    out
-}
-
-/// The zlib stream's running checksum over the uncompressed bytes.
-fn adler32(data: &[u8]) -> u32 {
-    /// The largest prime below 65536, which is what the sums run modulo.
-    const BASE: u32 = 65521;
-    let (mut low, mut high) = (1u32, 0u32);
-    for &byte in data {
-        low = (low + u32::from(byte)) % BASE;
-        high = (high + low) % BASE;
-    }
-    (high << 16) | low
+/// `data` as one finished zlib stream.
+///
+/// The encoder is a few hundred kilobytes of match finder, so it is boxed
+/// rather than built on this frame.
+fn zlib_stream(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut encoder = Box::new(Encoder::new());
+    let mut out = vec![0u8; encoder.bound(data.len())];
+    let written = encoder
+        .compress(data, &mut out, Flush::Finish)
+        .map_err(|error| format!("artsheet: compressing the picture failed: {error}"))?;
+    out.truncate(written);
+    Ok(out)
 }
 
 /// CRC-32/ISO-HDLC, the one PNG chunks carry.

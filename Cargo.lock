@@ -6937,6 +6937,7 @@ dependencies = [
  "tairix-abi",
  "tairix-browse",
  "tairix-cc",
+ "tairix-compress",
  "tairix-controls",
  "tairix-cpuops",
  "tairix-crypto",

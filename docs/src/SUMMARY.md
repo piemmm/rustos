@@ -59,6 +59,7 @@
   - [`tairix-caps`](./lib/caps.md)
   - [`tairix-collections`](./lib/collections.md)
   - [`tairix-complete`](./lib/complete.md)
+  - [`tairix-compress`](./lib/compress.md)
   - [`tairix-conout`](./lib/conout.md)
   - [`tairix-controls`](./lib/controls.md)
   - [`tairix-cpuops`](./lib/cpuops.md)

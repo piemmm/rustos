@@ -58,8 +58,9 @@ most-significant-bit first; `PLTE` and `tRNS` (including colour-key
 transparency, compared at the image's native bit depth before any 8-bit
 scaling); all five scanline filters (None, Sub, Up, Average, Paeth); and
 full Adam7 interlacing. The `IDAT` stream is zlib/DEFLATE, decoded through
-`tairix_compress`'s decode-only `inflate`/`zlib` modules rather than a
-second copy of that logic.
+[`tairix-compress`](./compress.md)'s `inflate`/`zlib` modules rather than a
+second copy of that logic — the whole-buffer entry points, since the stream
+arrives complete in the concatenated `IDAT` chunks.
 
 ### JPEG
 

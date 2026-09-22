@@ -304,6 +304,9 @@ tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
 # is smaller than the largest slot a desktop draws it in — fails the build
 # where the author can see it instead of degrading silently on screen.
 tairix-image = { path = "../../lib/image", version = "=0.0.0" }
+# The contact-sheet PNG writer frames the chunks itself but takes its zlib
+# stream from the shared codec rather than carrying a second compressor.
+tairix-compress = { path = "../../lib/compress", version = "=0.0.0" }
 # The one shared resampler. The desktop screendump assertions recompute the
 # wallpaper the guest composites by running the very decode, placement, and
 # resampling code the session's own render path runs, so the expected pixels

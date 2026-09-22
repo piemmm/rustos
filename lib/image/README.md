@@ -419,8 +419,9 @@ computation over untrusted values uses checked, saturating, or widened
 integer arithmetic so a crafted input cannot provoke an overflow panic
 even in a debug build. The crate is `no_std` + `alloc`,
 `#![forbid(unsafe_code)]`, and has no dependency beyond `tairix-compress`
-(PNG's `IDAT` stream is zlib/DEFLATE, so the decode-only `inflate`/`zlib`
-modules there are reused rather than re-implemented).
+(PNG's `IDAT` stream is zlib/DEFLATE, so the `inflate`/`zlib` modules there
+are reused rather than re-implemented — the whole-buffer entry points, since
+the concatenated `IDAT` chunks are the whole stream).
 
 This crate performs no I/O and holds no authority of its own: it is meant
 to run inside the image pipeline's parser sandbox, which supplies the
