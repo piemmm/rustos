@@ -37,7 +37,7 @@ use tairix_abi::time::Duration64;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{Errno, Origin, RandomFlags};
 use tairix_net::addr::IpAddr;
-use tairix_net::dns::{DnsTransport, RecordType, Resolution, Wait, PORT};
+use tairix_net::dns::{DnsTransport, LookupType, Resolution, Wait, PORT};
 use tairix_procinfo::IpcTransport;
 
 use crate::{pointer_name, resolve_name, resolve_pointer, ResolveError};
@@ -195,7 +195,7 @@ impl RtDnsTransport {
     pub fn resolve(
         &mut self,
         name: &str,
-        record_type: RecordType,
+        record_type: LookupType,
     ) -> Result<Resolution, ResolveError> {
         let mut rng = || {
             let mut bytes = [0u8; 4];
@@ -236,7 +236,7 @@ impl RtDnsTransport {
     /// The literal-first, family-preference policy itself is the shared
     /// [`crate::resolve_host`]; this only supplies the query.
     pub fn host_address(&mut self, host: &str, family: Option<NetAddrFamily>) -> Option<IpAddr> {
-        let mut query = |name: &str, record: RecordType| self.resolve(name, record).ok();
+        let mut query = |name: &str, record: LookupType| self.resolve(name, record).ok();
         crate::resolve_host(host, family, &mut query)
     }
 }
@@ -312,7 +312,7 @@ impl DnsTransport for RtDnsTransport {
 /// invalid name, no configured server, a failed server-set query, or a UDP
 /// transport failure). A negative or timed-out resolution is returned as a
 /// [`Resolution`], not an error.
-pub fn resolve(name: &str, record_type: RecordType) -> Result<Resolution, ResolveError> {
+pub fn resolve(name: &str, record_type: LookupType) -> Result<Resolution, ResolveError> {
     let mut udp = RtDnsTransport::open().map_err(ResolveError::Transport)?;
     udp.resolve(name, record_type)
 }

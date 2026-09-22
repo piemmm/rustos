@@ -59,8 +59,7 @@ use crate::eth::{
 };
 use crate::frag::{FragKey, PushOutcome, Reassembler, ReassemblyConfig};
 use crate::icmp::{
-    error_allowed, ErrorContext, ErrorRateLimiter, IcmpContext, IcmpEcho, IcmpError, IcmpErrorKind,
-    IcmpMessage,
+    error_allowed, ErrorContext, IcmpContext, IcmpEcho, IcmpError, IcmpErrorKind, IcmpMessage,
 };
 use crate::iface::{Iface, IfaceAction, IfaceConfig, TempAddrSource};
 use crate::igmp::{IgmpMessage, PROTOCOL_IGMP};
@@ -75,6 +74,7 @@ use crate::mld::{
 };
 use crate::nd::{apply_redirect, NdMessage, ND_HOP_LIMIT};
 use crate::neigh::{LookupResult, NeighborAction, NeighborConfig, NeighborTable};
+use crate::rate::TokenBucket;
 use crate::route::{CandidateAddr, DefaultRouterList, PathMtuCache, Prefix, RoutingTable};
 use crate::tcp::{self, TcpSegmentMeta, MAX_HEADER_LEN, PROTOCOL_TCP};
 use crate::udp::{self, UdpDatagram, PROTOCOL_UDP};
@@ -686,7 +686,7 @@ pub struct Stack {
     routers: DefaultRouterList,
     pmtu: PathMtuCache,
     reassembler: Reassembler,
-    error_limiter: ErrorRateLimiter,
+    error_limiter: TokenBucket,
     pending: Vec<PendingPacket>,
     ra_routes: usize,
     redirect_routes: usize,
@@ -794,7 +794,7 @@ impl Stack {
             routers: DefaultRouterList::new(config.router_capacity),
             pmtu: PathMtuCache::new(config.pmtu_capacity, config.pmtu_lifetime),
             reassembler: Reassembler::new(config.reassembly),
-            error_limiter: ErrorRateLimiter::new(config.error_burst, config.error_rate),
+            error_limiter: TokenBucket::new(config.error_burst, config.error_rate),
             bufs: BufPool::default(),
             pending: Vec::new(),
             ra_routes: 0,

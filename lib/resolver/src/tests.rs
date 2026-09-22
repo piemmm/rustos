@@ -18,7 +18,7 @@ use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::dns::{
-    AddrList, Answer, DnsTransport, Name, RecordType, Resolution, ResolveStatus, Wait,
+    AddrList, Answer, DnsTransport, LookupType, Name, Resolution, ResolveStatus, Wait,
 };
 
 use tairix_abi::net_ipc::address_parts;
@@ -257,7 +257,7 @@ fn resolves_a_record_via_the_configured_server() {
     let sysinfo = SysinfoFake::new(alloc::vec![v4_record(10, 0, 2, 3)]);
     let mut udp = DnsFake::new(|_server, q| alloc::vec![a_response(q, [93, 184, 216, 34])]);
     let mut rng = counter_rng();
-    let resolution = resolve_name("example.com", RecordType::A, &sysinfo, &mut udp, &mut rng)
+    let resolution = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng)
         .expect("no transport error");
     assert_eq!(resolution.status, ResolveStatus::Success);
     assert_eq!(
@@ -276,7 +276,7 @@ fn no_configured_server_is_a_distinct_error_not_a_timeout() {
     let sysinfo = SysinfoFake::new(Vec::new());
     let mut udp = DnsFake::new(|_server, _q| Vec::new());
     let mut rng = counter_rng();
-    let result = resolve_name("example.com", RecordType::A, &sysinfo, &mut udp, &mut rng);
+    let result = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng);
     assert_eq!(result, Err(ResolveError::NoServers));
     // Nothing was ever sent — the engine was never driven.
     assert!(udp.sent_to.is_empty());
@@ -289,7 +289,7 @@ fn a_silent_server_resolves_to_a_timeout() {
     let sysinfo = SysinfoFake::new(alloc::vec![v4_record(10, 0, 2, 3)]);
     let mut udp = DnsFake::new(|_server, _q| Vec::new());
     let mut rng = counter_rng();
-    let resolution = resolve_name("example.com", RecordType::A, &sysinfo, &mut udp, &mut rng)
+    let resolution = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng)
         .expect("no transport error");
     assert_eq!(resolution.status, ResolveStatus::Timeout);
     assert!(!udp.sent_to.is_empty(), "at least one query was attempted");
@@ -302,7 +302,7 @@ fn an_invalid_name_is_rejected_before_any_query() {
     let mut rng = counter_rng();
     // A label longer than 63 octets is invalid.
     let long_label = "a".repeat(64);
-    let result = resolve_name(&long_label, RecordType::A, &sysinfo, &mut udp, &mut rng);
+    let result = resolve_name(&long_label, LookupType::A, &sysinfo, &mut udp, &mut rng);
     assert!(matches!(result, Err(ResolveError::InvalidName(_))));
     assert!(
         udp.sent_to.is_empty(),
@@ -316,7 +316,7 @@ fn a_transport_send_error_aborts_fail_closed() {
     let mut udp = DnsFake::new(|_server, _q| Vec::new());
     udp.send_err = Some(Errno::NetworkUnreachable);
     let mut rng = counter_rng();
-    let result = resolve_name("example.com", RecordType::A, &sysinfo, &mut udp, &mut rng);
+    let result = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng);
     assert_eq!(
         result,
         Err(ResolveError::Transport(Errno::NetworkUnreachable))
@@ -328,7 +328,7 @@ fn a_server_source_failure_is_reported() {
     let sysinfo = SysinfoFake::denying();
     let mut udp = DnsFake::new(|_server, _q| Vec::new());
     let mut rng = counter_rng();
-    let result = resolve_name("example.com", RecordType::A, &sysinfo, &mut udp, &mut rng);
+    let result = resolve_name("example.com", LookupType::A, &sysinfo, &mut udp, &mut rng);
     assert_eq!(
         result,
         Err(ResolveError::ServerSource(Errno::PermissionDenied))
@@ -358,7 +358,7 @@ fn negative(status: ResolveStatus) -> Resolution {
 #[test]
 fn an_address_literal_resolves_without_a_query() {
     let mut asked = Vec::new();
-    let mut query = |name: &str, record: RecordType| {
+    let mut query = |name: &str, record: LookupType| {
         asked.push((name.to_string(), record));
         None
     };
@@ -373,7 +373,7 @@ fn an_address_literal_resolves_without_a_query() {
 
 #[test]
 fn a_literal_of_the_wrong_forced_family_names_nothing() {
-    let mut query = |_name: &str, _record: RecordType| None;
+    let mut query = |_name: &str, _record: LookupType| None;
     assert_eq!(
         resolve_host("::1", Some(NetAddrFamily::V4), &mut query),
         None,
@@ -391,36 +391,36 @@ fn a_name_prefers_ipv6_then_falls_back_to_ipv4() {
         0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
     ]));
     let mut order = Vec::new();
-    let mut query = |_name: &str, record: RecordType| {
+    let mut query = |_name: &str, record: LookupType| {
         order.push(record);
         Some(answered(v6))
     };
     assert_eq!(resolve_host("example.com", None, &mut query), Some(v6));
     assert_eq!(
         order,
-        alloc::vec![RecordType::Aaaa],
+        alloc::vec![LookupType::Aaaa],
         "AAAA is tried first and its answer ends the search"
     );
 
     // With no AAAA, the A record answers.
     let v4 = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
     let mut order = Vec::new();
-    let mut query = |_name: &str, record: RecordType| {
+    let mut query = |_name: &str, record: LookupType| {
         order.push(record);
         match record {
-            RecordType::Aaaa => Some(negative(ResolveStatus::NoData)),
-            RecordType::A | RecordType::Ptr => Some(answered(v4)),
+            LookupType::Aaaa => Some(negative(ResolveStatus::NoData)),
+            LookupType::A | LookupType::Ptr => Some(answered(v4)),
         }
     };
     assert_eq!(resolve_host("example.com", None, &mut query), Some(v4));
-    assert_eq!(order, alloc::vec![RecordType::Aaaa, RecordType::A]);
+    assert_eq!(order, alloc::vec![LookupType::Aaaa, LookupType::A]);
 }
 
 #[test]
 fn a_forced_family_queries_only_that_record_type() {
     let v4 = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
     let mut order = Vec::new();
-    let mut query = |_name: &str, record: RecordType| {
+    let mut query = |_name: &str, record: LookupType| {
         order.push(record);
         Some(answered(v4))
     };
@@ -428,30 +428,30 @@ fn a_forced_family_queries_only_that_record_type() {
         resolve_host("example.com", Some(NetAddrFamily::V4), &mut query),
         Some(v4)
     );
-    assert_eq!(order, alloc::vec![RecordType::A], "-4 never asks for AAAA");
+    assert_eq!(order, alloc::vec![LookupType::A], "-4 never asks for AAAA");
 }
 
 #[test]
 fn a_name_that_does_not_exist_resolves_to_nothing() {
-    let mut query = |_name: &str, _record: RecordType| Some(negative(ResolveStatus::NonExistent));
+    let mut query = |_name: &str, _record: LookupType| Some(negative(ResolveStatus::NonExistent));
     assert_eq!(resolve_host("nope.invalid", None, &mut query), None);
 }
 
 #[test]
 fn a_query_failure_moves_on_to_the_next_record_type() {
     let v4 = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
-    let mut query = |_name: &str, record: RecordType| match record {
+    let mut query = |_name: &str, record: LookupType| match record {
         // A failed AAAA query (no server, transport error) must not mask a
         // usable A record.
-        RecordType::Aaaa => None,
-        RecordType::A | RecordType::Ptr => Some(answered(v4)),
+        LookupType::Aaaa => None,
+        LookupType::A | LookupType::Ptr => Some(answered(v4)),
     };
     assert_eq!(resolve_host("example.com", None, &mut query), Some(v4));
 }
 
 #[test]
 fn a_success_with_no_address_is_not_an_answer() {
-    let mut query = |_name: &str, _record: RecordType| {
+    let mut query = |_name: &str, _record: LookupType| {
         Some(Resolution {
             status: ResolveStatus::Success,
             answer: Answer::Addresses(AddrList::default()),

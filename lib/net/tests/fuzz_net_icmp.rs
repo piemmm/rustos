@@ -11,7 +11,8 @@
 //! under `cargo xtask fuzz`.
 
 use tairix_abi::time::Duration64;
-use tairix_net::icmp::{ErrorRateLimiter, IcmpContext, IcmpEcho, IcmpError, IcmpMessage};
+use tairix_net::icmp::{IcmpContext, IcmpEcho, IcmpError, IcmpMessage};
+use tairix_net::rate::TokenBucket;
 use tairix_net::Ipv6Addr;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -123,7 +124,7 @@ fn rate_limiter_budget_holds_under_random_time_steps() {
         // elapsed seconds (+1 for the fractional carry).
         let burst = (rng.next_u64() % 8) as u32;
         let rate = (rng.next_u64() % 8) as u32;
-        let mut limiter = ErrorRateLimiter::new(burst, rate);
+        let mut limiter = TokenBucket::new(burst, rate);
         let mut now_ms: u64 = 0;
         let mut allowed: u64 = 0;
         for _ in 0..1_000 {

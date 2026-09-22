@@ -110,7 +110,7 @@ exceeded, and parameter problem, with the invoking-packet excerpt
 bounded per family). Error *generation* is defended: `error_allowed`
 enforces the RFC 4443 §2.4(e) rules (no error about an error, none to
 an ambiguous source, none for multicast except the sanctioned
-exceptions) and `ErrorRateLimiter` is the RFC 4443 §2.4(f) token
+exceptions) and `rate::TokenBucket` is the RFC 4443 §2.4(f) token
 bucket, so this host is never an amplification vector.
 
 ### `nd` — Neighbour Discovery
@@ -405,9 +405,13 @@ interprets the answer (RFC 1034 §5.3.1). It is a sibling of `dhcp` — pure,
 `no_std`, allocation-bounded, driven by injected monotonic time and
 caller-supplied CSPRNG values — not a protocol baked into a socket.
 
-The wire vocabulary is `Name`: a domain name in its canonical wire encoding
-(length-prefixed labels ended by the root label), ASCII-case-folded so two
-names compare equal exactly when they are equal under RFC 4343.
+The wire vocabulary is `Name`: a domain name in its uncompressed wire
+encoding (length-prefixed labels ended by the root label). Case is
+*preserved* and compared case-insensitively, which is what RFC 4343
+requires and what a DNS-SD service instance name needs — `Hall
+Printer._ipp._tcp.local` is displayed as its owner spelled it while still
+matching a query that spelled it differently — so `PartialEq`, `Hash`, and
+`Ord` all fold ASCII case and the stored octets never do.
 `Name::encode` parses a dotted host name with the label rules (non-empty,
 ≤ 63 octets, printable-ASCII — a control byte, space, or non-ASCII byte is
 rejected rather than encoded, since a resolver queries host names), bounded
@@ -507,6 +511,85 @@ live leases, and reaches the clock service by the same route: the
 its built-in fallback and below an explicitly configured server, so this
 one is deliberately *purely* DHCP-learned — a static tier here would
 destroy the distinction (`plans/TIMESYNC.md` §3).
+
+### `mdns` — multicast DNS and service discovery
+
+`mdns` is the pure per-interface multicast DNS engine (RFC 6762) and the
+records DNS-based service discovery carries over it (RFC 6763),
+`plans/ZEROCONF.md` Z1. It is the `dhcp` / `dns` shape again: no socket, no
+clock, no randomness — the caller feeds it received datagrams with the
+address and port they came from, monotonic `now` values, a CSPRNG for the
+jitter the protocol mandates, and a buffer to write outgoing datagrams
+into.
+
+mDNS is DNS on the wire, so the codec reuses `dns`'s `Name`, `RecordType`,
+and integer readers rather than defining a second one; `RecordType` gained
+`SRV`, `TXT`, and the multicast reading of `NSEC` in this increment,
+because this is what consumes them. What `mdns` adds is the multicast
+reading of the two class top bits — `QU` on a question (reply to me, not
+the group) and cache-flush on a record (replace what you held) — the
+record vocabulary service discovery needs (`RData`, `Service`, `TxtRecord`,
+`TypeBitmap`), and a writer that builds a message into a caller-owned
+buffer with RFC 1035 name compression and the RFC 3597 §4 rule that a name
+inside a post-1035 type's rdata is never compressed.
+
+Reading is two-phase and the phases fail differently. `Message::parse`
+walks the datagram once and refuses it **whole** on any structural fault: a
+short header, a non-zero opcode or rcode, a name that runs off the end or
+points forward, an rdata length past the message, or more questions or
+records than the fixed bounds admit. Within a message that passes, a record
+whose rdata does not match its own type is *skipped*, exactly as one of a
+type this engine has no decoder for is — the protocol is extensible, so a
+reader that rejected every message carrying something it did not understand
+would be unusable on a real segment. It is never guessed at.
+
+`RecordCache` is the per-interface cache. Every arriving record must be
+found or placed in constant time, so records are chained under a hash of
+their owner name and type, and that hash is **keyed** with the per-boot
+secret: a peer chooses the names, and an unkeyed hash would let it choose a
+set that all land in one chain and restore the scan the index exists to
+prevent. `MAX_RECORDS` and `MAX_RECORDS_PER_SOURCE` are fixed *security*
+bounds, not capacities that grow with the segment — resident state is the
+per-interface ceiling times the interface count, independent of how many
+hosts are shouting. The per-source bound is what makes the global one fair:
+a peer at its own ceiling evicts its **own** oldest record, so shouting
+costs the shouter its cache and nobody else theirs. Caches are never
+merged across interfaces, so a record learned on a hostile network can
+never answer a question scoped to the wired LAN. A goodbye (TTL 0) is
+honoured only from the source that asserted the record, and the cache-flush
+bit retires only that source's other records at the same name and type —
+sparing anything received in the last second, because an announcement of
+several records arrives as several messages.
+
+`MdnsEngine` is the responder and querier. A unique name is probed for
+three times 250 ms apart before it is announced (RFC 6762 §8.1), a
+simultaneous probe is settled by the RFC 6762 §8.2 comparison rather than a
+race, and a peer that later claims the name renames this host under the
+RFC 6762 §9 convention — `printer-2.local`, `Hall Printer (2)._ipp…` —
+incrementing rather than stacking suffixes. That renaming is **bounded**:
+RFC 6762 §9 has no natural end, so a peer that keeps claiming whatever name
+we move to would otherwise walk a host through the integers forever. After
+`MAX_RENAMES` the publication fails closed to *not published* and says so.
+
+Answering a query is bounded three ways. A record is multicast at most once
+per second (RFC 6762 §6), so a flood of identical questions produces one
+answer. A unicast reply — a `QU` question or a legacy resolver's, which is
+answered on the resolver's own port with the question echoed and a 10-second
+TTL cap (RFC 6762 §6.7) — is charged to a per-peer budget and to a budget
+for the interface, so a peer rotating its source address cannot sidestep the
+first. And a query whose source is **not on-link** is not answered at all:
+the engine is handed the interface's prefixes and refuses everything else
+before a byte is parsed, because reflected mDNS is an amplifier with a
+published multiplier. Defending our own name is the one thing never charged
+to a budget — whether this host keeps its name must not depend on something
+a flood can drain — so a probe for a name we own is answered at once, and
+multicast, so the whole segment sees the claim.
+
+The engine is tickless: `next_deadline` folds probe, announce, response
+delay, query backoff, cache expiry, and the RFC 6762 §5.2 cache-refresh
+points (80/85/90/95 % of TTL, and only for records a live question covers,
+so a passively cached record costs no timers) into the one instant the
+caller arms a one-shot for. Host-tested and fuzzed (`fuzz_net_mdns`).
 
 ### `igmp`, `mld` — multicast group-membership message codecs
 

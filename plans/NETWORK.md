@@ -330,7 +330,9 @@ planned, `[~]` in progress, `[x]` done.
   type numbering + pseudo-header difference): `IcmpMessage`,
   `IcmpEcho` (typed `EchoKind`), `IcmpError` (incl. the RFC 1191 v4
   packet-too-big wire form), the RFC 4443 §2.4(e) `error_allowed`
-  gate, and the §2.4(f) token-bucket `ErrorRateLimiter`.
+  gate, and the §2.4(f) budget, which is `rate::TokenBucket` — the one
+  token bucket in the crate, shared with the multicast-DNS response
+  limits rather than copied per protocol.
 - `nd` parses RS/RA/NS/NA/redirect with the RFC 4861 validations
   (hop-limit 255, code 0, non-multicast targets, solicited-NA-to-
   multicast refused, `MAX_ND_OPTIONS` = 16); emits host messages only

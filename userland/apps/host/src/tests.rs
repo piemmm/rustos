@@ -12,7 +12,7 @@ use core::cell::RefCell;
 use tairix_abi::Errno;
 use tairix_help::{HelpSource, SourceError};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tairix_net::dns::{AddrList, Answer, Name, RecordType, Resolution, ResolveStatus};
+use tairix_net::dns::{AddrList, Answer, LookupType, Name, Resolution, ResolveStatus};
 use tairix_resolver::ResolveError;
 
 use super::{parse, run, Command, Lookup, Output, ParseError, Resolver, USAGE};
@@ -25,7 +25,7 @@ struct ScriptResolver {
     a: Option<Result<Resolution, ResolveError>>,
     aaaa: Option<Result<Resolution, ResolveError>>,
     ptr: Option<Result<Resolution, ResolveError>>,
-    queried: RefCell<Vec<RecordType>>,
+    queried: RefCell<Vec<LookupType>>,
     names: RefCell<Vec<String>>,
 }
 
@@ -57,13 +57,13 @@ impl ScriptResolver {
 }
 
 impl Resolver for ScriptResolver {
-    fn resolve(&mut self, name: &str, record_type: RecordType) -> Result<Resolution, ResolveError> {
+    fn resolve(&mut self, name: &str, record_type: LookupType) -> Result<Resolution, ResolveError> {
         self.queried.borrow_mut().push(record_type);
         self.names.borrow_mut().push(name.to_string());
         let scripted = match record_type {
-            RecordType::A => self.a,
-            RecordType::Aaaa => self.aaaa,
-            RecordType::Ptr => self.ptr,
+            LookupType::A => self.a,
+            LookupType::Aaaa => self.aaaa,
+            LookupType::Ptr => self.ptr,
         };
         scripted.unwrap_or(Ok(timeout()))
     }
@@ -161,7 +161,7 @@ fn no_type_queries_a_then_aaaa() {
         command,
         Command::Lookup(Lookup {
             name: "example.com".to_string(),
-            types: alloc::vec![RecordType::A, RecordType::Aaaa],
+            types: alloc::vec![LookupType::A, LookupType::Aaaa],
         })
     );
 }
@@ -179,7 +179,7 @@ fn type_flag_restricts_to_one_type() {
             command,
             Command::Lookup(Lookup {
                 name: "example.com".to_string(),
-                types: alloc::vec![RecordType::Aaaa],
+                types: alloc::vec![LookupType::Aaaa],
             }),
             "args {args:?}"
         );
@@ -203,7 +203,7 @@ fn a_double_dash_ends_options() {
         command,
         Command::Lookup(Lookup {
             name: "-t".to_string(),
-            types: alloc::vec![RecordType::A, RecordType::Aaaa],
+            types: alloc::vec![LookupType::A, LookupType::Aaaa],
         })
     );
 }
@@ -238,7 +238,7 @@ fn a_success_prints_the_address_line() {
     // Both types were queried, A before AAAA.
     assert_eq!(
         resolver.queried.borrow().as_slice(),
-        &[RecordType::A, RecordType::Aaaa]
+        &[LookupType::A, LookupType::Aaaa]
     );
 }
 
@@ -249,7 +249,7 @@ fn an_aaaa_success_uses_the_ipv6_phrasing() {
     let (found, out, _err) = run_lookup(&mut resolver, &["-t", "AAAA", "example.com"]);
     assert!(found);
     assert!(out.contains("example.com has IPv6 address 2606:2800:220::1"));
-    assert_eq!(resolver.queried.borrow().as_slice(), &[RecordType::Aaaa]);
+    assert_eq!(resolver.queried.borrow().as_slice(), &[LookupType::Aaaa]);
 }
 
 #[test]
@@ -261,7 +261,7 @@ fn nxdomain_is_reported_once_and_stops_further_queries() {
     assert!(!found);
     assert!(out.contains("Host nope.invalid not found: 3(NXDOMAIN)"));
     // AAAA was never queried — NXDOMAIN is definitive for the name.
-    assert_eq!(resolver.queried.borrow().as_slice(), &[RecordType::A]);
+    assert_eq!(resolver.queried.borrow().as_slice(), &[LookupType::A]);
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn a_timeout_goes_to_stderr_and_stops() {
     assert!(!found);
     assert!(out.is_empty(), "no answer on stdout");
     assert!(err.contains("connection timed out"));
-    assert_eq!(resolver.queried.borrow().as_slice(), &[RecordType::A]);
+    assert_eq!(resolver.queried.borrow().as_slice(), &[LookupType::A]);
 }
 
 #[test]
@@ -282,7 +282,7 @@ fn no_configured_server_is_a_stderr_diagnostic() {
     assert!(out.is_empty());
     assert!(err.contains("no DNS server is configured"));
     // The hard failure aborts before AAAA is attempted.
-    assert_eq!(resolver.queried.borrow().as_slice(), &[RecordType::A]);
+    assert_eq!(resolver.queried.borrow().as_slice(), &[LookupType::A]);
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn an_ipv4_operand_becomes_a_ptr_lookup_of_its_reverse_name() {
         command,
         Command::Lookup(Lookup {
             name: "133.2.0.192.in-addr.arpa".to_string(),
-            types: alloc::vec![RecordType::Ptr],
+            types: alloc::vec![LookupType::Ptr],
         })
     );
 }
@@ -322,7 +322,7 @@ fn an_ipv6_operand_becomes_a_ptr_lookup_of_its_reverse_name() {
         command,
         Command::Lookup(Lookup {
             name: expected.to_string(),
-            types: alloc::vec![RecordType::Ptr],
+            types: alloc::vec![LookupType::Ptr],
         })
     );
 }
@@ -337,7 +337,7 @@ fn an_explicit_type_still_applies_to_an_address_operand() {
         command,
         Command::Lookup(Lookup {
             name: "2.2.0.10.in-addr.arpa".to_string(),
-            types: alloc::vec![RecordType::A],
+            types: alloc::vec![LookupType::A],
         })
     );
 }
@@ -349,7 +349,7 @@ fn ptr_is_an_accepted_type_name() {
         command,
         Command::Lookup(Lookup {
             name: "1.2.0.192.in-addr.arpa".to_string(),
-            types: alloc::vec![RecordType::Ptr],
+            types: alloc::vec![LookupType::Ptr],
         })
     );
 }
@@ -369,7 +369,7 @@ fn a_found_pointer_prints_the_bind_utils_line() {
         &["2.2.0.10.in-addr.arpa".to_string()],
         "the reverse name is what gets queried"
     );
-    assert_eq!(resolver.queried.borrow().as_slice(), &[RecordType::Ptr]);
+    assert_eq!(resolver.queried.borrow().as_slice(), &[LookupType::Ptr]);
 }
 
 #[test]

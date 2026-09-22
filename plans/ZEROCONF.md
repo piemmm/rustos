@@ -16,7 +16,7 @@ and keeps LLMNR and NetBIOS permanently out (§1 below).
 
 | id | What it is | Status |
 |---|---|---|
-| Z1 | `lib/net::mdns` pure engine: `SRV`/`TXT`/mDNS-`NSEC` record types, responder/querier state machine, per-interface cache, fuzz harness | planned |
+| Z1 | `lib/net::mdns` pure engine: `SRV`/`TXT`/mDNS-`NSEC` record types, responder/querier state machine, per-interface cache, fuzz harness | done |
 | Z2 | `lib/net::dnssd` DNS-SD vocabulary: the instance/type/domain triple, TXT key-value grammar, service-type grammar | planned |
 | Z3 | `discoveryd` split-process skeleton: unprivileged decoder owning the socket, privileged front owning authority | planned |
 | Z4 | Browse + resolve, scoped by grant; `.local` routing in `lib/resolver`; `lib/discovery` client | planned |
@@ -399,15 +399,55 @@ interface reconfiguration.
 
 ## 12. Stages
 
-### Z1 — the pure `lib/net::mdns` engine
+### Z1 — the pure `lib/net::mdns` engine — **done**
 
-`RecordType` extension (`Srv`/`Txt`/mDNS `Nsec`) in `lib/net::dns`; the
-responder/querier state machine; the per-interface bounded cache; known-answer
-suppression; the §8 rate limiter; `next_deadline()`. Host unit tests
-(probe/announce/conflict lifecycle, suppression, cache expiry and refresh
-points, per-source eviction fairness, off-link refusal, legacy-unicast
-handling) and a `fuzz_net_mdns` harness registered in `tools/xtask`. Pure —
-no service, no ABI, no netstack change, the DNS1 precedent.
+`lib/net/src/mdns.rs` and its `codec` / `cache` / engine submodules carry the
+whole of it: the message codec over `lib/net::dns`'s own `Name` and
+`RecordType`, the bounded per-interface `RecordCache`, and the `MdnsEngine`
+responder/querier. Pure — no service, no ABI, no netstack change.
+
+What it now guarantees, and the decisions a later increment must not
+re-derive:
+
+- **`dns::RecordType` is the wire vocabulary; `dns::LookupType` is the
+  subset a stub lookup can ask for.** Widening `RecordType` with `SRV` /
+  `TXT` / `NSEC` left the stub resolver's `Answer` with no shape for three
+  of its variants, so the resolver takes the refinement type instead. A
+  consumer that wants "the types `host -t` accepts" reads `LookupType::ALL`
+  rather than keeping a list.
+- **`dns::Name` preserves case and compares without it** (RFC 4343). It
+  used to fold on decode, which would have destroyed the display spelling
+  of every DNS-SD instance name before Z2 could ever read it. `PartialEq`,
+  `Hash`, and `Ord` fold; the octets do not. `Name::from_labels` builds a
+  name from raw label octets (an instance name is free-form UTF-8, which
+  `Name::encode`'s host-name rules refuse) and `Name::labels` reads them
+  back — the pair Z2's instance/type/domain split needs.
+- **The cache index is keyed and the bounds are fixed.** Records chain
+  under a keyed hash of (owner name, type), so a peer cannot choose a name
+  set that collapses into one chain. `MAX_RECORDS` (512) and
+  `MAX_RECORDS_PER_SOURCE` (32) are §24.4 bounds; a full slot table is
+  about half a mebibyte per interface, grown on demand, and independent of
+  segment population. A source at its own ceiling evicts its own oldest
+  record; only a globally full table evicts by recency.
+- **A derived `NSEC` is announced and answered with, never probed.** A
+  unique publication gains an `NSEC` asserting exactly the types published
+  at the name, but it is excluded from the probe's authority section and
+  from the RFC 6762 §8.2 comparison: a record a peer's probe cannot carry
+  would decide every tiebreak in our favour.
+- **Defending our own name is never charged to a budget.** Unicast replies
+  are budgeted per peer and per interface, but a probe for a name we own is
+  answered at once and multicast, outside both budgets and outside the
+  one-per-second rule. Otherwise draining the budget would be a lever for
+  taking a name.
+- **Renaming is bounded and then fails closed** to *not published*, with a
+  `ConflictBudgetExhausted` event — the §7 posture, implemented.
+- **`rate::TokenBucket` is the one token bucket in `lib/net`.** A second
+  protocol needing a rate limit reaches for that, never a private copy and
+  never across a layer into `icmp`.
+
+Still Z3's, not done here: nothing binds a socket, joins a group, or holds
+an identity. The engine is handed the interface's on-link prefixes and
+refuses everything else; who supplies them is the service's question.
 
 ### Z2 — `lib/net::dnssd` vocabulary
 

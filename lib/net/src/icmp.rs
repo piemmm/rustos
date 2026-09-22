@@ -8,7 +8,7 @@
 //! over it.
 //!
 //! Error generation is rate-limited by the caller through
-//! [`ErrorRateLimiter`] (a token bucket, RFC 4443 §2.4(f)) and gated by
+//! [`crate::rate::TokenBucket`] (RFC 4443 §2.4(f)) and gated by
 //! [`error_allowed`] — no error about an error, none triggered by
 //! multicast except where the RFC allows it — so this host is never an
 //! amplification vector.
@@ -16,7 +16,6 @@
 use crate::addr::Ipv6Addr;
 use crate::checksum::{internet_checksum, Checksum};
 use crate::ipv6::NEXT_HEADER_ICMPV6;
-use tairix_abi::time::{Duration64, NANOS_PER_SEC};
 
 /// Length of the fixed 4-byte ICMP/`ICMPv6` header (type, code, checksum).
 pub const ICMP_FIXED_HEADER_LEN: usize = 4;
@@ -479,60 +478,6 @@ pub fn error_allowed(context: ErrorContext) -> bool {
         return false;
     }
     true
-}
-
-/// Token-bucket limiter for ICMP/`ICMPv6` error generation (RFC 4443
-/// §2.4(f)): at most `burst` errors at once, refilled at `per_second`.
-///
-/// Pure and `now`-driven like every stateful engine in this crate: the
-/// caller asks [`Self::allow`] before emitting each error and drops the
-/// error (silently — suppression is the defence) when refused.
-#[derive(Clone, Debug)]
-pub struct ErrorRateLimiter {
-    /// Tokens scaled by [`NANOS_PER_SEC`], so refill needs no division.
-    tokens: u64,
-    /// Bucket capacity in scaled tokens.
-    capacity: u64,
-    /// Refill rate in scaled tokens per second (= errors per second).
-    per_second: u64,
-    /// Monotonic nanoseconds of the last refill.
-    last: u128,
-}
-
-/// One scaled token: the cost of one error message.
-const TOKEN: u64 = NANOS_PER_SEC as u64;
-
-impl ErrorRateLimiter {
-    /// A limiter allowing bursts of `burst` errors, refilled at
-    /// `per_second` errors per second. Zero values fail closed: a zero
-    /// burst or rate allows nothing.
-    #[must_use]
-    pub fn new(burst: u32, per_second: u32) -> Self {
-        Self {
-            tokens: u64::from(burst).saturating_mul(TOKEN),
-            capacity: u64::from(burst).saturating_mul(TOKEN),
-            per_second: u64::from(per_second),
-            last: 0,
-        }
-    }
-
-    /// Take one error's worth of budget at time `now`; `false` means
-    /// the error must be suppressed.
-    pub fn allow(&mut self, now: Duration64) -> bool {
-        let now = crate::timeutil::nanos(now);
-        let elapsed = now.saturating_sub(self.last);
-        self.last = now;
-        let refill = u64::try_from(elapsed)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(self.per_second);
-        self.tokens = core::cmp::min(self.capacity, self.tokens.saturating_add(refill));
-        if self.tokens >= TOKEN {
-            self.tokens -= TOKEN;
-            true
-        } else {
-            false
-        }
-    }
 }
 
 #[cfg(test)]

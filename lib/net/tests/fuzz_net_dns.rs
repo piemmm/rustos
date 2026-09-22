@@ -19,7 +19,7 @@
 
 use tairix_abi::time::Duration64;
 use tairix_net::dns::{
-    write_query, Answer, DnsResolver, DnsResponse, Name, QuerySpec, RecordType, MAX_ADDRESSES,
+    write_query, Answer, DnsResolver, DnsResponse, LookupType, Name, QuerySpec, MAX_ADDRESSES,
     MAX_QUERY_LEN,
 };
 use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -27,11 +27,11 @@ use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
-fn record_type(rng: &mut Lcg) -> RecordType {
+fn record_type(rng: &mut Lcg) -> LookupType {
     match rng.next_u64() % 3 {
-        0 => RecordType::A,
-        1 => RecordType::Aaaa,
-        _ => RecordType::Ptr,
+        0 => LookupType::A,
+        1 => LookupType::Aaaa,
+        _ => LookupType::Ptr,
     }
 }
 
@@ -65,11 +65,11 @@ fn exercise_parse(bytes: &[u8], spec: &QuerySpec) {
         assert_eq!(resp.id, spec.id);
         assert!(resp.answer.addresses().len() <= MAX_ADDRESSES);
         match spec.record_type {
-            RecordType::Ptr => {
+            LookupType::Ptr => {
                 assert!(matches!(resp.answer, Answer::Pointer(_)));
                 assert!(resp.answer.addresses().is_empty());
             }
-            RecordType::A | RecordType::Aaaa => {
+            LookupType::A | LookupType::Aaaa => {
                 assert!(matches!(resp.answer, Answer::Addresses(_)));
                 assert!(resp.answer.pointer().is_none());
             }

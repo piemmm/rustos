@@ -176,6 +176,12 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-net",
+        test: "fuzz_net_mdns",
+        description:
+            "lib/net multicast DNS (RFC 6762 message codec, record cache bounds, responder/querier)",
+    },
+    Target {
+        package: "tairix-net",
         test: "fuzz_net_ntp",
         description: "lib/net NTP client (RFC 5905 header decode, origin-nonce anti-spoof gate, poll/backoff state machine)",
     },
