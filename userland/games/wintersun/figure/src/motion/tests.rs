@@ -2,7 +2,10 @@
 
 use tairix_util::mathf;
 
-use super::{opposite, Kind, Motion};
+use super::{
+    opposite, rooted, Kind, Motion, IDLE_CROUCH, LEG_LENGTH, RUN_FLIGHT_RISE, RUN_STANCE,
+    WALK_CROUCH,
+};
 use crate::clip::{Key, Loop};
 use crate::gait::Gait;
 use crate::humanoid::{self, Bone, DRIVES};
@@ -162,4 +165,95 @@ fn a_standing_motion_has_no_stride() {
     let clip = motion.clip().expect("its clip");
     assert_eq!(Kind::Idle.stride(), None);
     assert!(Gait::fitted(&rigging, clip, Bone::Ankle(Side::Left).joint()).is_err());
+}
+
+/// The FG4 defect, at the level of the shipped art. A run has a moment with
+/// neither foot down, and the height the body is at then is not in its
+/// articulation — both legs tucked reads exactly like a deep crouch. Read
+/// off the lesser fold, the figure sank by that tuck at the moment it should
+/// have been at its highest. Its own curve must lift it instead.
+#[test]
+fn the_runs_body_rises_while_neither_foot_is_down() {
+    let motion = Motion::new(Kind::Run).expect("a shipped motion");
+    let clip = motion.clip().expect("its clip");
+
+    let stance = clip.root_at(0.0);
+    let apex = clip.root_at(f64::midpoint(RUN_STANCE, 0.5));
+    assert!(
+        apex > stance,
+        "mid-flight sits at {apex}, no higher than the stance's {stance}"
+    );
+    assert!(
+        mathf::fabs(apex - stance - rooted(RUN_FLIGHT_RISE)) < 1e-12,
+        "the rise measured {} rather than the authored {}",
+        apex - stance,
+        rooted(RUN_FLIGHT_RISE)
+    );
+
+    // The arc meets the stance height at both ends of each flight window, so
+    // the height never steps at the moment a foot takes over.
+    for edge in [RUN_STANCE, 0.5, 0.5 + RUN_STANCE, 1.0] {
+        assert!(
+            mathf::fabs(clip.root_at(edge) - stance) < 1e-12,
+            "the arc leaves the stance height {stance} at phase {edge}"
+        );
+    }
+    // And it never dips below the stance height anywhere in the cycle, which
+    // is the defect's own signature.
+    for step in 0..=256 {
+        let phase = real(step) / 256.0;
+        assert!(
+            clip.root_at(phase) >= stance - 1e-12,
+            "the body sank to {} at phase {phase}",
+            clip.root_at(phase)
+        );
+    }
+}
+
+/// A walk and an idle keep a foot down at every phase, so their bodies hold
+/// one height throughout: there is no moment whose height the articulation
+/// could not account for.
+#[test]
+fn the_grounded_motions_hold_one_height() {
+    for (kind, crouch) in [(Kind::Idle, IDLE_CROUCH), (Kind::Walk, WALK_CROUCH)] {
+        let motion = Motion::new(kind).expect("a shipped motion");
+        let clip = motion.clip().expect("its clip");
+        for step in 0..=64 {
+            let phase = real(step) / 64.0;
+            assert!(
+                mathf::fabs(clip.root_at(phase) - rooted(-crouch)) < 1e-12,
+                "{} moved its body to {} at phase {phase}",
+                kind.name(),
+                clip.root_at(phase)
+            );
+        }
+    }
+}
+
+/// Every shipped height is a fraction of the figure's own leg, so the curves
+/// carry no absolute length of their own and the same clip holds on a taller
+/// rig.
+#[test]
+fn every_shipped_root_height_is_a_fraction_of_a_leg() {
+    let rig = humanoid::rig().expect("the humanoid rig");
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = crate::plant::Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+    assert!(
+        mathf::fabs(legs.straight() - LEG_LENGTH) < 1e-12,
+        "the rig's leg is {} against the {LEG_LENGTH} the curves assume",
+        legs.straight()
+    );
+    for kind in Kind::ALL {
+        let motion = Motion::new(kind).expect("a shipped motion");
+        let clip = motion.clip().expect("its clip");
+        for step in 0..=64 {
+            let phase = real(step) / 64.0;
+            let height = clip.root_at(phase);
+            assert!(
+                (-1.0..=1.0).contains(&height),
+                "{} asked for {height} of a leg at phase {phase}",
+                kind.name()
+            );
+        }
+    }
 }

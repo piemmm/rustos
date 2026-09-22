@@ -2,9 +2,10 @@
 //! rather than something a reviewer squints at.
 //!
 //! Each function answers a single figure, and each figure has a bound beside
-//! it. The bounds are the shipped art's, arrived at by measuring it and
-//! leaving headroom; widening one to admit a clip that fails is the defect
-//! they exist to catch, not a fix.
+//! it. Most bounds are the shipped art's, arrived at by measuring it and
+//! leaving headroom; a few state the figure the art has to earn instead, and
+//! say so where they do. Either way, widening one to admit a clip that fails
+//! is the defect they exist to catch, not a fix.
 //!
 //! These live here rather than in the harness that renders the sheets for
 //! three reasons: they are allocation-free statements about this crate's own
@@ -19,8 +20,9 @@ use crate::clip::{Clip, Loop};
 use crate::error::FigureError;
 use crate::gait::{Gait, SAMPLES};
 use crate::joint::{JointId, Limit};
+use crate::plant::Legs;
 use crate::pose::Range;
-use crate::rig::Posture;
+use crate::rig::{Frames, Posture, Resolved};
 use crate::rigging::Rigging;
 
 /// The most of any joint's own travel a shipped clip may turn through.
@@ -56,7 +58,30 @@ pub const MAX_CLOSURE: f64 = 1e-9;
 /// The skate. Zero for a clip whose foot travels backward through the body
 /// at exactly the gait's own rate throughout its stance; what is left is the
 /// slide a player reads as the feet not gripping.
+///
+/// A hundredth of a stride, which is the figure this plan states the fitting
+/// has to earn rather than a measurement with headroom added: at the largest
+/// size the desktop draws a figure it is about one pixel over a whole cycle,
+/// so it is the point below which a slide stops being visible at all. The
+/// shipped set's worst is the run's, a shade under it at 0.0091.
 pub const MAX_SKATE: f64 = 0.01;
+
+/// How far a clip's stated root height may leave its planted foot from the
+/// ground, in figure-local units.
+///
+/// The clip authors the height its body is at and the leg curves author
+/// where the feet are; nothing in the planting solve makes the two agree, so
+/// a clip standing upright while folding its legs would sink its feet
+/// through the floor and one crouching with straight legs would hover. This
+/// is that disagreement, measured over every sample the foot is actually
+/// down for.
+///
+/// The residue is the gap between the crouch depth a foot path was authored
+/// with and the fold its keys, rounded to six places, actually produce — so
+/// the bound is that rounding rather than a judgement about art. A figure
+/// stands a hundred units tall and the shipped set's worst is the run's
+/// 0.052, which is well inside a pixel at every size the desktop draws one.
+pub const MAX_GROUNDING: f64 = 0.08;
 
 /// The worst fraction of a joint's own travel any pose of `clip` uses.
 ///
@@ -137,6 +162,40 @@ pub fn closure(clip: Clip<'_>) -> f64 {
 pub fn skate(rigging: &Rigging<'_>, clip: Clip<'_>, ankle: JointId) -> Result<f64, FigureError> {
     let gait = Gait::fitted(rigging, clip, ankle)?;
     Ok(gait.slide(rigging, clip, ankle)? / gait.stride())
+}
+
+/// How far the lowest point of `clip`'s own cycle sits from the floor, in
+/// figure-local units.
+///
+/// The one check that the two halves of a grounded pose agree. The leg
+/// curves say where the ankles are and the root height says where the body
+/// is; over a whole cycle the lowest either foot ever reaches has to be the
+/// floor exactly. Below it the figure's foot sinks into the ground, above it
+/// the figure never touches down — the two are the same quantity's two
+/// signs, so one number answers both.
+///
+/// Deliberately free of any notion of which foot is "down": a contact band
+/// widens near a foot's lowest point, where its height is flat, so a window
+/// drawn with one reports the foot planted well into its own toe-off. The
+/// extreme over the cycle needs no window at all.
+///
+/// # Errors
+///
+/// [`FigureError::PhaseOutsideClip`] never, for a grid inside the cycle;
+/// otherwise as the posture and the resolve, for a rig missing a leg.
+pub fn grounding(rigging: &Rigging<'_>, clip: Clip<'_>, legs: &Legs) -> Result<f64, FigureError> {
+    let mut frames = Frames::new();
+    let mut deepest = f64::MAX;
+    for index in 0..SAMPLES {
+        let phase = grid(index);
+        let pose = clip.sample(phase)?;
+        rigging.posture(&pose)?.resolve(Resolved::REST, &mut frames);
+        let standing = legs.standing(&frames)?;
+        let sunk =
+            clip.root_at(phase) * legs.straight() + mathf::fmin(standing[0].up, standing[1].up);
+        deepest = mathf::fmin(deepest, sunk);
+    }
+    Ok(mathf::fabs(deepest - legs.sole()))
 }
 
 /// The phase of sample `index` on the measurement grid.

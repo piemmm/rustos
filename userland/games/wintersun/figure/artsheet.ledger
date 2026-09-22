@@ -17,13 +17,13 @@
 # reviewer judges is always current rather than as-of-last-regeneration.
 #
 artsheet 1
-figure-digest 0x58d4a86bb486d2f9
+figure-digest 0x9614701ff10df8c1
 tones 6
 sides [32, 64, 128]
 
-motion idle  seconds 4.000000 limits 0.316579 continuity 0.001142 closure 0.000000
-motion walk  seconds 1.100000 limits 0.792064 continuity 0.038393 closure 0.000000 stride 56.000000 skate 0.002718
-motion run   seconds 0.620000 limits 0.774654 continuity 0.040978 closure 0.000000 stride 96.000000 skate 0.009121
+motion idle  seconds 4.000000 limits 0.316579 continuity 0.001142 closure 0.000000 grounding 0.000004
+motion walk  seconds 1.100000 limits 0.792064 continuity 0.038393 closure 0.000000 grounding 0.018419 stride 56.000000 skate 0.002718
+motion run   seconds 0.620000 limits 0.774654 continuity 0.040978 closure 0.000000 grounding 0.052303 stride 96.000000 skate 0.009121
 
 cell idle 0 0x0000 32  pixels 0x56f397f00b0ae028  coverage 0.091483  regions 13  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.193176
 cell idle 0 0x0000 64  pixels 0x06055e0c3c43aebe  coverage 0.092393  regions 21  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.192471
@@ -114,7 +114,7 @@ cell idle 7 0x0000 64  pixels 0x0fb955bff979f36f  coverage 0.092596  regions 19 
 cell idle 7 0x0000 128  pixels 0xb43b431997e782cf  coverage 0.094603  regions 39  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.194013
 cell idle 7 0x4000 32  pixels 0x022d609aa4b81823  coverage 0.155109  regions 12  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.216461
 cell idle 7 0x4000 64  pixels 0xf8d195a215280ea4  coverage 0.161710  regions 19  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.215378
-cell idle 7 0x4000 128  pixels 0xc75407825742bf15  coverage 0.168188  regions 29  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.216207
+cell idle 7 0x4000 128  pixels 0xf4eda83649819351  coverage 0.168193  regions 29  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.216220
 cell idle 7 0x8000 32  pixels 0xaf514e8e1486191b  coverage 0.090751  regions 13  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.192963
 cell idle 7 0x8000 64  pixels 0x412e45fd75a01956  coverage 0.092002  regions 23  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.191828
 cell idle 7 0x8000 128  pixels 0x44e38944393e3db0  coverage 0.094025  regions 46  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.192602
@@ -131,7 +131,7 @@ cell walk 0 0x8000 32  pixels 0x97e48501c26c0acd  coverage 0.109544  regions 14 
 cell walk 0 0x8000 64  pixels 0x3360e6d98d5a4700  coverage 0.113661  regions 19  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.197086
 cell walk 0 0x8000 128  pixels 0x02228d50240c652f  coverage 0.117220  regions 34  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.197375
 cell walk 0 0xc000 32  pixels 0xfd782f2afec42f87  coverage 0.137297  regions 10  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.191017
-cell walk 0 0xc000 64  pixels 0x6dc4af340eddccd2  coverage 0.142065  regions 13  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.190649
+cell walk 0 0xc000 64  pixels 0x649ad691a5e16329  coverage 0.142058  regions 13  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.190634
 cell walk 0 0xc000 128  pixels 0x07c24a40e05bf1aa  coverage 0.145704  regions 21  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.190727
 cell walk 1 0x0000 32  pixels 0x02f9683dc7b2fb51  coverage 0.107996  regions 13  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.196571
 cell walk 1 0x0000 64  pixels 0x29d1f18162a842a7  coverage 0.112838  regions 17  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.198116
@@ -179,7 +179,7 @@ cell walk 4 0x8000 32  pixels 0x05c0e74d40d223f0  coverage 0.113997  regions 9  
 cell walk 4 0x8000 64  pixels 0x1c56adc76482e8ff  coverage 0.117396  regions 14  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.197418
 cell walk 4 0x8000 128  pixels 0xa39482b5821a7a04  coverage 0.120768  regions 31  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.197688
 cell walk 4 0xc000 32  pixels 0x975e5bee7f382fc3  coverage 0.136102  regions 10  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.189583
-cell walk 4 0xc000 64  pixels 0x5facdb09bff3abf2  coverage 0.141626  regions 14  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.189226
+cell walk 4 0xc000 64  pixels 0x6a3280890f9f1e54  coverage 0.141618  regions 14  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.189211
 cell walk 4 0xc000 128  pixels 0x93d32565225dfdf5  coverage 0.145358  regions 22  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.189374
 cell walk 5 0x0000 32  pixels 0xbb187c5874aa678d  coverage 0.106284  regions 15  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.196609
 cell walk 5 0x0000 64  pixels 0xe9b76113107fb6e4  coverage 0.109745  regions 21  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.198116
@@ -225,7 +225,7 @@ cell run 0 0x4000 64  pixels 0xae52138fdf9c4e7b  coverage 0.146030  regions 18  
 cell run 0 0x4000 128  pixels 0x9e0ebd5ff26197b1  coverage 0.151099  regions 23  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.202009
 cell run 0 0x8000 32  pixels 0xc7c2345c1b7a0a8e  coverage 0.111095  regions 15  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.202141
 cell run 0 0x8000 64  pixels 0x5e14ea719fade02e  coverage 0.114844  regions 17  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.202431
-cell run 0 0x8000 128  pixels 0x8bcc54aff5808b1d  coverage 0.118401  regions 41  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.202687
+cell run 0 0x8000 128  pixels 0x29326c7ca340114e  coverage 0.118400  regions 41  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.202685
 cell run 0 0xc000 32  pixels 0x85997e73bf049345  coverage 0.137672  regions 8   contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.184418
 cell run 0 0xc000 64  pixels 0x1fe37bb8c564a4c8  coverage 0.141989  regions 16  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.183729
 cell run 0 0xc000 128  pixels 0xc574877ef46a2cb6  coverage 0.146692  regions 21  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.184194
@@ -267,10 +267,10 @@ cell run 3 0xc000 64  pixels 0xbaecd1632e1cb86c  coverage 0.136122  regions 11  
 cell run 3 0xc000 128  pixels 0x7364c5f2228f9555  coverage 0.139740  regions 22  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.183875
 cell run 4 0x0000 32  pixels 0x365038edaaf3eeb8  coverage 0.111853  regions 13  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.203224
 cell run 4 0x0000 64  pixels 0x304541dd9b67ea06  coverage 0.114773  regions 16  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.202065
-cell run 4 0x0000 128  pixels 0x013708048bc8f2c8  coverage 0.118757  regions 37  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.203297
+cell run 4 0x0000 128  pixels 0x071c4f4679a4a511  coverage 0.118756  regions 37  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.203296
 cell run 4 0x4000 32  pixels 0xe530c5f67dde05fb  coverage 0.134482  regions 12  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.199608
 cell run 4 0x4000 64  pixels 0xc505937d0889baf8  coverage 0.139595  regions 17  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.198891
-cell run 4 0x4000 128  pixels 0x13bf43315c76623c  coverage 0.144144  regions 19  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.198977
+cell run 4 0x4000 128  pixels 0x0b67ddb891599c48  coverage 0.144144  regions 19  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.198977
 cell run 4 0x8000 32  pixels 0x129f1633bc2c2bcc  coverage 0.119248  regions 8   contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.203453
 cell run 4 0x8000 64  pixels 0xd56c091bd38926d8  coverage 0.122763  regions 20  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.201792
 cell run 4 0x8000 128  pixels 0xa13a448d776de880  coverage 0.126769  regions 33  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.202638
@@ -309,7 +309,7 @@ cell run 7 0x4000 64  pixels 0x5472123571490672  coverage 0.139442  regions 21  
 cell run 7 0x4000 128  pixels 0xc2a6ea2c8427be2b  coverage 0.144008  regions 30  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.200541
 cell run 7 0x8000 32  pixels 0x0731d7c68f5f6767  coverage 0.112638  regions 14  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.203453
 cell run 7 0x8000 64  pixels 0x94e40121081f0d4c  coverage 0.115318  regions 19  contrast-dark 11.1365  contrast-light 2.7411  points 688   overdraw 0.202526
-cell run 7 0x8000 128  pixels 0x4222e0f27a2a975e  coverage 0.120031  regions 41  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.203314
+cell run 7 0x8000 128  pixels 0x4c602f070c248b5c  coverage 0.120031  regions 41  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.203301
 cell run 7 0xc000 32  pixels 0xb0bdb76c24bd0453  coverage 0.132587  regions 7   contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.184395
-cell run 7 0xc000 64  pixels 0xe7952bf50af0dcdf  coverage 0.136315  regions 13  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.184237
+cell run 7 0xc000 64  pixels 0x5cdb4745aab7748a  coverage 0.136295  regions 13  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.184214
 cell run 7 0xc000 128  pixels 0xee04130f728f7018  coverage 0.139925  regions 20  contrast-dark 8.1015  contrast-light 2.7411  points 688   overdraw 0.184222

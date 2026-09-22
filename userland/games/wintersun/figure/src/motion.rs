@@ -19,9 +19,17 @@
 //!
 //! The pelvis sits at a fixed height, so a foot cannot travel fore and aft
 //! along level ground with a straight leg: every locomotion path is authored
-//! with the figure standing a stated depth into its own legs, and the
-//! planting layer sinks the root by exactly that depth. That is why the walk
-//! has a crouch at all, and why it is a number here rather than a feel.
+//! with the figure standing a stated depth into its own legs. That is why
+//! the walk has a crouch at all, and why it is a number here rather than a
+//! feel.
+//!
+//! Each clip therefore states the height it holds the body at, because the
+//! articulation cannot be asked: both legs tucked is a run's flight phase
+//! and a deep crouch at once. The height is its crouch wherever a foot is
+//! down, and the run adds the arc its body follows over the moment it has
+//! neither. `quality::grounding` measures the two halves against each other,
+//! so a depth here that its keys do not produce is a failure rather than a
+//! figure quietly sunk into the floor.
 //!
 //! The ankle levels the foot against the ground by a fixed fraction of the
 //! leg's own turn rather than all of it, because a heel lifts at toe-off and
@@ -38,8 +46,9 @@
 
 use tairix_inline::ArrayVec;
 
-use crate::clip::{Clip, Curve, Event, Key, Loop};
+use crate::clip::{Clip, Curve, Event, Key, Lift, Loop};
 use crate::error::FigureError;
+use crate::humanoid::{SHANK_LENGTH, THIGH_LENGTH};
 use crate::pose::Param;
 use crate::socket::Side;
 
@@ -118,6 +127,7 @@ pub struct Motion {
     seconds: f64,
     repeat: Loop,
     events: &'static [Event],
+    lift: &'static [Key],
 }
 
 impl Motion {
@@ -129,10 +139,15 @@ impl Motion {
     /// reachable if one is edited into something a parameter's range does
     /// not hold, which is the point of checking it here.
     pub fn new(kind: Kind) -> Result<Self, FigureError> {
-        let (seconds, events, keyed): (f64, &'static [Event], &'static [Keyed]) = match kind {
-            Kind::Idle => (IDLE_SECONDS, &NO_EVENTS, &IDLE_CURVES),
-            Kind::Walk => (WALK_SECONDS, &FOOTSTEPS, &WALK_CURVES),
-            Kind::Run => (RUN_SECONDS, &FOOTSTEPS, &RUN_CURVES),
+        let (seconds, events, keyed, lift): (
+            f64,
+            &'static [Event],
+            &'static [Keyed],
+            &'static [Key],
+        ) = match kind {
+            Kind::Idle => (IDLE_SECONDS, &NO_EVENTS, &IDLE_CURVES, &IDLE_LIFT),
+            Kind::Walk => (WALK_SECONDS, &FOOTSTEPS, &WALK_CURVES, &WALK_LIFT),
+            Kind::Run => (RUN_SECONDS, &FOOTSTEPS, &RUN_CURVES, &RUN_LIFT),
         };
         let mut curves = ArrayVec::new();
         for (param, keys) in keyed {
@@ -146,6 +161,7 @@ impl Motion {
             seconds,
             repeat: Loop::Wrap,
             events,
+            lift,
         })
     }
 
@@ -161,7 +177,8 @@ impl Motion {
     ///
     /// Whatever [`Clip::new`] refuses, which for these tables is nothing.
     pub fn clip(&self) -> Result<Clip<'_>, FigureError> {
-        Clip::new(self.seconds, self.repeat, &self.curves, self.events)
+        Clip::new(self.seconds, self.repeat, &self.curves, self.events)?
+            .lifting(Lift::new(self.lift)?)
     }
 }
 
@@ -226,6 +243,84 @@ const RUN_HALF_STEP: f64 = 18.0;
 /// Under a half, so there is a moment with neither foot down — which is
 /// what makes it a run rather than a fast walk.
 const RUN_STANCE: f64 = 0.375;
+
+/// How deep each path stands into its own legs, in figure-local units.
+///
+/// The depth its leg keys were solved with, and therefore the height the
+/// body sits at while a foot is down: the root sinks by exactly this so the
+/// planted foot reaches the floor. `quality::grounding` measures the two
+/// against each other rather than either being trusted.
+const IDLE_CROUCH: f64 = 1.2;
+const WALK_CROUCH: f64 = 3.5;
+const RUN_CROUCH: f64 = 6.0;
+
+/// How far the running body rises between toe-off and mid-flight.
+///
+/// A run has a moment with neither foot down, and where the body is then is
+/// not in its articulation — both legs tucked reads identically to a deep
+/// crouch. The leg keys carry no push-off of their own to imply it, so the
+/// rise is stated here: a fortieth of the figure's height, which is a pixel
+/// or two of lift at the largest size the desktop draws one. Enough to read
+/// as a bound rather than a glide, and far inside the stride the feet are
+/// pacing.
+const RUN_FLIGHT_RISE: f64 = 2.5;
+
+/// The leg a root height is measured against: straight, hip to ankle.
+///
+/// Taken from the same bone lengths the rig is built from, so a root height
+/// is a fraction of the figure's own leg rather than of a number repeated
+/// beside it.
+const LEG_LENGTH: f64 = THIGH_LENGTH + SHANK_LENGTH;
+
+/// `height` figure-local units as the fraction a root-height key carries.
+const fn rooted(height: f64) -> f64 {
+    height / LEG_LENGTH
+}
+
+/// The run's root height `t` of the way through a flight window, `t` running
+/// from `-1` at toe-off through `0` at mid-flight to `1` at the next strike.
+///
+/// A parabola, which is the arc a body with nothing holding it up follows;
+/// it meets the stance height at both ends, so the height never steps where
+/// a foot takes over.
+const fn flight(t: f64) -> f64 {
+    rooted(-RUN_CROUCH + RUN_FLIGHT_RISE * (1.0 - t * t))
+}
+
+/// The idle and walk hold one height throughout: both keep a foot down for
+/// every phase of the cycle, so the body never leaves it.
+const IDLE_LIFT: [Key; 2] = [
+    Key::new(0.0, rooted(-IDLE_CROUCH)),
+    Key::new(1.0, rooted(-IDLE_CROUCH)),
+];
+
+const WALK_LIFT: [Key; 2] = [
+    Key::new(0.0, rooted(-WALK_CROUCH)),
+    Key::new(1.0, rooted(-WALK_CROUCH)),
+];
+
+/// The run's two flight arcs, one per step, keyed on the cycle's own grid.
+const RUN_LIFT: [Key; 19] = [
+    Key::new(0.000_000, flight(1.0)),
+    Key::new(0.375_000, flight(-1.0)),
+    Key::new(0.390_625, flight(-0.75)),
+    Key::new(0.406_250, flight(-0.50)),
+    Key::new(0.421_875, flight(-0.25)),
+    Key::new(0.437_500, flight(0.00)),
+    Key::new(0.453_125, flight(0.25)),
+    Key::new(0.468_750, flight(0.50)),
+    Key::new(0.484_375, flight(0.75)),
+    Key::new(0.500_000, flight(1.0)),
+    Key::new(0.875_000, flight(-1.0)),
+    Key::new(0.890_625, flight(-0.75)),
+    Key::new(0.906_250, flight(-0.50)),
+    Key::new(0.921_875, flight(-0.25)),
+    Key::new(0.937_500, flight(0.00)),
+    Key::new(0.953_125, flight(0.25)),
+    Key::new(0.968_750, flight(0.50)),
+    Key::new(0.984_375, flight(0.75)),
+    Key::new(1.000_000, flight(1.0)),
+];
 
 /// The authored leg cycles, left side, solved from the foot paths above.
 const WALK_HIP_LEFT: [Key; 33] = [

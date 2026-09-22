@@ -103,8 +103,29 @@ fn an_unreal_ground_height_is_refused() {
     let frames = resolved(&rigging, &pose);
     for ground in [[f64::NAN, 0.0], [0.0, f64::INFINITY]] {
         assert_eq!(
-            legs.plant(&rigging, &pose, &frames, ground).map(|_| ()),
+            legs.plant(&rigging, &pose, &frames, ground, 0.0)
+                .map(|_| ()),
             Err(FigureError::GroundUnreal)
+        );
+    }
+}
+
+/// A root height beyond the legs' own travel either way is a displacement
+/// the simulation authorised, not a cycle's rise and fall, so the solve
+/// refuses it rather than drawing a figure nobody placed.
+#[test]
+fn an_unreal_root_height_is_refused() {
+    let rig = rig();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+    let pose = Pose::REST;
+    let frames = resolved(&rigging, &pose);
+    for root in [f64::NAN, f64::INFINITY, 1.5, -1.5] {
+        assert_eq!(
+            legs.plant(&rigging, &pose, &frames, [0.0, 0.0], root)
+                .map(|_| ()),
+            Err(FigureError::LiftOutsideRange),
+            "root {root} was admitted"
         );
     }
 }
@@ -139,41 +160,122 @@ fn planting_on_flat_ground_changes_nothing() {
     let rig = rig();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
-    let sole = legs
-        .standing(&resolved(&rigging, &Pose::REST))
-        .expect("both feet")[0]
-        .up;
 
     for pose in [Pose::REST, striding()] {
         let frames = resolved(&rigging, &pose);
-        let planted = legs
-            .plant(&rigging, &pose, &frames, [0.0, 0.0])
-            .expect("it plants");
-        for param in Param::ALL {
+        // Whatever height the clip holds the body at: on the level the solve
+        // owes the articulation back untouched and the root the clip asked
+        // for, so a sheet is a drawing of the clip rather than of the solve.
+        for root in [-1.0, -0.2, 0.0, 0.15, 1.0] {
+            let planted = legs
+                .plant(&rigging, &pose, &frames, [0.0, 0.0], root)
+                .expect("it plants");
+            for param in Param::ALL {
+                assert!(
+                    mathf::fabs(planted.pose().get(param) - pose.get(param)) < 1e-6,
+                    "root {root}: {param:?} moved from {} to {}",
+                    pose.get(param),
+                    planted.pose().get(param)
+                );
+            }
             assert!(
-                mathf::fabs(planted.pose().get(param) - pose.get(param)) < 1e-6,
-                "{param:?} moved from {} to {}",
-                pose.get(param),
-                planted.pose().get(param)
+                planted.worst_miss() < SLACK,
+                "root {root} missed by {}",
+                planted.worst_miss()
+            );
+            assert_eq!(
+                planted.root().basis,
+                crate::frame::Basis::IDENTITY,
+                "level ground needs no lean"
+            );
+            let wanted = root * legs.straight();
+            assert!(
+                mathf::fabs(planted.root().at.up - wanted) < SLACK,
+                "root {root}: stood at {} wanted {wanted}",
+                planted.root().at.up
             );
         }
-        assert!(
-            planted.worst_miss() < SLACK,
-            "missed by {}",
-            planted.worst_miss()
-        );
-        assert_eq!(
-            planted.root().basis,
-            crate::frame::Basis::IDENTITY,
-            "level ground needs no lean"
-        );
+    }
+}
+
+/// The height a clip states is what puts its planted foot on the floor: a
+/// pose folded into its own legs lands only when the root sinks by that
+/// fold, which is the agreement `quality::grounding` bounds for the shipped
+/// set.
+#[test]
+fn the_height_a_clip_states_lands_its_planted_foot() {
+    let rig = rig();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+
+    for pose in [Pose::REST, striding()] {
+        let frames = resolved(&rigging, &pose);
+        let standing = legs.standing(&frames).expect("both feet");
+        let fold = mathf::fmin(standing[0].up, standing[1].up) - legs.sole();
+        let planted = legs
+            .plant(
+                &rigging,
+                &pose,
+                &frames,
+                [0.0, 0.0],
+                -fold / legs.straight(),
+            )
+            .expect("it plants");
         let landed = ankle_heights(&rigging, &planted.pose(), planted.root());
         let lowest = mathf::fmin(landed[0], landed[1]);
         assert!(
-            mathf::fabs(lowest - sole) < SLACK,
-            "the planted foot sits at {lowest}, not on the ground at {sole}"
+            mathf::fabs(lowest - legs.sole()) < SLACK,
+            "the planted foot sits at {lowest}, not on the ground at {}",
+            legs.sole()
         );
     }
+}
+
+/// The FG4 defect this root model exists to fix. Both legs tucked is a run's
+/// flight phase and a deep crouch at once, so a solve that reads the height
+/// off the *lesser* fold sinks the figure by that tuck at the moment it
+/// should be at its highest — measured on the shipped run at a hundredth of
+/// the figure's height, in the wrong direction. A clip that says it is
+/// airborne must come out airborne.
+#[test]
+fn a_tucked_pose_rises_with_its_clip_rather_than_sinking_by_its_fold() {
+    let rig = rig();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+
+    // Both knees well folded and both hips up: a figure with neither foot
+    // down, which is what a flight phase is.
+    let flight = Pose::REST
+        .with(Param::KneeBend(Side::Left), 0.50)
+        .expect("a real pose")
+        .with(Param::KneeBend(Side::Right), 0.45)
+        .expect("a real pose");
+    let frames = resolved(&rigging, &flight);
+    let standing = legs.standing(&frames).expect("both feet");
+    let tuck = mathf::fmin(standing[0].up, standing[1].up) - legs.sole();
+    assert!(tuck > 1.0, "the fixture must tuck both feet up at all");
+
+    let rise = 0.04;
+    let planted = legs
+        .plant(&rigging, &flight, &frames, [0.0, 0.0], rise)
+        .expect("it plants");
+    let stood = planted.root().at.up;
+    assert!(
+        stood > 0.0,
+        "a figure the clip lifted sank to {stood} instead of rising"
+    );
+    assert!(
+        mathf::fabs(stood - rise * legs.straight()) < SLACK,
+        "rose to {stood} rather than the {} it asked for",
+        rise * legs.straight()
+    );
+    // The defect's own signature: the old rule would have put the root at
+    // minus the lesser tuck, which is below the ground it started from.
+    assert!(
+        stood > -tuck,
+        "the root fell to {stood}, at or below the {} the fold alone gives",
+        -tuck
+    );
 }
 
 /// The regression the crouch rule exists for: a foot the clip lifted must
@@ -197,7 +299,7 @@ fn a_foot_the_clip_lifted_keeps_its_clearance() {
 
     for ground in [[0.0, 0.0], [2.0, 2.0], [1.5, -1.5], [-3.0, 0.5]] {
         let planted = legs
-            .plant(&rigging, &pose, &frames, ground)
+            .plant(&rigging, &pose, &frames, ground, 0.0)
             .expect("it plants");
         let landed = ankle_heights(&rigging, &planted.pose(), planted.root());
         let kept = landed[Side::Right as usize] - landed[Side::Left as usize];
@@ -232,7 +334,7 @@ fn each_foot_lands_on_its_own_terrain_height() {
         [0.0, -7.0],
     ] {
         let planted = legs
-            .plant(&rigging, &pose, &frames, ground)
+            .plant(&rigging, &pose, &frames, ground, 0.0)
             .expect("it plants");
         assert!(
             planted.worst_miss() < 1e-4,
@@ -269,7 +371,7 @@ fn the_root_drops_to_the_lower_foot_and_never_lifts() {
 
     for ground in [[0.0, -5.0], [-5.0, 0.0], [3.0, -2.0], [4.0, 9.0]] {
         let planted = legs
-            .plant(&rigging, &pose, &frames, ground)
+            .plant(&rigging, &pose, &frames, ground, 0.0)
             .expect("it plants");
         let lowest = mathf::fmin(mathf::fmin(ground[0], ground[1]), 0.0);
         assert!(
@@ -293,7 +395,7 @@ fn a_slope_past_the_reach_tilts_the_figure_instead_of_tearing_it() {
     let reach = legs.reach();
 
     let inside = legs
-        .plant(&rigging, &pose, &frames, [reach * 0.4, -reach * 0.4])
+        .plant(&rigging, &pose, &frames, [reach * 0.4, -reach * 0.4], 0.0)
         .expect("it plants");
     assert_eq!(
         inside.root().basis,
@@ -302,7 +404,7 @@ fn a_slope_past_the_reach_tilts_the_figure_instead_of_tearing_it() {
     );
 
     let beyond = legs
-        .plant(&rigging, &pose, &frames, [reach, -reach])
+        .plant(&rigging, &pose, &frames, [reach, -reach], 0.0)
         .expect("it plants");
     assert_ne!(
         beyond.root().basis,
@@ -316,7 +418,7 @@ fn a_slope_past_the_reach_tilts_the_figure_instead_of_tearing_it() {
     );
 
     let mirrored = legs
-        .plant(&rigging, &pose, &frames, [-reach, reach])
+        .plant(&rigging, &pose, &frames, [-reach, reach], 0.0)
         .expect("it plants");
     assert!(
         mirrored.root().basis.apply(Body::SIDE).up < 0.0,
@@ -336,7 +438,7 @@ fn ground_no_leg_can_reach_is_reported_as_a_miss() {
 
     // Both feet asked to stand far above the hips they hang from.
     let planted = legs
-        .plant(&rigging, &pose, &frames, [400.0, 400.0])
+        .plant(&rigging, &pose, &frames, [400.0, 400.0], 0.0)
         .expect("it still answers");
     assert!(
         planted.worst_miss() > 1.0,
@@ -352,8 +454,9 @@ fn ground_no_leg_can_reach_is_reported_as_a_miss() {
     }
 }
 
-/// Whatever the ground, the pose the solve hands back is one the rig admits
-/// — the in-limit guarantee survives the planter.
+/// Whatever the ground and whatever height the clip holds the body at, the
+/// pose the solve hands back is one the rig admits — the in-limit guarantee
+/// survives the planter.
 #[test]
 fn every_solved_pose_stays_inside_its_parameter_ranges() {
     let rig = rig();
@@ -362,23 +465,25 @@ fn every_solved_pose_stays_inside_its_parameter_ranges() {
 
     for pose in [Pose::REST, striding()] {
         let frames = resolved(&rigging, &pose);
-        let mut height = -40.0;
-        while height <= 40.0 {
-            let planted = legs
-                .plant(&rigging, &pose, &frames, [height, -height * 0.5])
-                .expect("it plants");
-            for param in Param::ALL {
-                assert!(
-                    param.range().holds(planted.pose().get(param)),
-                    "{param:?} left its range at height {height}"
-                );
+        for root in [-1.0, -0.4, 0.0, 0.3, 1.0] {
+            let mut height = -40.0;
+            while height <= 40.0 {
+                let planted = legs
+                    .plant(&rigging, &pose, &frames, [height, -height * 0.5], root)
+                    .expect("it plants");
+                for param in Param::ALL {
+                    assert!(
+                        param.range().holds(planted.pose().get(param)),
+                        "{param:?} left its range at height {height}, root {root}"
+                    );
+                }
+                // The pose is admissible, which is the stronger statement:
+                // every rotation it becomes is inside its joint's own limit.
+                rigging
+                    .posture(&planted.pose())
+                    .expect("a solved pose must be posturable");
+                height += 1.3;
             }
-            // The pose is admissible, which is the stronger statement: every
-            // rotation it becomes is inside its joint's own limit.
-            rigging
-                .posture(&planted.pose())
-                .expect("a solved pose must be posturable");
-            height += 1.3;
         }
     }
 }
@@ -407,7 +512,7 @@ fn a_foot_a_rig_cannot_aim_reports_its_miss_rather_than_a_landing() {
 
     // A foot asked well forward of where a knee alone can put it.
     let planted = legs
-        .plant(&kneeling, &pose, &frames, [12.0, 12.0])
+        .plant(&kneeling, &pose, &frames, [12.0, 12.0], 0.0)
         .expect("it still answers");
     assert!(
         planted.worst_miss() > 0.5,

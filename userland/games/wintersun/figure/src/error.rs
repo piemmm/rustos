@@ -108,6 +108,14 @@ pub enum FigureError {
     /// A root-motion curve that does not run from none of the move to all of
     /// it, so playing the clip out would not deliver what was authorised.
     TravelNotSpanning,
+    /// A root-height value beyond the legs' own fold range either way.
+    LiftOutsideRange,
+    /// A root-height curve that does not cover the whole cycle, leaving the
+    /// height at some phase to be guessed from an end key.
+    LiftNotSpanning,
+    /// A looping clip whose root-height curve ends somewhere other than it
+    /// began, so the figure would hitch vertically on every lap.
+    LiftNotClosing,
     /// A light that is not a real bearing and elevation above the horizon.
     LightUnreal,
     /// Too few samples to measure a cycle over.
@@ -160,6 +168,9 @@ impl fmt::Display for FigureError {
             Self::GroundUnreal => "terrain height not finite",
             Self::TravelOutsideRange => "root-motion value outside 0..=1",
             Self::TravelNotSpanning => "root-motion curve does not span the move",
+            Self::LiftOutsideRange => "root height outside the legs' fold range",
+            Self::LiftNotSpanning => "root-height curve does not span the cycle",
+            Self::LiftNotClosing => "root-height curve does not close on itself",
             Self::LightUnreal => "light not a real bearing and elevation",
             Self::SamplesTooFew => "too few samples to measure a cycle over",
         };

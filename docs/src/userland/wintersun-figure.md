@@ -215,10 +215,12 @@ between its inputs. A posture built from a pose therefore has no
 out-of-limit case at all — the only clamping anywhere absorbs the last bit of
 floating-point rounding on a value already mathematically inside its range.
 
-Root motion is deliberately not a parameter. A jump's lift, the pelvis drop
-of a crouch and a dodge's displacement cannot be decided without the ground
-the feet are standing on, so they belong with the terrain solve rather than
-split across two items.
+Root motion is deliberately not a parameter: a pose is articulation, and
+moving the whole body is a rigid transform of it. Where a dodge's
+displacement and a slope's lean are decided is the terrain solve, since
+neither can be known without the ground the feet are on. The one part the
+ground cannot answer for is how high the body is when *no* foot is down, and
+that the clip states itself — see the root-height curve below.
 
 ## A clip is keyed against a phase, not a clock
 
@@ -335,18 +337,57 @@ uphill foot floats and the downhill one sinks. This is a correctness
 requirement rather than polish: the error is worst exactly where the eye
 already is.
 
-`plant::Legs` solves it. A leg cannot stretch, so the lowest foot is the
-constraint: the root drops until that leg reaches its ground, and the other
-takes up the difference by folding. Each foot keeps the plan position the
-animation gave it and changes only its height, so a walk still swings its
-legs where the clip said — the hip is re-aimed and the knee re-folded to put
-the ankle at the new height, and the ankle turns back by as much as the leg
-above it turned, so a toe-off stays a toe-off.
+`plant::Legs` solves it. A leg cannot stretch, so the lowest ground is the
+constraint: the root drops until that leg reaches it, and the other takes up
+the difference by folding. Each foot keeps the plan position the animation
+gave it and changes only its height, so a walk still swings its legs where
+the clip said — the hip is re-aimed and the knee re-folded to put the ankle
+at the new height, and the ankle turns back by as much as the leg above it
+turned, so a toe-off stays a toe-off.
 
-On flat ground every target *is* the ankle the animation already produced, so
-the whole solve is an identity and a figure on the level is drawn exactly as
-its clip authored it. That property is a test, and it is the one that stops
-the planter quietly redrawing every figure in the game.
+Each foot is asked for the height the clip put it at, raised by the terrain
+beneath it, so a planted foot lands and a swing foot keeps its arc without
+either having to be told apart from the other. On flat ground every target
+*is* the ankle the animation already produced, so the whole solve is an
+identity and a figure on the level is drawn exactly as its clip authored it.
+That property is a test, and it is the one that stops the planter quietly
+redrawing every figure in the game.
+
+### The height the body is at is the clip's, not a reading of the fold
+
+Both legs folded is a deep crouch and a run's flight phase at once, so no
+reading of the articulation tells the two apart. Inferring the height from
+the *lesser* fold — which is what the planting layer used to do — gets a
+stance right and a flight exactly wrong: it sinks the figure by the tuck at
+the moment it should be rising, which on the shipped run measured a little
+over a unit in a hundred, in the wrong direction, over the quarter of the
+cycle with neither foot down.
+
+So a clip carries a root-height curve (`clip::Lift`), dimensionless like
+every other authored animation value — a fraction of a straight leg, so the
+same curve holds on a taller rig. Zero is where a straight leg puts the sole
+on the ground; negative is standing into the legs; positive is off the ground
+altogether. A displacement past a whole leg either way is a move the
+simulation authorised rather than a cycle's own rise and fall, and is
+refused. The idle and the walk keep a foot down at every phase and so hold
+one height throughout; the run adds the parabola its body follows across each
+flight window, meeting the stance height at both ends so the height never
+steps at the moment a foot takes over.
+
+Nothing in the solve makes a clip's stated height agree with its own leg
+keys — a clip claiming to stand upright while folding its legs would put its
+feet through the floor. That agreement is a *measured* property instead:
+over a whole cycle the lowest either foot ever reaches has to be the floor
+exactly, since below it the foot sinks in and above it the figure never lands.
+The two are one quantity's two signs, so `quality::grounding` answers both
+with one number, and it needs no notion of which foot is "down" — a contact
+band widens near a foot's lowest point, where its height is flat, and would
+report a foot planted well into its own toe-off.
+
+The shipped run's stance legs carry no push-off of their own, so its body
+holds one height while a foot is down and rises only across the flight. A
+mid-stance dip from leg compression would need its leg keys re-solved, and is
+staged rather than faked.
 
 How much height difference the legs can absorb is the rig's own statement —
 the span between a straight leg and a fully folded one, which for the shipped
@@ -447,6 +488,7 @@ judges current rather than as-of-last-regeneration.
 | Foot skate, as a fraction of the fitted stride | `figure::quality` | 0.009 |
 | Motion continuity, per unit of a parameter's range | `figure::quality` | 0.041 |
 | Loop closure | `figure::quality` | exact |
+| Grounding: the cycle's lowest foot against the floor | `figure::quality` | 0.052 of a hundred-unit figure |
 | Coverage ratio, tonal regions, contrast against both themes | the harness | 0.091–0.178, ≥ 6 regions, ≥ 2.74 |
 | Outline points and fill area per cell | `figure::paint` + the harness | 688 points, 0.22 overdraw |
 
@@ -472,9 +514,12 @@ never run.
 
 ## What comes next
 
-The species and build parameter space, and the designer that drives it. One
-thing the planting layer still owes: a figure with **neither** foot down — a
-run's flight phase — has no planted foot for the root rule to read, so it dips
-by about one unit in a hundred where it should rise. The honest fix is a
-clip-authored root height, which crosses the line that a pose is articulation
-only.
+The species and build parameter space, and the designer that drives it.
+
+The planting layer's one remaining debt is a run's mid-stance dip. Its body
+now holds the height its clip states while a foot is down and follows a
+parabola across each flight, which is what a body with nothing holding it up
+does; what it does not yet do is compress at midstance and extend at toe-off,
+because its leg keys carry no push-off to compress. Adding one means
+re-solving those keys through the foot path, and moves the stride and the
+skate with them.

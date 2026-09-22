@@ -62,6 +62,7 @@ struct Trace {
     forward: [f64; SAMPLES],
     side: [f64; SAMPLES],
     up: [f64; SAMPLES],
+    ceiling: f64,
 }
 
 impl Trace {
@@ -71,6 +72,7 @@ impl Trace {
             forward: [0.0; SAMPLES],
             side: [0.0; SAMPLES],
             up: [0.0; SAMPLES],
+            ceiling: 0.0,
         };
         let mut frames = Frames::new();
         for index in 0..SAMPLES {
@@ -83,7 +85,20 @@ impl Trace {
             trace.side[index] = at.side;
             trace.up[index] = at.up;
         }
+
+        let mut lowest = trace.up[0];
+        let mut highest = trace.up[0];
+        for height in trace.up {
+            lowest = mathf::fmin(lowest, height);
+            highest = mathf::fmax(highest, height);
+        }
+        trace.ceiling = lowest + (highest - lowest) * CONTACT_BAND;
         Ok(trace)
+    }
+
+    /// Whether the foot is on the ground at sample `index`, cyclically.
+    fn down(&self, index: usize) -> bool {
+        self.up[index % SAMPLES] <= self.ceiling
     }
 
     /// The start and length of the longest run of samples the foot is down
@@ -95,20 +110,13 @@ impl Trace {
     /// brief blip in it measures over the real step instead of over whichever
     /// fragment happened to come first.
     fn contact(&self) -> Result<(usize, usize), FigureError> {
-        let mut lowest = self.up[0];
-        let mut highest = self.up[0];
-        for height in self.up {
-            lowest = mathf::fmin(lowest, height);
-            highest = mathf::fmax(highest, height);
-        }
-        let ceiling = lowest + (highest - lowest) * CONTACT_BAND;
-        let down = |index: usize| self.up[index % SAMPLES] <= ceiling;
-
         // A window's first sample is one whose predecessor is airborne. A
         // foot down for the whole cycle has no such sample and is not a walk.
         let mut best = (0, 0);
-        for start in (0..SAMPLES).filter(|&i| down(i) && !down(i + SAMPLES - 1)) {
-            let length = (0..SAMPLES).take_while(|&step| down(start + step)).count();
+        for start in (0..SAMPLES).filter(|&i| self.down(i) && !self.down(i + SAMPLES - 1)) {
+            let length = (0..SAMPLES)
+                .take_while(|&step| self.down(start + step))
+                .count();
             if length > best.1 {
                 best = (start, length);
             }

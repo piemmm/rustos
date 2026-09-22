@@ -2,7 +2,7 @@
 
 use tairix_util::mathf;
 
-use super::{Clip, Curve, Easing, Event, Key, Loop, Travel};
+use super::{Clip, Curve, Easing, Event, Key, Lift, Loop, Travel};
 use crate::error::FigureError;
 use crate::pose::{Param, Pose};
 use crate::socket::Side;
@@ -638,4 +638,91 @@ fn a_clip_carries_its_move_or_none_at_all() {
     let moving = plain.travelling(travel);
     assert_eq!(moving.travel(), Some(travel));
     assert!(close(moving.travel().expect("a move").at(0.5), 0.5));
+}
+
+/// The root height has to cover the cycle: a curve stopping short would
+/// leave the height at some phase carried from an end key rather than
+/// authored, which is the guesswork the curve exists to remove.
+#[test]
+fn a_root_height_curve_that_does_not_span_the_cycle_is_refused() {
+    for keys in [
+        [Key::new(0.1, -0.1), Key::new(1.0, -0.1)],
+        [Key::new(0.0, -0.1), Key::new(0.9, -0.1)],
+    ] {
+        assert_eq!(
+            Lift::new(&keys).map(|_| ()),
+            Err(FigureError::LiftNotSpanning),
+            "{keys:?} must be refused"
+        );
+    }
+    assert_eq!(Lift::new(&[]).map(|_| ()), Err(FigureError::CurveEmpty));
+}
+
+/// A displacement past a whole leg either way is a move the simulation
+/// authorised, not a cycle's own rise and fall.
+#[test]
+fn a_root_height_beyond_a_leg_either_way_is_refused() {
+    for value in [-1.01, 1.01, f64::NAN, f64::INFINITY] {
+        let keys = [Key::new(0.0, 0.0), Key::new(0.5, value), Key::new(1.0, 0.0)];
+        assert_eq!(
+            Lift::new(&keys).map(|_| ()),
+            Err(FigureError::LiftOutsideRange),
+            "a value of {value} must be refused"
+        );
+    }
+}
+
+#[test]
+fn a_root_height_curve_out_of_order_is_refused() {
+    let keys = [
+        Key::new(0.0, -0.1),
+        Key::new(0.7, 0.0),
+        Key::new(0.7, 0.1),
+        Key::new(1.0, -0.1),
+    ];
+    assert_eq!(
+        Lift::new(&keys).map(|_| ()),
+        Err(FigureError::KeysNotAscending)
+    );
+}
+
+/// A cycling clip whose height ends somewhere other than it began hitches
+/// vertically on every lap. The loop mode is the clip's, so the clip is
+/// where that refusal belongs.
+#[test]
+fn a_looping_clip_whose_root_height_does_not_close_is_refused() {
+    const OPEN: [Key; 2] = [Key::new(0.0, -0.1), Key::new(1.0, 0.2)];
+    let lift = Lift::new(&OPEN).expect("the curve itself is real");
+    assert_eq!(
+        clip_of(&[], &[]).lifting(lift).map(|_| ()),
+        Err(FigureError::LiftNotClosing)
+    );
+    // A clip that plays once and holds has no join to hitch at, so the same
+    // curve is admitted there.
+    let once = Clip::new(1.0, Loop::Hold, &[], &[]).expect("a real clip");
+    assert!(once.lifting(lift).is_ok());
+}
+
+/// A clip that authors no height stands on straight legs, which is what
+/// makes the curve optional rather than a thing every clip must carry.
+#[test]
+fn a_clip_with_no_root_height_reads_as_standing_straight() {
+    let clip = clip_of(&[], &[]);
+    for phase in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        assert!(mathf::fabs(clip.root_at(phase)) < 1e-12);
+    }
+}
+
+/// The height wraps with the clip, so a cycling figure's body is at the same
+/// place either side of the join.
+#[test]
+fn a_cycling_root_height_wraps_with_its_clip() {
+    const ARC: [Key; 3] = [Key::new(0.0, -0.2), Key::new(0.5, 0.1), Key::new(1.0, -0.2)];
+    let lift = Lift::new(&ARC).expect("a real lift");
+    let clip = clip_of(&[], &[]).lifting(lift).expect("it closes");
+    assert!(mathf::fabs(clip.root_at(0.0) - clip.root_at(1.0)) < 1e-12);
+    assert!(mathf::fabs(clip.root_at(0.5) - 0.1) < 1e-12);
+    // Mid-segment, between its two keys and nowhere outside them.
+    let quarter = clip.root_at(0.25);
+    assert!(quarter > -0.2 && quarter < 0.1, "{quarter} left its keys");
 }

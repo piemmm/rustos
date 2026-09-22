@@ -233,14 +233,23 @@ fn measure() -> Result<String, String> {
             bend <= quality::MAX_CONTINUITY,
         )?;
         bound(kind.name(), "closure", gap, gap <= quality::MAX_CLOSURE)?;
+        let sunk = quality::grounding(&rigging, clip, &figure.legs()).map_err(refused)?;
+        bound(
+            kind.name(),
+            "grounding",
+            sunk,
+            sunk <= quality::MAX_GROUNDING,
+        )?;
         let _ = write!(
             ledger,
-            "motion {:<5} seconds {:.6} limits {:.6} continuity {:.6} closure {:.6}",
+            "motion {:<5} seconds {:.6} limits {:.6} continuity {:.6} closure {:.6} \
+             grounding {:.6}",
             kind.name(),
             clip.seconds(),
             used,
             bend,
-            gap
+            gap,
+            sunk
         );
         if let Some(authored) = kind.stride() {
             let ankle = Bone::Ankle(Side::Left).joint();

@@ -3,11 +3,13 @@
 use tairix_util::mathf;
 
 use super::{
-    closure, continuity, limits, skate, MAX_CLOSURE, MAX_CONTINUITY, MAX_LIMIT_USE, MAX_SKATE,
+    closure, continuity, grounding, limits, skate, MAX_CLOSURE, MAX_CONTINUITY, MAX_GROUNDING,
+    MAX_LIMIT_USE, MAX_SKATE,
 };
 use crate::clip::{Clip, Curve, Easing, Key, Loop};
 use crate::humanoid::{self, Bone, DRIVES};
 use crate::motion::{Kind, Motion};
+use crate::plant::Legs;
 use crate::pose::Param;
 use crate::rig::Rig;
 use crate::rigging::Rigging;
@@ -43,7 +45,50 @@ fn every_shipped_motion_clears_every_bound() {
             let slide = skate(&rigging, clip, ankle).expect("a fitted gait");
             assert!(slide <= MAX_SKATE, "{name} skates {slide} of its stride");
         }
+
+        let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+        let sunk = grounding(&rigging, clip, &legs).expect("it resolves");
+        assert!(sunk <= MAX_GROUNDING, "{name} grounds {sunk} off the floor");
     }
+}
+
+/// Grounding is two defects in one number, and it must catch both: a clip
+/// whose root sits too low drives its foot into the floor, and one whose
+/// root sits too high never lands at all. Neither is distinguishable from
+/// the articulation, which is why the height is authored and then measured.
+#[test]
+fn grounding_catches_a_root_too_low_and_a_root_too_high() {
+    const FOLDED: [Key; 1] = [Key::new(0.0, 0.35)];
+    let rig = rig();
+    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+    let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+    // Legs folded and no root height at all: the figure hovers by its fold.
+    let curves = [
+        Curve::new(Param::KneeBend(Side::Left), &FOLDED).expect("a real curve"),
+        Curve::new(Param::KneeBend(Side::Right), &FOLDED).expect("a real curve"),
+    ];
+    let hovering = Clip::new(1.0, Loop::Wrap, &curves, &[]).expect("a real clip");
+    let hover = grounding(&rigging, hovering, &legs).expect("it resolves");
+    assert!(
+        hover > MAX_GROUNDING,
+        "a crouch with no root height must not pass at {hover}"
+    );
+
+    // The same legs with the root driven further down than the fold: now the
+    // foot is through the floor by as much again.
+    let sunk_by = 2.0;
+    let lift = [
+        Key::new(0.0, -(hover + sunk_by) / legs.straight()),
+        Key::new(1.0, -(hover + sunk_by) / legs.straight()),
+    ];
+    let sinking = hovering
+        .lifting(crate::clip::Lift::new(&lift).expect("a real lift"))
+        .expect("a closing lift");
+    let sunk = grounding(&rigging, sinking, &legs).expect("it resolves");
+    assert!(
+        mathf::fabs(sunk - sunk_by) < 1e-6,
+        "a root {sunk_by} past the fold sinks {sunk}"
+    );
 }
 
 /// A clip pinned at a joint's limit measures one, and one is past the bound

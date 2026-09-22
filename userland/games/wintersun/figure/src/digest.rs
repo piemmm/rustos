@@ -22,8 +22,8 @@
 //!
 //! The complete placed-shape stream — every shape's surface position, screen
 //! turn, dimensions, colour and identity, in the depth order the painter
-//! walks — plus the planting root and miss, and the quality numbers the art
-//! is gated on.
+//! walks — plus the planting root and miss, the height each clip holds the
+//! body at across its cycle, and the quality numbers the art is gated on.
 //!
 //! Not the pixels. Those are `lib/raster`'s shared scan converter, which is
 //! separately tested and is the client frame digest's subject
@@ -53,13 +53,13 @@ use crate::socket::Side;
 
 /// The digest of the reference grid, on every Tier-1 target.
 ///
-/// Changing the rig, a clip, a joint limit, the projection, the planting
-/// solve or the shadow changes this. That is the point: it is not a number
-/// to be re-derived when a test fails, it is the record of what a figure
-/// does. A change that moves it changes every figure anybody will ever see,
-/// and the new value is written down deliberately rather than pasted out of
-/// a failure.
-pub const REFERENCE_DIGEST: u64 = 0x58D4_A86B_B486_D2F9;
+/// Changing the rig, a clip, a clip's root height, a joint limit, the
+/// projection, the planting solve or the shadow changes this. That is the
+/// point: it is not a number to be re-derived when a test fails, it is the
+/// record of what a figure does. A change that moves it changes every figure
+/// anybody will ever see, and the new value is written down deliberately
+/// rather than pasted out of a failure.
+pub const REFERENCE_DIGEST: u64 = 0x9614_701F_F10D_F8C1;
 
 /// The stream the reference grid is folded into.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4647;
@@ -87,6 +87,13 @@ const SLOPES: [[f64; 2]; 3] = [[2.5, -2.5], [18.0, -18.0], [400.0, 400.0]];
 /// that covers the fade and the slide a rising figure's shadow shows.
 const LIFTS: [f64; 3] = [0.0, 6.0, 41.0];
 
+/// How many phases the root-height curve is folded at.
+///
+/// Sixteenths, so both of the run's flight windows are crossed at their
+/// middle rather than only at the boundaries the reference grid's eighths
+/// land on.
+const ROOT_PROBES: u32 = 16;
+
 /// The distances the gait probe advances by.
 ///
 /// Not a whole number of strides between them, and one longer than a cycle,
@@ -110,7 +117,7 @@ pub fn reference() -> Result<u64, FigureError> {
 
     for kind in Kind::ALL {
         let clip = figure.clip(kind)?;
-        fold_quality(&mut hasher, &rigging, clip, kind)?;
+        fold_quality(&mut hasher, &rigging, clip, kind, figure.legs())?;
         fold_gait(&mut hasher, &rigging, clip, kind)?;
     }
 
@@ -176,12 +183,15 @@ fn fold_quality(
     rigging: &Rigging<'_>,
     clip: Clip<'_>,
     kind: Kind,
+    legs: Legs,
 ) -> Result<(), FigureError> {
     hasher.write(kind.name().as_bytes());
     fold_real(hasher, clip.seconds());
     fold_real(hasher, quality::limits(rigging, clip)?);
     fold_real(hasher, quality::continuity(clip));
     fold_real(hasher, quality::closure(clip));
+    fold_real(hasher, quality::grounding(rigging, clip, &legs)?);
+    fold_root(hasher, clip);
     if let Some(authored) = kind.stride() {
         fold_real(hasher, authored);
         fold_real(
@@ -190,6 +200,20 @@ fn fold_quality(
         );
     }
     Ok(())
+}
+
+/// The height a clip holds the body at, across the cycle.
+///
+/// Folded on its own grid rather than through the reference cells, because
+/// the grid's eight phases land on the run's flight *boundaries* — where the
+/// arc meets the stance height and contributes nothing — so a cell-only fold
+/// would leave the whole curve outside the cross-target claim. Sixteenths
+/// cross the middle of both flight windows.
+fn fold_root(hasher: &mut FastHash, clip: Clip<'_>) {
+    for step in 0..ROOT_PROBES {
+        let phase = f64::from(step) / f64::from(ROOT_PROBES);
+        fold_real(hasher, clip.root_at(phase));
+    }
 }
 
 /// The planting solve at each probe slope: where the root ended up, and what
@@ -202,13 +226,15 @@ fn fold_slopes(
 ) -> Result<(), FigureError> {
     // Mid-cycle rather than at the head of it, so the probe runs against a
     // figure with one leg swinging rather than one standing to attention.
-    let posed = clip.sample(0.5)?;
+    const PROBE: f64 = 0.5;
+    let posed = clip.sample(PROBE)?;
     let mut frames = Frames::new();
     rigging
         .posture(&posed)?
         .resolve(Resolved::REST, &mut frames);
+    let root = clip.root_at(PROBE);
     for ground in SLOPES {
-        fold_planted(hasher, &legs.plant(rigging, &posed, &frames, ground)?);
+        fold_planted(hasher, &legs.plant(rigging, &posed, &frames, ground, root)?);
     }
     Ok(())
 }

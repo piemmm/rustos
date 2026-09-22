@@ -298,6 +298,87 @@ impl<'a> Travel<'a> {
     }
 }
 
+/// How high a clip holds the figure's root, against its phase.
+///
+/// Dimensionless like every other authored animation value: a fraction of a
+/// straight leg's own length, so a clip plays on any rig declaring the same
+/// parameters rather than carrying one rig's lengths. Zero is where a
+/// straight leg puts the sole on the ground; negative is standing into the
+/// legs; positive is off the ground altogether.
+///
+/// A clip carries one because the height a figure's body is at is not in its
+/// articulation: both legs folded is a deep crouch and a run's flight phase
+/// at once, and reading the fold cannot tell them apart. What the planting
+/// solve can decide from the ground is where the *terrain* puts the figure;
+/// where the animation puts it is the animation's to say.
+///
+/// A displacement larger than the legs' whole travel is a move rather than a
+/// cycle's own rise and fall, and belongs to the simulation that authorised
+/// it — see [`Travel`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Lift<'a> {
+    keys: &'a [Key],
+}
+
+impl<'a> Lift<'a> {
+    /// A root-height curve through `keys`.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::CurveEmpty`] for no keys,
+    /// [`FigureError::KeysNotAscending`] for keys that do not strictly
+    /// ascend by phase, [`FigureError::PhaseOutsideClip`] for a phase
+    /// outside `0..=1`, [`FigureError::LiftOutsideRange`] for a value
+    /// outside `-1..=1`, and [`FigureError::LiftNotSpanning`] where the
+    /// curve does not reach both ends of the cycle.
+    #[allow(
+        clippy::float_cmp,
+        reason = "the ends are the contract: a curve stopping short of either \
+                  end leaves the root height there to be carried from an end \
+                  key rather than authored, which is what this refuses"
+    )]
+    pub fn new(keys: &'a [Key]) -> Result<Self, FigureError> {
+        let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
+            return Err(FigureError::CurveEmpty);
+        };
+        for (index, key) in keys.iter().enumerate() {
+            if !key.phase.is_finite() || !(0.0..=1.0).contains(&key.phase) {
+                return Err(FigureError::PhaseOutsideClip);
+            }
+            if index > 0 && key.phase <= keys[index - 1].phase {
+                return Err(FigureError::KeysNotAscending);
+            }
+            if !key.value.is_finite() || !(-1.0..=1.0).contains(&key.value) {
+                return Err(FigureError::LiftOutsideRange);
+            }
+        }
+        if first.phase != 0.0 || last.phase != 1.0 {
+            return Err(FigureError::LiftNotSpanning);
+        }
+        Ok(Self { keys })
+    }
+
+    /// The root height at `phase`, as a fraction of a straight leg.
+    #[must_use]
+    pub fn at(self, phase: f64, repeat: Loop) -> f64 {
+        mathf::clamp(walk(self.keys, phase, repeat), -1.0, 1.0)
+    }
+
+    /// Whether the curve ends where it began.
+    #[allow(
+        clippy::float_cmp,
+        reason = "a cycle either joins exactly or hitches: a tolerance here \
+                  would be a hitch nobody had to declare"
+    )]
+    fn closes(self) -> bool {
+        match (self.keys.first(), self.keys.last()) {
+            (Some(first), Some(last)) => first.value == last.value,
+            // `new` refuses an empty curve, so this is unreachable.
+            _ => false,
+        }
+    }
+}
+
 /// `from`'s value eased toward `to`'s, at `phase` across `start..=end`.
 fn between(from: Key, to: Key, start: f64, end: f64, phase: f64) -> f64 {
     let span = end - start;
@@ -314,6 +395,7 @@ pub struct Clip<'a> {
     curves: &'a [Curve<'a>],
     events: &'a [Event],
     travel: Option<Travel<'a>>,
+    lift: Option<Lift<'a>>,
     seconds: f64,
     repeat: Loop,
     mask: Mask,
@@ -365,6 +447,7 @@ impl<'a> Clip<'a> {
             curves,
             events,
             travel: None,
+            lift: None,
             seconds,
             repeat,
             mask,
@@ -376,6 +459,35 @@ impl<'a> Clip<'a> {
     pub const fn travelling(mut self, travel: Travel<'a>) -> Self {
         self.travel = Some(travel);
         self
+    }
+
+    /// The same clip carrying the root-height curve `lift`.
+    ///
+    /// Fallible where [`Self::travelling`] is not, because whether a curve
+    /// has to close on itself is the clip's own loop mode to say and
+    /// [`Lift::new`] cannot see it.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::LiftNotClosing`] where a looping clip's curve ends
+    /// somewhere other than it began.
+    pub fn lifting(mut self, lift: Lift<'a>) -> Result<Self, FigureError> {
+        if self.repeat == Loop::Wrap && !lift.closes() {
+            return Err(FigureError::LiftNotClosing);
+        }
+        self.lift = Some(lift);
+        Ok(self)
+    }
+
+    /// How high the root sits at `phase`, as a fraction of a straight leg.
+    ///
+    /// Zero for a clip that authors no height, which is a figure standing on
+    /// straight legs: a clip whose legs are folded and whose root is unstated
+    /// puts its feet through the floor, and `figure::quality`'s grounding
+    /// measurement is what holds the two together.
+    #[must_use]
+    pub fn root_at(self, phase: f64) -> f64 {
+        self.lift.map_or(0.0, |lift| lift.at(phase, self.repeat))
     }
 
     /// Its root-motion curve, if it moves the figure at all.

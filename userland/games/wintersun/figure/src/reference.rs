@@ -29,7 +29,10 @@ use crate::shadow::{Contact, Light};
 /// How many phases of each motion the grid covers.
 ///
 /// Enough to see a cycle rather than a pose: eight samples cross both
-/// stances, both swings and, for the run, its flight.
+/// stances and both swings. They land on the *boundaries* of the run's two
+/// flight windows rather than inside them, so what a clip does while neither
+/// foot is down is folded by the digest on its own finer grid rather than
+/// drawn here.
 pub const PHASES: usize = 8;
 
 /// The headings the grid covers.
@@ -204,17 +207,17 @@ impl Reference {
     /// Whatever the clip, the breath or the planting solve refuse.
     pub fn posed(&self, cell: Cell) -> Result<Planted, FigureError> {
         let rigging = humanoid::rigging(&self.rig)?;
+        let clip = self.clip(cell.kind)?;
         let mut breath = Breath::new(BREATH.0, BREATH.1)?;
         breath.advance(cell.breathed())?;
-        let posed = breath
-            .overlay()?
-            .applied(&self.clip(cell.kind)?.sample(cell.phase())?)?;
+        let posed = breath.overlay()?.applied(&clip.sample(cell.phase())?)?;
 
         let mut frames = Frames::new();
         rigging
             .posture(&posed)?
             .resolve(Resolved::REST, &mut frames);
-        self.legs.plant(&rigging, &posed, &frames, LEVEL)
+        self.legs
+            .plant(&rigging, &posed, &frames, LEVEL, clip.root_at(cell.phase()))
     }
 
     /// Where `part`'s rings end up for `cell`, given the resolve `frames`

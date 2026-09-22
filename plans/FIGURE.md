@@ -44,7 +44,7 @@ controls), `lib/raster` and `lib/util::mathf` rustdoc.
 | FG1 | `lib/raster::shape`: the six outline primitives, the tracer, the build-time vertex bounds, and `cinder` migrated onto them with its existing tests as the acceptance gate | done |
 | FG2 | `wintersun/figure`: the rig — skeleton, joint hierarchy with limits, named equipment sockets, draw order, the one body frame that serves every heading, and the skinned meshes a part is drawn as | done |
 | FG3 | Pose parameters, clips (keyframed parameter curves with easing), clip blending, and the transition state machine | done |
-| FG4 | Procedural layers over a clip: gait phase from distance travelled, look-at, recoil, cloth and hair sway, breathing, per-foot terrain planting, root motion and the figure's root placement, contact shadow | done |
+| FG4 | Procedural layers over a clip: gait phase from distance travelled, look-at, recoil, cloth and hair sway, breathing, per-foot terrain planting, the clip-authored root height, root motion and the figure's root placement, contact shadow | done |
 | FG5 | `cargo xtask artsheet`: the shipped motion set, the painter, the contact-sheet renderer, the committed ledger, and the automated quality checks | done |
 | FG6 | The parameter space: species and build parameters, the palette model, validated bounds, and the compact serialised form a character record stores | planned |
 | FG7 | The designer engine: the parameter model, live preview, presets, and randomised-but-plausible generation | planned |
@@ -348,26 +348,55 @@ keyframed:
   fading with height — the trick that makes a jump readable.
 
 **The height a foot is asked for is the clip's own, not the ground.** Two
-defects the art harness surfaced, both in how the planting solve reads a pose.
+defects the art harness surfaced, both in how the planting solve read a pose.
 Putting *both* feet on the terrain flattened a walk's swing arc into a
 shuffle; and because the pelvis sits at the rig's own fixed height, a foot
 cannot travel fore and aft along level ground without the whole figure
 sinking — so a walk authored with folded legs was left hovering over the floor
-by exactly that fold. Both follow from one reading of the pose: a leg reaches
-no further than straight, so the height a clip puts an ankle at is always at
-or above a straight leg's, and the difference is how far that leg is folded.
-The *smaller* of the two is the crouch the figure stands in and the root sinks
-by it; what is left over is a foot the clip lifted, and it keeps that
-clearance over whatever terrain it lands on. On flat ground the articulation
-therefore comes back untouched for *any* pose, with the planted foot on the
-floor.
+by exactly that fold. Each foot is therefore asked for the height the clip put
+it at, raised by the terrain beneath it: a planted foot lands and a swing foot
+keeps its arc, with neither picked out from the other, and on flat ground the
+articulation comes back untouched for *any* pose.
 
-**Still open: a figure with neither foot down.** During a run's flight phase
-the rule above has no planted foot to read, so it takes the lesser lift and
-the figure dips where it should rise — measured at one unit in a hundred over
-a quarter of the shipped run's cycle. The honest fix is a clip-authored root
-height, which crosses the FG3 line that a pose is articulation only; it is
-recorded here rather than papered over, and is the next thing FG4 owes.
+**The height the body is at is authored, because the articulation cannot be
+asked.** Both legs folded is a deep crouch and a run's flight phase at once.
+Inferring the height from the *lesser* fold — the rule FG4 originally shipped
+— gets a stance right and a flight exactly wrong: on the shipped run it sank
+the figure 1.05 units of its hundred at the moment it should have been
+highest, over the quarter of the cycle with neither foot down. A clip
+therefore carries a root-height curve (`clip::Lift`), dimensionless like every
+other authored animation value — a fraction of a straight leg, so one curve
+holds on a taller rig — with zero at a straight leg's sole on the ground,
+negative standing into the legs, and positive off the ground. Past a whole leg
+either way it is a move the simulation authorised, and refused.
+
+This is the clip-authored root height the plan previously recorded as
+crossing the FG3 line. It does not: a `Lift` is a clip-carried curve the FG4
+root layer consumes, exactly as `Travel` already is, and no part of it is a
+pose parameter — "a pose is articulation only" stands unchanged. What it does
+retire is the weaker claim that the root is always *derived* from the ground.
+
+**Agreement between the two halves is measured, not assumed.** Nothing in the
+solve makes a clip's stated height match its own leg keys, so a clip claiming
+to stand upright while folding its legs would put its feet through the floor.
+Instead: over a whole cycle the lowest either foot ever reaches must be the
+floor exactly — below it the foot sinks in, above it the figure never lands.
+One quantity's two signs, so `quality::grounding` answers both with one
+number, and it needs no notion of which foot is "down": a contact band widens
+near a foot's lowest point, where its height is flat, and reports a foot
+planted well into its own toe-off. The shipped set's worst is the run's 0.052
+units, which is the gap between the crouch depth a foot path was authored with
+and the fold its six-place keys actually produce — so the bound is that
+rounding rather than a judgement about art.
+
+**Still open: a run's mid-stance dip.** The body now holds its stated height
+while a foot is down and follows a parabola across each flight, which is what
+a body with nothing holding it up does. What it does not do is compress at
+midstance and extend at toe-off: the shipped run's stance legs carry no
+push-off to compress, so its whole vertical oscillation is the flight arc.
+Adding one means re-solving the run's leg keys through its foot path, which
+moves the stride and the skate with them — staged rather than faked, and the
+next thing FG4 owes.
 
 Every layer is a pure function of (pose, state, time) and is host-tested
 against its stated property, not against a screenshot.
@@ -420,11 +449,30 @@ widened to admit a change.
   measuring how finely the curve was keyed. Shipped worst: 0.041.
 - **Loop closure.** How far a looping clip's last pose sits from its first. The
   shipped tables are authored to join exactly, so the bound is rounding.
+- **Grounding.** Over a cycle, how far the lowest point either foot reaches
+  sits from the floor — penetration and hover being one quantity's two signs.
+  Shipped worst: 0.052 units of a hundred-unit figure.
 - **Silhouette readability**, three measured numbers per cell: the
   alpha-weighted **coverage ratio** inside a band; the count of **connected
   tonal regions**; and the **contrast ratio** against both themes' desktops.
 - **Budget.** Outline points per figure and fill area per cell, so a rig
   cannot quietly become the frame's cost centre.
+
+### What the grid does not sample
+
+The grid's eight phases are eighths, and the run's flight windows run from
+`RUN_STANCE` to a half and from a half plus `RUN_STANCE` to one — so the
+samples land on their *boundaries*, where the root arc meets the stance
+height and contributes nothing. The sheets therefore do not show a figure
+mid-flight, and this is why the inverted flight dip (§3) survived FG5's gate:
+the harness never rendered a phase at which it was visible.
+
+The curve is gated regardless — the digest folds it on its own sixteenths,
+which cross both windows at their middle, and the crate's own tests hold the
+arc's rise, its ends and its sign. What is still missing is a *picture* a
+reviewer can look at. Closing that means sixteen phases rather than eight,
+which doubles the grid, the ledger and the four determinism verticals' work;
+it is recorded here as a deliberate gap rather than taken silently.
 
 ### The honest limit
 
@@ -476,10 +524,13 @@ read it.
   `Spring::rate` (both bound an assertion against the value the object was
   built with, rather than restating it). An accessor whose only caller is a
   *tautology* test went; one whose caller is a real assertion stayed.
-- **The harness found two structural defects in FG2's placement and one in
-  FG4's planting**, all fixed: the billboard could not place a limb (§2), and
-  the planting solve both flattened a walk's swing foot and left a crouching
-  figure hovering over the ground (§3).
+- **The harness found two structural defects in FG2's placement and two in
+  FG4's planting**, all fixed: the billboard could not place a limb (§2); the
+  planting solve both flattened a walk's swing foot and left a crouching
+  figure hovering over the ground; and it read the body's height off the
+  lesser leg fold, which inverted a run's flight phase (§3). The last of those
+  is what made a clip's root height authored rather than derived, and added
+  `grounding` to the gated numbers below.
 
 ## 5. FG6/FG7 — the parameter space and the designer
 
@@ -585,16 +636,36 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
   a walk authored from mid-stance measures the same as one from the head of
   the cycle.
 - Planting: on flat ground the solve is an **identity** — every parameter
-  unchanged and no root at all — so a figure on the level is drawn exactly as
+  unchanged, at *any* authored root height, and the figure left at exactly the
+  height its clip asked for — so a figure on the level is drawn precisely as
   its clip authored it; off it, each foot lands on its own terrain height to
   within a ten-thousandth, verified by resolving the solved pose rather than
-  by trusting the solver's own arithmetic. The root drops to the lowest foot
-  and never lifts; a slope inside the reach leaves the figure square and one
-  past it leans, handed by which foot is higher; ground no leg can reach is
-  reported as a miss rather than fudged. Every solved pose stays inside its
-  parameter ranges and is posturable, across both a rest and a striding pose
-  and the whole span of slopes. Reach and stance come from the rig's own
-  joint table, and a leg whose joints are not a chain is refused.
+  by trusting the solver's own arithmetic. The terrain correction drops to the
+  lowest ground and never lifts; a slope inside the reach leaves the figure
+  square and one past it leans, handed by which foot is higher; ground no leg
+  can reach is reported as a miss rather than fudged. The height a clip states
+  is what lands its planted foot, and a pose tucked into both legs rises with
+  its clip rather than sinking by its fold — the flight-phase defect, as its
+  own reproducer. A root beyond a whole leg either way is refused. Every
+  solved pose stays inside its parameter ranges and is posturable, across a
+  rest and a striding pose, five authored heights and the whole span of
+  slopes. Reach, stance, sole and leg length come from the rig's own joint
+  table, and a leg whose joints are not a chain is refused.
+- Root height: a curve that does not span the cycle, one carrying a value past
+  a whole leg either way, one whose keys do not ascend, and a *looping* clip
+  whose height does not close on itself are each refused — the last at the
+  clip, since the loop mode is the clip's to know, and the same curve is
+  admitted on a clip that plays once and holds. A clip authoring no height
+  reads as standing straight. The shipped idle and walk hold one height at
+  every phase; the run's arc clears its stance height by exactly the rise it
+  authored, meets that height at both ends of both flight windows, and never
+  dips below it anywhere in the cycle. Every shipped height is inside a leg's
+  own travel, and the rig's leg is the length the curves were authored
+  against.
+- Grounding: the shipped set's lowest foot sits on the floor to within the
+  bound, and the measurement catches both of its failure directions — a crouch
+  with no root height hovers and is rejected, and a root driven past the fold
+  sinks by exactly as much again.
 - Root placement: a lift moves every part by exactly itself and a tilt turns
   the figure about its ground contact rather than flinging a part outward;
   an unreal scale, anchor, offset or tilt is refused where the stance is

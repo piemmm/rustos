@@ -10,32 +10,36 @@
 //!
 //! # What the solve does
 //!
-//! A leg cannot stretch, so the lowest foot is the constraint: the root drops
-//! until that leg can reach its ground, and every other leg then takes up the
+//! A leg cannot stretch, so the lowest ground is the constraint: the hips come
+//! down until that leg can reach it, and every other leg then takes up the
 //! difference by bending. Each foot keeps the *plan* position the animation
 //! gave it and changes only its height — the solve re-aims the hip and
 //! re-folds the knee to put the ankle there, and the ankle turns back by as
 //! much as the leg turned so the foot keeps the angle it was animated at.
 //!
-//! # The height a foot is asked for is the clip's own, not the ground
+//! # The height the body is at is the clip's, not something read off the fold
 //!
-//! A walk's swing foot is in the air, and putting *both* feet on the terrain
-//! would flatten its arc into a shuffle. The pelvis is also fixed at the
-//! rig's own height, so a foot cannot travel fore and aft along level ground
-//! without the whole figure sinking — which is why a walk is authored with
-//! its legs folded and the root has to answer for that fold.
+//! Both legs folded is a deep crouch and a run's flight phase at once, so no
+//! reading of the articulation can tell the two apart. Inferring the height
+//! from the *lesser* fold gets a stance right and a flight exactly wrong —
+//! it sinks the figure by the tuck at the moment it should be rising. The
+//! clip therefore states its own root height ([`Clip::root_at`]) and this
+//! module only answers for the ground.
 //!
-//! Both follow from one reading of the pose: a leg reaches no further than
-//! straight, so the height a clip puts an ankle at is always at or above a
-//! straight leg's, and the difference is how far that leg is folded. The
-//! *smaller* of the two is the crouch the figure is standing in, and the
-//! root sinks by it; what is left over is a foot the clip lifted, and it
-//! keeps that clearance over whatever terrain it lands on.
+//! So a foot is asked for the height the clip put it at, raised by the
+//! terrain beneath it: the swing foot keeps its arc, the planted foot lands,
+//! and neither needs to be picked out from the other. On flat ground every
+//! target is exactly where the clip already had it, so the articulation
+//! comes back untouched for *any* pose and the root is the authored one —
+//! a figure on the level is drawn precisely as its clip authored it.
 //!
-//! On flat ground the articulation therefore comes back untouched for *any*
-//! pose — the root absorbs the whole of the clip's crouch — so a figure on
-//! the level is drawn exactly as its clip authored it, with the foot it
-//! planted on the floor.
+//! Nothing here checks that a clip's stated height agrees with its own leg
+//! keys; a clip claiming to stand upright while folding its legs would put
+//! its feet through the floor. That agreement is a measured, bounded
+//! property of the shipped set instead (`figure::quality`'s grounding), so
+//! it is stated as a number rather than assumed by a solve.
+//!
+//! [`Clip::root_at`]: crate::clip::Clip::root_at
 //!
 //! # When the legs run out
 //!
@@ -88,6 +92,7 @@ pub struct Legs {
     hip: [Body; 2],
     sole: f64,
     reach: f64,
+    straight: f64,
 }
 
 /// What a planting solve produced.
@@ -186,7 +191,8 @@ impl Legs {
         // A straight leg from the hip is what puts the sole on the ground, so
         // the height it rests at is the rig's own statement of where its feet
         // are, not a constant beside it.
-        let sole = hip[0].up - (thigh[0] + shank[0]);
+        let straight = thigh[0] + shank[0];
+        let sole = hip[0].up - straight;
 
         Ok(Self {
             sides: legs,
@@ -195,6 +201,7 @@ impl Legs {
             hip,
             sole,
             reach,
+            straight,
         })
     }
 
@@ -209,6 +216,25 @@ impl Legs {
     #[must_use]
     pub fn stance(&self) -> f64 {
         mathf::fabs(self.hip[0].side - self.hip[1].side)
+    }
+
+    /// The height an ankle sits at with its leg straight and its sole on the
+    /// ground.
+    ///
+    /// The foot's own thickness, as the rig states it: what a clip's root
+    /// height is measured against.
+    #[must_use]
+    pub const fn sole(&self) -> f64 {
+        self.sole
+    }
+
+    /// How long a leg is, straight, from hip to ankle.
+    ///
+    /// What a clip's root height is a fraction of, so the same curve holds
+    /// on a taller figure without being rescaled by hand.
+    #[must_use]
+    pub const fn straight(&self) -> f64 {
+        self.straight
     }
 
     /// Where each ankle sits in the figure's frame, for the resolve in
@@ -232,42 +258,47 @@ impl Legs {
     /// Solve both legs so each foot meets its own ground.
     ///
     /// `pose` is the articulation every other layer has already finished
-    /// with, `frames` its resolve at rest, and `ground` the terrain height
-    /// under each foot relative to the figure's own ground point — the
-    /// heights a caller sampled at [`Self::standing`].
+    /// with, `frames` its resolve at rest, `ground` the terrain height under
+    /// each foot relative to the figure's own ground point — the heights a
+    /// caller sampled at [`Self::standing`] — and `lift` the height the clip
+    /// holds the body at, as a fraction of [`Self::straight`]
+    /// ([`Clip::root_at`][root]).
     ///
-    /// The root sinks by the crouch the pose is already standing in, and
-    /// each foot is asked for its terrain plus whatever clearance the clip
-    /// gave it over that crouch, so a swing foot stays in the air.
+    /// Each foot is asked for the height the clip put it at, raised by its
+    /// own terrain, so a planted foot lands and a swing foot keeps its arc
+    /// without either having to be told apart from the other.
     ///
     /// # Errors
     ///
     /// [`FigureError::GroundUnreal`] for a height that is not finite,
-    /// [`FigureError::NoSuchJoint`] if the resolve did not cover a leg, and
-    /// [`FigureError::GeometryUnreal`] for a resolve that is not finite.
+    /// [`FigureError::LiftOutsideRange`] for a root beyond a straight leg
+    /// either way, [`FigureError::NoSuchJoint`] if the resolve did not
+    /// cover a leg, and [`FigureError::GeometryUnreal`] for a resolve that is
+    /// not finite.
+    ///
+    /// [root]: crate::clip::Clip::root_at
     pub fn plant(
         &self,
         rigging: &Rigging<'_>,
         pose: &Pose,
         frames: &Frames,
         ground: [f64; 2],
+        lift: f64,
     ) -> Result<Planted, FigureError> {
         if !ground[0].is_finite() || !ground[1].is_finite() {
             return Err(FigureError::GroundUnreal);
         }
+        if !lift.is_finite() || !(-1.0..=1.0).contains(&lift) {
+            return Err(FigureError::LiftOutsideRange);
+        }
         let standing = self.standing(frames)?;
 
-        // A leg cannot reach further than straight, so a clip's ankle never
-        // sits below where a straight leg puts it: this clearance is how far
-        // the animation has folded the leg, and its smaller value is the
-        // crouch the whole figure is standing in.
-        let lift = [standing[0].up - self.sole, standing[1].up - self.sole];
-        let crouch = mathf::fmin(lift[0], lift[1]);
-        // The lowest foot sets the drop, because its leg is the one that
-        // cannot stretch to meet the ground — and the figure sinks by its
-        // own crouch on top of that, which is what puts a walk's stance foot
-        // on the floor instead of leaving the figure hovering over it.
-        let drop = mathf::fmin(0.0, mathf::fmin(ground[0], ground[1])) - crouch;
+        let height = lift * self.straight;
+        // The lowest ground sets how far the hips come down, because the leg
+        // reaching it is the one that cannot stretch; the authored height is
+        // where the body sits above that. Level ground leaves the figure at
+        // the height the clip asked for and nowhere else.
+        let drop = height + mathf::fmin(0.0, mathf::fmin(ground[0], ground[1]));
         // What the legs cannot absorb, the figure leans into. Positive roll
         // raises the left foot, which is the one to raise when it is higher.
         let difference = ground[0] - ground[1];
@@ -291,14 +322,13 @@ impl Legs {
             let hip = root.at.plus(root.basis.apply(carried));
             let parent = Self::parent_basis(rigging, leg, frames, root)?;
 
-            // The clearance the animation gave this foot over the crouch is
-            // its own, and it is carried onto whatever the terrain turns out
-            // to be — so a swing foot stays in the air and only the foot the
-            // clip actually planted is put on the ground.
+            // Where the clip put this foot, raised by the terrain under it:
+            // a planted foot lands on its own hill and a swing foot clears
+            // whatever it is about to come down on.
             let target = Body::new(
                 standing[index].forward,
                 standing[index].side,
-                ground[index] + self.sole + (lift[index] - crouch),
+                height + standing[index].up + ground[index],
             );
             let solved = self.aim(
                 rigging,

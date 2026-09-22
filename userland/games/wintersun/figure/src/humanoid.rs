@@ -603,10 +603,10 @@ const UPPER_ARM_LENGTH: f64 = 19.0;
 const FOREARM_LENGTH: f64 = 15.0;
 
 /// Hip to knee.
-const THIGH_LENGTH: f64 = 23.0;
+pub(crate) const THIGH_LENGTH: f64 = 23.0;
 
 /// Knee to ankle.
-const SHANK_LENGTH: f64 = 24.0;
+pub(crate) const SHANK_LENGTH: f64 = 24.0;
 
 /// A spine segment: a little of everything, and not much of any of it.
 fn spine_limits() -> Result<Limits, FigureError> {
