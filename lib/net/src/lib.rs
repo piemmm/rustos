@@ -73,6 +73,11 @@
 //!   goodbye, known-answer suppression, and the continuous-query backoff —
 //!   driven by injected time and caller-supplied CSPRNG jitter, with one
 //!   folded one-shot deadline. A query from off-link is never answered.
+//! - [`dnssd`] — the naming vocabulary service discovery layers over that
+//!   engine (RFC 6763): the instance / service-type / domain triple and
+//!   the name it is spelled as, the RFC 6335 service-name grammar, and the
+//!   `TXT` key/value reading — parsed and built, total and allocation-free,
+//!   with no state of its own.
 //! - [`igmp`] — the IGMPv2 codec (RFC 2236) and [`mld`] the MLDv2 codec
 //!   (RFC 3810): the IPv4 and IPv6 multicast group-membership message
 //!   framings.
@@ -151,6 +156,7 @@ pub mod checksum;
 pub mod dhcp;
 pub mod dhcpv6;
 pub mod dns;
+pub mod dnssd;
 pub mod eth;
 pub mod frag;
 pub mod icmp;

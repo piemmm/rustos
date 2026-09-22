@@ -312,6 +312,16 @@ pub struct TxtStrings<'a> {
     pos: usize,
 }
 
+impl<'a> TxtStrings<'a> {
+    /// Walk a run of length-prefixed strings that is not (yet) a whole
+    /// record — the rdata a DNS-SD builder reads back mid-build. Total on
+    /// any slice, so it carries no invariant [`TxtRecord::new`] has not
+    /// already established.
+    pub(crate) fn over(octets: &'a [u8]) -> Self {
+        Self { octets, pos: 0 }
+    }
+}
+
 impl<'a> Iterator for TxtStrings<'a> {
     type Item = &'a [u8];
 

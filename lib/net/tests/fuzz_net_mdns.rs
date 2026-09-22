@@ -13,6 +13,13 @@
 //!    holding more than its own share of it, whatever it sends.
 //! 4. A datagram from off-link changes nothing at all.
 //! 5. Every datagram the engine builds parses back.
+//! 6. The DNS-SD grammar is total on any labels: a name that parses into an
+//!    instance/type/domain triple spells back to the same name, and one
+//!    that does not is refused rather than guessed at.
+//! 7. Every `TXT` attribute the reader yields has a key the RFC's grammar
+//!    admits, and `get` answers with the first occurrence of a repeated one.
+//! 8. A record the builder produces reads back as exactly the attributes it
+//!    accepted.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -21,6 +28,9 @@
 use tairix_abi::time::Duration64;
 use tairix_hash::HashSeed;
 use tairix_net::dns::{Name, RecordType};
+use tairix_net::dnssd::{
+    ServiceInstance, ServiceType, TxtAttributes, TxtBuilder, TxtValue, MAX_TXT_STRING_LEN,
+};
 use tairix_net::mdns::{
     Destination, LinkScope, MdnsConfig, MdnsEngine, NameKind, QuestionType, RData, Record,
     RecordCache, Service, TxtRecord, MAX_RECORDS, MAX_RECORDS_PER_SOURCE, MAX_TXT_LEN, PORT,
@@ -79,20 +89,7 @@ fn draw_rdata(rng: &mut Lcg) -> RData {
             port: rng.next_u16(),
             target: draw_name(rng),
         }),
-        4 => {
-            // A run of length-prefixed strings that always spans exactly,
-            // so the constructor is exercised on accepted input too.
-            let mut octets = alloc_vec(rng.index(MAX_TXT_LEN / 4));
-            let mut pos = 0usize;
-            while pos < octets.len() {
-                let room = octets.len() - pos - 1;
-                let take = if room == 0 { 0 } else { rng.index(room + 1) };
-                octets[pos] = u8::try_from(take).unwrap_or(0);
-                pos += 1 + take;
-            }
-            octets.truncate(pos.min(octets.len()));
-            RData::Txt(TxtRecord::new(&octets).unwrap_or_else(|_| TxtRecord::empty()))
-        }
+        4 => RData::Txt(draw_txt(rng)),
         _ => {
             let mut bitmap = tairix_net::mdns::TypeBitmap::new();
             for record_type in [
@@ -114,6 +111,24 @@ fn draw_rdata(rng: &mut Lcg) -> RData {
 
 fn alloc_vec(len: usize) -> Vec<u8> {
     vec![0u8; len]
+}
+
+/// A `TXT` record whose length-prefixed strings span exactly, with drawn
+/// content — so the constructor is exercised on accepted input, and the
+/// DNS-SD reader on attribute text no publisher would have written.
+fn draw_txt(rng: &mut Lcg) -> TxtRecord {
+    let mut octets = alloc_vec(rng.index(MAX_TXT_LEN / 4));
+    let mut pos = 0usize;
+    while pos < octets.len() {
+        let room = octets.len() - pos - 1;
+        let take = if room == 0 { 0 } else { rng.index(room + 1) };
+        octets[pos] = u8::try_from(take).unwrap_or(0);
+        if let Some(body) = octets.get_mut(pos + 1..pos + 1 + take) {
+            rng.fill(body);
+        }
+        pos += 1 + take;
+    }
+    TxtRecord::new(&octets).unwrap_or_else(|_| TxtRecord::empty())
 }
 
 fn draw_record(rng: &mut Lcg) -> Record {
@@ -278,6 +293,152 @@ fn exercise_engine(rng: &mut Lcg) {
     assert_eq!(engine.next_deadline(), deadline_before);
 }
 
+/// Drive the DNS-SD grammar with names and attributes a peer chose.
+fn exercise_dnssd(rng: &mut Lcg) {
+    // Both shapes every call. A harness that leaves a structural case to a
+    // coin flip can spend a whole run on one side of it.
+    for with_instance in [true, false] {
+        exercise_dnssd_name(&draw_dnssd_name(rng, with_instance));
+    }
+    // Labels of wholly arbitrary bytes: parsing must be total on those too,
+    // not only on the shapes a publisher would have written.
+    let mut random = alloc_vec(1 + rng.index(20));
+    rng.fill(&mut random);
+    if let Ok(name) = Name::from_labels(&[&random]) {
+        exercise_dnssd_name(&name);
+    }
+    exercise_dnssd_txt(rng);
+    exercise_dnssd_builder(rng);
+}
+
+/// A name assembled from parts that are sometimes legal and sometimes not,
+/// so both the accepting and the refusing paths are reached.
+fn draw_dnssd_name(rng: &mut Lcg, with_instance: bool) -> Name {
+    const INSTANCES: [&[u8]; 4] = [
+        b"Hall Printer",
+        "Caf\u{e9}".as_bytes(),
+        b"x",
+        b"bad\x01name",
+    ];
+    const SERVICES: [&[u8]; 5] = [b"_ipp", b"_IPP", b"_dns-sd", b"ipp", b"_-bad"];
+    const TRANSPORTS: [&[u8]; 4] = [b"_tcp", b"_UDP", b"_sctp", b"local"];
+    const DOMAINS: [&[u8]; 3] = [b"local", b"example", b"com"];
+
+    let mut labels: Vec<&[u8]> = Vec::new();
+    if with_instance {
+        labels.push(INSTANCES[rng.index(INSTANCES.len())]);
+    }
+    labels.push(SERVICES[rng.index(SERVICES.len())]);
+    labels.push(TRANSPORTS[rng.index(TRANSPORTS.len())]);
+    for _ in 0..rng.index(4) {
+        labels.push(DOMAINS[rng.index(DOMAINS.len())]);
+    }
+    Name::from_labels(&labels).unwrap_or_else(|_| Name::root())
+}
+
+/// Whatever a name spells, reading it is total — and what it parses into
+/// must spell the same name back.
+fn exercise_dnssd_name(name: &Name) {
+    if let Ok(triple) = ServiceInstance::from_name(name) {
+        let spelled = triple
+            .to_name()
+            .expect("a triple parsed from a name is short enough to be that name again");
+        assert_eq!(spelled, *name, "a parsed instance must spell back");
+        assert_eq!(
+            ServiceInstance::from_name(&spelled),
+            Ok(triple),
+            "and parse back to itself"
+        );
+    }
+    if let Ok((service, domain)) = ServiceType::from_name(name) {
+        let spelled = service
+            .to_name(&domain)
+            .expect("a type parsed from a name is short enough to be that name again");
+        assert_eq!(spelled, *name, "a parsed service type must spell back");
+        assert_eq!(ServiceType::from_name(&spelled), Ok((service, domain)));
+    }
+}
+
+/// Every attribute the reader yields is one the RFC's grammar admits, and
+/// `get` answers with the first occurrence of a repeated key.
+fn exercise_dnssd_txt(rng: &mut Lcg) {
+    let record = draw_txt(rng);
+    let mut first_seen: Vec<&[u8]> = Vec::new();
+    for attribute in TxtAttributes::new(&record) {
+        assert!(!attribute.key.is_empty(), "an empty key is never yielded");
+        assert!(
+            attribute
+                .key
+                .iter()
+                .all(|byte| (0x20..=0x7E).contains(byte) && *byte != b'='),
+            "a key outside the grammar is never yielded"
+        );
+        assert!(attribute.has_key(attribute.key));
+        let found = TxtAttributes::new(&record).get(attribute.key);
+        if first_seen
+            .iter()
+            .any(|seen| seen.eq_ignore_ascii_case(attribute.key))
+        {
+            // A repeat never displaces the value already published.
+            assert_ne!(found, None);
+        } else {
+            assert_eq!(found, Some(attribute.value), "the first occurrence wins");
+            first_seen.push(attribute.key);
+        }
+    }
+}
+
+/// A record the builder produces reads back as exactly what it accepted.
+fn exercise_dnssd_builder(rng: &mut Lcg) {
+    let mut builder = TxtBuilder::new();
+    let mut accepted: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+    for _ in 0..rng.index(10) {
+        // Keys are drawn inside the printable range so the accepting path
+        // is reached; the refusals have their own unit tests.
+        let key: Vec<u8> = (0..=rng.index(6))
+            .map(|_| {
+                let byte = u8::try_from(0x20 + rng.index(0x5F)).unwrap_or(b'k');
+                if byte == b'=' {
+                    b'k'
+                } else {
+                    byte
+                }
+            })
+            .collect();
+        let mut value = alloc_vec(rng.index(MAX_TXT_STRING_LEN));
+        rng.fill(&mut value);
+        let drawn = if rng.next_u64() & 1 == 0 {
+            TxtValue::Flag
+        } else {
+            TxtValue::Value(&value)
+        };
+        if builder.push(&key, drawn).is_ok() {
+            accepted.push((
+                key,
+                match drawn {
+                    TxtValue::Flag => None,
+                    TxtValue::Value(bytes) => Some(bytes.to_vec()),
+                },
+            ));
+        }
+    }
+    let record = builder
+        .build()
+        .expect("a builder's own output is well formed");
+    let read: Vec<(Vec<u8>, Option<Vec<u8>>)> = TxtAttributes::new(&record)
+        .map(|attribute| {
+            (
+                attribute.key.to_vec(),
+                match attribute.value {
+                    TxtValue::Flag => None,
+                    TxtValue::Value(bytes) => Some(bytes.to_vec()),
+                },
+            )
+        })
+        .collect();
+    assert_eq!(read, accepted, "a built record reads back as it was given");
+}
+
 /// Anything the engine emits must be a message a peer could read, and must
 /// name somewhere to send it.
 fn check_emit(emitted: Option<(Destination, usize)>, buf: &[u8]) {
@@ -327,8 +488,17 @@ fn build_message(rng: &mut Lcg) -> Vec<u8> {
     out[..len].to_vec()
 }
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the
-/// generator in the sibling harnesses so failures reproduce one way.
+/// Lehmer-style LCG behind a `SplitMix64` output function — deterministic,
+/// no allocator, replaying exactly from its logged seed.
+///
+/// The mixer is load-bearing, not decoration. Bit *k* of a bare
+/// power-of-two-modulus LCG has period 2^(k+1), so its bit 0 simply
+/// alternates: a `& 1` coin flip drawn at a fixed point in the sequence is
+/// then a constant, an `index(2^k)` is a fixed cycle, and two of them are
+/// perfectly correlated. Measured here, that pinned a whole branch of this
+/// harness to one side for an entire run while every assertion inside it sat
+/// unreached. Mixing the output costs three multiplies a draw and removes
+/// the class.
 struct Lcg(u64);
 
 impl Lcg {
@@ -345,7 +515,7 @@ impl Lcg {
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1);
-        self.0
+        tairix_fuzzseed::splitmix64(self.0)
     }
 
     fn next_u32(&mut self) -> u32 {
@@ -388,6 +558,7 @@ fn random_inputs_never_panic() {
             exercise_parse(&build_message(&mut rng));
             exercise_cache(&mut rng);
             exercise_engine(&mut rng);
+            exercise_dnssd(&mut rng);
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

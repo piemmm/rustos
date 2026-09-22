@@ -591,6 +591,67 @@ points (80/85/90/95 % of TTL, and only for records a live question covers,
 so a passively cached record costs no timers) into the one instant the
 caller arms a one-shot for. Host-tested and fuzzed (`fuzz_net_mdns`).
 
+### `dnssd` — service instance naming and `TXT` attributes
+
+`dnssd` is the naming vocabulary DNS-based service discovery layers over
+that engine (RFC 6763), `plans/ZEROCONF.md` Z2. It parses and builds and
+does nothing else: no state, no allocation, and no second wire codec.
+
+A service instance is a triple — an instance label, a service type, and a
+domain — spelled as one DNS name. `ServiceInstance::from_name` splits
+`Hall Printer._ipp._tcp.local` into its parts and `to_name` spells it back;
+`ServiceType::from_name` does the two-label half, which is the name a browse
+`PTR` query asks about. The domain is whatever follows, however deep: the
+split is taken over the name's *own* wire octets through the codec's
+existing reader, so there is no arbitrary label-count ceiling and no second
+walker. That is sound because a label length never carries the two high bits
+a compression pointer is spelled with, so reading a name's own octets can
+only walk labels. There is one type/domain parser — the instance form calls
+it on the suffix after the instance label rather than repeating the split —
+and one assembler, which lays the labels out as wire octets and reads them
+back rather than building a label list.
+
+Each part is validated against its own grammar and refused with the rule it
+broke, never guessed at. An instance label is free-form Net-Unicode UTF-8
+within the DNS label bound, refusing the ASCII controls RFC 6763 §4.1.1
+forbids. A service name is RFC 6335 §5.1: one to fifteen characters of
+`A-Za-z0-9-`, at least one letter, and no leading, trailing, or doubled
+hyphen. A transport label is `_tcp` or `_udp` and nothing else. A name with
+no domain beneath the type is refused, as is a triple whose parts are each
+valid but jointly outgrow the 255-octet name bound. RFC 6763 §9's service
+enumeration name needs no special case: it is instance-shaped, so the
+ordinary triple reads it.
+
+Case is preserved and compared without it, exactly as `dns::Name` does (RFC
+4343) — two instance names differing only in ASCII case are one DNS name and
+therefore conflict, while the spelling the owner chose survives. What
+`dnssd` validates is *structure*, not drawability: `InstanceName` will not
+render itself and its `Debug` prints an octet count, as `TxtRecord`'s does,
+because an instance name is peer-authored text and making one safe to draw
+is the single display-safety policy above this crate rather than a second
+sanitiser here (`plans/ZEROCONF.md` §6.6). There is deliberately no
+`as_str` — the octets are validated UTF-8, so a caller that needs one takes
+it, and an infallible accessor would need an unreachable unwrap. NFC
+normalisation (RFC 5198) is not applied; the Unicode tables it needs do not
+belong in a `no_std` wire crate.
+
+`TxtAttributes` reads a record's key/value attributes (RFC 6763 §6). An
+attribute is absent, a flag (no `=`), an empty value (`key=`), or a value —
+four states, not a string map, and a value may hold any binary including
+further `=` signs. A string the grammar cannot read is dropped silently as
+the RFC requires: an empty one, one beginning with `=`, and one whose key
+holds a byte outside printable US-ASCII. Keys are case-insensitive and `get`
+answers with the **first** occurrence of a repeated one, the rule RFC 6763
+§6.5 binds a reader to. The iterator does *not* deduplicate, and that is the
+security decision rather than an omission: a record is authored by a peer
+that chooses its own arrival rate, so folding duplicates inside the walk
+would hand it a quadratic cost on the receive path. `TxtBuilder` is the
+publication side, refusing a key the grammar does not admit and one already
+written — so a record it emits reads back as the attribute set it was given
+— and it delegates the final check to the one `TxtRecord` constructor rather
+than asserting the invariant a second time. Host-tested, and fuzzed in the
+same harness as the engine (`fuzz_net_mdns`).
+
 ### `igmp`, `mld` — multicast group-membership message codecs
 
 The IPv4 (IGMPv2, RFC 2236) and IPv6 (MLDv2, RFC 3810) membership

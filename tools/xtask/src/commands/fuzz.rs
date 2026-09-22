@@ -177,8 +177,7 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-net",
         test: "fuzz_net_mdns",
-        description:
-            "lib/net multicast DNS (RFC 6762 message codec, record cache bounds, responder/querier)",
+        description: "lib/net multicast DNS (RFC 6762 message codec, record cache bounds, responder/querier) and the RFC 6763 DNS-SD name + TXT grammar over it",
     },
     Target {
         package: "tairix-net",

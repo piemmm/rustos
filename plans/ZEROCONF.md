@@ -17,7 +17,7 @@ and keeps LLMNR and NetBIOS permanently out (§1 below).
 | id | What it is | Status |
 |---|---|---|
 | Z1 | `lib/net::mdns` pure engine: `SRV`/`TXT`/mDNS-`NSEC` record types, responder/querier state machine, per-interface cache, fuzz harness | done |
-| Z2 | `lib/net::dnssd` DNS-SD vocabulary: the instance/type/domain triple, TXT key-value grammar, service-type grammar | planned |
+| Z2 | `lib/net::dnssd` DNS-SD vocabulary: the instance/type/domain triple, TXT key-value grammar, service-type grammar | done |
 | Z3 | `discoveryd` split-process skeleton: unprivileged decoder owning the socket, privileged front owning authority | planned |
 | Z4 | Browse + resolve, scoped by grant; `.local` routing in `lib/resolver`; `lib/discovery` client | planned |
 | Z5 | Publication: the three-gate authority check (attested / granted / owned), manifest `publishes` section, grant store | planned |
@@ -449,10 +449,54 @@ Still Z3's, not done here: nothing binds a socket, joins a group, or holds
 an identity. The engine is handed the interface's on-link prefixes and
 refuses everything else; who supplies them is the service's question.
 
-### Z2 — `lib/net::dnssd` vocabulary
+### Z2 — `lib/net::dnssd` vocabulary — **done**
 
-The instance/type/domain triple with the RFC 6763 §4.1 grammar and §6 TXT
-key-value rules, bounded and total. Host-tested, folded into the Z1 harness.
+`lib/net/src/dnssd.rs` carries the RFC 6763 §4.1 naming grammar and the §6
+`TXT` key/value rules: `ServiceInstance` / `ServiceType` / `InstanceName` /
+`Transport`, the name they spell and are split from, and
+`TxtAttributes` / `TxtBuilder` over `mdns::TxtRecord`. Pure — no state, no
+allocation, no wire codec of its own. Host-tested and folded into the Z1
+fuzz harness.
+
+What it now guarantees, and the decisions a later increment must not
+re-derive:
+
+- **One type/domain parser and one assembler.** The instance form calls the
+  service-type parser on the suffix after the instance label rather than
+  repeating the split, and both `to_name` paths share one assembler. The
+  split and the assembly work over the name's own wire octets through
+  `dns::Name`'s reader, so a deep domain costs no arbitrary label ceiling —
+  sound because a label length never carries the two high bits a compression
+  pointer is spelled with. `mdns::MAX_RENAME_LABELS` stays private to the
+  renamer; nothing here inherits a label count.
+- **Case is preserved and compared without it**, matching `dns::Name` (RFC
+  4343). Two instance names differing only in ASCII case are one DNS name
+  and so conflict, which is what Z5's uniqueness check needs; the owner's
+  spelling survives for Z9 to draw. `Hash` is deliberately absent — there is
+  no caller, and a derived one beside the manual `PartialEq` is a
+  compile-time error rather than a silent trap, so Z4 writes the consistent
+  one when it needs a map key.
+- **Structure is validated; drawability is not.** The §6.6 display-safety
+  policy is one shared definition above this crate, so `dnssd` implements
+  the RFC's length / character / encoding MUSTs and stops. It adds no
+  homograph, bidi, or `Cf`/`Mn` filter, and applies no NFC normalisation
+  (RFC 5198) because the Unicode tables that needs do not belong in a
+  `no_std` wire crate. `InstanceName` renders nothing and offers no
+  `as_str`, so no unsanitised display path looks like the obvious one.
+- **Reading a `TXT` record is linear, and `get` is first-wins.** A peer
+  authors the record and chooses the arrival rate, so the iterator yields
+  duplicates rather than folding them — deduplicating inside the walk would
+  be quadratic on the receive path. RFC 6763 §6.5's "take the first" is
+  `get`'s job. The builder's duplicate check *is* quadratic and is allowed
+  to be: publication happens once, off any hot path.
+- **`TxtStrings` gained a `pub(crate)` slice constructor** so the builder
+  reads back its own partial rdata through the one string walker rather
+  than growing a private copy.
+- **Subtypes (RFC 6763 §7.1 `_sub`) are deliberately out.** A subtype is
+  selective *enumeration*, not part of the instance-name abstraction; Z4
+  adds it in place if browse needs it. RFC 6763 §9's service-enumeration
+  name needs nothing: it is instance-shaped and the ordinary triple reads
+  it.
 
 ### Z3 — `discoveryd`: the split process
 
