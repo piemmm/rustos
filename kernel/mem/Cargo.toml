@@ -72,6 +72,10 @@ tairix-compress = { path = "../../lib/compress", version = "=0.0.0" }
 # free.
 tairix-pagezero = { path = "../../lib/pagezero", version = "=0.0.0", default-features = false }
 
+# The shared guard-region sentinel, so the slab guard, the kthread stack guard
+# and the boot-stack guard cannot drift onto different poison bytes.
+tairix-memguard = { path = "../../lib/memguard", version = "=0.0.0" }
+
 # Audited AEAD for the encrypted-swap layer: pages the
 # kernel writes to a swap device are sealed with `lib/crypto`'s
 # ChaCha20-Poly1305 wrapper so a swap device never holds plaintext secrets.

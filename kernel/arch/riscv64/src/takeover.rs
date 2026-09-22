@@ -68,8 +68,7 @@
 
 use tairix_arch_api::{MachineTakeover, TakeoverError};
 
-/// Size of the reserved takeover stack, in bytes (64 KiB — the same
-/// generous headroom the boot stack reserves). It lives in `.bss` inside
+/// Size of the reserved takeover stack, in bytes. It lives in `.bss` inside
 /// the kernel image, so the sweep (which tests only *usable* frames) never
 /// overwrites it.
 const TAKEOVER_STACK_BYTES: usize = 64 * 1024;

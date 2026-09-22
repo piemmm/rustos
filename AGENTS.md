@@ -634,6 +634,7 @@ tairix/
 │   ├── kalloc/          # Freeing kernel heap allocator.
 │   ├── keymap/          # Shared terminal key map.
 │   ├── log/             # Structured logging.
+│   ├── memguard/        # Guard-region poison: the shared sentinel + canary window.
 │   ├── multiboot2/      # Shared Multiboot2 information-structure wire layout.
 │   ├── net/             # Network protocol engine (wire protocols).
 │   ├── netchan/         # NIC device-channel driver side (netchan-v1 server).

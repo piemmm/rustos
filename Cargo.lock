@@ -2450,6 +2450,7 @@ dependencies = [
  "tairix-kernel-syscall",
  "tairix-keymap",
  "tairix-log",
+ "tairix-memguard",
  "tairix-pagezero",
  "tairix-path",
  "tairix-reclaim",
@@ -2509,6 +2510,7 @@ dependencies = [
  "tairix-inline",
  "tairix-kernel-mem",
  "tairix-log",
+ "tairix-memguard",
  "tairix-pagezero",
  "tairix-reclaim",
  "tairix-sync",
@@ -2725,6 +2727,10 @@ dependencies = [
  "tairix-procinfo",
  "tairix-rt",
 ]
+
+[[package]]
+name = "tairix-memguard"
+version = "0.0.0"
 
 [[package]]
 name = "tairix-mkdir"

@@ -84,6 +84,7 @@ members = [
     "lib/input",
     "lib/keymap",
     "lib/log",
+    "lib/memguard",
     "lib/multiboot2",
     "lib/net",
     "lib/netchan",

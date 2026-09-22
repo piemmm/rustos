@@ -19,7 +19,8 @@
 //! # The boot stack
 //!
 //! The bootstrap processor runs on the linker-reserved boot stack
-//! (`__boot_stack_bottom .. __boot_stack_top` in `boot.s`).
+//! (`__boot_stack_bottom .. __boot_stack_top`, sized and placed by the
+//! active linker script).
 //! `boot_stack` returns that region, rooted, when the captured `sp` lies
 //! within it and `None` otherwise — a kthread stack, which the kernel
 //! resolves instead — so the unwinder never reads memory the port cannot
@@ -34,9 +35,9 @@ use tairix_arch_api::{
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 extern "C" {
-    /// Lowest address of the BSP boot stack (see `boot.s`).
+    /// Lowest address of the BSP boot stack (see the linker script).
     static __boot_stack_bottom: u8;
-    /// Exclusive top of the BSP boot stack (see `boot.s`).
+    /// Exclusive top of the BSP boot stack (see the linker script).
     static __boot_stack_top: u8;
 }
 
@@ -156,7 +157,7 @@ impl CpuStateCapture for Backtracer {
         // link-time constant; we never dereference them here.
         let low = core::ptr::addr_of!(__boot_stack_bottom) as u64;
         let high = core::ptr::addr_of!(__boot_stack_top) as u64;
-        // SAFETY: `boot.s` reserves `[__boot_stack_bottom, __boot_stack_top)` as this
+        // SAFETY: the linker script reserves `[__boot_stack_bottom, __boot_stack_top)` as this
         // CPU's boot stack and nothing else claims those bytes, so they are
         // mapped and writable for the whole life of the kernel. Minting the
         // root here is what lets the unwinder derive each read rather than

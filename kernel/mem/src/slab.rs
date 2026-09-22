@@ -21,20 +21,13 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_arch_api::{next_free_tag, MemTag, MemoryTagging, TAG_COUNT};
+use tairix_memguard::GUARD_BYTE;
 
 use crate::error::AllocError;
 use crate::frame::PAGE_SIZE;
 #[cfg(test)]
 use crate::ptr::offset_within;
 use crate::ptr::slice_within;
-
-/// Byte pattern used to fill the guard pages on the host.
-///
-/// `0xCC` is x86's `int3` (breakpoint). Picking an "obviously wrong"
-/// byte that is unlikely to be a valid value in kernel object types
-/// makes accidental matches improbable. Real hardware never touches
-/// this byte — the guard pages there are simply unmapped.
-const GUARD_BYTE: u8 = 0xCC;
 
 /// Width of the guard region in bytes.
 ///

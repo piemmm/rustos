@@ -108,6 +108,9 @@ tairix-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
 tairix-kernel-irq = { path = "../irq", version = "=0.0.0" }
 tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 tairix-util = { path = "../../lib/util", version = "=0.0.0" }
+# The shared guard-region sentinel, so the kthread stack guard, the slab guard
+# and the boot-stack guard cannot drift onto different poison bytes.
+tairix-memguard = { path = "../../lib/memguard", version = "=0.0.0" }
 # The single shared path-spelling parser: the `fs_chdir` / `copy_path_in`
 # cwd-relative resolver normalises a caller's path string
 # (relative → absolute, `.`/`..` collapsed, escape blocked) through

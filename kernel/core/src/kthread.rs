@@ -69,6 +69,7 @@ use tairix_kernel_mem::LiveUserSpace;
 use tairix_kernel_sched_api::{
     CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerPolicy, TaskAction, TaskId,
 };
+use tairix_memguard::{canary_intact, CANARY_BYTES, GUARD_BYTE};
 use tairix_sync::once::OnceCell;
 
 use crate::cpu_state::{self, LiveSpacePtr, ResumeHandle as UserResumeHandle};
@@ -137,23 +138,6 @@ pub const KTHREAD_STACK_BYTES: usize = 32 * 1024;
 /// lands, the poison-byte emulation below is the real, non-deferred defence
 /// (a guard now, not "later").
 const STACK_GUARD_BYTES: usize = 4096;
-
-/// Byte the [`BoxStack`] guard page is filled with (`0xCC`, x86 `int3`),
-/// matching `kernel/mem`'s slab guard: an "obviously wrong" value whose
-/// disturbance signals an overrun. On the deployment (unmapped-page) form the
-/// guard is never written at all — the access faults — so this byte is purely
-/// the host/software-emulation sentinel.
-const STACK_GUARD_BYTE: u8 = 0xCC;
-
-/// Bytes at the *top* of the guard region (immediately below the usable
-/// stack base) that [`BoxStack::check_guard`] verifies on the hot path.
-///
-/// A kernel stack grows downward and is written contiguously, so an overrun
-/// must cross these bytes first; verifying this small, O(1) window on every
-/// switch-back catches a contiguous overrun without scanning the whole guard
-/// page on the scheduler hot path. The full page still
-/// provides the 4 KiB of absorption.
-const STACK_GUARD_CANARY_BYTES: usize = 64;
 
 /// A kernel-stack guard violation: the task overran its stack into the
 /// [`BoxStack`] guard region.
@@ -264,7 +248,7 @@ const BOX_STACK_BYTES: usize = STACK_GUARD_BYTES + KTHREAD_STACK_BYTES;
 /// extent `STACK_ALIGN`-aligned is what lets the usable top be the
 /// allocation's end rather than a rounded-down approximation of it.
 const _STACK_LAYOUT_OK: () = {
-    assert!(STACK_GUARD_CANARY_BYTES <= STACK_GUARD_BYTES);
+    assert!(CANARY_BYTES <= STACK_GUARD_BYTES);
     assert!(STACK_GUARD_BYTES.is_multiple_of(4096));
     assert!(BOX_STACK_BYTES.is_multiple_of(STACK_ALIGN));
 };
@@ -294,7 +278,7 @@ impl BoxStack {
         let base = NonNull::new(raw)?;
         // SAFETY: `alloc_zeroed` returned `BOX_STACK_BYTES` writable bytes
         // we now own exclusively; the guard is its lowest region.
-        unsafe { base.write_bytes(STACK_GUARD_BYTE, STACK_GUARD_BYTES) };
+        unsafe { base.write_bytes(GUARD_BYTE, STACK_GUARD_BYTES) };
         Some(Self { base })
     }
 }
@@ -333,11 +317,10 @@ unsafe impl KernelStack for BoxStack {
     }
 
     fn check_guard(&self) -> Result<(), StackGuardViolation> {
-        // Verify the canary: the top `STACK_GUARD_CANARY_BYTES` of the guard,
-        // immediately below the usable base, which a contiguous downward
-        // overrun crosses first. Checking just this O(1) window keeps the
-        // scheduler switch-back path cheap while still
-        // catching a stack overflow; the full guard page provides absorption.
+        // The window immediately below the usable base, which a contiguous
+        // downward overrun crosses first. Checking just this keeps the
+        // scheduler switch-back path O(1); the full guard page provides
+        // absorption.
         //
         // SAFETY: the window lies inside the guard region of the live
         // allocation this value owns, and is disjoint from the usable
@@ -345,13 +328,13 @@ unsafe impl KernelStack for BoxStack {
         let canary = unsafe {
             core::slice::from_raw_parts(
                 self.base
-                    .add(STACK_GUARD_BYTES - STACK_GUARD_CANARY_BYTES)
+                    .add(STACK_GUARD_BYTES - CANARY_BYTES)
                     .as_ptr()
                     .cast_const(),
-                STACK_GUARD_CANARY_BYTES,
+                CANARY_BYTES,
             )
         };
-        if canary.iter().all(|&b| b == STACK_GUARD_BYTE) {
+        if canary_intact(canary) {
             Ok(())
         } else {
             Err(StackGuardViolation)
@@ -2622,9 +2605,7 @@ mod tests {
         // The guard region (low) is poison-filled and the usable region
         // (high) is zeroed; `top` is the exclusive upper bound of the usable
         // region, above the guard.
-        assert!(stack.bytes()[..STACK_GUARD_BYTES]
-            .iter()
-            .all(|&b| b == STACK_GUARD_BYTE));
+        assert!(canary_intact(&stack.bytes()[..STACK_GUARD_BYTES]));
         assert!(stack.bytes()[STACK_GUARD_BYTES..].iter().all(|&b| b == 0));
         // The allocation is `STACK_ALIGN`-aligned and a whole multiple of it,
         // so the usable top is the allocation's end exactly — no rounding,
@@ -2648,7 +2629,7 @@ mod tests {
     fn box_stack_check_guard_detects_an_overrun_at_the_canary_floor() {
         // The deepest byte the canary covers is still detected.
         let mut stack = BoxStack::new().expect("stack allocates");
-        stack.bytes()[STACK_GUARD_BYTES - STACK_GUARD_CANARY_BYTES] = 0;
+        stack.bytes()[STACK_GUARD_BYTES - CANARY_BYTES] = 0;
         assert_eq!(stack.check_guard(), Err(StackGuardViolation));
     }
 

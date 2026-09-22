@@ -95,6 +95,11 @@ Do **not** begin a stage before all its listed dependencies are complete.
   ChaCha12 fast-key-erasure generator over the same crate, a pluggable
   entropy / hardware-RNG seam (the §19.2 platform RNG), and a fast
   *predictable* xoshiro256++ generator for decorrelation and fixtures.
+- `lib/memguard`: the guard-region sentinel (`GUARD_BYTE`) and the canary
+  window a hot path verifies it through. **Done** — hoisted out of the two
+  private copies `kernel/mem`'s slab guard and `kernel/core`'s kthread stack
+  guard each carried, so the guards cannot drift onto different poison bytes;
+  the boot-stack guard (`plans/OPEN-DEFECTS.md` D150) is its third consumer.
 - `lib/util`: only items used by ≥ 2 crates.
 
 **Tests**
