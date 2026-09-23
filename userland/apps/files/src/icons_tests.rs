@@ -227,7 +227,7 @@ impl Arrangement {
 
     /// Whether a decode has landed since this was last asked.
     fn take_landed(&mut self) -> bool {
-        self.desk.borrow_mut().take_landed()
+        !self.desk.borrow_mut().take_landed().is_empty()
     }
 
     /// The pressure wake's pair: the cache gives back what the new band no

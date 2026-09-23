@@ -2707,19 +2707,12 @@ mod program {
                 if papered {
                     fade.set_awaiting_backdrop(!shell.backdrop_settled());
                 }
-                // Icon artwork that landed is drawn by asking for it again:
-                // every icon surface resolves through the one cache the
-                // decoder's answers go into, so a repaint is the whole of
-                // adopting them. A window's title-bar and taskbar identity are
-                // the exception — those *store* the picture, so the windows
-                // still waiting for one are offered it here.
+                // The batch names which decodes came back, so each surface
+                // adopts it at the granularity of the items it draws — a
+                // slot, a window's identity, a bar control — rather than
+                // repainting itself whole because something arrived.
                 let arted = artworks.take_landed();
-                if arted {
-                    // A slot's picture and a window's identity are *stored*
-                    // on the model rather than resolved as the surface
-                    // paints, so both are offered the artwork again before
-                    // the present; every other icon surface simply asks the
-                    // cache once more.
+                if !arted.is_empty() {
                     refresh_app_strip(
                         &mut apps,
                         &mut shell,
@@ -2742,7 +2735,7 @@ mod program {
                         &programs.bundles,
                         |owner| identity.app_of(owner),
                     );
-                    shell.present_icon_artwork(&mut compositor);
+                    shell.present_icon_artwork(&mut compositor, &arted);
                 }
                 // A re-list moved every icon, a new wallpaper replaced the
                 // ground, and a settings change re-laid the column: each of
@@ -2752,7 +2745,7 @@ mod program {
                 // alone.
                 if relisted || papered || settings_landed {
                     shell.present_desktop(&mut compositor, &desktop);
-                } else if arted {
+                } else if !arted.is_empty() {
                     let layout = shell.desktop_layout(&compositor, &desktop);
                     let mut icons = damage::sink();
                     desktop.mark_icons(&layout, &mut icons);
@@ -3868,8 +3861,8 @@ mod program {
             }
         }
 
-        /// Whether a decode has landed since this was last asked.
-        fn take_landed(&self) -> bool {
+        /// What has been delivered since this was last asked.
+        fn take_landed(&self) -> tairix_icon::Landed {
             self.desk.lock().take_landed()
         }
 

@@ -1209,8 +1209,12 @@ mod program {
 
         /// Whether a decode has landed since this was last asked, so a wake
         /// that delivered nothing costs no frame.
+        ///
+        /// The panel's readings are re-derived whole on any change, so which
+        /// decodes landed buys it nothing; the desk's own answer is narrowed
+        /// to the question this loop asks.
         fn take_landed(&self) -> bool {
-            self.desk.lock().take_landed()
+            !self.desk.lock().take_landed().is_empty()
         }
 
         /// Ask the worker to leave and wake it.

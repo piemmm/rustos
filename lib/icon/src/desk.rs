@@ -33,12 +33,12 @@
 //! [`ArtworkDesk::retry_declined`] offers it again, on the wake of the
 //! pressure band that refused it.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use tairix_raster::Surface;
 use tairix_reclaim::CachedBytes;
 
-use crate::artwork::{ArtworkKey, ArtworkResolver, Resolved};
+use crate::artwork::{ArtworkKey, ArtworkResolver, IconRequest, Resolved};
 
 /// One decode: what to resolve, and the pixel side to resolve it at.
 ///
@@ -100,6 +100,48 @@ impl Delivered {
     }
 }
 
+/// Which decodes have come back since the embedder last asked.
+///
+/// Naming them rather than answering a bare "something landed" is what lets a
+/// surface repaint the items the batch actually changed: the alternative is
+/// every surface that draws any artwork repainting whole for a batch that
+/// moved one slot, which on the measured desktop was a full-width icon bar
+/// and a full launcher popup per delivered batch.
+///
+/// A refusal lands like any other answer: the decode was run, so an item that
+/// resolves through it is offered the tier below rather than left as it was.
+#[derive(Debug)]
+pub struct Landed {
+    jobs: BTreeSet<ArtworkJob>,
+}
+
+impl Landed {
+    /// Whether nothing landed, so a wake that delivered nothing costs no
+    /// frame.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
+
+    /// Whether `request` at `side` draws through one of these decodes.
+    ///
+    /// **Every** tier is asked, not just the one that answers today: a
+    /// request whose own icon is still being produced draws its class
+    /// artwork, so the class artwork landing is what moved its pixels. The
+    /// converse — a lower tier landing while a higher one already serves —
+    /// can only cost one item a repaint that changes nothing, which is the
+    /// direction a missed latch is not.
+    #[must_use]
+    pub fn resolves(&self, request: IconRequest<'_>, side: u32) -> bool {
+        request.tiers().any(|tier| {
+            self.jobs.contains(&ArtworkJob {
+                key: tier.cache_key(),
+                side,
+            })
+        })
+    }
+}
+
 /// What has been asked for, what is being produced, and what has come back.
 ///
 /// The embedder supplies the exclusion and the blocking; nothing here waits.
@@ -111,8 +153,9 @@ pub struct ArtworkDesk {
     /// decoded, so a busy surface cannot indefinitely displace a quiet one's
     /// single icon.
     queue: VecDeque<ArtworkJob>,
-    /// Whether anything has been delivered since the embedder last asked.
-    landed: bool,
+    /// What has been delivered since the embedder last asked. Bounded by the
+    /// decodes in flight, and drained on the wake each batch owes.
+    landed: BTreeSet<ArtworkJob>,
     /// Whether a delivery still owes the embedder's loop a wake. Distinct
     /// from `landed`, which the loop itself consumes: this is the producer's
     /// debt, and it survives a delivery made while more work was queued.
@@ -129,7 +172,7 @@ impl ArtworkDesk {
         Self {
             slots: BTreeMap::new(),
             queue: VecDeque::new(),
-            landed: false,
+            landed: BTreeSet::new(),
             wake_owed: false,
             stopping: false,
         }
@@ -231,7 +274,7 @@ impl ArtworkDesk {
         let mut kept = false;
         if let Some(state @ State::Running) = self.slots.get_mut(job) {
             *state = State::Done(artwork);
-            self.landed = true;
+            self.landed.insert(job.clone());
             self.wake_owed = true;
             kept = true;
         }
@@ -240,14 +283,15 @@ impl ArtworkDesk {
         Delivered { kept, wake }
     }
 
-    /// Whether anything has been delivered since this was last asked, clearing
-    /// the record.
+    /// What has been delivered since this was last asked, clearing the record.
     ///
-    /// The embedder repaints on a `true`, so the surfaces that drew a glyph for
-    /// want of pixels draw the pixels — and a wake that delivered nothing costs
-    /// no frame.
-    pub fn take_landed(&mut self) -> bool {
-        core::mem::take(&mut self.landed)
+    /// The embedder repaints the items these answers changed, so the surfaces
+    /// that drew a glyph for want of pixels draw the pixels — and a wake that
+    /// delivered nothing costs no frame.
+    pub fn take_landed(&mut self) -> Landed {
+        Landed {
+            jobs: core::mem::take(&mut self.landed),
+        }
     }
 
     /// Note that the cache could not keep what `job` produced, so this desk
@@ -293,9 +337,10 @@ impl ArtworkDesk {
     /// outlive their session in reusable heap.
     pub fn stop(&mut self) {
         self.stopping = true;
-        // Nothing is left to repaint, so a producer's outstanding wake debt
-        // dies with the answers it would have shown.
+        // Nothing is left to repaint, so a producer's outstanding wake debt —
+        // and the batch it would have shown — dies with the answers.
         self.wake_owed = false;
+        self.landed.clear();
         for state in self.slots.values_mut() {
             if let State::Done(Some(artwork)) = state {
                 artwork.wipe();

@@ -399,7 +399,10 @@ The read and the sandbox round trip run on a worker thread over the shared
 what it missed and draws the glyph, and the worker's wake — a permanent member
 of the loop's wait-set — brings the pixels. One wake per drained batch, so a
 table of fifty rows costs one repaint rather than fifty; the desk owns that
-rule, so the file manager and the Switchboard cannot diverge on it.
+rule, so the file manager and the Switchboard cannot diverge on it. The batch
+*names* the decodes that came back (`Landed`), so a surface that stores its
+pictures repaints the items the batch moved and a whole table does not
+recompose because one row's icon arrived.
 
 The *request* names the bundle, so the resolution order is correct end to end:
 the desktop session reports which bundle it launched each window owner from

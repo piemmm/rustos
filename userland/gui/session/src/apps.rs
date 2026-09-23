@@ -916,7 +916,9 @@ pub fn prefetch_bar_icons(
 /// opening a large library never decodes an icon nobody sees, and a row
 /// already holding artwork of the right pixel side is left alone, so
 /// re-resolving before each paint costs a lookup rather than a copy. A
-/// closed popup resolves nothing at all.
+/// closed popup resolves nothing at all. A row whose picture this changes
+/// latches that row's own rectangle, so a decode landing while the popup is
+/// up is drawn without the panel being repainted whole.
 pub fn resolve_library_icons(
     taskbar: &mut Taskbar,
     scale: Scale,
@@ -926,12 +928,10 @@ pub fn resolve_library_icons(
     if !taskbar.library().is_open() {
         return;
     }
-    let requests = {
-        let layout = taskbar.library_layout(scale);
-        taskbar
-            .library()
-            .visible_icon_requests(&layout, scale, taskbar.theme())
-    };
+    let layout = taskbar.library_layout(scale);
+    let requests = taskbar
+        .library()
+        .visible_icon_requests(&layout, scale, taskbar.theme());
     for LibraryIconRequest { row, side, entry } in requests {
         let drawn = taskbar
             .library()
@@ -952,7 +952,7 @@ pub fn resolve_library_icons(
             .artwork(resolver, request, side)
             .and_then(IconPicture::artwork)
             .cloned();
-        taskbar.set_library_row_artwork(row, art);
+        taskbar.set_library_row_artwork(row, &layout, art);
     }
 }
 

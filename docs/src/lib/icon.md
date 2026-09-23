@@ -241,6 +241,18 @@ a draw needs* and *producing it*:
   here is what stops the three producers that drive a desk — the desktop
   session, the file manager and the Switchboard — from each keeping their own
   count and drifting apart.
+- **A landing names what came back, not merely that something did.**
+  `ArtworkDesk::take_landed` answers a `Landed`: `is_empty()` for the loop
+  that only needs to know whether the wake carried anything, and
+  `resolves(request, side)` for a surface asking whether *this* item's picture
+  moved. Every tier of the request is asked, not only the one that answers
+  today — a request whose own icon is still being produced draws its class
+  artwork, so the class artwork landing is what moved its pixels — which makes
+  the answer an over-approximation in the safe direction: at worst one item
+  repaints and looks the same, where a missed latch would leave it stale. A
+  refusal lands like a picture, because the item that asked now draws the tier
+  below. Without the names, every surface drawing any artwork has to repaint
+  whole for a batch that moved one slot.
 
 The desk holds no lock, thread, or syscall, so its whole policy is host-tested.
 Two embedders drive it over the same rules, and both do it the same way: each

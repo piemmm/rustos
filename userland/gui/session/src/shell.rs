@@ -47,7 +47,7 @@ use tairix_cursor::{CursorRegistry, CursorTheme, CURSOR_BASE_SIDE_PX};
 use tairix_geometry::Region;
 use tairix_icon::{
     artwork_cache, ArtworkCache, ArtworkResolver, IconArtworkSource, IconKind, IconRequest,
-    IconSet, InlineArtwork, NoArtworkSeam,
+    IconSet, InlineArtwork, Landed, NoArtworkSeam,
 };
 use tairix_log::Sink;
 use tairix_proglib::Catalog;
@@ -947,15 +947,17 @@ impl DesktopShell {
         }
     }
 
-    /// Repaint the bar's icon-bearing surfaces, because artwork a previous
-    /// paint fell back to a built-in glyph for has since been decoded.
+    /// Repaint the bar's items whose picture the `landed` decodes moved,
+    /// because the paint that wanted them fell back to a built-in glyph.
     ///
     /// The desktop's own icon column is the embedder's to repaint (it owns the
     /// model the column is laid out from); this is the taskbar half of the same
     /// answer, so a decode that lands is drawn wherever it belongs without the
-    /// embedder having to know which of the bar's five surfaces show icons.
-    pub fn present_icon_artwork(&mut self, compositor: &mut Compositor) {
-        self.session.taskbar_mut().request_icon_repaint();
+    /// embedder having to know which of the bar's surfaces show icons, or
+    /// which of their items one picture is worth.
+    pub fn present_icon_artwork(&mut self, compositor: &mut Compositor, landed: &Landed) {
+        let scale = compositor.scale();
+        self.session.taskbar_mut().adopt_icon_artwork(landed, scale);
         self.present(compositor);
     }
 
@@ -1402,7 +1404,8 @@ impl DesktopShell {
     /// slots and re-present, so the strip reflects a launch, an exit, a
     /// window opening or closing, or a re-declaration in the same frame.
     pub fn set_apps(&mut self, compositor: &mut Compositor, apps: Vec<AppSlot>) {
-        self.session.taskbar_mut().set_apps(apps);
+        let scale = compositor.scale();
+        self.session.taskbar_mut().set_apps(apps, scale);
         self.present(compositor);
     }
 

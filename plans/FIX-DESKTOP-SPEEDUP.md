@@ -707,6 +707,22 @@ per delivered batch, where a decode can only change the picture inside a tile �
 `Desktop::mark_icons` scopes it to the cells, and an empty column costs no frame
 at all.
 
+**Arriving artwork is adopted per item, not per surface.** The desk answers
+which decodes came back (`tairix_icon::Landed`) rather than a bare bool, so
+each surface repaints what the batch moved. The two that *store* a picture
+compare before they latch: `Taskbar::set_apps` owes the slots whose
+`AppSlot` actually changed — nothing at all for the re-derived strip that
+matched, which is most of them — and the strip's whole region only when the
+slot *count* re-lays every rectangle in it; `set_library_row_artwork` owes the
+row whose picture changed, which is what makes resolving every shown row
+before every paint free. The pictures with no model change behind them are the
+class artwork a bar control with none of its own resolves *as it paints*
+(the Library button, a slot with no bundle icon, the account capsule):
+`Taskbar::adopt_icon_artwork` asks the batch whether each of those requests
+resolves through it and latches that control's rectangle alone. The paint is
+the other reader of that set, so a host test renders the bar with and without
+the class tier and fails if a pixel moves outside what the adopt named.
+
 #### Tests
 
 - `lib/controls`: `Repaint`'s clean/whole/add/merge/`area` semantics;
@@ -723,7 +739,13 @@ at all.
   controls they name.
 - `userland/gui/session`: an account owing one control repainting in place
   (same window id) and marking only that control; a refused present keeping
-  what its surface owed; and the host sweep above.
+  what its surface owed; resolving the popup's rows before a paint owing the
+  rows whose picture changed and nothing on the next resolution; and the host
+  sweep above.
+- `lib/icon`: a landing naming only the decode it answered, at only the side
+  it answered; a refusal naming its request like a picture; a landed class
+  master naming the request that falls back to it; and a teardown dropping the
+  batch it wiped.
 
 #### What is deliberately left
 

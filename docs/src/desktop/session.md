@@ -302,9 +302,19 @@ the built-in glyph for that frame.
   the pressure band moves. An answer the cache *took* is simply forgotten by the
   desk, so an icon it later evicts is decoded again rather than drawing its
   glyph for ever.
-- Most surfaces adopt a landing simply by asking the cache again. The two that
-  *store* the picture instead — the bar's application strip and a window's
-  title-bar identity — are offered it again explicitly on the wake.
+- **A landing is adopted per item, never per surface.** The desk answers a
+  `Landed` naming which decodes came back, and each surface repaints the items
+  that batch moved: the bar's application strip and the launcher popup's rows
+  *store* their pictures, so they are offered the artwork again on the wake and
+  latch only the slots and rows whose stored picture actually changed; a
+  window's title-bar identity is offered it the same way. The remaining
+  pictures — the class artwork a bar control with none of its own falls back to
+  as it paints — have no model change behind them at all, so
+  `Taskbar::adopt_icon_artwork` asks the batch whether each of *those* requests
+  resolves through it and latches that control's rectangle alone. Latching the
+  whole bar and the whole popup for every delivered batch cost 48 672 px a
+  batch on a 1024×768 board where the items that changed were an icon square
+  each.
 - **Asked for early, not on the frame that needs it.** A decode off the loop
   still costs a round trip, so a surface that first asks as it *paints* shows a
   screenful of glyphs and fills in one icon at a time afterwards. The desktop

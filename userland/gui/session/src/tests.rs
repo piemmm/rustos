@@ -797,13 +797,10 @@ fn sweeping_the_bar_repaints_the_controls_crossed_and_never_the_strip() {
 
     let mut shell = shell();
     let mut comp = compositor();
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .set_apps(alloc::vec![tairix_taskbar::AppSlot::new(
-            "Files",
-            IconKind::AppBundle
-        )]);
+    shell.session_mut().taskbar_mut().set_apps(
+        alloc::vec![tairix_taskbar::AppSlot::new("Files", IconKind::AppBundle)],
+        Scale::ONE,
+    );
     shell.present(&mut comp);
     comp.composite();
 
@@ -1804,13 +1801,11 @@ fn a_press_on_an_app_slot_reaches_the_taskbar_through_the_seat() {
         .taskbar_mut()
         .tasks_mut()
         .add(TaskId(1), "Editor");
-    seat.session
-        .taskbar_mut()
-        .set_apps(vec![tairix_taskbar::AppSlot::new(
-            "Editor",
-            IconKind::AppBundle,
-        )
-        .with_windows(vec![TaskId(1)])]);
+    seat.session.taskbar_mut().set_apps(
+        vec![tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle)
+            .with_windows(vec![TaskId(1)])],
+        Scale::ONE,
+    );
     seat.settle();
 
     let slot = seat
@@ -5206,11 +5201,15 @@ fn picker_cells_caption_each_window_and_refuse_below_a_choice() {
     );
     bar.tasks_mut().add(TaskId(1), "Shell");
     bar.tasks_mut().add(TaskId(2), "Logs");
-    bar.set_apps(vec![
-        tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
-            .with_windows(vec![TaskId(1), TaskId(2)]),
-        tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle).with_windows(vec![TaskId(1)]),
-    ]);
+    bar.set_apps(
+        vec![
+            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+                .with_windows(vec![TaskId(1), TaskId(2)]),
+            tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle)
+                .with_windows(vec![TaskId(1)]),
+        ],
+        Scale::ONE,
+    );
     let magenta = Color {
         r: 255,
         g: 0,
@@ -9190,6 +9189,63 @@ fn the_launcher_has_its_icons_before_it_is_first_drawn() {
     );
 }
 
+/// Resolving the popup's rows before a paint owes the rows whose picture it
+/// actually changed, and — since it runs before *every* paint — owes nothing
+/// at all on the next one. A whole-popup latch here repainted the panel on
+/// every frame it was drawn; no latch at all left a decode that landed while
+/// the popup was up unshown until something unrelated moved.
+#[test]
+fn resolving_the_popups_rows_owes_the_rows_whose_picture_changed() {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let mut cat = Catalog::new();
+    cat.insert(entry_with_icon("one", "One", Some("icon.svg")))
+        .expect("fits");
+    let (mut session, _comp) = open_library_over(cat);
+    let mut reader = ArtworkFileReader(shipped_app_bundle_master(
+        MemoryAssets::default().with("/Apps/one.app/Resources/icon.svg", &[BUNDLE_TINT]),
+    ));
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let layout = session.taskbar().library_layout(Scale::ONE);
+    let rows = shown_entry_rows(&session);
+    assert_eq!(rows.len(), 1, "one entry, one row");
+    let rect = layout
+        .rows
+        .iter()
+        .find(|&&(index, _)| index == rows[0])
+        .map(|&(_, rect)| rect)
+        .expect("the row is laid out");
+    let _ = session.taskbar_mut().take_repaint();
+
+    let mut resolve = |session: &mut DesktopSession, cache: &mut _| {
+        resolve_library_icons(
+            session.taskbar_mut(),
+            Scale::ONE,
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            cache,
+        );
+        session.taskbar_mut().take_repaint()
+    };
+
+    let owed = resolve(&mut session, &mut cache);
+    let mut rows = tairix_controls::damage::sink();
+    rows.add(rect);
+    rows.translate(-layout.panel.left(), -layout.panel.top());
+    assert_eq!(
+        owed,
+        TaskbarRepaint {
+            library: Repaint::Parts(rows),
+            ..TaskbarRepaint::NONE
+        },
+        "the one row that gained a picture is the one that repaints"
+    );
+    assert_eq!(
+        resolve(&mut session, &mut cache),
+        TaskbarRepaint::NONE,
+        "resolving again before the next paint changes nothing and owes nothing"
+    );
+}
+
 #[test]
 fn a_library_row_whose_asset_will_not_serve_falls_back_and_never_blanks() {
     // Three ways an application's own icon can fail — the file is absent,
@@ -9363,7 +9419,7 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
     // can serve nothing, once through the do-nothing lookup. Identical
     // pixels means the empty-store desktop is exactly the glyph desktop,
     // and a bar drawn from glyphs is not a blank bar.
-    session.taskbar_mut().set_apps(slots);
+    session.taskbar_mut().set_apps(slots, Scale::ONE);
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
     let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);

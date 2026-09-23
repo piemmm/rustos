@@ -10793,6 +10793,7 @@ fn appbar_slot_rect(
                 )
             })
             .collect(),
+        tairix_geometry::Scale::ONE,
     );
     taskbar
         .layout(tairix_geometry::Scale::ONE)
@@ -11418,13 +11419,13 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
     // bar's two ends and so do not move with the strip, but the strip is
     // modelled anyway: a sweep that did not cross a real slot would not
     // exercise the hover the gate is about.
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .set_apps(vec![AppSlot::new(
+    shell.session_mut().taskbar_mut().set_apps(
+        vec![AppSlot::new(
             FILES_BAR_APP_NAME,
             tairix_icon::IconKind::AppBundle,
-        )]);
+        )],
+        scale,
+    );
 
     let taskbar = shell.session().taskbar();
     let bar = taskbar.layout(scale);
@@ -11665,7 +11666,7 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
         AppSlot::new(BAR_APP_NAME, tairix_icon::IconKind::AppBundle)
             .with_declaration(declared.menu, declared.click),
     );
-    shell.session_mut().taskbar_mut().set_apps(seated);
+    shell.session_mut().taskbar_mut().set_apps(seated, scale);
 
     // The slot the session gives the launched application.
     let slot = rect_centre(
@@ -12814,13 +12815,13 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     // click lands where the guest draws it. A slot is icon-only at a fixed
     // extent, so only its presence moves the geometry; the label is the one
     // the session resolves from the bundle's own signed manifest.
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .set_apps(vec![tairix_taskbar::AppSlot::new(
+    shell.session_mut().taskbar_mut().set_apps(
+        vec![tairix_taskbar::AppSlot::new(
             FILES_BAR_APP_NAME,
             tairix_icon::IconKind::AppBundle,
-        )]);
+        )],
+        Scale::ONE,
+    );
 
     let taskbar = shell.session().taskbar();
     let bar = taskbar.layout(Scale::ONE);

@@ -20,6 +20,12 @@ fn job(path: &str, side: u32) -> ArtworkJob {
     }
 }
 
+/// A draw site's request for the asset at `path`, whose first tier is the
+/// key the desk is asked for.
+fn request(path: &str) -> IconRequest<'_> {
+    IconRequest::asset(crate::IconKind::File, path)
+}
+
 /// A distinguishable picture, so a test can tell one delivery from another.
 fn picture(side: u32) -> Surface {
     Surface::new(side, side).expect("a square surface")
@@ -78,8 +84,14 @@ fn a_delivered_decode_is_collected_once_and_reports_a_landing() {
     let _ = desk.collect(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))).kept());
-    assert!(desk.take_landed(), "a delivery owes the embedder a repaint");
-    assert!(!desk.take_landed(), "the landing is reported once");
+    assert!(
+        desk.take_landed().resolves(request("/a.png"), 8),
+        "a delivery names the request it answers"
+    );
+    assert!(
+        desk.take_landed().is_empty(),
+        "the landing is reported once"
+    );
 
     match desk.collect(&asset("/a.png"), 8) {
         Resolved::Done(Some(art)) => assert_eq!(art.width(), 8),
@@ -101,7 +113,7 @@ fn a_want_records_a_decode_without_collecting_it() {
     assert!(desk.has_work());
     assert_eq!(desk.next_job(), Some(job("/a.png", 32)));
     assert!(
-        !desk.take_landed(),
+        desk.take_landed().is_empty(),
         "asking for a decode is not the same as one landing"
     );
 }
@@ -351,7 +363,7 @@ fn an_answer_the_desk_is_not_holding_is_dropped() {
     let running = desk.next_job().expect("a job");
     desk.stop();
     assert!(!desk.deliver(&running, Some(picture(8))).kept());
-    assert!(!desk.take_landed());
+    assert!(desk.take_landed().is_empty());
 }
 
 #[test]
@@ -444,7 +456,13 @@ fn a_batch_of_decodes_owes_one_wake_on_the_last_of_them() {
         desk.deliver(&last, Some(picture(16))).wake(),
         "the drained batch owes the loop its one wake"
     );
-    assert!(desk.take_landed(), "all three landings are one repaint");
+    let landed = desk.take_landed();
+    assert!(
+        ["/a.png", "/b.png", "/c.png"]
+            .iter()
+            .all(|name| landed.resolves(request(name), 16)),
+        "all three landings are one repaint, and it names each of them"
+    );
 }
 
 /// A lone ask is its own drained batch, so an icon still lands the moment it
@@ -497,4 +515,70 @@ fn a_stopped_desk_owes_no_wake_for_what_it_wiped() {
     let second = desk.next_job().expect("the second job");
     desk.stop();
     assert!(!desk.deliver(&second, Some(picture(16))).wake());
+}
+
+/// A landing names the decode it answered and nothing else, which is the
+/// whole of what lets a surface repaint one item instead of all of them.
+#[test]
+fn a_landing_names_only_what_it_answered() {
+    let mut desk = ArtworkDesk::new();
+    let _ = desk.collect(&asset("/a.png"), 8);
+    let _ = desk.collect(&asset("/b.png"), 8);
+    let running = desk.next_job().expect("a job");
+    let _ = desk.deliver(&running, Some(picture(8)));
+
+    let landed = desk.take_landed();
+    assert!(landed.resolves(request("/a.png"), 8));
+    assert!(
+        !landed.resolves(request("/b.png"), 8),
+        "a decode still being produced has not changed anything"
+    );
+    assert!(
+        !landed.resolves(request("/a.png"), 16),
+        "a picture at another side is another decode"
+    );
+}
+
+/// A refusal is an answer: the item that asked draws the tier below it, so it
+/// is named exactly as a picture would be.
+#[test]
+fn a_refusal_lands_like_a_picture() {
+    let mut desk = ArtworkDesk::new();
+    let _ = desk.collect(&asset("/a.png"), 8);
+    let running = desk.next_job().expect("a job");
+    let _ = desk.deliver(&running, None);
+    assert!(desk.take_landed().resolves(request("/a.png"), 8));
+}
+
+/// A request is named by *any* tier that landed, because the tier that draws
+/// today depends on which of them have answered.
+#[test]
+fn a_landed_class_picture_names_the_request_that_falls_back_to_it() {
+    let mut desk = ArtworkDesk::new();
+    let class = crate::icon_artwork_path(crate::IconKind::AppBundle);
+    let _ = desk.collect(&asset(&class), 8);
+    let running = desk.next_job().expect("a job");
+    let _ = desk.deliver(&running, Some(picture(8)));
+
+    let landed = desk.take_landed();
+    assert!(
+        landed.resolves(
+            IconRequest::asset(crate::IconKind::AppBundle, "/own.png"),
+            8
+        ),
+        "the picture this request draws while its own icon is pending"
+    );
+}
+
+/// Tearing down wipes every answer still held, so the batch that would have
+/// shown them is dropped with them rather than driving a repaint of pixels
+/// that no longer exist.
+#[test]
+fn a_teardown_drops_the_unreported_batch() {
+    let mut desk = ArtworkDesk::new();
+    let _ = desk.collect(&asset("/a.png"), 8);
+    let running = desk.next_job().expect("a job");
+    let _ = desk.deliver(&running, Some(picture(8)));
+    desk.stop();
+    assert!(desk.take_landed().is_empty());
 }

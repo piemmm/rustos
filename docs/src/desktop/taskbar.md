@@ -252,10 +252,10 @@ account:
 | `readout`       | the Switchboard capsule's expanded instrument readout  |
 
 Each account is either `Whole` — every pixel, which is what a change to the
-*model* owes, because a new clock label or a rebuilt application strip has no
-rectangle smaller than the surface — or `Parts(region)`, the rectangles a
-*control* reported it repainted, in that surface's own pixels. An empty
-`Parts` is a surface whose pixels on screen are already current.
+*model* owes when it has no rectangle smaller than the surface, such as a new
+clock label — or `Parts(region)`, the rectangles a *control* reported it
+repainted, in that surface's own pixels. An empty `Parts` is a surface whose
+pixels on screen are already current.
 
 `TaskbarRepaint::NONE` and `::ALL` are the two extremes, one constant names
 each single surface whole, `any()` asks whether anything is pending, and `|` /
@@ -272,6 +272,16 @@ Which surface a report belongs to is answered by the code that laid the control
 out, never guessed from geometry — and a reported rectangle that lands outside
 the surface names none of its pixels, so a collapsed readout (`Rect::EMPTY`)
 owes nothing.
+
+**A model change owes a `Parts` account too, wherever the model knows which
+item moved.** The session re-derives the application strip on every wake that
+*could* have changed it, and resolves every shown launcher row before every
+paint, so a model change is far more often a no-op than not: `set_apps` and
+`set_library_row_artwork` compare what they are handed against what is there
+and owe only the slots and rows whose drawn state actually moved — nothing at
+all for a push that changed nothing. A changed slot *count* re-lays every
+rectangle inside the strip, so that owes `app_strip`, which is the region that
+changed rather than one slot's damage.
 
 The one surface that stays whole-account by construction is the **library
 popup**: its outcome type reports only "the popup's pixels changed", and the
@@ -601,8 +611,12 @@ draws it (`AGENTS.md` §2.2, §17.4). Three methods express the split:
   draw at. A hundred-entry library therefore costs the session a read and a
   decode per *visible* row, never per catalogued application, and scrolling
   asks only for the rows that just came into view.
-- `set_row_artwork(row, artwork)` files an answer; an out-of-range index is
-  ignored rather than mis-filed.
+- `Taskbar::set_library_row_artwork(row, layout, artwork)` files an answer,
+  latching that row's own rectangle when the picture changed and nothing when
+  it did not; an out-of-range index, or a row the layout does not show, is
+  ignored rather than mis-filed. The comparison is what makes resolving before
+  *every* paint free: latching unconditionally here would re-dirty the popup on
+  each frame it is drawn and repaint it for ever.
 - `row_artwork(row)` is what `paint_library` blits.
 
 Any rebuild of the row list (a new catalog, a changed filter, a folder folded

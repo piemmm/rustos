@@ -27,7 +27,7 @@ use tairix_controls::{
     TraySignalAction,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconRequest, Landed};
 use tairix_input::InputEvent;
 use tairix_proglib::EntryId;
 use tairix_raster::Surface;
@@ -139,9 +139,11 @@ impl TaskbarConfig {
 ///
 /// The bar does **not** own a UI scale: the desktop density belongs to the
 /// output, so the scale is supplied by the compositor at layout, hit-test,
-/// and render time. A runtime DPI change is therefore
-/// transparent to the taskbar model — the bar is simply laid out and
-/// re-presented at the new density, with no state to update here.
+/// and render time — and at the few model changes that must name the
+/// rectangle they moved rather than the surface holding it. A runtime DPI
+/// change is therefore transparent to the taskbar model — the bar is simply
+/// laid out and re-presented at the new density, with no state to update
+/// here.
 #[derive(Clone, Debug)]
 pub struct Taskbar {
     config: TaskbarConfig,
@@ -265,18 +267,29 @@ impl Taskbar {
     }
 
     /// Hand the popup the owner-resolved icon artwork for one of the rows it
-    /// shows ([`LibraryPopup::set_row_artwork`]), for the session that
-    /// resolved it from the entry's own bundle.
+    /// shows, for the session that resolved it from the entry's own bundle,
+    /// latching that row alone when the picture changed.
     ///
-    /// Unlike [`library_mut`](Self::library_mut) this latches nothing, and
-    /// deliberately so: the session resolves a shown row's icon immediately
-    /// *before* painting a popup that some real change has already latched,
-    /// so latching here would re-dirty the popup on every frame it is drawn
-    /// and repaint it forever. The artwork is on the surface the same frame
-    /// because it is set before the paint, not because it asked for another
-    /// one.
-    pub fn set_library_row_artwork(&mut self, row: usize, artwork: Option<Surface>) {
-        self.library.set_row_artwork(row, artwork);
+    /// Unlike [`library_mut`](Self::library_mut) this cannot latch the whole
+    /// popup: the session re-resolves every shown row immediately *before*
+    /// each paint, so a whole-popup latch here would re-dirty the popup on
+    /// every frame it is drawn and repaint it forever. The comparison in the
+    /// popup is what makes a row-sized latch safe *and* sufficient — a row
+    /// whose decode lands while the popup is up is drawn on the next frame
+    /// rather than waiting for an unrelated change to repaint the panel.
+    ///
+    /// `layout` is the popup's current geometry, which the caller already
+    /// holds to know which rows to resolve.
+    pub fn set_library_row_artwork(
+        &mut self,
+        row: usize,
+        layout: &LibraryLayout,
+        artwork: Option<Surface>,
+    ) {
+        let mut reported = damage::sink();
+        self.library
+            .set_row_artwork(row, layout, artwork, &mut reported);
+        owe(&mut self.repaint.library, &reported, layout.panel);
     }
 
     /// The application strip.
@@ -299,10 +312,24 @@ impl Taskbar {
     /// A picker open over an application the new set no longer has one for is
     /// closed with it, so the bar can never show a picker for windows that are
     /// gone — or for a window that has stopped being the minimised one the
-    /// picker existed to recover. The strip draws on the bar itself, so this
-    /// latches [`bar`](TaskbarRepaint::bar) (and the picker when one closes).
-    pub fn set_apps(&mut self, apps: Vec<AppSlot>) {
-        self.apps.set_apps(apps);
+    /// picker existed to recover.
+    ///
+    /// The strip draws on the bar itself, so the bar is the only surface this
+    /// latches (plus the picker when one closes) — and it latches only the
+    /// slots whose drawn state the new set actually moved. The session
+    /// re-derives the strip on every wake that could have changed it, most of
+    /// which changed nothing, so an unconditional whole-bar latch here made a
+    /// settled desktop recompose a full-width strip for no reason; a changed
+    /// *count* re-lays every slot and owes the strip's region instead.
+    pub fn set_apps(&mut self, apps: Vec<AppSlot>, scale: Scale) {
+        // Laid out before the swap, so a slot's rectangle is the one it is
+        // drawn at either side of an equal-length push; an unequal one owes
+        // the whole region, which the count cannot move.
+        let layout = self.layout(scale);
+        let mut reported = damage::sink();
+        self.apps
+            .set_apps(apps, &layout.apps, layout.app_strip, &mut reported);
+        owe(&mut self.repaint.bar, &reported, layout.bar);
         if self
             .picker
             .app()
@@ -310,7 +337,6 @@ impl Taskbar {
         {
             self.close_picker();
         }
-        self.repaint |= TaskbarRepaint::BAR;
     }
 
     /// The running-task list.
@@ -567,17 +593,79 @@ impl Taskbar {
         self.repaint |= parts;
     }
 
-    /// Latch the surfaces that draw an application's own picture, for an
-    /// embedder whose icon artwork arrived after they were last painted.
+    /// Latch the bar's items whose picture a batch of `landed` decodes moved,
+    /// at the desktop `scale`.
     ///
-    /// The bar (its application slots) and the library popup (its rows) are
-    /// the two that do; the hover window picker, the notification popover, and
-    /// the instrument readout draw no application artwork at all, so a decode
-    /// landing must not cost their pixels. Which surfaces those are
-    /// is the bar's own knowledge, so it says so here rather than an embedder
-    /// guessing at a flag set.
-    pub fn request_icon_repaint(&mut self) {
-        self.request_repaint(TaskbarRepaint::BAR | TaskbarRepaint::LIBRARY);
+    /// Only the controls that resolve a picture from the shared artwork cache
+    /// *while painting* are the bar's to adopt here — the Library button, an
+    /// application slot carrying no bundle icon of its own, and the account
+    /// capsule, each falling back to its kind's shipped class master.
+    /// Everything else the bar draws a picture for **stores** it — an
+    /// application slot's own icon arrives through
+    /// [`set_apps`](Self::set_apps), a launcher row's through
+    /// [`set_library_row_artwork`](Self::set_library_row_artwork) — and each
+    /// of those latches the one item it changed as it is written, so a decode
+    /// landing for them costs nothing here. The hover window picker, the
+    /// notification popover, and the instrument readout draw no artwork from
+    /// that cache at all.
+    ///
+    /// Which items those are is the bar's own knowledge, so it says so here
+    /// rather than an embedder guessing at a flag set.
+    pub fn adopt_icon_artwork(&mut self, landed: &Landed, scale: Scale) {
+        if landed.is_empty() {
+            return;
+        }
+        let layout = self.layout(scale);
+        let mut reported = damage::sink();
+        self.visit_class_artwork_draws(&layout, scale, |rect, kind, side| {
+            if landed.resolves(IconRequest::kind(kind), side) {
+                reported.add(rect);
+            }
+        });
+        owe(&mut self.repaint.bar, &reported, layout.bar);
+    }
+
+    /// Visit every rectangle of the bar whose picture the shared artwork
+    /// cache answers *during the paint* — the class artwork a control with no
+    /// picture of its own falls back to — with the kind and pixel side it
+    /// resolves at.
+    ///
+    /// The paint is the other reader of this set, so the two are held
+    /// together by a test that renders the bar with and without each class
+    /// picture and fails if a pixel moves outside what this names.
+    ///
+    /// The capsule is visited whether or not its account disc will win,
+    /// because answering that means rasterising the disc: a slot-sized
+    /// repaint that changes nothing is the cheap direction, and a missed one
+    /// leaves stale pixels.
+    fn visit_class_artwork_draws(
+        &self,
+        layout: &BarLayout,
+        scale: Scale,
+        mut visit: impl FnMut(Rect, IconKind, u32),
+    ) {
+        if !layout.library.is_empty() {
+            let button = &self.library_button;
+            let side = button.icon_side(layout.library, scale, &self.theme);
+            visit(layout.library, button.icon(), side);
+        }
+        for (index, &slot) in layout.apps.iter().enumerate() {
+            if slot.is_empty() {
+                continue;
+            }
+            let (Some(app), Some(item)) = (self.apps.get(index), self.apps.item(index)) else {
+                continue;
+            };
+            if app.artwork().is_some() {
+                continue;
+            }
+            visit(slot, app.icon(), item.icon_side(slot, scale, &self.theme));
+        }
+        if !layout.switchboard.is_empty() {
+            let signal = self.tray.signal();
+            let side = signal.icon_side(layout.switchboard, scale, &self.theme);
+            visit(layout.switchboard, signal.icon(), side);
+        }
     }
 
     /// Compute the bar's geometry for its current application and icon

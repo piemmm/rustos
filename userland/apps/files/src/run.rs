@@ -2046,9 +2046,11 @@ mod program {
         /// Whether a decode has landed since this was last asked.
         ///
         /// The loop repaints on a `true`, so a wake that delivered nothing new
-        /// costs no frame.
+        /// costs no frame. A batch's tiles are spread over every open window's
+        /// grid, so which decodes landed buys the loop nothing and the desk's
+        /// answer is narrowed to the question it asks.
         fn take_artwork_landed(&self) -> bool {
-            self.work.lock().artwork.take_landed()
+            !self.work.lock().artwork.take_landed().is_empty()
         }
 
         /// Answer the folder cue for `components`, recording the probe if this

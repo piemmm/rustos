@@ -680,7 +680,7 @@ fn the_leading_launcher_partitions_the_leading_end() {
 #[test]
 fn hit_testing_resolves_every_region() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Editor")]);
+    bar.set_apps(alloc::vec![app("Editor")], Scale::ONE);
     bar.set_status_signals(alloc::vec![StatusSignal::new(
         IconId(7),
         StatusKind::Network
@@ -801,7 +801,7 @@ fn the_separator_gutter_shifts_everything_after_the_launcher() {
     let gutter =
         i32::try_from(metrics.border_thickness + metrics.control_gap * 2).expect("a modest gutter");
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Editor")]);
+    bar.set_apps(alloc::vec![app("Editor")], Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     let launcher = i32::try_from(layout.library.width).expect("a modest launcher");
 
@@ -953,7 +953,7 @@ fn a_bar_too_small_for_its_rim_keeps_its_content_inside_itself() {
                     ..TaskbarConfig::bottom_bar(screen_w, screen_h)
                 };
                 let mut bar = Taskbar::new(config, &theme.clone().floating());
-                bar.set_apps(alloc::vec![app("Editor")]);
+                bar.set_apps(alloc::vec![app("Editor")], scale);
                 let layout = bar.layout(scale);
                 let frame = layout.bar;
                 let at = alloc::format!("{percent}% {screen_w}x{screen_h} {edge:?}");
@@ -1005,7 +1005,7 @@ fn overflowing_app_slot_is_clipped_to_empty() {
     // The strip of this screen holds 15 whole 48 px slots, so 24 running
     // applications put the later slots well past its trailing edge.
     let apps: Vec<AppSlot> = (0..24).map(|_| app("App")).collect();
-    bar.set_apps(apps);
+    bar.set_apps(apps, Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     assert!(layout.apps[0].width > 0);
     assert!(
@@ -1017,7 +1017,10 @@ fn overflowing_app_slot_is_clipped_to_empty() {
 #[test]
 fn an_app_slot_is_a_square_the_launchers_share() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("A window title far wider than any slot")]);
+    bar.set_apps(
+        alloc::vec![app("A window title far wider than any slot")],
+        Scale::ONE,
+    );
     for percent in [100, 200] {
         let scale = Scale::from_percent(percent).expect("a valid scale");
         let layout = bar.layout(scale);
@@ -1045,7 +1048,7 @@ fn the_app_strip_spans_the_launcher_to_the_trailing_end() {
     assert!(layout.app_strip.left() > layout.separator.right());
     assert_eq!(layout.app_strip.right(), layout.notification_area.left());
 
-    bar.set_apps(alloc::vec![app("One"), app("Two")]);
+    bar.set_apps(alloc::vec![app("One"), app("Two")], Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.apps.len(), 2);
     assert!(layout.app_strip.left() > layout.separator.right());
@@ -1064,7 +1067,7 @@ fn app_slots_clip_fail_closed_on_a_tiny_screen() {
     // account capsule (48) plus clock (80) take 128. Screen 213, less the two
     // 5 px margins the bar floats in and the two 1 px rims its content sits
     // inside, leaves 201. Remaining for the application strip: 201 - 193 = 8.
-    bar.set_apps(alloc::vec![app("App")]);
+    bar.set_apps(alloc::vec![app("App")], Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
     assert_eq!(layout.apps[0].width, 8, "the slot clips to fit");
@@ -1074,7 +1077,7 @@ fn app_slots_clip_fail_closed_on_a_tiny_screen() {
         TaskbarConfig::bottom_bar(201, 40),
         &Theme::dark().floating(),
     );
-    bar.set_apps(alloc::vec![app("App")]);
+    bar.set_apps(alloc::vec![app("App")], Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     assert!(layout.apps[0].is_empty());
     assert!(
@@ -1095,7 +1098,7 @@ fn app_strip_positions_on_all_four_edges() {
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
         let mut bar = Taskbar::new(config, &theme.clone().floating());
-        bar.set_apps(alloc::vec![app("App")]);
+        bar.set_apps(alloc::vec![app("App")], Scale::ONE);
         let layout = bar.layout(Scale::ONE);
         assert!(!layout.app_strip.is_empty(), "{edge:?}");
         assert_eq!(layout.apps.len(), 1, "{edge:?}");
@@ -1317,7 +1320,7 @@ fn doubling_the_scale_doubles_logical_lengths() {
 #[test]
 fn hit_testing_follows_the_scale() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Editor")]);
+    bar.set_apps(alloc::vec![app("Editor")], Scale::ONE);
     let scale = Scale::from_percent(200).expect("a valid scale");
     // At 2x the bar starts 10 physical pixels in (the doubled margin) and its
     // content 2 further (the doubled rim), the Library button spans 96
@@ -1393,7 +1396,7 @@ fn set_config_latches_every_surface() {
 #[test]
 fn set_apps_clamps_a_stale_hover() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("One"), app("Two")]);
+    bar.set_apps(alloc::vec![app("One"), app("Two")], Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     let second = centre_of(layout.apps[1]);
     bar.track_hover(Some(second), Scale::ONE);
@@ -1401,7 +1404,7 @@ fn set_apps_clamps_a_stale_hover() {
 
     // Replace with one slot: the hover is clamped away rather than left
     // naming a slot that is gone.
-    bar.set_apps(alloc::vec![app("One")]);
+    bar.set_apps(alloc::vec![app("One")], Scale::ONE);
     assert_eq!(bar.apps().hover(), None);
 }
 
@@ -1409,11 +1412,14 @@ fn set_apps_clamps_a_stale_hover() {
 fn app_slot_accessors_report_what_the_session_resolved() {
     let mut bar = bottom_bar();
     let art = Surface::filled(16, 16, Color::rgb(255, 0, 255).premultiply()).expect("artwork");
-    bar.set_apps(alloc::vec![app("Editor")
-        .with_artwork(art)
-        .with_windows(alloc::vec![TaskId(1), TaskId(2)])
-        .with_declaration(declared_menu(), AppBarClick::Open)
-        .with_identity(identity("Editor"))]);
+    bar.set_apps(
+        alloc::vec![app("Editor")
+            .with_artwork(art)
+            .with_windows(alloc::vec![TaskId(1), TaskId(2)])
+            .with_declaration(declared_menu(), AppBarClick::Open)
+            .with_identity(identity("Editor"))],
+        Scale::ONE,
+    );
 
     assert_eq!(bar.apps().len(), 1);
     assert!(!bar.apps().is_empty());
@@ -1469,9 +1475,12 @@ fn library_press_toggles_the_popup_shut() {
 #[test]
 fn a_click_on_a_declared_default_action_reaches_the_application() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Terminal")
-        .with_windows(alloc::vec![TaskId(1)])
-        .with_declaration(declared_menu(), AppBarClick::Open)]);
+    bar.set_apps(
+        alloc::vec![app("Terminal")
+            .with_windows(alloc::vec![TaskId(1)])
+            .with_declaration(declared_menu(), AppBarClick::Open)],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     assert_eq!(
@@ -1490,9 +1499,12 @@ fn a_click_on_a_declared_default_action_reaches_the_application() {
 fn a_click_on_a_raising_declaration_raises_the_applications_window() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(4), "Widgets");
-    bar.set_apps(alloc::vec![app("Widgets")
-        .with_windows(alloc::vec![TaskId(4)])
-        .with_declaration(declared_menu(), AppBarClick::Raise)]);
+    bar.set_apps(
+        alloc::vec![app("Widgets")
+            .with_windows(alloc::vec![TaskId(4)])
+            .with_declaration(declared_menu(), AppBarClick::Raise)],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     assert_eq!(
@@ -1504,9 +1516,10 @@ fn a_click_on_a_raising_declaration_raises_the_applications_window() {
 #[test]
 fn a_click_on_an_application_with_no_windows_and_no_action_does_nothing() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![
-        app("Idle").with_declaration(declared_menu(), AppBarClick::Raise)
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Idle").with_declaration(declared_menu(), AppBarClick::Raise)],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     assert_eq!(
@@ -1544,9 +1557,12 @@ fn each_declared_click_answers_the_same_way_with_and_without_a_window() {
         ] {
             let mut bar = bottom_bar();
             bar.tasks_mut().add(TaskId(1), "Resident");
-            bar.set_apps(alloc::vec![app("Resident")
-                .with_windows(windows.clone())
-                .with_declaration(declared_menu(), click)]);
+            bar.set_apps(
+                alloc::vec![app("Resident")
+                    .with_windows(windows.clone())
+                    .with_declaration(declared_menu(), click)],
+                Scale::ONE,
+            );
             let mut input = TaskbarInput::new();
             let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
             assert_eq!(
@@ -1567,9 +1583,10 @@ fn a_second_click_on_the_focused_application_never_minimises_it() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");
     bar.tasks_mut().set_focused(Some(TaskId(1)));
-    bar.set_apps(alloc::vec![
-        app("Editor").with_windows(alloc::vec![TaskId(1)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(1)])],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     assert_eq!(
@@ -1633,9 +1650,12 @@ fn ask_app_menu(input: &mut TaskbarInput, bar: &mut Taskbar) -> Option<MenuReque
 /// A bar with one application whose declared menu is [`declared_menu`].
 fn bar_with_declared_app() -> Taskbar {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(declared_menu(), AppBarClick::Open)
-        .with_identity(identity("Terminal"))]);
+    bar.set_apps(
+        alloc::vec![app("Terminal")
+            .with_declaration(declared_menu(), AppBarClick::Open)
+            .with_identity(identity("Terminal"))],
+        Scale::ONE,
+    );
     let _ = bar.take_repaint();
     bar
 }
@@ -1685,7 +1705,7 @@ fn an_application_that_declared_no_menu_asks_for_nothing() {
     let mut bar = bottom_bar();
     // A process the session gave a slot for its windows alone: no
     // declaration, so a secondary press is claimed and asks for no menu.
-    bar.set_apps(alloc::vec![app("Unattributed")]);
+    bar.set_apps(alloc::vec![app("Unattributed")], Scale::ONE);
     let _ = bar.take_repaint();
     let mut input = TaskbarInput::new();
     assert!(
@@ -1733,9 +1753,12 @@ fn the_menu_states_exactly_the_rows_the_application_declared() {
     menu.push(AppMenuRow::Info).expect("fits");
 
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(menu, AppBarClick::Open)
-        .with_identity(identity("Terminal"))]);
+    bar.set_apps(
+        alloc::vec![app("Terminal")
+            .with_declaration(menu, AppBarClick::Open)
+            .with_identity(identity("Terminal"))],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
@@ -1787,9 +1810,12 @@ fn a_menu_at_the_row_cap_states_every_row_it_declared() {
     assert!(menu.push(item(99, "Overflow")).is_err(), "the cap holds");
 
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Busy")
-        .with_declaration(menu, AppBarClick::Raise)
-        .with_identity(identity("Busy"))]);
+    bar.set_apps(
+        alloc::vec![app("Busy")
+            .with_declaration(menu, AppBarClick::Raise)
+            .with_identity(identity("Busy"))],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
     assert_eq!(plate_of(&request.model, None).len(), APP_MENU_MAX_ROWS);
@@ -1817,9 +1843,12 @@ fn a_disabled_declared_row_is_stated_disabled_with_its_reason() {
     ))
     .expect("fits");
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(menu, AppBarClick::Open)
-        .with_identity(identity("Terminal"))]);
+    bar.set_apps(
+        alloc::vec![app("Terminal")
+            .with_declaration(menu, AppBarClick::Open)
+            .with_identity(identity("Terminal"))],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
@@ -1862,9 +1891,12 @@ fn a_declared_submenu_becomes_a_child_plate_whose_rows_keep_their_own_ids() {
     menu.push_under(item(7, "Amber"), 0).expect("fits");
     menu.push_under(item(8, "Green"), 0).expect("fits");
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(menu, AppBarClick::Open)
-        .with_identity(identity("Terminal"))]);
+    bar.set_apps(
+        alloc::vec![app("Terminal")
+            .with_declaration(menu, AppBarClick::Open)
+            .with_identity(identity("Terminal"))],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
@@ -1902,9 +1934,12 @@ fn a_separator_inside_a_declared_submenu_opens_a_group_rather_than_a_blank_row()
     menu.push_under(AppMenuRow::Separator, 0).expect("fits");
     menu.push_under(item(8, "Green"), 0).expect("fits");
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Terminal")
-        .with_declaration(menu, AppBarClick::Open)
-        .with_identity(identity("Terminal"))]);
+    bar.set_apps(
+        alloc::vec![app("Terminal")
+            .with_declaration(menu, AppBarClick::Open)
+            .with_identity(identity("Terminal"))],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
@@ -1957,14 +1992,17 @@ fn the_information_row_states_the_manifest_attested_identity() {
 #[test]
 fn a_manifest_without_purpose_or_author_states_only_what_it_has() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Sparse")
-        .with_declaration(declared_menu(), AppBarClick::Raise)
-        .with_identity(AppIdentity {
-            name: String::from("Sparse"),
-            version: String::from("0.1"),
-            purpose: None,
-            author: None,
-        })]);
+    bar.set_apps(
+        alloc::vec![app("Sparse")
+            .with_declaration(declared_menu(), AppBarClick::Raise)
+            .with_identity(AppIdentity {
+                name: String::from("Sparse"),
+                version: String::from("0.1"),
+                purpose: None,
+                author: None,
+            })],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
     let ChainChild::Info(facts) = row_named(&request.model, INFO_ROW_LABEL).child() else {
@@ -2161,9 +2199,10 @@ fn a_pointer_that_left_the_bar_drops_its_hover_and_lets_the_picker_go() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     dwell_on(&mut input, &mut bar, slot);
@@ -2221,9 +2260,10 @@ fn a_pointer_that_entered_the_bar_hovers_without_opening_a_hover_surface() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     let _ = bar.take_repaint();
@@ -2287,9 +2327,10 @@ fn a_pointer_that_left_the_bar_collapses_the_capsules_readout() {
 fn hovering_one_window_asks_for_no_picker() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Only");
-    bar.set_apps(alloc::vec![
-        app("Editor").with_windows(alloc::vec![TaskId(1)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(1)])],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     assert_eq!(
@@ -2310,9 +2351,10 @@ fn resting_on_two_windows_asks_for_the_picker_once_the_dwell_elapses() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
 
@@ -2384,9 +2426,10 @@ fn sweeping_across_a_slot_opens_nothing() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
 
@@ -2411,9 +2454,10 @@ fn sweeping_across_a_slot_opens_nothing() {
 fn the_picker_refuses_fewer_cells_than_a_choice() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Only");
-    bar.set_apps(alloc::vec![
-        app("Editor").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     let _ = bar.take_repaint();
 
     // Fewer than PICKER_MIN_WINDOWS cells, none of them minimised: a picker
@@ -2447,9 +2491,10 @@ fn a_lone_minimised_window_still_opens_a_picker() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Only");
     bar.tasks_mut().minimise(TaskId(1));
-    bar.set_apps(alloc::vec![
-        app("Editor").with_windows(alloc::vec![TaskId(1)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(1)])],
+        Scale::ONE,
+    );
 
     // There is nothing to *choose*, but there is something to *recover*: a
     // minimised sole window is hidden and the slot's own click cannot bring
@@ -2466,9 +2511,10 @@ fn a_lone_minimised_window_still_opens_a_picker() {
 fn a_lone_visible_window_opens_no_picker() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Only");
-    bar.set_apps(alloc::vec![
-        app("Editor").with_windows(alloc::vec![TaskId(1)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(1)])],
+        Scale::ONE,
+    );
 
     assert!(
         !slot_has_picker(&bar, 0),
@@ -2501,9 +2547,10 @@ fn one_predicate_answers_whether_a_slot_has_a_picker() {
 fn the_slot_predicate_reads_the_minimised_state_off_the_task_list() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Only");
-    bar.set_apps(alloc::vec![
-        app("Editor").with_windows(alloc::vec![TaskId(1)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(1)])],
+        Scale::ONE,
+    );
     assert!(!slot_has_picker(&bar, 0));
 
     bar.tasks_mut().minimise(TaskId(1));
@@ -2529,9 +2576,10 @@ fn a_minimised_cell_states_it_and_a_visible_one_does_not() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Hidden");
     bar.tasks_mut().add(TaskId(2), "Shown");
-    bar.set_apps(alloc::vec![
-        app("Editor").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, alloc::vec![minimised, visible], Scale::ONE);
     let first = bar.picker().preview(0).expect("a first cell");
     let second = bar.picker().preview(1).expect("a second cell");
@@ -2567,7 +2615,7 @@ fn a_picker_open_only_to_recover_closes_once_the_window_is_back() {
     bar.tasks_mut().add(TaskId(1), "Only");
     bar.tasks_mut().minimise(TaskId(1));
     let slots = alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(1)])];
-    bar.set_apps(slots.clone());
+    bar.set_apps(slots.clone(), Scale::ONE);
     bar.show_window_picker(
         0,
         alloc::vec![PickerEntry::new(TaskId(1), "Only").minimised(true)],
@@ -2579,7 +2627,7 @@ fn a_picker_open_only_to_recover_closes_once_the_window_is_back() {
     // next time the session hands the bar its slots it goes.
     bar.tasks_mut().set_focused(Some(TaskId(1)));
     assert!(!bar.tasks().is_minimised(TaskId(1)));
-    bar.set_apps(slots);
+    bar.set_apps(slots, Scale::ONE);
     assert!(
         !bar.picker().is_open(),
         "with nothing to choose and nothing left to recover the picker closes"
@@ -2592,11 +2640,10 @@ fn the_picker_lays_a_cell_out_per_window_and_stays_on_screen() {
     for id in 1..=3 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![app("Terminal").with_windows(alloc::vec![
-        TaskId(1),
-        TaskId(2),
-        TaskId(3)
-    ])]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2), TaskId(3)])],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
 
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
@@ -2643,7 +2690,10 @@ fn every_window_is_reachable_however_many_there_are() {
     for &id in &windows {
         bar.tasks_mut().add(id, "W");
     }
-    bar.set_apps(alloc::vec![app("Terminal").with_windows(windows.clone())]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(windows.clone())],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let mut input = TaskbarInput::new();
 
@@ -2736,7 +2786,10 @@ fn a_grid_too_big_for_the_screen_scrolls_instead_of_clipping() {
     for &id in &windows {
         bar.tasks_mut().add(id, "W");
     }
-    bar.set_apps(alloc::vec![app("Terminal").with_windows(windows.clone())]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(windows.clone())],
+        Scale::ONE,
+    );
     bar.show_window_picker(
         0,
         windows
@@ -2787,7 +2840,10 @@ fn a_grid_re_columned_under_a_scrolled_panel_still_lays_cells_out() {
     for &id in &windows {
         bar.tasks_mut().add(id, "W");
     }
-    bar.set_apps(alloc::vec![app("Terminal").with_windows(windows.clone())]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(windows.clone())],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let mut input = TaskbarInput::new();
 
@@ -2825,10 +2881,13 @@ fn a_dwell_whose_slot_moved_under_it_opens_nothing() {
     for id in 1..=4 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)]),
-        app("Editor").with_windows(alloc::vec![TaskId(3), TaskId(4)]),
-    ]);
+    bar.set_apps(
+        alloc::vec![
+            app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)]),
+            app("Editor").with_windows(alloc::vec![TaskId(3), TaskId(4)]),
+        ],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let second = centre_of(bar.layout(Scale::ONE).apps[1]);
     let _ = moved_at(&mut input, &mut bar, second, NOW_NS);
@@ -2836,9 +2895,10 @@ fn a_dwell_whose_slot_moved_under_it_opens_nothing() {
 
     // The leading application exits, so what was slot 1 is now slot 0 and the
     // pointer rests over nothing.
-    bar.set_apps(alloc::vec![
-        app("Editor").with_windows(alloc::vec![TaskId(3), TaskId(4)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(3), TaskId(4)])],
+        Scale::ONE,
+    );
     assert_eq!(
         input.tick(&mut bar, NOW_NS + PICKER_OPEN_DELAY_NS),
         TaskbarResponse::Ignored,
@@ -2855,9 +2915,10 @@ fn a_late_thumbnail_lands_in_its_own_cell() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let _ = bar.take_repaint();
     assert!(
@@ -2889,9 +2950,10 @@ fn hovering_a_cell_highlights_only_the_picker() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let layout = bar.picker_layout(Scale::ONE).expect("open");
     let mut input = TaskbarInput::new();
@@ -2925,9 +2987,10 @@ fn pressing_a_cell_chooses_that_window_and_closes_the_picker() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     bar.tasks_mut().minimise(TaskId(2));
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let layout = bar.picker_layout(Scale::ONE).expect("open");
@@ -2952,9 +3015,10 @@ fn pressing_the_pickers_own_chrome_is_claimed_and_does_nothing() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let layout = bar.picker_layout(Scale::ONE).expect("open");
     let mut input = TaskbarInput::new();
@@ -2977,9 +3041,10 @@ fn the_picker_takes_no_keyboard() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let mut input = TaskbarInput::new();
     // A hover surface holds no keyboard: the focused window keeps its keys,
@@ -3000,9 +3065,10 @@ fn leaving_the_slot_closes_the_picker_after_the_grace() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let mut input = TaskbarInput::new();
 
@@ -3046,9 +3112,10 @@ fn losing_the_second_window_closes_the_picker_with_it() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     assert!(bar.picker().is_open());
     let _ = bar.take_repaint();
@@ -3057,9 +3124,10 @@ fn losing_the_second_window_closes_the_picker_with_it() {
     // the bar a fresh strip: the picker has nothing left to choose between
     // and must not survive showing windows that are gone.
     bar.tasks_mut().remove(TaskId(2));
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1)])],
+        Scale::ONE,
+    );
     assert!(!bar.picker().is_open());
     assert!(bar.picker_layout(Scale::ONE).is_none());
     assert_eq!(
@@ -3074,16 +3142,16 @@ fn the_picker_survives_a_strip_update_that_keeps_the_choice() {
     for id in 1..=3 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![app("Terminal").with_windows(alloc::vec![
-        TaskId(1),
-        TaskId(2),
-        TaskId(3)
-    ])]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2), TaskId(3)])],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     bar.tasks_mut().remove(TaskId(3));
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     assert!(
         bar.picker().is_open(),
         "two windows is still a choice, so the picker stays"
@@ -3096,9 +3164,12 @@ fn a_modal_surface_keeps_the_picker_from_opening_underneath_it() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![app("Terminal")
-        .with_windows(alloc::vec![TaskId(1), TaskId(2)])
-        .with_declaration(declared_menu(), AppBarClick::Open)]);
+    bar.set_apps(
+        alloc::vec![app("Terminal")
+            .with_windows(alloc::vec![TaskId(1), TaskId(2)])
+            .with_declaration(declared_menu(), AppBarClick::Open)],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
 
@@ -3120,9 +3191,12 @@ fn clicking_the_slot_closes_the_picker_and_acts_on_the_application() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![app("Terminal")
-        .with_windows(alloc::vec![TaskId(1), TaskId(2)])
-        .with_declaration(declared_menu(), AppBarClick::Open)]);
+    bar.set_apps(
+        alloc::vec![app("Terminal")
+            .with_windows(alloc::vec![TaskId(1), TaskId(2)])
+            .with_declaration(declared_menu(), AppBarClick::Open)],
+        Scale::ONE,
+    );
     bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
     let mut input = TaskbarInput::new();
     let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
@@ -3141,9 +3215,10 @@ fn render_picker_paints_a_thumbnail_or_the_applications_glyph() {
     for id in 1..=2 {
         bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
     }
-    bar.set_apps(alloc::vec![
-        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
-    ]);
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
     let renderer = TaskbarRenderer::new(test_icon_cache());
     assert!(
         painted_picker(&renderer, &bar, Scale::ONE).is_none(),
@@ -3254,9 +3329,12 @@ fn the_library_announces_each_showing_once_and_never_while_closed() {
 fn click_away_dismisses_without_acting_on_what_it_hit() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");
-    bar.set_apps(alloc::vec![app("Editor")
-        .with_windows(alloc::vec![TaskId(1)])
-        .with_declaration(declared_menu(), AppBarClick::Open)]);
+    bar.set_apps(
+        alloc::vec![app("Editor")
+            .with_windows(alloc::vec![TaskId(1)])
+            .with_declaration(declared_menu(), AppBarClick::Open)],
+        Scale::ONE,
+    );
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
 
@@ -4371,7 +4449,7 @@ fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
             ] {
                 let mut bar = bottom_bar();
                 bar.apply_theme(&theme.clone().floating());
-                bar.set_apps(alloc::vec![app("App")]);
+                bar.set_apps(alloc::vec![app("App")], Scale::ONE);
                 let layout = bar.layout(Scale::ONE);
                 let frame = layout.bar;
                 let slot = if on_strip {
@@ -4447,7 +4525,7 @@ fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
 #[test]
 fn every_icon_on_the_strip_rests_bare_on_the_bar() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Editor")]);
+    bar.set_apps(alloc::vec![app("Editor")], Scale::ONE);
     let theme = Theme::dark();
     let palette = theme.palette();
     let surface = painted_bar(
@@ -4494,7 +4572,7 @@ fn every_icon_on_the_strip_rests_bare_on_the_bar() {
 #[test]
 fn the_separator_rule_is_painted_in_the_border_colour() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Editor")]);
+    bar.set_apps(alloc::vec![app("Editor")], Scale::ONE);
     let theme = Theme::dark();
     let palette = theme.palette();
     let surface = painted_bar(
@@ -4538,7 +4616,7 @@ fn the_separator_rule_is_painted_in_the_border_colour() {
 #[test]
 fn hovering_the_launcher_washes_only_that_slot_and_draws_no_edge() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Editor")]);
+    bar.set_apps(alloc::vec![app("Editor")], Scale::ONE);
     let theme = Theme::dark();
     let palette = theme.palette();
     let layout = bar.layout(Scale::ONE);
@@ -4583,7 +4661,7 @@ fn hovering_the_launcher_washes_only_that_slot_and_draws_no_edge() {
 #[test]
 fn the_library_button_reads_as_held_down_while_its_popup_is_open() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("Editor")]);
+    bar.set_apps(alloc::vec![app("Editor")], Scale::ONE);
     let theme = Theme::dark();
     let palette = theme.palette();
     let layout = bar.layout(Scale::ONE);
@@ -4617,10 +4695,13 @@ fn an_app_slot_carries_no_presence_or_focus_mark() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");
     bar.tasks_mut().set_focused(Some(TaskId(1)));
-    bar.set_apps(alloc::vec![
-        app("Editor").with_windows(alloc::vec![TaskId(1)]),
-        app("Idle"),
-    ]);
+    bar.set_apps(
+        alloc::vec![
+            app("Editor").with_windows(alloc::vec![TaskId(1)]),
+            app("Idle"),
+        ],
+        Scale::ONE,
+    );
 
     let layout = bar.layout(Scale::ONE);
     let surface = painted_bar(
@@ -4814,11 +4895,14 @@ fn app_strip_and_menu_actions_latch_repaints() {
     let mut bar = bottom_bar();
     let _ = bar.take_repaint();
 
-    // set_apps draws on the bar's own strip: bar only.
-    bar.set_apps(alloc::vec![
-        app("App").with_declaration(declared_menu(), AppBarClick::Open)
-    ]);
-    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
+    // set_apps draws on the bar's own strip, and a changed slot count re-lays
+    // every rectangle in it: the strip's region, never the whole bar.
+    bar.set_apps(
+        alloc::vec![app("App").with_declaration(declared_menu(), AppBarClick::Open)],
+        Scale::ONE,
+    );
+    let strip = bar.layout(Scale::ONE).app_strip;
+    assert_eq!(bar.take_repaint(), bar_owes(&bar, Scale::ONE, &[strip]));
 
     // Motion over a slot changes that slot's own hover feedback and nothing
     // else the bar draws.
@@ -4897,7 +4981,7 @@ fn an_app_slot_draws_its_icon_and_no_label_beside_it() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
     let label = "An enormously long application name that cannot fit";
-    bar.set_apps(alloc::vec![app(label)]);
+    bar.set_apps(alloc::vec![app(label)], Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     let slot = layout.apps[0];
     let surface = painted_bar(
@@ -4962,10 +5046,13 @@ fn app_slots_render_artwork_or_the_fallback_glyph() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
     let magenta = Color::rgb(255, 0, 255).premultiply();
-    bar.set_apps(alloc::vec![
-        app("Art").with_artwork(Surface::filled(16, 16, magenta).unwrap()),
-        app("Glyph"),
-    ]);
+    bar.set_apps(
+        alloc::vec![
+            app("Art").with_artwork(Surface::filled(16, 16, magenta).unwrap()),
+            app("Glyph"),
+        ],
+        Scale::ONE,
+    );
     let layout = bar.layout(Scale::ONE);
     let surface = painted_bar(
         &mut TaskbarRenderer::new(test_icon_cache()),
@@ -4998,10 +5085,13 @@ fn each_app_slot_draws_its_own_application_artwork() {
     let mut bar = bottom_bar();
     let magenta = Color::rgb(255, 0, 255).premultiply();
     let cyan = Color::rgb(0, 255, 255).premultiply();
-    bar.set_apps(alloc::vec![
-        app("Magenta").with_artwork(Surface::filled(16, 16, magenta).unwrap()),
-        app("Cyan").with_artwork(Surface::filled(16, 16, cyan).unwrap()),
-    ]);
+    bar.set_apps(
+        alloc::vec![
+            app("Magenta").with_artwork(Surface::filled(16, 16, magenta).unwrap()),
+            app("Cyan").with_artwork(Surface::filled(16, 16, cyan).unwrap()),
+        ],
+        Scale::ONE,
+    );
 
     let layout = bar.layout(Scale::ONE);
     let surface = painted_bar(
@@ -5037,7 +5127,7 @@ fn an_app_slot_with_no_resolved_artwork_keeps_the_shared_application_glyph() {
     // A process this desktop cannot attribute to a bundle: the session
     // resolves no picture for it, and the slot must still read as an
     // application rather than as a blank plate.
-    bar.set_apps(alloc::vec![app("Unattributed")]);
+    bar.set_apps(alloc::vec![app("Unattributed")], Scale::ONE);
 
     let layout = bar.layout(Scale::ONE);
     let surface = painted_bar(
@@ -5346,10 +5436,13 @@ fn an_application_slot_falls_back_to_its_kinds_artwork_before_the_glyph() {
     let mut bar = bottom_bar();
     let own = Color::rgb(255, 0, 255);
     let bundle = Color::rgb(0, 255, 0);
-    bar.set_apps(alloc::vec![
-        app("Own").with_artwork(Surface::filled(16, 16, own.premultiply()).expect("artwork")),
-        app("Shipped"),
-    ]);
+    bar.set_apps(
+        alloc::vec![
+            app("Own").with_artwork(Surface::filled(16, 16, own.premultiply()).expect("artwork")),
+            app("Shipped"),
+        ],
+        Scale::ONE,
+    );
     let mut artwork = FakeArtwork::new(&[(IconKind::AppBundle, bundle)]);
 
     let layout = bar.layout(Scale::ONE);
@@ -5382,7 +5475,7 @@ fn an_application_slot_falls_back_to_its_kinds_artwork_before_the_glyph() {
 fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
     let theme = Theme::dark();
     let mut bar = bar_with_status_signals();
-    bar.set_apps(alloc::vec![app("App")]);
+    bar.set_apps(alloc::vec![app("App")], Scale::ONE);
     bar.clock_mut().set_label("12:34");
 
     let layout = bar.layout(Scale::ONE);
@@ -5757,8 +5850,8 @@ fn a_rebuild_drops_stale_row_artwork() {
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
     let magenta = Color::rgb(255, 0, 255).premultiply();
-    bar.library_mut()
-        .set_row_artwork(1, Surface::filled(16, 16, magenta));
+    let layout = bar.library_layout(Scale::ONE);
+    bar.set_library_row_artwork(1, &layout, Surface::filled(16, 16, magenta));
     assert!(bar.library().row_artwork(1).is_some());
 
     // Re-cataloguing re-indexes the rows, so artwork keyed to the old
@@ -5767,8 +5860,7 @@ fn a_rebuild_drops_stale_row_artwork() {
     assert!(bar.library().row_artwork(1).is_none());
 
     // An index past the end is ignored rather than panicking.
-    bar.library_mut()
-        .set_row_artwork(9_999, Surface::filled(16, 16, magenta));
+    bar.set_library_row_artwork(9_999, &layout, Surface::filled(16, 16, magenta));
     assert!(bar.library().row_artwork(9_999).is_none());
 }
 
@@ -5781,10 +5873,9 @@ fn a_popup_row_draws_its_artwork_and_a_row_without_it_draws_the_glyph() {
     let magenta = Color::rgb(255, 0, 255).premultiply();
     let (row, _) = visible_row_where(&bar, |row| matches!(row, LibraryRow::Entry { .. }))
         .expect("an entry row is shown");
-    bar.library_mut()
-        .set_row_artwork(row, Surface::filled(16, 16, magenta));
-
     let layout = bar.library_layout(Scale::ONE);
+    bar.set_library_row_artwork(row, &layout, Surface::filled(16, 16, magenta));
+
     let rect = layout
         .rows
         .iter()
@@ -7116,7 +7207,7 @@ fn every_popup_the_bar_opens_grounds_itself_in_the_floating_chrome() {
 #[test]
 fn a_hover_crossing_two_slots_owes_the_slot_it_left_and_the_slot_it_entered() {
     let mut bar = bottom_bar();
-    bar.set_apps(alloc::vec![app("One"), app("Two")]);
+    bar.set_apps(alloc::vec![app("One"), app("Two")], Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     bar.track_hover(Some(centre_of(layout.apps[0])), Scale::ONE);
     let _ = bar.take_repaint();
@@ -7140,7 +7231,7 @@ fn a_bar_repaint_scoped_to_a_hovered_control_lands_what_a_whole_paint_lands() {
     let scale = Scale::ONE;
     for target in [Target::Library, Target::Slot(1)] {
         let mut bar = bottom_bar();
-        bar.set_apps(alloc::vec![app("One"), app("Two")]);
+        bar.set_apps(alloc::vec![app("One"), app("Two")], Scale::ONE);
         let layout = bar.layout(scale);
         let at = match target {
             Target::Library => centre_of(layout.library),
@@ -8004,4 +8095,208 @@ fn asking_for_the_system_menu_latches_nothing_the_bar_draws() {
         TaskbarRepaint::NONE,
         "the plate is the desktop chain's surface, so the bar repaints nothing"
     );
+}
+
+/// An artwork lookup that answers every request with one distinctive picture:
+/// what a bar's paint sees once the shipped class masters have been decoded.
+///
+/// The bar only ever asks it for a *class* picture — a control carrying one of
+/// its own draws that instead and never reaches the lookup — so answering
+/// everything is answering the class tier.
+struct ClassArtwork(Surface);
+
+impl IconArtwork for ClassArtwork {
+    fn artwork(&mut self, _request: IconRequest<'_>, _side: u32) -> Option<IconPicture<'_>> {
+        Some(IconPicture::Artwork(&self.0))
+    }
+}
+
+/// A delivered batch naming each of `kinds`' shipped class masters at every
+/// side the bar could draw one at, built by driving a real desk so the test
+/// exercises the answer an embedder actually receives.
+fn landed_class_artwork(kinds: &[IconKind]) -> tairix_icon::Landed {
+    let mut desk = tairix_icon::ArtworkDesk::new();
+    for &kind in kinds {
+        for side in 1..=THICKNESS {
+            desk.want(
+                &tairix_icon::ArtworkKey::Asset(tairix_icon::icon_artwork_path(kind)),
+                side,
+            );
+        }
+    }
+    while let Some(job) = desk.next_job() {
+        let _ = desk.deliver(&job, None);
+    }
+    desk.take_landed()
+}
+
+/// The screen rectangles of every pixel that differs between two paints of
+/// the same bar, as one region — what a latch must cover.
+fn pixels_moved(before: &Surface, after: &Surface, frame: Rect) -> Vec<Point> {
+    (frame.top()..frame.bottom())
+        .flat_map(|y| (frame.left()..frame.right()).map(move |x| Point::new(x, y)))
+        .filter(|p| pixel_at(before, frame, p.x, p.y) != pixel_at(after, frame, p.x, p.y))
+        .collect()
+}
+
+/// A push that lands the strip already on the bar changes no pixel, so it must
+/// repaint none. The session re-derives the strip on every wake that could
+/// have moved it, most of which moved nothing, so an unconditional latch here
+/// recomposed a full-width bar for as long as icons kept arriving.
+#[test]
+fn a_strip_push_that_changes_nothing_repaints_nothing() {
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("One"), app("Two")], Scale::ONE);
+    let _ = bar.take_repaint();
+
+    bar.set_apps(alloc::vec![app("One"), app("Two")], Scale::ONE);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
+}
+
+/// Artwork arriving for one application owes that application's slot, not the
+/// strip and not the bar.
+#[test]
+fn artwork_arriving_for_one_slot_repaints_that_slot_alone() {
+    let mut bar = bottom_bar();
+    bar.set_apps(
+        alloc::vec![app("One"), app("Two"), app("Three")],
+        Scale::ONE,
+    );
+    let _ = bar.take_repaint();
+    let layout = bar.layout(Scale::ONE);
+
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    bar.set_apps(
+        alloc::vec![
+            app("One"),
+            app("Two").with_artwork(Surface::filled(16, 16, magenta).expect("a picture")),
+            app("Three"),
+        ],
+        Scale::ONE,
+    );
+    assert_eq!(
+        bar.take_repaint(),
+        bar_owes(&bar, Scale::ONE, &[layout.apps[1]]),
+        "one slot's picture is one slot's pixels"
+    );
+}
+
+/// A launcher row's picture owes that row, and re-setting the picture it
+/// already holds owes nothing — the session re-resolves every shown row before
+/// each paint, so a latch that did not compare would repaint the popup for
+/// ever.
+#[test]
+fn artwork_arriving_for_one_library_row_repaints_that_row_alone() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let layout = bar.library_layout(Scale::ONE);
+    let (row, rect) = visible_row_where(&bar, |row| matches!(row, LibraryRow::Entry { .. }))
+        .expect("an entry row is shown");
+    let _ = bar.take_repaint();
+
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    let picture = Surface::filled(16, 16, magenta).expect("a picture");
+    bar.set_library_row_artwork(row, &layout, Some(picture.clone()));
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint {
+            library: owes(layout.panel, &[rect]),
+            ..TaskbarRepaint::NONE
+        },
+        "one row's picture is one row's pixels"
+    );
+
+    bar.set_library_row_artwork(row, &layout, Some(picture));
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NONE,
+        "re-resolving a row to the picture it already holds changes nothing"
+    );
+}
+
+/// A batch naming a class master the bar draws owes the controls that fall
+/// back to it, and one naming a class nothing on the bar draws owes nothing.
+#[test]
+fn adopting_landed_class_artwork_owes_only_the_controls_that_draw_it() {
+    let mut bar = bottom_bar();
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    bar.set_apps(
+        alloc::vec![
+            app("Own").with_artwork(Surface::filled(16, 16, magenta).expect("a picture")),
+            app("Class"),
+        ],
+        Scale::ONE,
+    );
+    let _ = bar.take_repaint();
+    let layout = bar.layout(Scale::ONE);
+
+    bar.adopt_icon_artwork(&landed_class_artwork(&[IconKind::AppBundle]), Scale::ONE);
+    assert_eq!(
+        bar.take_repaint(),
+        bar_owes(&bar, Scale::ONE, &[layout.apps[1]]),
+        "the slot carrying its own picture never reaches the class tier"
+    );
+
+    bar.adopt_icon_artwork(&landed_class_artwork(&[IconKind::Library]), Scale::ONE);
+    assert_eq!(
+        bar.take_repaint(),
+        bar_owes(&bar, Scale::ONE, &[layout.library]),
+        "the launcher button is the only control drawing the Library class"
+    );
+
+    bar.adopt_icon_artwork(&landed_class_artwork(&[IconKind::Bell]), Scale::ONE);
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::NONE,
+        "a class the bar draws nowhere costs no pixels"
+    );
+}
+
+/// The guard that keeps the adopt path and the paint from drifting apart.
+///
+/// The bar resolves some pictures from the shared artwork cache *as it
+/// paints* — a control carrying none of its own falls back to its class's
+/// shipped master — so a decode landing for one moves pixels with no model
+/// change behind it, and `adopt_icon_artwork` is the only thing that latches
+/// them. Paint the bar with the class tier empty and again with it answering,
+/// and every pixel that moved must lie inside what the adopt named. A control
+/// that starts resolving a picture at paint time without the adopt path
+/// learning of it fails here rather than leaving stale pixels on a screen.
+#[test]
+fn adopting_landed_class_artwork_covers_every_pixel_it_moves() {
+    let scale = Scale::ONE;
+    let mut bar = bottom_bar();
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    bar.set_apps(
+        alloc::vec![
+            app("Own").with_artwork(Surface::filled(16, 16, magenta).expect("a picture")),
+            app("Class"),
+        ],
+        scale,
+    );
+    let _ = bar.take_repaint();
+
+    let frame = bar.layout(scale).bar;
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let before = painted_bar(&mut renderer, &bar, scale, &mut NoArtwork).expect("bar renders");
+    let mut class = ClassArtwork(
+        Surface::filled(8, 8, Color::rgb(0, 255, 0).premultiply()).expect("a picture"),
+    );
+    let after = painted_bar(&mut renderer, &bar, scale, &mut class).expect("bar renders");
+
+    let moved = pixels_moved(&before, &after, frame);
+    assert!(
+        !moved.is_empty(),
+        "the fixture must actually resolve a class picture, or it guards nothing"
+    );
+
+    bar.adopt_icon_artwork(&landed_class_artwork(&tairix_icon::ICON_KINDS), scale);
+    let owed = bar.take_repaint().bar.area(frame.width, frame.height);
+    for point in moved {
+        assert!(
+            owed.contains(Point::new(point.x - frame.left(), point.y - frame.top())),
+            "the paint moved a pixel at {point:?} that the adopt did not name"
+        );
+    }
 }

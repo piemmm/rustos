@@ -49,7 +49,13 @@ pub struct AppIdentity {
 }
 
 /// One running application, as the session resolved it for the bar.
-#[derive(Clone, Debug)]
+///
+/// Compared by value, including its artwork's pixels: the session re-derives
+/// the whole strip whenever anything about the running set *might* have
+/// moved, which is far more often than anything does, so the bar decides
+/// what to repaint by what actually changed rather than by having been
+/// handed a strip.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppSlot {
     label: String,
     icon: IconKind,
@@ -173,11 +179,40 @@ impl AppStrip {
         Self::default()
     }
 
-    /// Replace the strip's slots with the session's freshly resolved ones.
+    /// Replace the strip's slots with the session's freshly resolved ones,
+    /// reporting the pixels that changed — `slots` being the strip's screen
+    /// rectangles in slot order and `strip` the whole region they are laid
+    /// out in.
+    ///
+    /// The session re-derives the strip on every wake that could have moved
+    /// it, so most pushes land the set already there: comparing is what keeps
+    /// an unchanged push from repainting a full-width bar, and it costs a
+    /// memcmp of a handful of icon-sized pictures against the blend it saves.
+    /// A changed slot owes its own rectangle; a changed *count* re-lays every
+    /// rectangle inside the strip, which is not one slot's damage but the
+    /// region's.
     ///
     /// A hover that no longer names a slot is dropped, so the strip can
-    /// never highlight a slot that is gone.
-    pub fn set_apps(&mut self, apps: Vec<AppSlot>) {
+    /// never highlight a slot that is gone. That can only happen as the count
+    /// shrinks, which already owes the region — as does a slot `slots` names
+    /// no rectangle for, because a report that named nothing would leave its
+    /// pixels stale.
+    pub(crate) fn set_apps(
+        &mut self,
+        apps: Vec<AppSlot>,
+        slots: &[Rect],
+        strip: Rect,
+        damage: &mut Region,
+    ) {
+        if apps.len() == self.apps.len() {
+            for (index, (was, now)) in self.apps.iter().zip(&apps).enumerate() {
+                if was != now {
+                    damage.add(slots.get(index).copied().unwrap_or(strip));
+                }
+            }
+        } else {
+            damage.add(strip);
+        }
         self.hover = self.hover.filter(|&index| index < apps.len());
         self.apps = apps;
     }

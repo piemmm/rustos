@@ -254,7 +254,7 @@ impl<R: ArtworkReader, D: ArtworkRasteriser> ArtworkResolver for InlineArtwork<R
 
 /// A thing's *own* artwork, preferred over its kind's shipped artwork.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum OwnIcon<'a> {
+pub(crate) enum OwnIcon<'a> {
     /// An asset path the caller has already resolved (the program-library
     /// catalog stores one per listed application).
     Asset(&'a str),
@@ -340,7 +340,7 @@ impl<'a> IconRequest<'a> {
 
     /// The candidates this request resolves through, in the order they are
     /// tried. The one statement of the desktop's icon-resolution order.
-    fn tiers(self) -> impl Iterator<Item = Tier<'a>> {
+    pub(crate) fn tiers(self) -> impl Iterator<Item = Tier<'a>> {
         [
             self.own.map(Tier::Own),
             Some(Tier::Raster(self.kind)),
@@ -355,7 +355,7 @@ impl<'a> IconRequest<'a> {
 ///
 /// Held as the kind rather than as a built path so a tier that is never
 /// reached never formats one.
-enum Tier<'a> {
+pub(crate) enum Tier<'a> {
     /// The thing's own icon.
     Own(OwnIcon<'a>),
     /// The class's shipped raster master.
@@ -366,7 +366,7 @@ enum Tier<'a> {
 
 impl Tier<'_> {
     /// The cache slot this candidate occupies.
-    fn cache_key(self) -> ArtworkKey {
+    pub(crate) fn cache_key(self) -> ArtworkKey {
         match self {
             Self::Own(OwnIcon::Asset(path)) => ArtworkKey::Asset(String::from(path)),
             Self::Own(OwnIcon::Bundle(dir)) => ArtworkKey::Bundle(String::from(dir)),

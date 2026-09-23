@@ -100,9 +100,9 @@ pub fn folder_label(category: LibraryCategory) -> &'static str {
 /// The popup reports these for the entry rows it actually shows so the
 /// session (which holds the filesystem and decode capabilities the bar does
 /// not) resolves each row's icon and hands it back with
-/// [`LibraryPopup::set_row_artwork`] — the same render/resolve split the
-/// application strip uses. Folder rows raise no request: they draw their
-/// built-in folder glyph.
+/// [`Taskbar::set_library_row_artwork`](crate::Taskbar::set_library_row_artwork)
+/// — the same render/resolve split the application strip uses. Folder rows
+/// raise no request: they draw their built-in folder glyph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LibraryIconRequest {
     /// The row's index into [`LibraryPopup::rows`].
@@ -310,9 +310,9 @@ impl LibraryPopup {
     /// they draw their own folder glyph), each carrying the row's index, the
     /// pixel side its icon draws at, and the entry to resolve the artwork
     /// from. The session resolves each and hands the result back with
-    /// [`set_row_artwork`](Self::set_row_artwork). Only the rows `layout`
-    /// shows are reported, so opening a large library never asks the session
-    /// to decode an icon nobody sees.
+    /// [`Taskbar::set_library_row_artwork`](crate::Taskbar::set_library_row_artwork).
+    /// Only the rows `layout` shows are reported, so opening a large library
+    /// never asks the session to decode an icon nobody sees.
     #[must_use]
     pub fn visible_icon_requests(
         &self,
@@ -339,13 +339,34 @@ impl LibraryPopup {
     }
 
     /// Set the owner-resolved icon artwork for the row at `index` (an index
-    /// into [`rows`](Self::rows)), or clear it with `None`.
+    /// into [`rows`](Self::rows)), or clear it with `None`, reporting the
+    /// row's screen rectangle when that changed the picture it draws.
+    ///
+    /// The session re-resolves every shown row before each paint, so the
+    /// comparison is the whole rule: reporting unconditionally would re-dirty
+    /// the popup on every frame it is drawn and repaint it for ever, while
+    /// reporting nothing leaves a decode that lands while the popup is up
+    /// unshown until some unrelated change repaints it.
     ///
     /// Out-of-range indices are ignored, so a request resolved against a
-    /// since-rebuilt row list is a no-op rather than a panic.
-    pub fn set_row_artwork(&mut self, index: usize, artwork: Option<Surface>) {
-        if let Some(slot) = self.row_artwork.get_mut(index) {
-            *slot = artwork;
+    /// since-rebuilt row list is a no-op rather than a panic; a row `layout`
+    /// does not show has no rectangle and reports none.
+    pub(crate) fn set_row_artwork(
+        &mut self,
+        index: usize,
+        layout: &LibraryLayout,
+        artwork: Option<Surface>,
+        damage: &mut Region,
+    ) {
+        let Some(slot) = self.row_artwork.get_mut(index) else {
+            return;
+        };
+        if *slot == artwork {
+            return;
+        }
+        *slot = artwork;
+        if let Some(&(_, rect)) = layout.rows.iter().find(|&&(row, _)| row == index) {
+            damage.add(rect);
         }
     }
 
