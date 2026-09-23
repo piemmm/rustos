@@ -36,7 +36,7 @@ fn exercise(bytes: &[u8]) {
 
 #[test]
 fn random_short_inputs_never_panic() {
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "random_short_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -46,7 +46,7 @@ fn random_short_inputs_never_panic() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
-            let size = ((rng.next_u64() & 0xFFFF) as usize) % (buf.len() + 1);
+            let size = rng.at_most(buf.len());
             rng.fill(&mut buf[..size]);
             exercise(&buf[..size]);
         }

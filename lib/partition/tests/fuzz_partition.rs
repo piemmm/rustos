@@ -18,13 +18,14 @@
 //!   aborting *is* the failure.
 //!
 //! TAIRiX pulls in no external fuzz runner: a
-//! per-run-seeded LCG mutates valid seed images (a real MBR from
+//! per-run-seeded `Prng` mutates valid seed images (a real MBR from
 //! [`tairix_partition::mbr::encode`] and a CRC-correct GPT) and feeds pure
 //! noise. A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep;
 //! `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::DriverError;
+use tairix_fuzzseed::Prng;
 use tairix_partition::{gpt, mbr, parse_partition_table, Partition, PartitionType};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -146,16 +147,6 @@ fn gpt_image() -> Vec<u8> {
     img
 }
 
-/// `x` reduced into `0..=max`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
-
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
 /// Parse `bytes` as a disk at both common logical-block sizes and drain
 /// the result: must never panic, whatever the image.
 fn exercise_never_panics(bytes: &[u8]) {
@@ -188,40 +179,35 @@ fn parsing_any_partition_table_never_panics() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let corpus = [mbr_image(), gpt_image()];
 
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "parsing_any_partition_table_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A real disk image with a handful of bytes flipped at random,
         //    hammering the signature, type bytes, LBAs, header, and CRCs.
-        let template = &corpus[bounded(next(), corpus.len() - 1)];
+        let template = rng.pick(&corpus);
         let mut mutated = template.clone();
-        let flips = bounded(next(), 24);
+        let flips = rng.at_most(24);
         for _ in 0..flips {
             if mutated.is_empty() {
                 break;
             }
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         exercise_never_panics(&mutated);
 
         // 2. A truncation of a real image, driving the bounds checks.
-        let keep = bounded(next(), template.len());
+        let keep = rng.at_most(template.len());
         exercise_never_panics(&template[..keep]);
 
         // 3. Pure noise of an arbitrary length.
-        let nlen = bounded(next(), 9000);
-        let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 29)).collect();
+        let nlen = rng.at_most(9000);
+        let mut noise = vec![0u8; nlen];
+        rng.fill(&mut noise);
         exercise_never_panics(&noise);
 
         iteration += 1;

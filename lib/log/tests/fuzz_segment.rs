@@ -77,7 +77,7 @@ fn exercise(bytes: &[u8], k: &LogAttestationKey) {
 
 #[test]
 fn random_and_mutated_segments_never_panic() {
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "random_and_mutated_segments_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -92,7 +92,7 @@ fn random_and_mutated_segments_never_panic() {
         for i in 0..SMOKE_ITERATIONS {
             if i % 2 == 0 {
                 // Pure random bytes of a random length.
-                let size = ((rng.next_u64() & 0x3FF) as usize) % (buf.len() + 1);
+                let size = rng.at_most(buf.len());
                 rng.fill(&mut buf[..size]);
                 exercise(&buf[..size], &k);
             } else {
@@ -100,8 +100,8 @@ fn random_and_mutated_segments_never_panic() {
                 buf[..base_len].copy_from_slice(&base[..base_len]);
                 let flips = (rng.next_u64() % 4) + 1;
                 for _ in 0..flips {
-                    let pos = ((rng.next_u64() & 0x3FF) as usize) % base_len;
-                    buf[pos] ^= rng.next_u64().to_le_bytes()[0] | 1;
+                    let pos = rng.below(base_len);
+                    buf[pos] ^= rng.next_u8() | 1;
                 }
                 exercise(&buf[..base_len], &k);
             }

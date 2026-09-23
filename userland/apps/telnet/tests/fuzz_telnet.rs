@@ -19,6 +19,7 @@
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
+use tairix_fuzzseed::Prng;
 use tairix_telnet::command::Config;
 use tairix_telnet::linemode::{Linemode, SlcTable, SLC_MAX};
 use tairix_telnet::nvt::{NvtEvent, Parser, MAX_SUBNEG_LEN};
@@ -36,10 +37,10 @@ const CHUNKS_PER_ROUND: usize = 8;
 
 /// Feed arbitrary bytes through the parser in arbitrary chunks and assert the
 /// bounded, total invariants.
-fn exercise_parser(rng: &mut Lcg, buf: &mut [u8; MAX_CHUNK]) {
+fn exercise_parser(rng: &mut Prng, buf: &mut [u8; MAX_CHUNK]) {
     let mut parser = Parser::new();
     for _ in 0..CHUNKS_PER_ROUND {
-        let size = rng.index(MAX_CHUNK + 1);
+        let size = rng.below(MAX_CHUNK + 1);
         rng.fill(&mut buf[..size]);
         parser.feed(&buf[..size], |event| {
             if let NvtEvent::Subnegotiation { params, .. } = event {
@@ -55,12 +56,12 @@ fn exercise_parser(rng: &mut Lcg, buf: &mut [u8; MAX_CHUNK]) {
 
 /// Drive a live session with arbitrary network bytes, asserting it never
 /// panics, never amplifies, and never emits anything but well-formed telnet.
-fn exercise_session(rng: &mut Lcg, buf: &mut [u8; MAX_CHUNK]) {
+fn exercise_session(rng: &mut Prng, buf: &mut [u8; MAX_CHUNK]) {
     let mut session = Session::new(&Config::default(), "TAIRIX", 38_400);
     session.begin(&Config::default());
     let _ = session.take_wire();
     for _ in 0..CHUNKS_PER_ROUND {
-        let size = rng.index(MAX_CHUNK + 1);
+        let size = rng.below(MAX_CHUNK + 1);
         rng.fill(&mut buf[..size]);
         let _ = session.on_network(&buf[..size]);
         let wire = session.take_wire();
@@ -78,7 +79,7 @@ fn exercise_session(rng: &mut Lcg, buf: &mut [u8; MAX_CHUNK]) {
 
         // Arbitrary keystrokes on the same session, so both directions are
         // driven against whatever state the hostile stream left behind.
-        let typed = rng.index(MAX_CHUNK + 1);
+        let typed = rng.below(MAX_CHUNK + 1);
         rng.fill(&mut buf[..typed]);
         let _ = session.on_keyboard(&buf[..typed]);
         reparses(&session.take_wire());
@@ -113,11 +114,11 @@ fn reparses(bytes: &[u8]) {
 
 /// Drive the RFC 1184 folds with arbitrary payloads, asserting the reply is at
 /// most one triplet per triplet received.
-fn exercise_linemode(rng: &mut Lcg, buf: &mut [u8; MAX_CHUNK]) {
+fn exercise_linemode(rng: &mut Prng, buf: &mut [u8; MAX_CHUNK]) {
     let mut lm = Linemode::new();
     let mut table = SlcTable::new();
     for _ in 0..CHUNKS_PER_ROUND {
-        let size = rng.index(MAX_CHUNK + 1);
+        let size = rng.below(MAX_CHUNK + 1);
         rng.fill(&mut buf[..size]);
         let outcome = lm.fold(&buf[..size]);
         assert!(outcome.reply.len() <= 5 + size * 3);
@@ -141,46 +142,9 @@ fn exercise_linemode(rng: &mut Lcg, buf: &mut [u8; MAX_CHUNK]) {
     }
 }
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the generator
-/// in the sibling harnesses so failures reproduce one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    /// A bounded index in `[0, modulus)`; `modulus` must be non-zero.
-    fn index(&mut self, modulus: usize) -> usize {
-        (self.next_u64() & 0xFFFF) as usize % modulus
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

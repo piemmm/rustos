@@ -12,13 +12,14 @@
 //!   `Inflater` in arbitrary chunks against arbitrary output room; and
 //! * the encoder's `bound` is a real bound — the output never exceeds it.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws the
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` draws the
 //! inputs. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once
 //! from a fresh, logged seed; `cargo xtask fuzz --soak` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
 
 use tairix_compress::deflate::{Deflate, Flush};
 use tairix_compress::inflate::{inflate_into, Inflater};
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 600;
@@ -32,17 +33,6 @@ const MAX_STREAM: usize = 4096;
 
 /// Largest output a decode of arbitrary bytes is allowed to produce.
 const MAX_OUTPUT: usize = 1 << 20;
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
 
 /// Decode arbitrary bytes into a bounded destination: must never panic.
 fn decode_never_panics(stream: &[u8]) {
@@ -109,33 +99,33 @@ fn round_trips(input: &[u8], chunk: usize, room: usize) {
 
 /// A plaintext mixing runs, a small alphabet, and noise, so a draw exercises
 /// long matches, dynamic Huffman, and the stored fallback in turn.
-fn draw_input(next: &mut impl FnMut() -> u64, len: usize) -> Vec<u8> {
+fn draw_input(rng: &mut Prng, len: usize) -> Vec<u8> {
     let mut input = Vec::with_capacity(len);
     while input.len() < len {
         let remaining = len - input.len();
-        match next() % 4 {
+        match rng.next_u64() % 4 {
             0 => {
-                let run = bounded(next(), 300).min(remaining);
-                input.extend(std::iter::repeat_n(low_byte(next()), run));
+                let run = rng.at_most(300).min(remaining);
+                input.extend(std::iter::repeat_n(rng.next_u8(), run));
             }
             1 => {
-                let run = bounded(next(), 200).min(remaining);
+                let run = rng.at_most(200).min(remaining);
                 for _ in 0..run {
-                    input.push(b'a' + low_byte(next() >> 9) % 5);
+                    input.push(b'a' + rng.next_u8() % 5);
                 }
             }
             2 => {
                 // Repeat something already written, which is what a
                 // back-reference is for.
-                let span = bounded(next(), 400).min(remaining).min(input.len());
+                let span = rng.at_most(400).min(remaining).min(input.len());
                 let from = input.len() - span;
                 let echo = input[from..from + span].to_vec();
                 input.extend_from_slice(&echo);
             }
             _ => {
-                let run = bounded(next(), 100).min(remaining);
+                let run = rng.at_most(100).min(remaining);
                 for _ in 0..run {
-                    input.push(low_byte(next() >> 17));
+                    input.push(rng.next_u8());
                 }
             }
         }
@@ -147,24 +137,18 @@ fn draw_input(next: &mut impl FnMut() -> u64, len: usize) -> Vec<u8> {
 fn inflate_never_panics_and_the_codec_round_trips() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "inflate_never_panics_and_the_codec_round_trips",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A structured plaintext, round-tripped whole and in pieces.
-        let len = bounded(next(), MAX_INPUT);
-        let input = draw_input(&mut next, len);
-        let chunk = bounded(next(), 512).max(1);
-        let room = bounded(next(), 8192).max(1);
+        let len = rng.at_most(MAX_INPUT);
+        let input = draw_input(&mut rng, len);
+        let chunk = rng.at_most(512).max(1);
+        let room = rng.at_most(8192).max(1);
         round_trips(&input, chunk, room);
 
         // 2. Corrupt a real stream and feed it to the decoder.
@@ -172,20 +156,19 @@ fn inflate_never_panics_and_the_codec_round_trips() {
         let mut stream = vec![0u8; encoder.bound(input.len())];
         if let Ok(written) = encoder.deflate(&input, &mut stream, Flush::Finish) {
             let mut damaged = stream[..written].to_vec();
-            for _ in 0..bounded(next(), 8) {
+            for _ in 0..rng.at_most(8) {
                 if damaged.is_empty() {
                     break;
                 }
-                let at = bounded(next(), damaged.len() - 1);
-                damaged[at] ^= low_byte(next() >> 19);
+                let at = rng.below(damaged.len());
+                damaged[at] ^= rng.next_u8();
             }
             decode_never_panics(&damaged);
         }
 
         // 3. Pure noise straight into the decoder.
-        let noise: Vec<u8> = (0..bounded(next(), MAX_STREAM))
-            .map(|_| low_byte(next() >> 23))
-            .collect();
+        let mut noise = vec![0u8; rng.at_most(MAX_STREAM)];
+        rng.fill(&mut noise);
         decode_never_panics(&noise);
 
         iteration += 1;

@@ -12,7 +12,7 @@
 //!   the engine renders output or reports an unknown command, never a crash
 //!   (fail closed).
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng`
 //! ([`tairix_fuzzseed`]) draws pseudo-random byte scripts, splices real
 //! command words together with hostile arguments, and mutates them. A plain
 //! `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged
@@ -193,7 +193,7 @@ fn repl_never_panics_for_any_input() {
         "repl_never_panics_for_any_input",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     );
-    let mut rng = tairix_fuzzseed::Lcg::new(seed);
+    let mut rng = tairix_fuzzseed::Prng::new(seed);
 
     let mut iteration: u64 = 0;
     loop {
@@ -203,7 +203,7 @@ fn repl_never_panics_for_any_input() {
         let word_count = rng.below(24);
         let mut script: Vec<u8> = Vec::new();
         for _ in 0..word_count {
-            let word = WORDS[rng.below(WORDS.len())];
+            let word = *rng.pick(WORDS);
             script.extend_from_slice(word);
             match rng.below(6) {
                 0 => script.push(b'\n'),

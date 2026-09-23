@@ -418,18 +418,7 @@ fn device_flagged_mapping_is_refused_in_depth() {
 fn incompressible_page_is_refused_and_stays_mapped() {
     let mut env = env!();
     let mut ramzip = tier(&env);
-    let frame = env.frames.alloc(MemoryClass::Compressed).expect("frame");
-    let page = page_at(15);
-    // PRNG noise: incompressible by construction.
-    let bytes = env.frame_bytes_mut(frame);
-    let mut state = 0x1234_5678_9ABC_DEF0_u64;
-    for byte in bytes.iter_mut() {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        *byte = (state >> 33).to_le_bytes()[0];
-    }
-    env.space.map(page, frame, user_rw()).expect("map");
+    let page = map_incompressible_page(&mut env, 15);
     env.press_to(PressureBand::Moderate);
     assert_eq!(
         try_compress(&mut env, &mut ramzip, page, TASK),
@@ -820,14 +809,8 @@ fn compress_run(env: &mut Env, ramzip: &mut Ramzip, pages: &[Page]) -> usize {
 fn map_incompressible_page(env: &mut Env, page_number: u64) -> Page {
     let frame = env.frames.alloc(MemoryClass::Compressed).expect("frame");
     let page = page_at(page_number);
-    let bytes = env.frame_bytes_mut(frame);
-    let mut state = 0x1234_5678_9ABC_DEF0_u64 ^ page_number;
-    for byte in bytes.iter_mut() {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        *byte = (state >> 33).to_le_bytes()[0];
-    }
+    tairix_fuzzseed::Prng::new(0x1234_5678_9ABC_DEF0 ^ page_number)
+        .fill(env.frame_bytes_mut(frame));
     env.space.map(page, frame, user_rw()).expect("map");
     page
 }

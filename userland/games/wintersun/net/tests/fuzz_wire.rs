@@ -14,12 +14,13 @@
 //! * every decoded run iterates exactly as many items as it reports, which is
 //!   the invariant the sequence's cheap accessors rest on.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates real
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` mutates real
 //! encoded messages and draws pseudo-random bytes. A plain `cargo test` runs
 //! the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask
 //! fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock
 //! budget.
 
+use tairix_fuzzseed::Prng;
 use tairix_wintersun_net::bounds::{
     MAX_ACCOUNT_NAME_LEN, MAX_CHAT_BYTES, MAX_CONSOLE_COMMAND_BYTES, MAX_CONSOLE_REPLY_BYTES,
     MAX_ENTITIES_IN_INTEREST, MAX_GAME_EVENTS, MAX_PASSWORD_LEN, MAX_PLAINTEXT_LEN, MAX_TICK_HZ,
@@ -146,47 +147,47 @@ fn out_len(encoded: Result<usize, tairix_wintersun_net::WireError>) -> usize {
 }
 
 /// One round of mutation against one template set.
-fn mutate_round(rng: &mut corpus::Lcg, templates: &[Vec<u8>], exercise: fn(&[u8])) {
-    let template = &templates[rng.bounded(templates.len() - 1)];
+fn mutate_round(rng: &mut Prng, templates: &[Vec<u8>], exercise: fn(&[u8])) {
+    let template = rng.pick(templates);
 
     // A real frame with a handful of bytes flipped: hammers the kind tag,
     // the discriminants, the counts, and the length prefixes.
     let mut mutated = template.clone();
-    let flips = rng.bounded(8);
+    let flips = rng.at_most(8);
     for _ in 0..flips {
         if mutated.is_empty() {
             break;
         }
-        let pos = rng.bounded(mutated.len() - 1);
-        mutated[pos] ^= rng.byte();
+        let pos = rng.below(mutated.len());
+        mutated[pos] ^= rng.next_u8();
     }
     exercise(&mutated);
 
     // A truncation at an arbitrary point.
-    let cut = rng.bounded(template.len());
+    let cut = rng.at_most(template.len());
     exercise(&template[..cut]);
 
     // A real frame with trailing bytes appended, which no encoder produces.
     let mut extended = template.clone();
-    let extra = rng.bounded(16);
-    extended.extend(rng.blob(extra));
+    let extra = rng.at_most(16);
+    extended.extend(corpus::blob(rng, extra));
     exercise(&extended);
 }
 
 /// A frame whose kind tag is plausible but whose body is noise: the shape
 /// that drives the count and length paths hardest.
-fn forged_round(rng: &mut corpus::Lcg) {
-    let kind = u16::from(rng.byte() % 12);
-    let body_len = rng.bounded(600);
-    let body = rng.blob(body_len);
+fn forged_round(rng: &mut Prng) {
+    let kind = u16::from(rng.next_u8() % 12);
+    let body_len = rng.at_most(600);
+    let body = corpus::blob(rng, body_len);
     let mut forged = Vec::with_capacity(2 + body.len());
     forged.extend_from_slice(&kind.to_le_bytes());
     forged.extend_from_slice(&body);
     exercise_client(&forged);
     exercise_server(&forged);
 
-    let noise_len = rng.bounded(128);
-    let noise = rng.blob(noise_len);
+    let noise_len = rng.at_most(128);
+    let noise = corpus::blob(rng, noise_len);
     exercise_client(&noise);
     exercise_server(&noise);
 }
@@ -196,8 +197,7 @@ fn decoding_any_bytes_never_panics_and_round_trips_canonically() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     // The seed is drawn and logged by `tairix_fuzzseed`: fresh per run,
     // reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
-    let mut rng =
-        corpus::Lcg::seeded("decoding_any_bytes_never_panics_and_round_trips_canonically");
+    let mut rng = corpus::seeded("decoding_any_bytes_never_panics_and_round_trips_canonically");
 
     let client_templates = corpus::client_frames();
     let server_templates = corpus::server_frames();

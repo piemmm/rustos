@@ -25,43 +25,11 @@
 //! the same seeded stream keeps being drawn until the budget elapses.
 
 use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
+use tairix_fuzzseed::Prng;
 use tairix_wallpaper::{merge, DesktopSettings};
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 5_000;
-
-/// Deterministic LCG, matching the sibling harnesses.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next_u64() % n
-    }
-
-    fn chance(&mut self, n: u64) -> bool {
-        self.below(n) == 0
-    }
-
-    fn pick<'a>(&mut self, choices: &[&'a str]) -> &'a str {
-        choices[usize::try_from(self.below(choices.len() as u64)).expect("index fits")]
-    }
-}
 
 /// Every key of the registry, so no `set_field`/`field_value` arm is left
 /// unfuzzed. The count is asserted against `SettingsKey::ALL` below, so a
@@ -102,8 +70,8 @@ const CURSOR_SET_VALUES: &[&str] = &["Standard", "High Visibility", "Gone Away",
 const CURSOR_SIZE_VALUES: &[&str] = &["normal", "large", "larger", "largest"];
 const BAD_TOKENS: &[&str] = &["", " ", "has space", "bogus", "relative/path.png"];
 
-fn value_for(rng: &mut Lcg, key: &str) -> &'static str {
-    if rng.chance(32) {
+fn value_for(rng: &mut Prng, key: &str) -> &'static str {
+    if rng.below(32) == 0 {
         return rng.pick(BAD_TOKENS);
     }
     match key {
@@ -123,17 +91,17 @@ fn value_for(rng: &mut Lcg, key: &str) -> &'static str {
     }
 }
 
-fn document(rng: &mut Lcg) -> String {
+fn document(rng: &mut Prng) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
     let mut keys: Vec<&str> = KEYS.to_vec();
-    let n = rng.below(keys.len() as u64 + 1);
+    let n = rng.below(keys.len() + 1);
     for _ in 0..n {
-        let index = usize::try_from(rng.below(keys.len() as u64)).expect("index fits");
+        let index = rng.below(keys.len());
         let key = keys.swap_remove(index);
 
-        if rng.chance(10) {
+        if rng.below(10) == 0 {
             out.push_str("# comment\n");
         }
         let value = value_for(rng, key);
@@ -197,7 +165,7 @@ fn the_generator_names_every_registry_key() {
 
 #[test]
 fn generated_documents_round_trip_through_the_canonical_render() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "generated_documents_round_trip_through_the_canonical_render",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -214,7 +182,7 @@ fn generated_documents_round_trip_through_the_canonical_render() {
 
 #[test]
 fn arbitrary_ascii_never_panics() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "arbitrary_ascii_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -241,7 +209,7 @@ fn arbitrary_ascii_never_panics() {
 #[test]
 fn the_generator_produces_accepted_documents() {
     const DRAWS: u64 = 2_000;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_generator_produces_accepted_documents",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

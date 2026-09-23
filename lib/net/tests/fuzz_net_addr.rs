@@ -22,6 +22,7 @@
 
 use core::num::NonZeroU32;
 
+use tairix_fuzzseed::Prng;
 use tairix_net::addr::{Ipv6Scope, ScopedIpv6Addr};
 use tairix_net::checksum::Checksum;
 use tairix_net::{internet_checksum, Ipv4Addr, Ipv6Addr};
@@ -29,40 +30,7 @@ use tairix_net::{internet_checksum, Ipv4Addr, Ipv6Addr};
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the
-/// generator in `lib/abi/tests/fuzz_decode.rs` so the two harnesses share
-/// one reproducible-failure story.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
-fn exercise_scope(rng: &mut Lcg) {
+fn exercise_scope(rng: &mut Prng) {
     let mut octets = [0u8; 16];
     rng.fill(&mut octets);
     // Bias half the draws into the interesting prefixes so multicast and
@@ -74,7 +42,7 @@ fn exercise_scope(rng: &mut Lcg) {
     }
     let addr = Ipv6Addr::from(octets);
     let scope = Ipv6Scope::of(&addr);
-    let zone = NonZeroU32::new((rng.next_u64() & 0xFFFF_FFFF) as u32);
+    let zone = NonZeroU32::new(rng.next_u32());
     // A refusal is the fail-closed path; reaching past the call at all
     // proves "no panic", so only the accepted case has invariants.
     if let Ok(scoped) = ScopedIpv6Addr::new(addr, zone) {
@@ -86,15 +54,15 @@ fn exercise_scope(rng: &mut Lcg) {
     }
 }
 
-fn exercise_checksum(rng: &mut Lcg, buf: &mut [u8]) {
-    let len = ((rng.next_u64() & 0xFF) as usize) % (buf.len() + 1);
+fn exercise_checksum(rng: &mut Prng, buf: &mut [u8]) {
+    let len = rng.at_most(buf.len());
     let data = &mut buf[..len];
     rng.fill(data);
     let expected = internet_checksum(data);
 
     // Any two split points must fold identically to the one-shot.
-    let a = ((rng.next_u64() & 0xFF) as usize) % (len + 1);
-    let b = a + ((rng.next_u64() & 0xFF) as usize) % (len - a + 1);
+    let a = rng.at_most(len);
+    let b = a + rng.at_most(len - a);
     let mut sum = Checksum::new();
     sum.push(&data[..a]);
     sum.push(&data[a..b]);
@@ -104,9 +72,9 @@ fn exercise_checksum(rng: &mut Lcg, buf: &mut [u8]) {
     // The pseudo-header seeds must equal the contiguous equivalent.
     let upper_len16 = u16::try_from(len).expect("buffer is shorter than u16::MAX");
     let upper_len32 = u32::from(upper_len16);
-    let src = Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes());
-    let dst = Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes());
-    let protocol = (rng.next_u64() & 0xFF) as u8;
+    let src = Ipv4Addr::from(rng.next_u32().to_be_bytes());
+    let dst = Ipv4Addr::from(rng.next_u32().to_be_bytes());
+    let protocol = rng.next_u8();
     let mut seeded = Checksum::ipv4_pseudo(src, dst, protocol, upper_len16);
     seeded.push(data);
     let mut contiguous = Vec::new();
@@ -122,7 +90,7 @@ fn exercise_checksum(rng: &mut Lcg, buf: &mut [u8]) {
     let src6 = Ipv6Addr::from(v6);
     rng.fill(&mut v6);
     let dst6 = Ipv6Addr::from(v6);
-    let next_header = (rng.next_u64() & 0xFF) as u8;
+    let next_header = rng.next_u8();
     let mut seeded = Checksum::ipv6_pseudo(src6, dst6, next_header, upper_len32);
     seeded.push(data);
     let mut contiguous = Vec::new();
@@ -136,7 +104,7 @@ fn exercise_checksum(rng: &mut Lcg, buf: &mut [u8]) {
 
 #[test]
 fn random_inputs_uphold_address_and_checksum_invariants() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_uphold_address_and_checksum_invariants",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

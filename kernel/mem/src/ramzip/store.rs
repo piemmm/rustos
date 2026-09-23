@@ -255,13 +255,7 @@ mod tests {
     /// A page of PRNG noise: incompressible by construction.
     fn incompressible_page() -> [u8; PAGE_SIZE] {
         let mut page = [0u8; PAGE_SIZE];
-        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-        for byte in &mut page {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            *byte = (state >> 33).to_le_bytes()[0];
-        }
+        tairix_fuzzseed::Prng::new(0x9E37_79B9_7F4A_7C15).fill(&mut page);
         page
     }
 

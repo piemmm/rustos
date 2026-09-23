@@ -47,7 +47,7 @@ fn gated_index(stream: Stream) -> Option<usize> {
 
 #[test]
 fn rate_limiter_accounts_every_drop_and_never_panics() {
-    let mut prng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut prng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "rate_limiter_accounts_every_drop_and_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

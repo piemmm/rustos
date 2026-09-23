@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_rng::RandU64;
+use tairix_fuzzseed::Prng;
 
 use super::{box_blur, BlurScratch, Reciprocal, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT};
 use crate::color::{div255_biased, Pixel, ROUND_NEAREST};
@@ -134,7 +134,7 @@ fn the_blur_is_the_naive_average_for_every_shape_and_radius() {
     // implementation produces. Includes the shapes that exercise the clamped
     // ends — a single row, a single column, and a radius wider than the region,
     // where every sample of some window is a replicated edge.
-    let mut rng = TestRng::new(0x51ED_0B10_0BED_51ED);
+    let mut rng = Prng::new(0x51ED_0B10_0BED_51ED);
     for (width, height) in [
         (1usize, 1usize),
         (1, 9),
@@ -145,7 +145,7 @@ fn the_blur_is_the_naive_average_for_every_shape_and_radius() {
         (16, 9),
         (13, 11),
     ] {
-        let field: Vec<Pixel> = (0..width * height).map(|_| rng.pixel()).collect();
+        let field: Vec<Pixel> = (0..width * height).map(|_| pixel(&mut rng)).collect();
         for radius in [0usize, 1, 2, 3, 4, 8, 17] {
             assert_eq!(
                 blurred(&field, width, height, radius),
@@ -223,7 +223,7 @@ fn the_reciprocal_answers_exactly_what_the_divide_would() {
 
     // Boundaries and a spread for the large counts, including the first one
     // past the reciprocal's range and one whose numerator saturates.
-    let mut rng = TestRng::new(0xD15C_0FFE_ED15_C0DE);
+    let mut rng = Prng::new(0xD15C_0FFE_ED15_C0DE);
     for count in [
         255u32,
         257,
@@ -253,34 +253,11 @@ fn the_reciprocal_answers_exactly_what_the_divide_would() {
     }
 }
 
-/// A deterministic generator for the differential sweeps, so a failure is
-/// reproducible from the seed alone.
-///
-/// It is `lib/rng`'s own predictable generator rather than a private one
-/// written here, so the workspace keeps one of these. Predictability is what
-/// a fixture wants; nothing here is a security surface.
-struct TestRng(tairix_rng::NonCryptoRng);
-
-impl TestRng {
-    fn new(seed: u64) -> Self {
-        Self(tairix_rng::NonCryptoRng::seed_from_u64(seed))
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        u32::try_from(self.0.next_u64() >> 32).unwrap_or(u32::MAX)
-    }
-
-    /// A pixel with independent channels, alpha included, so a blur that
-    /// crosses channels is caught.
-    fn pixel(&mut self) -> Pixel {
-        let bytes = self.0.next_u64().to_le_bytes();
-        Pixel {
-            r: bytes[0],
-            g: bytes[1],
-            b: bytes[2],
-            a: bytes[3],
-        }
-    }
+/// A pixel with independent channels, alpha included, so a blur that crosses
+/// channels is caught.
+fn pixel(rng: &mut Prng) -> Pixel {
+    let [r, g, b, a] = rng.next_u32().to_le_bytes();
+    Pixel { r, g, b, a }
 }
 
 #[test]
@@ -726,7 +703,7 @@ fn frosted_around_via(
 /// travels with the window.
 #[test]
 fn a_frosted_border_around_a_kept_block_is_exactly_the_whole_frost() {
-    let mut rng = TestRng::new(0x9A11_0F20_57D1_7E20);
+    let mut rng = Prng::new(0x9A11_0F20_57D1_7E20);
     let rect = (2u32, 1, 13, 11);
     for radius in [1u32, 2, 3, 7] {
         // Full coverage, a rounded weight, and none at all: the mix and its
@@ -767,7 +744,7 @@ fn a_frosted_border_around_a_kept_block_is_exactly_the_whole_frost() {
 }
 
 /// A non-empty sub-range of `0..extent`.
-fn span_within(rng: &mut TestRng, extent: u32) -> Range<u32> {
+fn span_within(rng: &mut Prng, extent: u32) -> Range<u32> {
     let start = rng.next_u32() % extent;
     let len = 1 + rng.next_u32() % (extent - start);
     start..start + len
@@ -1016,7 +993,7 @@ fn a_frost_divided_into_pieces_is_exactly_the_undivided_frost() {
 /// reaches outside it.
 #[test]
 fn a_divided_border_frost_is_exactly_the_undivided_border_frost() {
-    let mut rng = TestRng::new(0x5B1F_2C77_04AE_9931);
+    let mut rng = Prng::new(0x5B1F_2C77_04AE_9931);
     let rect = (2u32, 1, 17, 13);
     for radius in [1u32, 3, 6] {
         for weight in [255u8, 200, 0] {

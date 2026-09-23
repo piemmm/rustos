@@ -421,18 +421,12 @@ fn saturating_edges_do_not_break_the_canonical_form() {
 /// form is a faithful set.
 #[test]
 fn differential_sweep_against_a_pixel_grid() {
-    let mut state = 0x1234_5678_9abc_def0u64;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
+    let mut rng = tairix_fuzzseed::Prng::new(0x1234_5678_9abc_def0);
     for _ in 0..400 {
         let mut region = Region::new();
         let mut grid = Grid::new();
         for _ in 0..12 {
-            let draw = next();
+            let draw = rng.next_u64();
             let x = i32::try_from(draw % 20).unwrap_or(0);
             let y = i32::try_from((draw >> 8) % 20).unwrap_or(0);
             let w = u32::try_from((draw >> 16) % 8).unwrap_or(0);

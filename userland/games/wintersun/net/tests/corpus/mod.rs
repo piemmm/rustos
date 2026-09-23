@@ -16,14 +16,15 @@
 //! New crashing inputs are appended as raw byte literals with a named
 //! verdict test in `regression_corpus.rs`.
 //!
-//! The seeded generator the mutating harnesses draw from lives here too, so
-//! the three of them share one definition rather than a copy each.
+//! The seeding and the two input shapes the mutating harnesses draw live here
+//! too, so the three of them share one definition rather than a copy each.
 
 // Compiled into each test binary in this directory, and each uses a subset,
 // so per-binary `dead_code` reports are false here.
 #![allow(dead_code)]
 
 use tairix_abi::time::Time64;
+use tairix_fuzzseed::Prng;
 use tairix_wintersun_net::bounds::{
     MAX_CHAT_BYTES, MAX_CONSOLE_COMMAND_BYTES, MAX_CONSOLE_REPLY_BYTES, MAX_ENTITIES_IN_INTEREST,
     MAX_GAME_EVENTS, MAX_PASSWORD_LEN, MAX_PLAINTEXT_LEN, MAX_TICK_HZ, MAX_WORLD_EDITS,
@@ -41,56 +42,24 @@ use tairix_wintersun_net::value::{
     SpellId, StructureId, TickInstant, TickPhase, WorldChange, WorldEdit, WorldPoint, WorldVector,
 };
 
-/// The seeded linear congruential generator the harnesses draw inputs from.
-///
-/// One definition for all three: the seed is chosen and logged by
-/// `tairix_fuzzseed`, so a reported crash replays from the value in its log.
-pub struct Lcg(u64);
+/// The shared generator, seeded and logged per run by `tairix_fuzzseed` so a
+/// reported crash replays from the value in its log.
+pub fn seeded(name: &str) -> Prng {
+    Prng::new(tairix_fuzzseed::start(name, tairix_fuzzseed::FUZZ_SEED_ENV))
+}
 
-impl Lcg {
-    /// Start from the per-run seed `tairix_fuzzseed` drew and logged.
-    pub fn seeded(name: &str) -> Self {
-        Self(tairix_fuzzseed::start(name, tairix_fuzzseed::FUZZ_SEED_ENV))
-    }
+/// Thirty-two fresh bytes: a key, a nonce, or an ephemeral scalar.
+pub fn bytes32(rng: &mut Prng) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    rng.fill(&mut out);
+    out
+}
 
-    /// The next state.
-    pub fn next(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.0
-    }
-
-    /// One byte, without a narrowing cast.
-    pub fn byte(&mut self) -> u8 {
-        self.next().to_le_bytes()[0]
-    }
-
-    /// A value in `0..=max`, without a narrowing cast.
-    pub fn bounded(&mut self, max: usize) -> usize {
-        let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-        usize::try_from(self.next() % span).unwrap_or(0)
-    }
-
-    /// A bit position within a byte.
-    pub fn bit(&mut self) -> u32 {
-        u32::from(self.byte() % 8)
-    }
-
-    /// Thirty-two fresh bytes: a key, a nonce, or an ephemeral scalar.
-    pub fn bytes32(&mut self) -> [u8; 32] {
-        let mut out = [0u8; 32];
-        for byte in &mut out {
-            *byte = self.byte();
-        }
-        out
-    }
-
-    /// `len` fresh bytes.
-    pub fn blob(&mut self, len: usize) -> Vec<u8> {
-        (0..len).map(|_| self.byte()).collect()
-    }
+/// `len` fresh bytes.
+pub fn blob(rng: &mut Prng, len: usize) -> Vec<u8> {
+    let mut out = vec![0u8; len];
+    rng.fill(&mut out);
+    out
 }
 
 fn encode_client(message: &ClientMessage<'_>) -> Vec<u8> {

@@ -15,6 +15,7 @@
 
 use tairix_abi::driver::net::MacAddress;
 use tairix_abi::time::Duration64;
+use tairix_fuzzseed::Prng;
 use tairix_net::dhcp::{
     DhcpClient, DhcpReply, MessageSpec, MessageType, MAX_ADDRESSES, MAX_MESSAGE_LEN,
 };
@@ -23,7 +24,7 @@ use tairix_net::Ipv4Addr;
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
-fn mac(rng: &mut Lcg) -> MacAddress {
+fn mac(rng: &mut Prng) -> MacAddress {
     let mut octets = [0u8; 6];
     rng.fill(&mut octets);
     MacAddress(octets)
@@ -42,7 +43,7 @@ fn exercise_parse(bytes: &[u8], xid: u32, chaddr: MacAddress) {
 /// Encode a random client message and confirm it is a fixed-length,
 /// non-panicking encode (the emit path is also attacker-reachable via the
 /// state machine's outputs).
-fn exercise_write(rng: &mut Lcg, chaddr: MacAddress) {
+fn exercise_write(rng: &mut Prng, chaddr: MacAddress) {
     let types = [
         MessageType::Discover,
         MessageType::Request,
@@ -50,7 +51,7 @@ fn exercise_write(rng: &mut Lcg, chaddr: MacAddress) {
         MessageType::Release,
     ];
     let spec = MessageSpec {
-        message_type: types[rng.index(types.len())],
+        message_type: *rng.pick(&types),
         xid: rng.next_u32(),
         secs: rng.next_u16(),
         broadcast: rng.next_u64() & 1 == 0,
@@ -66,10 +67,10 @@ fn exercise_write(rng: &mut Lcg, chaddr: MacAddress) {
 
 /// Drive the client with a parsed reply, asserting it never panics and
 /// always yields a coherent next-deadline decision.
-fn exercise_client(rng: &mut Lcg, chaddr: MacAddress) {
+fn exercise_client(rng: &mut Prng, chaddr: MacAddress) {
     // A separate generator for the client's CSPRNG draws, so the reply
     // builder can keep using `rng` without a borrow conflict.
-    let mut csprng = Lcg::new(rng.next_u64());
+    let mut csprng = Prng::new(rng.next_u64());
     let mut rand = || csprng.next_u32();
     let mut client = DhcpClient::new(chaddr);
     let mut now = 0i64;
@@ -95,7 +96,7 @@ fn exercise_client(rng: &mut Lcg, chaddr: MacAddress) {
 /// Build a plausible server reply for `xid`/`chaddr` with random options,
 /// so the state machine explores real transitions rather than always
 /// rejecting the input at the header.
-fn build_reply(rng: &mut Lcg, xid: u32, chaddr: MacAddress) -> [u8; 300] {
+fn build_reply(rng: &mut Prng, xid: u32, chaddr: MacAddress) -> [u8; 300] {
     let mut out = [0u8; 300];
     out[0] = 2;
     out[1] = 1;
@@ -106,7 +107,7 @@ fn build_reply(rng: &mut Lcg, xid: u32, chaddr: MacAddress) -> [u8; 300] {
     out[28..34].copy_from_slice(&chaddr.0);
     out[236..240].copy_from_slice(&[99, 130, 83, 99]);
     let types = [MessageType::Offer, MessageType::Ack, MessageType::Nak];
-    let mt = types[rng.index(types.len())];
+    let mt = *rng.pick(&types);
     let mut i = 240;
     out[i] = 53;
     out[i + 1] = 1;
@@ -129,55 +130,9 @@ fn build_reply(rng: &mut Lcg, xid: u32, chaddr: MacAddress) -> [u8; 300] {
     out
 }
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the
-/// generator in the sibling harnesses so failures reproduce one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        // The mask makes the narrowing lossless, so no truncation warning.
-        (self.next_u64() & 0xFFFF_FFFF) as u32
-    }
-
-    fn next_u16(&mut self) -> u16 {
-        (self.next_u64() & 0xFFFF) as u16
-    }
-
-    /// A bounded index in `[0, modulus)`; `modulus` must be non-zero.
-    fn index(&mut self, modulus: usize) -> usize {
-        (self.next_u64() & 0xFFFF) as usize % modulus
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -187,7 +142,7 @@ fn random_inputs_never_panic() {
         for _ in 0..SMOKE_ITERATIONS {
             let chaddr = mac(&mut rng);
             let xid = rng.next_u32();
-            let size = rng.index(buf.len() + 1);
+            let size = rng.below(buf.len() + 1);
             rng.fill(&mut buf[..size]);
             exercise_parse(&buf[..size], xid, chaddr);
             exercise_write(&mut rng, chaddr);
@@ -204,7 +159,7 @@ fn corrupted_reply_never_panics() {
     // Bit-flip every bit of a valid reply to walk the accept/reject
     // boundary of the header and option checks.
     let chaddr = MacAddress([0x52, 0x54, 0, 1, 2, 3]);
-    let mut rng = Lcg::new(1);
+    let mut rng = Prng::new(1);
     let mut reply = build_reply(&mut rng, 0xABCD, chaddr);
     assert!(DhcpReply::parse(&reply, 0xABCD, chaddr).is_some());
     for byte in 0..reply.len() {

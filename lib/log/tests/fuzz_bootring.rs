@@ -95,8 +95,8 @@ fn apply_loss<const N: usize>(ring: &mut BootRing<N>, model: &mut VecDeque<Shado
 
 /// One run: a random stream of pushes and pops against a fresh `N`-byte ring,
 /// with the shadow model predicting every outcome.
-fn run<const N: usize>(prng: &mut tairix_fuzzseed::Lcg, scratch: &mut [u8]) {
-    let cpu_id = u32::try_from(prng.next_u64() & 0xff).expect("masked to a byte");
+fn run<const N: usize>(prng: &mut tairix_fuzzseed::Prng, scratch: &mut [u8]) {
+    let cpu_id = u32::from(prng.next_u8());
     let mut ring: BootRing<N> = BootRing::new(cpu_id);
     let mut model: VecDeque<Shadow> = VecDeque::new();
     let mut next_seq = 0u64;
@@ -141,7 +141,7 @@ fn run<const N: usize>(prng: &mut tairix_fuzzseed::Lcg, scratch: &mut [u8]) {
 
 #[test]
 fn boot_ring_matches_a_shadow_model_and_never_panics() {
-    let mut prng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut prng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "boot_ring_matches_a_shadow_model_and_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

@@ -96,7 +96,7 @@ const MESSAGES: [&str; 5] = [
     "the quick brown fox jumped over the lazy dog many many times over",
 ];
 
-fn one_round(rng: &mut tairix_fuzzseed::Lcg) {
+fn one_round(rng: &mut tairix_fuzzseed::Prng) {
     let store = CaptureStore::default();
     let sink = store.segments.clone();
 
@@ -194,7 +194,7 @@ fn one_round(rng: &mut tairix_fuzzseed::Lcg) {
 
 #[test]
 fn journal_never_panics_and_persists_verifiable_segments() {
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "journal_never_panics_and_persists_verifiable_segments",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

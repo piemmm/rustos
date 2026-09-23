@@ -40,6 +40,7 @@ use std::collections::VecDeque;
 use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
+use tairix_fuzzseed::Prng;
 use tairix_kernel_ipc::{EndpointId, Port};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
 use tairix_log::{set_max_level, Event, Level, Sink};
@@ -72,22 +73,6 @@ const CAP_UNIVERSE: &[CapabilityId] = &[
 struct NullSink;
 impl Sink for NullSink {
     fn write_event(&self, _event: &Event<'_>) {}
-}
-
-/// xor-shift* PRNG. Deterministic, fast, zero-allocation.
-struct Rng(u64);
-impl Rng {
-    const fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
 }
 
 fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
@@ -137,7 +122,7 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
         usize::try_from(u64::from(MAX_PAYLOAD).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN)))
             .expect("the port's payload bound fits usize on every supported target");
 
-    let mut rng = Rng::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "fuzz_send_is_fail_closed_and_recv_is_faithful",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -162,7 +147,7 @@ fn fuzz_send_is_fail_closed_and_recv_is_faithful() {
             let len = (rng.next_u64() % 129) as usize;
             let mut payload = vec![0u8; len];
             for byte in &mut payload {
-                *byte = (rng.next_u64() & 0xFF) as u8;
+                *byte = rng.next_u8();
             }
 
             // Mirror of the dispatcher's decision, in its exact precedence:
@@ -239,7 +224,7 @@ fn fuzz_closed_port_fails_closed_for_any_sender() {
     let port = authorised_port(&sink);
     port.destroy(&sink);
 
-    let mut rng = Rng::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "fuzz_closed_port_fails_closed_for_any_sender",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

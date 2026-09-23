@@ -13,29 +13,19 @@
 //! * the retained bytes prefix the encoding and the returned depth only
 //!   moves by at most one level per instruction.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG produces
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` produces
 //! the streams. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep
 //! once from a fresh, logged seed; `cargo xtask fuzz` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
 
 use tairix_disasm::wasm;
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
 /// Largest byte stream fed to the decoder per iteration.
 const MAX_STREAM: usize = 256;
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
 
 /// Walks `stream` to the end, asserting the forward-progress invariants.
 fn walk(stream: &[u8], start_depth: u32) {
@@ -65,35 +55,28 @@ fn walk(stream: &[u8], start_depth: u32) {
 #[test]
 fn decode_never_panics_and_always_advances() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "decode_never_panics_and_always_advances",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. Pure noise at a random starting depth (including extremes).
-        let noise: Vec<u8> = (0..bounded(next(), MAX_STREAM))
-            .map(|_| low_byte(next() >> 29))
-            .collect();
-        let depth = u32::try_from(next() & 0xffff).unwrap_or(0);
+        let mut noise = vec![0u8; rng.at_most(MAX_STREAM)];
+        rng.fill(&mut noise);
+        let depth = u32::try_from(rng.next_u64() & 0xffff).unwrap_or(0);
         walk(&noise, depth);
 
         // 2. Structure-heavy streams: blocks, branches, and LEB-carrying
         //    opcodes with hostile immediates.
         let mut body = Vec::new();
-        for _ in 0..bounded(next(), 64) {
-            body.push([0x02, 0x03, 0x04, 0x05, 0x0b, 0x0c, 0x0e, 0x41, 0xfc][bounded(next(), 8)]);
-            body.push(low_byte(next() >> 13));
-            if next() & 1 == 0 {
-                body.push(low_byte(next() >> 41) | 0x80);
-                body.push(low_byte(next() >> 47));
+        for _ in 0..rng.at_most(64) {
+            body.push([0x02, 0x03, 0x04, 0x05, 0x0b, 0x0c, 0x0e, 0x41, 0xfc][rng.at_most(8)]);
+            body.push(rng.next_u8());
+            if rng.next_u64() & 1 == 0 {
+                body.push(rng.next_u8() | 0x80);
+                body.push(rng.next_u8());
             }
         }
         walk(&body, 1);

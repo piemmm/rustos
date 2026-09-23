@@ -29,7 +29,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use tairix_collections::{HashMap, LruMap, RangeError, RangeKey, RangeMap, RangeSet, SmallVec};
-use tairix_fuzzseed::Lcg;
+use tairix_fuzzseed::Prng;
 use tairix_hash::{BuildSipHash13, HashSeed};
 
 /// Inline bound the `SmallVec` under test is built at, so the stream crosses
@@ -73,7 +73,7 @@ impl Drop for Tracked {
 /// The control tag comes from the hash's top bits and the group index from its
 /// low bits, so a uniform stream exercises neither a tag collision nor a long
 /// probe chain. Narrow, aligned, and strided streams do.
-fn draw_key(rng: &mut Lcg, width: usize) -> u64 {
+fn draw_key(rng: &mut Prng, width: usize) -> u64 {
     match rng.below(4) {
         0 => rng.below(width) as u64,
         1 => (rng.below(4096) as u64) << 12,
@@ -82,7 +82,7 @@ fn draw_key(rng: &mut Lcg, width: usize) -> u64 {
     }
 }
 
-fn run_round(rng: &mut Lcg, seed: HashSeed) {
+fn run_round(rng: &mut Prng, seed: HashSeed) {
     let live = Rc::new(Cell::new(0i64));
     let mut map: HashMap<u64, Tracked, BuildSipHash13> =
         HashMap::with_hasher(BuildSipHash13::with_seed(seed));
@@ -152,7 +152,7 @@ fn run_round(rng: &mut Lcg, seed: HashSeed) {
 }
 
 /// Drive a `SmallVec` across its spill against a `Vec` model.
-fn sweep_smallvec(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
+fn sweep_smallvec(prng: &mut Prng, live: &Rc<Cell<i64>>) {
     let mut vec: SmallVec<Tracked, INLINE> = SmallVec::new();
     let mut model: Vec<u64> = Vec::new();
     let mut spilled = false;
@@ -186,7 +186,7 @@ fn sweep_smallvec(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
 ///
 /// The model is a plain vector of keys, oldest first, searched linearly — the
 /// definition of the order the map claims to keep in constant time.
-fn sweep_lru(rng: &mut Lcg, seed: HashSeed, live: &Rc<Cell<i64>>) {
+fn sweep_lru(rng: &mut Prng, seed: HashSeed, live: &Rc<Cell<i64>>) {
     let mut map: LruMap<u64, Tracked, BuildSipHash13> =
         LruMap::with_hasher(BuildSipHash13::with_seed(seed));
     let mut order: Vec<u64> = Vec::new();
@@ -286,7 +286,7 @@ const RANGE_BASES: [u64; 3] = [0, 1 << 40, u64::MAX - RANGE_WINDOW];
 /// count that overruns it — the shapes a caller supplies and the container
 /// must refuse rather than wrap. At the topmost base the window's end *is*
 /// `u64::MAX`, so an overrunning count is also one past the key space.
-fn draw_span(rng: &mut Lcg, base: u64) -> (u64, u64) {
+fn draw_span(rng: &mut Prng, base: u64) -> (u64, u64) {
     let start = base + rng.below(usize::try_from(RANGE_WINDOW).expect("small")) as u64;
     let count = match rng.below(8) {
         0 => 0,
@@ -299,7 +299,7 @@ fn draw_span(rng: &mut Lcg, base: u64) -> (u64, u64) {
 
 /// Drive a `RangeSet` against a per-element model: the definition of what a
 /// set of ranges holds.
-fn sweep_range_set(rng: &mut Lcg, base: u64) {
+fn sweep_range_set(rng: &mut Prng, base: u64) {
     let mut set: RangeSet<u64> = RangeSet::new();
     let mut model: Vec<bool> = std::vec![false; usize::try_from(RANGE_WINDOW).expect("small")];
     let top = base + RANGE_WINDOW;
@@ -381,7 +381,7 @@ fn sweep_range_set(rng: &mut Lcg, base: u64) {
 
 /// Drive a `RangeMap` against a naive entry list, checking the disjointness
 /// refusal and that a refused value is dropped rather than leaked.
-fn sweep_range_map(rng: &mut Lcg, base: u64, live: &Rc<Cell<i64>>) {
+fn sweep_range_map(rng: &mut Prng, base: u64, live: &Rc<Cell<i64>>) {
     let mut map: RangeMap<u64, Tracked> = RangeMap::new();
     let mut model: Vec<(u64, u64)> = Vec::new();
     let window = base..base + RANGE_WINDOW;
@@ -470,7 +470,7 @@ fn sweep_range_map(rng: &mut Lcg, base: u64, live: &Rc<Cell<i64>>) {
 
 #[test]
 fn heap_backed_containers_agree_with_their_models() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "heap_backed_containers_agree_with_their_models",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -490,7 +490,7 @@ fn heap_backed_containers_agree_with_their_models() {
             sweep_lru(&mut rng, key, &live);
             assert_eq!(live.get(), 0, "an `LruMap` leaked or double-dropped");
 
-            let base = RANGE_BASES[rng.below(RANGE_BASES.len())];
+            let base = *rng.pick(&RANGE_BASES);
             sweep_range_set(&mut rng, base);
             let live = Rc::new(Cell::new(0i64));
             sweep_range_map(&mut rng, base, &live);

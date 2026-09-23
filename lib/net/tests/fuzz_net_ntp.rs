@@ -25,6 +25,7 @@
 
 use tairix_abi::time::Duration64;
 use tairix_abi::{is_plausible_wall_time, RELEASE_EPOCH_SECS};
+use tairix_fuzzseed::Prng;
 use tairix_net::ntp::{
     backoff, client_request, evaluate, jitter, Header, NtpClient, NtpTimestamp, Outcome, Reply,
     Transaction, BACKOFF_CAP, MAX_ROUND_TRIP, MAX_SERVERS, MIN_POLL, PACKET_LEN,
@@ -85,8 +86,8 @@ fn exercise_evaluate(bytes: &[u8], txn: &Transaction, received_at: Duration64) {
 }
 
 /// Drive the client state machine with arbitrary datagrams and instants.
-fn exercise_client(rng: &mut Lcg, buf: &mut [u8]) {
-    let servers = u8::try_from(1 + rng.index(MAX_SERVERS)).unwrap_or(1);
+fn exercise_client(rng: &mut Prng, buf: &mut [u8]) {
+    let servers = u8::try_from(1 + rng.below(MAX_SERVERS)).unwrap_or(1);
     let mut client = NtpClient::new(servers, MIN_POLL, Duration64::ZERO);
     let mut now = Duration64::ZERO;
 
@@ -111,7 +112,7 @@ fn exercise_client(rng: &mut Lcg, buf: &mut [u8]) {
         }
         // Feed an arbitrary datagram, sometimes echoing the real nonce so the
         // accepting path is explored too rather than only the rejecting one.
-        let size = rng.index(buf.len() + 1);
+        let size = rng.below(buf.len() + 1);
         rng.fill(&mut buf[..size]);
         if size >= PACKET_LEN {
             if let Some(txn) = client.outstanding() {
@@ -138,7 +139,7 @@ fn exercise_client(rng: &mut Lcg, buf: &mut [u8]) {
 }
 
 /// Timestamp conversion and the politeness helpers are total.
-fn exercise_arithmetic(rng: &mut Lcg) {
+fn exercise_arithmetic(rng: &mut Prng) {
     let raw = rng.next_u64();
     let ts = NtpTimestamp::from_raw(raw);
     assert_eq!(ts.raw(), raw, "the nonce check needs an exact round trip");
@@ -170,42 +171,9 @@ fn exercise_arithmetic(rng: &mut Lcg) {
     assert!(Header::decode(&packet).is_some());
 }
 
-/// The seeded stream. A plain LCG: the harness needs reproducible bits, not
-/// cryptographic ones.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    /// A bounded index in `[0, modulus)`; `modulus` must be non-zero.
-    fn index(&mut self, modulus: usize) -> usize {
-        usize::try_from(self.next_u64() & 0xFFFF).unwrap_or(0) % modulus
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -223,7 +191,7 @@ fn random_inputs_never_panic() {
                     .saturating_total_nanos()
                     .saturating_add(rng.next_u64() % 10_000_000_000),
             );
-            let size = rng.index(buf.len() + 1);
+            let size = rng.below(buf.len() + 1);
             rng.fill(&mut buf[..size]);
             exercise_decode(&buf[..size]);
             exercise_evaluate(&buf[..size], &txn, received_at);

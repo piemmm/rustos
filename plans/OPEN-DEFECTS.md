@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 40 open, 110 closed, 150 total.
+**closed**, and a partial fix stays **open**. 39 open, 111 closed, 150 total.
 
-### Open (40)
+### Open (39)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -66,7 +66,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D144 | `menu-qemu-aarch64` stalled once at its runtime ceiling with the terminal never launched, and the mechanism is not known | observed once in a full 182-test matrix run on `6f1895cc5`; has not reproduced (standalone 22.4 s, then 25.1 s, then green in a full gate). **Not** load: the guest was alive and idle at the kill (≈8 IPC/s, silent 1.98 s) and 600 s dwarfs the 22 s a pass needs, so it stalled rather than ran slow. Reached `desktop fully revealed` + `first input delivered kind=pointer`, then nothing: no `terminal.app` bundle load and so no `served window first frame on screen`, the gate the rest of the script waits on — the launch click had no effect. The recorded suspicion, that the row click raced the program-library popup, is **disproven**: the popup takes the pointer grab from `is_open()`, i.e. from the model, so a row click delivered before the popup's first present is still hit-tested against the open popup. Leading remaining candidate is `lib/virtio_input`'s documented silent-drop bound (the device discards events when no posted buffer is free; a press/release vanishing mid-burst was seen end to end before the pool went from 8 to 64), whose stated trigger — a click arriving while the desktop re-renders — is exactly what the old script produced by firing the row click during the popup's ~159 ms paint; weak, though, since a 64-deep pool should absorb a burst this small. The six library scripts now gate the row click on the popup's own `program-library popup on screen` witness (id 20015), so no script depends on the question and a recurrence records whether the popup ever reached the screen. Diagnosing it still needs the failing serial log copied aside: `persist_serial` rewrites one path per test |
 | D145 | `netstack`'s `accept` scans the whole socket table to find the next unaccepted child, and a spurious `accept` scans it all | noticed while converting the socket bound to measured bytes (`plans/SSH.md` S0b); not absorbed, because it is a second index's worth of design rather than part of that conversion. Every other owned-handle lookup is O(1) through a keyed index; this one is `sockets.iter().position(...)` over the entire table, so a server accepting *n* connections pays O(n²), and the common `WouldBlock` — an `accept` with nothing ready — pays a **full** scan. Remote peers decide how many connections there are to accept, so it is the same "cost follows the table" class the indices were added to remove, reached by a path the owner drives. It is not a correctness or containment defect: the bound still holds and no authority leaks. The fix is not a fifth index but a per-listener FIFO of unaccepted child ids living *inside* the `Proto::Listen` variant, so it is created, drained, and dropped with the listener that owns it and needs no reservation of its own; `accept` then pops a handle and resolves it through `by_id` in constant time. Touches `Proto::Listen`'s shape and every listener site (`to_record`, `defence_counters`, `close`, `listen`, `accept_socket`, `drive_listener`, `advance_listener`, `drain_listener_accepts`, `stream_next_deadline`, `committed_of`, the invariant check). **Re-check trigger:** `plans/SSH.md` S5, whose `sshd` is the tree's first real `accept` consumer and the first workload that would feel it |
 | D146 | a CPU fault in a minimal QEMU integration kernel is a silent hang: no vector table is installed and no fault handler is registered, so nothing reports the syndrome | found while diagnosing the `figure-determinism-qemu-aarch64` boot-stack overflow, which presented only as a 90 s silence with the transcript's last line being the step *before* the fault. These bins supply their own `kernel_main` and call at most `enable_fp_el1`; `tairix_arch_aarch64::exceptions::init_vectors` is never called, so `VBAR_EL1` stays 0 and a synchronous fault vectors to physical `0x200`, executes zeros as `UDF`, and re-faults forever — the guest is wedged rather than dead, so the harness can only kill it on the inactivity budget. The real syndrome (`Prefetch Abort, ESR 0x21/0x86000000, FAR/ELR 0x3ff0000000000000` — a branch to the f64 `1.0` from a corrupted vtable slot) was recoverable only by re-running the bin by hand under `qemu -d int`. Installing vectors alone is **not** the fix: `exceptions::fatal_exception` offers the trap to `fault::fault_handler()` and, finding none registered, falls through to `halt_current_cpu()` — still silent. The fix is a shared guest-side itest kernel helper (there is none today: `tests/integration/harness` is host-side build glue and `finisher` only provides `fail_point!`) that installs the vector table and registers a handler printing `ESR`/`FAR`/`ELR` through the serial sink before exiting with a failure code, wired into the itest bins on both bare-metal ports. riscv64 has the same gap by the same route. Until it lands, any fault in these bins costs a manual `-d int` re-run to diagnose. The boot-stack guard (D150) cannot help here yet: its verdict is read on the panic path, which a fault in these bins never reaches, so an overrun that faults rather than panics — the aarch64 case above — is still silence |
-| D151 | every in-tree fuzz harness draws its structural choices from an unmixed LCG's low bits, where bit *k* has period 2^(k+1) | found while folding the DNS-SD grammar into `fuzz_net_mdns` (`plans/ZEROCONF.md` Z2). Measured against the shared recurrence (`x*6364136223846793005 + 1`, output = raw state): `next_u64() & 1` is `0,1,0,1,…` and `index(4)` is `2,3,0,1,…`. So a coin flip reached at a **fixed parity** of the draw sequence is a constant, and two flips an even number of draws apart are identical. Demonstrated, not theorised: the new `ServiceInstance::from_name` branch executed **0** times across 2000 sweep iterations with every assertion inside it unreached, and reaches 328 once the generator's output is mixed. **`fuzz_net_mdns` is fixed** — its `Lcg` now returns `fuzzseed::splitmix64(state)` and the exercise covers both name shapes deterministically rather than by draw. Open elsewhere, every one taking its choices off the raw state: 26 files carry their own `struct Lcg` — 22 fuzz harnesses, three `lib/net/src` unit-test fixtures and the WinterSun net corpus its three harnesses share — `lib/compress`'s three harnesses inline the same multiplier as a closure and choose off its lowest bits (`next() % 4`, `next() & 1`, `is_multiple_of(8)`), and `tairix_fuzzseed::Lcg` is itself unmixed, its `below` taking `% n` at 188 call sites, 152 of them in `fuzz_image`. Not swept here because each harness explores genuinely new paths once its draws decorrelate, so the sweep carries an unbounded tail of real finds across unrelated subsystems; it is its own body of work. The duplication — with a comment in each copy asserting they are identical — is the second half of the same entry: mix `tairix_fuzzseed::Lcg`, give it the `index`/`next_u32`/`next_u16` the copies grew, and delete the copies, together with the private generators that escape the low-bit flaw but duplicate the seam (xorshift64* in `kernel/ipc`, `kernel/mem` twice, `kernel/syscall` and `lib/virtio`; the high-bits LCG in `lib/image`'s VP8 fixture; `fs_soak`'s SplitMix64) |
 | D152 | a panic raised inside the framebuffer console's renderer deadlocks its own report | aarch64, the one port whose kernel renders a framebuffer console, on a release build with a live framebuffer. `SerialSink::write_event` renders through `video::write_bytes`, whose shared `paint` body takes `RENDER_LOCK` blocking, so a fault inside `lib/fbcon` or `paint` with the lock held hangs silently on the record it is emitting; `video::reclaim_surface`'s `try_lock` steps around the hang without fixing the write path. See the Scope bullet |
 
 ### D140 — the loaded notification-icon set is never installed
@@ -94,7 +93,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (110)
+### Closed (111)
 
 | ID | Subject |
 |---|---|
@@ -208,11 +207,26 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D148 | the hover gate's damage bound was exhausted by a desktop that re-damaged its whole icon bar after every published frame |
 | D149 | icon artwork landing repainted the whole icon bar and the whole library popup, where only the slots and rows that gained a picture changed |
 | D150 | boot stack had no overrun detector on any port |
+| D151 | every in-tree fuzz harness drew its structural choices from an unmixed LCG's low bits, where bit *k* has period 2^(k+1) |
 
 ## Scope
 
 The open items, in priority order:
 
+- **D151 — every in-tree fuzz harness drew its structural choices from an
+  unmixed LCG's low bits — FIXED.** `tairix_fuzzseed::Prng` (SplitMix64,
+  pinned to the reference stream) is the one generator every harness, soak and
+  randomised test draws from: every output bit is mixed, and the bounded draws
+  (`below`, `at_most`, `pick`) reduce by multiply-shift from the high word, so
+  no choice rests on a low bit. No private generator remains — the
+  `struct Lcg`s, the inline closures, the xorshift64* and SplitMix64 copies,
+  and the per-file `bounded`/`low_byte`/`index` helpers are deleted — and the
+  entropy stand-ins are one shared test module each in `lib/rng` and
+  `kernel/core`. The one exception is code under test that consumes `lib/rng`'s
+  `RandU64`, which its tests feed from `NonCryptoRng`.
+  `no_low_bit_repeats_on_a_power_of_two_period` and
+  `a_power_of_two_bound_is_not_a_fixed_cycle` fail for any power-of-two LCG;
+  `docs/src/security/fuzzing.md` states the rule.
 - **D150 — the boot stack had no overrun detector on any port — FIXED.** The
   MMU is off while the boot stack is in use, so the guard is poison rather
   than a hole: every port reserves 4 KiB below the stack (the linker script on

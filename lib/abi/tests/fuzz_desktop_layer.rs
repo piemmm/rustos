@@ -20,7 +20,7 @@
 //!   `DESKTOP_LAYER_MAX_SIDE_LOGICAL` — the bound that keeps a layer surface
 //!   from reproducing a surface the user is meant to trust.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates valid
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` mutates valid
 //! seed frames and feeds pure noise. A plain `cargo test` runs the fixed smoke
 //! sweep; `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
@@ -30,6 +30,7 @@ use tairix_abi::window_ipc::{
     WindowRequest, DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL,
     WINDOW_TERRAIN_REPLY_MAX,
 };
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -93,16 +94,6 @@ fn encode(request: &WindowRequest) -> Vec<u8> {
     let len = request.encode(&mut out).expect("the seed frame fits");
     out.truncate(len);
     out
-}
-
-/// `x` reduced into `0..=max`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
-
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
 }
 
 /// Decode `bytes` as a request; anything accepted must round-trip, and an
@@ -197,80 +188,77 @@ fn decoding_any_desktop_layer_frame_never_panics() {
         .to_le_bytes(),
     ];
 
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "decoding_any_desktop_layer_frame_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A valid request with a handful of bytes flipped.
-        let seed = &seeds[bounded(next(), seeds.len() - 1)];
+        let seed = rng.pick(&seeds);
         let mut mutated = seed.clone();
-        let flips = bounded(next(), 16);
+        let flips = rng.at_most(16);
         for _ in 0..flips {
             if mutated.is_empty() {
                 break;
             }
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         exercise_request(&mutated);
 
         // 2. A truncation of a valid request, driving the exact-length checks.
-        let keep = bounded(next(), seed.len());
+        let keep = rng.at_most(seed.len());
         exercise_request(&seed[..keep]);
 
         // 3. An over-long request: a byte past the operation's own end is a
         //    smuggled field, however innocuous its value.
         let mut longer = seed.clone();
-        longer.push(low_byte(next() >> 41));
+        longer.push(rng.next_u8());
         exercise_request(&longer);
 
         // 4. Pure noise of an arbitrary length through the request decoder.
-        let nlen = bounded(next(), 512);
-        let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 29)).collect();
+        let nlen = rng.at_most(512);
+        let mut noise = vec![0u8; nlen];
+        rng.fill(&mut noise);
         exercise_request(&noise);
 
         // 5. A valid event with bytes flipped, driving the reserved-tail and
         //    closed-set checks.
-        let mut event = event_seeds[bounded(next(), event_seeds.len() - 1)];
-        let eflips = bounded(next(), 6);
+        let mut event = *rng.pick(&event_seeds);
+        let eflips = rng.at_most(6);
         for _ in 0..eflips {
-            let pos = bounded(next(), event.len() - 1);
-            event[pos] ^= low_byte(next() >> 19);
+            let pos = rng.below(event.len());
+            event[pos] ^= rng.next_u8();
         }
         exercise_event(&event);
 
         // 6. Pure noise as an event frame.
-        let elen = bounded(next(), WindowEvent::WIRE_LEN + 8);
-        let enoise: Vec<u8> = (0..elen).map(|_| low_byte(next() >> 31)).collect();
+        let elen = rng.at_most(WindowEvent::WIRE_LEN + 8);
+        let mut enoise = vec![0u8; elen];
+        rng.fill(&mut enoise);
         exercise_event(&enoise);
 
         // 7. A valid terrain reply with bytes flipped: a corrupt count, a
         //    dirty reserved pair, or a plate with no area must all refuse.
         let mut reply = reply_seed.clone();
-        let rflips = bounded(next(), 12);
+        let rflips = rng.at_most(12);
         for _ in 0..rflips {
             if reply.is_empty() {
                 break;
             }
-            let pos = bounded(next(), reply.len() - 1);
-            reply[pos] ^= low_byte(next() >> 23);
+            let pos = rng.below(reply.len());
+            reply[pos] ^= rng.next_u8();
         }
         exercise_terrain(&reply);
 
         // 8. A truncated terrain reply, and pure noise as one.
-        let rkeep = bounded(next(), reply_seed.len());
+        let rkeep = rng.at_most(reply_seed.len());
         exercise_terrain(&reply_seed[..rkeep]);
-        let rlen = bounded(next(), WINDOW_TERRAIN_REPLY_MAX);
-        let rnoise: Vec<u8> = (0..rlen).map(|_| low_byte(next() >> 37)).collect();
+        let rlen = rng.at_most(WINDOW_TERRAIN_REPLY_MAX);
+        let mut rnoise = vec![0u8; rlen];
+        rng.fill(&mut rnoise);
         exercise_terrain(&rnoise);
 
         iteration += 1;

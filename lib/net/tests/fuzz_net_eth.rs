@@ -2,7 +2,7 @@
 //!
 //! Every decoder in this crate parses bytes that arrived from a possibly
 //! hostile peer over the link layer, so each one is driven by a fuzz
-//! harness. A deterministic, per-run-seeded LCG generates pseudo-random
+//! harness. A deterministic, per-run-seeded `Prng` generates pseudo-random
 //! inputs and asserts the two invariants every codec must uphold no
 //! matter what bits a peer crafts:
 //!
@@ -25,6 +25,7 @@
 //! random one, so it runs once regardless of the budget.
 
 use tairix_abi::driver::net::MacAddress;
+use tairix_fuzzseed::Prng;
 use tairix_net::arp::{self, ArpPacket};
 use tairix_net::eth::{self, EthernetFrame};
 use tairix_net::icmp::{IcmpContext, IcmpEcho};
@@ -103,42 +104,9 @@ fn exercise_icmp(bytes: &[u8]) {
     }
 }
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the
-/// generator in `lib/abi/tests/fuzz_decode.rs` so the two harnesses share
-/// one reproducible-failure story.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -146,7 +114,7 @@ fn random_inputs_never_panic() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
-            let size = ((rng.next_u64() & 0x1FF) as usize) % (buf.len() + 1);
+            let size = rng.at_most(buf.len());
             rng.fill(&mut buf[..size]);
             exercise(&buf[..size]);
         }

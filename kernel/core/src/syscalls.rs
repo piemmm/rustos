@@ -13259,8 +13259,9 @@ mod tests {
     // already in scope through `use super::*`; only `EmbeddedProgram` is
     // additionally needed here.
     use crate::spawn::EmbeddedProgram;
+    use crate::test_entropy::SeededEntropy;
     use tairix_log::{set_max_level, Level};
-    use tairix_rng::{EntropyError, EntropySource, OutputReserve};
+    use tairix_rng::OutputReserve;
 
     use crate::random::BootReserve;
 
@@ -13348,24 +13349,6 @@ mod tests {
         assert!(crate::preempt::take_preempt_pending(OTHER));
     }
 
-    /// Deterministic stand-in entropy source for the `random_get`
-    /// copy-out tests (not real entropy): a counter expanded so a seeded
-    /// reserve's output is reproducible and non-zero.
-    struct TestEntropy(u64);
-
-    impl EntropySource for TestEntropy {
-        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-            for byte in out.iter_mut() {
-                self.0 = self
-                    .0
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                *byte = self.0.to_le_bytes()[4];
-            }
-            Ok(())
-        }
-    }
-
     /// The **unseeded** boot reserve every generic handler test composes:
     /// those tests never call `random_get`, so the reserve's state is
     /// irrelevant — what matters is that the handler receives its ninth
@@ -13374,13 +13357,13 @@ mod tests {
         RwLock::new(Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>)
     }
 
-    /// A reserve **seeded** from the deterministic [`TestEntropy`] source,
+    /// A reserve **seeded** from the deterministic [`SeededEntropy`] source,
     /// ready to serve the `random_get` copy-out tests with reproducible
     /// non-zero bytes.
     fn seeded_rng() -> RwLock<Box<dyn RandomReserve + Send + Sync>> {
-        let mut reserve = OutputReserve::<TestEntropy>::new();
+        let mut reserve = OutputReserve::<SeededEntropy>::new();
         reserve
-            .seed(TestEntropy(0x00C0_FFEE))
+            .seed(SeededEntropy::new(0x00C0_FFEE))
             .expect("the deterministic source seeds");
         RwLock::new(Box::new(reserve) as Box<dyn RandomReserve + Send + Sync>)
     }

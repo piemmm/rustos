@@ -19,6 +19,7 @@ use tairix_abi::net_ipc::{NetAddrFamily, NetIfKind, IF_NAME_LEN};
 use tairix_abi::{
     CapabilityId, CapabilitySummary, Duration64, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE,
 };
+use tairix_fuzzseed::Prng;
 use tairix_log::{Event, Sink};
 use tairix_net::iface::TempAddrSource;
 use tairix_netstack::{Caller, Netstack, SocketService};
@@ -104,41 +105,9 @@ fn routed_stack() -> Netstack {
     stack
 }
 
-/// Lehmer-style LCG — deterministic, matching the sibling harnesses so a
-/// failure reproduces one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn serve_never_panics_and_gates_on_cap_net() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "serve_never_panics_and_gates_on_cap_net",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -148,13 +117,8 @@ fn serve_never_panics_and_gates_on_cap_net() {
     ));
     let mut stack = routed_stack();
     let sink = NullSink;
-    let mut entropy_state: u32 = 0x1234_5678;
-    let mut entropy = || {
-        entropy_state = entropy_state
-            .wrapping_mul(1_664_525)
-            .wrapping_add(1_013_904_223);
-        entropy_state
-    };
+    let mut entropy_stream = Prng::new(0x1234_5678);
+    let mut entropy = || entropy_stream.next_u32();
     let mut request = [0u8; 256];
     let mut reply = [0u8; 64];
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
@@ -167,7 +131,7 @@ fn serve_never_panics_and_gates_on_cap_net() {
             // A caller with CAP_NET half the time; distinct principals so
             // the table exercises per-principal accounting.
             let net = rng.next_u64() & 1 == 0;
-            let proc_byte = (rng.next_u64() & 0xFF) as u8;
+            let proc_byte = rng.next_u8();
             let who = caller(net, proc_byte);
             let before = svc.len();
             let result = svc.serve(

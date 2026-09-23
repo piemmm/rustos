@@ -12,7 +12,7 @@
 //!   interpret (fail closed), and a never-terminated
 //!   bracketed paste cannot make it misbehave.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng`
 //! draws pseudo-random byte strings and mutates real key/mouse/paste templates.
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed; `cargo xtask
@@ -20,6 +20,7 @@
 //! budget.
 
 use tairix_curses::Input;
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -39,17 +40,6 @@ const TEMPLATES: &[&[u8]] = &[
     b"\x1b[200~unterminated paste that never ends",
 ];
 
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
-
 /// Feed arbitrary bytes through a fresh decoder: must never panic, whatever it
 /// emits. Draining the events also exercises the [`tairix_curses::Event`]
 /// payloads.
@@ -66,48 +56,43 @@ fn feed_never_panics(bytes: &[u8]) {
 fn feed_never_panics_for_any_input() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // The seed is drawn and logged by `tairix_fuzzseed::start`: fresh
     // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "feed_never_panics_for_any_input",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A real template with a handful of bytes flipped at random.
-        let template = TEMPLATES[bounded(next(), TEMPLATES.len() - 1)];
+        let template = *rng.pick(TEMPLATES);
         let mut mutated = template.to_vec();
-        let flips = bounded(next(), 8);
+        let flips = rng.at_most(8);
         for _ in 0..flips {
             if mutated.is_empty() {
                 break;
             }
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         feed_never_panics(&mutated);
 
         // 2. A structured-but-hostile mouse report: the SGR introducer, a
         //    random parameter blob, and a final byte.
-        let blob_len = bounded(next(), 64);
+        let blob_len = rng.at_most(64);
         let mut spliced = Vec::new();
         spliced.extend_from_slice(b"\x1b[<");
         for _ in 0..blob_len {
-            spliced.push(low_byte(next() >> 23));
+            spliced.push(rng.next_u8());
         }
         spliced.push(b'M');
         feed_never_panics(&spliced);
 
         // 3. Pure noise straight into the decoder.
-        let nlen = bounded(next(), MAX_NOISE);
-        let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 29)).collect();
+        let nlen = rng.at_most(MAX_NOISE);
+        let mut noise = vec![0u8; nlen];
+        rng.fill(&mut noise);
         feed_never_panics(&noise);
 
         iteration += 1;

@@ -304,15 +304,8 @@ fn contiguous_volume(blocks: u64) -> (ARXFS<SparseBlock>, u64) {
         .expect("create");
     // Incompressible and never repeating, so the write neither clusters nor
     // dedupes and every logical block gets its own physical one.
-    let mut state = 0x2545_F491_4F6C_DD1Du64;
-    let body: Vec<u8> = (0..blocks * u64::from(BLOCK_SIZE))
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state.to_le_bytes()[3]
-        })
-        .collect();
+    let mut body = vec![0u8; usize::try_from(blocks * u64::from(BLOCK_SIZE)).expect("fits")];
+    tairix_fuzzseed::Prng::new(0x2545_F491_4F6C_DD1D).fill(&mut body);
     let mut done = 0usize;
     while done < body.len() {
         let wrote = fs

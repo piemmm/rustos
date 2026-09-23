@@ -33,6 +33,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use tairix_fuzzseed::Prng;
 use tairix_kernel_mem::swap::SWAP_RECORD_LEN;
 use tairix_kernel_mem::{
     EncryptedSwap, EntropySource, SealError, SealKey, SwapBackend, SwapError, SwapPage,
@@ -53,32 +54,11 @@ fn record_len_u64() -> u64 {
     u64::try_from(SWAP_RECORD_LEN).expect("record length fits u64")
 }
 
-/// xor-shift* PRNG. Deterministic, fast, zero-allocation.
-struct Rng(u64);
-impl Rng {
-    const fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-    fn byte(&mut self) -> u8 {
-        (self.next_u64() & 0xFF) as u8
-    }
-}
-
 /// PRNG-seeded entropy source (test-only; not a real CSPRNG).
-struct RngEntropy(Rng);
+struct RngEntropy(Prng);
 impl EntropySource for RngEntropy {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), SealError> {
-        for b in out.iter_mut() {
-            *b = self.0.byte();
-        }
+        self.0.fill(out);
         Ok(())
     }
 }
@@ -133,13 +113,13 @@ impl SwapBackend for MockBackend {
 
 #[test]
 fn fuzz_swap_restore_is_fail_closed() {
-    let mut rng = Rng::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "fuzz_swap_restore_is_fail_closed",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let device = MockBackend::new(SLOTS);
-    let key = SealKey::generate(&mut RngEntropy(Rng::new(1))).expect("key");
-    let mut swap = EncryptedSwap::activate(device.clone(), key, &mut RngEntropy(Rng::new(2)))
+    let key = SealKey::generate(&mut RngEntropy(Prng::new(1))).expect("key");
+    let mut swap = EncryptedSwap::activate(device.clone(), key, &mut RngEntropy(Prng::new(2)))
         .expect("activate");
 
     let mut round_trips = 0u64;
@@ -149,9 +129,7 @@ fn fuzz_swap_restore_is_fail_closed() {
         for _ in 0..SMOKE_ITERATIONS {
             let slot = rng.next_u64() % SLOTS;
             let mut page = [0u8; PAGE_LEN];
-            for b in &mut page {
-                *b = rng.byte();
-            }
+            rng.fill(&mut page);
 
             // Store, then immediately verify the untampered round-trip.
             swap.store(slot, &page)
@@ -167,7 +145,7 @@ fn fuzz_swap_restore_is_fail_closed() {
                     let off = usize::try_from(rng.next_u64() % record_len_u64())
                         .expect("offset fits usize");
                     swap.store(slot, &page).expect("re-store");
-                    device.tamper(slot, off, rng.byte());
+                    device.tamper(slot, off, rng.next_u8());
                     let mut out = [0xAAu8; PAGE_LEN];
                     assert_eq!(
                         swap.load(slot, &mut out),

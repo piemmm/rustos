@@ -2152,6 +2152,9 @@ dependencies = [
 [[package]]
 name = "tairix-geometry"
 version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+]
 
 [[package]]
 name = "tairix-getcap"
@@ -2378,6 +2381,7 @@ name = "tairix-kalloc"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fuzzseed",
  "tairix-sync",
 ]
 
@@ -2446,6 +2450,7 @@ dependencies = [
  "tairix-crypto",
  "tairix-fbcon",
  "tairix-fsmeta",
+ "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
  "tairix-itest-harness",
@@ -2982,10 +2987,10 @@ dependencies = [
 name = "tairix-raster"
 version = "0.0.0"
 dependencies = [
+ "tairix-fuzzseed",
  "tairix-inline",
  "tairix-parallel",
  "tairix-reclaim",
- "tairix-rng",
  "tairix-theme",
  "tairix-util",
 ]
@@ -3062,6 +3067,7 @@ name = "tairix-rng"
 version = "0.0.0"
 dependencies = [
  "tairix-crypto",
+ "tairix-fuzzseed",
  "zeroize",
 ]
 

@@ -15,3 +15,8 @@ workspace = true
 # layering. The compositing colour algebra lives in `lib/raster`; this
 # crate owns only the coordinate types the GUI crates share, so it is
 # depended on, never depends.
+
+[dev-dependencies]
+# The shared seeded generator the randomised unit tests draw from (never in a
+# shipping build).
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

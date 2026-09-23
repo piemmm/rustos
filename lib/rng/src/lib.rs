@@ -98,6 +98,8 @@ pub mod jitter;
 pub mod noncrypto;
 pub mod rand;
 pub mod reserve;
+#[cfg(test)]
+mod test_sources;
 
 pub use bootseed::{BootSeedSource, MAX_BOOT_SEED_LEN};
 pub use csprng::{CsRng, DEFAULT_RESEED_INTERVAL};

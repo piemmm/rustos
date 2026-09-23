@@ -113,7 +113,7 @@ fn exercise_hostile(raw: &[u8], monotonic: Duration64, level: Level) {
 
 #[test]
 fn rendered_lines_are_control_free_and_never_panic() {
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "rendered_lines_are_control_free_and_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -124,11 +124,11 @@ fn rendered_lines_are_control_free_and_never_panic() {
         for i in 0..SMOKE_ITERATIONS {
             let monotonic = Duration64::from_nanos(rng.next_u64());
             if i % 2 == 0 {
-                let size = ((rng.next_u64() & 0x1FF) as usize) % (buf.len() + 1);
+                let size = rng.at_most(buf.len());
                 rng.fill(&mut buf[..size]);
                 exercise_decoded(&buf[..size], monotonic);
             } else {
-                let size = ((rng.next_u64() & 0xFF) as usize) % (buf.len() + 1);
+                let size = rng.at_most(buf.len());
                 rng.fill(&mut buf[..size]);
                 let level = Level::from_u8((rng.next_u64() % 6) as u8).unwrap_or(Level::Info);
                 exercise_hostile(&buf[..size], monotonic, level);

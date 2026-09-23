@@ -12,17 +12,18 @@
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
+use tairix_fuzzseed::Prng;
 use tairix_net::udp::{self, Pseudo, UdpDatagram, UDP_HEADER_LEN};
 use tairix_net::{Ipv4Addr, Ipv6Addr};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
-fn pseudo(rng: &mut Lcg) -> Pseudo {
+fn pseudo(rng: &mut Prng) -> Pseudo {
     if rng.next_u64().is_multiple_of(2) {
         Pseudo::V4 {
-            source: Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes()),
-            destination: Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes()),
+            source: Ipv4Addr::from(rng.next_u32().to_be_bytes()),
+            destination: Ipv4Addr::from(rng.next_u32().to_be_bytes()),
         }
     } else {
         let mut octets = [0u8; 16];
@@ -44,9 +45,9 @@ fn exercise_parse(p: Pseudo, bytes: &[u8]) {
     }
 }
 
-fn exercise_round_trip(rng: &mut Lcg, p: Pseudo) {
-    let src_port = (rng.next_u64() & 0xFFFF) as u16;
-    let dst_port = (rng.next_u64() & 0xFFFF) as u16;
+fn exercise_round_trip(rng: &mut Prng, p: Pseudo) {
+    let src_port = rng.next_u16();
+    let dst_port = rng.next_u16();
     let len = (rng.next_u64() & 0x1FF) as usize;
     let mut payload = vec![0u8; len];
     rng.fill(&mut payload);
@@ -58,41 +59,9 @@ fn exercise_round_trip(rng: &mut Lcg, p: Pseudo) {
     assert_eq!(dg.payload, &payload[..]);
 }
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the
-/// generator in the sibling harnesses so failures reproduce one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -101,7 +70,7 @@ fn random_inputs_never_panic() {
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let p = pseudo(&mut rng);
-            let size = ((rng.next_u64() & 0x7F) as usize) % (buf.len() + 1);
+            let size = rng.at_most(buf.len());
             rng.fill(&mut buf[..size]);
             exercise_parse(p, &buf[..size]);
             exercise_round_trip(&mut rng, p);

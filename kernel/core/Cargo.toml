@@ -243,3 +243,5 @@ tairix-arch-api = { path = "../arch/api", version = "=0.0.0", features = ["host-
 # definition the image build uses, so the kernel verifier and the composer
 # can never drift.
 tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = ["app-image"] }
+# The shared seeded generator the randomised unit tests draw from.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

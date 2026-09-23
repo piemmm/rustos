@@ -30,9 +30,10 @@ iteration:
   `LengthOutOfRange`. Never a panic, never
   silent corruption.
 
-The exerciser is deterministic: a per-iteration seed drives the content
-and a SplitMix64-style advance, so any failure reproduces from the seed
-printed in the error.
+The exerciser is deterministic: every content byte is the shared
+`tairix_fuzzseed::splitmix64` hash of the per-iteration seed, the file
+and the offset, so any failure reproduces from the seed printed in the
+error.
 
 ## The randomized `arxfs-random` target
 

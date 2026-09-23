@@ -257,16 +257,9 @@ fn every_operation_matches_a_per_element_model() {
     const STEPS: u32 = if cfg!(miri) { 24 } else { 600 };
     let mut set: RangeSet<u64> = RangeSet::new();
     let mut model = alloc::collections::BTreeSet::new();
-    // xorshift, so the sequence is fixed and reproducible without a clock.
-    let mut state = 0x9E37_79B9_7F4A_7C15u64;
-    let mut next = || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
+    let mut rng = tairix_fuzzseed::Prng::new(0x9E37_79B9_7F4A_7C15);
     for step in 0..STEPS {
-        let raw = next();
+        let raw = rng.next_u64();
         let start = raw % WINDOW;
         let len = 1 + (raw >> 8) % 9;
         let end = (start + len).min(WINDOW);

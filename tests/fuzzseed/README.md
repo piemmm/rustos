@@ -11,9 +11,13 @@ filesystem soak. It is the single place (`AGENTS.md` §2.2) that:
   replay (`resolve_seed` / `start`);
 - **logs the seed at the start of each test**, with the exact `VAR=value` to
   reproduce it (`announce` / `start`);
-- bounds the work: a **single smoke iteration** by default
-  (`smoke_iterations`), or a wall-clock soak loop (`budget_deadline` /
-  `within_budget`).
+- bounds the work: a **single smoke iteration** by default, or a
+  wall-clock soak loop (`budget_deadline` / `within_budget`);
+- owns the **one generator** every harness and randomised test draws from,
+  `Prng` (SplitMix64): every output bit is mixed, so `below`, `at_most`,
+  `pick`, `next_u8`…`next_u64`, and `fill` may be used for any choice. A
+  bounded draw spends one word whatever its bound, so a stream replays
+  exactly from its seed. A private generator anywhere else is a defect.
 
 It lives under `tests/` — not `lib/`, which is reserved for code that ships
 inside TAIRiX — and is consumed only as a `[dev-dependencies]` entry of the

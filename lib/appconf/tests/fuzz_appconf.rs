@@ -23,36 +23,10 @@
 use std::collections::BTreeMap;
 
 use tairix_appconf::{ConfError, Document, MAX_LINES, MAX_SETTINGS};
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
-
-/// Lehmer-style LCG — deterministic, matches the sibling harnesses so a
-/// failure reproduces one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn pick<'a>(&mut self, choices: &[&'a str]) -> &'a str {
-        let index = usize::try_from(self.next_u64() % choices.len() as u64).expect("index fits");
-        choices[index]
-    }
-}
 
 /// Keys and values mixed legal with illegal, so a generated document walks
 /// the accept/reject boundary rather than mostly failing at the first byte.
@@ -90,7 +64,7 @@ const VALUES: &[&str] = &[
 ];
 const SEPARATORS: &[&str] = &["=", " = ", "   =", "=   ", " ="];
 
-fn structured_line(rng: &mut Lcg) -> String {
+fn structured_line(rng: &mut Prng) -> String {
     match rng.next_u64() % 10 {
         0 => return String::from("# a comment"),
         1 => return String::new(),
@@ -106,7 +80,7 @@ fn structured_line(rng: &mut Lcg) -> String {
     )
 }
 
-fn build_document(rng: &mut Lcg) -> String {
+fn build_document(rng: &mut Prng) -> String {
     let lines = (rng.next_u64() % 40) as usize;
     let mut doc = String::new();
     for index in 0..lines {
@@ -129,7 +103,7 @@ fn snapshot(doc: &Document) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn check(text: &str, rng: &mut Lcg) {
+fn check(text: &str, rng: &mut Prng) {
     // (1) parse never panics and honours its bounds.
     let doc = match Document::parse(text) {
         Ok(doc) => doc,
@@ -160,8 +134,8 @@ fn check(text: &str, rng: &mut Lcg) {
     }
 
     // (4) a write touches one key and nothing else.
-    let key = rng.pick(KEYS);
-    let value = rng.pick(VALUES);
+    let key = *rng.pick(KEYS);
+    let value = *rng.pick(VALUES);
     let before = snapshot(&doc);
     let refused_before: Vec<String> = doc.unparsed().map(|line| line.text.to_string()).collect();
     let mut written = Document::parse(text).expect("the same text parses again");
@@ -194,7 +168,7 @@ fn check(text: &str, rng: &mut Lcg) {
 
 #[test]
 fn structured_documents_hold_every_invariant() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "structured_documents_hold_every_invariant",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -212,7 +186,7 @@ fn structured_documents_hold_every_invariant() {
 
 #[test]
 fn arbitrary_ascii_never_panics() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "arbitrary_ascii_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

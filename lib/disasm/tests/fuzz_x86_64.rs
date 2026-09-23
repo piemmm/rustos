@@ -8,12 +8,13 @@
 //!   min(remaining, 15)), so a walk over any input terminates;
 //! * the retained bytes are exactly the leading encoding bytes.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG produces
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` produces
 //! the streams. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep
 //! once from a fresh, logged seed; `cargo xtask fuzz` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock budget.
 
 use tairix_disasm::x86_64;
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -30,17 +31,6 @@ const TEMPLATE: &[u8] = &[
     0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x10, 0x48, 0x8d, 0x3d, 0x00, 0x00, 0x00, 0x00, 0xe8,
     0x00, 0x00, 0x00, 0x00, 0xc9, 0xc3,
 ];
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
 
 /// Walks `stream` to the end, asserting the forward-progress invariants.
 fn walk(stream: &[u8]) {
@@ -71,31 +61,24 @@ fn walk(stream: &[u8]) {
 #[test]
 fn decode_never_panics_and_always_advances() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "decode_never_panics_and_always_advances",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. Pure noise.
-        let noise: Vec<u8> = (0..bounded(next(), MAX_STREAM))
-            .map(|_| low_byte(next() >> 29))
-            .collect();
+        let mut noise = vec![0u8; rng.at_most(MAX_STREAM)];
+        rng.fill(&mut noise);
         walk(&noise);
 
         // 2. The valid template with a handful of bytes flipped, so real
         //    opcodes see hostile ModRM/SIB/immediate fields.
         let mut mutated = TEMPLATE.to_vec();
-        for _ in 0..bounded(next(), 6) {
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+        for _ in 0..rng.at_most(6) {
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         walk(&mutated);
 
@@ -105,11 +88,11 @@ fn decode_never_panics_and_always_advances() {
         let prefixes = [
             0x66u8, 0x67, 0xf0, 0xf2, 0xf3, 0x2e, 0x3e, 0x64, 0x65, 0x48, 0x41,
         ];
-        for _ in 0..bounded(next(), 20) {
-            storm.push(prefixes[bounded(next(), prefixes.len() - 1)]);
+        for _ in 0..rng.at_most(20) {
+            storm.push(*rng.pick(&prefixes));
         }
-        storm.push(low_byte(next() >> 19));
-        storm.push(low_byte(next() >> 23));
+        storm.push(rng.next_u8());
+        storm.push(rng.next_u8());
         walk(&storm);
 
         iteration += 1;

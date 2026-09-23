@@ -24,6 +24,7 @@ use super::{
 };
 use crate::orientation::Orientation;
 use crate::{sniff, DecodeError, DecodeLimits, FitBox, ImageFormat};
+use tairix_fuzzseed::Prng;
 
 /// Generous limits for every fixture that is not itself exercising a
 /// limit refusal.
@@ -768,14 +769,13 @@ fn every_scale_of_the_fast_idct_matches_the_direct_reference_within_one() {
     // silently reconstructs each block's top-left corner magnified, which
     // reads as a blocky, low-resolution picture. Holding every scale to
     // the standard's own definition is what catches that.
-    let mut state = 0x0123_4567_89AB_CDEFu64;
+    let mut rng = Prng::new(0x0123_4567_89AB_CDEF);
     let quant = [1u16; 64];
     let mut worst = 0i32;
     for _ in 0..1_000 {
         let mut coeffs = [0i32; 64];
         for c in &mut coeffs {
-            let raw = i32::try_from(lcg_next(&mut state) % 4096).unwrap_or(0);
-            *c = raw - 2048;
+            *c = i32::try_from(rng.below(4096)).unwrap_or(0) - 2048;
         }
         let deq = dequantize(&coeffs, &quant);
         let scales: [(usize, Vec<u8>); 4] = [
@@ -834,13 +834,12 @@ fn a_reduced_scale_block_carries_the_same_mean_as_the_full_scale_one() {
     // shift, so any leaning towards one corner of the block shows up
     // immediately. Coefficients are small enough that no sample reaches
     // the `0..=255` clamp, which would bias the mean by itself.
-    let mut state = 0xDEAD_BEEF_1234_5678u64;
+    let mut rng = Prng::new(0xDEAD_BEEF_1234_5678);
     let quant = [1u16; 64];
     for _ in 0..500 {
         let mut coeffs = [0i32; 64];
         for c in coeffs.iter_mut().skip(1) {
-            let raw = i32::try_from(lcg_next(&mut state) % 64).unwrap_or(0);
-            *c = raw - 32;
+            *c = i32::try_from(rng.below(64)).unwrap_or(0) - 32;
         }
         for (m, samples) in [
             (
@@ -1151,27 +1150,13 @@ fn dnl_marker_is_refused() {
 // Property-style: the decoder never panics on arbitrary or mutated bytes
 // =======================================================================
 
-/// A small, deterministic PRNG local to this file (this crate's own
-/// public API is all that is under test; nothing here reaches into
-/// `tairix_fuzzseed` beyond the `Lcg` stream generator it already shares
-/// with `tests/fuzz_image.rs`).
-fn lcg_next(state: &mut u64) -> u64 {
-    *state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1);
-    *state
-}
-
 #[test]
 fn arbitrary_bytes_never_panic() {
-    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut rng = Prng::new(0x9E37_79B9_7F4A_7C15);
     let limits = DecodeLimits::new(64, 64, 64 * 64, 4096);
     for _ in 0..2_000 {
-        let len = usize::try_from(lcg_next(&mut state) % 300).unwrap_or(0);
-        let mut buf = vec![0u8; len];
-        for byte in &mut buf {
-            *byte = u8::try_from(lcg_next(&mut state) & 0xFF).unwrap_or(0);
-        }
+        let mut buf = vec![0u8; rng.below(300)];
+        rng.fill(&mut buf);
         let _ = decode(&buf, &limits);
         let _ = decode_fitted(&buf, &limits, FitBox::new(8, 8));
     }
@@ -1179,19 +1164,14 @@ fn arbitrary_bytes_never_panic() {
 
 #[test]
 fn mutated_valid_fixtures_never_panic() {
-    let mut state = 0xD1B5_4A32_D192_ED03u64;
+    let mut rng = Prng::new(0xD1B5_4A32_D192_ED03);
     let limits = DecodeLimits::new(64, 64, 64 * 64, 4096);
     let pristine = build_flat_mono(16, 16, &[60, 90, 150, 200], Some(2));
     for _ in 0..2_000 {
         let mut mutated = pristine.clone();
-        let flips = usize::try_from(lcg_next(&mut state) % 6).unwrap_or(0);
-        for _ in 0..flips {
-            if mutated.is_empty() {
-                break;
-            }
-            let pos = usize::try_from(lcg_next(&mut state)).unwrap_or(0) % mutated.len();
-            let bit = u8::try_from(lcg_next(&mut state) & 7).unwrap_or(0);
-            mutated[pos] ^= 1u8 << bit;
+        for _ in 0..rng.below(6) {
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= 1u8 << rng.below(8);
         }
         let _ = decode(&mutated, &limits);
     }

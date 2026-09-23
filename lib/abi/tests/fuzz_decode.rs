@@ -3,7 +3,7 @@
 //! Every decoder in `lib/abi` accepts an arbitrary byte slice from a
 //! possibly hostile peer; the right way to drive it is
 //! a fuzz harness. This file is the smoke harness that runs in
-//! `cargo test`: a deterministic 64-bit LCG generates 100 000 short
+//! `cargo test`: the shared seeded `Prng` generates 100 000 short
 //! pseudo-random inputs and asserts the decoders refuse them cleanly
 //! without panicking and without ever producing an `Ok` result that
 //! disagrees with the round-trip encoder.
@@ -1242,7 +1242,7 @@ fn exercise_process_builder(bytes: &[u8]) {
 
 #[test]
 fn random_short_inputs_never_panic() {
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "random_short_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -1251,10 +1251,7 @@ fn random_short_inputs_never_panic() {
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             // Random size in [0, buf.len()].
-            // Mask to a width that fits any usize then range-reduce. The
-            // bitmask makes the cast lossless without depending on
-            // target-pointer width.
-            let size = ((rng.next_u64() & 0xFFFF) as usize) % (buf.len() + 1);
+            let size = rng.at_most(buf.len());
             rng.fill(&mut buf[..size]);
             exercise(&buf[..size]);
         }

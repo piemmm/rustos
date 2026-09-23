@@ -18,7 +18,7 @@
 
 use core::hash::Hasher;
 
-use tairix_fuzzseed::Lcg;
+use tairix_fuzzseed::Prng;
 use tairix_hash::{FastHash, HashSeed, SipHash13};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -34,7 +34,7 @@ const MAX_LEN: usize = 300;
 
 /// Draw an input of a random length, biased towards the short lengths where
 /// the tail-handling branches live.
-fn draw_input(rng: &mut Lcg, buf: &mut Vec<u8>) {
+fn draw_input(rng: &mut Prng, buf: &mut Vec<u8>) {
     let len = match rng.below(4) {
         0 => rng.below(9),
         1 => rng.below(40),
@@ -46,7 +46,7 @@ fn draw_input(rng: &mut Lcg, buf: &mut Vec<u8>) {
 
 /// Hash `input` by splitting it at random boundaries, so a chunking that
 /// disagrees with the one-shot is caught.
-fn hash_in_pieces(seed: HashSeed, fast_seed: u64, input: &[u8], rng: &mut Lcg) -> (u64, u64) {
+fn hash_in_pieces(seed: HashSeed, fast_seed: u64, input: &[u8], rng: &mut Prng) -> (u64, u64) {
     let mut sip = SipHash13::new(seed);
     let mut fast = FastHash::with_seed(fast_seed);
     let mut rest = input;
@@ -60,7 +60,7 @@ fn hash_in_pieces(seed: HashSeed, fast_seed: u64, input: &[u8], rng: &mut Lcg) -
     (sip.finish(), fast.finish())
 }
 
-fn check(seed: HashSeed, fast_seed: u64, input: &[u8], rng: &mut Lcg) {
+fn check(seed: HashSeed, fast_seed: u64, input: &[u8], rng: &mut Prng) {
     let sip_once = SipHash13::hash_bytes(seed, input);
     let fast_once = FastHash::hash_bytes(fast_seed, input);
 
@@ -95,7 +95,7 @@ fn check(seed: HashSeed, fast_seed: u64, input: &[u8], rng: &mut Lcg) {
 
 #[test]
 fn arbitrary_input_hashes_consistently() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "arbitrary_input_hashes_consistently",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

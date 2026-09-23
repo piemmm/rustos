@@ -154,13 +154,8 @@ fn fitting_never_folds_an_outline_over_itself() {
     // coordinates that were ordered stay ordered, so no contour turns inside
     // out however the strokes and zones pull at it.
     let zones = AlignZones::new(alloc::vec![Zone::new(0.0, 0.3), Zone::new(-7.0, -7.4)]);
-    let mut seed = 0x243f_6a88_85a3_08d3u64;
-    let mut next = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        f64::from(u16::try_from(seed % 16_000).unwrap_or(0)) / 1000.0
-    };
+    let mut rng = tairix_fuzzseed::Prng::new(0x243f_6a88_85a3_08d3);
+    let mut next = || f64::from(u16::try_from(rng.below(16_000)).unwrap_or(0)) / 1000.0;
     for _ in 0..200 {
         let before: Vec<Segment> = (0..24)
             .map(|_| seg(next(), next(), next(), next()))

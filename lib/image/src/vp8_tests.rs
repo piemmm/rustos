@@ -10,9 +10,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::fixture::{keyframe, Block, Rng, Writer};
+use super::fixture::{keyframe, Block, Writer};
 use super::{decode, inverse_dct, inverse_walsh, probe, BLOCK_COEFFS, START_CODE};
 use crate::{DecodeError, DecodeLimits, RGBA_BYTES};
+use tairix_fuzzseed::Prng;
 
 /// Generous enough that no fixture here is refused for its size.
 fn limits() -> DecodeLimits {
@@ -21,16 +22,11 @@ fn limits() -> DecodeLimits {
 
 #[test]
 fn the_boolean_coder_round_trips_every_probability() {
-    let mut rng = Rng(0x5EED_1234_ABCD_0001);
+    let mut rng = Prng::new(0x5EED_1234_ABCD_0001);
     for _ in 0..200 {
-        let count = 1 + rng.next() % 400;
+        let count = 1 + rng.below(400);
         let choices: Vec<(u8, bool)> = (0..count)
-            .map(|_| {
-                (
-                    u8::try_from(rng.next() % 256).expect("one byte"),
-                    rng.next() % 2 == 1,
-                )
-            })
+            .map(|_| (rng.next_u8(), rng.next_u64() & 1 == 1))
             .collect();
         let mut writer = Writer::new();
         for &(probability, value) in &choices {

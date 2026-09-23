@@ -14,12 +14,13 @@
 //!   encoder).
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded
-//! LCG draws pseudo-random inputs and corrupts real frames. A plain `cargo
+//! `Prng` draws pseudo-random inputs and corrupts real frames. A plain `cargo
 //! test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed;
 //! `cargo xtask fuzz --soak` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
 use tairix_compress::{compress, decompress, max_compressed_len};
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -29,17 +30,6 @@ const MAX_INPUT: usize = 8192;
 
 /// Largest arbitrary byte string fed straight to the decoder.
 const MAX_FRAME: usize = 4096;
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
 
 /// Decompress arbitrary bytes into a bounded destination: must never panic.
 fn decode_never_panics(frame: &[u8]) {
@@ -61,32 +51,26 @@ fn round_trips(input: &[u8]) {
 fn decompress_never_panics_and_codec_round_trips() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // The seed is drawn and logged by `tairix_fuzzseed::start`: fresh
     // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "decompress_never_panics_and_codec_round_trips",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A structured input that mixes runs (compressible) with noise
         //    (incompressible), then round-trips through the codec.
-        let len = bounded(next(), MAX_INPUT);
+        let len = rng.at_most(MAX_INPUT);
         let mut input = Vec::with_capacity(len);
         while input.len() < len {
-            if next() & 1 == 0 {
-                let run = bounded(next(), 64).min(len - input.len());
-                let byte = low_byte(next());
+            if rng.next_u64() & 1 == 0 {
+                let run = rng.at_most(64).min(len - input.len());
+                let byte = rng.next_u8();
                 input.extend(std::iter::repeat_n(byte, run));
             } else {
-                input.push(low_byte(next() >> 11));
+                input.push(rng.next_u8());
             }
         }
         round_trips(&input);
@@ -95,20 +79,21 @@ fn decompress_never_panics_and_codec_round_trips() {
         let mut packed = vec![0u8; max_compressed_len(input.len())];
         if let Ok(n) = compress(&input, &mut packed) {
             let mut frame = packed[..n].to_vec();
-            let flips = bounded(next(), 8);
+            let flips = rng.at_most(8);
             for _ in 0..flips {
                 if frame.is_empty() {
                     break;
                 }
-                let pos = bounded(next(), frame.len() - 1);
-                frame[pos] ^= low_byte(next() >> 19);
+                let pos = rng.below(frame.len());
+                frame[pos] ^= rng.next_u8();
             }
             decode_never_panics(&frame);
         }
 
         // 3. Pure noise straight into the decoder.
-        let nlen = bounded(next(), MAX_FRAME);
-        let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 23)).collect();
+        let nlen = rng.at_most(MAX_FRAME);
+        let mut noise = vec![0u8; nlen];
+        rng.fill(&mut noise);
         decode_never_panics(&noise);
 
         iteration += 1;

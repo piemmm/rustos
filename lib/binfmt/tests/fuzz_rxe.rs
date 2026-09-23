@@ -11,7 +11,7 @@
 //!   segments, needed libraries, capabilities) can be walked without a
 //!   panic.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates a
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` mutates a
 //! valid image/manifest built through the `lib/abi` encoders and mixes in
 //! pure noise. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep
 //! once from a fresh, logged seed; `cargo xtask fuzz` exports
@@ -22,23 +22,13 @@ use tairix_abi::{
     ABI_VERSION_CURRENT, LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
 };
 use tairix_binfmt::rxe::{ManifestSummary, RxeView};
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
 /// Largest arbitrary byte string fed to the decoders.
 const MAX_NOISE: usize = 1024;
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
 
 /// A valid load image built through the `lib/abi` encoders.
 fn valid_image() -> Vec<u8> {
@@ -118,16 +108,10 @@ fn exercise(bytes: &[u8]) {
 #[test]
 fn parse_never_panics_for_any_input() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "parse_never_panics_for_any_input",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let image = valid_image();
     let manifest = valid_manifest();
@@ -135,26 +119,29 @@ fn parse_never_panics_for_any_input() {
     let mut iteration: u64 = 0;
     loop {
         // 1. A valid image/manifest with a handful of bytes flipped.
-        let template = if next() & 1 == 0 { &image } else { &manifest };
+        let template = if rng.next_u64() & 1 == 0 {
+            &image
+        } else {
+            &manifest
+        };
         let mut mutated = template.clone();
-        for _ in 0..bounded(next(), 8) {
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+        for _ in 0..rng.at_most(8) {
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         exercise(&mutated);
 
         // 2. The same, truncated or extended at random.
-        let cut = bounded(next(), mutated.len());
+        let cut = rng.at_most(mutated.len());
         exercise(&mutated[..cut]);
-        mutated.extend((0..bounded(next(), 64)).map(|_| low_byte(next() >> 23)));
+        mutated.extend((0..rng.at_most(64)).map(|_| rng.next_u8()));
         exercise(&mutated);
 
         // 3. Pure noise, optionally forced to open with a real magic.
-        let mut noise: Vec<u8> = (0..bounded(next(), MAX_NOISE))
-            .map(|_| low_byte(next() >> 29))
-            .collect();
-        if noise.len() >= 4 && next() & 1 == 0 {
-            let magic = if next() & 2 == 0 {
+        let mut noise = vec![0u8; rng.at_most(MAX_NOISE)];
+        rng.fill(&mut noise);
+        if noise.len() >= 4 && rng.next_u64() & 1 == 0 {
+            let magic = if rng.next_u64() & 2 == 0 {
                 LOAD_MAGIC.to_le_bytes()
             } else {
                 MANIFEST_MAGIC.to_le_bytes()

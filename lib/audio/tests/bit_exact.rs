@@ -31,6 +31,7 @@ use tairix_audio::convert::Dither;
 use tairix_audio::mix::{Mixer, SinkFormat, StreamMix};
 use tairix_audio::resample::{FilterBank, Resampler};
 use tairix_audio::volume::{millibel_to_linear, resolve, VolumeRequest};
+use tairix_fuzzseed::Prng;
 
 /// Every encoding the pivot carries whole, which is the set the claim covers.
 const EXACT_FORMATS: &[SampleFormat] = &[
@@ -93,24 +94,17 @@ fn layouts() -> [ChannelMap; 5] {
 /// encoding, and the engine deliberately bounds both before they reach a
 /// shared mix. Feeding one here would test that boundary rather than the
 /// exactness claim, which is about real audio.
-fn probes(format: SampleFormat, count: usize, seed: u64) -> Vec<u8> {
-    let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+fn probes(format: SampleFormat, count: usize, rng: &mut Prng) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(count * format.bytes_per_sample());
     for _ in 0..count {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        let draw = (state >> 16) & 0xFFFF_FFFF;
+        let draw = rng.next_u32();
+        let [b0, b1, ..] = draw.to_le_bytes();
         match format {
-            SampleFormat::U8 => bytes.push(u8::try_from(draw & 0xFF).unwrap_or(0)),
-            SampleFormat::S16 => {
-                let value = i16::from_le_bytes([
-                    u8::try_from(draw & 0xFF).unwrap_or(0),
-                    u8::try_from((draw >> 8) & 0xFF).unwrap_or(0),
-                ]);
-                bytes.extend_from_slice(&value.to_le_bytes());
-            }
+            SampleFormat::U8 => bytes.push(b0),
+            SampleFormat::S16 => bytes.extend_from_slice(&[b0, b1]),
             SampleFormat::S24 | SampleFormat::S24In32 => {
+                // Sign-extended twenty-four bits, which is what both packed
+                // and containered forms of this encoding hold.
                 let raw = i32::try_from(draw & 0x00FF_FFFF).unwrap_or(0);
                 let value = if raw >= 0x0080_0000 {
                     raw - 0x0100_0000
@@ -123,12 +117,10 @@ fn probes(format: SampleFormat, count: usize, seed: u64) -> Vec<u8> {
                     bytes.extend_from_slice(&value.to_le_bytes());
                 }
             }
-            SampleFormat::S32 => {
-                let value = i32::from_le_bytes(u32::try_from(draw).unwrap_or(0).to_le_bytes());
-                bytes.extend_from_slice(&value.to_le_bytes());
-            }
+            SampleFormat::S32 => bytes.extend_from_slice(&draw.to_le_bytes()),
             SampleFormat::F32 => {
-                let unit = f32::from(u16::try_from(draw & 0xFFFF).unwrap_or(0)) / 32_768.0 - 1.0;
+                // Inside full scale, where the pivot is the identity.
+                let unit = f32::from(u16::from_le_bytes([b0, b1])) / 32_768.0 - 1.0;
                 bytes.extend_from_slice(&unit.to_le_bytes());
             }
         }
@@ -205,20 +197,54 @@ fn through_the_engine(
 
 #[test]
 fn the_engine_is_bit_exact_across_formats_rates_channel_counts_and_blocks() {
-    let mut seed = 1u64;
+    let mut rng = Prng::new(1);
     for format in EXACT_FORMATS {
         for hz in RATES {
             for map in layouts() {
                 let channels = usize::from(map.channels());
                 for frames in BLOCKS {
-                    seed = seed.wrapping_add(0x1234_5678);
-                    let samples = probes(*format, frames * channels, seed);
+                    let samples = probes(*format, frames * channels, &mut rng);
                     let out = through_the_engine(*format, *hz, map, *frames, &samples);
                     assert_eq!(
                         out, samples,
                         "{format:?} at {hz} Hz over {channels} channels, {frames} frames"
                     );
                 }
+            }
+        }
+    }
+}
+
+/// The mixer alone, sized for more frames than it is handed, so a partial
+/// block is held to the same exactness as a full one.
+#[test]
+fn the_mixer_is_bit_exact_for_a_block_shorter_than_its_capacity() {
+    let mut rng = Prng::new(0x243F_6A88_85A3_08D3);
+    for map in &layouts()[..3] {
+        let matrix = ChannelMatrix::derive(map, map).expect("a layout maps onto itself");
+        let channels = usize::from(map.channels());
+        for format in EXACT_FORMATS {
+            for frames in [1usize, 2, 3, 7, 16, 31] {
+                let sink = SinkFormat {
+                    format: *format,
+                    rate: rate(48_000),
+                    channel_map: *map,
+                };
+                let mut mixer = Mixer::new(sink, 32, 0x00C0_FFEE).expect("a mixer");
+                let samples = probes(*format, frames * channels, &mut rng);
+                let mut out = vec![0u8; samples.len()];
+                let stream = StreamMix {
+                    format: *format,
+                    matrix: &matrix,
+                    gain: 1.0,
+                    resampled: false,
+                    samples: &samples,
+                };
+                mixer.mix([stream], frames, &mut out).expect("mixed");
+                assert_eq!(
+                    out, samples,
+                    "{format:?} over {channels} channels, {frames} frames"
+                );
             }
         }
     }
@@ -272,7 +298,7 @@ fn the_extremes_of_every_encoding_survive_the_engine() {
 /// pretending the claim covers it.
 #[test]
 fn a_thirty_two_bit_integer_source_keeps_its_top_twenty_four_bits() {
-    let samples = probes(SampleFormat::S32, 64, 99);
+    let samples = probes(SampleFormat::S32, 64, &mut Prng::new(99));
     let out = through_the_engine(SampleFormat::S32, 48_000, ChannelMap::MONO, 64, &samples);
     assert_ne!(
         out, samples,

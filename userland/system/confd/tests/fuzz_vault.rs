@@ -26,54 +26,18 @@ use tairix_confd::vault::{
     open_document, seal_document, Entropy, MasterSecret, VaultError, VaultKey, MASTER_SECRET_LEN,
     VAULT_HEADER_LEN,
 };
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 2_000;
 
-/// Lehmer-style LCG — deterministic, and the same generator the sibling
-/// harnesses use so a failure reproduces one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    /// The stream's high byte — an LCG's low bits are its worst, so a
-    /// byte-at-a-time draw takes from the top.
-    fn byte(&mut self) -> u8 {
-        self.next_u64().to_le_bytes()[7]
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        if bound == 0 {
-            return 0;
-        }
-        usize::try_from(self.next_u64() % bound as u64).expect("a bounded index fits")
-    }
-}
-
 /// An [`Entropy`] source driven by the harness's own stream, so a sealed record
 /// is reproducible from the logged seed and a nonce still differs per draw.
-struct StreamEntropy<'a>(&'a mut Lcg);
+struct StreamEntropy<'a>(&'a mut Prng);
 
 impl Entropy for StreamEntropy<'_> {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), Errno> {
-        for byte in out.iter_mut() {
-            *byte = self.0.byte();
-        }
+        self.0.fill(out);
         Ok(())
     }
 }
@@ -104,13 +68,13 @@ fn publisher(tag: u8) -> PublisherId {
 }
 
 /// An application identity drawn from the stream.
-fn identity(rng: &mut Lcg) -> AppIdentity {
+fn identity(rng: &mut Prng) -> AppIdentity {
     const IDS: &[&str] = &["os.tairix.mail", "os.tairix.terminal", "org.pty.widgets"];
-    AppIdentity::new(IDS[rng.below(IDS.len())], publisher(rng.byte())).expect("a legal identity")
+    AppIdentity::new(rng.pick(IDS), publisher(rng.next_u8())).expect("a legal identity")
 }
 
 /// A vault key drawn from the stream.
-fn key(rng: &mut Lcg) -> VaultKey {
+fn key(rng: &mut Prng) -> VaultKey {
     let app = identity(rng);
     let master = {
         let mut source = StreamEntropy(rng);
@@ -120,10 +84,10 @@ fn key(rng: &mut Lcg) -> VaultKey {
 }
 
 /// A document of drawn secrets.
-fn document(rng: &mut Lcg) -> Document {
+fn document(rng: &mut Prng) -> Document {
     let mut document = Document::new();
     for _ in 0..rng.below(6) {
-        let _ = document.set(KEYS[rng.below(KEYS.len())], VALUES[rng.below(VALUES.len())]);
+        let _ = document.set(rng.pick(KEYS), rng.pick(VALUES));
     }
     document
 }
@@ -144,19 +108,17 @@ fn assert_refused(outcome: Result<Document, VaultError>, what: &str) {
 
 #[test]
 fn arbitrary_bytes_are_never_a_master_secret_record() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "arbitrary_bytes_are_never_a_master_secret_record",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
-            let uid = rng.byte().into();
+            let uid = rng.next_u8().into();
             let len = rng.below(MasterSecret::WIRE_LEN * 2);
             let mut bytes = vec![0u8; len];
-            for byte in &mut bytes {
-                *byte = rng.byte();
-            }
+            rng.fill(&mut bytes);
             // Drawn bytes: overwhelmingly not a record, and never a panic.
             let _ = MasterSecret::decode(&bytes, uid);
 
@@ -200,7 +162,7 @@ fn arbitrary_bytes_are_never_a_master_secret_record() {
 
 #[test]
 fn arbitrary_bytes_are_never_an_openable_vault() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "arbitrary_bytes_are_never_an_openable_vault",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -210,9 +172,7 @@ fn arbitrary_bytes_are_never_an_openable_vault() {
             let opener = key(&mut rng);
             let len = rng.below(VAULT_HEADER_LEN * 3);
             let mut bytes = vec![0u8; len];
-            for byte in &mut bytes {
-                *byte = rng.byte();
-            }
+            rng.fill(&mut bytes);
             assert_refused(open_document(&opener, &bytes), "drawn bytes");
         }
         if !tairix_fuzzseed::within_budget(deadline) {
@@ -223,7 +183,7 @@ fn arbitrary_bytes_are_never_an_openable_vault() {
 
 #[test]
 fn a_sealed_document_round_trips_and_tolerates_no_mutation() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "a_sealed_document_round_trips_and_tolerates_no_mutation",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -261,7 +221,7 @@ fn a_sealed_document_round_trips_and_tolerates_no_mutation() {
             assert_refused(open_document(&opener, &record[..short]), "a truncation");
 
             let mut extended = record.clone();
-            extended.push(rng.byte());
+            extended.push(rng.next_u8());
             assert_refused(open_document(&opener, &extended), "an extension");
 
             // A second seal of the same document under the same key must not

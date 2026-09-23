@@ -58,7 +58,7 @@ fn assert_json_shape(out: &str) {
 }
 
 /// Derive a [`RecordFrame`] from the PRNG so the container-owned facts vary too.
-fn frame(rng: &mut tairix_fuzzseed::Lcg) -> RecordFrame {
+fn frame(rng: &mut tairix_fuzzseed::Prng) -> RecordFrame {
     let stream = Stream::from_u8((rng.next_u64() % 6) as u8).unwrap_or(Stream::Runtime);
     let mut boot = [0u8; BOOT_ID_LEN];
     rng.fill(&mut boot);
@@ -66,7 +66,7 @@ fn frame(rng: &mut tairix_fuzzseed::Lcg) -> RecordFrame {
         stream,
         boot_id: BootId::from_raw(boot),
         // Mask before narrowing so the value provably fits (no truncation lint).
-        cpu_id: (rng.next_u64() & 0xFFFF_FFFF) as u32,
+        cpu_id: rng.next_u32(),
         seq: rng.next_u64(),
         monotonic: Duration64::from_nanos(rng.next_u64()),
     }
@@ -157,7 +157,7 @@ fn exercise_hostile(raw: &[u8], frame: &RecordFrame, level: Level) {
 
 #[test]
 fn rendered_views_are_control_free_and_never_panic() {
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "rendered_views_are_control_free_and_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -168,11 +168,11 @@ fn rendered_views_are_control_free_and_never_panic() {
         for i in 0..SMOKE_ITERATIONS {
             let frame = frame(&mut rng);
             if i % 2 == 0 {
-                let size = ((rng.next_u64() & 0x1FF) as usize) % (buf.len() + 1);
+                let size = rng.at_most(buf.len());
                 rng.fill(&mut buf[..size]);
                 exercise_decoded(&buf[..size], &frame);
             } else {
-                let size = ((rng.next_u64() & 0xFF) as usize) % (buf.len() + 1);
+                let size = rng.at_most(buf.len());
                 rng.fill(&mut buf[..size]);
                 let level = Level::from_u8((rng.next_u64() % 6) as u8).unwrap_or(Level::Info);
                 exercise_hostile(&buf[..size], &frame, level);

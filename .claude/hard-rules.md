@@ -42,8 +42,8 @@ PROCESS
   because X" is an answer; silence is not. Never narrow an enrolment to
   make a finding go away. (§19.11, §15.19)
 - Check the `plans/` jump-sheet before touching a covered area. (§15.18)
-- Adversarial self-review against §23, then the §23.5 completion report.
-- Separate to the adversarial review, before declaring any implementation complete, YOU *MUST* critically self-review all new and modified code for poor design and avoidable performance costs, including inefficient or unnecessarily nested loops, excessive time or space complexity, redundant computations, repeated allocations, and unsuitable data structures; fix identified issues without compromising correctness, safety, or readability, and validate changes with tests and, where appropriate, benchmarks rather than assuming they are faster(benchmarks should not be affected by speed of ci/testing machine cpu).
+- Adversarial self-review against §23, then the §23.5 completion report. YOU MUST declare findings in this review even if there are none. This will be also be checked by another system.
+- Separate to the adversarial review, before declaring any implementation complete, YOU *MUST* critically self-review all new and modified code for poor design and avoidable performance costs, including inefficient or unnecessarily nested loops, excessive time or space complexity, redundant computations, repeated allocations, and unsuitable data structures; fix identified issues without compromising correctness, safety, or readability, and validate changes with tests and, where appropriate, benchmarks rather than assuming they are faster(benchmarks should not be affected by speed of ci/testing machine cpu). YOU MUST declare findings in this review even if there are none. This will be also be checked by another system as well.
 
 GENERAL
 - This system may be a small single user system, or a large enterprise system servicing thousands of users. Code appropriately.

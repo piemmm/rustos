@@ -468,23 +468,17 @@ fn attributes_fold_sgr_operations() {
 
 #[test]
 fn parser_consumes_a_deterministic_byte_sweep_without_panic() {
-    // A fixed-seed LCG drives a smoke sweep of arbitrary byte strings; the
-    // single invariant is that `feed` never panics and the parser stays usable.
-    // The dedicated wall-clock budgeted run lives in `tests/fuzz_vt.rs`.
-    let mut state: u64 = 0x1234_5678_9abc_def0;
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
-
+    // A fixed-seed sweep of arbitrary byte strings; the single invariant is
+    // that `feed` never panics and the parser stays usable. The dedicated
+    // wall-clock budgeted run lives in `tests/fuzz_vt.rs`.
+    let mut rng = tairix_fuzzseed::Prng::new(0x1234_5678_9abc_def0);
     let mut parser = Parser::new();
     let mut sink = String::new();
+    let mut bytes = [0u8; 31];
     for _ in 0..50_000 {
-        let len = usize::try_from(next() % 32).unwrap_or(0);
-        let bytes: Vec<u8> = (0..len).map(|_| next().to_le_bytes()[0]).collect();
-        parser.feed(&bytes, |op| {
+        let chunk = &mut bytes[..rng.below(32)];
+        rng.fill(chunk);
+        parser.feed(chunk, |op| {
             if let Op::Print(ch) = op {
                 sink.push(ch);
             }

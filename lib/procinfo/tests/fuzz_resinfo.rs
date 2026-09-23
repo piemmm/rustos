@@ -17,14 +17,14 @@
 //!   line-shaped and never exceeds the bound a caller sizes a pipe write
 //!   against, whatever the broker replied.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` draws
 //! reference strings (mutated real templates, delimiter splices, pure noise)
 //! and drives a stand-in broker whose reply is itself PRNG-chosen between a
 //! valid record, garbage bytes, and an error. A plain `cargo test` runs the
 //! [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask
 //! fuzz` extends the loop to a wall-clock budget.
 
-use core::cell::Cell;
+use core::cell::RefCell;
 
 use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
 use tairix_abi::sysinfo::{
@@ -35,6 +35,7 @@ use tairix_abi::sysinfo::{
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::MEMORY_CLASS_COUNT;
 use tairix_abi::{Errno, LimitKind, ResourceLimit};
+use tairix_fuzzseed::Prng;
 use tairix_procinfo::{
     read_value, resolve, Producer, ResponsePayload, Transport, MAX_INFO_VALUE_LEN,
     MAX_METRIC_NAME_LEN, MAX_QUERY_LEN, MAX_VALUE_LEN, RESINFO_VERSION_CURRENT,
@@ -106,24 +107,14 @@ const TEMPLATES: &[&str] = &[
 /// valid record, arbitrary garbage bytes, and a transport error — so the
 /// resolver's decode and error paths are all exercised.
 struct HostileBroker {
-    state: Cell<u64>,
+    rng: RefCell<Prng>,
 }
 
 impl HostileBroker {
     fn new(seed: u64) -> Self {
         Self {
-            state: Cell::new(seed | 1),
+            rng: RefCell::new(Prng::new(seed)),
         }
-    }
-
-    fn next(&self) -> u64 {
-        let s = self
-            .state
-            .get()
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state.set(s);
-        s
     }
 
     fn valid_reply(query: SysinfoQueryId) -> Option<Vec<u8>> {
@@ -268,33 +259,24 @@ impl Transport for HostileBroker {
         // The request is always framed by the resolver, so the header decodes;
         // a decode failure here would itself be a bug worth surfacing.
         let header = SysinfoRequestHeader::from_bytes(request)?;
-        match self.next() % 4 {
+        let mut rng = self.rng.borrow_mut();
+        match rng.below(4) {
             // A well-formed record for a known query, else an empty reply.
             0 | 1 => Ok(Self::valid_reply(header.query).unwrap_or_default()),
             // Arbitrary garbage: a random-length run of pseudo-random bytes.
             2 => {
-                let len = usize::try_from(self.next() % 200).unwrap_or(0);
-                Ok((0..len).map(|_| self.next().to_le_bytes()[0]).collect())
+                let mut garbage = vec![0u8; rng.below(200)];
+                rng.fill(&mut garbage);
+                Ok(garbage)
             }
             // A transport error (including a capability denial).
-            _ => Err(if self.next() & 1 == 0 {
+            _ => Err(if rng.next_u64() & 1 == 0 {
                 Errno::PermissionDenied
             } else {
                 Errno::NotFound
             }),
         }
     }
-}
-
-/// `x` reduced into `0..=max`.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
-
-/// Low byte of `x`.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
 }
 
 /// Parse `input` (never panics) and, when it parses, resolve it against a
@@ -329,53 +311,48 @@ fn exercise(input: &str, broker: &HostileBroker) {
 #[test]
 fn resolve_never_panics_and_stays_well_formed() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "resolve_never_panics_and_stays_well_formed",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
-        let broker = HostileBroker::new(next());
+        let broker = HostileBroker::new(rng.next_u64());
 
         // 1. A real template with a handful of bytes flipped at random.
-        let template = TEMPLATES[bounded(next(), TEMPLATES.len() - 1)];
+        let template = *rng.pick(TEMPLATES);
         let mut mutated: Vec<u8> = template.as_bytes().to_vec();
-        let flips = bounded(next(), 5);
+        let flips = rng.at_most(5);
         for _ in 0..flips {
             if mutated.is_empty() {
                 break;
             }
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         exercise(&String::from_utf8_lossy(&mutated), &broker);
 
         // 2. A structured-but-hostile string exercising the delimiter split.
-        let blob_len = bounded(next(), 40);
+        let blob_len = rng.at_most(40);
         let mut spliced = String::new();
         for _ in 0..blob_len {
-            match bounded(next(), 6) {
+            match rng.at_most(6) {
                 0 => spliced.push(':'),
                 1 => spliced.push('/'),
                 2 => spliced.push('@'),
                 3 => spliced.push_str("::"),
                 4 => spliced.push('?'),
                 5 => spliced.push_str("info"),
-                _ => spliced.push(char::from(b'a' + low_byte(next() >> 29) % 26)),
+                _ => spliced.push(char::from(b'a' + rng.next_u8() % 26)),
             }
         }
         exercise(&spliced, &broker);
 
         // 3. Pure noise (lossy UTF-8).
-        let nlen = bounded(next(), MAX_NOISE);
-        let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 23)).collect();
+        let nlen = rng.at_most(MAX_NOISE);
+        let mut noise = vec![0u8; nlen];
+        rng.fill(&mut noise);
         exercise(&String::from_utf8_lossy(&noise), &broker);
 
         iteration += 1;

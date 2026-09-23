@@ -229,13 +229,12 @@ impl EntropySource for InterruptPoolSource<'_> {
 mod tests {
     use super::*;
 
-    /// Feed `count` samples from an LCG (a stand-in for a healthy
+    /// Feed `count` varying samples (a stand-in for a healthy
     /// high-resolution counter whose successive readings vary).
     fn feed_varying(pool: &InterruptEntropyPool, seed: u64, count: usize) {
-        let mut lcg = seed;
+        let mut stream = tairix_fuzzseed::Prng::new(seed);
         for _ in 0..count {
-            lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            pool.record(lcg);
+            pool.record(stream.next_u64());
         }
     }
 

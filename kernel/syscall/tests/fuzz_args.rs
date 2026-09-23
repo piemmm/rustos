@@ -2,8 +2,8 @@
 //!
 //! Stage 2.7 requires a fuzz harness for the per-syscall argument
 //! validation path (PLAN Stage 2.7 brief). We do not
-//! pull in an external fuzz runner: a deterministic LCG with a fixed
-//! seed exercises 100 000 random `(syscall, RawArgs)` pairs on every
+//! pull in an external fuzz runner: the shared `Prng`, seeded and logged
+//! per run, drives 100 000 random `(syscall, RawArgs)` pairs on every
 //! `cargo test` run and asserts the two invariants the dispatcher must
 //! uphold no matter what bits a caller crafts:
 //!
@@ -13,8 +13,8 @@
 //!    [`would_accept`]). If the dispatcher disagrees with the mirror,
 //!    the test fails and prints the offending input.
 //!
-//! The deterministic seed makes failures reproducible — a flaky fuzz
-//! target is a bug.
+//! The logged seed makes failures reproducible — a flaky fuzz target is
+//! a bug.
 //!
 //! ## Wall-clock budget
 //!
@@ -34,6 +34,7 @@ use tairix_abi::{
     FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
+use tairix_fuzzseed::Prng;
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
 use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use tairix_log::{set_max_level, Event, Level, Sink};
@@ -41,23 +42,6 @@ use tairix_log::{set_max_level, Event, Level, Sink};
 /// Iteration count of one sweep. Pinned at 100 000 to match the
 /// abi-decode fuzz harness in `lib/abi/tests/fuzz_decode.rs` (Stage 1).
 const ITERATIONS: u64 = 100_000;
-
-/// xor-shift* PRNG. Deterministic, fast, and zero-allocation; not used
-/// for anything except generating fuzz inputs.
-struct Rng(u64);
-impl Rng {
-    const fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-}
 
 /// Handler that always succeeds, returning the first argument verbatim.
 /// The fuzz target only cares about whether the dispatcher *reaches*
@@ -1307,7 +1291,7 @@ fn fuzz_dispatcher_matches_mirror() {
         caps: &caps,
     };
 
-    let mut rng = Rng::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "fuzz_dispatcher_matches_mirror",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

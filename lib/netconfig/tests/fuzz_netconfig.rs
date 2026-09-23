@@ -18,39 +18,13 @@
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
+use tairix_fuzzseed::Prng;
 use tairix_netconfig::{
     ConfigDraft, IfaceKey, NetworkConfig, MAX_BOND_MEMBERS, MAX_CONFIG_LEN, MAX_INTERFACES,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
-
-/// Lehmer-style LCG — deterministic, matches the sibling harnesses so a
-/// failure reproduces one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn pick<'a>(&mut self, choices: &[&'a str]) -> &'a str {
-        let index = usize::try_from(self.next_u64() % choices.len() as u64).expect("index fits");
-        choices[index]
-    }
-}
 
 /// The token soup a structured line is drawn from: real key suffixes and
 /// values mixed with malformed ones, so generated documents walk the
@@ -105,7 +79,7 @@ const VALUES: &[&str] = &[
     "",
 ];
 
-fn structured_line(rng: &mut Lcg) -> String {
+fn structured_line(rng: &mut Prng) -> String {
     use std::fmt::Write as _;
     let mut line = String::new();
     // Occasionally a comment or blank line.
@@ -124,7 +98,7 @@ fn structured_line(rng: &mut Lcg) -> String {
     line
 }
 
-fn build_document(rng: &mut Lcg) -> String {
+fn build_document(rng: &mut Prng) -> String {
     let lines = (rng.next_u64() % 40) as usize;
     let mut doc = String::new();
     for _ in 0..lines {
@@ -155,7 +129,7 @@ fn check(doc: &str) {
 
 #[test]
 fn structured_documents_round_trip_and_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "structured_documents_round_trip_and_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -174,7 +148,7 @@ fn structured_documents_round_trip_and_never_panic() {
 /// Apply one random edit to `draft`: a set of a drawn key to a drawn value,
 /// or an unset of a drawn key. A refused set is an expected outcome, not a
 /// failure — what matters is that it leaves the draft committable.
-fn edit_draft(rng: &mut Lcg, draft: &mut ConfigDraft) {
+fn edit_draft(rng: &mut Prng, draft: &mut ConfigDraft) {
     let iface = rng.pick(IFACES);
     let index = usize::try_from(rng.next_u64() % IfaceKey::ALL.len() as u64).expect("index fits");
     let Some(key) = IfaceKey::ALL.get(index).copied() else {
@@ -189,7 +163,7 @@ fn edit_draft(rng: &mut Lcg, draft: &mut ConfigDraft) {
 
 #[test]
 fn drafted_documents_commit_consistent_or_refuse() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "drafted_documents_commit_consistent_or_refuse",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -225,7 +199,7 @@ fn drafted_documents_commit_consistent_or_refuse() {
 
 #[test]
 fn arbitrary_ascii_never_panics() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "arbitrary_ascii_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

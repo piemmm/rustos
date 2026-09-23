@@ -23,7 +23,7 @@
 //! * every `PcmRing` operation over arbitrary positions either refuses or
 //!   answers a frame count the ring could actually hold.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates valid
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` mutates valid
 //! seed frames and feeds pure noise. A plain `cargo test` runs the fixed smoke
 //! sweep; `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
@@ -51,29 +51,20 @@ use tairix_abi::driver::audio_ring::{
     aligned_region, PcmGeometry, PcmRing, PCM_RING_HEADER_LEN, REGION_ALIGN_PADDING,
 };
 use tairix_abi::time::{Duration64, Time64};
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 8_000;
 
-/// `x` reduced into `0..=max`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
-
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// Flip up to `most` bytes of `frame` using `next`.
-fn scramble(frame: &mut [u8], most: usize, next: &mut impl FnMut() -> u64) {
+/// Flip up to `most` bytes of `frame` using `rng`.
+fn scramble(frame: &mut [u8], most: usize, rng: &mut Prng) {
     if frame.is_empty() {
         return;
     }
-    let flips = bounded(next(), most);
+    let flips = rng.at_most(most);
     for _ in 0..flips {
-        let pos = bounded(next(), frame.len() - 1);
-        frame[pos] ^= low_byte(next() >> 17);
+        let pos = rng.below(frame.len());
+        frame[pos] ^= rng.next_u8();
     }
 }
 
@@ -262,46 +253,39 @@ fn exercise_replies(bytes: &[u8]) {
 /// Drive every ring operation over a region whose two peer-written positions
 /// are arbitrary bytes. Nothing may panic, and anything the ring *answers*
 /// must be a frame count it could actually have held.
-fn exercise_ring(
-    geometry: PcmGeometry,
-    producer: u64,
-    consumer: u64,
-    next: &mut impl FnMut() -> u64,
-) {
+fn exercise_ring(geometry: PcmGeometry, producer: u64, consumer: u64, rng: &mut Prng) {
     let mut buffer = vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING];
     let region = aligned_region(&mut buffer, geometry.region_len()).expect("aligned region");
     region[..8].copy_from_slice(&producer.to_le_bytes());
     let consumer_at = PCM_RING_HEADER_LEN / 2;
     region[consumer_at..consumer_at + 8].copy_from_slice(&consumer.to_le_bytes());
-    let mut ring = PcmRing::bind(region, geometry).expect("a correctly sized region binds");
+    let mut pcm = PcmRing::bind(region, geometry).expect("a correctly sized region binds");
 
     let capacity = geometry.frames();
-    if let Ok(readable) = ring.readable_frames() {
+    if let Ok(readable) = pcm.readable_frames() {
         assert!(readable <= capacity, "queued past the ring's own depth");
     }
-    if let Ok(writable) = ring.writable_frames() {
+    if let Ok(writable) = pcm.writable_frames() {
         assert!(writable <= capacity, "free past the ring's own depth");
     }
 
-    let frames = bounded(next(), capacity as usize * 2);
+    let frames = rng.at_most(capacity as usize * 2);
     let mut samples = vec![0u8; frames * geometry.frame_bytes()];
-    for byte in &mut samples {
-        *byte = low_byte(next() >> 23);
-    }
-    if let Ok(written) = ring.write(&samples) {
+    rng.fill(&mut samples);
+    if let Ok(written) = pcm.write(&samples) {
         assert!(written <= capacity, "wrote more frames than the ring holds");
     }
-    if let Ok(silenced) = ring.write_silence(u32::try_from(frames).unwrap_or(u32::MAX)) {
+    if let Ok(silenced) = pcm.write_silence(u32::try_from(frames).unwrap_or(u32::MAX)) {
         assert!(
             silenced <= capacity,
             "silenced more frames than the ring holds"
         );
     }
     let mut out = vec![0u8; frames * geometry.frame_bytes()];
-    if let Ok(read) = ring.read(&mut out) {
+    if let Ok(read) = pcm.read(&mut out) {
         assert!(read <= capacity, "read more frames than the ring holds");
     }
-    if let Ok(dropped) = ring.discard(u32::try_from(frames).unwrap_or(u32::MAX)) {
+    if let Ok(dropped) = pcm.discard(u32::try_from(frames).unwrap_or(u32::MAX)) {
         assert!(
             dropped <= capacity,
             "discarded more frames than the ring holds"
@@ -311,7 +295,7 @@ fn exercise_ring(
     // positions say.
     if geometry.frame_bytes() > 1 {
         let partial = vec![0u8; geometry.frame_bytes() - 1];
-        assert!(ring.write(&partial).is_err());
+        assert!(pcm.write(&partial).is_err());
     }
 }
 
@@ -504,92 +488,82 @@ fn decoding_any_audio_frame_never_panics() {
     let widest_reply = widest_reply();
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "decoding_any_audio_frame_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A valid device-channel request with a handful of bytes flipped.
-        let seed = &channel_seeds[bounded(next(), channel_seeds.len() - 1)];
+        let seed = rng.pick(&channel_seeds);
         let mut mutated = seed.clone();
-        scramble(&mut mutated, 12, &mut next);
+        scramble(&mut mutated, 12, &mut rng);
         exercise_channel_request(&mutated);
 
         // 2. A truncation, driving the exact-length checks, and an over-long
         //    frame, which must be read as its own prefix and nothing more.
-        exercise_channel_request(&seed[..bounded(next(), seed.len())]);
+        exercise_channel_request(&seed[..rng.at_most(seed.len())]);
         let mut longer = seed.clone();
-        longer.push(low_byte(next() >> 41));
+        longer.push(rng.next_u8());
         exercise_channel_request(&longer);
 
         // 3. Pure noise as a device-channel request.
-        let noise: Vec<u8> = (0..bounded(next(), AUDIO_CHANNEL_MAX_REQUEST + 8))
-            .map(|_| low_byte(next() >> 31))
-            .collect();
+        let mut noise = vec![0u8; rng.at_most(AUDIO_CHANNEL_MAX_REQUEST + 8)];
+        rng.fill(&mut noise);
         exercise_channel_request(&noise);
 
         // 4. The same three shapes for a client request.
-        let seed = &client_seeds[bounded(next(), client_seeds.len() - 1)];
+        let seed = rng.pick(&client_seeds);
         let mut mutated = seed.clone();
-        scramble(&mut mutated, 12, &mut next);
+        scramble(&mut mutated, 12, &mut rng);
         exercise_client_request(&mutated);
-        exercise_client_request(&seed[..bounded(next(), seed.len())]);
-        let noise: Vec<u8> = (0..bounded(next(), AUDIO_MAX_REQUEST + 8))
-            .map(|_| low_byte(next() >> 29))
-            .collect();
+        exercise_client_request(&seed[..rng.at_most(seed.len())]);
+        let mut noise = vec![0u8; rng.at_most(AUDIO_MAX_REQUEST + 8)];
+        rng.fill(&mut noise);
         exercise_client_request(&noise);
 
         // 5. Notifications: a mutated valid frame, a truncation, and noise.
         //    Both notification decoders see every image, so a frame one of
         //    them accepts cannot confuse the other.
-        let seed = &notify_seeds[bounded(next(), notify_seeds.len() - 1)];
+        let seed = rng.pick(&notify_seeds);
         let mut mutated = seed.clone();
-        scramble(&mut mutated, 8, &mut next);
+        scramble(&mut mutated, 8, &mut rng);
         exercise_notifications(&mutated);
-        exercise_notifications(&seed[..bounded(next(), seed.len())]);
+        exercise_notifications(&seed[..rng.at_most(seed.len())]);
         let widest_notify = AUDIO_CHANNEL_NOTIFY_LEN.max(AUDIO_NOTIFY_LEN);
-        let noise: Vec<u8> = (0..bounded(next(), widest_notify + 8))
-            .map(|_| low_byte(next() >> 37))
-            .collect();
+        let mut noise = vec![0u8; rng.at_most(widest_notify + 8)];
+        rng.fill(&mut noise);
         exercise_notifications(&noise);
 
         // 6. Replies: every decoder sees every image, so a frame meant for one
         //    reply shape cannot be mistaken for another.
-        let seed = &reply_seeds[bounded(next(), reply_seeds.len() - 1)];
+        let seed = rng.pick(&reply_seeds);
         let mut mutated = seed.clone();
-        scramble(&mut mutated, 16, &mut next);
+        scramble(&mut mutated, 16, &mut rng);
         exercise_replies(&mutated);
-        exercise_replies(&seed[..bounded(next(), seed.len())]);
-        let noise: Vec<u8> = (0..bounded(next(), widest_reply + 8))
-            .map(|_| low_byte(next() >> 43))
-            .collect();
+        exercise_replies(&seed[..rng.at_most(seed.len())]);
+        let mut noise = vec![0u8; rng.at_most(widest_reply + 8)];
+        rng.fill(&mut noise);
         exercise_replies(&noise);
 
         // 7. The ring over positions a hostile peer could have written:
         //    backwards, over-full, and at the very top of the counter where a
         //    careless publish would overflow.
-        let geometry = geometries[bounded(next(), geometries.len() - 1)];
-        let producer = match bounded(next(), 3) {
-            0 => next(),
-            1 => u64::MAX - u64::from(low_byte(next())),
-            2 => u64::from(low_byte(next())),
+        let geometry = *rng.pick(&geometries);
+        let producer = match rng.at_most(3) {
+            0 => rng.next_u64(),
+            1 => u64::MAX - u64::from(rng.next_u8()),
+            2 => u64::from(rng.next_u8()),
             _ => 0,
         };
-        let consumer = match bounded(next(), 3) {
-            0 => next(),
-            1 => producer.wrapping_sub(u64::from(low_byte(next()))),
-            2 => producer.wrapping_add(u64::from(low_byte(next()))),
+        let consumer = match rng.at_most(3) {
+            0 => rng.next_u64(),
+            1 => producer.wrapping_sub(u64::from(rng.next_u8())),
+            2 => producer.wrapping_add(u64::from(rng.next_u8())),
             _ => producer,
         };
-        exercise_ring(geometry, producer, consumer, &mut next);
+        exercise_ring(geometry, producer, consumer, &mut rng);
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {

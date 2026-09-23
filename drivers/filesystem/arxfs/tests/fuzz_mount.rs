@@ -28,7 +28,7 @@
 //! `Result`, never panics, and fails closed.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded
-//! LCG draws pseudo-random images, and a structured sweep flips bytes of a real
+//! `Prng` draws pseudo-random images, and a structured sweep flips bytes of a real
 //! formatted image to hammer the block-identity checks (magic, type,
 //! address, keyed authenticator). Stage 3 added the keyed metadata
 //! authenticator and a redundant mirror copy of every metadata block, so the
@@ -56,6 +56,7 @@ use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_drv_fs_arxfs::{
     EntropySource, RescueSink, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
 };
+use tairix_fuzzseed::Prng;
 use tairix_log::{Event, Sink};
 
 /// Stand in for the kernel's per-boot publication, so the volume's dedupe
@@ -206,16 +207,6 @@ impl Block for MemBlock {
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
     }
-}
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..len` as a `usize`, without a narrowing `as` cast.
-fn index(x: u64, len: usize) -> usize {
-    usize::try_from(x % len as u64).unwrap_or(0)
 }
 
 /// Drive the directory-block decode path on a mounted volume: walk every
@@ -375,16 +366,10 @@ fn open_never_panics_on_arbitrary_images() {
     // Draw and log the seed up front so every sampled byte position and every
     // PRNG image below replays exactly from the logged value:
     // fresh per run, fresh per soak run under `cargo xtask fuzz`.
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "open_never_panics_on_arbitrary_images",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     // Structured single-byte sweep over a valid image, probing the
     // identity/checksum rejection on a near-valid image. The soak visits
@@ -395,7 +380,7 @@ fn open_never_panics_on_arbitrary_images() {
     // `exercise` is a full encrypted mount + re-check, far heavier than a
     // byte decoder.
     if let Some(deadline) = deadline {
-        tairix_fuzzseed::budgeted_sweep(base.len(), next(), deadline, |i| {
+        tairix_fuzzseed::budgeted_sweep(base.len(), rng.next_u64(), deadline, |i| {
             let mut image = base.clone();
             image[i] ^= 0xff;
             exercise(&image);
@@ -403,7 +388,7 @@ fn open_never_panics_on_arbitrary_images() {
     } else {
         for _ in 0..SMOKE_FLIP_SAMPLES {
             let mut image = base.clone();
-            let i = index(next(), base.len());
+            let i = rng.below(base.len());
             image[i] ^= 0xff;
             exercise(&image);
         }
@@ -430,22 +415,23 @@ fn open_never_panics_on_arbitrary_images() {
         exercise(&image);
     }
 
-    // PRNG sweep: an LCG mutates the valid image at random offsets. The smoke
+    // PRNG sweep: the generator mutates the valid image at random offsets. The smoke
     // pass does SMOKE_ITERATIONS images; the soak loops the continuing stream
     // until the wall-clock budget elapses.
     let mut iteration: u64 = 0;
     loop {
         let mut image = base.clone();
-        let flips = index(next(), 24);
+        let flips = rng.below(24);
         for _ in 0..flips {
-            let pos = index(next(), image.len());
-            image[pos] = low_byte(next() >> 17);
+            let pos = rng.below(image.len());
+            image[pos] = rng.next_u8();
         }
         exercise(&image);
 
         // Occasionally feed pure noise too.
-        if (next() >> 5).trailing_zeros() >= 3 {
-            let noise: Vec<u8> = (0..IMAGE_LEN).map(|_| low_byte(next() >> 23)).collect();
+        if rng.below(8) == 0 {
+            let mut noise = vec![0u8; IMAGE_LEN];
+            rng.fill(&mut noise);
             exercise(&noise);
         }
 

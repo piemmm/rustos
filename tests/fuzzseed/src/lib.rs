@@ -4,7 +4,7 @@
 //!
 //! ## Why this exists
 //!
-//! Every one of those harnesses needs the same three things, and before this
+//! Every one of those harnesses needs the same four things, and before this
 //! crate each one re-implemented them — a duplication smell:
 //!
 //! 1. **A per-run seed that is fresh by default but pinnable for replay.** A
@@ -24,6 +24,9 @@
 //!    body runs a single time). The soak orchestrators export a budget
 //!    environment variable and the harness loops its continuing stream until
 //!    [`within_budget`] says the time is up.
+//! 4. **One generator to draw from.** [`Prng`] is the only one; a harness
+//!    carrying its own is a defect, because a weak generator hides whole
+//!    branches while the harness still reports green.
 //!
 //! It also owns the *names* of those environment variables, so the
 //! orchestrator that exports one and the harness that reads it cannot drift
@@ -87,14 +90,22 @@ pub const RNGSOAK_BUDGET_ENV: &str = "TAIRIX_RNGSOAK_BUDGET_SECS";
 /// pass; unset selects the harness's own smoke count.
 pub const RNGSOAK_BYTES_ENV: &str = "TAIRIX_RNGSOAK_BYTES";
 
-/// `SplitMix64` finaliser: spreads the bits of `x` so even sequential inputs
-/// (a counter, a job index) map to well-separated outputs.
-#[must_use]
-pub fn splitmix64(x: u64) -> u64 {
-    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+/// `SplitMix64`'s Weyl increment, 2^64 divided by the golden ratio.
+const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// `SplitMix64`'s output finaliser: a bijection with full avalanche.
+fn mix(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+/// Hash `x` to a well-spread 64-bit value, so even sequential inputs (a
+/// counter, a job index) map to unrelated outputs. Equal to the first draw
+/// of `Prng::new(x)`.
+#[must_use]
+pub fn splitmix64(x: u64) -> u64 {
+    mix(x.wrapping_add(GOLDEN_GAMMA))
 }
 
 /// Draw a fresh, hard-to-repeat seed from host entropy.
@@ -230,66 +241,88 @@ pub fn budgeted_sweep(len: usize, seed: u64, deadline: Instant, mut visit: impl 
     }
 }
 
-/// Expand a 64-bit seed into a 32-byte seed (e.g. proptest's `ChaCha` seed)
-/// via four `SplitMix64` rounds.
+/// Expand a 64-bit seed into a 32-byte seed (e.g. proptest's `ChaCha` seed):
+/// the first four draws of `Prng::new(seed)`.
 #[must_use]
 pub fn expand_seed(seed: u64) -> [u8; 32] {
-    let mut state = seed;
     let mut bytes = [0u8; 32];
-    for chunk in bytes.chunks_mut(8) {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        chunk.copy_from_slice(&z.to_le_bytes());
-    }
+    Prng::new(seed).fill(&mut bytes);
     bytes
 }
 
-/// A small, deterministic 64-bit linear congruential generator (Knuth's MMIX
-/// multiplier). Given the same seed it reproduces the same stream, so a
-/// failure replays exactly from its logged seed; the *start* seed is what
-/// [`start`] randomises per run.
-pub struct Lcg(u64);
+/// The one deterministic generator every harness draws its test inputs from:
+/// `SplitMix64` (Steele, Lea & Flood, "Fast Splittable Pseudorandom Number
+/// Generators", OOPSLA 2014).
+///
+/// Every output bit is mixed, so a draw may be reduced, masked, or split
+/// freely — unlike a power-of-two-modulus LCG, whose bit *k* repeats with
+/// period 2^(k+1), so that a coin flip taken at a fixed position in the draw
+/// sequence is a constant and the branch behind it never runs.
+///
+/// The stream replays exactly from its seed; [`start`] randomises the seed
+/// per run. A bounded or narrow draw consumes one word whatever its argument,
+/// so where a stream goes never depends on a bound drawn from it.
+#[derive(Debug)]
+pub struct Prng(u64);
 
-impl Lcg {
-    /// Seed the generator. A zero seed is nudged off the fixed point so the
-    /// recurrence never collapses.
+impl Prng {
+    /// A generator whose stream is fixed by `seed`. Every seed is valid.
     #[must_use]
     pub fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
+        Self(seed)
     }
 
-    /// Next 64-bit value.
+    /// The next 64-bit value.
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
+        self.0 = self.0.wrapping_add(GOLDEN_GAMMA);
+        mix(self.0)
     }
 
-    /// A value in `0..n` (returns `0` when `n == 0`).
+    /// The next 32-bit value.
+    pub fn next_u32(&mut self) -> u32 {
+        u32::try_from(self.next_u64() >> 32).unwrap_or(0)
+    }
+
+    /// The next 16-bit value.
+    pub fn next_u16(&mut self) -> u16 {
+        u16::try_from(self.next_u64() >> 48).unwrap_or(0)
+    }
+
+    /// The next byte.
+    pub fn next_u8(&mut self) -> u8 {
+        self.next_u64().to_be_bytes()[0]
+    }
+
+    /// A value in `0..n`, or `0` when `n == 0`.
     pub fn below(&mut self, n: usize) -> usize {
-        if n == 0 {
-            return 0;
-        }
-        usize::try_from(self.next_u64() % (n as u64)).unwrap_or(0)
+        self.within(u128::from(n as u64))
+    }
+
+    /// A value in `0..=max`.
+    pub fn at_most(&mut self, max: usize) -> usize {
+        self.within(u128::from(max as u64) + 1)
+    }
+
+    /// A uniformly chosen element of `items`.
+    ///
+    /// # Panics
+    /// When `items` is empty.
+    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[self.below(items.len())]
+    }
+
+    /// Lemire's multiply-shift reduction: the high word of `draw * span` is
+    /// uniform over `0..span` to within `span / 2^64`, with no division and no
+    /// dependence on the draw's low bits.
+    fn within(&mut self, span: u128) -> usize {
+        let scaled = (u128::from(self.next_u64()) * span) >> 64;
+        usize::try_from(scaled).unwrap_or(usize::MAX)
     }
 
     /// Fill `buf` with pseudo-random bytes.
     pub fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
+        for chunk in buf.chunks_mut(8) {
+            chunk.copy_from_slice(&self.next_u64().to_le_bytes()[..chunk.len()]);
         }
     }
 }
@@ -401,9 +434,11 @@ impl Drop for Counted {
 mod tests {
     use super::{
         budget_deadline, budgeted_sweep, entropy_seed, expand_seed, resolve_seed, splitmix64,
-        within_budget, Lcg,
+        within_budget, Prng,
     };
     use std::time::{Duration, Instant};
+
+    const SEEDS: [u64; 5] = [0, 1, 42, 0xDEAD_BEEF, u64::MAX];
 
     #[test]
     fn splitmix64_separates_sequential_inputs() {
@@ -477,30 +512,165 @@ mod tests {
     }
 
     #[test]
-    fn lcg_is_reproducible_from_its_seed() {
-        let mut a = Lcg::new(42);
-        let mut b = Lcg::new(42);
+    fn prng_matches_the_splitmix64_reference_stream() {
+        // The reference implementation's first outputs for seed 0.
+        let mut rng = Prng::new(0);
+        let expected = [
+            0xE220_A839_7B1D_CDAF,
+            0x6E78_9E6A_A1B9_65F4,
+            0x06C4_5D18_8009_454F,
+            0xF88B_B8A8_724C_81EC,
+        ];
+        for want in expected {
+            assert_eq!(rng.next_u64(), want);
+        }
+        let mut bytes = [0u8; 32];
+        for (chunk, word) in bytes.chunks_mut(8).zip(expected) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(expand_seed(0), bytes);
+        for seed in SEEDS {
+            assert_eq!(splitmix64(seed), Prng::new(seed).next_u64());
+        }
+    }
+
+    #[test]
+    fn prng_is_reproducible_from_its_seed() {
+        let mut a = Prng::new(42);
+        let mut b = Prng::new(42);
         for _ in 0..100 {
             assert_eq!(a.next_u64(), b.next_u64());
         }
     }
 
+    /// In a power-of-two-modulus LCG bit `k` repeats with period `2^(k+1)`,
+    /// so a coin flip taken at a fixed parity of the draw sequence never
+    /// changes. Here every low bit agrees with itself one such period later
+    /// only as often as chance allows.
     #[test]
-    fn lcg_below_stays_in_range_and_handles_zero() {
-        let mut rng = Lcg::new(99);
-        for _ in 0..1000 {
-            assert!(rng.below(10) < 10);
+    fn no_low_bit_repeats_on_a_power_of_two_period() {
+        for seed in SEEDS {
+            let mut rng = Prng::new(seed);
+            let draws: Vec<u64> = (0..8192).map(|_| rng.next_u64()).collect();
+            for bit in 0..10 {
+                let period = 2usize << bit;
+                let pairs = draws.len() - period;
+                let agree = (0..pairs)
+                    .filter(|&i| (draws[i] >> bit) & 1 == (draws[i + period] >> bit) & 1)
+                    .count();
+                assert!(
+                    (pairs * 45 / 100..=pairs * 55 / 100).contains(&agree),
+                    "seed {seed}: bit {bit} agreed {agree}/{pairs} across period {period}"
+                );
+            }
         }
-        assert_eq!(rng.below(0), 0);
+    }
+
+    /// A power-of-two bound reduced by `%` off an LCG was a fixed cycle
+    /// (`below(4)` ran `2, 3, 0, 1, ...`).
+    #[test]
+    fn a_power_of_two_bound_is_not_a_fixed_cycle() {
+        for seed in SEEDS {
+            let mut rng = Prng::new(seed);
+            let draws: Vec<usize> = (0..4096).map(|_| rng.below(4)).collect();
+            let pairs = draws.len() - 4;
+            let repeats = (0..pairs).filter(|&i| draws[i] == draws[i + 4]).count();
+            assert!(
+                repeats < pairs * 30 / 100,
+                "seed {seed}: below(4) repeated {repeats}/{pairs} four draws on"
+            );
+        }
     }
 
     #[test]
-    fn lcg_fill_writes_every_byte_for_any_length() {
-        let mut rng = Lcg::new(123);
+    fn bounded_draws_stay_in_range_and_cover_it() {
+        let mut rng = Prng::new(99);
+        for n in [1usize, 2, 3, 7, 10, 64] {
+            let mut below = vec![false; n];
+            let mut at_most = vec![false; n + 1];
+            for _ in 0..2000 {
+                below[rng.below(n)] = true;
+                at_most[rng.at_most(n)] = true;
+            }
+            assert!(below.iter().all(|&hit| hit), "below({n}) missed a value");
+            assert!(
+                at_most.iter().all(|&hit| hit),
+                "at_most({n}) missed a value"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_draws_handle_the_extreme_bounds() {
+        let mut rng = Prng::new(7);
+        for _ in 0..64 {
+            assert_eq!(rng.below(0), 0);
+            assert_eq!(rng.below(1), 0);
+            assert_eq!(rng.at_most(0), 0);
+            let _ = rng.at_most(usize::MAX);
+        }
+        let wide = 1usize << 40;
+        assert!(
+            (0..64)
+                .map(|_| rng.below(wide))
+                .any(|v| v > usize::from(u16::MAX)),
+            "a wide bound is reached past sixteen bits"
+        );
+    }
+
+    #[test]
+    fn pick_reaches_every_element() {
+        let items = ["a", "b", "c", "d", "e"];
+        let mut seen = [false; 5];
+        let mut rng = Prng::new(3);
+        for _ in 0..500 {
+            let chosen = rng.pick(&items);
+            let at = items
+                .iter()
+                .position(|item| item == chosen)
+                .expect("a member");
+            seen[at] = true;
+        }
+        assert!(seen.iter().all(|&hit| hit));
+    }
+
+    #[test]
+    fn every_draw_consumes_exactly_one_word() {
+        let mut probe = Prng::new(5);
+        let mut words = Prng::new(5);
+        let _ = probe.below(0);
+        let _ = probe.at_most(usize::MAX);
+        let _ = probe.next_u8();
+        let _ = probe.next_u16();
+        let _ = probe.next_u32();
+        let _ = probe.pick(&[1, 2, 3]);
+        for _ in 0..6 {
+            let _ = words.next_u64();
+        }
+        assert_eq!(probe.next_u64(), words.next_u64());
+    }
+
+    #[test]
+    fn narrow_draws_take_the_high_bits() {
+        let mut narrow = Prng::new(11);
+        let mut wide = Prng::new(11);
+        assert_eq!(u64::from(narrow.next_u32()), wide.next_u64() >> 32);
+        assert_eq!(u64::from(narrow.next_u16()), wide.next_u64() >> 48);
+        assert_eq!(u64::from(narrow.next_u8()), wide.next_u64() >> 56);
+    }
+
+    #[test]
+    fn fill_writes_the_stream_for_any_length() {
         for len in [0usize, 1, 7, 8, 9, 33] {
             let mut buf = vec![0u8; len];
-            rng.fill(&mut buf);
-            assert_eq!(buf.len(), len);
+            Prng::new(123).fill(&mut buf);
+            let mut words = Prng::new(123);
+            let mut expected = Vec::new();
+            while expected.len() < len {
+                expected.extend_from_slice(&words.next_u64().to_le_bytes());
+            }
+            expected.truncate(len);
+            assert_eq!(buf, expected);
         }
     }
 

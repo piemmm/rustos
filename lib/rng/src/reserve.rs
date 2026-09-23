@@ -325,62 +325,20 @@ impl<E: EntropySource, const N: usize> core::fmt::Debug for OutputReserve<E, N> 
 #[cfg(test)]
 mod tests {
     use super::{OutputReserve, ReserveError, DEFAULT_RESERVE_BYTES};
-    use crate::entropy::{EntropyError, EntropySource};
+    use crate::entropy::EntropyError;
     use crate::fast::PERTURB_INTERVAL_BYTES;
+    use crate::test_sources::{ParkingSource, SeededSource};
 
-    /// Deterministic stand-in for an entropy source (see the `csprng` tests):
-    /// a counter expanded so each fill is distinct. Not entropy — it makes
-    /// the reserve's behaviour reproducible. An optional budget drives the
-    /// shortage paths.
-    struct CountingSource {
-        counter: u64,
-        budget: Option<u32>,
-    }
-
-    impl CountingSource {
-        fn new(seed: u64) -> Self {
-            Self {
-                counter: seed,
-                budget: None,
-            }
-        }
-        fn with_budget(seed: u64, n: u32) -> Self {
-            Self {
-                counter: seed,
-                budget: Some(n),
-            }
-        }
-    }
-
-    impl EntropySource for CountingSource {
-        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-            if let Some(b) = self.budget.as_mut() {
-                if *b == 0 {
-                    return Err(EntropyError::Unavailable);
-                }
-                *b -= 1;
-            }
-            for byte in out.iter_mut() {
-                self.counter = self
-                    .counter
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                *byte = self.counter.to_le_bytes()[4];
-            }
-            Ok(())
-        }
-    }
-
-    fn ready_reserve<const N: usize>(seed: u64) -> OutputReserve<CountingSource, N> {
-        let mut r = OutputReserve::<CountingSource, N>::new();
-        r.seed(CountingSource::new(seed)).expect("seed succeeds");
+    fn ready_reserve<const N: usize>(seed: u64) -> OutputReserve<SeededSource, N> {
+        let mut r = OutputReserve::<SeededSource, N>::new();
+        r.seed(SeededSource::new(seed)).expect("seed succeeds");
         r
     }
 
     /// Draw `bytes` from `reserve` in `chunk`-sized requests, returning the
     /// tail of the stream so two reserves' late output can be compared.
     fn drain<const N: usize>(
-        reserve: &mut OutputReserve<CountingSource, N>,
+        reserve: &mut OutputReserve<SeededSource, N>,
         bytes: u64,
         tail: &mut [u8],
     ) {
@@ -400,7 +358,7 @@ mod tests {
 
     #[test]
     fn unseeded_reserve_is_not_ready_and_fails_closed() {
-        let mut r = OutputReserve::<CountingSource, 64>::new();
+        let mut r = OutputReserve::<SeededSource, 64>::new();
         assert!(!r.is_ready());
         let mut out = [0u8; 8];
         assert_eq!(r.fill(&mut out), Err(ReserveError::NotReady));
@@ -412,9 +370,9 @@ mod tests {
 
     #[test]
     fn seed_failure_leaves_reserve_unseeded() {
-        let mut r = OutputReserve::<CountingSource, 64>::new();
+        let mut r = OutputReserve::<SeededSource, 64>::new();
         // Budget 0: even the instantiation seed cannot be drawn.
-        let err = r.seed(CountingSource::with_budget(1, 0)).unwrap_err();
+        let err = r.seed(SeededSource::with_budget(1, 0)).unwrap_err();
         assert_eq!(err, ReserveError::Entropy(EntropyError::Unavailable));
         assert!(!r.is_ready());
     }
@@ -434,7 +392,7 @@ mod tests {
         use crate::csprng::CsRng;
         use crate::fast::FastRng;
         use crate::rand::RandU64;
-        let mut reference: FastRng<64> = CsRng::new(CountingSource::new(3))
+        let mut reference: FastRng<64> = CsRng::new(SeededSource::new(3))
             .expect("seed")
             .fork_fast()
             .expect("fork");
@@ -512,7 +470,7 @@ mod tests {
     /// A discard on an unseeded reserve must not panic or make it look ready.
     #[test]
     fn discard_on_an_unseeded_reserve_is_a_no_op() {
-        let mut r = OutputReserve::<CountingSource, 64>::new();
+        let mut r = OutputReserve::<SeededSource, 64>::new();
         r.discard();
         assert!(!r.is_ready());
     }
@@ -536,8 +494,8 @@ mod tests {
 
     #[test]
     fn reseed_succeeds_and_discards_buffer() {
-        let mut r = OutputReserve::<CountingSource, 64>::new();
-        r.seed(CountingSource::new(3)).unwrap();
+        let mut r = OutputReserve::<SeededSource, 64>::new();
+        r.seed(SeededSource::new(3)).unwrap();
         let mut out = [0u8; 8];
         r.fill(&mut out).unwrap();
         assert!(r.buffered() > 0);
@@ -548,7 +506,7 @@ mod tests {
 
     #[test]
     fn reseed_before_seed_is_not_ready() {
-        let mut r = OutputReserve::<CountingSource, 64>::new();
+        let mut r = OutputReserve::<SeededSource, 64>::new();
         assert_eq!(r.reseed(), Err(ReserveError::NotReady));
         assert_eq!(r.reseed_blocking(), Err(ReserveError::NotReady));
     }
@@ -558,8 +516,8 @@ mod tests {
         // Budget 1: only the instantiation seed succeeds. A subsequent
         // explicit reseed has no entropy left, and that must surface rather
         // than be hidden or replaced with weak randomness.
-        let mut r = OutputReserve::<CountingSource, 16>::new();
-        r.seed(CountingSource::with_budget(9, 1)).unwrap();
+        let mut r = OutputReserve::<SeededSource, 16>::new();
+        r.seed(SeededSource::with_budget(9, 1)).unwrap();
         // Serving still works — generation needs no fresh entropy at all…
         let mut out = [0u8; 8];
         r.fill(&mut out).expect("generation needs no fresh entropy");
@@ -580,8 +538,8 @@ mod tests {
         let mut perturbing = ready_reserve::<2048>(11);
         // Budget 1 covers instantiation only, so this reserve's perturbation
         // reseed finds nothing and it keeps its original key.
-        let mut starved = OutputReserve::<CountingSource, 2048>::new();
-        starved.seed(CountingSource::with_budget(11, 1)).unwrap();
+        let mut starved = OutputReserve::<SeededSource, 2048>::new();
+        starved.seed(SeededSource::with_budget(11, 1)).unwrap();
 
         // Before the cadence elapses both are the same generator.
         let (mut early_a, mut early_b) = ([0u8; 64], [0u8; 64]);
@@ -602,8 +560,8 @@ mod tests {
     /// caller's bytes.
     #[test]
     fn a_perturbation_shortage_never_denies_a_draw() {
-        let mut starved = OutputReserve::<CountingSource, 2048>::new();
-        starved.seed(CountingSource::with_budget(5, 1)).unwrap();
+        let mut starved = OutputReserve::<SeededSource, 2048>::new();
+        starved.seed(SeededSource::with_budget(5, 1)).unwrap();
         let mut tail = [0u8; 64];
         drain(&mut starved, PERTURB_INTERVAL_BYTES, &mut tail);
         assert_ne!(tail, [0u8; 64], "output must keep flowing");
@@ -611,47 +569,6 @@ mod tests {
         starved
             .fill_blocking(&mut tail)
             .expect("a blocking fill serves too");
-    }
-
-    /// A source whose non-blocking `fill` is exhausted after `budget` draws
-    /// but whose `fill_blocking` always delivers — a stand-in for a parking
-    /// platform source, exercising the reserve's blocking paths.
-    struct ParkingSource {
-        counter: u64,
-        budget: u32,
-    }
-
-    impl ParkingSource {
-        fn new(seed: u64, budget: u32) -> Self {
-            Self {
-                counter: seed,
-                budget,
-            }
-        }
-    }
-
-    impl EntropySource for ParkingSource {
-        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-            if self.budget == 0 {
-                return Err(EntropyError::Unavailable);
-            }
-            self.budget -= 1;
-            for byte in out.iter_mut() {
-                self.counter = self
-                    .counter
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                *byte = self.counter.to_le_bytes()[4];
-            }
-            Ok(())
-        }
-
-        fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-            if self.budget == 0 {
-                self.budget = 1;
-            }
-            self.fill(out)
-        }
     }
 
     #[test]

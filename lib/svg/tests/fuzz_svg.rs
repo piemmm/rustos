@@ -9,7 +9,7 @@
 //!   the supported subset and `Err` (fail closed) for everything else.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded
-//! LCG draws pseudo-random byte strings, mutates real SVG templates, and
+//! `Prng` draws pseudo-random byte strings, mutates real SVG templates, and
 //! assembles structured-but-hostile documents. A plain `cargo test` runs the
 //! [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask
 //! fuzz --soak` exports
@@ -17,6 +17,7 @@
 
 use core::fmt::Write as _;
 
+use tairix_fuzzseed::Prng;
 use tairix_svg::font::NoFonts;
 use tairix_svg::{decode, SvgError, Viewport};
 
@@ -193,17 +194,6 @@ const PROPERTIES: &[&str] = &[
     "font-family",
 ];
 
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
-
 /// The pixel side the accepted artwork is rendered at.
 ///
 /// Small on purpose: what is being checked is that the renderer accepts what
@@ -364,26 +354,26 @@ impl tairix_svg::font::FontProvider for FuzzFont {
 
 /// One sweep's generated `<text>` document, decoded with a provider that
 /// answers and again with one that does not.
-fn generated_text(next: &mut impl FnMut() -> u64) {
-    let anchor = ["start", "middle", "end", "sideways"][bounded(next(), 3)];
-    let adjust = ["spacing", "spacingAndGlyphs", "neither"][bounded(next(), 2)];
-    let space = ["default", "preserve", "collapse"][bounded(next(), 2)];
-    let weight = ["normal", "bold", "bolder", "lighter", "250", "1400"][bounded(next(), 5)];
-    let posture = ["normal", "italic", "oblique", "sideways"][bounded(next(), 3)];
+fn generated_text(rng: &mut Prng) {
+    let anchor = ["start", "middle", "end", "sideways"][rng.at_most(3)];
+    let adjust = ["spacing", "spacingAndGlyphs", "neither"][rng.at_most(2)];
+    let space = ["default", "preserve", "collapse"][rng.at_most(2)];
+    let weight = ["normal", "bold", "bolder", "lighter", "250", "1400"][rng.at_most(5)];
+    let posture = ["normal", "italic", "oblique", "sideways"][rng.at_most(3)];
     // The *positions* are drawn from the wild list, because placing a
     // glyph anywhere costs the same. The *size* is not: a million-unit
     // em subdivides one curve into the whole vertex budget before the
     // budget refuses it, and the flattener's behaviour there is what
     // the generated-path case above already fuzzes. Here the point is
     // the layout.
-    let size = TEXT_SIZES[bounded(next(), TEXT_SIZES.len() - 1)];
-    let list = NUMBERS[bounded(next(), NUMBERS.len() - 1)];
+    let size = *rng.pick(TEXT_SIZES);
+    let list = *rng.pick(NUMBERS);
     // Short on purpose: what varies between iterations is the *shape*
     // of the layout — the position lists, the anchor, the adjustment,
     // the spacings — and one sweep should not cost more in glyphs than
     // every other case put together.
     let mut body = String::new();
-    for _ in 0..bounded(next(), 1) {
+    for _ in 0..rng.at_most(1) {
         let _ = write!(
             body,
             r#"<tspan dx="{list}" rotate="{list} 30" font-size="{size}">c</tspan>"#
@@ -411,38 +401,33 @@ fn alloc_document(body: &str) -> String {
 fn decode_never_panics_for_any_input() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // The seed is drawn and logged by `tairix_fuzzseed::start`: fresh
     // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "decode_never_panics_for_any_input",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A real template with a handful of bytes flipped at random.
-        let template = TEMPLATES[bounded(next(), TEMPLATES.len() - 1)];
+        let template = *rng.pick(TEMPLATES);
         let mut mutated = template.to_vec();
-        let flips = bounded(next(), 8);
+        let flips = rng.at_most(8);
         for _ in 0..flips {
             if mutated.is_empty() {
                 break;
             }
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         decode_never_panics(&mutated);
 
         // 2. A structured-but-hostile document: a valid frame with a random
         //    blob spliced into the middle, exercising the element scanner.
-        let blob_len = bounded(next(), 64);
-        let blob: Vec<u8> = (0..blob_len).map(|_| low_byte(next() >> 23)).collect();
+        let blob_len = rng.at_most(64);
+        let mut blob = vec![0u8; blob_len];
+        rng.fill(&mut blob);
         let mut spliced = Vec::new();
         spliced.extend_from_slice(br#"<svg viewBox="0 0 16 16">"#);
         spliced.extend_from_slice(&blob);
@@ -453,28 +438,28 @@ fn decode_never_panics_for_any_input() {
         //    curve, arc, and reflection arms are reached deliberately rather
         //    than by a lucky byte flip.
         let mut data = String::from("M0 0");
-        let steps = bounded(next(), 12);
+        let steps = rng.at_most(12);
         for _ in 0..steps {
-            let command = COMMANDS[bounded(next(), COMMANDS.len() - 1)];
+            let command = *rng.pick(COMMANDS);
             data.push(char::from(command));
-            let arity = bounded(next(), 7);
+            let arity = rng.at_most(7);
             for _ in 0..arity {
-                data.push_str(NUMBERS[bounded(next(), NUMBERS.len() - 1)]);
-                match bounded(next(), 3) {
+                data.push_str(rng.pick(NUMBERS));
+                match rng.at_most(3) {
                     0 => data.push(' '),
                     1 => data.push(','),
                     _ => {}
                 }
             }
         }
-        let orient = ["auto", "auto-start-reverse", "30", "-1.5rad", "2turn"][bounded(next(), 4)];
+        let orient = ["auto", "auto-start-reverse", "30", "-1.5rad", "2turn"][rng.at_most(4)];
         let effect = [
             "none",
             "non-scaling-stroke",
             "non-rotation non-scaling-stroke viewport",
             "non-scaling-size",
             "wobble",
-        ][bounded(next(), 4)];
+        ][rng.at_most(4)];
         let generated = alloc_document(&format!(
             r##"<marker id="k" markerWidth="2" markerHeight="2" refX="1" orient="{orient}"
                   overflow="visible"><rect width="3" height="3" fill="#0a0"/></marker>
@@ -488,13 +473,13 @@ fn decode_never_panics_for_any_input() {
         // 4. A generated stylesheet: the selector and declaration grammar,
         //    so the cascade's own parser is reached deliberately.
         let mut sheet = String::new();
-        let rules = bounded(next(), 6);
+        let rules = rng.at_most(6);
         for _ in 0..rules {
-            let selector = SELECTORS[bounded(next(), SELECTORS.len() - 1)];
-            let property = PROPERTIES[bounded(next(), PROPERTIES.len() - 1)];
-            let value = NUMBERS[bounded(next(), NUMBERS.len() - 1)];
+            let selector = *rng.pick(SELECTORS);
+            let property = *rng.pick(PROPERTIES);
+            let value = *rng.pick(NUMBERS);
             let _ = write!(sheet, "{selector}{{{property}:{value}");
-            match bounded(next(), 3) {
+            match rng.at_most(3) {
                 0 => sheet.push_str("!important}"),
                 1 => sheet.push_str(";}"),
                 _ => sheet.push('}'),
@@ -520,12 +505,13 @@ fn decode_never_panics_for_any_input() {
         //    wall-clock bounded, so it covers text in the same proportion
         //    over hours.
         if iteration.is_multiple_of(TEXT_EVERY) {
-            generated_text(&mut next);
+            generated_text(&mut rng);
         }
 
         // 6. Pure noise straight into the decoder.
-        let nlen = bounded(next(), MAX_NOISE);
-        let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 29)).collect();
+        let nlen = rng.at_most(MAX_NOISE);
+        let mut noise = vec![0u8; nlen];
+        rng.fill(&mut noise);
         decode_never_panics(&noise);
 
         iteration += 1;

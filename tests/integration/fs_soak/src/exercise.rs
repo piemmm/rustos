@@ -22,23 +22,17 @@ use crate::{RamBlock, SoakFs};
 /// count modest, so the fill is not dominated by directory growth.
 const FILL_FILE_BYTES: usize = 2 * 1024 * 1024;
 
-/// Deterministic content byte for `(seed, file, offset)`. The inputs are run
-/// through a SplitMix64-style avalanche so adjacent offsets yield unrelated
-/// bytes: every block is then high-entropy and distinct, so the content is
-/// neither compressible nor deduplicable and the fill genuinely consumes
-/// physical blocks (a flat ramp would collide mod 256 and dedupe away under
-/// `docs/src/filesystem/arxfs-spec.md` §9). Taking the low byte avoids any
-/// narrowing `as` cast.
+/// Deterministic content byte for `(seed, file, offset)`. The inputs are
+/// hashed so adjacent offsets yield unrelated bytes: every block is then
+/// high-entropy and distinct, so the content is neither compressible nor
+/// deduplicable and the fill genuinely consumes physical blocks (a flat ramp
+/// would collide mod 256 and dedupe away under
+/// `docs/src/filesystem/arxfs-spec.md` §9).
 fn byte_at(seed: u64, file: u64, offset: u64) -> u8 {
-    let mut x = seed
+    let key = seed
         ^ file.wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ offset.wrapping_mul(0xD1B5_4A32_D192_ED03);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
-    x ^= x >> 33;
-    x.to_le_bytes()[0]
+    tairix_fuzzseed::splitmix64(key).to_le_bytes()[0]
 }
 
 /// Build `len` bytes of deterministic content for file `file`.

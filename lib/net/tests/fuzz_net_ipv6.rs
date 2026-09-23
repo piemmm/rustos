@@ -12,6 +12,7 @@
 //! from the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses
 //! under `cargo xtask fuzz`.
 
+use tairix_fuzzseed::Prng;
 use tairix_net::ipv6::{self, Ipv6Header};
 use tairix_net::Ipv6Addr;
 
@@ -40,41 +41,9 @@ fn exercise_walk(first_header: u8, payload: &[u8]) {
     }
 }
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the
-/// generator in the sibling harnesses so failures reproduce one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -82,7 +51,7 @@ fn random_inputs_never_panic() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
-            let size = ((rng.next_u64() & 0x1FF) as usize) % (buf.len() + 1);
+            let size = rng.at_most(buf.len());
             rng.fill(&mut buf[..size]);
             exercise_header(&buf[..size]);
             // Bias the first header toward the extension-header values
@@ -93,7 +62,7 @@ fn random_inputs_never_panic() {
                 2 => ipv6::NEXT_HEADER_FRAGMENT,
                 3 => ipv6::NEXT_HEADER_DEST_OPTS,
                 4 => ipv6::NEXT_HEADER_NO_NEXT,
-                _ => (rng.next_u64() & 0xFF) as u8,
+                _ => rng.next_u8(),
             };
             exercise_walk(first, &buf[..size]);
         }
@@ -171,7 +140,7 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
 /// serialise, and cover the whole payload exactly once.
 #[test]
 fn fragmentation_is_total_and_pieces_reconstruct() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "fragmentation_is_total_and_pieces_reconstruct",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

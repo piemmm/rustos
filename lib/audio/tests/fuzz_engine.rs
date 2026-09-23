@@ -38,6 +38,7 @@ use tairix_audio::convert::{self, Dither, DitherSource};
 use tairix_audio::mix::{Mixer, SinkFormat, StreamMix};
 use tairix_audio::resample::{FilterBank, Ratio, Resampler};
 use tairix_audio::volume::{millibel_to_linear, resolve, VolumeRequest};
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 ///
@@ -49,12 +50,6 @@ const SMOKE_ITERATIONS: u64 = 600;
 
 /// Frames the largest driven block carries.
 const MAX_FRAMES: usize = 64;
-
-/// `x` reduced into `0..=max`, without a narrowing cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
 
 /// Every encoding, so no stage is driven over only the convenient ones.
 const FORMATS: &[SampleFormat] = &[
@@ -87,15 +82,13 @@ const RATES: &[u32] = &[
 
 /// A layout of `count` distinct positions drawn from the vocabulary, or
 /// [`None`] where the draw did not make a valid one.
-fn layout(draw: u64, count: usize) -> Option<ChannelMap> {
+fn layout(rng: &mut Prng, count: usize) -> Option<ChannelMap> {
     let mut chosen = Vec::with_capacity(count);
-    let mut rolling = draw;
     for _ in 0..count {
-        let position = POSITIONS[bounded(rolling, POSITIONS.len() - 1)];
+        let position = *rng.pick(POSITIONS);
         if !chosen.contains(&position) {
             chosen.push(position);
         }
-        rolling = rolling.rotate_left(7) ^ 0x9E37_79B9;
     }
     ChannelMap::new(&chosen).ok()
 }
@@ -119,26 +112,20 @@ fn assert_deliverable(format: SampleFormat, bytes: &[u8], what: &str) {
 #[test]
 fn driving_the_engine_with_any_input_never_panics_and_always_delivers_audio() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "driving_the_engine_with_any_input_never_panics_and_always_delivers_audio",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut noise = vec![0u8; MAX_FRAMES * 8 * 4];
     let mut iteration: u64 = 0;
     loop {
-        exercise_conversion(&mut noise, &mut next);
-        exercise_channel_matrix(&mut next);
-        exercise_mixer(&mut noise, &mut next);
-        exercise_resampler(&mut next);
-        exercise_clock(&mut next);
-        exercise_volume(&mut next);
+        exercise_conversion(&mut noise, &mut rng);
+        exercise_channel_matrix(&mut rng);
+        exercise_mixer(&mut noise, &mut rng);
+        exercise_resampler(&mut rng);
+        exercise_clock(&mut rng);
+        exercise_volume(&mut rng);
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
@@ -148,9 +135,9 @@ fn driving_the_engine_with_any_input_never_panics_and_always_delivers_audio() {
 }
 
 /// Fill `buffer` with pseudo-random bytes.
-fn scramble(buffer: &mut [u8], next: &mut impl FnMut() -> u64) {
+fn scramble(buffer: &mut [u8], rng: &mut Prng) {
     for chunk in buffer.chunks_mut(8) {
-        let word = next().to_le_bytes();
+        let word = rng.next_u64().to_le_bytes();
         let span = chunk.len();
         chunk.copy_from_slice(&word[..span]);
     }
@@ -158,12 +145,12 @@ fn scramble(buffer: &mut [u8], next: &mut impl FnMut() -> u64) {
 
 /// Any byte image in any encoding converts into any other without panicking,
 /// and what comes out is always deliverable audio.
-fn exercise_conversion(noise: &mut [u8], next: &mut impl FnMut() -> u64) {
-    let from = FORMATS[bounded(next(), FORMATS.len() - 1)];
-    let to = FORMATS[bounded(next(), FORMATS.len() - 1)];
-    let samples = bounded(next(), MAX_FRAMES);
+fn exercise_conversion(noise: &mut [u8], rng: &mut Prng) {
+    let from = *rng.pick(FORMATS);
+    let to = *rng.pick(FORMATS);
+    let samples = rng.at_most(MAX_FRAMES);
     let span = samples * from.bytes_per_sample();
-    scramble(&mut noise[..span], next);
+    scramble(&mut noise[..span], rng);
     let mut scratch = vec![0.0f32; samples.max(1)];
     let mut out = vec![0u8; samples * to.bytes_per_sample()];
     if convert::convert(from, to, &noise[..span], &mut out, &mut scratch).is_ok() {
@@ -179,11 +166,10 @@ fn exercise_conversion(noise: &mut [u8], next: &mut impl FnMut() -> u64) {
 
 /// A layout pair either yields a finite matrix or is refused; nothing in
 /// between.
-fn exercise_channel_matrix(next: &mut impl FnMut() -> u64) {
-    let source_count = 1 + bounded(next(), 7);
-    let sink_count = 1 + bounded(next(), 7);
-    let (Some(source), Some(sink)) = (layout(next(), source_count), layout(next(), sink_count))
-    else {
+fn exercise_channel_matrix(rng: &mut Prng) {
+    let source_count = 1 + rng.at_most(7);
+    let sink_count = 1 + rng.at_most(7);
+    let (Some(source), Some(sink)) = (layout(rng, source_count), layout(rng, sink_count)) else {
         return;
     };
     let Ok(matrix) = ChannelMatrix::derive(&source, &sink) else {
@@ -213,13 +199,14 @@ fn exercise_channel_matrix(next: &mut impl FnMut() -> u64) {
 
 /// A hostile stream beside a well-behaved one: the sink still receives
 /// deliverable audio, and the honest stream is still in it.
-fn exercise_mixer(noise: &mut [u8], next: &mut impl FnMut() -> u64) {
-    let sink_format = FORMATS[bounded(next(), FORMATS.len() - 1)];
-    let Some(map) = layout(next(), 1 + bounded(next(), 7)) else {
+fn exercise_mixer(noise: &mut [u8], rng: &mut Prng) {
+    let sink_format = *rng.pick(FORMATS);
+    let count = 1 + rng.at_most(7);
+    let Some(map) = layout(rng, count) else {
         return;
     };
     let channels = usize::from(map.channels());
-    let frames = 1 + bounded(next(), MAX_FRAMES - 1);
+    let frames = 1 + rng.below(MAX_FRAMES);
     let Ok(matrix) = ChannelMatrix::derive(&map, &map) else {
         return;
     };
@@ -230,16 +217,16 @@ fn exercise_mixer(noise: &mut [u8], next: &mut impl FnMut() -> u64) {
             channel_map: map,
         },
         frames,
-        next(),
+        rng.next_u64(),
     ) else {
         return;
     };
-    if next() & 1 == 0 {
+    if rng.next_u64() & 1 == 0 {
         mixer.set_dither(Dither::None);
     }
-    let hostile_format = FORMATS[bounded(next(), FORMATS.len() - 1)];
+    let hostile_format = *rng.pick(FORMATS);
     let span = frames * channels * hostile_format.bytes_per_sample();
-    scramble(&mut noise[..span], next);
+    scramble(&mut noise[..span], rng);
     let hostile = noise[..span].to_vec();
     let quiet =
         vec![sink_format.silence_byte(); frames * channels * sink_format.bytes_per_sample()];
@@ -248,8 +235,8 @@ fn exercise_mixer(noise: &mut [u8], next: &mut impl FnMut() -> u64) {
         StreamMix {
             format: hostile_format,
             matrix: &matrix,
-            gain: gain_draw(next()),
-            resampled: next() & 1 == 0,
+            gain: gain_draw(rng.next_u64()),
+            resampled: rng.next_u64() & 1 == 0,
             samples: &hostile,
         },
         StreamMix {
@@ -260,7 +247,7 @@ fn exercise_mixer(noise: &mut [u8], next: &mut impl FnMut() -> u64) {
             samples: &quiet,
         },
     ];
-    let taken = 1 + bounded(next(), frames - 1);
+    let taken = 1 + rng.below(frames);
     if mixer.mix(streams.iter().copied(), taken, &mut out).is_ok() {
         assert_deliverable(
             sink_format,
@@ -285,23 +272,23 @@ fn gain_draw(word: u64) -> f32 {
 
 /// Any ratio, any block sizes: the output stays inside the stated bound and
 /// every sample stays finite.
-fn exercise_resampler(next: &mut impl FnMut() -> u64) {
-    let from = RATES[bounded(next(), RATES.len() - 1)];
-    let to = RATES[bounded(next(), RATES.len() - 1)];
+fn exercise_resampler(rng: &mut Prng) {
+    let from = *rng.pick(RATES);
+    let to = *rng.pick(RATES);
     let (Ok(source), Ok(sink)) = (Rate::new(from), Rate::new(to)) else {
         return;
     };
     let Ok(bank) = FilterBank::new(source, sink) else {
         return;
     };
-    let channels = 1 + bounded(next(), 7);
+    let channels = 1 + rng.at_most(7);
     let Ok(mut resampler) = Resampler::new(&bank, channels) else {
         return;
     };
-    let frames = 1 + bounded(next(), 32);
+    let frames = 1 + rng.at_most(32);
     let input: Vec<f32> = (0..frames * channels)
         .map(|_| {
-            let word = next();
+            let word = rng.next_u64();
             f32::from(u16::try_from(word & 0xFFFF).unwrap_or(0)) / 32_768.0 - 1.0
         })
         .collect();
@@ -323,8 +310,8 @@ fn exercise_resampler(next: &mut impl FnMut() -> u64) {
     }
     // A ratio handed straight in, which is the drifting clock domain's form.
     if let Some(ratio) = Ratio::new(
-        u32::try_from(1 + bounded(next(), 4_095)).unwrap_or(1),
-        u32::try_from(1 + bounded(next(), 4_095)).unwrap_or(1),
+        u32::try_from(1 + rng.at_most(4_095)).unwrap_or(1),
+        u32::try_from(1 + rng.at_most(4_095)).unwrap_or(1),
     ) {
         let _ = FilterBank::for_ratio(ratio);
     }
@@ -332,16 +319,16 @@ fn exercise_resampler(next: &mut impl FnMut() -> u64) {
 
 /// However hostile the pairs, the model either refuses them or reports a
 /// rate the protocol can carry.
-fn exercise_clock(next: &mut impl FnMut() -> u64) {
-    let hz = RATES[bounded(next(), RATES.len() - 1)];
+fn exercise_clock(rng: &mut Prng) {
+    let hz = *rng.pick(RATES);
     let Ok(nominal) = Rate::new(hz) else {
         return;
     };
     let mut model = ClockModel::new(nominal);
     for _ in 0..16 {
-        let position = Frames::new(next() >> bounded(next(), 40));
-        let secs = i64::try_from(next() >> 40).unwrap_or(0) - 8_000;
-        let nanos = u32::try_from(next() % 1_000_000_000).unwrap_or(0);
+        let position = Frames::new(rng.next_u64() >> rng.at_most(40));
+        let secs = i64::try_from(rng.next_u64() >> 40).unwrap_or(0) - 8_000;
+        let nanos = u32::try_from(rng.next_u64() % 1_000_000_000).unwrap_or(0);
         let Ok(when) = Time64::new(secs, nanos) else {
             continue;
         };
@@ -360,21 +347,21 @@ fn exercise_clock(next: &mut impl FnMut() -> u64) {
 }
 
 /// Every combination of gains resolves to a finite, non-negative multiply.
-fn exercise_volume(next: &mut impl FnMut() -> u64) {
+fn exercise_volume(rng: &mut Prng) {
     let millibel = |word: u64| {
         i32::from_le_bytes(u32::try_from(word & 0xFFFF_FFFF).unwrap_or(0).to_le_bytes())
     };
     let request = VolumeRequest {
-        stream_millibel: millibel(next()),
-        application_millibel: millibel(next()),
-        sink_millibel: millibel(next()),
-        duck_millibel: millibel(next()),
-        muted: next() & 1 == 0,
+        stream_millibel: millibel(rng.next_u64()),
+        application_millibel: millibel(rng.next_u64()),
+        sink_millibel: millibel(rng.next_u64()),
+        duck_millibel: millibel(rng.next_u64()),
+        muted: rng.next_u64() & 1 == 0,
     };
     let hardware = GainRange::new(
-        millibel(next()),
-        millibel(next()),
-        u32::try_from(1 + bounded(next(), 4_095)).unwrap_or(1),
+        millibel(rng.next_u64()),
+        millibel(rng.next_u64()),
+        u32::try_from(1 + rng.at_most(4_095)).unwrap_or(1),
     )
     .ok();
     let resolved = resolve(&request, hardware);
@@ -391,7 +378,7 @@ fn exercise_volume(next: &mut impl FnMut() -> u64) {
     }
     // The noise source is driven too: a dithered block must stay finite.
     let mut block = vec![0.0f32; 16];
-    DitherSource::new(next()).apply(SampleFormat::S16, &mut block);
+    DitherSource::new(rng.next_u64()).apply(SampleFormat::S16, &mut block);
     for sample in &block {
         assert!(sample.is_finite(), "dither produced {sample}");
     }

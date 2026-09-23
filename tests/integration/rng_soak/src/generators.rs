@@ -8,6 +8,7 @@
 //! about unpredictability, so a battery is the wrong instrument for judging
 //! that type. Its structural properties are unit-tested where it lives.
 
+use tairix_fuzzseed::Prng;
 use tairix_rng::{CsRng, EntropyError, EntropySource, FastRng, RandU64, STREAM_KEY_LEN};
 
 /// A byte source the battery can draw a sequence from.
@@ -20,25 +21,17 @@ pub trait Stream {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), String>;
 }
 
-/// Deterministic stand-in for a platform entropy source: a counter mixed
-/// wide enough that each fill differs.
+/// Deterministic stand-in for a platform entropy source: the shared test
+/// generator, so each fill differs.
 ///
 /// Not entropy, and never used as any. It is what makes a battery run
 /// reproducible from its logged seed, which is the only way a failure over
 /// millions of sequences can be investigated.
-struct SeededEntropy {
-    state: u64,
-}
+struct SeededEntropy(Prng);
 
 impl EntropySource for SeededEntropy {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-        for byte in out.iter_mut() {
-            self.state = self
-                .state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1);
-            *byte = self.state.to_le_bytes()[4];
-        }
+        self.0.fill(out);
         Ok(())
     }
 }
@@ -145,13 +138,13 @@ pub fn build(name: &str, seed: u64) -> Result<Box<dyn Stream>, String> {
     match name {
         "fast" => {
             let mut key = [0u8; STREAM_KEY_LEN];
-            SeededEntropy { state: seed }
+            SeededEntropy(Prng::new(seed))
                 .fill(&mut key)
                 .map_err(|e| format!("seeding the fast generator failed: {e:?}"))?;
             Ok(Box::new(Fast(FastRng::from_key(&key))))
         }
         "csprng" => {
-            let rng = CsRng::new(SeededEntropy { state: seed })
+            let rng = CsRng::new(SeededEntropy(Prng::new(seed)))
                 .map_err(|e| format!("instantiating the DRBG failed: {e:?}"))?;
             Ok(Box::new(Cs(rng)))
         }

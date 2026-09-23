@@ -41,7 +41,7 @@ fn exercise_random(bytes: &[u8]) {
 }
 
 /// Encode a random sequence of small-alphabet strings, then decode it back.
-fn exercise_round_trip(rng: &mut tairix_fuzzseed::Lcg) {
+fn exercise_round_trip(rng: &mut tairix_fuzzseed::Prng) {
     let count = (rng.next_u64() % 40) as usize;
     let mut strings: Vec<String> = Vec::with_capacity(count);
     for _ in 0..count {
@@ -77,7 +77,7 @@ fn exercise_round_trip(rng: &mut tairix_fuzzseed::Lcg) {
 
 #[test]
 fn random_and_round_trip_dictionary_never_panic() {
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "random_and_round_trip_dictionary_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -87,7 +87,7 @@ fn random_and_round_trip_dictionary_never_panic() {
     loop {
         for i in 0..SMOKE_ITERATIONS {
             if i % 2 == 0 {
-                let size = ((rng.next_u64() & 0x1FF) as usize) % (buf.len() + 1);
+                let size = rng.at_most(buf.len());
                 rng.fill(&mut buf[..size]);
                 exercise_random(&buf[..size]);
             } else {

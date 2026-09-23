@@ -386,30 +386,10 @@ fn window_scale_and_options_negotiate() {
     // the codec (write/parse) without exceeding the 40-byte region.
 }
 
-/// A small deterministic LCG (no allocator, reproducible) for the property
-/// test's schedule.
-struct Lcg(u64);
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x1234_5678_9abc_def1
-        } else {
-            seed
-        })
-    }
-    fn next(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-}
-
 #[test]
 fn bulk_transfer_survives_reordering_and_loss() {
     for seed in 1..=16u64 {
-        let mut rng = Lcg::new(seed);
+        let mut rng = Prng::new(seed);
         let now = ms(0);
         let (mut client, mut server) = handshake(now);
 
@@ -424,12 +404,12 @@ fn bulk_transfer_survives_reordering_and_loss() {
         let mut in_flight: Vec<Vec<u8>> = Vec::new();
 
         for _round in 0..4000 {
-            t += 1 + (rng.next() % 5);
+            t += 1 + (rng.next_u64() % 5);
             let now = ms(t);
 
             // Offer more application data.
             if offered < payload.len() {
-                let take = ((rng.next() % 512) as usize + 1).min(payload.len() - offered);
+                let take = ((rng.next_u64() % 512) as usize + 1).min(payload.len() - offered);
                 let n = client.send(&payload[offered..offered + take]).unwrap_or(0);
                 offered += n;
                 if offered == payload.len() {
@@ -452,10 +432,10 @@ fn bulk_transfer_survives_reordering_and_loss() {
             // Deliver some in-flight frames, occasionally dropping/reordering.
             if !in_flight.is_empty() {
                 // Randomly drop the head 1-in-8.
-                if rng.next().is_multiple_of(8) {
+                if rng.next_u64().is_multiple_of(8) {
                     in_flight.remove(0);
                 } else {
-                    let idx = usize::try_from(rng.next() % in_flight.len() as u64).unwrap();
+                    let idx = usize::try_from(rng.next_u64() % in_flight.len() as u64).unwrap();
                     let frame = in_flight.remove(idx);
                     feed(&mut server, &frame, now);
                 }
@@ -964,6 +944,7 @@ fn sending_data_defers_keepalive() {
 
 use crate::addr::Ecn;
 use crate::tcp::TcpFlags;
+use tairix_fuzzseed::Prng;
 
 /// A [`TcpConfig`] that offers ECN (RFC 3168 §6.1.1).
 fn config_ecn() -> TcpConfig {

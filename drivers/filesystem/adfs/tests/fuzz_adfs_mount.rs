@@ -12,7 +12,7 @@
 //!   else — and a volume that mounts is walked (directories, lookups,
 //!   attributes, stats) without panicking either.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` draws
 //! pseudo-random images, and a structured sweep flips bytes of real
 //! formatted images — one per map flavour (old map, new map, big
 //! directories) — to hammer the checksum and structural validation.
@@ -28,6 +28,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::DriverError;
 use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
+use tairix_fuzzseed::Prng;
 
 const BLOCK_SIZE: u32 = 512;
 
@@ -99,16 +100,6 @@ impl Block for MemBlock {
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
     }
-}
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..len` as a `usize`, without a narrowing `as` cast.
-fn index(x: u64, len: usize) -> usize {
-    usize::try_from(x % len as u64).unwrap_or(0)
 }
 
 /// Walk every reachable directory (bounded), resolving each decoded
@@ -192,13 +183,10 @@ fn fuzz_adfs_mount() {
 
     // Draw and log the seed up front so every sampled byte position and
     // every PRNG image below replays exactly from the logged value.
-    let mut state: u64 = tairix_fuzzseed::start("fuzz_adfs_mount", tairix_fuzzseed::FUZZ_SEED_ENV);
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "fuzz_adfs_mount",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
 
     for (variant, bytes) in BASES {
         let base = formatted_image(variant, bytes);
@@ -209,7 +197,7 @@ fn fuzz_adfs_mount() {
         // budget probes a reproducible spread on time — while the smoke pass
         // samples a fixed number of positions.
         if let Some(deadline) = deadline {
-            tairix_fuzzseed::budgeted_sweep(base.len(), next(), deadline, |i| {
+            tairix_fuzzseed::budgeted_sweep(base.len(), rng.next_u64(), deadline, |i| {
                 let mut image = base.clone();
                 image[i] ^= 0xFF;
                 exercise(&image);
@@ -217,7 +205,7 @@ fn fuzz_adfs_mount() {
         } else {
             for _ in 0..SMOKE_FLIP_SAMPLES {
                 let mut image = base.clone();
-                let i = index(next(), base.len());
+                let i = rng.below(base.len());
                 image[i] ^= 0xFF;
                 exercise(&image);
             }
@@ -228,15 +216,16 @@ fn fuzz_adfs_mount() {
         let mut iteration: u64 = 0;
         loop {
             let mut image = base.clone();
-            let flips = 1 + index(next(), 23);
+            let flips = 1 + rng.below(23);
             for _ in 0..flips {
-                let pos = index(next(), image.len());
-                image[pos] = low_byte(next() >> 17);
+                let pos = rng.below(image.len());
+                image[pos] = rng.next_u8();
             }
             exercise(&image);
 
-            if (next() >> 5).trailing_zeros() >= 3 {
-                let noise: Vec<u8> = (0..64 * 1024).map(|_| low_byte(next() >> 23)).collect();
+            if rng.below(8) == 0 {
+                let mut noise = vec![0u8; 64 * 1024];
+                rng.fill(&mut noise);
                 exercise(&noise);
             }
 

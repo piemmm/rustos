@@ -472,18 +472,13 @@ fn a_bracketed_paste_is_delivered_as_one_event() {
 
 #[test]
 fn the_decoder_never_panics_on_a_hostile_byte_sweep() {
-    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    let mut rng = tairix_fuzzseed::Prng::new(0x9e37_79b9_7f4a_7c15);
     let mut input = Input::new();
+    let mut bytes = [0u8; 23];
     for _ in 0..20_000 {
-        let len = usize::try_from(next() % 24).unwrap_or(0);
-        let bytes: Vec<u8> = (0..len).map(|_| next().to_le_bytes()[0]).collect();
-        input.feed(&bytes, |_| {});
+        let chunk = &mut bytes[..rng.below(24)];
+        rng.fill(chunk);
+        input.feed(chunk, |_| {});
     }
 }
 

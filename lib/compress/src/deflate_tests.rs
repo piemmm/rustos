@@ -198,13 +198,8 @@ fn buffered_input_is_flushed_by_a_later_call() {
 fn input_spanning_several_window_slides_round_trips() {
     // Pseudo-random bytes drawn from a small alphabet: compressible enough
     // to produce matches, long enough to slide the window many times.
-    let mut state = 0x1234_5678u32;
-    let input: Vec<u8> = (0..400_000)
-        .map(|_| {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            u8::try_from((state >> 24) % 7).unwrap_or(0) + b'a'
-        })
-        .collect();
+    let mut rng = tairix_fuzzseed::Prng::new(0x1234_5678);
+    let input: Vec<u8> = (0..400_000).map(|_| *rng.pick(b"abcdefg")).collect();
     let stream = finish(&input);
     assert_eq!(expand(&stream, input.len()), input);
 }

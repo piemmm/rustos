@@ -22,7 +22,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use tairix_fuzzseed::Lcg;
+use tairix_fuzzseed::Prng;
 use tairix_inline::{ArrayString, ArrayVec, RingBuf, SecretRing};
 
 /// Rounds run per sweep. Miri interprets every operation, so it drives a
@@ -65,7 +65,7 @@ impl Drop for Tracked {
 }
 
 /// Drive an `ArrayVec` of tracked elements against a `Vec` model.
-fn sweep_arrayvec(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
+fn sweep_arrayvec(prng: &mut Prng, live: &Rc<Cell<i64>>) {
     let mut vec: ArrayVec<Tracked, INLINE> = ArrayVec::new();
     let mut model: Vec<u64> = Vec::new();
     for tag in 0..u64::from(OPS_PER_ROUND) {
@@ -106,7 +106,7 @@ fn sweep_arrayvec(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
 
 /// Push arbitrary text at an `ArrayString` under both policies. Whatever the
 /// bytes, the stored prefix must be valid UTF-8 and never a partial character.
-fn sweep_arraystring(prng: &mut Lcg) {
+fn sweep_arraystring(prng: &mut Prng) {
     const CAP: usize = 11;
     let mut text = String::new();
     for _ in 0..OPS_PER_ROUND {
@@ -150,7 +150,7 @@ fn sweep_arraystring(prng: &mut Lcg) {
 }
 
 /// Drive a `RingBuf` of tracked elements at both ends against a `VecDeque`.
-fn sweep_ringbuf(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
+fn sweep_ringbuf(prng: &mut Prng, live: &Rc<Cell<i64>>) {
     let mut ring: RingBuf<Tracked, INLINE> = RingBuf::new();
     let mut model: VecDeque<u64> = VecDeque::new();
     for tag in 0..u64::from(OPS_PER_ROUND) {
@@ -202,7 +202,7 @@ fn sweep_ringbuf(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
 
 /// Drive a `SecretRing` of bytes through bulk pushes and drains. Beyond
 /// matching the model, no slot it has vacated may hold anything but the blank.
-fn sweep_secret_ring(prng: &mut Lcg) {
+fn sweep_secret_ring(prng: &mut Prng) {
     // A non-zero blank, so a slot that was never scrubbed reads differently
     // from one that was zeroed by chance.
     const BLANK: u8 = 0xa5;
@@ -256,7 +256,7 @@ fn sweep_secret_ring(prng: &mut Lcg) {
 
 #[test]
 fn inline_containers_match_their_models_and_never_panic() {
-    let mut prng = Lcg::new(tairix_fuzzseed::start(
+    let mut prng = Prng::new(tairix_fuzzseed::start(
         "inline_containers_match_their_models_and_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

@@ -966,13 +966,10 @@ fn net_caller(proc_byte: u8) -> Caller {
     ))
 }
 
-/// A deterministic entropy source for ephemeral-port draws.
-fn counter_entropy() -> impl FnMut() -> u32 {
-    let mut seed: u32 = 0xC0FF_EE00;
-    move || {
-        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        seed
-    }
+/// A deterministic entropy source for ephemeral-port and sequence draws.
+fn seeded_entropy() -> impl FnMut() -> u32 {
+    let mut rng = tairix_fuzzseed::Prng::new(0xC0FF_EE00);
+    move || rng.next_u32()
 }
 
 fn encode_request(request: &SocketRequest<'_>) -> Vec<u8> {
@@ -1007,7 +1004,7 @@ fn socket_open_requires_cap_net() {
     let mut svc = socket_service();
     let mut stack = managed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -1036,7 +1033,7 @@ fn socket_open_and_bind_assigns_a_port() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
 
     let request = encode_request(&SocketRequest::Socket {
@@ -1117,7 +1114,7 @@ fn socket_open_rejects_zero_delivery_port() {
     let mut svc = socket_service();
     let mut stack = managed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -1143,7 +1140,7 @@ fn a_handle_is_scoped_to_its_creating_principal() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -1207,7 +1204,7 @@ fn a_principals_share_is_bounded_in_bytes_not_in_sockets() {
     let mut stack = managed_stack();
     stack.apply_settings(settings_with_budget(budget_for_idle_sockets(8)), t(1));
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = idle_socket_request();
     let mut open = |svc: &mut SocketService, stack: &mut Netstack, who: u8| {
@@ -1236,7 +1233,7 @@ fn the_same_budget_carries_many_idle_sockets_or_few_busy_ones() {
     // cannot make: what a principal may hold depends on what its sockets are
     // committed to, not on how many there are. One budget, two workloads.
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 256];
     let share = 16 * u64::try_from(MIN_CONNECTION_BUFFER_BYTES).expect("fits");
     let budget = 16 * share;
@@ -1323,7 +1320,7 @@ fn a_connections_windows_are_sized_from_what_the_share_has_left() {
     let mut stack = routed_stack();
     stack.apply_settings(settings_with_budget(16 * 4 * 1024 * 1024), t(1));
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 256];
     let open = idle_socket_request();
     let share = stack.settings().socket_bytes_per_principal();
@@ -1394,7 +1391,7 @@ fn the_budget_bounds_the_whole_stack_across_principals() {
     let mut stack = managed_stack();
     stack.apply_settings(settings_with_budget(budget_for_idle_sockets(1)), t(1));
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = idle_socket_request();
     let mut admitted = 0u8;
@@ -1467,7 +1464,7 @@ fn enough_principals_cannot_jointly_outgrow_the_stack_budget() {
     let mut stack = routed_stack();
     stack.apply_settings(settings_with_budget(16 * 1024 * 1024), t(1));
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 256];
     let open = idle_socket_request();
     let budget = stack.settings().socket_budget_bytes;
@@ -1517,7 +1514,7 @@ fn closing_a_socket_returns_its_bytes_to_the_share() {
     let mut stack = managed_stack();
     stack.apply_settings(settings_with_budget(budget_for_idle_sockets(4)), t(1));
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 256];
     let open = idle_socket_request();
     let who = net_caller(1).origin().proc_id();
@@ -1581,7 +1578,7 @@ fn unicast_send_originates_frames() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -1628,7 +1625,7 @@ fn send_without_a_peer_or_dest_is_not_connected() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -1671,7 +1668,7 @@ fn inbound_datagram_is_delivered_to_the_bound_socket() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     // Open + bind port 7 for delivery port 0x5000.
     let request = encode_request(&SocketRequest::Socket {
@@ -1756,7 +1753,7 @@ fn icmp_echo_socket_open_requires_cap_net_raw() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -1796,7 +1793,7 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     // Open an ICMP echo socket delivering to port 0x6000.
     let request = encode_request(&SocketRequest::Socket {
@@ -1897,7 +1894,7 @@ fn echo_send_on_an_unconnected_socket_without_dest_is_refused() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -1941,7 +1938,7 @@ fn a_connected_socket_only_receives_from_its_peer() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -2015,7 +2012,7 @@ fn multicast_join_gates_group_delivery() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -2096,7 +2093,7 @@ fn open_socket(
     sock_type: SocketType,
 ) -> Result<u32, Errno> {
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -2115,7 +2112,7 @@ fn serve_req(
     request: &SocketRequest<'_>,
 ) -> Result<(), Errno> {
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let bytes = encode_request(request);
     svc.serve(stack, who, &sink, &mut ent, &bytes, &mut reply, t(2))
@@ -3302,7 +3299,7 @@ fn closing_a_socket_leaves_every_survivor_addressable() {
     let mut svc = socket_service();
     let mut stack = managed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let mut serve =
         |svc: &mut SocketService, stack: &mut Netstack, req: &[u8], reply: &mut [u8; 64]| {
@@ -3376,7 +3373,7 @@ fn a_bound_socket_is_never_rebound() {
     let mut svc = socket_service();
     let mut stack = managed_stack();
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
     let open = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
@@ -3820,7 +3817,7 @@ fn disabling_a_family_refuses_a_socket_open_for_it() {
         t(2),
     );
     let sink = RecordingSink::new();
-    let mut ent = counter_entropy();
+    let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
 
     // A v6 socket open is refused fail-closed for the disabled family.

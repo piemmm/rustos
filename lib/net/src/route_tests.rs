@@ -3,6 +3,7 @@
 
 use super::*;
 use alloc::vec::Vec;
+use tairix_fuzzseed::Prng;
 
 fn v4(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
     Ipv4Addr::new(a, b, c, d)
@@ -120,28 +121,15 @@ fn ipv6_lookup_works_at_full_width() {
         .is_none());
 }
 
-/// Deterministic LCG (the shared fuzz-harness generator shape).
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-}
-
 #[test]
 fn property_lookup_matches_naive_oracle() {
-    let mut rng = Lcg(0xCAFE_F00D);
+    let mut rng = Prng::new(0xCAFE_F00D);
     for _ in 0..50 {
         let mut table: RoutingTable<Ipv4Addr, usize> = RoutingTable::new();
         let mut oracle: Vec<(Prefix<Ipv4Addr>, usize)> = Vec::new();
         for id in 0..64usize {
             let len = (rng.next_u64() % 33) as u8;
-            let raw = (rng.next_u64() & 0xFFFF_FFFF) as u32;
+            let raw = rng.next_u32();
             let masked = if len == 0 {
                 0
             } else {
@@ -158,12 +146,12 @@ fn property_lookup_matches_naive_oracle() {
             if oracle.is_empty() {
                 break;
             }
-            let victim = ((rng.next_u64() & 0xFFFF) as usize) % oracle.len();
+            let victim = rng.below(oracle.len());
             let (prefix, _) = oracle.swap_remove(victim);
             assert!(table.remove(prefix));
         }
         for _ in 0..256 {
-            let addr = Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes());
+            let addr = Ipv4Addr::from(rng.next_u32().to_be_bytes());
             let expected = oracle
                 .iter()
                 .filter(|(p, _)| p.contains(addr))

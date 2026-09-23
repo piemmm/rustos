@@ -66,11 +66,10 @@ fn no_sequence_of_operations_leaves_the_pool_outside_its_bound() {
     // over generated sequences; this keeps a fast version of it beside the
     // type.
     let mut pool = Pool::full(1000);
-    let mut state = 0x9E37_79B9_u32;
+    let mut rng = tairix_fuzzseed::Prng::new(0x9E37_79B9);
     for _ in 0..20_000 {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let amount = state >> 16;
-        match state & 0x7 {
+        let amount = u32::from(rng.next_u16());
+        match rng.below(8) {
             0 => {
                 pool.spend(amount);
             }

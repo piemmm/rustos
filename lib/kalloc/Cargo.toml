@@ -26,6 +26,11 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # its own and allocates nothing, so the allocator crate stays a leaf.
 tairix-sync = { path = "../sync", version = "=0.0.0" }
 
+[dev-dependencies]
+# The shared seeded generator the randomised unit tests draw from (never in a
+# shipping build).
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+
 [features]
 # Forwards the lock-site observation the lockup watchdog needs onto the heap
 # lock. Off by default, exactly as in `tairix-sync`: a shippable build compiles

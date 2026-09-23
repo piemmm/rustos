@@ -77,12 +77,8 @@ fn corpus_round_trips_byte_identical() {
     let gradient: Vec<u8> = (0..4096u32)
         .map(|x| u8::try_from(x % 251).unwrap_or(0))
         .collect();
-    let mut noise = Vec::new();
-    let mut state: u32 = 0x1234_5678;
-    for _ in 0..4096 {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        noise.push(u8::try_from(state >> 24).unwrap_or(0));
-    }
+    let mut noise = vec![0u8; 4096];
+    tairix_fuzzseed::Prng::new(0x1234_5678).fill(&mut noise);
 
     round_trip(text);
     round_trip(&records);
@@ -121,12 +117,8 @@ fn incompressible_is_stored_via_literals_and_round_trips() {
     // Pseudo-random bytes do not compress; the codec must still produce a
     // valid frame that decodes byte-identically (ARXFS stores such a record
     // raw, but the codec itself must never corrupt it).
-    let mut noise = Vec::new();
-    let mut state: u32 = 0xC0FF_EE00;
-    for _ in 0..2048 {
-        state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-        noise.push(u8::try_from((state >> 16) & 0xFF).unwrap_or(0));
-    }
+    let mut noise = vec![0u8; 2048];
+    tairix_fuzzseed::Prng::new(0xC0FF_EE00).fill(&mut noise);
     round_trip(&noise);
 }
 

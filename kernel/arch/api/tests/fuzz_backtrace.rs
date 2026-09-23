@@ -30,13 +30,14 @@
 //! failed read ends the walk cleanly and never provokes an out-of-bounds
 //! read.
 //!
-//! No external fuzz runner: a per-run-seeded LCG (seed drawn and logged by
-//! `tairix_fuzzseed`) fills a backing "stack" with random words and drives
+//! No external fuzz runner: the shared `tairix_fuzzseed::Prng`, seeded and
+//! logged per run, fills a backing "stack" with random words and drives
 //! the walk from random start frame pointers with random frame layouts and
 //! random (possibly degenerate) bounds. A plain `cargo test` runs the fixed
 //! smoke sweep; `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
 use tairix_arch_api::backtrace::{walk, FrameLayout, StackBounds, StackReader, MAX_FRAMES};
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 ///
@@ -49,11 +50,6 @@ const SMOKE_ITERATIONS: u64 = if cfg!(miri) { 64 } else { 200_000 };
 
 /// Number of 64-bit words in the backing "stack" the walker reads.
 const WORDS: usize = 512;
-
-/// [`WORDS`] as a `u64`, without a fallible cast in the hot loop.
-const fn words_u64() -> u64 {
-    WORDS as u64
-}
 
 /// A backing store the walker reads through. Every `read_word` address is
 /// asserted to lie within the store *and* within the bounds the walk was
@@ -76,7 +72,7 @@ impl StackReader for FuzzStack {
             "walk read {addr:#x} outside the bounds it was given"
         );
         assert_eq!(addr % 8, 0, "walk read a non-8-aligned address {addr:#x}");
-        let end = self.base + words_u64() * 8;
+        let end = word_addr(self.base, WORDS);
         assert!(
             addr >= self.base && addr + 8 <= end,
             "walk read {addr:#x} outside the backing store [{:#x},{:#x})",
@@ -94,11 +90,6 @@ impl StackReader for FuzzStack {
     }
 }
 
-/// `x` reduced into `0..=max`, without a narrowing `as` cast.
-fn bounded(x: u64, max: u64) -> u64 {
-    x % (max.saturating_add(1))
-}
-
 /// Low 16 bits of `x` as an `i16`, without a narrowing `as` cast (the
 /// workspace denies `cast_possible_truncation`).
 fn i16_of(x: u64) -> i16 {
@@ -111,19 +102,18 @@ fn word_index(addr: u64, base: u64) -> usize {
     usize::try_from((addr - base) / 8).unwrap_or(0)
 }
 
+/// Address of word `index` of a store at `base`.
+fn word_addr(base: u64, index: usize) -> u64 {
+    base + u64::try_from(index).unwrap_or(u64::MAX) * 8
+}
+
 #[test]
 fn walking_any_frame_chain_terminates_and_stays_in_bounds() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "walking_any_frame_chain_terminates_and_stays_in_bounds",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     // A fixed, aligned base for the backing store's address space. Using a
     // non-zero base exercises the offset arithmetic (a low base would make
@@ -140,44 +130,41 @@ fn walking_any_frame_chain_terminates_and_stays_in_bounds() {
             // Bias some words toward plausible in-store frame pointers so
             // the walk sometimes makes progress rather than always failing
             // the first check; others stay fully random.
-            if next() & 1 == 0 {
-                let widx = bounded(next(), words_u64() - 1);
-                *w = base + widx * 8;
+            if rng.next_u64() & 1 == 0 {
+                *w = word_addr(base, rng.below(WORDS));
             } else {
-                *w = next();
+                *w = rng.next_u64();
             }
         }
 
         // Random, possibly degenerate, bounds — always a sub-range of the
         // backing store so the reader's store assertion is a true "did the
         // walk honour the bounds" check, never a harness lie.
-        let lo_idx = bounded(next(), words_u64() - 1);
-        let hi_idx = bounded(next(), words_u64());
-        let low = base + lo_idx * 8;
-        let high = base + hi_idx * 8;
+        let low = word_addr(base, rng.below(WORDS));
+        let high = word_addr(base, rng.at_most(WORDS));
         let bounds = StackBounds::new(low, high);
 
         // Random layout: both signs, arbitrary magnitudes (including ones
         // that will wrap and be rejected).
         let layout = FrameLayout {
-            saved_fp_offset: i16_of(next()),
-            return_addr_offset: i16_of(next() >> 16),
+            saved_fp_offset: i16_of(rng.next_u64()),
+            return_addr_offset: i16_of(rng.next_u64()),
         };
 
         // Random start fp: sometimes a valid in-store aligned pointer,
         // sometimes wild / unaligned / null.
-        let start_fp = match next() % 4 {
-            0 => base + bounded(next(), words_u64() - 1) * 8, // aligned in-store
-            1 => next(),                                      // fully wild
-            2 => base + bounded(next(), words_u64() - 1) * 8 + 1, // unaligned
-            _ => 0,                                           // null
+        let start_fp = match rng.next_u64() % 4 {
+            0 => word_addr(base, rng.below(WORDS)), // aligned in-store
+            1 => rng.next_u64(),                    // fully wild
+            2 => word_addr(base, rng.below(WORDS)) + 1, // unaligned
+            _ => 0,                                 // null
         };
 
         // On roughly half of iterations, make the address space unreadable
         // from a random word onward so the fallible (None-terminated) walk
         // path is exercised; otherwise every in-bounds word is readable.
-        let unreadable_from = if next() & 1 == 0 {
-            base + bounded(next(), words_u64()) * 8
+        let unreadable_from = if rng.next_u64() & 1 == 0 {
+            word_addr(base, rng.at_most(WORDS))
         } else {
             u64::MAX
         };

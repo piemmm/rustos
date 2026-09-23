@@ -31,7 +31,7 @@
 //! table, Huffman builder, or code-stream writer, so a bug in any of those is
 //! still caught here.
 
-use tairix_fuzzseed::Lcg;
+use tairix_fuzzseed::Prng;
 use tairix_image::{
     decode, decode_as, decode_fitted, probe_as, sniff, DecodeLimits, FitBox, ImageFormat, Sequence,
     SequenceKind,
@@ -139,7 +139,7 @@ fn row_sample_bytes(width: u32, colour_type: u8, bit_depth: u8) -> usize {
 /// colour the generator always emits a full 256-entry palette, so any byte
 /// value is a valid index regardless of bit depth.
 fn build_raw_scanlines(
-    rng: &mut Lcg,
+    rng: &mut Prng,
     width: u32,
     height: u32,
     colour_type: u8,
@@ -177,7 +177,7 @@ fn build_raw_scanlines(
 }
 
 /// Build one structurally valid, randomised PNG.
-fn build_valid_png(rng: &mut Lcg) -> Vec<u8> {
+fn build_valid_png(rng: &mut Prng) -> Vec<u8> {
     let colour_type = *[0u8, 2, 3, 4, 6].get(rng.below(5)).unwrap_or(&0);
     let depths: &[u8] = match colour_type {
         0 => &[1, 2, 4, 8, 16],
@@ -437,7 +437,7 @@ fn actual_blocks(natural: u32, factor: u32, factor_max: u32) -> u32 {
 /// orientation the tag does not define and sometimes declaring more
 /// entries than it holds — so the reader is exercised on its refusals as
 /// well as its eight defined values, before mutation reaches it at all.
-fn exif_payload(rng: &mut Lcg) -> Vec<u8> {
+fn exif_payload(rng: &mut Prng) -> Vec<u8> {
     let big = rng.below(2) == 0;
     let u16b = |v: u16| {
         if big {
@@ -486,7 +486,7 @@ fn exif_payload(rng: &mut Lcg) -> Vec<u8> {
 /// The application segments that may sit between `SOI` and the tables: a
 /// JFIF identifier the decoder must skip whole, and an EXIF block it must
 /// read an orientation out of.
-fn leading_app_segments(rng: &mut Lcg) -> Vec<u8> {
+fn leading_app_segments(rng: &mut Prng) -> Vec<u8> {
     let mut out = Vec::new();
     if rng.below(2) == 0 {
         out.extend(segment(APP0, b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00"));
@@ -498,7 +498,7 @@ fn leading_app_segments(rng: &mut Lcg) -> Vec<u8> {
     out
 }
 
-fn build_valid_jpeg(rng: &mut Lcg) -> Vec<u8> {
+fn build_valid_jpeg(rng: &mut Prng) -> Vec<u8> {
     let progressive = rng.below(2) == 0;
     let width = u32::try_from(rng.below(24) + 1).unwrap_or(1);
     let height = u32::try_from(rng.below(24) + 1).unwrap_or(1);
@@ -632,7 +632,7 @@ fn segment_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
 /// Structurally mutate a pristine JPEG: maybe reorder two header segments,
 /// maybe overwrite one segment's own declared length, then flip a handful
 /// of random bits.
-fn mutate_jpeg(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+fn mutate_jpeg(rng: &mut Prng, pristine: &[u8]) -> Vec<u8> {
     let mut bytes = pristine.to_vec();
     let bounds = segment_bounds(&bytes);
     if rng.below(2) == 0 {
@@ -720,7 +720,7 @@ fn gif_lzw(indices: &[u8], min_code_size: u8) -> Vec<u8> {
 /// global-table presence, frame count, per-frame sub-rectangle,
 /// interlacing, local tables, disposal method, transparency, delay, the
 /// animation-loop extension, and interleaved comment blocks.
-fn build_valid_gif(rng: &mut Lcg) -> Vec<u8> {
+fn build_valid_gif(rng: &mut Prng) -> Vec<u8> {
     let width = u16::try_from(rng.below(20) + 1).unwrap_or(1);
     let height = u16::try_from(rng.below(20) + 1).unwrap_or(1);
     // A frame with no table at all is refused, so at least one of the global
@@ -854,7 +854,7 @@ fn gif_block_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
 /// Structurally mutate a pristine GIF: maybe reorder two blocks, maybe
 /// overwrite one sub-block's declared length or one packed-fields byte, then
 /// flip a handful of random bits.
-fn mutate_gif(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+fn mutate_gif(rng: &mut Prng, pristine: &[u8]) -> Vec<u8> {
     let mut bytes = pristine.to_vec();
     let bounds = gif_block_bounds(&bytes);
     if rng.below(2) == 0 {
@@ -903,7 +903,7 @@ fn bmp_stride(width: u32, bits: u32) -> usize {
 
 /// A run-length-encoded pixel array covering `height` rows of `width`
 /// pixels exactly, mixing encoded and absolute runs.
-fn bmp_rle(rng: &mut Lcg, width: u32, height: u32, four_bit: bool) -> Vec<u8> {
+fn bmp_rle(rng: &mut Prng, width: u32, height: u32, four_bit: bool) -> Vec<u8> {
     let width = usize::try_from(width).unwrap_or(1);
     let mut out = Vec::new();
     for _ in 0..height {
@@ -975,7 +975,7 @@ fn bmp_dib(size: u32, width: i32, height: i32, bits: u32, compression: u32) -> V
 
 /// Build one structurally valid, randomised BMP: a randomised header
 /// version, geometry, row order, bit count, encoding, and colour table.
-fn build_valid_bmp(rng: &mut Lcg) -> Vec<u8> {
+fn build_valid_bmp(rng: &mut Prng) -> Vec<u8> {
     let size = *BMP_HEADER_LENS
         .get(rng.below(BMP_HEADER_LENS.len()))
         .unwrap_or(&40);
@@ -1076,7 +1076,7 @@ fn bmp_fields(bytes: &[u8]) -> Vec<(usize, usize)> {
 
 /// Structurally mutate a pristine BMP: maybe overwrite one declared header
 /// field, then flip a handful of random bits.
-fn mutate_bmp(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+fn mutate_bmp(rng: &mut Prng, pristine: &[u8]) -> Vec<u8> {
     let mut bytes = pristine.to_vec();
     let fields = bmp_fields(&bytes);
     if rng.below(2) == 0 {
@@ -1106,7 +1106,7 @@ const ICO_ENTRY_LEN: usize = 16;
 /// One icon entry's bitmap: a `BITMAPINFOHEADER` declaring twice the
 /// picture's height, its colour table, the colour rows, and the 1-bit mask
 /// over them.
-fn ico_dib_picture(rng: &mut Lcg, width: u32, height: u32) -> Vec<u8> {
+fn ico_dib_picture(rng: &mut Prng, width: u32, height: u32) -> Vec<u8> {
     let bits = *BMP_BIT_COUNTS
         .get(rng.below(BMP_BIT_COUNTS.len()))
         .unwrap_or(&32);
@@ -1134,7 +1134,7 @@ fn ico_dib_picture(rng: &mut Lcg, width: u32, height: u32) -> Vec<u8> {
 
 /// Build one structurally valid, randomised icon or cursor: a randomised
 /// entry count, with each entry either a bitmap or a whole PNG file.
-fn build_valid_ico(rng: &mut Lcg) -> Vec<u8> {
+fn build_valid_ico(rng: &mut Prng) -> Vec<u8> {
     let pictures: Vec<Vec<u8>> = (0..=rng.below(3))
         .map(|_| {
             if rng.below(4) == 0 {
@@ -1191,7 +1191,7 @@ fn ico_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
 /// Structurally mutate a pristine icon: maybe swap two directory rows (so
 /// every entry's declared length and offset describe the wrong picture),
 /// maybe overwrite one row's fields, then flip a handful of random bits.
-fn mutate_ico(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+fn mutate_ico(rng: &mut Prng, pristine: &[u8]) -> Vec<u8> {
     let mut bytes = pristine.to_vec();
     let bounds = ico_bounds(&bytes);
     if rng.below(2) == 0 {
@@ -1238,14 +1238,14 @@ const SPRITE_MODES: [(u32, u32); 4] = [(0, 1), (1, 2), (12, 4), (15, 8)];
 
 /// One structurally valid sprite: a control block, an optional palette, the
 /// image rows, and an optional mask.
-fn build_valid_sprite(rng: &mut Lcg) -> Vec<u8> {
+fn build_valid_sprite(rng: &mut Prng) -> Vec<u8> {
     let width = u32::try_from(rng.below(16) + 1).unwrap_or(1);
     let height = u32::try_from(rng.below(8) + 1).unwrap_or(1);
     // A numbered mode allows left-hand wastage; a mode word never does, and
     // type 16 exists only in a RISC OS 5 word.
     let (mode, bits, left) = match rng.below(3) {
         0 => {
-            let (mode, bits) = SPRITE_MODES[rng.below(SPRITE_MODES.len())];
+            let (mode, bits) = *rng.pick(&SPRITE_MODES);
             (mode, bits, u32::try_from(rng.below(4)).unwrap_or(0) * bits)
         }
         1 => {
@@ -1254,7 +1254,7 @@ fn build_valid_sprite(rng: &mut Lcg) -> Vec<u8> {
             (wide | (kind << 27) | (90 << 14) | (90 << 1) | 1, bits, 0)
         }
         _ => {
-            let (kind, bits) = SPRITE_TYPES[rng.below(SPRITE_TYPES.len())];
+            let (kind, bits) = *rng.pick(&SPRITE_TYPES);
             // Bits 8-15 carry mode flags; only the RGB family decodes, and
             // alpha needs a fourth field, so the order bit alone is safe.
             let flags = u32::from(rng.below(2) == 0) << 6;
@@ -1318,7 +1318,7 @@ fn build_valid_sprite(rng: &mut Lcg) -> Vec<u8> {
 
 /// Build one structurally valid sprite area: a randomised count of sprites,
 /// each of a randomised depth, mode word form, palette length, and mask.
-fn build_valid_sprite_area(rng: &mut Lcg) -> Vec<u8> {
+fn build_valid_sprite_area(rng: &mut Prng) -> Vec<u8> {
     let sprites: Vec<Vec<u8>> = (0..=rng.below(3))
         .map(|_| build_valid_sprite(rng))
         .collect();
@@ -1364,7 +1364,7 @@ fn sprite_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
 /// Structurally mutate a pristine sprite area: maybe swap two control blocks
 /// (so every offset within one describes the wrong payload), maybe overwrite
 /// one field of one block, then flip a handful of random bits.
-fn mutate_sprite(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+fn mutate_sprite(rng: &mut Prng, pristine: &[u8]) -> Vec<u8> {
     let mut bytes = pristine.to_vec();
     let bounds = sprite_bounds(&bytes);
     if rng.below(2) == 0 {
@@ -1585,7 +1585,7 @@ fn tiff_zlib(data: &[u8]) -> Vec<u8> {
 
 /// One page's fields and units, over a random photometric, bit depth,
 /// plane arrangement, orientation, predictor, and strip or tile grid.
-fn tiff_random_page(rng: &mut Lcg) -> (Vec<TiffField>, Vec<Vec<u8>>) {
+fn tiff_random_page(rng: &mut Prng) -> (Vec<TiffField>, Vec<Vec<u8>>) {
     let photometric = [0u16, 1, 2, 3][rng.below(4)];
     let bits = if photometric == 3 {
         [1u16, 2, 4, 8][rng.below(4)]
@@ -1662,7 +1662,7 @@ fn tiff_random_page(rng: &mut Lcg) -> (Vec<TiffField>, Vec<Vec<u8>>) {
 }
 
 /// Build one structurally valid, randomised TIFF of one or two pages.
-fn build_valid_tiff(rng: &mut Lcg) -> Vec<u8> {
+fn build_valid_tiff(rng: &mut Prng) -> Vec<u8> {
     let big = rng.below(2) == 0;
     let mut out = Vec::new();
     out.extend_from_slice(if big { b"MM" } else { b"II" });
@@ -1729,7 +1729,7 @@ fn tiff_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
 /// Structurally mutate a pristine TIFF: maybe reorder two directory
 /// entries, maybe rewrite one into a compression tag so a payload reaches a
 /// decoder it was not written for, then flip a handful of bits.
-fn mutate_tiff(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+fn mutate_tiff(rng: &mut Prng, pristine: &[u8]) -> Vec<u8> {
     let mut bytes = pristine.to_vec();
     if rng.below(3) == 0 {
         let bounds = tiff_bounds(&bytes);
@@ -1740,8 +1740,8 @@ fn mutate_tiff(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
     let bounds = tiff_bounds(&bytes);
     if rng.below(2) == 0 && !bounds.is_empty() {
         let big = bytes.first_chunk::<2>() == Some(b"MM");
-        let (entry, _) = bounds[rng.below(bounds.len())];
-        let compression = TIFF_COMPRESSIONS[rng.below(TIFF_COMPRESSIONS.len())];
+        let (entry, _) = *rng.pick(&bounds);
+        let compression = *rng.pick(&TIFF_COMPRESSIONS);
         let order16 = |value: u16| {
             if big {
                 value.to_be_bytes()
@@ -1829,7 +1829,7 @@ fn webp_flat_group(bits: &mut WebpBits, colour: [u8; 4]) {
 }
 
 /// A whole lossless bitstream of one colour.
-fn webp_lossless(rng: &mut Lcg, width: u32, height: u32) -> Vec<u8> {
+fn webp_lossless(rng: &mut Prng, width: u32, height: u32) -> Vec<u8> {
     let mut bits = WebpBits::new();
     bits.put(u32::from(WEBP_LOSSLESS_SIGNATURE), 8);
     bits.put(width - 1, 14);
@@ -1871,7 +1871,7 @@ fn webp_alpha_stream(value: u8) -> Vec<u8> {
 /// of the format's probability tables. It reaches far more of the decoder
 /// than a flat frame would, and the picture it produces is one the decoder
 /// is free to refuse.
-fn webp_lossy(rng: &mut Lcg, width: u32, height: u32) -> Vec<u8> {
+fn webp_lossy(rng: &mut Prng, width: u32, height: u32) -> Vec<u8> {
     let mut partition = vec![0u8; 24 + rng.below(200)];
     rng.fill(&mut partition);
     let mut out = Vec::new();
@@ -1923,7 +1923,7 @@ fn webp_extended(flags: u8, width: u32, height: u32) -> Vec<u8> {
 /// Build one structurally valid, randomised WEBP that genuinely decodes: a
 /// simple lossless file, an extended still with an alpha plane, or an
 /// animation.
-fn build_valid_webp(rng: &mut Lcg) -> Vec<u8> {
+fn build_valid_webp(rng: &mut Prng) -> Vec<u8> {
     let width = 8 + 8 * u32::try_from(rng.below(3)).unwrap_or(0);
     let height = 8 + 8 * u32::try_from(rng.below(3)).unwrap_or(0);
     match rng.below(4) {
@@ -1966,7 +1966,7 @@ fn build_valid_webp(rng: &mut Lcg) -> Vec<u8> {
 ///
 /// Its picture is whatever the random partition decodes to, or a refusal, so
 /// this feeds the mutation sweep rather than the pristine corpus.
-fn build_lossy_webp(rng: &mut Lcg) -> Vec<u8> {
+fn build_lossy_webp(rng: &mut Prng) -> Vec<u8> {
     let width = 16 + 16 * u32::try_from(rng.below(2)).unwrap_or(0);
     let height = 16 + 16 * u32::try_from(rng.below(2)).unwrap_or(0);
     let bitstream = webp_chunk(*b"VP8 ", &webp_lossy(rng, width, height));
@@ -2022,7 +2022,7 @@ fn webp_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
 
 /// Structurally mutate a pristine WEBP: maybe reorder two chunks, then flip
 /// a handful of random bits.
-fn mutate_webp(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+fn mutate_webp(rng: &mut Prng, pristine: &[u8]) -> Vec<u8> {
     let mut bytes = pristine.to_vec();
     let bounds = webp_bounds(&bytes);
     if rng.below(2) == 0 {
@@ -2071,7 +2071,7 @@ fn chunk_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
 /// The ranges must **cover** the span from the first to the last, because
 /// the rebuild concatenates them: bounds with a gap between two of them
 /// would drop whatever sat in it.
-fn swap_two_ranges(rng: &mut Lcg, bytes: &[u8], bounds: &[(usize, usize)]) -> Option<Vec<u8>> {
+fn swap_two_ranges(rng: &mut Prng, bytes: &[u8], bounds: &[(usize, usize)]) -> Option<Vec<u8>> {
     if bounds.len() < 2 {
         return None;
     }
@@ -2095,7 +2095,7 @@ fn swap_two_ranges(rng: &mut Lcg, bytes: &[u8], bounds: &[(usize, usize)]) -> Op
 /// Flip up to five random bits of `bytes`, which lands on length, CRC,
 /// table, and header fields often enough since they are ordinary bytes like
 /// any other.
-fn flip_bits(rng: &mut Lcg, bytes: &mut [u8]) {
+fn flip_bits(rng: &mut Prng, bytes: &mut [u8]) {
     let flips = rng.below(6);
     for _ in 0..flips {
         if bytes.is_empty() {
@@ -2109,7 +2109,7 @@ fn flip_bits(rng: &mut Lcg, bytes: &mut [u8]) {
 
 /// Structurally mutate a pristine PNG: maybe reorder two chunks, then flip
 /// a handful of random bits.
-fn mutate_png(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+fn mutate_png(rng: &mut Prng, pristine: &[u8]) -> Vec<u8> {
     let mut bytes = pristine.to_vec();
     let bounds = chunk_bounds(&bytes);
     if rng.below(2) == 0 {
@@ -2214,7 +2214,7 @@ fn walk<B: AsRef<[u8]>>(mut sequence: Sequence<B>, limits: &DecodeLimits) {
 
 #[test]
 fn arbitrary_bytes_never_panic_and_respect_limits() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "arbitrary_bytes_never_panic_and_respect_limits",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2239,7 +2239,7 @@ fn arbitrary_bytes_behind_each_signature_never_panic() {
     // Random bytes essentially never open with a valid signature, so
     // without this the format decoders themselves — the scanline, Huffman,
     // and scan paths — would hardly ever be entered at all.
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "arbitrary_bytes_behind_each_signature_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2276,7 +2276,7 @@ fn arbitrary_bytes_behind_each_signature_never_panic() {
 
 #[test]
 fn mutated_valid_png_fixtures_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "mutated_valid_png_fixtures_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2295,7 +2295,7 @@ fn mutated_valid_png_fixtures_never_panic() {
 
 #[test]
 fn mutated_valid_jpeg_fixtures_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "mutated_valid_jpeg_fixtures_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2314,7 +2314,7 @@ fn mutated_valid_jpeg_fixtures_never_panic() {
 
 #[test]
 fn mutated_valid_gif_fixtures_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "mutated_valid_gif_fixtures_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2334,7 +2334,7 @@ fn mutated_valid_gif_fixtures_never_panic() {
 #[test]
 fn the_gif_generator_produces_a_valid_corpus() {
     const DRAWS: u64 = 500;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_gif_generator_produces_a_valid_corpus",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2359,7 +2359,7 @@ fn the_gif_generator_produces_a_valid_corpus() {
 #[test]
 fn the_png_generator_produces_a_valid_corpus() {
     const DRAWS: u64 = 500;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_png_generator_produces_a_valid_corpus",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2376,7 +2376,7 @@ fn the_png_generator_produces_a_valid_corpus() {
 #[test]
 fn the_jpeg_generator_produces_a_valid_corpus() {
     const DRAWS: u64 = 500;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_jpeg_generator_produces_a_valid_corpus",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2399,7 +2399,7 @@ fn the_jpeg_generator_produces_a_valid_corpus() {
 
 #[test]
 fn mutated_valid_bmp_fixtures_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "mutated_valid_bmp_fixtures_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2418,7 +2418,7 @@ fn mutated_valid_bmp_fixtures_never_panic() {
 
 #[test]
 fn mutated_valid_ico_fixtures_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "mutated_valid_ico_fixtures_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2438,7 +2438,7 @@ fn mutated_valid_ico_fixtures_never_panic() {
 #[test]
 fn the_bmp_generator_produces_a_valid_corpus() {
     const DRAWS: u64 = 500;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_bmp_generator_produces_a_valid_corpus",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2455,7 +2455,7 @@ fn the_bmp_generator_produces_a_valid_corpus() {
 #[test]
 fn the_ico_generator_produces_a_valid_corpus() {
     const DRAWS: u64 = 500;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_ico_generator_produces_a_valid_corpus",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2479,7 +2479,7 @@ fn the_ico_generator_produces_a_valid_corpus() {
 
 #[test]
 fn mutated_valid_sprite_fixtures_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "mutated_valid_sprite_fixtures_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2499,7 +2499,7 @@ fn mutated_valid_sprite_fixtures_never_panic() {
 #[test]
 fn the_sprite_generator_produces_a_valid_corpus() {
     const DRAWS: u64 = 500;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_sprite_generator_produces_a_valid_corpus",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2523,7 +2523,7 @@ fn the_sprite_generator_produces_a_valid_corpus() {
 
 #[test]
 fn mutated_valid_tiff_fixtures_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "mutated_valid_tiff_fixtures_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2543,7 +2543,7 @@ fn mutated_valid_tiff_fixtures_never_panic() {
 #[test]
 fn the_tiff_generator_produces_a_valid_corpus() {
     const DRAWS: u64 = 500;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_tiff_generator_produces_a_valid_corpus",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2574,7 +2574,7 @@ const WEBP_SIGNATURE_PREFIX: [u8; 12] = [
 
 #[test]
 fn mutated_valid_webp_fixtures_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "mutated_valid_webp_fixtures_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -2598,7 +2598,7 @@ fn mutated_valid_webp_fixtures_never_panic() {
 #[test]
 fn the_webp_generator_produces_a_valid_corpus() {
     const DRAWS: u64 = 500;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_webp_generator_produces_a_valid_corpus",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

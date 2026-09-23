@@ -19,7 +19,7 @@
 //!   (fail closed). The run aborting *is* the failure.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded
-//! LCG draws pseudo-random byte strings, flips bytes inside real device trees
+//! `Prng` draws pseudo-random byte strings, flips bytes inside real device trees
 //! built by the shared `fixture` builder (one DTB builder,
 //! not a second one rolled here), and splices a valid 40-byte header onto a
 //! hostile structure block. A plain `cargo test` runs the fixed
@@ -28,6 +28,7 @@
 
 use tairix_fdt::fixture::{arm_with_cpus, virt_like, DtbBuilder};
 use tairix_fdt::Fdt;
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -77,17 +78,6 @@ fn templates() -> Vec<Vec<u8>> {
             b.build()
         },
     ]
-}
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
 }
 
 /// Parse `bytes` and drain every public reader: must never panic, whatever the
@@ -152,54 +142,49 @@ fn parsing_any_device_tree_never_panics() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let corpus = templates();
 
-    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // The seed is drawn and logged by `tairix_fuzzseed::start`: fresh
     // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "parsing_any_device_tree_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A real device tree with a handful of bytes flipped at random,
         //    hammering the header offsets, token stream, and string block.
-        let template = &corpus[bounded(next(), corpus.len() - 1)];
+        let template = rng.pick(&corpus);
         let mut mutated = template.clone();
-        let flips = bounded(next(), 12);
+        let flips = rng.at_most(12);
         for _ in 0..flips {
             if mutated.is_empty() {
                 break;
             }
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         exercise_never_panics(&mutated);
 
         // 2. A truncation of a real tree: a header that promises more blob
         //    than is present, driving the bounds checks in `Fdt::new` and the
         //    iterators.
-        let keep = bounded(next(), template.len());
+        let keep = rng.at_most(template.len());
         exercise_never_panics(&template[..keep]);
 
         // 3. A structured-but-hostile blob: a valid 40-byte FDT magic header
         //    over a random structure/strings region, so the reader accepts the
         //    header and then meets an adversarial token stream.
-        let blob_len = bounded(next(), 256);
+        let blob_len = rng.at_most(256);
         let mut spliced = template[..40.min(template.len())].to_vec();
         for _ in 0..blob_len {
-            spliced.push(low_byte(next() >> 23));
+            spliced.push(rng.next_u8());
         }
         exercise_never_panics(&spliced);
 
         // 4. Pure noise straight into the reader.
-        let nlen = bounded(next(), MAX_NOISE);
-        let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 29)).collect();
+        let nlen = rng.at_most(MAX_NOISE);
+        let mut noise = vec![0u8; nlen];
+        rng.fill(&mut noise);
         exercise_never_panics(&noise);
 
         iteration += 1;

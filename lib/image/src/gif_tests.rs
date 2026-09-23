@@ -1073,15 +1073,8 @@ fn a_stream_that_fills_the_table_keeps_decoding_at_twelve_bits() {
     // 4096 entries the format's widest code can address. Neither the writer
     // nor the decoder emits a clear code, so both must carry on against the
     // table as it stands — the deferred clear real encoders rely on.
-    let mut state = 0x2545_F491_4F6C_DD1Du64;
-    let indices: Vec<u8> = (0..128 * 96)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            u8::try_from(state & 0xFF).expect("masked")
-        })
-        .collect();
+    let mut indices = vec![0u8; 128 * 96];
+    tairix_fuzzseed::Prng::new(0x2545_F491_4F6C_DD1D).fill(&mut indices);
     let compressed = file(&[&header(128, 96, false), &frame_256(128, 96, &indices, true)]);
     let literal = file(&[
         &header(128, 96, false),

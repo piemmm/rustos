@@ -169,7 +169,7 @@ fn exercise(word0: u64, word1: u64, ingress: &mut Ingress) {
 
 #[test]
 fn ingress_admission_never_panics_and_holds_invariants() {
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "ingress_admission_never_panics_and_holds_invariants",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

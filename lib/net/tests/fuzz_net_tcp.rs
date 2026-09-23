@@ -14,6 +14,7 @@
 //! under `cargo xtask fuzz`.
 
 use tairix_abi::time::Duration64;
+use tairix_fuzzseed::Prng;
 use tairix_net::checksum::Pseudo;
 use tairix_net::tcp::conn::{OutSegment, State, Tcb, TcpConfig};
 use tairix_net::tcp::{
@@ -25,11 +26,11 @@ use tairix_net::{Ipv4Addr, Ipv6Addr};
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
-fn pseudo(rng: &mut Lcg) -> Pseudo {
+fn pseudo(rng: &mut Prng) -> Pseudo {
     if rng.next_u64().is_multiple_of(2) {
         Pseudo::V4 {
-            source: Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes()),
-            destination: Ipv4Addr::from(((rng.next_u64() & 0xFFFF_FFFF) as u32).to_be_bytes()),
+            source: Ipv4Addr::from(rng.next_u32().to_be_bytes()),
+            destination: Ipv4Addr::from(rng.next_u32().to_be_bytes()),
         }
     } else {
         let mut octets = [0u8; 16];
@@ -52,22 +53,22 @@ fn exercise_parse(p: Pseudo, bytes: &[u8]) {
     }
 }
 
-fn random_options(rng: &mut Lcg) -> TcpOptions {
+fn random_options(rng: &mut Prng) -> TcpOptions {
     let mut opts = TcpOptions::new();
     let bits = rng.next_u64();
     if bits & 1 != 0 {
-        opts.mss = Some((rng.next_u64() & 0xFFFF) as u16);
+        opts.mss = Some(rng.next_u16());
     }
     if bits & 2 != 0 {
-        opts.window_scale = Some((rng.next_u64() & 0xFF) as u8);
+        opts.window_scale = Some(rng.next_u8());
     }
     if bits & 4 != 0 {
         opts.sack_permitted = true;
     }
     if bits & 8 != 0 {
         opts.timestamps = Some(Timestamps {
-            value: (rng.next_u64() & 0xFFFF_FFFF) as u32,
-            echo: (rng.next_u64() & 0xFFFF_FFFF) as u32,
+            value: rng.next_u32(),
+            echo: rng.next_u32(),
         });
     }
     if bits & 16 != 0 {
@@ -78,8 +79,8 @@ fn random_options(rng: &mut Lcg) -> TcpOptions {
         }; MAX_SACK_BLOCKS];
         for block in blocks.iter_mut().take(count) {
             *block = SackBlock {
-                left: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
-                right: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
+                left: SeqNumber::new(rng.next_u32()),
+                right: SeqNumber::new(rng.next_u32()),
             };
         }
         assert!(opts.set_sack(&blocks[..count]));
@@ -87,16 +88,16 @@ fn random_options(rng: &mut Lcg) -> TcpOptions {
     opts
 }
 
-fn exercise_round_trip(rng: &mut Lcg, p: Pseudo) {
+fn exercise_round_trip(rng: &mut Prng, p: Pseudo) {
     let options = random_options(rng);
     let meta = TcpSegmentMeta {
-        source_port: (rng.next_u64() & 0xFFFF) as u16,
-        destination_port: (rng.next_u64() & 0xFFFF) as u16,
-        seq: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
-        ack: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
-        flags: TcpFlags::from_bits((rng.next_u64() & 0xFF) as u8),
-        window: (rng.next_u64() & 0xFFFF) as u16,
-        urgent: (rng.next_u64() & 0xFFFF) as u16,
+        source_port: rng.next_u16(),
+        destination_port: rng.next_u16(),
+        seq: SeqNumber::new(rng.next_u32()),
+        ack: SeqNumber::new(rng.next_u32()),
+        flags: TcpFlags::from_bits(rng.next_u8()),
+        window: rng.next_u16(),
+        urgent: rng.next_u16(),
         options,
     };
     let len = (rng.next_u64() & 0x1FF) as usize;
@@ -126,41 +127,9 @@ fn exercise_round_trip(rng: &mut Lcg, p: Pseudo) {
     assert_eq!(seg.payload, &payload[..]);
 }
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the
-/// generator in the sibling harnesses so failures reproduce one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -169,7 +138,7 @@ fn random_inputs_never_panic() {
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let p = pseudo(&mut rng);
-            let size = ((rng.next_u64() & 0x7F) as usize) % (buf.len() + 1);
+            let size = rng.at_most(buf.len());
             rng.fill(&mut buf[..size]);
             exercise_parse(p, &buf[..size]);
             exercise_round_trip(&mut rng, p);
@@ -275,7 +244,7 @@ fn driver_feed(tcb: &mut Tcb, frame: &[u8], now: Duration64) {
 
 /// A parseable but arbitrary segment aimed at the server, so `on_segment`
 /// sees hostile flag/seq/ack combinations (RST/SYN injection, blind data).
-fn injected(rng: &mut Lcg, base_seq: u32) -> Vec<u8> {
+fn injected(rng: &mut Prng, base_seq: u32) -> Vec<u8> {
     // Bias the sequence near the plausible window so the acceptability and
     // RFC 5961 paths are actually reached, not always rejected up front.
     let seq = base_seq.wrapping_add((rng.next_u64() % 4096) as u32);
@@ -283,14 +252,14 @@ fn injected(rng: &mut Lcg, base_seq: u32) -> Vec<u8> {
         source_port: 40000,
         destination_port: 80,
         seq: SeqNumber::new(seq),
-        ack: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
-        flags: TcpFlags::from_bits((rng.next_u64() & 0xFF) as u8),
-        window: (rng.next_u64() & 0xFFFF) as u16,
+        ack: SeqNumber::new(rng.next_u32()),
+        flags: TcpFlags::from_bits(rng.next_u8()),
+        window: rng.next_u16(),
         urgent: 0,
         options: TcpOptions::new(),
     };
     let len = (rng.next_u64() % 32) as usize;
-    let payload: Vec<u8> = (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+    let payload: Vec<u8> = (0..len).map(|_| rng.next_u8()).collect();
     let mut buf = vec![0u8; MAX_HEADER_LEN + len];
     match tcp::write(DRIVER_PSEUDO, &meta, &payload, &mut buf) {
         Ok(n) => {
@@ -305,7 +274,7 @@ fn injected(rng: &mut Lcg, base_seq: u32) -> Vec<u8> {
 /// recovery), carrying arbitrary SACK blocks near its send space, so the
 /// scoreboard's `record`/`is_lost`/`NextSeg` path is driven by hostile
 /// selective acknowledgements — never trusting them to stay in window.
-fn injected_sack_ack(rng: &mut Lcg, client_isn: u32, server_isn: u32) -> Vec<u8> {
+fn injected_sack_ack(rng: &mut Prng, client_isn: u32, server_isn: u32) -> Vec<u8> {
     let seq = server_isn
         .wrapping_add(1)
         .wrapping_add((rng.next_u64() % 4096) as u32);
@@ -335,7 +304,7 @@ fn injected_sack_ack(rng: &mut Lcg, client_isn: u32, server_isn: u32) -> Vec<u8>
         seq: SeqNumber::new(seq),
         ack: SeqNumber::new(ack),
         flags: TcpFlags::ACK,
-        window: (rng.next_u64() & 0xFFFF) as u16,
+        window: rng.next_u16(),
         urgent: 0,
         options,
     };
@@ -349,10 +318,10 @@ fn injected_sack_ack(rng: &mut Lcg, client_isn: u32, server_isn: u32) -> Vec<u8>
     }
 }
 
-fn drive_once(rng: &mut Lcg) {
+fn drive_once(rng: &mut Prng) {
     let now0 = ms(0);
-    let client_isn = (rng.next_u64() & 0xFFFF_FFFF) as u32;
-    let server_isn = (rng.next_u64() & 0xFFFF_FFFF) as u32;
+    let client_isn = rng.next_u32();
+    let server_isn = rng.next_u32();
     let mut client = Tcb::connect(driver_config(), 40000, 80, client_isn, now0);
     let mut server = Tcb::listen(driver_config(), 80, 0, server_isn);
 
@@ -368,12 +337,12 @@ fn drive_once(rng: &mut Lcg) {
         match rng.next_u64() % 8 {
             0..=2 => {
                 let len = (rng.next_u64() % 300) as usize;
-                let data: Vec<u8> = (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+                let data: Vec<u8> = (0..len).map(|_| rng.next_u8()).collect();
                 let _ = client.send(&data);
             }
             3 => {
                 let len = (rng.next_u64() % 300) as usize;
-                let data: Vec<u8> = (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+                let data: Vec<u8> = (0..len).map(|_| rng.next_u8()).collect();
                 let _ = server.send(&data);
             }
             4 => {
@@ -438,7 +407,7 @@ fn drive_once(rng: &mut Lcg) {
 
 #[test]
 fn state_machine_driver_never_panics() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "state_machine_driver_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -494,11 +463,11 @@ fn listen_pseudo(peer: tairix_net::tcp::listen::Peer) -> Pseudo {
     }
 }
 
-fn random_peer(rng: &mut Lcg) -> tairix_net::tcp::listen::Peer {
-    let bytes = (rng.next_u64() & 0xFFFF_FFFF) as u32;
+fn random_peer(rng: &mut Prng) -> tairix_net::tcp::listen::Peer {
+    let bytes = rng.next_u32();
     tairix_net::tcp::listen::Peer {
         addr: tairix_net::IpAddr::V4(Ipv4Addr::from(bytes.to_be_bytes())),
-        port: ((rng.next_u64() & 0xFFFF) as u16) | 1,
+        port: (rng.next_u16()) | 1,
     }
 }
 
@@ -506,7 +475,7 @@ fn random_peer(rng: &mut Lcg) -> tairix_net::tcp::listen::Peer {
 /// that every reply parses.
 fn listener_inject(
     listener: &mut tairix_net::tcp::listen::Listener,
-    rng: &mut Lcg,
+    rng: &mut Prng,
     peer: tairix_net::tcp::listen::Peer,
     secret: &FuzzSecret,
     now: Duration64,
@@ -517,15 +486,15 @@ fn listener_inject(
     let meta = TcpSegmentMeta {
         source_port: peer.port,
         destination_port: LISTEN_PORT,
-        seq: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
-        ack: SeqNumber::new((rng.next_u64() & 0xFFFF_FFFF) as u32),
-        flags: TcpFlags::from_bits((rng.next_u64() & 0xFF) as u8),
-        window: (rng.next_u64() & 0xFFFF) as u16,
+        seq: SeqNumber::new(rng.next_u32()),
+        ack: SeqNumber::new(rng.next_u32()),
+        flags: TcpFlags::from_bits(rng.next_u8()),
+        window: rng.next_u16(),
         urgent: 0,
         options: random_options(rng),
     };
     let len = (rng.next_u64() % 8) as usize;
-    let payload: Vec<u8> = (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+    let payload: Vec<u8> = (0..len).map(|_| rng.next_u8()).collect();
     let mut buf = vec![0u8; MAX_HEADER_LEN + len];
     let Ok(n) = tcp::write(ps, &meta, &payload, &mut buf) else {
         return;
@@ -550,7 +519,7 @@ fn listener_inject(
     assert!(listener.pending() <= max_accept, "accept bound broken");
 }
 
-fn listener_drive_once(rng: &mut Lcg) {
+fn listener_drive_once(rng: &mut Prng) {
     let secret = FuzzSecret(rng.next_u64() | 1);
     let max_half_open = ((rng.next_u64() % 8) as usize) + 1;
     let max_accept = ((rng.next_u64() % 8) as usize) + 1;
@@ -630,7 +599,7 @@ fn listener_drive_once(rng: &mut Lcg) {
 
 #[test]
 fn listener_driver_never_panics() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "listener_driver_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

@@ -1,8 +1,8 @@
 //! `cargo xtask fuzz` — drive the in-tree fuzz harnesses.
 //!
 //! TAIRiX does not pull in an external fuzz runner: the
-//! per-crate harnesses are seeded, allocation-free Rust tests that
-//! explicitly sanctions as the "equivalent in-tree harness". This
+//! per-crate harnesses are seeded, allocation-free Rust tests, which the
+//! charter sanctions as the "equivalent in-tree harness". This
 //! orchestrator is the single place that runs every such harness for a
 //! wall-clock budget, so a PR and a nightly soak share one definition of the
 //! target set.
@@ -16,7 +16,7 @@
 //! never replay the same input stream; with `--seed N`, a deterministic
 //! seed that reproduces a logged crash. The chosen seed is logged with each
 //! job. A harness that crashes, hangs, or fails its invariant fails the
-//! command fails closed.
+//! command: it fails closed.
 //!
 //! Adding a harness means adding a [`Target`] here, never teaching `ci`
 //! about it directly. The burn-down now covers the wire decoders,

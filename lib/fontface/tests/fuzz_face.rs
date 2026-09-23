@@ -31,7 +31,7 @@
 //!   contour it returns must be closed and finite, or the bound it broke must
 //!   have refused it.
 //!
-//! No external fuzz runner: a per-run-seeded LCG (seed drawn and logged by
+//! No external fuzz runner: a per-run-seeded `Prng` (seed drawn and logged by
 //! `tairix_fuzzseed`) drives the loop. A plain `cargo test` runs the fixed
 //! [`SMOKE_ITERATIONS`] sweep once; `cargo xtask fuzz` extends it to a
 //! wall-clock budget.
@@ -39,6 +39,7 @@
 use std::path::PathBuf;
 
 use tairix_fontface::{AxisSetting, CellGeometry, Face, OutlineSegment, ATLAS_EM_PX};
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 /// Rasterising an outline is heavier than a wire decode, so the smoke count
@@ -52,15 +53,10 @@ const SMOKE_ITERATIONS: u64 = 20_000;
 /// contract).
 const MAX_FUZZ_HEIGHT: u32 = 48;
 
-/// `x` reduced into `0..len` as an index, without a narrowing `as` cast.
-fn index(x: u64, len: usize) -> usize {
-    let modulus = u64::try_from(len).unwrap_or(1).max(1);
-    usize::try_from(x % modulus).unwrap_or(0)
-}
-
-/// `x` reduced into `0..=max`, without a narrowing `as` cast.
-fn bounded(x: u64, max: u32) -> u32 {
-    u32::try_from(x % (u64::from(max) + 1)).unwrap_or(0)
+/// A cell height in `8..=max` pixels.
+fn cell_height(rng: &mut Prng, max: u32) -> u32 {
+    let extra = rng.at_most(max.saturating_sub(8) as usize);
+    8 + u32::try_from(extra).unwrap_or(0)
 }
 
 /// Read a committed face by its `<family>/<file>` path.
@@ -164,16 +160,10 @@ fn fuzz_setting(tag: [u8; 4], word: u64) -> AxisSetting {
 #[test]
 fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mono = asset("mono/Inconsolata-EX.ttf");
     let variable = asset("inter/Inter-Variable.ttf");
@@ -195,8 +185,8 @@ fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
     loop {
         // (1) Fuzz the rasteriser over the whole glyph and size space with the
         // known-good monospace face.
-        let (_, glyph) = mono_mapped[index(next(), mono_mapped.len())];
-        let height = 8 + bounded(next(), MAX_FUZZ_HEIGHT - 8);
+        let (_, glyph) = *rng.pick(&mono_mapped);
+        let height = cell_height(&mut rng, MAX_FUZZ_HEIGHT);
         exercise_rasterise(&good, glyph, height);
         exercise_outline(&good, glyph);
 
@@ -204,15 +194,16 @@ fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
         // and exercise its metrics + proportional draw — a hostile *value* on
         // a valid face must not panic or read out of bounds.
         let settings = [
-            fuzz_setting(*b"wght", next()),
-            fuzz_setting(*b"wdth", next()),
-            fuzz_setting(*b"opsz", next()),
+            fuzz_setting(*b"wght", rng.next_u64()),
+            fuzz_setting(*b"wdth", rng.next_u64()),
+            fuzz_setting(*b"opsz", rng.next_u64()),
         ];
-        let take = 1 + index(next(), settings.len());
+        let take = 1 + rng.below(settings.len());
         if let Ok(instanced) = Face::parse_instance(&variable, &settings[..take]) {
             let _ = instanced.axes();
-            let (_, vglyph) = var_mapped[index(next(), var_mapped.len().max(1))];
-            exercise_proportional(&instanced, vglyph, 8 + bounded(next(), MAX_FUZZ_HEIGHT - 8));
+            let (_, vglyph) = var_mapped[rng.below(var_mapped.len().max(1))];
+            let height = cell_height(&mut rng, MAX_FUZZ_HEIGHT);
+            exercise_proportional(&instanced, vglyph, height);
             exercise_outline(&instanced, vglyph);
         }
 
@@ -221,22 +212,26 @@ fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
         // decoders see adversarial bytes, the variable one — which is the hard,
         // structurally-near-valid case; on even iterations a fully random short
         // buffer.
-        let base: &[u8] = if next() & 2 == 0 { &mono } else { &variable };
-        let candidate: &[u8] = if next() & 1 == 0 {
-            let len = index(next(), 4096);
+        let base: &[u8] = if rng.next_u64() & 2 == 0 {
+            &mono
+        } else {
+            &variable
+        };
+        let candidate: &[u8] = if rng.next_u64() & 1 == 0 {
+            let len = rng.below(4096);
             scratch.clear();
             scratch.resize(len, 0);
             for byte in &mut scratch {
-                *byte = next().to_le_bytes()[0];
+                *byte = rng.next_u8();
             }
             &scratch
         } else {
             scratch.clear();
             scratch.extend_from_slice(base);
-            let flips = 1 + index(next(), 8);
+            let flips = 1 + rng.below(8);
             for _ in 0..flips {
-                let pos = index(next(), scratch.len());
-                scratch[pos] ^= 1u8 << (next() % 8);
+                let pos = rng.below(scratch.len());
+                scratch[pos] ^= 1u8 << (rng.next_u64() % 8);
             }
             &scratch
         };
@@ -248,9 +243,10 @@ fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
             let _ = face.uniform_advance();
             let _ = face.axes();
             for probe in 0..4u64 {
-                let code = u32::try_from(next().wrapping_add(probe) & 0x1F_FFFF).unwrap_or(0);
+                let code =
+                    u32::try_from(rng.next_u64().wrapping_add(probe) & 0x1F_FFFF).unwrap_or(0);
                 if let Some(glyph) = face.glyph_for(code) {
-                    let height = 8 + bounded(next(), 24);
+                    let height = cell_height(&mut rng, 32);
                     exercise_rasterise(&face, glyph, height);
                     exercise_proportional(&face, glyph, height);
                     exercise_outline(&face, glyph);

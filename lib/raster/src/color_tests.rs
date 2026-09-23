@@ -7,19 +7,16 @@
 
 use alloc::vec::Vec;
 
-use tairix_rng::RandU64;
-
 use super::{blend_solid_span, blend_span, Pixel};
 use crate::dither::DitherRow;
 
 /// A deterministic stream of premultiplied pixels, so a failure is
-/// reproducible from the seed alone. `lib/rng`'s own predictable generator,
-/// as the blur tests use, rather than a second one written here.
-struct Pixels(tairix_rng::NonCryptoRng);
+/// reproducible from the seed alone.
+struct Pixels(tairix_fuzzseed::Prng);
 
 impl Pixels {
     fn new(seed: u64) -> Self {
-        Self(tairix_rng::NonCryptoRng::seed_from_u64(seed))
+        Self(tairix_fuzzseed::Prng::new(seed))
     }
 
     /// Alpha first, then channels that cannot exceed it, which is the

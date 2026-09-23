@@ -1100,18 +1100,12 @@ mod tests {
         let syntaxes = [Syntax::Rust, Syntax::Asm, Syntax::Toml, Syntax::Script];
         let labels = labels();
         // Fixed seed: a failure reproduces without one being recorded.
-        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
-        let mut next = |bound: usize| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            usize::try_from(x % bound as u64).unwrap_or(0)
-        };
+        let mut rng = tairix_fuzzseed::Prng::new(0x2545_F491_4F6C_DD1D);
         for _ in 0..4_000 {
             let mut src = String::new();
-            for _ in 0..=next(12) {
-                for _ in 0..=next(10) {
-                    src.push_str(ALPHABET[next(ALPHABET.len())]);
+            for _ in 0..=rng.below(12) {
+                for _ in 0..=rng.below(10) {
+                    src.push_str(rng.pick(&ALPHABET));
                 }
                 src.push('\n');
             }

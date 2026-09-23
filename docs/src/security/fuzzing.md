@@ -15,12 +15,12 @@ TAIRiX does not pull in an external fuzz runner. §19.6 explicitly
 sanctions an "equivalent in-tree harness", and `AGENTS.md` §2.12
 ("roll your own") makes that the default: every dependency widens the
 trusted computing base. Each harness is therefore an ordinary
-`cargo test` integration test driven by a small, seeded,
-allocation-free PRNG. The seed is chosen by the orchestrator (see
-[Seeding](#seeding-deterministic-ci-progressing-soaks) below): fixed for
-a plain `cargo test` so the smoke sweep is reproducible, and fresh per
-run under `cargo xtask fuzz` so consecutive soaks explore new inputs
-instead of replaying the same stream. A flaky fuzz target is a bug
+`cargo test` integration test driven by the one shared, seeded,
+allocation-free generator (see [The generator](#the-generator)). The
+seed is fresh and logged on every run (see
+[Seeding](#seeding-fresh-per-run-logged-for-replay) below), so repeated
+runs explore new inputs instead of replaying one stream, and any failure
+replays from the seed in its log. A flaky fuzz target is a bug
 (`AGENTS.md` §7).
 
 The authoritative list of harnesses is the `TARGETS` registry in
@@ -76,10 +76,9 @@ each gain a harness as they land and enter the same registry.
 
 ## Two run modes
 
-A plain `cargo test` runs each harness as a fast, fixed-iteration smoke
-sweep (100 000 inputs) so the normal suite stays quick and fully
-deterministic. The dedicated orchestrator turns the same harnesses into
-wall-clock runs:
+A plain `cargo test` runs each harness's fixed-iteration smoke sweep
+once, so the normal suite stays quick. The dedicated orchestrator turns
+the same harnesses into wall-clock runs:
 
 ```text
 cargo xtask fuzz            # --quick: ≥ 5 s per harness (the CI budget)
@@ -122,6 +121,24 @@ govern the kernel CSPRNG, §22).
 The stateful proptest models (`AGENTS.md` §19.7) follow the identical
 pattern through `cargo xtask proptest --seed N` and
 `TAIRIX_PROPTEST_SEED`.
+
+## The generator
+
+Every harness, and every randomised unit test, draws from
+`tairix_fuzzseed::Prng`: SplitMix64, whose every output bit is fully
+mixed. The one exception is code under test that itself consumes
+`lib/rng`'s `RandU64`, which its tests feed from `NonCryptoRng`. A harness takes whatever draw it needs — `below(n)` (`0..n`),
+`at_most(max)` (`0..=max`), `pick(items)`, `next_u8/16/32/64`, or
+`fill(buf)` — and never reduces, masks, or shifts a raw word to dodge
+weak bits, because there are none. The bounded draws reduce by
+multiply-shift from the high word, so no choice depends on the low bits.
+
+A private generator in a harness is a defect, not a local convenience.
+The classic choice, a power-of-two-modulus LCG, repeats its bit *k* with
+period 2^(k+1): a coin flip taken at a fixed parity of the draw sequence
+is a constant, and the branch behind it never runs while the harness
+reports green. `tests/fuzzseed` pins the property with a test that fails
+for any such generator.
 
 ## CI integration
 

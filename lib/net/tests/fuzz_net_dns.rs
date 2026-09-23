@@ -18,6 +18,7 @@
 //! `cargo xtask fuzz`.
 
 use tairix_abi::time::Duration64;
+use tairix_fuzzseed::Prng;
 use tairix_net::dns::{
     write_query, Answer, DnsResolver, DnsResponse, LookupType, Name, QuerySpec, MAX_ADDRESSES,
     MAX_QUERY_LEN,
@@ -27,7 +28,7 @@ use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
-fn record_type(rng: &mut Lcg) -> LookupType {
+fn record_type(rng: &mut Prng) -> LookupType {
     match rng.next_u64() % 3 {
         0 => LookupType::A,
         1 => LookupType::Aaaa,
@@ -38,7 +39,7 @@ fn record_type(rng: &mut Lcg) -> LookupType {
 /// A random but always-valid query name drawn from a small label alphabet,
 /// so the resolver and codec explore real names rather than only rejecting
 /// at the encoder.
-fn query_name(rng: &mut Lcg) -> Name {
+fn query_name(rng: &mut Prng) -> Name {
     const NAMES: [&str; 5] = [
         "example.com",
         "www.example.com",
@@ -55,7 +56,7 @@ fn query_name(rng: &mut Lcg) -> Name {
             rng.fill(&mut octets);
             Name::reverse(IpAddr::V6(Ipv6Addr::from(octets)))
         }
-        _ => Name::encode(NAMES[rng.index(NAMES.len())]).expect("fixed names encode"),
+        _ => Name::encode(rng.pick(&NAMES)).expect("fixed names encode"),
     }
 }
 
@@ -85,7 +86,7 @@ fn exercise_parse(bytes: &[u8], spec: &QuerySpec) {
 }
 
 /// Encode a random query and confirm it is a bounded, non-panicking encode.
-fn exercise_write(rng: &mut Lcg) {
+fn exercise_write(rng: &mut Prng) {
     let spec = QuerySpec {
         id: rng.next_u16(),
         name: query_name(rng),
@@ -99,8 +100,8 @@ fn exercise_write(rng: &mut Lcg) {
 
 /// Drive the resolver with arbitrary datagrams and time, asserting it never
 /// panics and always yields a coherent next-deadline decision.
-fn exercise_resolver(rng: &mut Lcg) {
-    let mut csprng = Lcg::new(rng.next_u64());
+fn exercise_resolver(rng: &mut Prng) {
+    let mut csprng = Prng::new(rng.next_u64());
     let mut rand = || csprng.next_u32();
     let servers = [
         IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
@@ -108,7 +109,7 @@ fn exercise_resolver(rng: &mut Lcg) {
     ];
     let name = query_name(rng);
     let rtype = record_type(rng);
-    let mut resolver = DnsResolver::new(name, rtype, &servers[..rng.index(servers.len() + 1)]);
+    let mut resolver = DnsResolver::new(name, rtype, &servers[..rng.below(servers.len() + 1)]);
     let mut now = 0i64;
     let _ = resolver.poll(Duration64::from_secs(now), &mut rand);
     let mut buf = [0u8; 128];
@@ -116,7 +117,7 @@ fn exercise_resolver(rng: &mut Lcg) {
         now = now.saturating_add(i64::from(rng.next_u32() % 200));
         // Sometimes a datagram, sometimes a timer poll.
         if rng.next_u64() & 1 == 0 {
-            let size = rng.index(buf.len() + 1);
+            let size = rng.below(buf.len() + 1);
             rng.fill(&mut buf[..size]);
             let _ = resolver.on_response(Duration64::from_secs(now), &buf[..size], &mut rand);
         } else {
@@ -128,54 +129,9 @@ fn exercise_resolver(rng: &mut Lcg) {
     }
 }
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the
-/// generator in the sibling harnesses so failures reproduce one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        (self.next_u64() & 0xFFFF_FFFF) as u32
-    }
-
-    fn next_u16(&mut self) -> u16 {
-        (self.next_u64() & 0xFFFF) as u16
-    }
-
-    /// A bounded index in `[0, modulus)`; `modulus` must be non-zero.
-    fn index(&mut self, modulus: usize) -> usize {
-        (self.next_u64() & 0xFFFF) as usize % modulus
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -189,7 +145,7 @@ fn random_inputs_never_panic() {
                 record_type: record_type(&mut rng),
                 recursion_desired: true,
             };
-            let size = rng.index(buf.len() + 1);
+            let size = rng.below(buf.len() + 1);
             rng.fill(&mut buf[..size]);
             exercise_parse(&buf[..size], &spec);
             exercise_write(&mut rng);

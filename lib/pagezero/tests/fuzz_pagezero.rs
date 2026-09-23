@@ -22,12 +22,13 @@
 //! path against the byte-fill reference; on a target with no hardware candidate
 //! both sides are the portable routine and the harness confirms it is stable.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG draws lengths,
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` draws lengths,
 //! alignments, and fill patterns. A plain `cargo test` runs the fixed
 //! [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` extends the loop to a
 //! wall-clock budget.
 
 use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
+use tairix_fuzzseed::Prng;
 use tairix_pagezero::{resolve, zero, zero_portable};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -48,11 +49,6 @@ fn all_pagezero_features() -> CpuFeatureSet {
         .with(CpuFeature::DcZva)
 }
 
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
-
 #[test]
 fn selected_impl_zeroes_exactly_the_region_on_any_input() {
     // Resolve once to the hardware candidate (when present); `zero` then
@@ -60,16 +56,10 @@ fn selected_impl_zeroes_exactly_the_region_on_any_input() {
     let _ = resolve(all_pagezero_features());
 
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "selected_impl_zeroes_exactly_the_region_on_any_input",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     // Two identically pre-filled buffers: the reference byte-fill is applied to
     // one, the selected implementation to the other; they must end equal.
@@ -78,11 +68,11 @@ fn selected_impl_zeroes_exactly_the_region_on_any_input() {
     let mut iteration: u64 = 0;
     loop {
         // A random start offset and length within the buffer.
-        let offset = bounded(next(), BUF_LEN);
-        let len = bounded(next(), BUF_LEN - offset);
+        let offset = rng.at_most(BUF_LEN);
+        let len = rng.at_most(BUF_LEN - offset);
         // Fill both buffers with the same non-zero-ish random pattern.
         for i in 0..BUF_LEN {
-            let byte = next().to_le_bytes()[0];
+            let byte = rng.next_u8();
             got[i] = byte;
             expected[i] = byte;
         }

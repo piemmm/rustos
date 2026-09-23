@@ -4,6 +4,7 @@ use super::*;
 use crate::addr::{Ipv4Addr, Ipv6Addr};
 use alloc::vec;
 use alloc::vec::Vec;
+use tairix_fuzzseed::Prng;
 
 fn key_v4(id: u32) -> FragKey {
     FragKey {
@@ -299,23 +300,9 @@ fn zero_datagram_cap_fails_closed() {
     );
 }
 
-/// Deterministic LCG for the property sweeps (the fuzz-harness
-/// generator, reused so failures reproduce the same way).
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-}
-
 #[test]
 fn property_random_splits_reassemble_exactly() {
-    let mut rng = Lcg(0xD15_EA5E);
+    let mut rng = Prng::new(0xD15_EA5E);
     for round in 0..200u32 {
         let len = 1 + ((rng.next_u64() & 0xFFF) as usize);
         let payload: Vec<u8> = (0..len)
@@ -324,14 +311,14 @@ fn property_random_splits_reassemble_exactly() {
         // Split into 8-byte-aligned pieces.
         let mut cuts = vec![0usize, len];
         for _ in 0..(rng.next_u64() % 8) {
-            cuts.push((((rng.next_u64() & 0xFFFF) as usize) % len) & !7);
+            cuts.push(rng.below(len) & !7);
         }
         cuts.sort_unstable();
         cuts.dedup();
         let mut pieces: Vec<(usize, usize)> = cuts.windows(2).map(|w| (w[0], w[1])).collect();
         // Shuffle the pieces deterministically.
         for i in (1..pieces.len()).rev() {
-            let j = ((rng.next_u64() & 0xFFFF) as usize) % (i + 1);
+            let j = rng.at_most(i);
             pieces.swap(i, j);
         }
         let key = key_v4(round);
@@ -360,7 +347,7 @@ fn property_budgets_never_exceeded_under_random_load() {
         ..ReassemblyConfig::default()
     };
     let mut reassembler = Reassembler::new(config);
-    let mut rng = Lcg(0xFEED_FACE);
+    let mut rng = Prng::new(0xFEED_FACE);
     for step in 0..5_000i64 {
         let id = (rng.next_u64() & 0x1F) as u32;
         let source = source_v4((rng.next_u64() & 0x3) as u8);

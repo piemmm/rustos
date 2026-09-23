@@ -26,6 +26,7 @@
 //! the same seeded stream keeps being drawn until the budget elapses.
 
 use tairix_appconf::Document;
+use tairix_fuzzseed::Prng;
 use tairix_proglib::{
     document as catalog_document, load, merge, Catalog, CatalogError, EntryPatch, Record,
     MAX_ENTRIES,
@@ -47,41 +48,6 @@ fn rendered(catalog: &Catalog) -> String {
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 5_000;
-
-/// Deterministic LCG, matching the sibling harnesses so a reported seed
-/// reproduces a failure exactly one way.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next_u64() % n
-    }
-
-    /// Whether a one-in-`n` event fires.
-    fn chance(&mut self, n: u64) -> bool {
-        self.below(n) == 0
-    }
-
-    fn pick<'a>(&mut self, choices: &[&'a str]) -> &'a str {
-        choices[usize::try_from(self.below(choices.len() as u64)).expect("index fits")]
-    }
-}
 
 /// Identifiers a record may be filed under. Drawn without replacement per
 /// document so a duplicate key is a *mutation*, not the common case.
@@ -141,15 +107,15 @@ const BAD_TOKENS: &[&str] = &[
 /// several records, so they compound: they are kept low enough that the
 /// whole document is accepted far more often than not, which is what keeps
 /// the round-trip and merge invariants genuinely exercised.
-fn line(rng: &mut Lcg, id: &str, field: &str, value: &str) -> String {
+fn line(rng: &mut Prng, id: &str, field: &str, value: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    let field = if rng.chance(64) {
+    let field = if rng.below(64) == 0 {
         rng.pick(BAD_TOKENS)
     } else {
         field
     };
-    let value = if rng.chance(48) {
+    let value = if rng.below(48) == 0 {
         rng.pick(BAD_TOKENS)
     } else {
         value
@@ -161,15 +127,15 @@ fn line(rng: &mut Lcg, id: &str, field: &str, value: &str) -> String {
 /// One record: a declared entry (`name` + `bundle`) or a patch (no
 /// `bundle`, optionally `hidden`), with the odd stray comment or blank line
 /// and the occasional malformed identifier.
-fn record(rng: &mut Lcg, id: &str, out: &mut String) {
-    let id = if rng.chance(64) {
+fn record(rng: &mut Prng, id: &str, out: &mut String) {
+    let id = if rng.below(64) == 0 {
         rng.pick(BAD_TOKENS)
     } else {
         id
     };
-    let declared = !rng.chance(3);
+    let declared = rng.below(3) != 0;
 
-    if rng.chance(6) {
+    if rng.below(6) == 0 {
         out.push_str("# a comment\n");
     }
     let name = rng.pick(NAMES);
@@ -180,12 +146,12 @@ fn record(rng: &mut Lcg, id: &str, out: &mut String) {
         out.push_str(&line(rng, id, "bundle", bundle));
         out.push('\n');
     }
-    if rng.chance(2) {
+    if rng.below(2) == 0 {
         let category = rng.pick(CATEGORIES);
         out.push_str(&line(rng, id, "category", category));
         out.push('\n');
     }
-    if rng.chance(3) {
+    if rng.below(3) == 0 {
         let icon = rng.pick(ICONS);
         out.push_str(&line(rng, id, "icon", icon));
         out.push('\n');
@@ -193,10 +159,10 @@ fn record(rng: &mut Lcg, id: &str, out: &mut String) {
     // `hidden` is legal on any record — a declaration may suppress itself,
     // a patch carries the overlay's verdict — so emit it on both, walking
     // the flag grammar's accept/reject boundary with the odd bad spelling.
-    if rng.chance(3) {
-        let flag = if rng.chance(8) {
+    if rng.below(3) == 0 {
+        let flag = if rng.below(8) == 0 {
             "yes"
-        } else if rng.chance(2) {
+        } else if rng.below(2) == 0 {
             "false"
         } else {
             "true"
@@ -204,19 +170,19 @@ fn record(rng: &mut Lcg, id: &str, out: &mut String) {
         out.push_str(&line(rng, id, "hidden", flag));
         out.push('\n');
     }
-    if rng.chance(8) {
+    if rng.below(8) == 0 {
         out.push('\n');
     }
 }
 
-fn document(rng: &mut Lcg) -> String {
+fn document(rng: &mut Prng) -> String {
     let mut out = String::new();
     let mut pool: Vec<&str> = IDS.to_vec();
-    let records = rng.below(IDS.len() as u64 + 1);
+    let records = rng.below(IDS.len() + 1);
     for _ in 0..records {
         // Draw without replacement: a repeated identifier would be a
         // duplicate-key refusal in almost every document otherwise.
-        let index = usize::try_from(rng.below(pool.len().max(1) as u64)).expect("index fits");
+        let index = rng.below(pool.len().max(1));
         let Some(id) = pool.get(index).copied() else {
             break;
         };
@@ -280,7 +246,7 @@ fn check_merge(machine: &str, overlay: &str) {
 
 #[test]
 fn generated_documents_round_trip_through_the_canonical_render() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "generated_documents_round_trip_through_render",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -297,7 +263,7 @@ fn generated_documents_round_trip_through_the_canonical_render() {
 
 #[test]
 fn merging_resolves_every_patch_and_honours_every_hide() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "merging_resolves_every_patch_and_honours_every_hide",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -316,7 +282,7 @@ fn merging_resolves_every_patch_and_honours_every_hide() {
 
 #[test]
 fn arbitrary_ascii_never_panics() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "arbitrary_ascii_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -345,7 +311,7 @@ fn arbitrary_ascii_never_panics() {
 #[test]
 fn the_generator_produces_accepted_documents() {
     const DRAWS: u64 = 2_000;
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "the_generator_produces_accepted_documents",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

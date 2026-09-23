@@ -12,11 +12,12 @@
 //!   encoder flushes per message is exactly what the decoder yields, with
 //!   nothing left to carry between messages.
 //!
-//! Inputs are drawn from a per-run-seeded LCG, as elsewhere in the tree; the
+//! Inputs are drawn from a per-run-seeded `Prng`, as elsewhere in the tree; the
 //! smoke sweep runs on a plain `cargo test` and `cargo xtask fuzz --soak`
 //! extends it to a wall-clock budget.
 
 use tairix_compress::zlib::{decompress_into, Decoder, Encoder, Flush};
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 400;
@@ -32,17 +33,6 @@ const MAX_STREAM: usize = 4096;
 
 /// Largest output a decode of arbitrary bytes is allowed to produce.
 const MAX_OUTPUT: usize = 1 << 18;
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
 
 /// Decode arbitrary bytes both ways: must never panic.
 fn decode_never_panics(stream: &[u8]) {
@@ -63,7 +53,7 @@ fn decode_never_panics(stream: &[u8]) {
 }
 
 /// Text-like bytes with plenty of repetition, the traffic SSH compresses.
-fn draw_message(next: &mut impl FnMut() -> u64, len: usize) -> Vec<u8> {
+fn draw_message(rng: &mut Prng, len: usize) -> Vec<u8> {
     const WORDS: [&[u8]; 6] = [
         b"$ ls -l /System/Commands\r\n",
         b"total 0\r\n",
@@ -75,11 +65,11 @@ fn draw_message(next: &mut impl FnMut() -> u64, len: usize) -> Vec<u8> {
     let mut message = Vec::with_capacity(len);
     while message.len() < len {
         let remaining = len - message.len();
-        if next().is_multiple_of(8) {
-            message.push(low_byte(next() >> 13));
+        if rng.next_u64().is_multiple_of(8) {
+            message.push(rng.next_u8());
             continue;
         }
-        let word = WORDS[bounded(next(), WORDS.len() - 1)];
+        let word = *rng.pick(&WORDS);
         message.extend_from_slice(&word[..word.len().min(remaining)]);
     }
     message
@@ -89,27 +79,21 @@ fn draw_message(next: &mut impl FnMut() -> u64, len: usize) -> Vec<u8> {
 fn zlib_never_panics_and_the_streaming_pair_round_trips() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
 
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "zlib_never_panics_and_the_streaming_pair_round_trips",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A packetised conversation, flushed per message.
         let mut encoder = Box::new(Encoder::new());
         let mut decoder = Box::new(Decoder::new());
-        let rounds = bounded(next(), MAX_MESSAGES);
+        let rounds = rng.at_most(MAX_MESSAGES);
         let mut whole = Vec::new();
         for _ in 0..rounds {
-            let len = bounded(next(), MAX_MESSAGE);
-            let message = draw_message(&mut next, len);
+            let len = rng.at_most(MAX_MESSAGE);
+            let message = draw_message(&mut rng, len);
             let mut wire = vec![0u8; encoder.bound(message.len())];
             let written = encoder
                 .compress(&message, &mut wire, Flush::Sync)
@@ -135,8 +119,8 @@ fn zlib_never_panics_and_the_streaming_pair_round_trips() {
         assert!(written >= 4, "a finished stream carries its trailer");
 
         // 3. Corrupt a freshly finished stream at random offsets.
-        let len = bounded(next(), MAX_MESSAGE);
-        let message = draw_message(&mut next, len);
+        let len = rng.at_most(MAX_MESSAGE);
+        let message = draw_message(&mut rng, len);
         let mut fresh = Box::new(Encoder::new());
         let mut stream = vec![0u8; fresh.bound(message.len())];
         let written = fresh
@@ -151,12 +135,12 @@ fn zlib_never_panics_and_the_streaming_pair_round_trips() {
         assert_eq!(&out[..], &message[..]);
 
         let mut damaged = stream[..written].to_vec();
-        for _ in 0..bounded(next(), 6) {
+        for _ in 0..rng.at_most(6) {
             if damaged.is_empty() {
                 break;
             }
-            let at = bounded(next(), damaged.len() - 1);
-            damaged[at] ^= low_byte(next() >> 19);
+            let at = rng.below(damaged.len());
+            damaged[at] ^= rng.next_u8();
         }
         decode_never_panics(&damaged);
 
@@ -164,8 +148,8 @@ fn zlib_never_panics_and_the_streaming_pair_round_trips() {
         //    decodes, so only the checksum can catch it.
         if written >= 4 && !message.is_empty() {
             let mut flipped = stream[..written].to_vec();
-            let last = flipped.len() - 1 - bounded(next(), 3);
-            flipped[last] ^= 1 << bounded(next(), 7);
+            let last = flipped.len() - 1 - rng.at_most(3);
+            flipped[last] ^= 1 << rng.at_most(7);
             let mut out = vec![0u8; message.len()];
             assert!(
                 decompress_into(&flipped, &mut out).is_err(),
@@ -174,9 +158,8 @@ fn zlib_never_panics_and_the_streaming_pair_round_trips() {
         }
 
         // 5. Pure noise straight into both decoders.
-        let noise: Vec<u8> = (0..bounded(next(), MAX_STREAM))
-            .map(|_| low_byte(next() >> 23))
-            .collect();
+        let mut noise = vec![0u8; rng.at_most(MAX_STREAM)];
+        rng.fill(&mut noise);
         decode_never_panics(&noise);
 
         iteration += 1;

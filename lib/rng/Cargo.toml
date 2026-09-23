@@ -26,3 +26,8 @@ tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 # crate (no hand-rolled crypto, and `zeroize`'s volatile writes are not
 # elided by the optimiser). `default-features = false` keeps this `no_std`.
 zeroize = { version = "1.8.1", default-features = false }
+
+[dev-dependencies]
+# The shared seeded generator the randomised unit tests draw from (never in a
+# shipping build).
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

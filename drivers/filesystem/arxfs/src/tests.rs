@@ -1642,14 +1642,11 @@ fn compressible_cluster(fs: &ARXFS<MemBlock>) -> alloc::vec::Vec<u8> {
     payload
 }
 
-/// A pseudo-random, incompressible buffer of `len` bytes.
+/// A deterministic, high-entropy buffer of `len` bytes: no two blocks alike,
+/// so it neither compresses nor dedupes.
 fn incompressible(len: usize) -> alloc::vec::Vec<u8> {
-    let mut out = alloc::vec::Vec::with_capacity(len);
-    let mut state: u32 = 0x1234_5678;
-    for _ in 0..len {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        out.push(u8::try_from(state >> 24).unwrap_or(0));
-    }
+    let mut out = alloc::vec![0u8; len];
+    tairix_fuzzseed::Prng::new(0x1234_5678).fill(&mut out);
     out
 }
 
@@ -2279,7 +2276,7 @@ fn reflink_shares_chunks_until_one_side_is_written() {
     let cap = as_usize(fs.data_capacity());
     fs.create(root, b"src", NodeKind::RegularFile)
         .expect("create src");
-    let body = read_all_pattern(cap * 3);
+    let body = incompressible(cap * 3);
     assert_eq!(fs.write_at(root, b"src", 0, &body), Ok(body.len()));
 
     let dst = fs.reflink(root, b"src", b"dst").expect("reflink");
@@ -2514,21 +2511,6 @@ fn integrity_and_compression_hold_on_a_shared_chunk() {
         ),
         "corruption of the shared chunk fails closed for sharer b"
     );
-}
-
-/// A deterministic, high-entropy buffer of `len` bytes — distinct per block, so
-/// it is neither compressible nor deduplicable (used to exercise reflink block
-/// sharing without accidental cross-block dedupe).
-fn read_all_pattern(len: usize) -> alloc::vec::Vec<u8> {
-    let mut out = alloc::vec::Vec::with_capacity(len);
-    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-    for _ in 0..len {
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        out.push(state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes()[0]);
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -4269,7 +4251,7 @@ fn rescue_discovers_a_root_and_extracts_files_from_a_damaged_ring() {
     let mut fs = fmt(4096, 512, 128);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    let body = read_all_pattern(cap + cap / 2); // two logical blocks
+    let body = incompressible(cap + cap / 2); // two logical blocks
     fs.create(root, b"doc", NodeKind::RegularFile)
         .expect("create");
     fs.write_at(root, b"doc", 0, &body).expect("write");
@@ -4326,7 +4308,7 @@ fn rescue_never_emits_a_block_that_fails_integrity() {
     let mut fs = fmt(4096, 512, 128);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    let body = read_all_pattern(2 * cap); // exactly two logical blocks
+    let body = incompressible(2 * cap); // exactly two logical blocks
     fs.create(root, b"doc", NodeKind::RegularFile)
         .expect("create");
     fs.write_at(root, b"doc", 0, &body).expect("write");
@@ -10323,16 +10305,7 @@ fn releasing_a_run_frees_the_unshared_blocks_and_keeps_the_shared_one() {
     let mut fs = fmt(512, 512, 32);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
-    // A distinct, incompressible-enough pattern per block, so the four blocks
-    // neither dedupe onto one another nor cluster into a compressed extent.
-    let mut body = alloc::vec![0u8; cap * 4];
-    let mut state = 0x2545_F491_4F6C_DD1Du64;
-    for byte in &mut body {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        *byte = state.to_le_bytes()[3];
-    }
+    let body = incompressible(cap * 4);
     fs.create(root, b"a", NodeKind::RegularFile)
         .expect("create");
     assert_eq!(fs.write_at(root, b"a", 0, &body), Ok(body.len()));
@@ -10692,7 +10665,7 @@ fn a_truncate_that_outruns_its_transaction_is_only_ever_a_shorter_file() {
         .expect("create");
     fs.create(root, b"b", NodeKind::RegularFile)
         .expect("create");
-    let body = read_all_pattern(cap * as_usize(SPANNING_EXTENTS));
+    let body = incompressible(cap * as_usize(SPANNING_EXTENTS));
     for blk in 0..as_usize(SPANNING_EXTENTS) {
         let at = (blk * cap) as u64;
         for name in [b"a".as_slice(), b"b".as_slice()] {
@@ -10797,7 +10770,7 @@ fn the_reclaim_never_frees_a_node_a_name_still_reaches() {
     let root = fs.root();
     fs.create(root, b"live", NodeKind::RegularFile)
         .expect("create");
-    let body = read_all_pattern(2000);
+    let body = incompressible(2000);
     fs.write_at(root, b"live", 0, &body).expect("write");
     fs.commit().expect("commit");
     let ino = file_ino(&mut fs, b"live");

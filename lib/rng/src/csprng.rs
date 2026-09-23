@@ -328,56 +328,12 @@ impl<E: EntropySource> core::fmt::Debug for CsRng<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Deterministic stand-in for an entropy source: a counter expanded so
-    /// each fill is distinct. Lets the tests assert determinism without
-    /// needing real entropy; it is NOT used in production.
-    struct CountingSource {
-        counter: u64,
-        budget: Option<u32>,
-    }
-
-    impl CountingSource {
-        fn new(seed: u64) -> Self {
-            Self {
-                counter: seed,
-                budget: None,
-            }
-        }
-
-        /// A source that succeeds `n` times, then fails forever — to drive
-        /// the reseed-failure path.
-        fn with_budget(seed: u64, n: u32) -> Self {
-            Self {
-                counter: seed,
-                budget: Some(n),
-            }
-        }
-    }
-
-    impl EntropySource for CountingSource {
-        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-            if let Some(b) = self.budget.as_mut() {
-                if *b == 0 {
-                    return Err(EntropyError::Unavailable);
-                }
-                *b -= 1;
-            }
-            for byte in out.iter_mut() {
-                self.counter = self
-                    .counter
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                *byte = self.counter.to_le_bytes()[4];
-            }
-            Ok(())
-        }
-    }
+    use crate::test_sources::{ParkingSource, SeededSource};
 
     #[test]
     fn identical_sources_give_identical_streams() {
-        let mut a = CsRng::new(CountingSource::new(1)).unwrap();
-        let mut b = CsRng::new(CountingSource::new(1)).unwrap();
+        let mut a = CsRng::new(SeededSource::new(1)).unwrap();
+        let mut b = CsRng::new(SeededSource::new(1)).unwrap();
         let (mut oa, mut ob) = ([0u8; 100], [0u8; 100]);
         a.try_fill_bytes(&mut oa).unwrap();
         b.try_fill_bytes(&mut ob).unwrap();
@@ -386,21 +342,21 @@ mod tests {
 
     #[test]
     fn different_sources_diverge() {
-        let mut a = CsRng::new(CountingSource::new(1)).unwrap();
-        let mut b = CsRng::new(CountingSource::new(2)).unwrap();
+        let mut a = CsRng::new(SeededSource::new(1)).unwrap();
+        let mut b = CsRng::new(SeededSource::new(2)).unwrap();
         assert_ne!(a.try_next_u64().unwrap(), b.try_next_u64().unwrap());
     }
 
     #[test]
     fn personalization_diverges_same_source() {
-        let mut a = CsRng::with_personalization(CountingSource::new(7), b"domain-a").unwrap();
-        let mut b = CsRng::with_personalization(CountingSource::new(7), b"domain-b").unwrap();
+        let mut a = CsRng::with_personalization(SeededSource::new(7), b"domain-a").unwrap();
+        let mut b = CsRng::with_personalization(SeededSource::new(7), b"domain-b").unwrap();
         assert_ne!(a.try_next_u64().unwrap(), b.try_next_u64().unwrap());
     }
 
     #[test]
     fn construction_fails_when_entropy_is_unavailable() {
-        let src = CountingSource::with_budget(1, 0);
+        let src = SeededSource::with_budget(1, 0);
         assert_eq!(CsRng::new(src).err(), Some(EntropyError::Unavailable));
     }
 
@@ -408,7 +364,7 @@ mod tests {
     fn reseed_clock_triggers_a_reseed() {
         // Interval 2 => reseed before the 3rd draw. Budget: 1 (instantiate)
         // + 1 (the triggered reseed) = 2 successful fills, then plenty more.
-        let mut rng = CsRng::with_reseed_interval(CountingSource::new(9), 2, &[]).unwrap();
+        let mut rng = CsRng::with_reseed_interval(SeededSource::new(9), 2, &[]).unwrap();
         let mut out = [0u8; 8];
         rng.try_fill_bytes(&mut out).unwrap();
         assert_eq!(rng.calls_since_reseed(), 1);
@@ -427,60 +383,13 @@ mod tests {
         // that has no entropy left. That surfaces as the typed, transient
         // `Reseeding` (the generator is intact), never as a hard error and
         // never hidden behind weak output.
-        let mut rng =
-            CsRng::with_reseed_interval(CountingSource::with_budget(3, 1), 1, &[]).unwrap();
+        let mut rng = CsRng::with_reseed_interval(SeededSource::with_budget(3, 1), 1, &[]).unwrap();
         let mut out = [0u8; 8];
         rng.try_fill_bytes(&mut out).expect("first draw succeeds");
         assert_eq!(rng.try_fill_bytes(&mut out), Err(EntropyError::Reseeding));
         // The DRBG is intact: an explicit fallible reseed reports the same
         // transient signal rather than corrupting state.
         assert_eq!(rng.reseed(), Err(EntropyError::Reseeding));
-    }
-
-    /// A source whose non-blocking `fill` is exhausted after `budget` draws,
-    /// but whose blocking `fill_blocking` always delivers — a stand-in for a
-    /// pool a parking platform source would wait on.
-    struct ParkingSource {
-        counter: u64,
-        budget: u32,
-    }
-
-    impl ParkingSource {
-        fn new(seed: u64, budget: u32) -> Self {
-            Self {
-                counter: seed,
-                budget,
-            }
-        }
-
-        fn produce(&mut self, out: &mut [u8]) {
-            for byte in out.iter_mut() {
-                self.counter = self
-                    .counter
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                *byte = self.counter.to_le_bytes()[4];
-            }
-        }
-    }
-
-    impl EntropySource for ParkingSource {
-        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-            if self.budget == 0 {
-                return Err(EntropyError::Unavailable);
-            }
-            self.budget -= 1;
-            self.produce(out);
-            Ok(())
-        }
-
-        fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-            if self.budget == 0 {
-                // Model a wait that replenishes the pool, then deliver.
-                self.budget = 1;
-            }
-            self.fill(out)
-        }
     }
 
     #[test]
@@ -522,7 +431,7 @@ mod tests {
     #[test]
     fn fork_fast_is_unpredictable_and_each_fork_differs() {
         use crate::rand::RandU64;
-        let mut rng = CsRng::new(CountingSource::new(42)).unwrap();
+        let mut rng = CsRng::new(SeededSource::new(42)).unwrap();
         let mut f1: FastRng = rng.fork_fast().unwrap();
         let mut f2: FastRng = rng.fork_fast().unwrap();
         assert_ne!(f1.next_u64(), f2.next_u64(), "two forks must differ");
@@ -534,12 +443,12 @@ mod tests {
     fn fork_fast_takes_its_key_from_the_drbg_stream() {
         use crate::rand::RandU64;
         let mut expected_key = [0u8; tairix_crypto::STREAM_KEY_LEN];
-        CsRng::new(CountingSource::new(9))
+        CsRng::new(SeededSource::new(9))
             .unwrap()
             .try_fill_bytes(&mut expected_key)
             .unwrap();
         let mut reference: FastRng = FastRng::from_key(&expected_key);
-        let mut forked: FastRng = CsRng::new(CountingSource::new(9))
+        let mut forked: FastRng = CsRng::new(SeededSource::new(9))
             .unwrap()
             .fork_fast()
             .unwrap();
@@ -549,7 +458,7 @@ mod tests {
     #[test]
     fn output_is_well_balanced() {
         // Deterministic source => reproducible, never flaky.
-        let mut rng = CsRng::new(CountingSource::new(0xABCD)).unwrap();
+        let mut rng = CsRng::new(SeededSource::new(0xABCD)).unwrap();
         let mut sum: u64 = 0;
         let mut buf = [0u8; 4096];
         let mut produced = 0usize;
@@ -573,7 +482,7 @@ mod tests {
     fn debug_does_not_leak_state() {
         extern crate alloc;
         use alloc::format;
-        let rng = CsRng::new(CountingSource::new(5)).unwrap();
+        let rng = CsRng::new(SeededSource::new(5)).unwrap();
         let s = format!("{rng:?}");
         assert!(s.contains("CsRng"));
     }

@@ -19,6 +19,7 @@
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a
 //! fresh, logged seed; `cargo xtask fuzz` extends it to a wall-clock budget.
 
+use tairix_fuzzseed::Prng;
 use tairix_wintersun_net::bounds::{MAX_PLAINTEXT_LEN, MAX_RECORD_LEN, RECORD_HEADER_LEN};
 use tairix_wintersun_net::client::ClientMessage;
 use tairix_wintersun_net::server::ServerMessage;
@@ -65,18 +66,18 @@ fn present(session: &mut Session, record: &mut [u8]) -> bool {
 
 /// An honest stream of real frames opens in order, both ways, and each
 /// record carries back exactly what was sealed.
-fn honest_stream(rng: &mut corpus::Lcg, keys: ([u8; 32], [u8; 32]), frames: &[Vec<u8>]) {
+fn honest_stream(rng: &mut Prng, keys: ([u8; 32], [u8; 32]), frames: &[Vec<u8>]) {
     let (mut client, mut realm) = pair(keys.0, keys.1);
     let mut record = vec![0u8; MAX_RECORD_LEN];
     for _ in 0..4 {
-        let frame = &frames[rng.bounded(frames.len() - 1)];
+        let frame = rng.pick(frames);
         let n = client.seal_record(frame, &mut record).expect("seals");
         {
             let open = realm.open_record(&mut record[..n]).expect("opens");
             assert_eq!(open.plaintext(), frame.as_slice());
         }
 
-        let reply = &frames[rng.bounded(frames.len() - 1)];
+        let reply = rng.pick(frames);
         let n = realm.seal_record(reply, &mut record).expect("seals");
         {
             let open = client.open_record(&mut record[..n]).expect("opens");
@@ -116,19 +117,19 @@ fn reorder_and_replay(keys: ([u8; 32], [u8; 32]), sealed: &[u8]) {
 
 /// Truncation, extension, an oversize header, reflection, a bit flip, and a
 /// record from another session — each refused, each ending the session.
-fn interference(rng: &mut corpus::Lcg, keys: ([u8; 32], [u8; 32]), sealed: &[u8], frame: &[u8]) {
+fn interference(rng: &mut Prng, keys: ([u8; 32], [u8; 32]), sealed: &[u8], frame: &[u8]) {
     let (_, mut realm) = pair(keys.0, keys.1);
-    let cut = rng.bounded(sealed.len().saturating_sub(1));
+    let cut = rng.at_most(sealed.len().saturating_sub(1));
     assert!(!present(&mut realm, &mut sealed[..cut].to_vec()));
 
     let (_, mut realm) = pair(keys.0, keys.1);
     let mut long = sealed.to_vec();
-    long.push(rng.byte());
+    long.push(rng.next_u8());
     assert!(!present(&mut realm, &mut long));
 
     let (_, mut realm) = pair(keys.0, keys.1);
     let mut oversize = sealed.to_vec();
-    let declared = u32::try_from(MAX_PLAINTEXT_LEN + 1 + rng.bounded(1_000)).unwrap_or(u32::MAX);
+    let declared = u32::try_from(MAX_PLAINTEXT_LEN + 1 + rng.at_most(1_000)).unwrap_or(u32::MAX);
     oversize[..RECORD_HEADER_LEN].copy_from_slice(&declared.to_le_bytes());
     assert!(!present(&mut realm, &mut oversize));
     assert_eq!(realm.ended(), Some(DisconnectReason::RecordTooLarge));
@@ -140,11 +141,11 @@ fn interference(rng: &mut corpus::Lcg, keys: ([u8; 32], [u8; 32]), sealed: &[u8]
 
     let (_, mut realm) = pair(keys.0, keys.1);
     let mut flipped = sealed.to_vec();
-    let pos = rng.bounded(flipped.len() - 1);
-    flipped[pos] ^= 1u8 << rng.bit();
+    let pos = rng.below(flipped.len());
+    flipped[pos] ^= 1u8 << rng.below(8);
     assert!(!present(&mut realm, &mut flipped));
 
-    let other = rng.bytes32();
+    let other = corpus::bytes32(rng);
     if other != keys.0 {
         let (mut stranger, _) = pair(other, keys.1);
         let mut foreign = vec![0u8; MAX_RECORD_LEN];
@@ -157,37 +158,36 @@ fn interference(rng: &mut corpus::Lcg, keys: ([u8; 32], [u8; 32]), sealed: &[u8]
 
 /// Arbitrary bytes, and a well-formed header over a noise body — the shape
 /// that reaches furthest into the open path before failing.
-fn hostile_records(rng: &mut corpus::Lcg, keys: ([u8; 32], [u8; 32])) {
+fn hostile_records(rng: &mut Prng, keys: ([u8; 32], [u8; 32])) {
     let (_, mut realm) = pair(keys.0, keys.1);
-    let len = rng.bounded(MAX_RECORD_LEN + 4);
-    let mut noise = rng.blob(len);
+    let len = rng.at_most(MAX_RECORD_LEN + 4);
+    let mut noise = corpus::blob(rng, len);
     present(&mut realm, &mut noise);
 
     let (_, mut realm) = pair(keys.0, keys.1);
-    let body = rng.bounded(64);
+    let body = rng.at_most(64);
     let mut forged = Vec::with_capacity(RECORD_HEADER_LEN + body + 16);
     let declared = u32::try_from(body).unwrap_or(0);
     forged.extend_from_slice(&declared.to_le_bytes());
-    forged.extend(rng.blob(body + 16));
+    forged.extend(corpus::blob(rng, body + 16));
     assert!(!present(&mut realm, &mut forged));
 }
 
 #[test]
 fn the_record_transport_never_panics_and_fails_closed_on_any_interference() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut rng = corpus::Lcg::seeded(
-        "the_record_transport_never_panics_and_fails_closed_on_any_interference",
-    );
+    let mut rng =
+        corpus::seeded("the_record_transport_never_panics_and_fails_closed_on_any_interference");
 
     let mut frames = corpus::client_frames();
     frames.extend(corpus::server_frames());
 
     let mut iteration: u64 = 0;
     loop {
-        let keys = (rng.bytes32(), rng.bytes32());
+        let keys = (corpus::bytes32(&mut rng), corpus::bytes32(&mut rng));
         honest_stream(&mut rng, keys, &frames);
 
-        let frame = frames[rng.bounded(frames.len() - 1)].clone();
+        let frame = rng.pick(&frames).clone();
         let mut sealed = vec![0u8; MAX_RECORD_LEN];
         let sealed_len = {
             let (mut client, _) = pair(keys.0, keys.1);

@@ -303,29 +303,22 @@ fn churn_runs_in_bounded_memory() {
     // set; `used` returns to zero once everything is freed.
     let alloc = fixture(1 << 16);
     let mut live: alloc::vec::Vec<(*mut u8, Layout)> = alloc::vec::Vec::new();
-    // Simple xorshift so the test is deterministic and dependency-free.
-    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-    let mut next = || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
+    let mut rng = tairix_fuzzseed::Prng::new(0x9E37_79B9_7F4A_7C15);
     for _ in 0..5_000 {
-        let free = !live.is_empty() && next() % 2 == 0;
+        let free = !live.is_empty() && rng.below(2) == 0;
         if free {
-            // Reduce the u64 PRNG word modulo the live count first, so the
-            // value provably fits a `usize` on any target (no truncation).
-            let idx = usize::try_from(next() % live.len() as u64).unwrap_or(0);
-            let (p, l) = live.swap_remove(idx);
+            let (p, l) = live.swap_remove(rng.below(live.len()));
             // SAFETY: `p` came from this allocator with `l`.
             unsafe { alloc.dealloc(p, l) };
         } else {
-            // `next() % 200` is in `0..200`, so it always fits a `usize`.
-            let sz = 1 + usize::try_from(next() % 200).unwrap_or(0);
+            let sz = 1 + rng.below(200);
             // Every fifth request is a byte-tier one, so the churn crosses
             // both tiers rather than settling on either.
-            let sz = if next() % 5 == 0 { sz + PAGE_SIZE } else { sz };
+            let sz = if rng.below(5) == 0 {
+                sz + PAGE_SIZE
+            } else {
+                sz
+            };
             let layout = Layout::from_size_align(sz, 8).unwrap();
             // SAFETY: non-zero layout.
             let p = unsafe { alloc.alloc(layout) };

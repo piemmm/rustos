@@ -20,6 +20,7 @@
 
 use tairix_crypto::Ed25519SecretKey;
 
+use tairix_fuzzseed::Prng;
 use tairix_wintersun_net::bounds::{HANDSHAKE_MAGIC, PROTOCOL_VERSION};
 use tairix_wintersun_net::handshake::{
     refuse, respond, HandshakeError, Initiator, Outcome, Pinning, HELLO_LEN, MAX_HANDSHAKE_LEN,
@@ -97,16 +98,16 @@ struct Parties {
 }
 
 impl Parties {
-    fn drawn(rng: &mut corpus::Lcg) -> Self {
-        let realm = Ed25519SecretKey::from_seed(&rng.bytes32());
+    fn drawn(rng: &mut Prng) -> Self {
+        let realm = Ed25519SecretKey::from_seed(&corpus::bytes32(rng));
         let identity = *realm.public_key().as_bytes();
         Self {
             realm,
             identity,
-            client_ephemeral: rng.bytes32(),
-            realm_ephemeral: rng.bytes32(),
-            client_nonce: rng.bytes32(),
-            realm_nonce: rng.bytes32(),
+            client_ephemeral: corpus::bytes32(rng),
+            realm_ephemeral: corpus::bytes32(rng),
+            client_nonce: corpus::bytes32(rng),
+            realm_nonce: corpus::bytes32(rng),
         }
     }
 
@@ -132,13 +133,13 @@ fn honest_exchange(parties: &Parties) {
 
 /// Every way the transcript binding can be broken, and the pin that catches
 /// the one a valid signature does not.
-fn tampered_exchanges(rng: &mut corpus::Lcg, parties: &Parties) {
+fn tampered_exchanges(rng: &mut Prng, parties: &Parties) {
     // The client's hello is altered in flight. The realm signs what it saw;
     // the client checks what it sent.
     let (initiator, hello) = parties.start();
     let mut tampered = hello;
-    let pos = rng.bounded(HELLO_LEN - 1);
-    tampered[pos] ^= 1u8 << rng.bit();
+    let pos = rng.below(HELLO_LEN);
+    tampered[pos] ^= 1u8 << rng.below(8);
     let sent = parties.answer(&tampered);
     assert!(
         initiator.finish(&sent, Some(&parties.identity)).is_err(),
@@ -149,8 +150,8 @@ fn tampered_exchanges(rng: &mut corpus::Lcg, parties: &Parties) {
     let (initiator, hello) = parties.start();
     let mut sent = parties.answer(&hello);
     if !sent.is_empty() {
-        let pos = rng.bounded(sent.len() - 1);
-        sent[pos] ^= 1u8 << rng.bit();
+        let pos = rng.below(sent.len());
+        sent[pos] ^= 1u8 << rng.below(8);
     }
     assert!(
         initiator.finish(&sent, Some(&parties.identity)).is_err(),
@@ -159,7 +160,7 @@ fn tampered_exchanges(rng: &mut corpus::Lcg, parties: &Parties) {
 
     // A substituted realm: a valid signature under a key the client did not
     // pin. Only the pin refuses this one.
-    let impostor = Ed25519SecretKey::from_seed(&rng.bytes32());
+    let impostor = Ed25519SecretKey::from_seed(&corpus::bytes32(rng));
     if *impostor.public_key().as_bytes() != parties.identity {
         let (initiator, hello) = parties.start();
         let sent = answer(
@@ -180,7 +181,7 @@ fn tampered_exchanges(rng: &mut corpus::Lcg, parties: &Parties) {
     // An answer lifted from a different exchange: the transcript binds it to
     // the hello it answered, and to no other.
     let (first, _) = parties.start();
-    let (_, other_hello) = Initiator::start(rng.bytes32(), rng.bytes32());
+    let (_, other_hello) = Initiator::start(corpus::bytes32(rng), corpus::bytes32(rng));
     let other = parties.answer(&other_hello);
     assert!(
         first.finish(&other, Some(&parties.identity)).is_err(),
@@ -189,9 +190,9 @@ fn tampered_exchanges(rng: &mut corpus::Lcg, parties: &Parties) {
 }
 
 /// Arbitrary and plausible-but-forged bytes at each end.
-fn hostile_bytes(rng: &mut corpus::Lcg, parties: &Parties) {
-    let len = rng.bounded(MAX_HANDSHAKE_LEN + 8);
-    let noise = rng.blob(len);
+fn hostile_bytes(rng: &mut Prng, parties: &Parties) {
+    let len = rng.at_most(MAX_HANDSHAKE_LEN + 8);
+    let noise = corpus::blob(rng, len);
     parties.answer(&noise);
     let (initiator, _) = parties.start();
     read_answer(initiator, &noise, Some(&parties.identity));
@@ -200,15 +201,15 @@ fn hostile_bytes(rng: &mut corpus::Lcg, parties: &Parties) {
     // magic, version and kind arms rather than stopping at the first field.
     let mut forged = Vec::with_capacity(MAX_HANDSHAKE_LEN);
     forged.extend_from_slice(&HANDSHAKE_MAGIC.to_le_bytes());
-    let version = if rng.byte().is_multiple_of(4) {
+    let version = if rng.next_u8().is_multiple_of(4) {
         PROTOCOL_VERSION
     } else {
-        u16::from(rng.byte())
+        u16::from(rng.next_u8())
     };
     forged.extend_from_slice(&version.to_le_bytes());
-    forged.extend_from_slice(&u16::from(rng.byte() % 5).to_le_bytes());
-    let body = rng.bounded(MAX_HANDSHAKE_LEN - 8);
-    forged.extend(rng.blob(body));
+    forged.extend_from_slice(&u16::from(rng.next_u8() % 5).to_le_bytes());
+    let body = rng.at_most(MAX_HANDSHAKE_LEN - 8);
+    forged.extend(corpus::blob(rng, body));
     let (initiator, _) = parties.start();
     read_answer(initiator, &forged, None);
     parties.answer(&forged);
@@ -218,7 +219,7 @@ fn hostile_bytes(rng: &mut corpus::Lcg, parties: &Parties) {
 fn the_handshake_never_panics_and_only_completes_on_a_bound_transcript() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let mut rng =
-        corpus::Lcg::seeded("the_handshake_never_panics_and_only_completes_on_a_bound_transcript");
+        corpus::seeded("the_handshake_never_panics_and_only_completes_on_a_bound_transcript");
 
     let mut iteration: u64 = 0;
     loop {
@@ -228,7 +229,7 @@ fn the_handshake_never_panics_and_only_completes_on_a_bound_transcript() {
         hostile_bytes(&mut rng, &parties);
 
         // Every refusal the realm can state decodes back to that reason.
-        let reason = DisconnectReason::ALL[rng.bounded(DisconnectReason::ALL.len() - 1)];
+        let reason = *rng.pick(DisconnectReason::ALL);
         let refusal = refuse(reason);
         assert_eq!(refusal.to_send().len(), REFUSED_LEN);
         let (initiator, _) = parties.start();

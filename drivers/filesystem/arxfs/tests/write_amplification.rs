@@ -36,7 +36,7 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN};
-use tairix_fuzzseed::Lcg;
+use tairix_fuzzseed::Prng;
 use tairix_reclaim::{
     CacheBudget, FreeMemorySource, MemoryPressure, PinnedAccounting, PinnedLedger, PinnedShare,
     PressureBand, ReclaimOwner, ReportedPressure,
@@ -281,7 +281,7 @@ const FILE: &[u8] = b"payload";
 /// keeps the figures reproducible.
 fn payload(len: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; len];
-    Lcg::new(0x5741_4d50).fill(&mut bytes);
+    Prng::new(0x5741_4d50).fill(&mut bytes);
     bytes
 }
 

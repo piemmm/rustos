@@ -21,15 +21,13 @@
 //!   outcome must be a typed result, no frame may escape the session's own
 //!   inbound ceiling, and a contained session must stay contained.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG drives
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` drives
 //! the mutations through the shared `tairix_fuzzseed` seam. A plain
 //! `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed; `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to
 //! extend the loop to a wall-clock budget.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
+use tairix_fuzzseed::Prng;
 use tairix_raster::Region;
 use tairix_sandbox::decode::{
     container_summary, disassemble, manifest_summary, DecodeService, Isa,
@@ -55,17 +53,6 @@ const SMOKE_ITERATIONS: u64 = 2_000;
 
 /// Largest arbitrary byte string fed as an input file or a hostile reply.
 const MAX_NOISE: usize = 2048;
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
 
 /// A well-formed stratum-2 NTP server reply echoing `nonce`, reporting an
 /// instant inside the plausibility window — the template mutations start from.
@@ -95,27 +82,27 @@ fn ntp_reply_template(nonce: u64) -> Vec<u8> {
 fn fuzz_help_iteration(
     sandbox: &mut ParserSandbox<LoopbackLauncher<fn() -> HelpService>, SilentSink>,
     noise: &[u8],
-    next: &mut impl FnMut() -> u64,
+    rng: &mut Prng,
 ) -> RenderMode {
     let mut help = HELP_TEMPLATE.to_vec();
-    for _ in 0..bounded(next(), 6) {
-        let pos = bounded(next(), help.len() - 1);
-        help[pos] ^= low_byte(next() >> 17);
+    for _ in 0..rng.at_most(6) {
+        let pos = rng.below(help.len());
+        help[pos] ^= rng.next_u8();
     }
-    let mode = if next() & 1 == 0 {
+    let mode = if rng.next_u64() & 1 == 0 {
         RenderMode::Short
     } else {
         RenderMode::Full
     };
-    let styling = match bounded(next(), 2) {
+    let styling = match rng.at_most(2) {
         0 => Styling::Plain,
         1 => Styling::Monochrome,
         _ => Styling::Colour,
     };
     let locales = ["en-US", "fr-FR", "zh-CN", "", "not a tag", "xx-XX"];
-    let locale = locales[bounded(next(), locales.len() - 1)];
+    let locale = *rng.pick(&locales);
     let _ = render_help(sandbox, mode, styling, locale, &help);
-    let cut = bounded(next(), help.len());
+    let cut = rng.at_most(help.len());
     let _ = render_help(sandbox, mode, styling, locale, &help[..cut]);
     let _ = render_help(sandbox, mode, styling, locale, noise);
     mode
@@ -132,16 +119,16 @@ fn fuzz_help_iteration(
 fn fuzz_ntp_iteration(
     sandbox: &mut ParserSandbox<LoopbackLauncher<fn() -> TimeSyncService>, SilentSink>,
     noise: &[u8],
-    next: &mut impl FnMut() -> u64,
+    rng: &mut Prng,
 ) -> (u64, tairix_abi::time::Duration64) {
-    let nonce = next();
+    let nonce = rng.next_u64();
     let mut packet = ntp_reply_template(nonce);
-    for _ in 0..bounded(next(), 8) {
-        let pos = bounded(next(), packet.len() - 1);
-        packet[pos] ^= low_byte(next() >> 17);
+    for _ in 0..rng.at_most(8) {
+        let pos = rng.below(packet.len());
+        packet[pos] ^= rng.next_u8();
     }
-    let received = tairix_abi::time::Duration64::from_nanos(next() >> 24);
-    let cut = bounded(next(), packet.len());
+    let received = tairix_abi::time::Duration64::from_nanos(rng.next_u64() >> 24);
+    let cut = rng.at_most(packet.len());
     for (label_nonce, bytes) in [
         (nonce, &packet[..]),
         (nonce ^ 1, &packet[..]),
@@ -338,32 +325,25 @@ type HonestIconSandbox = ParserSandbox<LoopbackLauncher<fn() -> ImageRenderServi
 /// with a handful of bytes flipped, a random truncation, and pure `noise`,
 /// rasterised through the honest worker at a random side. Returns the side
 /// used, so the caller can reuse it against the hostile worker too.
-fn fuzz_icon_iteration(
-    honest_icon: &mut HonestIconSandbox,
-    noise: &[u8],
-    next: &mut impl FnMut() -> u64,
-) -> u32 {
-    let side = u32::try_from(bounded(
-        next(),
-        usize::try_from(MAX_ICON_SIDE - 1).unwrap_or(0),
-    ))
-    .unwrap_or(0)
+fn fuzz_icon_iteration(honest_icon: &mut HonestIconSandbox, noise: &[u8], rng: &mut Prng) -> u32 {
+    let side = u32::try_from(rng.at_most(usize::try_from(MAX_ICON_SIDE - 1).unwrap_or(0)))
+        .unwrap_or(0)
         + 1;
     let mut svg = SVG_TEMPLATE.to_vec();
-    for _ in 0..bounded(next(), 6) {
-        let pos = bounded(next(), svg.len() - 1);
-        svg[pos] ^= low_byte(next() >> 17);
+    for _ in 0..rng.at_most(6) {
+        let pos = rng.below(svg.len());
+        svg[pos] ^= rng.next_u8();
     }
     let _ = rasterise_icon(honest_icon, side, &svg, &mut NoFonts);
-    let cut = bounded(next(), svg.len());
+    let cut = rng.at_most(svg.len());
     let _ = rasterise_icon(honest_icon, side, &svg[..cut], &mut NoFonts);
     let mut png = png_template();
-    for _ in 0..bounded(next(), 6) {
-        let pos = bounded(next(), png.len() - 1);
-        png[pos] ^= low_byte(next() >> 17);
+    for _ in 0..rng.at_most(6) {
+        let pos = rng.below(png.len());
+        png[pos] ^= rng.next_u8();
     }
     let _ = rasterise_icon(honest_icon, side, &png, &mut NoFonts);
-    let cut = bounded(next(), png.len());
+    let cut = rng.at_most(png.len());
     let _ = rasterise_icon(honest_icon, side, &png[..cut], &mut NoFonts);
     let _ = rasterise_icon(honest_icon, side, noise, &mut NoFonts);
     side
@@ -378,18 +358,18 @@ fn fuzz_icon_iteration(
 fn fuzz_wallpaper_iteration(
     honest: &mut HonestIconSandbox,
     noise: &[u8],
-    next: &mut impl FnMut() -> u64,
+    rng: &mut Prng,
 ) -> (u32, u32, WallpaperFit) {
-    let width = u32::try_from(bounded(next(), 15)).unwrap_or(0) + 1;
-    let height = u32::try_from(bounded(next(), 15)).unwrap_or(0) + 1;
-    let fit = FITS[bounded(next(), FITS.len() - 1)];
+    let width = u32::try_from(rng.at_most(15)).unwrap_or(0) + 1;
+    let height = u32::try_from(rng.at_most(15)).unwrap_or(0) + 1;
+    let fit = *rng.pick(&FITS);
     let mut png = png_template();
-    for _ in 0..bounded(next(), 6) {
-        let pos = bounded(next(), png.len() - 1);
-        png[pos] ^= low_byte(next() >> 17);
+    for _ in 0..rng.at_most(6) {
+        let pos = rng.below(png.len());
+        png[pos] ^= rng.next_u8();
     }
     let _ = render_wallpaper(honest, width, height, fit, &png);
-    let cut = bounded(next(), png.len());
+    let cut = rng.at_most(png.len());
     let _ = render_wallpaper(honest, width, height, fit, &png[..cut]);
     let _ = render_wallpaper(honest, width, height, fit, noise);
     // Also exercise a destination one past the ceiling: always refused
@@ -411,43 +391,39 @@ fn fuzz_wallpaper_iteration(
 /// typed refusal rather than anything else. Both backings are driven,
 /// because a vector document reaches an entirely different draw path
 /// behind the same request grammar.
-fn fuzz_view_iteration(
-    honest: &mut HonestIconSandbox,
-    noise: &[u8],
-    next: &mut impl FnMut() -> u64,
-) {
+fn fuzz_view_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut Prng) {
     let mut png = png_template();
-    for _ in 0..bounded(next(), 6) {
-        let pos = bounded(next(), png.len() - 1);
-        png[pos] ^= low_byte(next() >> 17);
+    for _ in 0..rng.at_most(6) {
+        let pos = rng.below(png.len());
+        png[pos] ^= rng.next_u8();
     }
     let mut svg = SVG_TEMPLATE.to_vec();
-    for _ in 0..bounded(next(), 6) {
-        let pos = bounded(next(), svg.len() - 1);
-        svg[pos] ^= low_byte(next() >> 17);
+    for _ in 0..rng.at_most(6) {
+        let pos = rng.below(svg.len());
+        svg[pos] ^= rng.next_u8();
     }
-    let cut = bounded(next(), png.len());
+    let cut = rng.at_most(png.len());
     for document in [png.as_slice(), &png[..cut], svg.as_slice(), noise] {
         // A page and a band before anything is open, so the out-of-order
         // paths are reached whether or not this document opens at all.
-        let _ = select_page(honest, u32::try_from(bounded(next(), 4)).unwrap_or(0));
+        let _ = select_page(honest, u32::try_from(rng.at_most(4)).unwrap_or(0));
         let _ = render_page(honest, (1, 1), whole(1, 1), &mut [0u8; 4]);
         if send_document(honest, document).is_err() {
             continue;
         }
-        let named = NAMED_FORMATS[bounded(next(), NAMED_FORMATS.len() - 1)];
+        let named = *rng.pick(&NAMED_FORMATS);
         let Ok(opened) = open_view(honest, named, &mut NoFonts) else {
             continue;
         };
-        let index = u32::try_from(bounded(next(), 4)).unwrap_or(0);
+        let index = u32::try_from(rng.at_most(4)).unwrap_or(0);
         let Ok(page) = select_page(honest, index % opened.count.max(1)) else {
             continue;
         };
-        let width = u32::try_from(bounded(next(), 7)).unwrap_or(0) + 1;
-        let height = u32::try_from(bounded(next(), 7)).unwrap_or(0) + 1;
+        let width = u32::try_from(rng.at_most(7)).unwrap_or(0) + 1;
+        let height = u32::try_from(rng.at_most(7)).unwrap_or(0) + 1;
         let window = Region {
-            x: u32::try_from(bounded(next(), 3)).unwrap_or(0),
-            y: u32::try_from(bounded(next(), 3)).unwrap_or(0),
+            x: u32::try_from(rng.at_most(3)).unwrap_or(0),
+            y: u32::try_from(rng.at_most(3)).unwrap_or(0),
             width,
             height,
         };
@@ -458,8 +434,8 @@ fn fuzz_view_iteration(
         let _ = render_page(
             honest,
             (
-                u32::try_from(bounded(next(), 15)).unwrap_or(0) + 1,
-                u32::try_from(bounded(next(), 15)).unwrap_or(0) + 1,
+                u32::try_from(rng.at_most(15)).unwrap_or(0) + 1,
+                u32::try_from(rng.at_most(15)).unwrap_or(0) + 1,
             ),
             window,
             &mut out,
@@ -553,11 +529,11 @@ impl SessionService for FanService {
 /// half-working. The honest leg round-trips a random payload through the
 /// in-process fake, so the outbound encoder and the queue bounds are
 /// fuzzed alongside the decoder.
-fn fuzz_session_iteration(noise: &[u8], next: &mut impl FnMut() -> u64) {
-    let outbound = MIN_QUEUE_BYTES + bounded(next(), 512);
-    let inbound = MIN_QUEUE_BYTES + bounded(next(), 512);
+fn fuzz_session_iteration(noise: &[u8], rng: &mut Prng) {
+    let outbound = MIN_QUEUE_BYTES + rng.at_most(512);
+    let inbound = MIN_QUEUE_BYTES + rng.at_most(512);
     let bounds = SessionBounds::new(outbound, inbound).expect("above the floor");
-    let chunk = 1 + bounded(next(), 63);
+    let chunk = 1 + rng.at_most(63);
 
     let mut hostile = SandboxSession::new(
         HostileSession {
@@ -571,7 +547,7 @@ fn fuzz_session_iteration(noise: &[u8], next: &mut impl FnMut() -> u64) {
     .expect("the bounds commit");
     // A payload straddling the send ceiling: refused typed either way,
     // and never half-queued.
-    let payload = vec![0xA5u8; bounded(next(), outbound + 16)];
+    let payload = vec![0xA5u8; rng.at_most(outbound + 16)];
     let _ = hostile.send(&payload);
     let _ = hostile.on_writable();
     let mut contained = false;
@@ -606,11 +582,11 @@ fn fuzz_session_iteration(noise: &[u8], next: &mut impl FnMut() -> u64) {
         assert!(!hostile.wants_write());
     }
 
-    let fan = 1 + bounded(next(), 3);
+    let fan = 1 + rng.at_most(3);
     let mut honest =
         SandboxSession::new(LoopbackSession::new(FanService { fan }), bounds, SilentSink)
             .expect("the bounds commit");
-    let payload = vec![0x5Au8; bounded(next(), bounds.max_send_payload())];
+    let payload = vec![0x5Au8; rng.at_most(bounds.max_send_payload())];
     if honest.send(&payload).is_ok() {
         while honest.wants_write() && honest.on_writable().is_ok() {}
         let mut seen = 0;
@@ -634,23 +610,16 @@ fn fuzz_session_iteration(noise: &[u8], next: &mut impl FnMut() -> u64) {
 
 /// Launches [`HostileChannel`] workers with fresh noise per launch.
 struct HostileLauncher {
-    state: Rc<RefCell<u64>>,
+    rng: Prng,
 }
 
 impl Launcher for HostileLauncher {
     type Channel = HostileChannel;
 
     fn launch(&mut self) -> Result<HostileChannel, tairix_abi::Errno> {
-        let mut state = self.state.borrow_mut();
-        let mut next = || {
-            *state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            *state
-        };
-        let noise: Vec<u8> = (0..bounded(next(), MAX_NOISE))
-            .map(|_| low_byte(next() >> 21))
-            .collect();
+        let rng = &mut self.rng;
+        let mut noise = vec![0u8; rng.at_most(MAX_NOISE)];
+        rng.fill(&mut noise);
         let mut pending = u32::try_from(noise.len())
             .expect("bounded noise")
             .to_le_bytes()
@@ -667,16 +636,10 @@ impl Launcher for HostileLauncher {
 #[test]
 fn decode_surface_never_panics_for_any_input_or_reply() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "decode_surface_never_panics_for_any_input_or_reply",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = move || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut honest = ParserSandbox::new(
         LoopbackLauncher::new(DecodeService::default as fn() -> DecodeService),
@@ -694,10 +657,9 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         LoopbackLauncher::new(TimeSyncService::default as fn() -> TimeSyncService),
         SilentSink,
     );
-    let hostile_state = Rc::new(RefCell::new(next()));
     let mut hostile = ParserSandbox::new(
         HostileLauncher {
-            state: hostile_state,
+            rng: Prng::new(rng.next_u64()),
         },
         SilentSink,
     );
@@ -708,32 +670,31 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
     loop {
         // 1. A container template with a handful of bytes flipped, plus a
         //    random truncation, summarised through the honest worker.
-        let template = if next() & 1 == 0 { &wasm } else { &rxe };
+        let template = if rng.next_u64() & 1 == 0 { &wasm } else { &rxe };
         let mut mutated = template.clone();
-        for _ in 0..bounded(next(), 6) {
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+        for _ in 0..rng.at_most(6) {
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         let _ = container_summary(&mut honest, &mutated);
-        let cut = bounded(next(), mutated.len());
+        let cut = rng.at_most(mutated.len());
         let _ = container_summary(&mut honest, &mutated[..cut]);
 
         // 2. Pure noise as an input file and as a manifest.
-        let noise: Vec<u8> = (0..bounded(next(), MAX_NOISE))
-            .map(|_| low_byte(next() >> 29))
-            .collect();
+        let mut noise = vec![0u8; rng.at_most(MAX_NOISE)];
+        rng.fill(&mut noise);
         let _ = container_summary(&mut honest, &noise);
         let _ = manifest_summary(&mut honest, &noise);
 
         // 3. Noise disassembled under every ISA at a random address,
         //    depth, and window size.
-        let isa = ISAS[bounded(next(), ISAS.len() - 1)];
+        let isa = *rng.pick(&ISAS);
         let _ = disassemble(
             &mut honest,
             isa,
-            next(),
-            u32::from(low_byte(next())),
-            u32::from(low_byte(next())),
+            rng.next_u64(),
+            u32::from(rng.next_u8()),
+            u32::from(rng.next_u8()),
             &noise,
         );
 
@@ -741,32 +702,32 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         //    to keep this loop's body a readable, bounded size. Returns the
         //    render mode used, so the caller can reuse it against the
         //    hostile worker.
-        let mode = fuzz_help_iteration(&mut honest_help, &noise, &mut next);
+        let mode = fuzz_help_iteration(&mut honest_help, &noise, &mut rng);
 
         // 6. The icon-rasterisation and wallpaper surfaces, fuzzed in
         //    their own helpers to keep this loop's body a readable,
         //    bounded size. Both run over the same worker instance,
         //    exercising the two surfaces interleaved.
-        let side = fuzz_icon_iteration(&mut honest_icon, &noise, &mut next);
+        let side = fuzz_icon_iteration(&mut honest_icon, &noise, &mut rng);
         let (wallpaper_w, wallpaper_h, fit) =
-            fuzz_wallpaper_iteration(&mut honest_icon, &noise, &mut next);
-        fuzz_view_iteration(&mut honest_icon, &noise, &mut next);
+            fuzz_wallpaper_iteration(&mut honest_icon, &noise, &mut rng);
+        fuzz_view_iteration(&mut honest_icon, &noise, &mut rng);
 
         // 6b. The duplex session seam: its inbound codec over the same
         //    noise, plus an honest round trip through the in-process fake.
-        fuzz_session_iteration(&noise, &mut next);
+        fuzz_session_iteration(&noise, &mut rng);
 
         // 7. NTP server replies through the honest worker, in its own helper
         //    to keep this loop's body a readable, bounded size. Returns the
         //    nonce used, so the caller can reuse it against the hostile
         //    worker too.
-        let (nonce, received) = fuzz_ntp_iteration(&mut honest_time, &noise, &mut next);
+        let (nonce, received) = fuzz_ntp_iteration(&mut honest_time, &noise, &mut rng);
 
         // 8. The hostile worker: framed noise replies into every client
         //    decoder. Each request crashes and replaces the worker, so
         //    every iteration sees fresh noise.
         let _ = container_summary(&mut hostile, &rxe);
-        let _ = manifest_summary(&mut hostile, &noise[..bounded(next(), noise.len())]);
+        let _ = manifest_summary(&mut hostile, &noise[..rng.at_most(noise.len())]);
         let _ = disassemble(&mut hostile, isa, 0, 0, 8, b"\x90\x90");
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE, &mut NoFonts);

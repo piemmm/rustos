@@ -14,7 +14,7 @@
 //!   equal database (the format has one meaning).
 //!
 //! TAIRiX pulls in no external fuzz runner: a
-//! per-run-seeded LCG mutates real databases built through the public
+//! per-run-seeded `Prng` mutates real databases built through the public
 //! constructors, splices hostile record lines under a valid header, and
 //! feeds pure noise. A plain `cargo test` runs the fixed
 //! [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` exports
@@ -26,6 +26,7 @@
 
 use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
+use tairix_fuzzseed::Prng;
 use tairix_users::{
     AccountState, Gid, Identity, StoredPassword, Uid, UserRecord, UsersDb, FORMAT_HEADER,
     MIN_ITERATIONS,
@@ -102,12 +103,6 @@ fn templates() -> Vec<String> {
     ]
 }
 
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
-
 /// Parse `text`; on success, the round-trip invariant must hold. Must never
 /// panic, whatever the input.
 fn exercise_never_panics(text: &str) {
@@ -127,31 +122,25 @@ fn parsing_any_users_database_never_panics() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let corpus = templates();
 
-    // The LCG seed is drawn and logged by `tairix_fuzzseed::start`: fresh
+    // The seed is drawn and logged by `tairix_fuzzseed::start`: fresh
     // per run, reproducible from the logged value via `TAIRIX_FUZZ_SEED`.
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "parsing_any_users_database_never_panics",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let mut iteration: u64 = 0;
     loop {
         // 1. A real database with a handful of bytes swapped for alphabet
         //    bytes, hammering the header, field separators, and encodings.
-        let template = &corpus[bounded(next(), corpus.len() - 1)];
+        let template = rng.pick(&corpus);
         let mut mutated = template.clone().into_bytes();
-        for _ in 0..bounded(next(), 12) {
+        for _ in 0..rng.at_most(12) {
             if mutated.is_empty() {
                 break;
             }
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] = ALPHABET[bounded(next() >> 17, ALPHABET.len() - 1)];
+            let pos = rng.below(mutated.len());
+            mutated[pos] = *rng.pick(ALPHABET);
         }
         if let Ok(text) = core::str::from_utf8(&mutated) {
             exercise_never_panics(text);
@@ -159,7 +148,7 @@ fn parsing_any_users_database_never_panics() {
 
         // 2. A truncation of a real database, driving the field-count and
         //    record-shape checks.
-        let keep = bounded(next(), template.len());
+        let keep = rng.at_most(template.len());
         if let Some(prefix) = template.get(..keep) {
             exercise_never_panics(prefix);
         }
@@ -168,19 +157,15 @@ fn parsing_any_users_database_never_panics() {
         //    format's own alphabet.
         let mut spliced = String::from(FORMAT_HEADER);
         spliced.push('\n');
-        for _ in 0..bounded(next(), MAX_NOISE) {
-            spliced.push(char::from(
-                ALPHABET[bounded(next() >> 23, ALPHABET.len() - 1)],
-            ));
+        for _ in 0..rng.at_most(MAX_NOISE) {
+            spliced.push(char::from(*rng.pick(ALPHABET)));
         }
         exercise_never_panics(&spliced);
 
         // 4. Pure alphabet noise straight into the parser.
         let mut noise = String::new();
-        for _ in 0..bounded(next(), MAX_NOISE) {
-            noise.push(char::from(
-                ALPHABET[bounded(next() >> 29, ALPHABET.len() - 1)],
-            ));
+        for _ in 0..rng.at_most(MAX_NOISE) {
+            noise.push(char::from(*rng.pick(ALPHABET)));
         }
         exercise_never_panics(&noise);
 

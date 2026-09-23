@@ -26,7 +26,7 @@
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
-use tairix_fuzzseed::Lcg;
+use tairix_fuzzseed::Prng;
 use tairix_inline::intrusive::MAX_INDEX;
 use tairix_inline::{IntrusiveList, Link, LinkError};
 
@@ -91,15 +91,15 @@ impl Tracked {
 /// Draw an index the sibling list does not hold, so the operation stays inside
 /// the container's contract. Indices at or above the store's node count are
 /// never held, so the candidate set is never empty.
-fn draw_own(prng: &mut Lcg, other: &Tracked) -> usize {
+fn draw_own(prng: &mut Prng, other: &Tracked) -> usize {
     let candidates: Vec<usize> = (0..DRAW).filter(|&node| !other.holds(node)).collect();
-    candidates[prng.below(candidates.len())]
+    *prng.pick(&candidates)
 }
 
 /// A push takes any index: one another list holds is refused outright, so the
 /// full sharing is exercised here.
 fn step_push(
-    prng: &mut Lcg,
+    prng: &mut Prng,
     mine: &mut Tracked,
     other: &Tracked,
     store: &mut [Link],
@@ -131,7 +131,7 @@ fn step_push(
 
 /// Positional insertion, against an anchor the sibling list does not hold.
 fn step_insert(
-    prng: &mut Lcg,
+    prng: &mut Prng,
     mine: &mut Tracked,
     other: &Tracked,
     store: &mut [Link],
@@ -171,7 +171,7 @@ fn step_insert(
 }
 
 /// A pop from either end reports exactly the model's end node.
-fn step_pop(prng: &mut Lcg, mine: &mut Tracked, store: &mut [Link]) {
+fn step_pop(prng: &mut Prng, mine: &mut Tracked, store: &mut [Link]) {
     if prng.below(2) == 0 {
         let outcome = mine.list.pop_front(store);
         assert_eq!(outcome, mine.model.first().copied());
@@ -189,7 +189,7 @@ fn step_pop(prng: &mut Lcg, mine: &mut Tracked, store: &mut [Link]) {
 
 /// Unlink or touch a node the sibling list does not hold.
 fn step_remove(
-    prng: &mut Lcg,
+    prng: &mut Prng,
     mine: &mut Tracked,
     other: &Tracked,
     store: &mut [Link],
@@ -219,7 +219,7 @@ fn step_remove(
 
 /// Apply one drawn operation to whichever list it targets, and to that list's
 /// model, requiring the two to agree on whether it could apply at all.
-fn step(prng: &mut Lcg, lists: &mut [Tracked; 2], store: &mut [Link]) {
+fn step(prng: &mut Prng, lists: &mut [Tracked; 2], store: &mut [Link]) {
     let which = prng.below(2);
     let (first, second) = lists.split_at_mut(1);
     let (mine, other) = if which == 0 {
@@ -238,7 +238,7 @@ fn step(prng: &mut Lcg, lists: &mut [Tracked; 2], store: &mut [Link]) {
 }
 
 /// Drive two lists over one store through a random operation stream.
-fn sweep(prng: &mut Lcg) {
+fn sweep(prng: &mut Prng) {
     let mut store = [Link::UNLINKED; NODES];
     let mut lists = [Tracked::new(), Tracked::new()];
 
@@ -300,7 +300,7 @@ fn a_reserved_index_is_always_refused() {
 
 #[test]
 fn intrusive_lists_match_their_models_and_never_panic() {
-    let mut prng = Lcg::new(tairix_fuzzseed::start(
+    let mut prng = Prng::new(tairix_fuzzseed::start(
         "intrusive_lists_match_their_models_and_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));

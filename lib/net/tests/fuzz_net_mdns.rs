@@ -26,6 +26,7 @@
 //! `cargo xtask fuzz`.
 
 use tairix_abi::time::Duration64;
+use tairix_fuzzseed::Prng;
 use tairix_hash::HashSeed;
 use tairix_net::dns::{Name, RecordType};
 use tairix_net::dnssd::{
@@ -59,7 +60,7 @@ fn engine() -> MdnsEngine {
 
 /// A name drawn from a small set, so the engine explores real matches
 /// rather than only failing to match.
-fn draw_name(rng: &mut Lcg) -> Name {
+fn draw_name(rng: &mut Prng) -> Name {
     const NAMES: [&str; 5] = [
         "printer.local",
         "scanner.local",
@@ -71,10 +72,10 @@ fn draw_name(rng: &mut Lcg) -> Name {
         return Name::from_labels(&[b"Hall Printer", b"_ipp", b"_tcp", b"local"])
             .expect("labels encode");
     }
-    Name::encode(NAMES[rng.index(NAMES.len())]).expect("fixed names encode")
+    Name::encode(rng.pick(&NAMES)).expect("fixed names encode")
 }
 
-fn draw_rdata(rng: &mut Lcg) -> RData {
+fn draw_rdata(rng: &mut Prng) -> RData {
     match rng.next_u64() % 6 {
         0 => RData::A(Ipv4Addr::from(rng.next_u32().to_be_bytes())),
         1 => {
@@ -116,12 +117,12 @@ fn alloc_vec(len: usize) -> Vec<u8> {
 /// A `TXT` record whose length-prefixed strings span exactly, with drawn
 /// content — so the constructor is exercised on accepted input, and the
 /// DNS-SD reader on attribute text no publisher would have written.
-fn draw_txt(rng: &mut Lcg) -> TxtRecord {
-    let mut octets = alloc_vec(rng.index(MAX_TXT_LEN / 4));
+fn draw_txt(rng: &mut Prng) -> TxtRecord {
+    let mut octets = alloc_vec(rng.below(MAX_TXT_LEN / 4));
     let mut pos = 0usize;
     while pos < octets.len() {
         let room = octets.len() - pos - 1;
-        let take = if room == 0 { 0 } else { rng.index(room + 1) };
+        let take = if room == 0 { 0 } else { rng.below(room + 1) };
         octets[pos] = u8::try_from(take).unwrap_or(0);
         if let Some(body) = octets.get_mut(pos + 1..pos + 1 + take) {
             rng.fill(body);
@@ -131,7 +132,7 @@ fn draw_txt(rng: &mut Lcg) -> TxtRecord {
     TxtRecord::new(&octets).unwrap_or_else(|_| TxtRecord::empty())
 }
 
-fn draw_record(rng: &mut Lcg) -> Record {
+fn draw_record(rng: &mut Prng) -> Record {
     let name = draw_name(rng);
     let data = draw_rdata(rng);
     let mut record = if rng.next_u64() & 1 == 0 {
@@ -174,13 +175,13 @@ fn exercise_parse(bytes: &[u8]) {
 
 /// Drive the cache with arbitrary records from arbitrary sources and check
 /// the bounds hold whatever is thrown at it.
-fn exercise_cache(rng: &mut Lcg) {
+fn exercise_cache(rng: &mut Prng) {
     let mut cache = RecordCache::new(HashSeed::UNKEYED);
     let mut sources = Vec::new();
     for _ in 0..64 {
         let now = Duration64::from_secs(i64::from(rng.next_u32() % 300));
         let record = draw_record(rng);
-        let source = on_link(u8::try_from(rng.index(6)).unwrap_or(0));
+        let source = on_link(u8::try_from(rng.below(6)).unwrap_or(0));
         if !sources.contains(&source) {
             sources.push(source);
         }
@@ -208,13 +209,13 @@ fn exercise_cache(rng: &mut Lcg) {
 }
 
 /// Drive the whole engine with arbitrary datagrams at arbitrary times.
-fn exercise_engine(rng: &mut Lcg) {
-    let mut csprng = Lcg::new(rng.next_u64());
+fn exercise_engine(rng: &mut Prng) {
+    let mut csprng = Prng::new(rng.next_u64());
     let mut rand = || csprng.next_u32();
     let mut engine = engine();
     let mut buf = [0u8; BUF];
 
-    for _ in 0..=rng.index(3) {
+    for _ in 0..=rng.below(3) {
         let data = [draw_rdata(rng)];
         let kind = if rng.next_u64() & 1 == 0 {
             NameKind::Host
@@ -230,7 +231,7 @@ fn exercise_engine(rng: &mut Lcg) {
             &mut rand,
         );
     }
-    for _ in 0..rng.index(3) {
+    for _ in 0..rng.below(3) {
         let qtype = if rng.next_u64() & 1 == 0 {
             QuestionType::Any
         } else {
@@ -246,9 +247,9 @@ fn exercise_engine(rng: &mut Lcg) {
         let now = Duration64::from_nanos(millis.saturating_mul(1_000_000));
         match rng.next_u64() % 3 {
             0 => {
-                let size = rng.index(datagram.len() + 1);
+                let size = rng.below(datagram.len() + 1);
                 rng.fill(&mut datagram[..size]);
-                let source = on_link(u8::try_from(rng.index(8)).unwrap_or(0));
+                let source = on_link(u8::try_from(rng.below(8)).unwrap_or(0));
                 let port = if rng.next_u64() & 1 == 0 {
                     PORT
                 } else {
@@ -262,7 +263,7 @@ fn exercise_engine(rng: &mut Lcg) {
                 // A structurally valid message, so the deeper paths are
                 // reached rather than only the parser's rejection.
                 let built = build_message(rng);
-                let source = on_link(u8::try_from(rng.index(8)).unwrap_or(0));
+                let source = on_link(u8::try_from(rng.below(8)).unwrap_or(0));
                 let emitted = engine.on_message(now, &built, source, PORT, &mut rand, &mut buf);
                 check_emit(emitted.map(|emit| (emit.to, emit.len)), &buf);
             }
@@ -294,7 +295,7 @@ fn exercise_engine(rng: &mut Lcg) {
 }
 
 /// Drive the DNS-SD grammar with names and attributes a peer chose.
-fn exercise_dnssd(rng: &mut Lcg) {
+fn exercise_dnssd(rng: &mut Prng) {
     // Both shapes every call. A harness that leaves a structural case to a
     // coin flip can spend a whole run on one side of it.
     for with_instance in [true, false] {
@@ -302,7 +303,7 @@ fn exercise_dnssd(rng: &mut Lcg) {
     }
     // Labels of wholly arbitrary bytes: parsing must be total on those too,
     // not only on the shapes a publisher would have written.
-    let mut random = alloc_vec(1 + rng.index(20));
+    let mut random = alloc_vec(1 + rng.below(20));
     rng.fill(&mut random);
     if let Ok(name) = Name::from_labels(&[&random]) {
         exercise_dnssd_name(&name);
@@ -313,7 +314,7 @@ fn exercise_dnssd(rng: &mut Lcg) {
 
 /// A name assembled from parts that are sometimes legal and sometimes not,
 /// so both the accepting and the refusing paths are reached.
-fn draw_dnssd_name(rng: &mut Lcg, with_instance: bool) -> Name {
+fn draw_dnssd_name(rng: &mut Prng, with_instance: bool) -> Name {
     const INSTANCES: [&[u8]; 4] = [
         b"Hall Printer",
         "Caf\u{e9}".as_bytes(),
@@ -326,12 +327,12 @@ fn draw_dnssd_name(rng: &mut Lcg, with_instance: bool) -> Name {
 
     let mut labels: Vec<&[u8]> = Vec::new();
     if with_instance {
-        labels.push(INSTANCES[rng.index(INSTANCES.len())]);
+        labels.push(*rng.pick(&INSTANCES));
     }
-    labels.push(SERVICES[rng.index(SERVICES.len())]);
-    labels.push(TRANSPORTS[rng.index(TRANSPORTS.len())]);
-    for _ in 0..rng.index(4) {
-        labels.push(DOMAINS[rng.index(DOMAINS.len())]);
+    labels.push(*rng.pick(&SERVICES));
+    labels.push(*rng.pick(&TRANSPORTS));
+    for _ in 0..rng.below(4) {
+        labels.push(*rng.pick(&DOMAINS));
     }
     Name::from_labels(&labels).unwrap_or_else(|_| Name::root())
 }
@@ -361,7 +362,7 @@ fn exercise_dnssd_name(name: &Name) {
 
 /// Every attribute the reader yields is one the RFC's grammar admits, and
 /// `get` answers with the first occurrence of a repeated key.
-fn exercise_dnssd_txt(rng: &mut Lcg) {
+fn exercise_dnssd_txt(rng: &mut Prng) {
     let record = draw_txt(rng);
     let mut first_seen: Vec<&[u8]> = Vec::new();
     for attribute in TxtAttributes::new(&record) {
@@ -389,15 +390,15 @@ fn exercise_dnssd_txt(rng: &mut Lcg) {
 }
 
 /// A record the builder produces reads back as exactly what it accepted.
-fn exercise_dnssd_builder(rng: &mut Lcg) {
+fn exercise_dnssd_builder(rng: &mut Prng) {
     let mut builder = TxtBuilder::new();
     let mut accepted: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
-    for _ in 0..rng.index(10) {
+    for _ in 0..rng.below(10) {
         // Keys are drawn inside the printable range so the accepting path
         // is reached; the refusals have their own unit tests.
-        let key: Vec<u8> = (0..=rng.index(6))
+        let key: Vec<u8> = (0..=rng.below(6))
             .map(|_| {
-                let byte = u8::try_from(0x20 + rng.index(0x5F)).unwrap_or(b'k');
+                let byte = u8::try_from(0x20 + rng.below(0x5F)).unwrap_or(b'k');
                 if byte == b'=' {
                     b'k'
                 } else {
@@ -405,7 +406,7 @@ fn exercise_dnssd_builder(rng: &mut Lcg) {
                 }
             })
             .collect();
-        let mut value = alloc_vec(rng.index(MAX_TXT_STRING_LEN));
+        let mut value = alloc_vec(rng.below(MAX_TXT_STRING_LEN));
         rng.fill(&mut value);
         let drawn = if rng.next_u64() & 1 == 0 {
             TxtValue::Flag
@@ -456,13 +457,13 @@ fn check_emit(emitted: Option<(Destination, usize)>, buf: &[u8]) {
 }
 
 /// Build a structurally valid message out of drawn parts.
-fn build_message(rng: &mut Lcg) -> Vec<u8> {
+fn build_message(rng: &mut Prng) -> Vec<u8> {
     let mut out = [0u8; BUF];
     let len = {
         let mut writer =
             tairix_net::mdns::MessageWriter::new(&mut out, rng.next_u16(), rng.next_u64() & 1 == 0)
                 .expect("a header fits");
-        for _ in 0..rng.index(3) {
+        for _ in 0..rng.below(3) {
             let qtype = match rng.next_u64() % 3 {
                 0 => QuestionType::Any,
                 1 => QuestionType::Record(RecordType::Ptr),
@@ -472,7 +473,7 @@ fn build_message(rng: &mut Lcg) -> Vec<u8> {
             question.unicast_response = rng.next_u64() & 1 == 0;
             let _ = writer.push_question(&question);
         }
-        for _ in 0..rng.index(6) {
+        for _ in 0..rng.below(6) {
             let section = match rng.next_u64() % 3 {
                 0 => tairix_net::mdns::Section::Answer,
                 1 => tairix_net::mdns::Section::Authority,
@@ -488,63 +489,9 @@ fn build_message(rng: &mut Lcg) -> Vec<u8> {
     out[..len].to_vec()
 }
 
-/// Lehmer-style LCG behind a `SplitMix64` output function — deterministic,
-/// no allocator, replaying exactly from its logged seed.
-///
-/// The mixer is load-bearing, not decoration. Bit *k* of a bare
-/// power-of-two-modulus LCG has period 2^(k+1), so its bit 0 simply
-/// alternates: a `& 1` coin flip drawn at a fixed point in the sequence is
-/// then a constant, an `index(2^k)` is a fixed cycle, and two of them are
-/// perfectly correlated. Measured here, that pinned a whole branch of this
-/// harness to one side for an entire run while every assertion inside it sat
-/// unreached. Mixing the output costs three multiplies a draw and removes
-/// the class.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        tairix_fuzzseed::splitmix64(self.0)
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        (self.next_u64() & 0xFFFF_FFFF) as u32
-    }
-
-    fn next_u16(&mut self) -> u16 {
-        (self.next_u64() & 0xFFFF) as u16
-    }
-
-    /// A bounded index in `[0, modulus)`; `modulus` must be non-zero.
-    fn index(&mut self, modulus: usize) -> usize {
-        (self.next_u64() & 0xFFFF) as usize % modulus
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
 #[test]
 fn random_inputs_never_panic() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -552,7 +499,7 @@ fn random_inputs_never_panic() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
-            let size = rng.index(buf.len() + 1);
+            let size = rng.below(buf.len() + 1);
             rng.fill(&mut buf[..size]);
             exercise_parse(&buf[..size]);
             exercise_parse(&build_message(&mut rng));

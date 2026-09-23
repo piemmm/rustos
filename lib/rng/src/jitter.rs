@@ -294,32 +294,29 @@ impl<T: TimeSource> EntropySource for JitterSource<T> {
 mod tests {
     use super::*;
 
-    /// A time source whose deltas vary strongly (an LCG driving the
-    /// increment), standing in for a healthy high-resolution counter. Two
-    /// consecutive equal deltas — and therefore a stuck classification — are
-    /// astronomically unlikely, so the health path is reliably exercised
-    /// without flakiness.
+    /// A time source whose deltas vary strongly, standing in for a healthy
+    /// high-resolution counter. Two consecutive equal deltas — and therefore
+    /// a stuck classification — are astronomically unlikely, so the health
+    /// path is reliably exercised without flakiness.
     struct VaryingClock {
         now: u64,
-        lcg: u64,
+        stream: tairix_fuzzseed::Prng,
     }
 
     impl VaryingClock {
         fn new(seed: u64) -> Self {
-            Self { now: 0, lcg: seed }
+            Self {
+                now: 0,
+                stream: tairix_fuzzseed::Prng::new(seed),
+            }
         }
     }
 
     impl TimeSource for VaryingClock {
         fn now(&mut self) -> u64 {
-            // Advance by a pseudo-random, always-positive increment so each
-            // measured delta (two `now` calls straddling the workload) is
-            // effectively random.
-            self.lcg = self
-                .lcg
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1);
-            self.now = self.now.wrapping_add((self.lcg >> 40) | 1);
+            // A pseudo-random, always-positive increment, so each measured
+            // delta (two `now` calls straddling the workload) is random.
+            self.now = self.now.wrapping_add((self.stream.next_u64() >> 40) | 1);
             self.now
         }
     }

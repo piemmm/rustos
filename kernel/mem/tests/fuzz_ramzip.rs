@@ -21,6 +21,7 @@
 //! `cargo xtask fuzz` extends the same PRNG stream until the exported
 //! wall-clock budget elapses.
 
+use tairix_fuzzseed::Prng;
 use tairix_kernel_mem::{
     AddressSpace, BootMemoryMap, CompressRefusal, EntropySource, FaultError, FrameAllocator,
     HostPageTable, MapFlags, MemoryClass, MemoryRegion, Page, PageCandidate, PhysAddr, PhysMap,
@@ -32,32 +33,11 @@ const SMOKE_ITERATIONS: u64 = 2_000;
 const TOTAL_FRAMES: usize = 512;
 const SPACE: u64 = 1;
 
-/// xor-shift* PRNG. Deterministic, fast, zero-allocation.
-struct Rng(u64);
-impl Rng {
-    const fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-    fn byte(&mut self) -> u8 {
-        (self.next_u64() & 0xFF) as u8
-    }
-}
-
 /// PRNG-seeded entropy source (test-only; not a real CSPRNG).
-struct RngEntropy(Rng);
+struct RngEntropy(Prng);
 impl EntropySource for RngEntropy {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), SealError> {
-        for b in out.iter_mut() {
-            *b = self.0.byte();
-        }
+        self.0.fill(out);
         Ok(())
     }
 }
@@ -98,7 +78,7 @@ fn rebalance_to_moderate(
 /// Map one page of patterned (compressible) content — run length and
 /// seed vary so blob sizes differ per cycle — and snapshot it.
 fn map_patterned_page(
-    rng: &mut Rng,
+    rng: &mut Prng,
     frames: &'static FrameAllocator,
     physmap: &SimPhysMap,
     space: &mut AddressSpace<HostPageTable>,
@@ -108,7 +88,7 @@ fn map_patterned_page(
     let page = Page::from_addr(VirtAddr::new(number * PAGE_SIZE as u64)).expect("page");
     let frame = frames.alloc(MemoryClass::Compressed).expect("page frame");
     let run = 32 + usize::try_from(rng.next_u64() % 224).expect("run");
-    let seed = rng.byte();
+    let seed = rng.next_u8();
     {
         let ptr = physmap.translate(frame.start(), PAGE_SIZE).expect("frame");
         // SAFETY: the window is exactly one page inside the
@@ -130,7 +110,7 @@ fn map_patterned_page(
 /// Corrupt the sealed entry for `page` — a bit-flip anywhere in the
 /// sealed form, a metadata truncation, or (half the time) nothing.
 /// Returns whether the entry was corrupted.
-fn maybe_corrupt_entry(rng: &mut Rng, ramzip: &mut Ramzip, page: Page) -> bool {
+fn maybe_corrupt_entry(rng: &mut Prng, ramzip: &mut Ramzip, page: Page) -> bool {
     let sealed_len = ramzip.entry_sealed_len(SPACE, page).expect("entry");
     match rng.next_u64() % 4 {
         0 => {
@@ -150,7 +130,7 @@ fn maybe_corrupt_entry(rng: &mut Rng, ramzip: &mut Ramzip, page: Page) -> bool {
 
 #[test]
 fn fuzz_ramzip_restore_is_fail_closed() {
-    let mut rng = Rng::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "fuzz_ramzip_restore_is_fail_closed",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -167,7 +147,7 @@ fn fuzz_ramzip_restore_is_fail_closed() {
     let physmap = SimPhysMap::new(PhysAddr::new(0), TOTAL_FRAMES * PAGE_SIZE);
     let mut space: AddressSpace<HostPageTable> = AddressSpace::new(HostPageTable::new());
     let caps = RamzipCaps::from_physical(FreeMemorySource::total_bytes(frames));
-    let mut ramzip = Ramzip::new(caps, &mut RngEntropy(Rng::new(7))).expect("tier");
+    let mut ramzip = Ramzip::new(caps, &mut RngEntropy(Prng::new(7))).expect("tier");
 
     // Pin the gauge at moderate pressure so the compression gate is
     // open; the harness rebalances the held frames each cycle.

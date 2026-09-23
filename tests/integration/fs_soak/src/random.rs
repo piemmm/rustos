@@ -29,6 +29,7 @@ use tairix_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
 use tairix_abi::DriverError;
 
 use crate::{RamBlock, SoakFs};
+use tairix_fuzzseed::Prng;
 
 /// Largest a single soak file is grown to, in bytes (64 KiB). Bounding
 /// file size keeps the byte-exact oracle's memory modest while still
@@ -51,51 +52,6 @@ const OPS_PER_ITERATION: u32 = 3000;
 /// Run a full remount + whole-volume re-verify every this many
 /// operations, proving committed state survives a fresh `open()`.
 const REMOUNT_EVERY: u32 = 500;
-
-/// A small, deterministic `SplitMix64` PRNG. Given the same seed it
-/// reproduces the same run, so a failure replays from its tagged seed;
-/// the *start* seed is what the runner randomizes per launch.
-struct Rng {
-    state: u64,
-}
-
-impl Rng {
-    /// Seed the generator.
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    /// Next 64-bit value (`SplitMix64`).
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// A value in `0..n` (returns `0` when `n == 0`).
-    fn below(&mut self, n: usize) -> usize {
-        if n == 0 {
-            return 0;
-        }
-        // `% n` keeps the result < n, so the narrowing to `usize` is safe;
-        // `try_from` avoids a lint-tripping `as` cast.
-        usize::try_from(self.next_u64() % (n as u64)).unwrap_or(0)
-    }
-
-    /// `true` with probability `1 / n` (and never when `n == 0`).
-    fn one_in(&mut self, n: usize) -> bool {
-        n != 0 && self.below(n) == 0
-    }
-
-    /// Fill `buf` with pseudo-random bytes.
-    fn fill(&mut self, buf: &mut [u8]) {
-        for byte in buf.iter_mut() {
-            *byte = self.next_u64().to_le_bytes()[0];
-        }
-    }
-}
 
 /// The oracle: what the filesystem *should* contain. `dirs` always holds
 /// the root (the empty path); `files` maps each file's path to the exact
@@ -247,7 +203,7 @@ fn list_names<F: FilesystemRead>(
 
 /// A printable, model-unique leaf name from `[a-z0-9_]`. Uniqueness is
 /// the caller's job (it retries on collision).
-fn random_name(rng: &mut Rng) -> String {
+fn random_name(rng: &mut Prng) -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
     let len = 1 + rng.below(12);
     let mut name = String::with_capacity(len);
@@ -264,7 +220,7 @@ fn random_name(rng: &mut Rng) -> String {
 
 /// Pick a fresh leaf name for a new child of `dir` that no model entry
 /// already uses, or `None` after a few attempts (the directory is busy).
-fn fresh_name(rng: &mut Rng, model: &Model, dir: &str) -> Option<String> {
+fn fresh_name(rng: &mut Prng, model: &Model, dir: &str) -> Option<String> {
     for _ in 0..8 {
         let name = random_name(rng);
         let path = join(dir, &name);
@@ -276,14 +232,14 @@ fn fresh_name(rng: &mut Rng, model: &Model, dir: &str) -> Option<String> {
 }
 
 /// Choose a random existing directory path (including the root).
-fn pick_dir(rng: &mut Rng, model: &Model) -> String {
+fn pick_dir(rng: &mut Prng, model: &Model) -> String {
     let n = model.dirs.len();
     let idx = rng.below(n);
     model.dirs.iter().nth(idx).cloned().unwrap_or_default()
 }
 
 /// Choose a random existing file path, or `None` when none exist.
-fn pick_file(rng: &mut Rng, model: &Model) -> Option<String> {
+fn pick_file(rng: &mut Prng, model: &Model) -> Option<String> {
     let n = model.files.len();
     if n == 0 {
         return None;
@@ -308,7 +264,7 @@ fn dirs_matching(model: &Model, want_empty: bool) -> Vec<String> {
 fn op_create_file<F: SoakFs>(
     fs: &mut F,
     model: &mut Model,
-    rng: &mut Rng,
+    rng: &mut Prng,
     seed: u64,
 ) -> Result<(), String> {
     if model.files.len() >= MAX_FILES {
@@ -333,7 +289,7 @@ fn op_create_file<F: SoakFs>(
 fn op_create_dir<F: SoakFs>(
     fs: &mut F,
     model: &mut Model,
-    rng: &mut Rng,
+    rng: &mut Prng,
     seed: u64,
 ) -> Result<(), String> {
     // `dirs` includes the root, so the live sub-directory count is one
@@ -361,7 +317,7 @@ fn op_create_dir<F: SoakFs>(
 fn op_write<F: SoakFs>(
     fs: &mut F,
     model: &mut Model,
-    rng: &mut Rng,
+    rng: &mut Prng,
     seed: u64,
 ) -> Result<(), String> {
     let Some(path) = pick_file(rng, model) else {
@@ -410,14 +366,14 @@ fn op_write<F: SoakFs>(
 fn op_truncate<F: SoakFs>(
     fs: &mut F,
     model: &mut Model,
-    rng: &mut Rng,
+    rng: &mut Prng,
     seed: u64,
 ) -> Result<(), String> {
     let Some(path) = pick_file(rng, model) else {
         return Ok(());
     };
     let len = model.files.get(&path).map_or(0, Vec::len);
-    let new_size = if rng.one_in(2) {
+    let new_size = if rng.below(2) == 0 {
         len + rng.below(MAX_FILE_BYTES - len + 1) // grow (zero-extend)
     } else {
         rng.below(len + 1) // shrink
@@ -440,7 +396,7 @@ fn op_truncate<F: SoakFs>(
 fn op_remove_file<F: SoakFs>(
     fs: &mut F,
     model: &mut Model,
-    rng: &mut Rng,
+    rng: &mut Prng,
     seed: u64,
 ) -> Result<(), String> {
     let Some(path) = pick_file(rng, model) else {
@@ -463,7 +419,7 @@ fn op_remove_file<F: SoakFs>(
 fn op_remove_dir<F: SoakFs>(
     fs: &mut F,
     model: &mut Model,
-    rng: &mut Rng,
+    rng: &mut Prng,
     seed: u64,
 ) -> Result<(), String> {
     let candidates = dirs_matching(model, true);
@@ -490,7 +446,7 @@ fn op_remove_dir<F: SoakFs>(
 fn op_move<F: SoakFs>(
     fs: &mut F,
     model: &mut Model,
-    rng: &mut Rng,
+    rng: &mut Prng,
     seed: u64,
 ) -> Result<(), String> {
     let Some(src) = pick_file(rng, model) else {
@@ -555,7 +511,7 @@ fn op_move<F: SoakFs>(
 fn op_read_verify<F: SoakFs>(
     fs: &mut F,
     model: &mut Model,
-    rng: &mut Rng,
+    rng: &mut Prng,
     seed: u64,
 ) -> Result<(), String> {
     let Some(path) = pick_file(rng, model) else {
@@ -586,7 +542,7 @@ fn op_read_verify<F: SoakFs>(
 fn op_negative<F: SoakFs>(
     fs: &mut F,
     model: &Model,
-    rng: &mut Rng,
+    rng: &mut Prng,
     seed: u64,
 ) -> Result<(), String> {
     let root = fs.root();
@@ -720,7 +676,7 @@ pub fn random_exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), St
     let block = RamBlock::new(device_bytes);
     let mut fs = ck(F::format_volume(block), "format", seed)?;
     let mut model = Model::new();
-    let mut rng = Rng::new(seed);
+    let mut rng = Prng::new(seed);
 
     for step in 0..OPS_PER_ITERATION {
         match rng.below(100) {
@@ -735,7 +691,7 @@ pub fn random_exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), St
         }
 
         // Sprinkle in a fail-closed negative probe.
-        if rng.one_in(9) {
+        if rng.below(9) == 0 {
             op_negative(&mut fs, &model, &mut rng, seed)?;
         }
 
@@ -755,44 +711,7 @@ pub fn random_exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
-    use super::{fresh_name, join, random_name, split_parent, Model, Rng};
-
-    #[test]
-    fn rng_is_deterministic_from_its_seed() {
-        let mut a = Rng::new(0x1234_5678);
-        let mut b = Rng::new(0x1234_5678);
-        for _ in 0..1000 {
-            assert_eq!(a.next_u64(), b.next_u64());
-        }
-    }
-
-    #[test]
-    fn different_seeds_diverge() {
-        let mut a = Rng::new(1);
-        let mut b = Rng::new(2);
-        // Overwhelmingly likely to differ in the first few draws.
-        let diverged = (0..8).any(|_| a.next_u64() != b.next_u64());
-        assert!(diverged);
-    }
-
-    #[test]
-    fn below_stays_in_range_and_handles_zero() {
-        let mut rng = Rng::new(99);
-        assert_eq!(rng.below(0), 0);
-        for _ in 0..1000 {
-            assert!(rng.below(7) < 7);
-        }
-    }
-
-    #[test]
-    fn fill_writes_every_byte() {
-        let mut rng = Rng::new(7);
-        let mut buf = [0u8; 64];
-        rng.fill(&mut buf);
-        // Not a strict requirement, but a 64-byte all-zero fill from this
-        // PRNG would signal a broken generator.
-        assert!(buf.iter().any(|&b| b != 0));
-    }
+    use super::{fresh_name, join, random_name, split_parent, Model, Prng};
 
     #[test]
     fn split_parent_separates_leaf_from_directory() {
@@ -812,7 +731,7 @@ mod tests {
 
     #[test]
     fn random_name_is_non_empty_bounded_and_not_a_dotlink() {
-        let mut rng = Rng::new(0xDEAD_BEEF);
+        let mut rng = Prng::new(0xDEAD_BEEF);
         for _ in 0..2000 {
             let name = random_name(&mut rng);
             assert!(!name.is_empty());
@@ -843,7 +762,7 @@ mod tests {
     #[test]
     fn fresh_name_avoids_existing_children() {
         let mut model = Model::new();
-        let mut rng = Rng::new(5);
+        let mut rng = Prng::new(5);
         for _ in 0..40 {
             let name = fresh_name(&mut rng, &model, "").expect("a free name exists");
             let path = join("", &name);

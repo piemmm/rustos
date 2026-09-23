@@ -10,30 +10,20 @@
 //!   headers, sections, names, bytes, symbol tables) can be walked
 //!   without a panic or an out-of-bounds read.
 //!
-//! TAIRiX pulls in no external fuzz runner: a per-run-seeded LCG mutates
+//! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` mutates
 //! a hand-assembled valid ELF64 template and mixes in pure noise. A plain
 //! `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed; `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to
 //! extend the loop to a wall-clock budget.
 
 use tairix_binfmt::elf::ElfView;
+use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
 /// Largest arbitrary byte string fed to the decoder.
 const MAX_NOISE: usize = 1024;
-
-/// Low byte of `x`, without a narrowing `as` cast.
-fn low_byte(x: u64) -> u8 {
-    x.to_le_bytes()[0]
-}
-
-/// `x` reduced into `0..=max` as a `usize`, without a narrowing `as` cast.
-fn bounded(x: u64, max: usize) -> usize {
-    let span = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    usize::try_from(x % span).unwrap_or(0)
-}
 
 fn push_u16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_le_bytes());
@@ -135,16 +125,10 @@ fn exercise(bytes: &[u8]) {
 #[test]
 fn parse_never_panics_for_any_input() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut state: u64 = tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "parse_never_panics_for_any_input",
         tairix_fuzzseed::FUZZ_SEED_ENV,
-    );
-    let mut next = || {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        state
-    };
+    ));
 
     let template = valid_elf();
 
@@ -152,23 +136,22 @@ fn parse_never_panics_for_any_input() {
     loop {
         // 1. The valid template with a handful of bytes flipped.
         let mut mutated = template.clone();
-        for _ in 0..bounded(next(), 8) {
-            let pos = bounded(next(), mutated.len() - 1);
-            mutated[pos] ^= low_byte(next() >> 17);
+        for _ in 0..rng.at_most(8) {
+            let pos = rng.below(mutated.len());
+            mutated[pos] ^= rng.next_u8();
         }
         exercise(&mutated);
 
         // 2. The same, truncated or extended at random.
-        let cut = bounded(next(), mutated.len());
+        let cut = rng.at_most(mutated.len());
         exercise(&mutated[..cut]);
-        mutated.extend((0..bounded(next(), 64)).map(|_| low_byte(next() >> 23)));
+        mutated.extend((0..rng.at_most(64)).map(|_| rng.next_u8()));
         exercise(&mutated);
 
         // 3. Pure noise, optionally forced to open with the ELF magic.
-        let mut noise: Vec<u8> = (0..bounded(next(), MAX_NOISE))
-            .map(|_| low_byte(next() >> 29))
-            .collect();
-        if noise.len() >= 6 && next() & 1 == 0 {
+        let mut noise = vec![0u8; rng.at_most(MAX_NOISE)];
+        rng.fill(&mut noise);
+        if noise.len() >= 6 && rng.next_u64() & 1 == 0 {
             noise[..6].copy_from_slice(b"\x7fELF\x02\x01");
         }
         exercise(&noise);

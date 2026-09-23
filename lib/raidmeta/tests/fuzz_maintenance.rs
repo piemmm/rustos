@@ -73,7 +73,7 @@ fn well_formed() -> [u8; MaintenanceRecord::WIRE_LEN] {
 
 #[test]
 fn random_short_inputs_never_panic() {
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "maintenance_random_short_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -83,7 +83,7 @@ fn random_short_inputs_never_panic() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
-            let size = ((rng.next_u64() & 0xFFFF) as usize) % (buf.len() + 1);
+            let size = rng.at_most(buf.len());
             rng.fill(&mut buf[..size]);
             exercise(&buf[..size]);
         }
@@ -103,7 +103,7 @@ fn well_sealed_but_corrupted_records_never_panic() {
     // well-formed record and resealing it. Every interior check (flags,
     // canonical absent fields, the timestamp, the identity binding) is then
     // genuinely reached, and any record still accepted must round-trip.
-    let mut rng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
+    let mut rng = tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(
         "maintenance_well_sealed_but_corrupted_records_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -113,8 +113,8 @@ fn well_sealed_but_corrupted_records_never_panic() {
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let mut buf = template;
-            let start = ((rng.next_u64() & 0xFFFF) as usize) % body;
-            let len = 1 + ((rng.next_u64() & 0xFFFF) as usize) % (body - start);
+            let start = rng.below(body);
+            let len = 1 + rng.below(body - start);
             rng.fill(&mut buf[start..start + len]);
             let crc = tairix_crc32c::checksum(&buf[..body]);
             buf[body..].copy_from_slice(&crc.to_le_bytes());

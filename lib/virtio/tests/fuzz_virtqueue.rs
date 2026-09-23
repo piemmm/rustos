@@ -33,6 +33,7 @@
 //! drawing from the *same continuing* PRNG stream until the budget
 //! elapses, while the logged seed keeps any failure reproducible.
 
+use tairix_fuzzseed::Prng;
 use tairix_virtio::{
     ChainSegment, ChainView, Direction, DmaHost, DmaSlab, MockHost, MockTransport, SplitQueue,
     VirtioError,
@@ -41,22 +42,6 @@ use tairix_virtio::{
 const SMOKE_ITERATIONS: u64 = 20_000;
 const QUEUE_SIZE: u16 = 16;
 
-/// xor-shift* PRNG. Deterministic, fast, zero-allocation.
-struct Rng(u64);
-impl Rng {
-    const fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-}
-
 /// Build a `'static` `MockHost` the queue can borrow for the process.
 fn static_host() -> &'static MockHost {
     Box::leak(Box::new(MockHost::new()))
@@ -64,7 +49,7 @@ fn static_host() -> &'static MockHost {
 
 #[test]
 fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
-    let mut rng = Rng::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "fuzz_poll_used_is_fail_closed_against_a_hostile_device",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -114,7 +99,7 @@ fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
             // chain `next` link). Out-of-range offsets are no-ops by
             // design, so the harness never writes outside driver storage.
             let off = usize::try_from(rng.next_u64() % 320).unwrap_or(0);
-            let byte = (rng.next_u64() & 0xFF) as u8;
+            let byte = rng.next_u8();
             t.poke_descriptor(0, off, byte).expect("queue programmed");
 
             // Half the time aim inside the table, half the time anywhere
@@ -122,9 +107,9 @@ fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
             let head = if rng.next_u64() & 1 == 0 {
                 u16::try_from(rng.next_u64() % u64::from(QUEUE_SIZE)).unwrap_or(0)
             } else {
-                (rng.next_u64() & 0xFFFF) as u16
+                rng.next_u16()
             };
-            let written = (rng.next_u64() & 0xFFFF_FFFF) as u32;
+            let written = rng.next_u32();
             t.publish_raw_used(0, head, written)
                 .expect("queue programmed");
 

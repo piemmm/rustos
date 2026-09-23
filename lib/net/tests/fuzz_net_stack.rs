@@ -16,6 +16,7 @@
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, NetOffloads};
 use tairix_abi::time::Duration64;
+use tairix_fuzzseed::Prng;
 use tairix_net::eth::{EthernetFrame, ETHERNET_HEADER_LEN};
 use tairix_net::iface::{TempAddrSource, MAX_IPV6_ADDRS};
 use tairix_net::stack::{Stack, StackConfig, StackOutput};
@@ -32,42 +33,13 @@ const SMOKE_ITERATIONS: u64 = 5_000;
 const OUR_MAC: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
 const PEER_MAC: MacAddress = MacAddress([0x02, 0xBB, 0, 0, 0, 0x02]);
 
-/// Lehmer-style LCG — deterministic, no allocator. Identical to the
-/// generator in the sibling harnesses so failures reproduce one way.
+/// Temporary-address randomness drawn from the harness generator.
 #[derive(Debug)]
-struct Lcg(u64);
+struct TempRandom(Prng);
 
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 {
-            0x9E37_79B9_7F4A_7C15
-        } else {
-            seed
-        })
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-
-    fn fill(&mut self, buf: &mut [u8]) {
-        let mut i = 0;
-        while i < buf.len() {
-            let word = self.next_u64().to_le_bytes();
-            let take = core::cmp::min(8, buf.len() - i);
-            buf[i..i + take].copy_from_slice(&word[..take]);
-            i += take;
-        }
-    }
-}
-
-impl TempAddrSource for Lcg {
+impl TempAddrSource for TempRandom {
     fn fill_random(&mut self, out: &mut [u8]) {
-        self.fill(out);
+        self.0.fill(out);
     }
 }
 
@@ -88,7 +60,7 @@ fn fresh_stack() -> Stack {
     config.iface.privacy = true;
     let mut stack = Stack::new(
         &config,
-        Box::new(Lcg::new(0xF00D_C0DE)),
+        Box::new(TempRandom(Prng::new(0xF00D_C0DE))),
         Duration64::from_secs(0),
     )
     .expect("valid facts");
@@ -104,7 +76,7 @@ fn fresh_stack() -> Stack {
 
 #[test]
 fn random_frames_never_panic_and_state_stays_bounded() {
-    let mut rng = Lcg::new(tairix_fuzzseed::start(
+    let mut rng = Prng::new(tairix_fuzzseed::start(
         "random_frames_never_panic_and_state_stays_bounded",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
@@ -114,7 +86,7 @@ fn random_frames_never_panic_and_state_stays_bounded() {
         let mut buf = [0u8; 512];
         let mut secs: i64 = 0;
         for iteration in 0..SMOKE_ITERATIONS {
-            let size = ((rng.next_u64() & 0x3FF) as usize) % (buf.len() + 1);
+            let size = rng.at_most(buf.len());
             rng.fill(&mut buf[..size]);
             if size >= ETHERNET_HEADER_LEN {
                 // Bias toward frames the engine actually accepts:
@@ -148,7 +120,7 @@ fn random_frames_never_panic_and_state_stays_bounded() {
                 secs += 1;
                 let now = Duration64::from_secs(secs);
                 stack.advance(now, &mut out);
-                let dest = IpAddr::V4(Ipv4Addr::new(10, 0, 2, (rng.next_u64() & 0xFF) as u8));
+                let dest = IpAddr::V4(Ipv4Addr::new(10, 0, 2, rng.next_u8()));
                 let _ = stack.send_echo_request(dest, 1, 1, b"fuzz", now, &mut out);
             }
             assert!(stack.counters().rx_frames > 0);

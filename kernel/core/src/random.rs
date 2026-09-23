@@ -315,25 +315,10 @@ pub fn reserve_errno(_err: ReserveError) -> Errno {
 #[cfg(test)]
 mod tests {
     use super::{reserve_errno, BootReserve, NullEntropy, RandomReserve};
+    use crate::test_entropy::SeededEntropy;
     use tairix_abi::Errno;
+    use tairix_fuzzseed::Prng;
     use tairix_rng::{EntropyError, EntropySource, OutputReserve, ReserveError};
-
-    /// Deterministic stand-in for a seeded entropy source (not real entropy):
-    /// a counter so the reserve's drawing behaviour is reproducible in tests.
-    struct CountingSource(u64);
-
-    impl EntropySource for CountingSource {
-        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
-            for byte in out.iter_mut() {
-                self.0 = self
-                    .0
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1);
-                *byte = self.0.to_le_bytes()[4];
-            }
-            Ok(())
-        }
-    }
 
     #[test]
     fn boot_reserve_is_unseeded_and_draws_not_ready() {
@@ -353,9 +338,9 @@ mod tests {
 
     #[test]
     fn seeded_reserve_draws_through_the_object_safe_seam() {
-        let mut reserve = OutputReserve::<CountingSource, 64>::new();
+        let mut reserve = OutputReserve::<SeededEntropy, 64>::new();
         reserve
-            .seed(CountingSource(7))
+            .seed(SeededEntropy::new(7))
             .expect("the deterministic source seeds");
         let mut out = [0u8; 16];
         RandomReserve::draw(&mut reserve, &mut out, true).expect("a seeded reserve serves");
@@ -425,15 +410,13 @@ mod tests {
         assert_eq!(dead.fill(&mut out), Err(EntropyError::Unavailable));
     }
 
-    /// A varying host clock (an LCG) standing in for a healthy
-    /// high-resolution counter, so the jitter half of the mix is usable in a
-    /// host test. Returned as a boxed `FnMut` so each test owns its own.
+    /// A varying host clock standing in for a healthy high-resolution
+    /// counter, so the jitter half of the mix is usable in a host test.
     fn varying_clock(seed: u64) -> impl FnMut() -> u64 {
-        let mut lcg = seed;
+        let mut stream = Prng::new(seed);
         let mut now: u64 = 0;
         move || {
-            lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            now = now.wrapping_add((lcg >> 40) | 1);
+            now = now.wrapping_add((stream.next_u64() >> 40) | 1);
             now
         }
     }
@@ -511,10 +494,9 @@ mod tests {
         // Build the source first (captures a zero baseline), then feed a full
         // fresh ring of varying samples so the freshness gate opens.
         let interrupt = InterruptPoolSource::new(&pool);
-        let mut lcg = 0x1357_9BDFu64;
+        let mut stream = Prng::new(0x1357_9BDF);
         for _ in 0..128 {
-            lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            pool.record(lcg);
+            pool.record(stream.next_u64());
         }
         let hw_jitter = MixedPair::new(
             ArchEntropy::new(&DEAD_PORT),

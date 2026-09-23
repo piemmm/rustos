@@ -30,58 +30,6 @@ fn s16(values: &[i16]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
-/// `count` pseudo-random but **valid** samples of `format`.
-///
-/// Valid matters: an out-of-range twenty-four-in-thirty-two word or a `NaN`
-/// is not a sample of its encoding, and the engine deliberately bounds both
-/// before they reach a shared mix — so feeding one here would be testing the
-/// boundary rather than the exactness claim, which is about real audio.
-fn probes(format: SampleFormat, count: usize) -> Vec<u8> {
-    let mut state = 0x243F_6A88_85A3_08D3u64;
-    let mut bytes = Vec::with_capacity(count * format.bytes_per_sample());
-    for _ in 0..count {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        let draw = (state >> 16) & 0xFFFF_FFFF;
-        match format {
-            SampleFormat::U8 => bytes.push(u8::try_from(draw & 0xFF).unwrap_or(0)),
-            SampleFormat::S16 => {
-                let value = i16::from_le_bytes([
-                    u8::try_from(draw & 0xFF).unwrap_or(0),
-                    u8::try_from((draw >> 8) & 0xFF).unwrap_or(0),
-                ]);
-                bytes.extend_from_slice(&value.to_le_bytes());
-            }
-            SampleFormat::S24 | SampleFormat::S24In32 => {
-                // Sign-extended twenty-four bits, which is what both packed
-                // and containered forms of this encoding hold.
-                let raw = i32::try_from(draw & 0x00FF_FFFF).unwrap_or(0);
-                let value = if raw >= 0x0080_0000 {
-                    raw - 0x0100_0000
-                } else {
-                    raw
-                };
-                if format == SampleFormat::S24 {
-                    bytes.extend_from_slice(&value.to_le_bytes()[..3]);
-                } else {
-                    bytes.extend_from_slice(&value.to_le_bytes());
-                }
-            }
-            SampleFormat::S32 => {
-                let value = i32::from_le_bytes(u32::try_from(draw).unwrap_or(0).to_le_bytes());
-                bytes.extend_from_slice(&value.to_le_bytes());
-            }
-            SampleFormat::F32 => {
-                // Inside full scale, where the pivot is the identity.
-                let unit = f32::from(u16::try_from(draw & 0xFFFF).unwrap_or(0)) / 32_768.0 - 1.0;
-                bytes.extend_from_slice(&unit.to_le_bytes());
-            }
-        }
-    }
-    bytes
-}
-
 /// The headline property, at its simplest: one stream, unity gain, identity
 /// map, the sink's own encoding, no other contributor.
 #[test]
@@ -104,52 +52,6 @@ fn one_stream_at_unity_through_an_identity_map_is_bit_exact() {
     let written = mixer.mix([stream], 8, &mut out).expect("mixed");
     assert_eq!(written, samples.len());
     assert_eq!(out, samples, "the one path must not touch a sample");
-}
-
-/// The same property over every encoding the pivot carries whole, at several
-/// channel counts and block lengths.
-#[test]
-fn bit_exactness_holds_across_encodings_channel_counts_and_block_lengths() {
-    let layouts = [
-        ChannelMap::MONO,
-        ChannelMap::STEREO,
-        ChannelMap::new(&[
-            tairix_abi::driver::audio::ChannelPosition::FrontLeft,
-            tairix_abi::driver::audio::ChannelPosition::FrontRight,
-            tairix_abi::driver::audio::ChannelPosition::FrontCentre,
-        ])
-        .expect("valid"),
-    ];
-    let formats = [
-        SampleFormat::U8,
-        SampleFormat::S16,
-        SampleFormat::S24,
-        SampleFormat::S24In32,
-        SampleFormat::F32,
-    ];
-    for map in layouts {
-        let matrix = identity(map);
-        let channels = usize::from(map.channels());
-        for format in formats {
-            for frames in [1usize, 2, 3, 7, 16, 31] {
-                let mut mixer = Mixer::new(sink(format, map), 32, 0x00C0_FFEE).expect("mixer");
-                let samples = probes(format, frames * channels);
-                let mut out = vec![0u8; samples.len()];
-                let stream = StreamMix {
-                    format,
-                    matrix: &matrix,
-                    gain: 1.0,
-                    resampled: false,
-                    samples: &samples,
-                };
-                mixer.mix([stream], frames, &mut out).expect("mixed");
-                assert_eq!(
-                    out, samples,
-                    "{format:?} over {channels} channels, {frames} frames"
-                );
-            }
-        }
-    }
 }
 
 /// `0.0 + -0.0` is `+0.0`, so a zeroed accumulator would flatten a float
