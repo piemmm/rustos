@@ -155,6 +155,10 @@ impl DmaHost for AutoDrainHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
+
+    fn device_quiesced(&self) {
+        self.inner.device_quiesced();
+    }
 }
 
 impl tairix_virtio::VirtioHost for AutoDrainHost {
@@ -212,6 +216,10 @@ impl SilentHost {
 impl DmaHost for SilentHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
+    }
+
+    fn device_quiesced(&self) {
+        self.inner.device_quiesced();
     }
 }
 
@@ -311,6 +319,47 @@ fn a_silent_device_fails_closed_with_device_offline() {
         Err(DriverError::DeviceOffline),
         "a device that never signals must fail closed once its deadline elapses"
     );
+}
+
+#[test]
+fn bring_up_declares_the_device_quiesced_once_its_reset_confirms() {
+    let (t, _backing) = build_device();
+    let host = MockHost::new();
+    let _blk = VirtioBlk::open(t, &host).expect("open");
+    assert_eq!(host.quiesced_calls(), 1);
+}
+
+#[test]
+fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
+    let (mut t, _backing) = build_device();
+    t.refuse_resets_after(0);
+    let host = MockHost::new();
+    assert!(matches!(
+        VirtioBlk::open(t, &host),
+        Err(VirtioError::DeviceFault)
+    ));
+    assert_eq!(host.quiesced_calls(), 0);
+    assert_eq!(host.bytes_allocated(), 0);
+}
+
+#[test]
+fn a_confirmed_close_releases_every_region() {
+    let (t, _backing) = build_device();
+    let host = MockHost::new();
+    VirtioBlk::open(t, &host).expect("open").close();
+    assert_eq!(host.slabs_outstanding(), 0);
+}
+
+#[test]
+fn a_close_whose_reset_never_confirms_releases_nothing() {
+    let (t, _backing) = build_device();
+    let host = MockHost::new();
+    let mut blk = VirtioBlk::open(t, &host).expect("open");
+    let held = host.slabs_outstanding();
+    assert!(held > 0);
+    blk.transport_mut().refuse_resets_after(0);
+    blk.close();
+    assert_eq!(host.slabs_outstanding(), held);
 }
 
 #[test]

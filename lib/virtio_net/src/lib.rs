@@ -986,16 +986,14 @@ pub struct VirtioNet<'h, T: Transport> {
     /// device-visible rings alive. Empty on a single-queue device.
     _idle_tx: [Option<SplitQueue>; MAX_RX_QUEUES as usize],
     /// The control virtqueue, present only when `VIRTIO_NET_F_MQ` +
-    /// `VIRTIO_NET_F_CTRL_VQ` were negotiated. Used once at open to select
-    /// the receive/transmit queue-pair count, then held alive (its ring
-    /// stays device-visible). `None` on a single-queue device.
-    _ctrl_queue: Option<SplitQueue>,
-    /// The [`VirtioHost`] the DMA staging was allocated through. Held only
-    /// to bind the driver's lifetime to the host for `'h`: the staging
-    /// slabs free through the host's pool on drop, so the host must outlive
-    /// this engine. Not read after `open` (the service path never waits on
-    /// the device), hence the underscore.
-    _host: &'h dyn VirtioHost,
+    /// `VIRTIO_NET_F_CTRL_VQ` were negotiated. Used once at bring-up to
+    /// select the receive/transmit queue-pair count, then held alive (its
+    /// ring stays device-visible). `None` on a single-queue device.
+    ctrl_queue: Option<SplitQueue>,
+    /// The [`VirtioHost`] the DMA staging was allocated through, which must
+    /// outlive this engine because the staging slabs free through its pool.
+    /// Read only at bring-up: the service path never waits on the device.
+    host: &'h dyn VirtioHost,
     mac: MacAddress,
     /// Largest receive frame the device may deliver (link MTU + Ethernet
     /// header); sizes the receive staging and clamps a harvested frame.
@@ -1035,26 +1033,31 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     /// `VIRTIO_NET_F_GUEST_CSUM` when the device offers it),
     /// `FEATURES_OK`, set up the receive and transmit queues,
     /// `DRIVER_OK`, then read the MAC from the device-configuration
-    /// window.
+    /// window. Once the reset confirms, the device is declared quiesced
+    /// to `host`, so memory an earlier instance left with it can be
+    /// released; a failure once the device is live resets it again
+    /// before its memory is released.
     ///
     /// # Errors
     ///
-    /// Propagates [`VirtioError`] from the transport / queue setup.
-    /// Returns [`VirtioError::FeaturesRejected`] if the device
-    /// clears [`Status::FEATURES_OK`] after the driver completed
+    /// Propagates [`VirtioError`] from the transport / queue setup,
+    /// including [`VirtioError::DeviceFault`] for a device whose reset
+    /// never confirms. Returns [`VirtioError::FeaturesRejected`] if the
+    /// device clears [`Status::FEATURES_OK`] after the driver completed
     /// negotiation.
     // The virtio 1.1 §3.1 init sequence is one linear procedure —
-    // reset, feature negotiation, per-queue setup, DRIVER_OK, the
-    // multiqueue control command, staging carve-out — that reads far more
-    // clearly as one flow than split across helpers that would each take
-    // (and return) the half-built device.
+    // reset, feature negotiation, per-queue setup, staging carve-out,
+    // DRIVER_OK — that reads far more clearly as one flow than split
+    // across helpers that would each take (and return) the half-built
+    // device.
     #[allow(clippy::too_many_lines)]
     pub fn open(
         mut transport: T,
         host: &'h dyn VirtioHost,
         machine: Option<&BootFacts>,
     ) -> Result<Self, VirtioError> {
-        transport.reset();
+        transport.reset()?;
+        host.device_quiesced();
         let mut status = Status::default().with(Status::ACKNOWLEDGE);
         transport.set_status(status);
         status = status.with(Status::DRIVER);
@@ -1195,7 +1198,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // The control queue is the last virtqueue, at index
         // `2 * max_virtqueue_pairs` (virtio 1.1 §5.1.2), present only when
         // multiqueue was negotiated.
-        let mut ctrl_queue = if multiqueue {
+        let ctrl_queue = if multiqueue {
             let ctrl_index = max_pairs.max(1) * wire::QUEUE_PAIR_STRIDE;
             Some(SplitQueue::new(
                 &mut transport,
@@ -1206,19 +1209,6 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         } else {
             None
         };
-        status = status.with(Status::DRIVER_OK);
-        transport.set_status(status);
-        // Select the enabled queue-pair count through the control queue (a
-        // runtime command issued after DRIVER_OK). A single enabled pair is
-        // already the device default, so the command is only issued for more.
-        if let Some(ctrl) = ctrl_queue.as_mut() {
-            if pairs > 1 {
-                set_virtqueue_pairs(&mut transport, host, ctrl, pairs)?;
-            }
-        }
-        // Read MAC from device-config.
-        let mut mac = [0u8; MAC_ADDRESS_LEN];
-        transport.read_config(wire::CONFIG_MAC_OFFSET, &mut mac);
         // Carve the transmit staging pool once: one header + one frame
         // buffer per concurrently in-flight transmission, sized to the
         // transmit ring so the driver can keep it full without ever waiting
@@ -1237,14 +1227,20 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
                 .map_err(|_| VirtioError::DeviceFault)?;
             *slot = Some((header, data));
         }
+        // Everything fallible above precedes DRIVER_OK, so a failure there
+        // releases nothing the device was given.
+        status = status.with(Status::DRIVER_OK);
+        transport.set_status(status);
+        let mut mac = [0u8; MAC_ADDRESS_LEN];
+        transport.read_config(wire::CONFIG_MAC_OFFSET, &mut mac);
         let mut net = Self {
             transport,
             rx,
             rx_queue_count,
             tx_queue,
             _idle_tx: idle_tx,
-            _ctrl_queue: ctrl_queue,
-            _host: host,
+            ctrl_queue,
+            host,
             mac: MacAddress::new(mac),
             max_frame_len: wire::MAX_FRAME_LEN,
             max_tx_frame_len,
@@ -1252,21 +1248,39 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             tx: TxStaging::new(tx_free),
             features: driver_features,
         };
-        // Arm every receive queue: the device owns each posted pool from
-        // DRIVER_OK onward, so a burst arriving before the first service is
-        // captured rather than dropped.
-        for pair in 0..net.rx_queue_count {
-            if let Some(q) = net.rx[pair].as_mut() {
-                q.post_all(&mut net.transport)
-                    .map_err(|_| VirtioError::DeviceFault)?;
-            }
+        if let Err(e) = net.arm(pairs) {
+            net.close();
+            return Err(e);
         }
         Ok(net)
     }
 
-    /// Tear the device down for unload (sets the status byte to 0).
+    /// Select the enabled queue-pair count and post every receive pool: the
+    /// bring-up steps a live device takes part in.
+    fn arm(&mut self, pairs: u16) -> Result<(), VirtioError> {
+        // A single enabled pair is already the device default, so the
+        // control command is only issued for more.
+        if let Some(ctrl) = self.ctrl_queue.as_mut() {
+            if pairs > 1 {
+                set_virtqueue_pairs(&mut self.transport, self.host, ctrl, pairs)?;
+            }
+        }
+        // The device owns each posted pool from here on, so a burst arriving
+        // before the first service is captured rather than dropped.
+        for q in self.rx.iter_mut().take(self.rx_queue_count).flatten() {
+            q.post_all(&mut self.transport)
+                .map_err(|_| VirtioError::DeviceFault)?;
+        }
+        Ok(())
+    }
+
+    /// Tear the device down for unload: reset it, then release its memory.
     pub fn close(mut self) {
-        self.transport.reset();
+        if self.transport.reset().is_err() {
+            // A wedged device may still master its rings and staging: hold
+            // them for the kernel to quarantine when the driver exits.
+            core::mem::forget(self);
+        }
     }
 
     /// Borrow the underlying transport (host-side test access only;
@@ -1637,6 +1651,7 @@ fn set_virtqueue_pairs<T: Transport>(
     ];
     ctrl.add_chain(&segments)?;
     ctrl.kick(transport);
+    let mut failure = VirtioError::DeviceFault;
     for _ in 0..CTRL_POLL_BUDGET {
         match ctrl.poll_used() {
             Ok(_) => {
@@ -1649,10 +1664,15 @@ fn set_virtqueue_pairs<T: Transport>(
                 };
             }
             Err(VirtioError::NoCompletion | VirtioError::MalformedCompletion) => {}
-            Err(e) => return Err(e),
+            Err(e) => {
+                failure = e;
+                break;
+            }
         }
     }
-    Err(VirtioError::DeviceFault)
+    // The device never returned the command, so it may yet answer into it.
+    core::mem::forget(cmd);
+    Err(failure)
 }
 
 /// Outcome of one TX-frame staging in [`VirtioNet::stage_and_post`].

@@ -9,9 +9,13 @@
 //! interpreter, so each piece lives in a cell that stays reachable for the
 //! whole run instead.
 
-use tairix_sync::Once;
+use alloc::vec::Vec;
+
+use tairix_sync::{Once, SpinLock};
 
 use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
+use crate::dma::{DmaBlock, DmaCustody, DmaError};
+use crate::error::AllocError;
 use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
 use crate::phys::SimPhysMap;
 
@@ -67,3 +71,76 @@ macro_rules! frame_backing {
 }
 
 pub(crate) use frame_backing;
+
+/// What a [`RecordingCustody`] was handed.
+pub(crate) struct CustodyRecord {
+    /// Spaces bound and not yet unbound.
+    pub(crate) bound: usize,
+    /// Every `bind` accepted.
+    pub(crate) binds: usize,
+    /// Every block held, with the node and generation it came under.
+    pub(crate) held: Vec<(u32, u64, DmaBlock)>,
+}
+
+/// A [`DmaCustody`] that records what it is given, optionally refusing every
+/// binding.
+pub(crate) struct RecordingCustody {
+    refuse_bind: bool,
+    record: SpinLock<CustodyRecord>,
+}
+
+impl RecordingCustody {
+    pub(crate) const fn new(refuse_bind: bool) -> Self {
+        Self {
+            refuse_bind,
+            record: SpinLock::new(CustodyRecord {
+                bound: 0,
+                binds: 0,
+                held: Vec::new(),
+            }),
+        }
+    }
+
+    /// Run `f` over the record.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&CustodyRecord) -> R) -> R {
+        f(&self.record.lock())
+    }
+}
+
+impl DmaCustody for RecordingCustody {
+    fn bind(&self, _node: u32) -> Result<(), DmaError> {
+        if self.refuse_bind {
+            return Err(DmaError::Alloc(AllocError::OutOfMemory));
+        }
+        let mut record = self.record.lock();
+        record.bound += 1;
+        record.binds += 1;
+        Ok(())
+    }
+
+    fn hold(&self, node: u32, generation: u64, block: DmaBlock) {
+        self.record.lock().held.push((node, generation, block));
+    }
+
+    fn unbind(&self, _node: u32) {
+        let mut record = self.record.lock();
+        record.bound -= 1;
+    }
+}
+
+/// A [`RecordingCustody`] in a cell of this expansion's own; `refusing`
+/// builds one that refuses every binding.
+macro_rules! custody {
+    () => {{
+        static CUSTODY: crate::test_fixture::RecordingCustody =
+            crate::test_fixture::RecordingCustody::new(false);
+        &CUSTODY
+    }};
+    (refusing) => {{
+        static CUSTODY: crate::test_fixture::RecordingCustody =
+            crate::test_fixture::RecordingCustody::new(true);
+        &CUSTODY
+    }};
+}
+
+pub(crate) use custody;

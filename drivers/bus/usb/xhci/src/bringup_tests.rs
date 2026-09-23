@@ -13,6 +13,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use core::cell::Cell;
 use core::ptr::NonNull;
 
 use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
@@ -67,10 +68,12 @@ impl MmioMapper for MockMapper {
     }
 }
 
-/// DMA host minting one leaked slab at a fixed device-visible base.
+/// DMA host minting one leaked slab at a fixed device-visible base, and
+/// counting the bring-up's quiesce declarations.
 struct MockDmaHost {
     phys: u64,
     fail: bool,
+    quiesced: Cell<usize>,
 }
 
 impl DmaHost for MockDmaHost {
@@ -83,6 +86,10 @@ impl DmaHost for MockDmaHost {
         // process; `phys` is the test's device-visible base for `ptr[0]`. Drop
         // is a no-op (the `from_leaked` contract).
         Ok(unsafe { DmaSlab::from_leaked(self.phys, ptr, size, PoolId::MOCK, 0) })
+    }
+
+    fn device_quiesced(&self) {
+        self.quiesced.set(self.quiesced.get() + 1);
     }
 }
 
@@ -143,7 +150,11 @@ fn host_with(phys: u64, mmio_map: bool, mapper: bool, dma: bool) -> MockHost {
     MockHost {
         mmio_map,
         mapper: mapper.then_some(MockMapper),
-        dma: dma.then_some(MockDmaHost { phys, fail: false }),
+        dma: dma.then_some(MockDmaHost {
+            phys,
+            fail: false,
+            quiesced: Cell::new(0),
+        }),
     }
 }
 
@@ -229,6 +240,11 @@ fn diagnostic_localises_the_controller_open_stall() {
     assert_eq!(err.phase, BringupPhase::ControllerOpen);
     assert_eq!(err.error, DriverError::DeviceFault);
     assert_eq!(err.open_stage, Some(XhciOpenStage::Capability));
+    assert_eq!(
+        host.dma.as_ref().map(|dma| dma.quiesced.get()),
+        Some(0),
+        "a controller that was never reset is never declared quiesced"
+    );
     // The plain wrapper drops the breadcrumb and surfaces only the coarse
     // error — the two agree on the error.
     assert_eq!(bring_up(&host, APERTURE_TOP).err(), Some(err.error));

@@ -116,7 +116,7 @@ use tairix_kernel_irq::{
 };
 use tairix_kernel_mem::sensitive::alloc_sensitive;
 use tairix_kernel_mem::{
-    copy_in, copy_out, AllocError, FrameAllocator, Page, PageCandidate, PhysMap,
+    copy_in, copy_out, AllocError, DmaCustodian, FrameAllocator, Page, PageCandidate, PhysMap,
     RamzipFaultOutcome, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::{Priority, TaskId as SchedTaskId};
@@ -141,9 +141,9 @@ use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::devres::{
     addressable_port, dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility,
-    MmioMapFacility, MmioMemoryKind, MsiAllocFacility, PortIoFacility, SharedMemFacility,
-    NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY,
-    NULL_SHARED_MEM_FACILITY,
+    DmaQuarantineFacility, MmioMapFacility, MmioMemoryKind, MsiAllocFacility, PortIoFacility,
+    SharedMemFacility, NULL_DMA_ALLOC_FACILITY, NULL_DMA_QUARANTINE, NULL_MMIO_MAP_FACILITY,
+    NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction, UserFaultOutcome};
 use crate::filelock::{Held, OwnerId, Refusal, Request as LockRequest, Wakes};
@@ -424,6 +424,11 @@ where
     /// producer through [`Self::with_dma_alloc_facility`]. Held as a `'static`
     /// borrow, exactly like the MMIO-map producer.
     dma_alloc_facility: &'static (dyn DmaAllocFacility + 'static),
+    /// Custody of the DMA memory a dead driver's device may still master
+    /// (`plans/OPEN-DEFECTS.md` D167). Defaults to [`NULL_DMA_QUARANTINE`],
+    /// which refuses every binding so `dma_alloc` fails closed; the boot path
+    /// installs the real one through [`Self::with_dma_quarantine`].
+    dma_quarantine: &'static (dyn DmaQuarantineFacility + 'static),
     /// The architecture MSI-alloc producer the `msi_alloc` syscall drives to
     /// mint an MSI vector and report its doorbell (`plans/PI.md` U-MSI).
     /// Defaults to [`NULL_MSI_ALLOC_FACILITY`] (fail closed with
@@ -759,6 +764,24 @@ fn format_top_calls(ranked: [Option<(u64, u32)>; 2], buf: &mut [u8; TOP_CALLS_LE
     core::str::from_utf8(buf.get(..used).unwrap_or(&[])).unwrap_or("")
 }
 
+/// Why quarantined DMA memory went back to the allocator.
+#[derive(Clone, Copy)]
+enum DmaReleaseCause {
+    /// A later driver for the node declared its device reset.
+    Reset,
+    /// A surprise removal retired the node.
+    Removed,
+}
+
+impl DmaReleaseCause {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reset => "reset",
+            Self::Removed => "removed",
+        }
+    }
+}
+
 impl<'a, A> KernelSyscallHandlers<'a, A>
 where
     A: KernelArch + 'static,
@@ -879,6 +902,9 @@ where
             // `NotImplemented` with no DMA facility) — never carving against
             // an ungranted constraint.
             dma_alloc_facility: &NULL_DMA_ALLOC_FACILITY,
+            // No custody until the boot path installs the quarantine: every
+            // binding is refused, so no carve can exist without it.
+            dma_quarantine: &NULL_DMA_QUARANTINE,
             // The MSI-alloc facility is unwired until the boot path installs
             // the arch producer: `msi_alloc` fails closed with
             // `NotImplemented` (a platform with no MSI controller) — never
@@ -1357,6 +1383,21 @@ where
         self
     }
 
+    /// Install the DMA quarantine `dma_alloc` binds every carving space to and
+    /// `dma_quiesced` and node removal release from, consuming and
+    /// returning `self`.
+    ///
+    /// Until this is called the handler holds [`NULL_DMA_QUARANTINE`], so
+    /// `dma_alloc` fails closed with [`Errno::NotImplemented`].
+    #[must_use]
+    pub const fn with_dma_quarantine(
+        mut self,
+        dma_quarantine: &'static (dyn DmaQuarantineFacility + 'static),
+    ) -> Self {
+        self.dma_quarantine = dma_quarantine;
+        self
+    }
+
     /// Install the architecture MSI-alloc producer the `msi_alloc` syscall
     /// drives, consuming and returning `self` (`plans/PI.md` U-MSI).
     ///
@@ -1495,6 +1536,60 @@ where
                 }],
             );
         }
+    }
+
+    /// Record a quarantine decision that returned `bytes` of `node`'s DMA
+    /// memory to the allocator.
+    fn audit_dma_released(&self, node: u32, bytes: u64, cause: DmaReleaseCause) {
+        crate::audit::emit(
+            self.audit,
+            tairix_log::Level::Info,
+            AuditEvent::DmaQuarantineReleased,
+            &[
+                Field {
+                    key: "node",
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(node)),
+                },
+                Field {
+                    key: "bytes",
+                    value: tairix_log::FieldValue::UnsignedInt(bytes),
+                },
+                Field {
+                    key: "cause",
+                    value: tairix_log::FieldValue::Str(cause.as_str()),
+                },
+            ],
+        );
+    }
+
+    /// Record that the dying driver `process` left DMA memory to its node's
+    /// quarantine — read before its load record is withdrawn.
+    fn audit_dma_quarantined(&self, process: ProcessId) {
+        let Some(driver) = self.aspaces.read().loaded_driver(process) else {
+            return;
+        };
+        if driver.dma_bytes == 0 {
+            return;
+        }
+        crate::audit::emit(
+            self.audit,
+            tairix_log::Level::Warn,
+            AuditEvent::DmaQuarantined,
+            &[
+                Field {
+                    key: "node",
+                    value: tairix_log::FieldValue::UnsignedInt(u64::from(driver.node)),
+                },
+                Field {
+                    key: "generation",
+                    value: tairix_log::FieldValue::UnsignedInt(driver.generation),
+                },
+                Field {
+                    key: "bytes",
+                    value: tairix_log::FieldValue::UnsignedInt(driver.dma_bytes),
+                },
+            ],
+        );
     }
 
     /// Emit the [`AuditEvent::IrqLineQuarantined`] record when the
@@ -3096,6 +3191,10 @@ where
         // sides of one handover, so they sit together.
         self.seat_registry
             .release_owned_by(SeatOwner(process.0), self.audit);
+        // A driver dying with DMA carves leaves them to its node's quarantine
+        // when its space is torn down; say so while its load record still
+        // stands.
+        self.audit_dma_quarantined(process);
         // Tear down the process-bookkeeping subset — signal gates,
         // parent/child wait rows, capability record, and address-space
         // registry entry — through the one helper the deferred-launch
@@ -6809,7 +6908,14 @@ where
         // another driver's handle resolves to nothing and is refused
         // (— a driver reaches only the resources its
         // matched node requested), exactly as `mmio_map`.
-        let Some(resource) = self.aspaces.read().grant(caller.process(), handle) else {
+        let (resource, driver) = {
+            let aspaces = self.aspaces.read();
+            (
+                aspaces.grant(caller.process(), handle),
+                aspaces.loaded_driver(caller.process()),
+            )
+        };
+        let Some(resource) = resource else {
             return Err(Errno::NotFound);
         };
         // The grant must name a DMA constraint; reject any other kind before
@@ -6825,12 +6931,27 @@ where
         if constraint.max_len != 0 && (len as u64) > constraint.max_len {
             return Err(Errno::OutOfRange);
         }
+        // The device may outlive the caller, so a carve needs custody for the
+        // node the caller drives: only a driver loaded for one may carve.
+        let Some(driver) = driver else {
+            return Err(Errno::PermissionDenied);
+        };
+        let custodian = DmaCustodian {
+            node: driver.node,
+            generation: driver.generation,
+            custody: self.dma_quarantine,
+        };
         // Mechanism: the installed producer carves a physically-contiguous,
         // zeroed, coherent block bounded by the grant's `addr_limit` into the
         // caller's own live address space. The default `NULL_DMA_ALLOC_FACILITY`
         // fails closed with `NotImplemented`; frame
         // exhaustion surfaces as `OutOfMemory` (deterministic OOM).
-        let carve = self.dma_alloc_facility.alloc(len, constraint.addr_limit)?;
+        let carve = self
+            .dma_alloc_facility
+            .alloc(len, constraint.addr_limit, custodian)?;
+        self.aspaces
+            .write()
+            .note_dma_carved(caller.process(), carve.len);
         // Resolve the device-visible base the driver programs into its
         // hardware. For a coherent (untranslated) constraint it is the carved
         // CPU-physical base; for a translating inbound viewport
@@ -6840,17 +6961,18 @@ where
         // already lies below `addr_limit`, so this only re-bases it; a base
         // outside the viewport's CPU window fails closed.
         let device_addr = translate_device_addr(&constraint, carve.device_addr)?;
-        // The carve grew the caller's live space; publish the buffer's own
-        // pages into the registry snapshot before the copy below, so the new
-        // DMA window is visible to the copy path.
-        self.publish_region_mapping(caller.process(), carve.cpu_va, pages_spanning(len as u64));
+        // The carve grew the caller's live space; publish every page it
+        // mapped — the backing, which rounds the request up — into the
+        // registry snapshot before the copy below, so the copy path sees the
+        // DMA window exactly as the space does.
+        self.publish_region_mapping(caller.process(), carve.cpu_va, pages_spanning(carve.len));
         // Hand the device-visible base back through the `device_out` user
         // pointer via the validated `copy_to_user` boundary, exactly as `wait` writes the reaped status — a faulting
         // `device_out` collapses onto the same fail-closed `BadAddress` an
-        // actual fault produces. The buffer stays mapped; it is
-        // reclaimed when the task's live space is dropped on exit
-        // (`LiveSpace::drop`), so a driver that passes a bad pointer self-DoSes
-        // a buffer at worst — it never widens authority.
+        // actual fault produces. The buffer stays mapped; if the task dies
+        // holding it, its live space surrenders it to the quarantine, so a
+        // driver that passes a bad pointer self-DoSes a buffer at worst — it
+        // never widens authority.
         let device_bytes = device_addr.to_ne_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(device_out), &device_bytes)
@@ -6883,6 +7005,9 @@ where
         // anything. The default `NULL_DMA_ALLOC_FACILITY` fails closed with
         // `NotImplemented`.
         let released = self.dma_alloc_facility.free(cpu_va)?;
+        self.aspaces
+            .write()
+            .note_dma_freed(caller.process(), released as u64);
         // The free shrank the caller's live space; drop the buffer's own
         // pages from the registry snapshot so the copy path no longer sees
         // the released DMA window (leaving it in the stale snapshot would
@@ -6891,6 +7016,21 @@ where
         // reports it released.
         self.publish_region_teardown(caller.process(), cpu_va, pages_spanning(released as u64));
         Ok(0)
+    }
+
+    fn dma_quiesced(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // The dispatcher enforced `CAP_MEM_DMA`. The node and generation are
+        // the kernel's record of the caller's own load, never an argument, so
+        // a driver can quiet only its own node and only for instances admitted
+        // before it.
+        let Some(driver) = self.aspaces.read().loaded_driver(caller.process()) else {
+            return Err(Errno::NotFound);
+        };
+        let freed = self
+            .dma_quarantine
+            .release(driver.node, driver.generation)?;
+        self.audit_dma_released(driver.node, freed, DmaReleaseCause::Reset);
+        Ok(freed)
     }
 
     fn resource_grants(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
@@ -8991,6 +9131,21 @@ where
                 },
             ],
         );
+
+        // A device that vanished can master nothing, so the DMA memory its
+        // drivers left quarantined can be freed. An orderly retirement of a
+        // device still present proves nothing about it and frees nothing.
+        if !flags.is_orderly() {
+            let high_water = self.aspaces.read().driver_generation_high_water();
+            for &vanished in &removed {
+                match self.dma_quarantine.retire(vanished, high_water) {
+                    Ok(freed) if freed != 0 => {
+                        self.audit_dma_released(vanished, freed, DmaReleaseCause::Removed);
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         // Any display node that just left the tree — the named child or a
         // transitive descendant — takes its seat with it, through the same
@@ -12712,6 +12867,17 @@ where
         shared_mem_facility: &'static (dyn SharedMemFacility + 'static),
     ) -> Self {
         self.handlers = self.handlers.with_shared_mem_facility(shared_mem_facility);
+        self
+    }
+
+    /// Install the DMA quarantine, consuming and returning `self`: the
+    /// hook-level mirror of [`KernelSyscallHandlers::with_dma_quarantine`].
+    #[must_use]
+    pub fn with_dma_quarantine(
+        mut self,
+        dma_quarantine: &'static (dyn DmaQuarantineFacility + 'static),
+    ) -> Self {
+        self.handlers = self.handlers.with_dma_quarantine(dma_quarantine);
         self
     }
 
@@ -26243,7 +26409,12 @@ mod tests {
         ) -> Option<(tairix_kernel_mem::Frame, tairix_kernel_mem::MapFlags)> {
             self.space.translate(page)
         }
-        fn alloc_dma(&mut self, _len: usize, _limit: u64) -> Result<DmaMapping, LiveSpaceError> {
+        fn alloc_dma(
+            &mut self,
+            _len: usize,
+            _limit: u64,
+            _custodian: DmaCustodian,
+        ) -> Result<DmaMapping, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
         fn free_dma(&mut self, _cpu_va: u64) -> Result<usize, LiveSpaceError> {
@@ -27258,18 +27429,24 @@ mod tests {
         assert!(facility.last.lock().is_none());
     }
 
-    /// A DMA-alloc facility that records the `(len, addr_limit)` it was
-    /// handed and returns a configured carve, so the `dma_alloc` handler
-    /// tests can assert the validated request reached the mechanism without
-    /// a real `kernel/mem` carve path.
+    /// A DMA-alloc facility that records the `(len, addr_limit, node,
+    /// generation)` it was handed and returns a configured carve, so the
+    /// `dma_alloc` handler tests can assert the validated request — and the
+    /// custodian built from the caller's load record — reached the mechanism
+    /// without a real `kernel/mem` carve path.
     struct RecordingDmaFacility {
-        last: tairix_sync::SpinLock<Option<(usize, u64)>>,
+        last: tairix_sync::SpinLock<Option<(usize, u64, u32, u64)>>,
         freed: tairix_sync::SpinLock<Option<u64>>,
         ret: Result<crate::devres::DmaCarve, Errno>,
     }
     impl crate::devres::DmaAllocFacility for RecordingDmaFacility {
-        fn alloc(&self, len: usize, addr_limit: u64) -> Result<crate::devres::DmaCarve, Errno> {
-            *self.last.lock() = Some((len, addr_limit));
+        fn alloc(
+            &self,
+            len: usize,
+            addr_limit: u64,
+            custodian: DmaCustodian,
+        ) -> Result<crate::devres::DmaCarve, Errno> {
+            *self.last.lock() = Some((len, addr_limit, custodian.node, custodian.generation));
             self.ret
         }
         fn free(&self, cpu_va: u64) -> Result<usize, Errno> {
@@ -27319,6 +27496,7 @@ mod tests {
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
+                len: 0x1000,
             }),
         }));
         let h = KernelSyscallHandlers::new(
@@ -27376,6 +27554,7 @@ mod tests {
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
+                len: 0x1000,
             }),
         }));
         let h = KernelSyscallHandlers::new(
@@ -27425,12 +27604,14 @@ mod tests {
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x10_0000,
+                len: 0x1000,
             }),
         }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_dma_alloc_facility(facility);
+        aspaces.write().set_loaded_node(ProcessId(2), 0x44);
 
         // No address space registered for task 2 → the (translated)
         // device-address copy-out fails closed; the point is the carve ran
@@ -27442,7 +27623,10 @@ mod tests {
         // The carve ran with the request length and the grant's CPU-side
         // addressing limit — proving the translated grant is no longer
         // refused before the mechanism.
-        assert_eq!(*facility.last.lock(), Some((0x1000, 0x2_0000_0000)));
+        assert_eq!(
+            *facility.last.lock(),
+            Some((0x1000, 0x2_0000_0000, 0x44, 1))
+        );
     }
 
     /// A zero-length request and an over-the-grant-maximum request are both
@@ -27470,6 +27654,7 @@ mod tests {
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
+                len: 0x1000,
             }),
         }));
         let h = KernelSyscallHandlers::new(
@@ -27510,10 +27695,44 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
+        aspaces.write().set_loaded_node(ProcessId(2), 0x44);
 
         assert_eq!(
             h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
             Err(Errno::NotImplemented)
+        );
+    }
+
+    /// A caller holding a DMA grant but no load record — so no node its
+    /// memory could be quarantined against — is refused before the carve.
+    #[test]
+    fn dma_alloc_without_a_loaded_node_is_refused_before_the_carve() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let facility = recording_dma_facility();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(
+            facility.last.lock().is_none(),
+            "the carve was never reached"
         );
     }
 
@@ -27545,12 +27764,14 @@ mod tests {
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
+                len: 0x1000,
             }),
         }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_dma_alloc_facility(facility);
+        aspaces.write().set_loaded_node(ProcessId(2), 0x44);
 
         // No address space is registered for task 2, so the device-address
         // copy-out fails closed with `BadAddress`.
@@ -27559,8 +27780,17 @@ mod tests {
             Err(Errno::BadAddress)
         );
         // The carve nonetheless ran with the request length and the grant's
-        // addressing limit — never a caller-supplied bound.
-        assert_eq!(*facility.last.lock(), Some((0x1000, 0x4000_0000)));
+        // addressing limit — never a caller-supplied bound — and a custodian
+        // naming the caller's own node and admission generation.
+        assert_eq!(*facility.last.lock(), Some((0x1000, 0x4000_0000, 0x44, 1)));
+        assert_eq!(
+            aspaces
+                .read()
+                .loaded_driver(ProcessId(2))
+                .map(|d| d.dma_bytes),
+            Some(0x1000),
+            "the carve is tallied for the teardown record"
+        );
     }
 
     /// Build a `RecordingDmaFacility` over a fresh-and-`None` carve record,
@@ -27573,6 +27803,7 @@ mod tests {
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
                 device_addr: 0x4000_0000,
+                len: 0x1000,
             }),
         }))
     }
@@ -32162,6 +32393,171 @@ mod tests {
             .fields
             .iter()
             .any(|(key, value)| key == "mode" && value == "orderly"));
+    }
+
+    /// A quarantine that records every release and retirement it is asked
+    /// for.
+    struct RecordingQuarantine {
+        released: tairix_sync::SpinLock<alloc::vec::Vec<(u32, u64)>>,
+        retired: tairix_sync::SpinLock<alloc::vec::Vec<(u32, u64)>>,
+    }
+
+    impl RecordingQuarantine {
+        const fn new() -> Self {
+            Self {
+                released: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
+                retired: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
+            }
+        }
+    }
+
+    impl tairix_kernel_mem::DmaCustody for RecordingQuarantine {
+        fn bind(&self, _node: u32) -> Result<(), DmaError> {
+            Ok(())
+        }
+        fn hold(&self, _node: u32, _generation: u64, _block: tairix_kernel_mem::DmaBlock) {}
+        fn unbind(&self, _node: u32) {}
+    }
+
+    impl DmaQuarantineFacility for RecordingQuarantine {
+        fn release(&self, node: u32, generation: u64) -> Result<u64, Errno> {
+            self.released.lock().push((node, generation));
+            Ok(0x2000)
+        }
+        fn retire(&self, node: u32, through_generation: u64) -> Result<u64, Errno> {
+            self.retired.lock().push((node, through_generation));
+            Ok(0x1000)
+        }
+    }
+
+    /// `dma_quiesced` quiets exactly the caller's own node for exactly its
+    /// own admission generation, both read from the kernel's load record.
+    #[test]
+    fn dma_quiesced_quiets_only_the_callers_own_node_and_generation() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_quarantine(&QUARANTINE);
+
+        assert_eq!(h.dma_quiesced(&ctx), Err(Errno::NotFound), "not a driver");
+        assert!(QUARANTINE.released.lock().is_empty());
+
+        // An earlier load of the same node, then the caller's own.
+        aspaces.write().set_loaded_node(ProcessId(3), 0x44);
+        aspaces.write().set_loaded_node(ProcessId(2), 0x44);
+        assert_eq!(h.dma_quiesced(&ctx), Ok(0x2000));
+        assert_eq!(*QUARANTINE.released.lock(), alloc::vec![(0x44, 2)]);
+        let record = sink
+            .snapshot()
+            .into_iter()
+            .find(|ev| ev.id == AuditEvent::DmaQuarantineReleased.id())
+            .expect("the release is audited");
+        assert!(record
+            .fields
+            .iter()
+            .any(|(key, value)| key == "cause" && value == "reset"));
+    }
+
+    /// A vanished device can master nothing, so a surprise removal retires
+    /// its quarantine up to the generation high-water mark; an orderly
+    /// retirement of a device still present frees nothing.
+    #[test]
+    fn only_a_surprise_removal_retires_the_quarantine() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(5), 42);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_filesystem(fs)
+        .with_dma_quarantine(&QUARANTINE);
+
+        assert_eq!(h.hw_remove_node(&ctx, 43, orderly_flags()), Ok(0));
+        assert!(
+            QUARANTINE.retired.lock().is_empty(),
+            "an orderly retirement proves nothing about the device"
+        );
+        assert_eq!(h.hw_remove_node(&ctx, 42, 0), Ok(0));
+        assert_eq!(
+            *QUARANTINE.retired.lock(),
+            alloc::vec![(42, 2)],
+            "retired through the latest load's generation"
+        );
+    }
+
+    /// A driver that dies holding DMA carves leaves a record saying what its
+    /// node's quarantine now holds; one that carved nothing leaves none.
+    #[test]
+    fn a_driver_dying_with_dma_carves_records_the_quarantine() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        aspaces.write().set_loaded_node(ProcessId(6), 0x51);
+        h.reclaim_process_resources(ProcessId(6));
+        assert!(
+            !sink
+                .snapshot()
+                .iter()
+                .any(|ev| ev.id == AuditEvent::DmaQuarantined.id()),
+            "nothing carved, nothing quarantined"
+        );
+
+        aspaces.write().set_loaded_node(ProcessId(7), 0x51);
+        aspaces.write().note_dma_carved(ProcessId(7), 0x3000);
+        aspaces.write().note_dma_freed(ProcessId(7), 0x1000);
+        h.reclaim_process_resources(ProcessId(7));
+        let record = sink
+            .snapshot()
+            .into_iter()
+            .find(|ev| ev.id == AuditEvent::DmaQuarantined.id())
+            .expect("the quarantine is recorded");
+        for (key, expected) in [("node", "81"), ("generation", "2"), ("bytes", "8192")] {
+            assert!(
+                record
+                    .fields
+                    .iter()
+                    .any(|(k, value)| k == key && value == expected),
+                "{key} = {expected}"
+            );
+        }
     }
 
     /// Orderly removal of a node declaring *several* endpoints is refused if

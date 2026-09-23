@@ -34,7 +34,11 @@
 //! * `host.alloc_dma_zeroed` carves the `PROPERTY_LEN_BYTES` property buffer;
 //!   its device-visible base is the firmware's bus address for the buffer.
 //! * `MmioMailbox::new` over the doorbell window and the property buffer, then
-//!   `call_create` to bind the restricted-sender endpoint, then the serve loop.
+//!   a firmware-revision probe whose answer proves the firmware has finished
+//!   with any request an earlier instance left in flight, so the kernel may
+//!   release that instance's quarantined buffer (`host.device_quiesced`),
+//!   then `call_create` to bind the restricted-sender endpoint, then the
+//!   serve loop.
 //!
 //! After bring-up `main` serves forever: it blocks in `call_recv`, transforms
 //! each request, and answers with `call_reply` (a genuine
@@ -64,7 +68,8 @@ mod program {
     use tairix_caps::CapabilitySet;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_vcmailbox::{
-        MailboxError, MailboxTransport, MmioMailbox, DEFAULT_POLL_BUDGET, PROPERTY_LEN_BYTES,
+        decode_firmware_revision_response, encode_firmware_revision_query, MailboxError,
+        MailboxTransport, MmioMailbox, DEFAULT_POLL_BUDGET, PROPERTY_LEN_BYTES,
     };
 
     /// Exit code when the rt-backed driver host could not be built from the
@@ -186,9 +191,21 @@ mod program {
         // access to the property message. `buffer_phys` is the slab's
         // device-visible base, the correct `phys` for the window.
         let buffer = unsafe { RegisterWindow::from_mapping(buffer_phys, buffer_ptr, buffer_len) };
-        let Ok(mailbox) = MmioMailbox::new(regs, buffer, buffer_bus, POLL_BUDGET) else {
+        let Ok(mut mailbox) = MmioMailbox::new(regs, buffer, buffer_bus, POLL_BUDGET) else {
             return EXIT_BRINGUP_FAILED;
         };
+        // The firmware answers property requests one at a time in posting
+        // order, so its answer to this probe means it has finished with any
+        // request, and so any buffer, an earlier instance left in flight.
+        let mut probe = encode_firmware_revision_query();
+        if mailbox
+            .exchange(&mut probe)
+            .and_then(|()| decode_firmware_revision_response(&probe))
+            .is_err()
+        {
+            return EXIT_BRINGUP_FAILED;
+        }
+        host.device_quiesced();
         let channel = ServiceChannel {
             mailbox: RefCell::new(mailbox),
         };

@@ -1602,8 +1602,9 @@ property-channel client lives in the shared `lib/vcmailbox` crate
 - The doorbell is behind the `MailboxTransport` seam: `MmioMailbox`
   drives the register block over two capability-gated `RegisterWindow`s
   with a budget-bounded poll (`DEFAULT_POLL_BUDGET`), failing closed
-  with `Timeout`/`MalformedResponse` (foreign completion) — never an
-  unbounded spin.
+  with `Timeout` — never an unbounded spin. A property completion naming
+  another buffer (a dead predecessor's, answered late) is drained and
+  counted rather than taken for this exchange's reply.
 - Host tests cover framing (framebuffer + display-size), every
   fail-closed decode path, the alias↔aperture translation in both
   directions (`bus_to_arm_physical` / `arm_physical_to_bus`), and the
@@ -1928,7 +1929,13 @@ they are retained for the PCIe root-cause findings that still apply to
 accepted on metal** (attach → keystroke, detach → `usb_kbd` unloads while
 the controller stays up, re-attach → autoloads again, and cold boot with
 the keyboard unplugged then plugged in); the operator's UART logs are the
-recorded acceptance artefact. **Remaining for P10:** run
+recorded acceptance artefact. **Metal-pending (`plans/OPEN-DEFECTS.md`
+D167):** a driver restart that recovers its predecessor's quarantined DMA —
+`vcmailbox`'s firmware-revision probe, which rests on the VideoCore answering
+property requests in posting order, the VL805's `HCRST` before
+`UsbDevice::start`, and GENET's `DMA_DISABLED` wait — each observed as a
+`DMA_QUARANTINE_RELEASED` record after killing the driver mid-traffic.
+**Remaining for P10:** run
 `userland/gui/{wm,taskbar,session}` on the HVS path so
 `userland/session/login` offers the launchable graphical session when the
 display + input drivers are present (the headless build stays first-class,

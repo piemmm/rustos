@@ -39,7 +39,7 @@
 
 use tairix_abi::RegisterWindow;
 
-use crate::transport::{le_halves, u64_from_le_halves, write_u64_halves};
+use crate::transport::{await_reset, le_halves, u64_from_le_halves, write_u64_halves};
 use crate::{Status, Transport, VirtioError};
 
 /// Byte offsets within the virtio-MMIO register block (virtio 1.1
@@ -181,18 +181,13 @@ impl MmioTransport {
 }
 
 impl Transport for MmioTransport {
-    fn reset(&mut self) {
-        // Writing 0 to `Status` resets the device (virtio 1.1 §4.2.3.1).
-        // A bounded re-read keeps the wait finite so a wedged device
-        // cannot hang the boot path.
-        let _ = self.window.write_u32(regs::STATUS, 0);
-        for _ in 0..1_000_000 {
-            match self.window.read_u32(regs::STATUS) {
-                Ok(0) => break,
-                _ => core::hint::spin_loop(),
-            }
-        }
+    fn reset(&mut self) -> Result<(), VirtioError> {
         self.selected_queue = 0;
+        // Writing 0 to `Status` resets the device (virtio 1.1 §4.2.3.1).
+        self.window
+            .write_u32(regs::STATUS, 0)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        await_reset(|| self.window.read_u32(regs::STATUS).ok())
     }
 
     fn status(&self) -> Status {
@@ -405,7 +400,7 @@ mod tests {
             .with(Status::DRIVER);
         t.set_status(s);
         assert_eq!(t.status().bits(), Status::ACKNOWLEDGE | Status::DRIVER);
-        t.reset();
+        assert_eq!(t.reset(), Ok(()));
         assert_eq!(t.status().bits(), 0);
     }
 

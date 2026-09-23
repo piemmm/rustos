@@ -72,9 +72,7 @@ where
     // The carve is sized from the machine the host attested, through the
     // shared ring-sizing policy the network stack uses for its own rings.
     let layout = DmaLayout::for_machine(host.machine().as_ref());
-    let frames = host
-        .dma_host()
-        .ok_or(DriverError::Unsupported)?
-        .alloc_dma_zeroed(layout.bytes())?;
-    Genet::open(window, delay, frames, mac, layout)
+    let dma = host.dma_host().ok_or(DriverError::Unsupported)?;
+    let frames = dma.alloc_dma_zeroed(layout.bytes())?;
+    Genet::open(window, delay, frames, mac, layout, dma)
 }

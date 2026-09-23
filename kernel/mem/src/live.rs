@@ -44,7 +44,7 @@ use tairix_sync::SpinLock;
 use crate::anon::{map_anonymous, unmap_anonymous, zero_frame, AnonError};
 use crate::anon_window::AnonWindowMap;
 use crate::coldscan::{ColdPageScanner, ColdScanError};
-use crate::dma::{DmaError, DmaWindowMap};
+use crate::dma::{DmaCustodian, DmaError, DmaWindowMap};
 use crate::filemap::{map_file_page, unmap_file_region};
 use crate::frame::{Frame, FrameAllocator, MemoryClass, PAGE_SIZE};
 use crate::mmio::{MmioError, MmioWindowMap};
@@ -119,6 +119,9 @@ pub struct DmaMapping {
     pub cpu_va: u64,
     /// Physically-contiguous base address of the backing frames.
     pub phys_base: u64,
+    /// Backing length in bytes: the request rounded up to a power-of-two
+    /// page count.
+    pub len: usize,
 }
 
 /// The object-safe, mutating view of a process's live address space.
@@ -362,16 +365,26 @@ pub trait LiveUserSpace: Send {
     /// the allocator and the request refused fail-closed. `addr_limit == 0` declares no constraint.
     ///
     /// The producer has already resolved and validated the grant the buffer
-    /// is bounded by (owner-checked, kind, length); this only performs the carve + page-table mechanism, and the
-    /// buffer is reclaimed (frames zeroed and freed) when the live space is
-    /// dropped on task teardown.
+    /// is bounded by (owner-checked, kind, length); this only performs the
+    /// carve and page-table mechanism.
+    ///
+    /// Every carve names its `custodian`: the space binds to it on the first
+    /// carve and, when dropped, surrenders every buffer still live to it
+    /// rather than to the allocator, because the device may outlive the
+    /// driver. A space binds one custodian for its life.
     ///
     /// # Errors
     ///
     /// [`LiveSpaceError::Dma`] carrying the precise [`DmaError`]
     /// (zero length, exceeds the max buddy order, no contiguous block,
-    /// addressing-limit exceeded, no virtual slot, …).
-    fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError>;
+    /// addressing-limit exceeded, no virtual slot, a custodian that refused
+    /// the binding or differs from the bound one, …).
+    fn alloc_dma(
+        &mut self,
+        len: usize,
+        addr_limit: u64,
+        custodian: DmaCustodian,
+    ) -> Result<DmaMapping, LiveSpaceError>;
 
     /// Release the DMA buffer whose CPU virtual base is `cpu_va`, zeroing
     /// every backing byte (zero-on-free) before its frames return to the
@@ -586,7 +599,9 @@ pub trait LiveUserSpace: Send {
 /// * `anon` — the per-task placement allocator that chooses the base for a
 ///   non-`FIXED` anonymous mapping out of this task's heap window;
 /// * `dma` — the per-task guarded DMA-buffer allocator that carves a
-///   physically-contiguous coherent buffer out of this task's DMA window;
+///   physically-contiguous coherent buffer out of this task's DMA window,
+///   and `dma_custodian`, the custody its buffers are surrendered to at
+///   teardown (bound on the first carve);
 /// * `shared` — the per-task guarded allocator that maps a kernel-owned
 ///   cross-process shared-memory region (cacheable RAM) into this task's
 ///   shared-memory window. It reuses the [`MmioWindowMap`] guarded-window
@@ -610,6 +625,7 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
     mmio: MmioWindowMap,
     anon: AnonWindowMap,
     dma: DmaWindowMap,
+    dma_custodian: Option<DmaCustodian>,
     shared: MmioWindowMap,
     file: Option<AnonWindowMap>,
     space_id: u64,
@@ -710,6 +726,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             mmio,
             anon,
             dma,
+            dma_custodian: None,
             shared,
             file,
             space_id: next_space_id(),
@@ -1024,13 +1041,29 @@ where
         Ok(region.virt().as_u64())
     }
 
-    fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError> {
+    fn alloc_dma(
+        &mut self,
+        len: usize,
+        addr_limit: u64,
+        custodian: DmaCustodian,
+    ) -> Result<DmaMapping, LiveSpaceError> {
+        match &self.dma_custodian {
+            Some(bound) if !bound.same_as(&custodian) => {
+                return Err(DmaError::CustodianMismatch.into());
+            }
+            Some(_) => {}
+            None => {
+                custodian.custody.bind(custodian.node)?;
+                self.dma_custodian = Some(custodian);
+            }
+        }
         let buf =
             self.dma
                 .alloc_into(&mut self.space, self.frames, &self.physmap, len, addr_limit)?;
         Ok(DmaMapping {
             cpu_va: buf.virt().as_u64(),
             phys_base: buf.phys().as_u64(),
+            len: buf.len(),
         })
     }
 
@@ -1261,17 +1294,22 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
             tier.lock().purge_space(self.space_id);
         }
 
-        // 1. Reclaim every live DMA buffer: each physically-contiguous
-        //    backing block is zeroed (zero-on-free) and returned to the
-        //    frame allocator, and its pages leave the space's bookkeeping.
-        self.dma
-            .drain_into(&mut self.space, self.frames, &self.physmap);
+        // 1. Surrender every live DMA buffer to the space's custodian, never
+        //    to the allocator: the device may still master it. A space with
+        //    no custodian never carved.
+        if let Some(custodian) = self.dma_custodian.take() {
+            self.dma
+                .surrender_into(&mut self.space, &self.physmap, &custodian);
+            custodian.custody.unbind(custodian.node);
+        }
 
         // 2. Release every remaining tracked mapping. A page inside the
         //    device-window or shared-memory window is only *unmapped* —
         //    its frame belongs to a device (MMIO registers) or to the
         //    shared-region registry, which zeroes and frees region frames
-        //    itself once the owner and every grantee have released them.
+        //    itself once the owner and every grantee have released them. A
+        //    page left in the DMA window (an unmap that failed above) is
+        //    unmapped likewise: its frame is the custodian's now.
         //    Every other page (image segments, user stack, startup block,
         //    anonymous heap — `FIXED` and placed alike) is backed by a
         //    frame this task drew from the kernel allocator: it is zeroed
@@ -1279,17 +1317,19 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
         //    freed. A frame the direct map cannot reach is leaked rather
         //    than freed unscrubbed (fail closed; unreachable in practice
         //    — every allocator frame lies in the direct map).
-        let pages: Vec<_> = self.space.live_pages().collect();
-        for page in pages {
-            let window_only =
-                self.mmio.contains(page.start()) || self.shared.contains(page.start());
-            // The page is recorded live, so the unmap can only fail on a
+        //    The walk allocates nothing, so a teardown under memory pressure
+        //    cannot fail for want of the memory it is about to return.
+        while let Some((page, unmapped)) = self.space.unmap_lowest() {
+            // The page was recorded live, so the unmap can only fail on a
             // backend defect; declining to touch the frame is the only
             // safe recovery (never a panic).
-            let Ok(frame) = self.space.unmap(page) else {
+            let Ok(frame) = unmapped else {
                 continue;
             };
-            if window_only {
+            if self.mmio.contains(page.start())
+                || self.shared.contains(page.start())
+                || self.dma.contains(page.start())
+            {
                 continue;
             }
             if zero_frame(&self.physmap, frame).is_ok() {
@@ -1323,10 +1363,10 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
 mod tests {
     use super::{LiveSpace, LiveSpaceError, LiveUserSpace};
     use crate::anon::AnonError;
-    use crate::dma::DmaError;
+    use crate::dma::{DmaCustodian, DmaError};
     use crate::frame::{FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
     use crate::phys::SimPhysMap;
-    use crate::test_fixture::frame_backing;
+    use crate::test_fixture::{custody, frame_backing};
     use crate::uaccess::{copy_in, copy_out};
     use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
     use tairix_sync::Once;
@@ -1356,6 +1396,18 @@ mod tests {
 
     fn sim() -> SimPhysMap {
         SimPhysMap::new(PhysAddr::new(SIM_BASE), SIM_BYTES)
+    }
+
+    /// The node and admission generation the tests' carves are made for.
+    const TEST_NODE: u32 = 7;
+    const TEST_GENERATION: u64 = 3;
+
+    fn custodian(custody: &'static crate::test_fixture::RecordingCustody) -> DmaCustodian {
+        DmaCustodian {
+            node: TEST_NODE,
+            generation: TEST_GENERATION,
+            custody,
+        }
     }
 
     use crate::phys::PhysMap;
@@ -1741,7 +1793,7 @@ mod tests {
     fn alloc_dma_maps_a_zeroed_coherent_buffer_in_the_dma_window() {
         let mut live = live_space!();
         let mapping = live
-            .alloc_dma(2 * PAGE_SIZE, 0)
+            .alloc_dma(2 * PAGE_SIZE, 0, custodian(custody!()))
             .expect("a free block exists");
         // The CPU VA lies inside the configured DMA window, past the leading
         // guard page.
@@ -1836,7 +1888,7 @@ mod tests {
         .expect("windows are valid");
 
         let mapping = live
-            .alloc_dma(2 * PAGE_SIZE, 0)
+            .alloc_dma(2 * PAGE_SIZE, 0, custodian(custody!()))
             .expect("a free block exists");
         assert_eq!(
             recorded.calls.load(Ordering::Relaxed),
@@ -1869,7 +1921,7 @@ mod tests {
         // satisfied by any block, so the carve is refused fail-closed and no
         // pages are mapped.
         assert_eq!(
-            live.alloc_dma(PAGE_SIZE, SIM_BASE),
+            live.alloc_dma(PAGE_SIZE, SIM_BASE, custodian(custody!())),
             Err(LiveSpaceError::Dma(DmaError::AddrLimitExceeded))
         );
         assert_eq!(
@@ -1883,23 +1935,19 @@ mod tests {
     fn alloc_dma_rejects_zero_length() {
         let mut live = live_space!();
         assert_eq!(
-            live.alloc_dma(0, 0),
+            live.alloc_dma(0, 0, custodian(custody!())),
             Err(LiveSpaceError::Dma(DmaError::ZeroSize))
         );
     }
 
-    #[test]
-    fn dropping_the_live_space_reclaims_every_dma_block() {
-        // Build the live space over a `'static` allocator we keep a handle to,
-        // so we can observe the frame count before, during, and after the
-        // space (and its DMA buffers) are torn down.
-        let (frames, _simmap) = backing!();
-        let before = frames.free_frames();
-        {
-            let mut live = LiveSpace::new(
+    /// A live space over the shared sim map, so a test can observe the bytes
+    /// its carves hold after the space is gone.
+    macro_rules! shared_live_space {
+        ($frames:expr, $simmap:expr) => {{
+            LiveSpace::new(
                 AddressSpace::new(HostPageTable::new()),
-                sim(),
-                frames,
+                SharedSim($simmap),
+                $frames,
                 VirtAddr::new(MMIO_WINDOW_BASE),
                 MMIO_WINDOW_PAGES,
                 VirtAddr::new(ANON_WINDOW_BASE),
@@ -1911,29 +1959,138 @@ mod tests {
                 VirtAddr::new(FILE_WINDOW_BASE),
                 FILE_WINDOW_PAGES,
             )
-            .expect("windows are valid");
-            live.alloc_dma(2 * PAGE_SIZE, 0)
+            .expect("windows are valid")
+        }};
+    }
+
+    /// Whether every byte of `block` reads zero through `simmap`.
+    fn block_is_zero(simmap: &SimPhysMap, block: crate::dma::DmaBlock) -> bool {
+        let ptr = simmap
+            .translate(block.frame.start(), block.len())
+            .expect("block in the sim window");
+        // SAFETY: the sim map proved the pointer valid for the block; the
+        // block's owning space is gone, so nothing else references it.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), block.len()) };
+        bytes.iter().all(|&b| b == 0)
+    }
+
+    #[test]
+    fn dropping_the_live_space_surrenders_every_dma_block_to_its_custodian() {
+        // A device may still master a dead driver's DMA memory, so teardown
+        // must hand it to the custodian — allocated, unmapped, and scrubbed —
+        // never back to the allocator.
+        let (frames, simmap) = backing!();
+        let held = custody!();
+        let before = frames.free_frames();
+        let (first, second);
+        {
+            let mut live = shared_live_space!(frames, simmap);
+            first = live
+                .alloc_dma(2 * PAGE_SIZE, 0, custodian(held))
                 .expect("a free block exists");
-            assert!(
-                frames.free_frames() < before,
-                "the DMA carve consumed frames"
-            );
+            second = live
+                .alloc_dma(PAGE_SIZE, 0, custodian(held))
+                .expect("a second block");
+            copy_out(
+                live.space(),
+                simmap,
+                VirtAddr::new(first.cpu_va),
+                &[0xC3u8; 64],
+            )
+            .expect("writable DMA buffer");
+            held.with(|r| assert_eq!((r.bound, r.binds), (1, 1), "one binding per space"));
         }
-        // Dropping the live space reclaimed the DMA block's frames.
         assert_eq!(
             frames.free_frames(),
-            before,
-            "every DMA frame is returned to the allocator on teardown"
+            before - 3,
+            "no surrendered frame returned to the allocator"
         );
+        held.with(|record| {
+            assert_eq!(record.bound, 0, "the space unbound once it surrendered");
+            let mut bases: alloc::vec::Vec<u64> = record
+                .held
+                .iter()
+                .map(|&(node, generation, block)| {
+                    assert_eq!((node, generation), (TEST_NODE, TEST_GENERATION));
+                    assert!(block_is_zero(simmap, block), "a held block is scrubbed");
+                    block.frame.start().as_u64()
+                })
+                .collect();
+            bases.sort_unstable();
+            let mut expected = [first.phys_base, second.phys_base];
+            expected.sort_unstable();
+            assert_eq!(bases, expected, "exactly the live carves were surrendered");
+            for &(_, _, block) in &record.held {
+                frames
+                    .free_order(block.frame, block.order)
+                    .expect("hygiene: the test releases what it held");
+            }
+        });
+        assert_eq!(frames.free_frames(), before);
+    }
+
+    #[test]
+    fn a_space_binds_one_custodian_for_its_life() {
+        let mut live = live_space!();
+        let held = custody!();
+        let other = custody!();
+        live.alloc_dma(PAGE_SIZE, 0, custodian(held))
+            .expect("the first carve binds");
+        live.alloc_dma(PAGE_SIZE, 0, custodian(held))
+            .expect("the bound custodian carves again");
+        held.with(|r| assert_eq!(r.binds, 1, "a space binds once"));
+        assert_eq!(
+            live.alloc_dma(PAGE_SIZE, 0, custodian(other)),
+            Err(LiveSpaceError::Dma(DmaError::CustodianMismatch)),
+            "a second custody is refused"
+        );
+        let mut next = custodian(held);
+        next.generation += 1;
+        assert_eq!(
+            live.alloc_dma(PAGE_SIZE, 0, next),
+            Err(LiveSpaceError::Dma(DmaError::CustodianMismatch)),
+            "so is another driver instance's"
+        );
+        other.with(|r| assert_eq!(r.binds, 0));
+    }
+
+    #[test]
+    fn a_refused_binding_refuses_the_carve() {
+        let (frames, simmap) = backing!();
+        let before = frames.free_frames();
+        let mut live = shared_live_space!(frames, simmap);
+        assert_eq!(
+            live.alloc_dma(PAGE_SIZE, 0, custodian(custody!(refusing))),
+            Err(LiveSpaceError::Dma(DmaError::Alloc(
+                crate::error::AllocError::OutOfMemory
+            )))
+        );
+        assert_eq!(frames.free_frames(), before, "no frame was carved");
+        assert_eq!(live.space().mapped_pages(), 0);
+    }
+
+    #[test]
+    fn a_space_that_never_carved_surrenders_nothing() {
+        let held = custody!();
+        {
+            let mut live = live_space!();
+            live.map_anonymous(0x4000, 1).expect("an ordinary mapping");
+        }
+        held.with(|r| {
+            assert_eq!((r.binds, r.bound), (0, 0));
+            assert!(r.held.is_empty());
+        });
     }
 
     #[test]
     fn dropping_the_live_space_reclaims_the_whole_footprint() {
         // The I2 regression test (`plans/APPS.md`): a task's exit must
-        // return *every* frame it owned — `FIXED` anonymous, placed
-        // anonymous, and DMA alike — while leaving registry-owned shared
-        // frames and device windows untouched, and scrub the freed bytes.
+        // return every frame it owned — `FIXED` and placed anonymous alike —
+        // while leaving registry-owned shared frames, device windows and the
+        // DMA carve (the custodian's now) untouched, and scrub the freed
+        // bytes.
         let (frames, simmap) = backing!();
+        let held = custody!();
         let before = frames.free_frames();
 
         // A stand-in shared-region frame owned by "the registry", mapped
@@ -1963,7 +2120,8 @@ mod tests {
 
             live.map_anonymous(fixed_base, 2).expect("fixed anon");
             live.map_anonymous_placed(3).expect("placed anon");
-            live.alloc_dma(2 * PAGE_SIZE, 0).expect("dma carve");
+            live.alloc_dma(2 * PAGE_SIZE, 0, custodian(held))
+                .expect("dma carve");
             live.map_device_window(0xFE98_0000, 0x2000)
                 .expect("device window");
             live.map_shared(region_frame.start().as_u64(), PAGE_SIZE)
@@ -1992,10 +2150,14 @@ mod tests {
 
         // Every frame the task owned returned to the allocator; the
         // registry-owned region frame did not (its lifecycle belongs to
-        // the shared-region registry).
+        // the shared-region registry), and nor did the DMA carve.
+        let dma_pages = held.with(|record| {
+            assert_eq!(record.held.len(), 1, "the one carve was surrendered");
+            record.held[0].2.len() / PAGE_SIZE
+        });
         assert_eq!(
             frames.free_frames(),
-            after_region,
+            after_region - dma_pages,
             "exit reclaims the whole owned footprint and nothing else"
         );
 
@@ -2012,8 +2174,15 @@ mod tests {
             "freed frames are zeroed on teardown"
         );
 
-        // Hygiene: return the registry frame so the allocator is whole.
+        // Hygiene: return the registry frame and the held carve so the
+        // allocator is whole.
         let _ = frames.free(region_frame);
+        held.with(|record| {
+            let (_, _, block) = record.held[0];
+            frames
+                .free_order(block.frame, block.order)
+                .expect("the held carve frees");
+        });
         assert_eq!(frames.free_frames(), before);
     }
 
@@ -2043,8 +2212,11 @@ mod tests {
         )
         .expect("windows are valid");
 
+        let held = custody!();
         for _ in 0..50 {
-            let mapping = live.alloc_dma(2 * PAGE_SIZE, 0).expect("a free block");
+            let mapping = live
+                .alloc_dma(2 * PAGE_SIZE, 0, custodian(held))
+                .expect("a free block");
             assert!(frames.free_frames() < before, "the carve consumed frames");
             live.free_dma(mapping.cpu_va).expect("free by cpu base");
             assert_eq!(

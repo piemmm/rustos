@@ -20,7 +20,7 @@ seek slider.
 | SND2 | `lib/abi`: `HwDeviceClass::Audio`, the PCM vocabulary, `audio_ring`, `audiochan-v1`, `audio-v1` | done |
 | SND3 | `lib/audio`: conversion, mixer, resampler, channel mapping, clock model, routing policy, volume model, the stream client — all host-tested, plus the ring's loom model | done |
 | SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | done |
-| SND5 | `lib/abi` DMA-engine class trait (`DmaEngine`/`DmaChannel`, cyclic chains, discovered request lines); `drivers/dma/bcm2711` | planned |
+| SND5 | `lib/abi` DMA-engine class trait (`DmaEngine`/`DmaChannel`, cyclic chains, discovered request lines); the discovery, hardware-tree and kernel prerequisites §The DMA-engine seam names; `drivers/dma/bcm2835` | planned |
 | SND6 | Isochronous transfer support: the endpoint kind and service-interval scheduling in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and feedback endpoints in `drivers/bus/usb/xhci` | planned |
 | SND7 | `drivers/audio/usb_uac`: UAC1 and UAC2, clock and feature units, explicit and implicit feedback | planned |
 | SND8 | `drivers/audio/bcm2711_pwm` with noise shaping; `drivers/audio/bcm2711_i2s` with a separately-bound codec | planned |
@@ -790,27 +790,10 @@ and valuable: the x86_64 motherboard path is testable in CI.
 Three real paths over one seam the tree is missing.
 
 **The seam: a DMA engine (SND5).** `DmaHost` mints DMA-able *memory* and
-nothing models a DMA *controller channel* — request a channel for a given
-peripheral request line, program a cyclic control-block chain, start, stop,
-read the live position, and park on the per-period interrupt. Every Pi audio
-path is fed by one, which is why no Pi audio path is currently reachable at
-all, and it is the plan's second priority for that reason.
-
-It is a **shared** seam, not an audio one, and its absence is the tree's gap
-rather than this plan's: SPI, SD and UART DMA all want the same four
-operations, and a driver that programmed the controller's registers itself
-would be the duplication the charter forbids the moment the second one
-appeared. So it is `lib/abi/src/driver/dmaengine.rs` with `drivers/dma/bcm2711`
-implementing it, and it is written for a periodic slave transfer in general
-rather than for an audio ring.
-
-The cyclic chain is what makes it event-driven rather than polled: the control
-blocks are linked into a ring with an interrupt at each period boundary, so the
-driver parks on the completion interrupt and is woken once per period — it
-never reads a position register in a loop to find out where the hardware got
-to. The peripheral request line is read from the node's own `dmas` property,
-never a constant: a request number baked into shared code would be exactly the
-board coupling the charter forbids.
+nothing models a DMA *controller channel*. Every Pi audio path is fed by one,
+which is why none is reachable today, and SPI, SD and UART DMA want the same
+operations, so it is a shared seam written for a periodic slave transfer in
+general rather than for an audio ring — §The DMA-engine seam, below.
 
 1. **HDMI audio — `drivers/audio/rpi_hdmi`.** The VC6 HDMI controller's MAI
    block: its FIFO fed by a cyclic DMA channel with the HDMI request line, the
@@ -851,6 +834,203 @@ board coupling the charter forbids.
    no control interface binds with nothing, and one with an I2C control port
    binds through `lib/i2c` and `drivers/bus/i2c`. Two drivers composing over
    one stream is the shape every serious audio system has and is worth proving.
+
+#### The DMA-engine seam (SND5)
+
+**What the tree exposes.** Taken from the firmware tree `tools/mkimage`
+pins (`bcm2711-rpi-4-b.dtb`, firmware 1.20260521) and the BCM2711 peripherals
+document, chapter 4:
+
+| Node | `compatible` | Registers | Channels | `brcm,dma-channel-mask` | Interrupts |
+|---|---|---|---|---|---|
+| `/soc/dma-controller@7e007000` | `brcm,bcm2835-dma` | `0x7e007000` + `0xb00` | 0–10: 0–6 full, 7–10 LITE | `0x7f5`: 0, 2, 4–10 | 11 (`dma0`–`dma10`); 7/8 and 9/10 share a line |
+| `/scb/dma@7e007b00` | `brcm,bcm2711-dma` | `0x7e007b00` + `0x400` | 11–14, DMA4 | `0x7000`: 12–14 | 4 (`dma11`–`dma14`) |
+
+The mask counts in the part's absolute channel numbers, and a node's first
+channel is its window's offset into the 4 KiB DMA page over the `0x100`
+channel stride. A LITE channel moves at most 65 532 bytes per block and has no
+2D or ignore modes; its `DEBUG.LITE` bit says which it is. The legacy engines
+reach RAM through `/soc`'s `dma-ranges` (bus `0xc0000000` ↔ CPU `0x0`, 1 GiB)
+and peripherals at their legacy-master addresses (bus `0x7c000000` ↔ CPU
+`0xfc000000`, 56 MiB); DMA4 reaches all 16 GiB untranslated and peripherals at
+`0x4_7c000000`. Channel 15 and the global `INT_STATUS`/`ENABLE` registers lie
+outside both nodes and are never touched: `ENABLE`'s `PAGE` fields choose which
+gibibyte the uncached alias reaches, and the firmware owns them.
+
+The default tree's consumers:
+
+| Consumer | Controller | Specifiers | `dma-names` |
+|---|---|---|---|
+| `i2s@7e203000` (PCM) | `dma` | 2, 3 | `tx`, `rx` |
+| `spi@7e204000` | `dma` | 6, 7 | `tx`, `rx` |
+| `mmc@7e300000`, `mmcnr@7e300000` | `dma` | 11 | `rx-tx` |
+| `mmc@7e202000` (SD host) | `dma` | `0x2000000d` | `rx-tx` |
+| `smi@7e600000` | `dma` | 4 | `rx-tx` |
+| `hdmi@7ef00700`, `hdmi@7ef05700` | `dma40` | `0x41fa000a`, `0x41fa0011` | `audio-rx` |
+
+Neither PWM node carries `dmas`; that is SND8's prerequisite, below.
+
+The one `#dma-cells` cell is the downstream binding, wider than upstream's
+"the DREQ number": bits 4:0 are the DREQ, and above them the firmware states
+how its peripheral wants serving — AXI priority (19:16), panic priority
+(23:20), wide source (24), wide destination (25), no write-response wait (27),
+wait for outstanding writes (28), no debug pause (29), and burst (30). They are
+platform facts carried to the controller by discovery and applied by it; a set
+bit outside those refuses the request rather than being ignored.
+
+**Security.** A control block holds bus addresses and there is no IOMMU, so
+whoever writes one can read and write all of RAM. The controller driver is
+therefore the only process that maps the controller's registers or writes
+control-block memory, and a consumer never supplies an address: it quotes
+claims the kernel attests, and the driver builds every block from attested
+facts alone.
+
+- **The request line** is the consumer's own `DmaRequest` grant, which
+  discovery built from its node's `dmas` entry. The consumer quotes the
+  record; the driver asks the kernel whether the in-service caller holds
+  exactly that grant (`call_peer_holds`, below) and refuses otherwise. The DREQ
+  and the serving flags come from the attested record, never from the frame.
+- **The FIFO** is a CPU-physical register address the consumer quotes. The
+  driver asks whether the caller holds an MMIO grant covering the whole
+  peripheral-side access (4 bytes, or 16 for a wide one), then translates it
+  through its own peripheral `dma-ranges` window to the legacy-master address.
+  A FIFO outside the caller's windows or outside the controller's reach is
+  refused, and the peripheral side never increments.
+- **The buffer** is made by the controller, never by the consumer: a
+  DMA-capable shared region carved under the controller's own addressing
+  constraint, whose device address the kernel reports to its creator, and a
+  mapping of which the kernel grants to the requesting process. Every block's
+  memory side lies inside its channel's own region by construction. It is
+  Linux's rule — a dmaengine client maps its buffer against the controller's
+  device — with the kernel holding it rather than the client.
+- **Lifetime.** The region is refcounted by the kernel. A consumer that dies
+  drops only its mapping; the controller stops the channel before releasing its
+  own reference, so a consumer's death never leaves the hardware on freed
+  memory. The *controller's* death is covered by the node quarantine
+  (`plans/OPEN-DEFECTS.md` D167): its regions and control blocks stay out of
+  the allocator until the node's next driver instance declares its device
+  quiesced, which the controller's bring-up does only once it has reset every
+  channel in its mask.
+- **Ownership.** A channel belongs to the process instance that opened it and
+  every later call must come from that instance. An `Open` for the same
+  request from a different instance that the kernel attests as its holder
+  reclaims the channel — stopped, its region released — because the grant, the
+  authority, has moved with the node's new driver.
+- **Every refusal is audited** with a stable event id naming the request and
+  the reason.
+
+**The cross-process shape.** One endpoint per controller node, from a reserved
+block indexed by the node's id, bindable only by the holder of that node's
+`DmaController` duty. It is the I²C `BusChild` precedent with one duty in place
+of one per child, because a DMA controller's consumers are scattered across the
+tree rather than beneath it and a duty per consumer would not fit a node. The
+endpoint is restricted-sender on `CAP_IPC_ENDPOINT` with the grant coupled to
+the call, and a `DmaRequest` grant covers *calling* its controller's endpoint —
+never serving it, so no consumer can squat the controller's rendezvous.
+
+- `Open { request }` claims the lowest free channel the mask allows, at most
+  one per request.
+- `Prepare { fifo, direction, period_bytes, periods }` makes the region and the
+  cyclic chain, one interrupting block per period (a period split into several
+  blocks where a LITE channel's limit demands, the interrupt on its last).
+- `Start`; `Stop` (abort, then channel reset); `Position` (the live
+  memory-side offset, read from the channel); `Close`.
+- `Wait { after }` is a posted call the driver answers at the first period
+  boundary past `after`, carrying the monotone byte position and the monotonic
+  time the interrupt was serviced, or the channel's error bits if it faulted.
+  The reply cannot be forged or lost: it comes from the endpoint's owner, a
+  boundary that passed while no `Wait` was posted is answered at once, and a
+  consumer that dies has its call retired by the kernel, which the driver sees
+  as a refused reply and answers by stopping the channel.
+
+**The latency consequence.** A period crosses one more process than SND4's
+virtio path: interrupt → controller → consumer → `audiod`. The extra hop costs
+slack, not latency. It is asynchronous — the controller replies and returns to
+its wait set — and it carries the interrupt-time stamp, so the clock pair
+invariant 3 builds on is not degraded by it. Output latency is still the DMA
+ring's depth plus the mixer's period; the consumer's refill deadline shrinks
+by one process wake, expected to be tens of microseconds against a period of
+milliseconds and measured on metal with SND8 rather than assumed. It is
+structural rather than chosen: a channel's interrupt must be acknowledged in
+its own `CS` register, which shares its page with fourteen other channels' and
+so cannot be granted alone. The mitigation is the mixer's own discipline — a real-time serve
+thread whose interrupt path allocates, locks and blocks on nothing.
+
+No memory but the sample region is shared between the two processes, so this
+hop has no lock-free protocol to model: the position travels in the reply, and
+a reply is a kernel IPC.
+
+**Discovery.** `dmas`, `dma-names` and `#dma-cells` are the generic devicetree
+DMA binding, so the shared walk (`kernel/arch/api/src/fdtwalk.rs`) reads them
+for every FDT port rather than `kernel/arch/aarch64` alone:
+
+- A node with `#dma-cells` is a DMA controller. It is classed
+  `HwDeviceClass::Dma`, carries a `DmaController` duty naming its endpoint, and
+  carries one `Dma` resource per entry of its parent bus's `dma-ranges`, each
+  translated. `/soc` has two, and the existing aperture decoder folds entries
+  into one span, which would misstate them as a single untranslated window of
+  nearly 4 GiB.
+- Each entry of a consumer's `dmas` becomes a `DmaRequest` naming its
+  controller's endpoint, the specifier (up to two cells — a wider one is
+  dropped, never truncated), the entry's position, and its `dma-names` string
+  where that fits the record's eight bytes. A phandle resolves to the id the
+  walk will assign by replaying the walk's own emission rule, so a consumer met
+  before its controller still names the right endpoint.
+- The Broadcom mask is a vendor property, so `kernel/arch/aarch64`'s
+  augmentation reads it and converts it to window-relative numbering; the
+  shared walk reads the generic `dma-channel-mask` otherwise. The duty records
+  whether the tree stated a mask at all, and the Broadcom driver serves nothing
+  without one, because its binding makes the property mandatory.
+
+Two defects in the walk are fixed with it, both found against the pinned tree:
+
+- **`HW_NODE_MAX_RESOURCES` is 8**, so the legacy controller's eleven
+  interrupts are cut to seven today and channels 7–10 cannot be reached. It
+  becomes 16; the controller node needs 15.
+- **`interrupt-parent` is ignored**, so a node wired to a nested interrupt
+  controller has its specifiers decoded as the GIC's: `hdmi0` is granted INTID
+  33, an ARM mailbox line. A specifier is mapped only when the node's effective
+  interrupt parent is the port's root controller.
+
+**Kernel prerequisites.** Three general mechanisms, each with its holder and
+enforcement point in this change:
+
+- `shm_create_dma` — a shared region carved physically contiguous under a
+  `Dma` grant, zeroed, mapped `DMA_COHERENT` in every mapping so no alias is
+  cacheable, with its translated device address reported to its creator.
+- `shm_grant_peer` — mint a mapping of a region for the in-service caller of an
+  endpoint the grantor owns; `shm_grant` reaches only an endpoint's server.
+- `call_peer_holds` — whether the in-service caller holds a grant covering a
+  given resource: `call_peer_seat`'s shape, generalised from seats to grants,
+  answering only about a caller the server is actively serving.
+
+**Scope.** SND5's driver is `drivers/dma/bcm2835`, the legacy engine
+(`brcm,bcm2835-dma`), named for the binding it serves: every default-tree
+consumer but HDMI names it, SND8's I²S among them. DMA4 (`brcm,bcm2711-dma`) is
+a different register model and block format on its own node, whose only
+default-tree consumers are the two HDMI audio paths, so it arrives with SND19
+as `drivers/dma/bcm2711`, and the serve loop moves into a `lib/*` crate when
+that second driver gives it two consumers. The seam has no pause (a paused DREQ-paced transfer starves
+its peripheral; a consumer wanting silence writes silence), no
+memory-to-memory, and no one-shot scatter-gather, which SPI and SD bring with
+them when they arrive as consumers.
+
+**Verification.** Host tests run the driver against a register-level model of
+the controller that fetches control blocks from memory: the chain walked
+cyclically with one interrupt per period, LITE limits, stop and abort, and the
+three error bits. Every refusal has its test — an unheld request, a FIFO
+outside the caller's windows or the controller's reach, a masked or exhausted
+channel, a geometry the channel cannot hold. Discovery is tested over a fixture
+in the pinned tree's shape carrying `dmas`, every new wire type round-trips,
+and the endpoint's decoder has a fuzz harness drawing through
+`tairix_fuzzseed::splitmix64`.
+
+No QEMU vertical is reachable. The tree boots no `raspi*` machine
+(`plans/PI.md`), and QEMU 11.1's `bcm2835-dma` model runs a chain to its end
+synchronously with DREQ ignored, so a cyclic chain — the seam's whole purpose
+— never ends and hangs the emulator. Metal acceptance stays pending until
+SND8's first transfer on a Pi 4 supplies its artefact, and is recorded so in
+`plans/PI.md` when the driver lands.
 
 ### `drivers/audio/usb_uac` — USB Audio Class
 
@@ -1410,11 +1590,10 @@ someone else's problem:
   amended to point here for the isochronous half; nothing is silently diverged
   from.
 - **A native VC6 HDMI encoder on the Pi (SND19's blocker)** is *not* owned
-  here, and is the one open decision. Without it HDMI audio cannot land, and
-  with it the work is a display change: mode set, N/CTS, InfoFrames and EDID,
-  belonging to `plans/PI.md`. The decision is whether to take that on as part
-  of reaching HDMI audio, or to ship Pi audio on the analogue jack and I2S
-  first.
+  here. Without it HDMI audio cannot land, and with it the work is a display
+  change: mode set, N/CTS, InfoFrames and EDID, belonging to `plans/PI.md`.
+  The decision is whether to take that on as part of reaching HDMI audio, or to
+  ship Pi audio on the analogue jack and I2S first.
 
   **The recommendation is the latter.** The jack and I2S are fully native,
   unblocked by SND5, and prove the whole stack on real silicon; the encoder is
@@ -1422,6 +1601,35 @@ someone else's problem:
   large dependency dragged sideways into an audio change. There is no third
   option: the only other route to HDMI audio is refused outright rather than
   deferred, for the reason given above.
+
+SND5's design surfaced two decisions, both taken:
+
+- **DMA memory outlives its use by the device, across its driver's death**, for
+  every DMA-mastering driver through `plans/OPEN-DEFECTS.md` D167's node
+  quarantine (Fuchsia's BTI rule): a dead driver's carves are held against its
+  hardware-tree node until the node's next driver declares its device
+  quiesced (`DmaHost::device_quiesced`), so a cyclic chain a dead controller
+  left running can never fetch its next block from reused memory. SND5's code
+  needs no special case beyond resetting every masked channel before it
+  declares.
+- **SND5's leaf is `drivers/dma/bcm2835`**, the legacy engine; DMA4 arrives
+  with SND19 (§Scope above). One crate for both would have needed a driver to
+  learn which of its bind keys matched — `devmgr` hands a driver only its
+  grants — and a DMA4 model nothing exercises before SND19.
+
+SND8 inherits three facts from the pinned tree, each needing a home before its
+drivers can bind:
+
+- **Neither PWM node carries `dmas`**, so the jack's request line (DREQ 5 for
+  PWM0, per the peripherals document) has no discovered source. The image
+  builder already applies a firmware overlay (`disable-bt`); a first-party one
+  adding the property is the likely shape.
+- **PWM and I²S are `status = "disabled"`** in the pinned tree, and the walk
+  emits disabled nodes and lets drivers bind them (`plans/OPEN-DEFECTS.md`
+  D168).
+- **Their pins need their alternate function**, and nothing in the tree sets
+  one: no pinctrl or GPIO driver exists. The firmware's `config.txt` `gpio=`
+  directive can set it at boot.
 
 One decision inside this plan is worth surfacing because it is visible to
 users: **HDA codecs get no quirk table.** A small number of laptops whose
@@ -1509,7 +1717,12 @@ have written.
 `lib/audio` carries `forbid(unsafe_code)` and performs no shared-memory access
 of its own — it works on slices its caller owns — so `cargo xtask miri` has
 nothing there to interpret and the crate is not enrolled. `lib/audiochan` is
-SND4's, and is enrolled there if its accesses warrant it.
+not enrolled either, for a different reason: its one `unsafe`, turning the
+kernel's `shm_map` result into the region slice, sits in the freestanding-only
+`serve` module, which has no host build for the interpreter to run, and its
+soundness rests on the kernel's mapping contract, which the QEMU vertical
+exercises on all three targets. The host-built half, `AudioChannelServer`,
+carries no `unsafe` at all.
 
 **`tairix-abi` is enrolled in `cargo xtask miri` too, and the enrolment found
 a real one.** Both shared rings downgraded their header to a shared `&[u8]`

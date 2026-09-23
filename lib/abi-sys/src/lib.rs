@@ -136,6 +136,8 @@ const NUM_PORT_READ: u64 = SyscallNumber::PORT_READ.as_u16() as u64;
 const NUM_PORT_WRITE: u64 = SyscallNumber::PORT_WRITE.as_u16() as u64;
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 const NUM_DMA_FREE: u64 = SyscallNumber::DMA_FREE.as_u16() as u64;
+/// `dma_quiesced` syscall number (as above).
+const NUM_DMA_QUIESCED: u64 = SyscallNumber::DMA_QUIESCED.as_u16() as u64;
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
 const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
@@ -1180,6 +1182,17 @@ pub extern "C" fn sys_dma_free(handle: u64, cpu_va: u64) -> i32 {
     // is an opaque lookup key the kernel resolves against the caller's own
     // DMA window before releasing the carve.
     unsafe { ret_i32(raw_syscall(NUM_DMA_FREE, [handle, cpu_va, 0, 0, 0, 0])) }
+}
+
+/// `dma_quiesced`: declare the calling driver's device quiesced, releasing the
+/// DMA memory earlier drivers of its node left in quarantine
+/// (`SyscallNumber::DMA_QUIESCED`). Returns the bytes freed, or a
+/// `TAIRIX_E_*` code reinterpreted into the result.
+#[must_use]
+#[export_name = "tairix_sys_dma_quiesced"]
+pub extern "C" fn sys_dma_quiesced() -> u64 {
+    // SAFETY: see `sys_yield`; the call takes no argument.
+    unsafe { raw_syscall(NUM_DMA_QUIESCED, [0; 6]) }
 }
 
 /// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
@@ -3275,6 +3288,7 @@ mod tests {
         (NUM_PORT_WRITE, "port_write", 4),
         (NUM_DMA_ALLOC, "dma_alloc", 3),
         (NUM_DMA_FREE, "dma_free", 2),
+        (NUM_DMA_QUIESCED, "dma_quiesced", 0),
         (NUM_RESOURCE_GRANTS, "resource_grants", 2),
         (NUM_HW_TREE_READ, "hw_tree_read", 2),
         (NUM_HW_TREE_WAIT, "hw_tree_wait", 2),

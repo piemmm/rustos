@@ -553,6 +553,7 @@ tairix/
 │
 ├── drivers/             # Loadable modules. One folder per device class.
 │   ├── accelerator/     # Offload engines: virtio_crypto.
+│   ├── audio/           # Sound devices: virtio_snd.
 │   ├── cpufreq/         # CPU frequency mechanisms: rpi (VideoCore ARM clock).
 │   ├── display/
 │   │   ├── vesa/
@@ -692,6 +693,7 @@ tairix/
 │   │   ├── init/        # PID 1.
 │   │   ├── devmgr/      # Device manager: hardware-tree match + driver autoload.
 │   │   ├── appmgr/      # Application bundle loader.
+│   │   ├── audiod/      # Audio mixer/router: sole holder of CAP_AUDIO_DEVICE.
 │   │   ├── confd/       # App-data service: the per-app settings store.
 │   │   ├── timed/       # Time service: NTP client, sole CAP_TIME_SET holder.
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).

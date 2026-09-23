@@ -29,7 +29,10 @@ use crate::{regs, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci, D
 /// `regs_phys` is the ARM-physical base of the SDHCI register block as
 /// reported by the hardware-tree `brcm,bcm2711-emmc2` node. The window is
 /// mapped read/write under [`CapabilityId::MMIO_MAP`] and handed to
-/// [`Emmc2::open`], which runs the SD identification sequence.
+/// [`Emmc2::open`], which resets the controller and runs the SD
+/// identification sequence; once it succeeds the controller is declared
+/// quiesced to the host's DMA facility, so memory an earlier instance left
+/// with it can be released.
 ///
 /// If the host exposes a [`DmaHost`](tairix_abi::driver::dma::DmaHost),
 /// this allocates one [`crate::DMA_REGION_BYTES`] staging slab and drives
@@ -100,5 +103,10 @@ pub fn open_discovered<W: CompletionWait>(
         Some(slab) => IrqSdhci::with_dma(window, waiter, slab),
         None => IrqSdhci::new(window, waiter),
     };
-    Emmc2::open(engine_host)
+    let device = Emmc2::open(engine_host)?;
+    // Bring-up reset the whole host controller, its ADMA engine included.
+    if let Some(dma) = host.dma_host() {
+        dma.device_quiesced();
+    }
+    Ok(device)
 }

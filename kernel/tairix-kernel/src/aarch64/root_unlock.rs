@@ -943,6 +943,9 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for Emmc2DmaHost<'_, P, S> {
         Ok(unsafe { DmaSlab::from_leaked(phys, base, len, self.id, 0) }
             .with_coherency(sync_emmc2_dma_range))
     }
+
+    /// Nothing to release: the staging slab lives for the kernel's life.
+    fn device_quiesced(&self) {}
 }
 
 /// The production aarch64 identity-map extent the DMA/MMIO physical map

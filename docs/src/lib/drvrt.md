@@ -50,7 +50,10 @@ bus driver's `register()` consumes:
   here rather than in the architecture-neutral PCI walk.
 - **`VirtioHost`** — `alloc_dma_zeroed(size)` carves the device-shared DMA
   region with `dma_alloc` against the DMA grant and returns a `DmaSlab` whose
-  `phys()` is the device-visible base the controller programs. A non-coherent
+  `phys()` is the device-visible base the controller programs, and
+  `device_quiesced()` issues `dma_quiesced` for a driver holding
+  `CAP_MEM_DMA`, releasing what a dead predecessor left in its node's DMA
+  quarantine. A non-coherent
   interconnect's cache-maintenance shim (e.g. the BCM2711 PCIe master) is
   supplied by the architecture-aware driver process, never synthesised here, so
   the crate stays platform-neutral (§2.20). It deliberately provides no virtio

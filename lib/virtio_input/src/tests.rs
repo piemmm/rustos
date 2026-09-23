@@ -78,6 +78,10 @@ impl DmaHost for AutoDrainHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
+
+    fn device_quiesced(&self) {
+        self.inner.device_quiesced();
+    }
 }
 
 impl VirtioHost for AutoDrainHost {
@@ -241,12 +245,44 @@ fn poll_rejects_empty_buffer() {
 }
 
 #[test]
-fn close_resets_the_device() {
+fn bring_up_declares_the_device_quiesced_once_its_reset_confirms() {
     let (t, _events) = build_device();
-    let dev = open_input(t);
-    // `close` consumes the device and resets the transport status byte;
-    // a clean teardown is the unload path.
+    let host = MockHost::new();
+    let _dev = VirtioInput::open(t, &host).expect("open");
+    assert_eq!(host.quiesced_calls(), 1);
+}
+
+#[test]
+fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
+    let (mut t, _events) = build_device();
+    t.refuse_resets_after(0);
+    let host = MockHost::new();
+    assert_eq!(
+        VirtioInput::open(t, &host).err(),
+        Some(DriverError::DeviceFault)
+    );
+    assert_eq!(host.quiesced_calls(), 0);
+    assert_eq!(host.bytes_allocated(), 0);
+}
+
+#[test]
+fn a_confirmed_close_releases_every_region() {
+    let (t, _events) = build_device();
+    let host = MockHost::new();
+    VirtioInput::open(t, &host).expect("open").close();
+    assert_eq!(host.slabs_outstanding(), 0);
+}
+
+#[test]
+fn a_close_whose_reset_never_confirms_releases_nothing() {
+    let (t, _events) = build_device();
+    let host = MockHost::new();
+    let mut dev = VirtioInput::open(t, &host).expect("open");
+    let held = host.slabs_outstanding();
+    assert!(held > 0);
+    dev.transport_mut().refuse_resets_after(0);
     dev.close();
+    assert_eq!(host.slabs_outstanding(), held);
 }
 
 #[test]
@@ -305,9 +341,9 @@ struct ResetProbe {
 }
 
 impl Transport for ResetProbe {
-    fn reset(&mut self) {
+    fn reset(&mut self) -> Result<(), VirtioError> {
         self.resets.set(self.resets.get() + 1);
-        self.inner.reset();
+        self.inner.reset()
     }
     fn status(&self) -> Status {
         self.inner.status()

@@ -279,21 +279,25 @@ const _: () = assert!(CONTROL_BUFFER_LEN >= wire::HDR_LEN + wire::MAX_INFO_RECOR
 impl<'h, T: Transport> VirtioSnd<'h, T> {
     /// Bring the device online: negotiate, program the four virtqueues, post
     /// the event pool, and read the device's own description of every jack,
-    /// stream and channel map it presents.
+    /// stream and channel map it presents. Once the reset confirms, the device
+    /// is declared quiesced to `host`, so memory an earlier instance left with
+    /// it can be released; a failure once the device is live resets it again
+    /// before its memory is released.
     ///
     /// # Errors
     ///
     /// The transport's or queue setup's [`VirtioError`] mapped to a
-    /// [`DriverError`], [`DriverError::DeviceFault`] for a device that clears
-    /// `FEATURES_OK`, presents fewer than four queues, or describes more
-    /// streams than the contract admits, and any [`DriverError`] a DMA
-    /// allocation refuses.
+    /// [`DriverError`], [`DriverError::DeviceFault`] for a device that never
+    /// confirms its reset, clears `FEATURES_OK`, presents fewer than four
+    /// queues, or describes more streams than the contract admits, and any
+    /// [`DriverError`] a DMA allocation refuses.
     pub fn open(
         mut transport: T,
         host: &'h dyn VirtioHost,
         clock: &'h dyn MonotonicClock,
     ) -> Result<Self, DriverError> {
-        transport.reset();
+        transport.reset().map_err(VirtioError::as_driver_error)?;
+        host.device_quiesced();
         let mut status = Status::default().with(Status::ACKNOWLEDGE);
         transport.set_status(status);
         status = status.with(Status::DRIVER);
@@ -347,12 +351,30 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
             pending: AudioInterrupt::NONE,
             events_armed: false,
         };
-        for slot in 0..EVENT_QUEUE_SIZE {
-            device.post_event_slot(slot)?;
+        if let Err(e) = device.arm() {
+            device.close();
+            return Err(e);
         }
-        device.eventq.kick(&mut device.transport);
-        device.enumerate()?;
         Ok(device)
+    }
+
+    /// Post the event pool and read the device's description of itself: the
+    /// bring-up steps a live device takes part in.
+    fn arm(&mut self) -> Result<(), DriverError> {
+        for slot in 0..EVENT_QUEUE_SIZE {
+            self.post_event_slot(slot)?;
+        }
+        self.eventq.kick(&mut self.transport);
+        self.enumerate()
+    }
+
+    /// Reset the device, then release its memory.
+    fn close(mut self) {
+        if self.transport.reset().is_err() {
+            // A wedged device may still master its rings and event pool: hold
+            // them for the kernel to quarantine when the driver exits.
+            core::mem::forget(self);
+        }
     }
 
     /// Program one virtqueue at the deepest size the device offers up to

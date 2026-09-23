@@ -30,6 +30,14 @@ and the device drivers carry only the device-specific wire format.
   (see [Modern MMIO transport](#modern-mmio-transport-mmiotransport)).
 - Virtio 1.1 §3.1 device-initialisation status sequencing
   (`reset` → `ACKNOWLEDGE` → `DRIVER` → `FEATURES_OK` → `DRIVER_OK`).
+  `Transport::reset` confirms the reset by re-reading the status until it
+  reads 0, bounded, and fails with `DeviceFault` otherwise: a device that has
+  not reset may still master memory it was given. Each driver declares its
+  device quiesced (`DmaHost::device_quiesced`) only after a confirmed reset,
+  carves everything fallible before `DRIVER_OK`, resets again before
+  releasing memory when a step after `DRIVER_OK` fails, and on a `close`
+  whose reset does not confirm withholds its rings and staging for the
+  kernel's DMA quarantine rather than freeing them.
 - The virtio 1.1 §2.6 **split virtqueue** (`SplitQueue`): descriptor
   table, avail ring, used ring, free-descriptor pool, descriptor
   chaining.

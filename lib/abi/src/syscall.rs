@@ -2500,6 +2500,23 @@ impl SyscallNumber {
     /// and whatever the payload's own decode refuses.
     pub const NOTICE_PUBLISH: Self = Self(125);
 
+    /// Declare the calling driver's device quiesced, releasing the DMA memory
+    /// earlier drivers of the same hardware-tree node left in quarantine
+    /// (`plans/OPEN-DEFECTS.md` D167).
+    ///
+    /// A driver that exits holding [`SyscallNumber::DMA_ALLOC`] carves does
+    /// not return them to the allocator, because its device may still master
+    /// them; they are held against its node until a later instance for the
+    /// node calls this once its device can no longer reach them — after a
+    /// reset, for most devices. A carve an earlier instance leaves after the
+    /// call is freed as it arrives. Memory the caller itself carved is never
+    /// released by its own call.
+    ///
+    /// No arguments. Returns the bytes freed now, or `-errno`:
+    /// [`Errno::NotFound`] for a caller that was not loaded for a node.
+    /// Gated by [`crate::CapabilityId::MEM_DMA`].
+    pub const DMA_QUIESCED: Self = Self(126);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

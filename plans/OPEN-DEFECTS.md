@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 43 open, 120 closed, 163 total.
+**closed**, and a partial fix stays **open**. 47 open, 121 closed, 168 total.
 
-### Open (43)
+### Open (47)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -72,6 +72,10 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D155 | the breadcrumb's collapse cell draws a private `...` where every other cut text ends in `…` | blocked on a decision: `plans/GUI-CONTROLS-DESIGN.md` §11 fixes "three periods, not `…`" so the mark renders under any coverage, but the console atlas covers U+2026 (`lib/font`'s `coverage_reaches_beyond_ascii`) and the shipped faces draw it (the Settings vertical's Appearance description ends in `…`). Either the plan's rule is retired and `nav.rs` draws `tairix_font::ELLIPSIS`, or it stands and its rationale is restated; a regression test lands with whichever |
 | D164 | 22 userland programs allocate fixed start-up buffers with `vec!`, whose allocation failure panics rather than returning a typed error | a sweep, one program at a time; new code takes `tairix_util::fallible::filled`. See the Scope bullet |
 | D166 | x86_64's only platform entropy source is `RDSEED`/`RDRAND`, so a part or hypervisor that does not enumerate them leaves the kernel's random reserve unseeded for the whole boot | noticed when `netstack` began refusing to serve without a keyed SYN-cookie secret, instead of running with an unkeyed one, and every x86_64 network vertical went red: the QEMU harness presented `qemu64`, which has neither instruction, so each x86_64 guest booted `entropy reserve unseeded cause=draw_failed` and every CSPRNG consumer failed closed. The harness now presents both (`tools/qemu/src/x86_64.rs` `CPU`), as current silicon does; that corrects the test machine, not this defect. The kernel still trusts one source alone where the randomness design mixes several (`plans/FIX-RANDOMNESS.md`), so older parts that predate the instructions and hypervisors that mask their CPUID bits get no randomness at all. The fix is a second source the port can always reach, mixed with the first — a seed the boot loader hands over (its UEFI shell can draw one from `EFI_RNG_PROTOCOL`, `plans/BOOTLOADER.md`), and conditioned interrupt-timing jitter — never a fallback to predictable bytes. **Re-check trigger:** the next change to `kernel/arch/x86_64/src/entropy.rs` or to the boot hand-off |
+| D168 | the shared device-tree walk emits nodes the firmware marked `status = "disabled"` or `"reserved"`, and drivers bind them | noticed against the pinned Pi 4 tree while designing SND5; not absorbed, because changing the rule can unbind a path metal already accepts. See the section |
+| D169 | stable audit event ids collide across components: about thirty are claimed by two or three unrelated emitters | noticed while allocating the D167 ids; not absorbed — the fix is an id registry, a renumbering, and a `ci` uniqueness check. See the section |
+| D170 | direct reclaim allocates on the kernel heap, infallibly, on the path memory pressure triggers | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the cold scanner's interface changes. See the section |
+| D171 | a dead address space is torn down with one TLB invalidation per page, broadcast on aarch64 | noticed while making `LiveSpace::drop`'s walk allocation-free (D167); not absorbed, because the fix is an Arch HAL contract on every port. See the section |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -98,7 +102,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (120)
+### Closed (121)
 
 | ID | Subject |
 |---|---|
@@ -222,6 +226,7 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D162 | the kernel never seeded its CSPRNG on a port whose hardware RNG is declared `Pending`, though the boot seed it had captured could have |
 | D163 | `netstack` exited on every start-up failure without stating why |
 | D165 | the SVG decoder admitted a pattern tile magnified past what the renderer can size, which the renderer then refused to draw at all |
+| D167 | a dead driver's DMA memory was freed while its device could still master it |
 
 ## Scope
 
@@ -8281,3 +8286,139 @@ exposed it. The two halves of the witness are host-tested beside the service
 (`the_bar_settles_only_once_it_is_revealed_and_holding_its_resolved_pictures`,
 `a_bar_slot_whose_artwork_is_refused_settles_on_its_glyph`), each guard
 verified to fail the test when removed.
+
+## D167 — a dead driver's DMA memory was freed while its device could still master it — FIXED
+
+A driver that ends with its device still running — a crash, a kill, an exit
+that skipped the reset — no longer returns its DMA memory to the allocator.
+A space's first carve binds a `DmaCustodian` (`kernel/mem/src/dma.rs`): the
+driver's hardware-tree node, its admission generation (`AddressSpaceRegistry`
+stamps one on every driver it admits), and the kernel's per-node custody
+(`kernel/core/src/dmaquarantine.rs`). `LiveSpace::drop` zeroes, cleans,
+unmaps and surrenders each block to it and records `DMA_QUARANTINED` (4091).
+A later driver for the node calls `dma_quiesced` (no. 126, `CAP_MEM_DMA`,
+audited) once its bring-up has confirmed the device reset, and the kernel
+frees, scrubbed, the node's blocks of every earlier generation, recording
+`DMA_QUARANTINE_RELEASED` (4092).
+
+What it guarantees:
+
+- **Generations, not ordering.** The exit is recorded — so `devmgr` may
+  spawn a successor — before the scheduler's reap drops the dead space, so a
+  block can reach custody after its successor released. The node's quiet
+  bound frees such a block on arrival; a block of the releaser's own or a
+  later generation is never freed.
+- **A surprise removal retires the node** at the admission high-water mark,
+  so a vanished device's memory frees and a reused node id's next driver keeps
+  its protection; an orderly removal leaves release to the next instance.
+- **Custody never fails open.** A block for an unbound node, or one the
+  registry cannot record, keeps its frames allocated for good; a kernel with
+  no direct physical map wires `NULL_DMA_QUARANTINE`, which refuses the carve.
+- **A declaration is truthful.** Each DMA-mastering driver declares only
+  after a confirmed reset: virtio's `Transport::reset` fails with
+  `DeviceFault` unless the status reads back 0; xHCI declares in
+  `UsbDevice::start`, which only a completed `HCRST` can reach; GENET waits
+  for `DMA_DISABLED` on both engines; EMMC2 declares after its `SRST_HC`
+  bring-up; the VideoCore mailbox service declares after a firmware-revision
+  probe, resting on the firmware answering property requests in posting
+  order (the metal acceptance confirms it), and an exchange drains a stale
+  property completion rather than failing on it.
+- **A live driver's own frees follow the same rule.** The virtio drivers
+  carve everything fallible before `DRIVER_OK` and reset again before
+  releasing when a later step fails; a `close` whose reset does not confirm,
+  a GENET engine that will not stop, and a virtio-net control command the
+  device never returned are withheld for the quarantine rather than freed.
+- **The teardown walk allocates nothing.** `LiveSpace::drop` drains its pages
+  through `AddressSpace::unmap_lowest`, so a space dying under memory
+  pressure cannot fail for want of the memory it is returning.
+
+Regression tests: `kernel/core/src/dmaquarantine/tests.rs` (held until a
+later generation releases, late arrival freed, retire at the high-water mark
+spares a reused id, an unbound node's block leaked, the end-to-end
+`LiveSpace` surrender); `kernel/mem`'s surrender and one-custodian-per-space
+tests and the `unmap_lowest` drain; `kernel/core/src/syscalls.rs`'s
+caller-scoped release, surprise-only
+retire and quarantine audit; `lib/virtio`'s bounded reset wait; and per
+driver a declaration-after-reset test and a wedged-device test proving the
+memory withheld.
+
+## D168 — the shared device-tree walk emits nodes the firmware marked disabled or reserved, and drivers bind them (OPEN)
+
+`kernel/arch/api/src/fdtwalk.rs`'s `is_emitted` reads no `status` property, so a
+node the firmware declared `"disabled"` (not operational) or `"reserved"`
+(operational but owned by another software component, Devicetree Specification
+v0.4 §2.3.4) is published and matched like any other. On the pinned Pi 4 tree
+that is concrete: all six `brcm,bcm2835-i2c` controllers are disabled — the
+firmware enables one only when an overlay routes its pins — and the I²C bus
+driver is autoloaded onto every one. SND8's PWM and I²S nodes are disabled the
+same way.
+
+Not absorbed into SND5, because the rule decides what metal binds: skipping
+disabled nodes is right, but it can unbind a path metal already accepts if an
+image depends on a node its `config.txt` never enables, so the change needs
+each Pi-bound driver's node checked against the image the builder writes. The
+fix is `is_emitted` honouring `status` ("okay" and an absent property emit,
+anything else does not) with the bus-child look-ahead replaying the same rule,
+plus a fixture test that a disabled node and its children are spliced out.
+
+## D169 — stable event ids collide across components (OPEN)
+
+An `EventId` is meant to name one security-relevant decision, but ids are
+picked per crate with no registry, and about thirty are claimed by unrelated
+emitters, some three ways: 4191/4192 by `drivers/bus/usb/xhci` (domain
+recovered/offline), `drivers/storage/raid` (composer ready, member admitted)
+and `drivers/storage/volmgr` (RAID candidate); 4142–4146 by
+`drivers/input/usb_kbd` and the kernel's root and system mounts; 4150–4157 by
+xhci, `usb_mouse` and the kernel supervisor host; 4166–4173 by `usb_mouse`,
+`usb_msd` and the kernel mount and volume services; 4180–4190 by `volmgr`,
+`raid_member`, `lib/netchan` and the kernel volume and writeback services; and
+4100/4101 and 4133–4141 by kernel emitters that also appear in the kernel
+audit catalogue (`kernel/core/src/audit.rs`). A reader filtering the audit log
+by id conflates them, which defeats the id.
+
+Some repeats are legitimate and the fix must keep them: one event emitted by
+each architecture's sibling (`4_242` in every port's serial driver, the
+per-arch `boot.rs` ids) and a tool matching a kernel id (the `tools/xtask`
+QEMU scripts). The fix is one id registry — a range per component, the kernel
+catalogue one of them — with every emitter taking its ids from its range, the
+colliding ids renumbered in place with their docs and script references, and a
+`ci` check that fails when one `EventId` value is emitted by two components
+outside a declared shared event. That check is its regression test.
+
+## D170 — direct reclaim allocates on the kernel heap, infallibly, under the pressure that triggered it (OPEN)
+
+`LiveSpace::ramzip_reclaim` (`kernel/mem/src/live.rs`) collects every resident
+anonymous page into a `Vec` and then sorts and dedups it, and
+`ColdScanner::scan` (`kernel/mem/src/coldscan.rs`) builds a second `Vec` of the
+cold ones — both with infallible allocation, on the path a memory-pressure
+fault drives. A kernel heap that cannot grow at that moment aborts the reclaim
+that would have relieved it, and the candidate list costs a word per resident
+page of the largest process on every triggering fault. The sort and dedup are
+pure cost: `AddressSpace::live_pages` already yields ascending, unique pages.
+
+The fix is a scanner that walks the space's live record itself from its clock
+hand — a `BTreeMap` range, ascending and unique by construction — filtering
+anonymous pages as it goes, and hands each cold page to the compressor as it
+finds it, bounded by `want`, so reclaim allocates nothing. Its regression test
+is a reclaim that completes against a heap refusing every allocation, beside
+the scanner's existing second-chance tests.
+
+## D171 — a dead address space is torn down with one TLB invalidation per page (OPEN)
+
+`LiveSpace::drop` (`kernel/mem/src/live.rs`) unmaps each page through
+`AddressSpace::unmap_lowest`, and every unmap flushes that page: on aarch64
+`flush_page` is `TLBI VAAE1IS`, broadcast to every core in the inner-shareable
+domain, so tearing down a 1 GiB process issues about 262 000 broadcast
+invalidations, each with its barrier, and stalls every other core's
+translation while it runs. The flushes buy nothing: the space is active on no
+CPU when it is dropped, so nothing can walk its tables and create a new entry,
+and one address-space-wide invalidation before the first frame is freed
+purges every stale one.
+
+The fix is an Arch HAL teardown contract: `AddressSpace` gains an unmap that
+does not flush, valid only once the space can be active nowhere, and the
+teardown issues the port's whole-space invalidate once before it frees any
+frame — per port, since x86_64's `invlpg` is local and riscv64's `sfence.vma`
+needs its own shootdown. Its regression test is a teardown that asserts the
+flush count stays one whatever the page count, beside a port conformance
+check that a dropped space leaves no reachable stale translation.

@@ -10,10 +10,12 @@
 
 use crate::dma::{DmaSlab, PoolId};
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use core::cell::RefCell;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use tairix_abi::{CapabilityQuery, DriverError};
 
 // `VirtioHost` moved into `lib/abi` at Stage 4.D Item 0-tail; the
@@ -73,13 +75,28 @@ pub trait VirtioHostFactory {
 /// `u64`, which is the legitimate identity-mapped value for the
 /// unit-test process. The leaked `Box::leak` storage strategy is
 /// retained: slabs are minted with [`PoolId::MOCK`] and a
-/// monotonically increasing `slot`, and freeing through the slab's
-/// drop is a no-op (the slab carries no `free_fn`).
+/// monotonically increasing `slot`, and a slab's drop only counts the
+/// release (see [`Self::slabs_outstanding`]); its bytes stay leaked.
 #[derive(Default)]
 pub struct MockHost {
     notify_log: RefCell<Vec<u16>>,
     bytes_allocated: Cell<usize>,
     next_slot: Cell<usize>,
+    quiesced: Cell<usize>,
+    released: Arc<AtomicUsize>,
+}
+
+/// Counts one mock slab's release. Each slab owns one strong count of the
+/// counter, so the count stays valid however long the slab outlives its host.
+///
+/// # Safety
+///
+/// `pool` is the pointer [`Arc::into_raw`] minted for this slab alone.
+unsafe fn count_mock_release(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize) {
+    // SAFETY: the caller passes the slab's own `into_raw` pointer, and a
+    // slab's drop runs once, so this consumes the count exactly once.
+    let released = unsafe { Arc::from_raw(pool.cast::<AtomicUsize>()) };
+    released.fetch_add(1, Ordering::Relaxed);
 }
 
 impl MockHost {
@@ -103,6 +120,21 @@ impl MockHost {
     #[must_use]
     pub fn bytes_allocated(&self) -> usize {
         self.bytes_allocated.get()
+    }
+
+    /// How many times a driver declared its device quiesced.
+    #[must_use]
+    pub fn quiesced_calls(&self) -> usize {
+        self.quiesced.get()
+    }
+
+    /// Slabs this host minted that have not been released: what a driver
+    /// still holds, or deliberately withheld from a device it could not stop.
+    #[must_use]
+    pub fn slabs_outstanding(&self) -> usize {
+        self.next_slot
+            .get()
+            .saturating_sub(self.released.load(Ordering::Relaxed))
     }
 }
 
@@ -142,11 +174,27 @@ impl DmaHost for MockHost {
         let slot = self.next_slot.get();
         self.next_slot.set(slot.wrapping_add(1));
         self.bytes_allocated.set(bytes_after);
+        let counter = Arc::into_raw(Arc::clone(&self.released)).cast::<()>();
         // SAFETY: `bytes` is a `'static`-lifetime exclusive slice
         // of exactly `size` bytes; nothing else holds a reference
         // to it. We discard the `&'static mut [u8]` value above
-        // and treat the slab as the sole owner via `ptr`.
-        Ok(unsafe { DmaSlab::from_leaked(phys, ptr, size, PoolId::MOCK, slot) })
+        // and treat the slab as the sole owner via `ptr`. `counter` is
+        // the slab's own strong count, which `count_mock_release` consumes.
+        Ok(unsafe {
+            DmaSlab::from_pool(
+                phys,
+                ptr,
+                size,
+                PoolId::MOCK,
+                slot,
+                counter,
+                count_mock_release,
+            )
+        })
+    }
+
+    fn device_quiesced(&self) {
+        self.quiesced.set(self.quiesced.get() + 1);
     }
 }
 
@@ -205,6 +253,22 @@ mod tests {
         assert_ne!(a.slot(), b.slot());
         assert_ne!(b.slot(), c.slot());
         assert_ne!(a.slot(), c.slot());
+    }
+
+    #[test]
+    fn a_mock_slab_counts_its_release_once_even_past_its_host() {
+        let host = MockHost::new();
+        let kept = host.alloc_dma_zeroed(8).unwrap();
+        let dropped = host.alloc_dma_zeroed(8).unwrap();
+        let withheld = host.alloc_dma_zeroed(8).unwrap();
+        assert_eq!(host.slabs_outstanding(), 3);
+        drop(dropped);
+        core::mem::forget(withheld);
+        assert_eq!(host.slabs_outstanding(), 2);
+        drop(host);
+        // The counter is shared with the slab, so a release after its host is
+        // gone is still sound.
+        drop(kept);
     }
 
     #[test]

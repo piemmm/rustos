@@ -1245,6 +1245,20 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Release the DMA memory earlier drivers of the calling driver's node
+    /// left in quarantine, now that the caller has reset the device.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::MEM_DMA`]. The implementation resolves the caller's
+    /// node and admission generation kernel-side — never from an argument —
+    /// and frees only memory a driver admitted earlier carved, returning the
+    /// bytes freed.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn dma_quiesced(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Enumerate the device-resource grants the kernel minted for the
     /// calling driver task, delivering its unforgeable handles
     /// (`plans/PI.md` P10 chunk 5d-2).
@@ -3375,6 +3389,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // returned — a lookup key, never dereferenced by the kernel.
                 self.handlers.dma_free(caller, args.0[0], args.0[1])
             }
+            SyscallNumber::DMA_QUIESCED => self.handlers.dma_quiesced(caller),
             SyscallNumber::RESOURCE_GRANTS => {
                 // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
                 // is the buffer capacity.
@@ -4733,6 +4748,11 @@ mod tests {
             // the dispatcher decoded both arguments (grant handle, CPU base)
             // without wiring a real grant table / DMA facility here.
             Ok(handle + cpu_va)
+        }
+
+        fn dma_quiesced(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("dma_quiesced");
+            Ok(0)
         }
 
         fn resource_grants(

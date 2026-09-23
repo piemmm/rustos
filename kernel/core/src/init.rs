@@ -2579,6 +2579,12 @@ fn run_phases<A: KernelArch>(
         .with_port_io_facility(state.arch.as_ref().port_io_facility())
         // Serve `shm_*` through the `kernel/mem`-backed shared-memory producer.
         .with_shared_mem_facility(shared_mem_facility)
+        // Hold a dead driver's DMA memory until its device is proven quiet;
+        // without it every `dma_alloc` fails closed.
+        .with_dma_quarantine(build_dma_quarantine(
+            state.arch.as_ref(),
+            state.frame_allocator,
+        ))
         // Serve `signal` through the scheduler-side producer built above
         // (`plans/SPAWN.md` SP7b); the default `NULL_PROCESS_SIGNAL` keeps
         // `signal` fail-closed `NotImplemented` until this is installed.
@@ -2701,6 +2707,21 @@ fn live_producers<A: KernelArch>(
         Box::leak(Box::new(crate::live_producer::LiveDmaAlloc::new(arch))),
         build_shared_mem_facility(arch, frames),
     )
+}
+
+/// Build (and `Box::leak`) the DMA quarantine over the kernel frame allocator
+/// and the arch direct map it scrubs through, or the fail-closed
+/// [`crate::devres::NULL_DMA_QUARANTINE`] when the port wires no direct map.
+fn build_dma_quarantine<A: KernelArch>(
+    arch: &'static A,
+    frames: &'static FrameAllocator,
+) -> &'static (dyn crate::devres::DmaQuarantineFacility + 'static) {
+    match arch.direct_phys_map() {
+        Some(physmap) => Box::leak(Box::new(crate::dmaquarantine::DmaQuarantine::new(
+            frames, physmap,
+        ))),
+        None => &crate::devres::NULL_DMA_QUARANTINE,
+    }
 }
 
 /// Build (and `Box::leak`) the production shared-memory facility over the

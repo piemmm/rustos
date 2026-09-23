@@ -315,10 +315,11 @@ The seam is symmetric: `PageTableFrames::free_table` is the teardown
 half, and a task's exit returns everything it owned. The retained
 per-task `LiveSpace` (the object the `mem_map` / `mmio_map` / `dma_alloc`
 syscalls mutate) is owned by the task's kernel-thread control block and
-dropped when the scheduler reaps the exited task; its `Drop` (1) drains
-every live DMA carve (zero-on-free, frames back to the allocator),
+dropped when the scheduler reaps the exited task; its `Drop` (1) zeroes,
+unmaps and surrenders every live DMA carve to its node's DMA quarantine
+(§5, never straight back to the allocator: the device may still master it),
 (2) walks every remaining tracked mapping — a page inside the
-device-window or shared-memory window is only *unmapped* (its frames
+DMA, device or shared-memory window is only *unmapped* (its frames
 belong to a device or to the shared-region registry), while every other
 page (image segments, user stack, startup block, anonymous heap) is
 unmapped, its frame **zeroed** through the direct map so a dead
@@ -599,10 +600,28 @@ path) drives the *same* `DmaWindowMap` against the
 space it owns and lends, adding an `addr_limit` bound (the granted device
 DMA constraint, §18.3): a contiguous block that would reach at or above the
 limit is returned to the allocator and the carve refused
-(`DmaError::AddrLimitExceeded`). `LiveSpace` reclaims (zeroes and frees)
-every live DMA block when it is dropped on task exit, so a driver's exit
-leaks no frames and leaves no secret-bearing buffer recoverable
-(`AGENTS.md` §4).
+(`DmaError::AddrLimitExceeded`).
+
+**A dead driver's DMA memory is quarantined, not freed.** A driver can end
+with its device still mastering a carve — a crash, a kill, an exit that
+skipped the reset — and a frame returned to the allocator then could be
+written by that device after another process owns it. So a space's first
+carve binds a [`DmaCustodian`][DmaCustodian]: the driver's hardware-tree node,
+its admission generation, and the custody (`kernel/core::dmaquarantine`) the
+kernel keeps per node. When the space drops,
+[`DmaWindowMap::surrender_into`][DmaWindowMap] zeroes each block, cleans it
+to the point of coherency, unmaps it, and hands the frames to that custody,
+which holds them until a later driver for the node declares its device reset
+(`dma_quiesced`); only blocks of an earlier generation than the declaring
+driver's are freed, and a block that arrives after its node was already
+released at a higher generation is freed on arrival. A surprise hot-removal
+retires the node at the admission high-water mark. Custody never fails: a
+block it cannot record keeps its frames allocated for good. The syscall
+contract and the audit records are in
+[the syscall reference](syscalls.md); the design is
+`plans/OPEN-DEFECTS.md` D167.
+
+[DmaCustodian]: ../../tairix_kernel_mem/dma/struct.DmaCustodian.html
 
 ### 5.1 Slab hand-off to user-space drivers
 

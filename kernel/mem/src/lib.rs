@@ -87,7 +87,7 @@ pub use anon::{map_anonymous, page_count_for, unmap_anonymous, AnonError, ANON_F
 pub use anon_window::AnonWindowMap;
 pub use bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 pub use coldscan::{ColdPageScanner, ColdScanError};
-pub use dma::{DmaBuffer, DmaError, DmaPool, DmaWindowMap};
+pub use dma::{DmaBlock, DmaBuffer, DmaCustodian, DmaCustody, DmaError, DmaPool, DmaWindowMap};
 pub use error::AllocError;
 pub use filemap::{map_file_page, unmap_file_region, FILE_FLAGS};
 pub use frame::{

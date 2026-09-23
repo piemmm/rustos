@@ -101,6 +101,12 @@ pub trait DmaBank {
     /// [`DriverError::OutOfRange`] if `[offset, offset + bytes.len())` does
     /// not lie wholly within one live chunk.
     fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<(), DriverError>;
+
+    /// The controller has been reset and can no longer reach memory an
+    /// earlier instance of this driver gave it, as
+    /// [`DmaHost::device_quiesced`](tairix_abi::driver::dma::DmaHost::device_quiesced)
+    /// declares.
+    fn device_quiesced(&self);
 }
 
 /// The parked wait seam the engine's synchronous event waits block through.
@@ -2661,6 +2667,9 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// Grow the controller's shared chunk out of `dma`, lay the shared
     /// structures out inside it, program them, and start the controller.
     ///
+    /// The controller is first declared quiesced to `dma`: an [`Xhci`]
+    /// exists only once [`Xhci::open`] has halted and reset it.
+    ///
     /// The chunk is sized **exactly** to the geometry the silicon reports
     /// (`MaxSlots`, context size, scratchpad count and page size); no
     /// per-device memory is reserved here — each device's region is grown
@@ -2700,6 +2709,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     ) -> Result<Self, DriverError> {
         let mut xhci = xhci;
         let mut dma = dma;
+        dma.device_quiesced();
         let layout = Layout::new(
             xhci.max_slots(),
             xhci.csz(),

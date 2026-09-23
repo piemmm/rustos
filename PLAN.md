@@ -9278,7 +9278,7 @@ submission naming another context's resource is refused rather than clamped; an
 overrunning submission loses its context while every other survives; and the
 accelerated path's gain is a recorded measurement, not a claim.
 
-## SOUND — the audio stack (`plans/SOUND.md`)  **[IN PROGRESS — SND1–SND4 done; SND5 onward planned]**
+## SOUND — the audio stack (`plans/SOUND.md`)  **[IN PROGRESS — SND1–SND4 done; SND5 designed, its D167 prerequisite done]**
 
 **Dependencies:** Stage 4.HW (discovery and driver autoload) and Stage 6
 (userland services) for SND4 onward; nothing outside the tree for SND1–SND3.
@@ -9348,6 +9348,17 @@ here (§13).
   all three Tier-1 QEMU targets and asserts the host-side capture is
   sample-exact, so the bit-exactness property is proved on a running machine
   and not only in host tests.
+
+**SND5 is designed.** The DMA-engine seam's security model,
+cross-process shape and discovery are settled in `plans/SOUND.md` §The
+DMA-engine seam, from the pinned Pi 4 tree and the BCM2711 peripherals
+document: the controller builds every control block from kernel-attested facts
+and a buffer it carves itself, so a consumer never names an address. Its
+prerequisite, `plans/OPEN-DEFECTS.md` D167 — DMA memory quarantined against
+its hardware-tree node across a driver's death, for every DMA-mastering
+driver — is done, and its driver is `drivers/dma/bcm2835`, the legacy engine,
+with DMA4 arriving with SND19. No QEMU vertical is reachable, because QEMU's `bcm2835-dma` model
+never ends a cyclic chain.
 
 **What remains** is the plan's own ledger, SND5 onward: the DMA-engine and
 isochronous-transfer seams the plan owns, the remaining drivers, the

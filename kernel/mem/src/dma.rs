@@ -126,6 +126,13 @@ pub enum DmaError {
     /// rather than handing a device a buffer it cannot reach (or, worse,
     /// one outside the region the kernel granted it).
     AddrLimitExceeded,
+    /// The carve named a different [`DmaCustodian`] from the one the space is
+    /// already bound to. A space's DMA memory has one custodian for its life,
+    /// so its teardown has exactly one place to surrender it to.
+    CustodianMismatch,
+    /// No custody can take this space's DMA memory at teardown, so it may
+    /// not carve any.
+    NoCustody,
 }
 
 impl From<AllocError> for DmaError {
@@ -153,7 +160,95 @@ impl fmt::Display for DmaError {
             Self::AddrLimitExceeded => {
                 f.write_str("dma buffer exceeds the granted device addressing limit")
             }
+            Self::CustodianMismatch => {
+                f.write_str("dma carve names a custodian the space is not bound to")
+            }
+            Self::NoCustody => f.write_str("no custody can take this space's dma memory"),
         }
+    }
+}
+
+/// A contiguous block of DMA frames surrendered by a torn-down address space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DmaBlock {
+    /// First frame of the block.
+    pub frame: Frame,
+    /// Buddy order the block was allocated at.
+    pub order: u32,
+}
+
+impl DmaBlock {
+    /// Bytes the block spans.
+    #[must_use]
+    pub fn len(self) -> usize {
+        PAGE_SIZE << self.order
+    }
+
+    /// Always `false`: a block spans at least one page.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        false
+    }
+}
+
+/// Custody of DMA memory whose device may outlive the address space that
+/// carved it (`plans/OPEN-DEFECTS.md` D167).
+///
+/// With no IOMMU a device keeps the bus addresses it was handed, so memory
+/// carved for it must not return to the allocator just because the driver's
+/// address space died. The custodian holds it until the device is proven
+/// quiet.
+pub trait DmaCustody: Sync {
+    /// Record one address space as able to carve for hardware-tree `node`.
+    ///
+    /// Called once per space, before its first carve.
+    ///
+    /// # Errors
+    ///
+    /// [`DmaError::Alloc`] when the custodian cannot record the space; the
+    /// carve is then refused, since nothing could take its memory at teardown.
+    fn bind(&self, node: u32) -> Result<(), DmaError>;
+
+    /// Take `block`, carved for `node` by the driver instance admitted as
+    /// `generation`, from a torn-down space.
+    ///
+    /// The block's frames stay allocated and are mapped nowhere; the
+    /// custodian alone decides when they return to the allocator. It must
+    /// never fail: a block it cannot record is leaked, never freed.
+    fn hold(&self, node: u32, generation: u64, block: DmaBlock);
+
+    /// The space bound for `node` has surrendered every block it held.
+    fn unbind(&self, node: u32);
+}
+
+/// The custodian an address space's DMA memory is surrendered to, and the
+/// device it was carved for.
+#[derive(Clone, Copy)]
+pub struct DmaCustodian {
+    /// Hardware-tree node the carving driver was loaded for.
+    pub node: u32,
+    /// The carving driver instance's admission generation for that node.
+    pub generation: u64,
+    /// Where the memory goes at teardown.
+    pub custody: &'static dyn DmaCustody,
+}
+
+impl DmaCustodian {
+    /// Whether `self` and `other` name the same driver instance and custody.
+    #[must_use]
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.node == other.node
+            && self.generation == other.generation
+            && core::ptr::addr_eq(self.custody, other.custody)
+    }
+}
+
+impl fmt::Debug for DmaCustodian {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DmaCustodian")
+            .field("node", &self.node)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
     }
 }
 
@@ -411,35 +506,59 @@ impl DmaWindowMap {
         self.capacity_pages
     }
 
-    /// Reclaim **every** live DMA buffer from the borrowed `space`, zeroing
-    /// each backing block (zero-on-free) before its frames
-    /// return to `frames`.
+    /// Whether `addr` lies inside this allocator's virtual window.
+    #[must_use]
+    pub fn contains(&self, addr: VirtAddr) -> bool {
+        let start = self.base.as_u64();
+        // `new` proved the window's byte span representable.
+        let span = (self.capacity_pages * PAGE_SIZE) as u64;
+        addr.as_u64() >= start && addr.as_u64() - start < span
+    }
+
+    /// Surrender **every** live DMA buffer to `custodian` instead of the
+    /// allocator: each block is zeroed and cleaned to memory, its pages leave
+    /// `space`, and its still-allocated frames pass to the custodian.
     ///
-    /// Best-effort teardown for [`crate::live::LiveSpace`]'s `Drop`: a driver
-    /// task's exit must not leak the physical frames its DMA buffers held or
-    /// leave their (possibly secret-bearing) contents recoverable. A
-    /// per-buffer error on this path has no better recovery than dropping it
-    /// (never a panic).
-    pub fn drain_into<P: PageTable>(
+    /// The zeroing scrubs what the buffers held at once and makes a control
+    /// block a device fetches afterwards read as all zero — no transfer, no
+    /// successor. It is defence in depth: the custodian's hold is what keeps
+    /// the frames from reuse, and a device still mastering them may write
+    /// again. Allocation-free, because it runs on teardown.
+    pub fn surrender_into<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
-        frames: &FrameAllocator,
         phys: &dyn PhysMap,
+        custodian: &DmaCustodian,
     ) {
-        // Collect the live keys first so the free loop does not iterate the
-        // map while `free_from` removes from it.
-        let keys: Vec<u64> = self.allocations.keys().copied().collect();
-        for virt in keys {
-            let Some(record) = self.allocations.get(&virt) else {
-                continue;
-            };
-            let buf = DmaBuffer {
-                virt: VirtAddr::new(virt),
-                phys: record.start_frame.start(),
-                len: record.data_pages * PAGE_SIZE,
-            };
-            let _ = self.free_from(space, frames, phys, buf);
+        for record in self.allocations.values() {
+            let data_len = record.data_pages * PAGE_SIZE;
+            let start = record.start_frame.start();
+            if let Some(ptr) = phys.translate(start, data_len) {
+                // SAFETY: the frames are this space's own carve, still
+                // allocated, and reachable by nothing else but the device; the
+                // direct map translated exactly `data_len` bytes.
+                if let Some(bytes) = unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) } {
+                    bytes.zeroize();
+                    phys.clean_invalidate(start, data_len);
+                }
+            }
+            let first_data_slot = record.leading_guard_slot + 1;
+            for i in 0..record.data_pages {
+                if let Ok(page) = Page::from_addr(self.virt_of_slot(first_data_slot + i)) {
+                    let _ = space.unmap(page);
+                }
+            }
+            custodian.custody.hold(
+                custodian.node,
+                custodian.generation,
+                DmaBlock {
+                    frame: record.start_frame,
+                    order: record.order,
+                },
+            );
         }
+        self.allocations.clear();
+        self.slot_used.clear();
     }
 
     /// Reserve the record slot for one further live allocation, so the carve

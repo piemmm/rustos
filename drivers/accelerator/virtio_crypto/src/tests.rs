@@ -290,6 +290,10 @@ impl DmaHost for AutoDrainHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
+
+    fn device_quiesced(&self) {
+        self.inner.device_quiesced();
+    }
 }
 
 impl VirtioHost for AutoDrainHost {
@@ -322,6 +326,10 @@ struct SilentHost {
 impl DmaHost for SilentHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
+    }
+
+    fn device_quiesced(&self) {
+        self.inner.device_quiesced();
     }
 }
 
@@ -736,8 +744,42 @@ fn the_device_interrupt_is_acknowledged_once_per_published_chain() {
 }
 
 #[test]
-fn close_resets_the_device() {
-    let (driver, _log, _host) = open_healthy();
-    let driver = *driver;
+fn bring_up_declares_the_device_quiesced_once_its_reset_confirms() {
+    let (t, _log) = build_device(healthy_config());
+    let host = MockHost::new();
+    let _driver = VirtioCrypto::open(t, &host).expect("open");
+    assert_eq!(host.quiesced_calls(), 1);
+}
+
+#[test]
+fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
+    let (mut t, _log) = build_device(healthy_config());
+    t.refuse_resets_after(0);
+    let host = MockHost::new();
+    assert_eq!(
+        VirtioCrypto::open(t, &host).err(),
+        Some(DriverError::DeviceFault)
+    );
+    assert_eq!(host.quiesced_calls(), 0);
+    assert_eq!(host.bytes_allocated(), 0);
+}
+
+#[test]
+fn a_confirmed_close_releases_every_region() {
+    let (t, _log) = build_device(healthy_config());
+    let host = MockHost::new();
+    VirtioCrypto::open(t, &host).expect("open").close();
+    assert_eq!(host.slabs_outstanding(), 0);
+}
+
+#[test]
+fn a_close_whose_reset_never_confirms_releases_nothing() {
+    let (t, _log) = build_device(healthy_config());
+    let host = MockHost::new();
+    let mut driver = VirtioCrypto::open(t, &host).expect("open");
+    let held = host.slabs_outstanding();
+    assert!(held > 0);
+    driver.transport_mut().refuse_resets_after(0);
     driver.close();
+    assert_eq!(host.slabs_outstanding(), held);
 }

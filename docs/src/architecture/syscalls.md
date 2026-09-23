@@ -160,15 +160,23 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 114 | `fs_readlink`  | `user_ptr` (path), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 | 115 | `fs_link`      | `user_ptr` (existing), `len`, `user_ptr` (link), `len`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | yes |
 | 116 | `fs_realpath`  | `user_ptr` (path), `len`, `user_ptr` (out), `len`, `u32 mode` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+| 117 | `port_read`    | `Handle handle`, `len port`, `u32 width` | `u64` (value) | `CAP_MMIO_MAP`       | no      |
+| 118 | `port_write`   | `Handle handle`, `len port`, `u32 width`, `len value` | `errno` | `CAP_MMIO_MAP` | yes |
+| 119 | `latency_watch` | `u64 budget_ns`                        | `u64` (armed budget) | —          | no      |
+| 120 | `fs_lock`      | `u32 fd`, `u32 mode`, `u32 flags`, `u64 start`, `u64 len`, `u64 deadline` | `errno` | `CAP_FS_ACCESS` | no |
+| 121 | `fs_lock_query` | `u32 fd`, `u32 mode`, `u64 start`, `u64 len`, `user_ptr` (conflict), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+| 122 | `cpufreq_bind` | `user_ptr` (limits)                     | `Handle`      | `CAP_CPUFREQ`           | yes     |
+| 123 | `cpufreq_wait` | `Handle handle`, `u64 last_seq`, `user_ptr` (target) | `errno` | `CAP_CPUFREQ`      | no      |
+| 124 | `notice_read`  | `u32 topic`, `user_ptr`, `len`          | `u64` (bytes) | —                       | no      |
+| 125 | `notice_publish` | `u32 topic`, `user_ptr`, `len`        | `errno`       | — (per-topic authority) | yes     |
+| 126 | `dma_quiesced` | —                                       | `u64` (bytes freed) | `CAP_MEM_DMA`     | yes     |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
-`waitset_create`/`waitset_ctl`/`waitset_wait` — 76–77 — `file_map`/
-`file_unmap` — and 117–125 — `port_read`/`port_write`, `latency_watch`,
-`fs_lock`/`fs_lock_query`, `cpufreq_bind`/`cpufreq_wait`, and
-`notice_read`/`notice_publish` — are defined in `lib/abi/src/syscall.rs`;
-their rows are not yet transcribed into this table. The table in
-`lib/abi/src/syscalls.rs` is the source of truth either way, and
-`cargo xtask abi-check` is what enforces it.)
+`waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
+`file_unmap` — are defined in `lib/abi/src/syscall.rs`; their rows are not
+yet transcribed into this table. The table in `lib/abi/src/syscalls.rs` is
+the source of truth either way, and `cargo xtask abi-check` is what enforces
+it.)
 
 `notice_read` (no. 124) and `notice_publish` (no. 125) are the system-notice
 pair: the unprivileged, non-blocking read of a machine-wide topic's current
@@ -440,7 +448,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SHM`          | `shm_create`, `shm_map`, `shm_grant` |
 | `CAP_IPC_ENDPOINT` | `call_grant` (the dispatch gate); also the per-endpoint gate a grant-restricted endpoint's *senders* must hold, enforced in `ipc_call`/`call_post` alongside the per-endpoint grant |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
-| `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`    |
+| `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`, `dma_quiesced` |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
@@ -523,9 +531,10 @@ coherent-bus case); for a **translating inbound viewport**
 base is re-based onto the far side of the viewport — checked, never wrapped
 (`OutOfRange` if it escapes the aperture, `AGENTS.md` §18.1 / §2.9) — so the
 device issues the bus address the bridge translates back to the carved RAM.
-The backing frames are zeroed and returned to the allocator when the task's
-live space is dropped on exit (`LiveSpace::drop` — zero-on-free, §4). It is
-gated on **`CAP_MEM_DMA`** and **audited** (a low-volume, security-relevant
+When the task's live space is dropped on exit (`LiveSpace::drop`) each carve
+it still holds is zeroed, unmapped, and **surrendered to its node's DMA
+quarantine** rather than freed, because the device may still be mastering it;
+see `dma_quiesced` below. It is gated on **`CAP_MEM_DMA`** and **audited** (a low-volume, security-relevant
 grant of hardware-reachable memory); the carve mechanism defaults to a
 fail-closed NULL producer (`NULL_DMA_ALLOC_FACILITY` → `NotImplemented`),
 so a kernel without the `kernel/mem` live producer denies rather than
@@ -551,10 +560,41 @@ anything (§5.4 — fail closed). Like `dma_alloc` it is gated on
 NULL producer (`NotImplemented`). The first-party Rust wrapper is
 `tairix_rt::dma_free`; the user-space driver host (`tairix_drvrt`) mints each
 carve's `DmaSlab` so its `Drop` issues `dma_free` automatically — a driver's
-per-request slabs reclaim themselves at scope end, never leaking. (Frames a
-driver never frees are still reclaimed wholesale when its live space is
-dropped on exit, `LiveSpace::drop`; `dma_free` is what keeps a *running*
-driver's footprint bounded.)
+per-request slabs reclaim themselves at scope end, never leaking. A driver
+frees a buffer only once its device can no longer reach it; a carve it never
+frees is quarantined when it exits, as below. `dma_free` is what keeps a
+*running* driver's footprint bounded.
+
+`dma_quiesced` (no. 126) releases a node's **DMA quarantine**
+(`kernel/core::dmaquarantine`, `plans/OPEN-DEFECTS.md` D167). A driver that
+ends without freeing its carves — a crash, a kill, an exit with the device
+still running — leaves memory its device may still be mastering, so
+`LiveSpace::drop` zeroes and unmaps each carve and surrenders the frames to
+the quarantine kept for the driver's hardware-tree node, tagged with that
+driver's *admission generation* (a counter the kernel stamps on every driver
+it admits), and records `DMA_QUARANTINED` (4091). A later driver for the same
+node calls `dma_quiesced` once its bring-up has **confirmed** the device can no
+longer reach that memory — a virtio status read back as 0, a completed xHCI
+`HCRST`, both GENET DMA engines reporting themselves stopped, a VideoCore
+answer to a probe posted after the dead instance's requests. The kernel then
+frees, scrubbed, every held block of an earlier generation (never the
+caller's own) and records `DMA_QUARANTINE_RELEASED` (4092, `cause=reset`).
+Generations, not the order of exit and respawn, make this safe: a dead
+driver's space may be dropped after its successor has already released, and a
+block surrendered that late is freed on arrival because its generation is
+already below the node's quiet bound. A **surprise** hot-removal
+(`hw_remove_node` without the orderly flag) retires the removed nodes at the
+admission high-water mark, so a vanished device's memory is freed and a
+reused node id never inherits the bound; an orderly removal leaves the
+quarantine to the next instance's reset. The caller is kernel-identified (its
+own loaded node and generation, never an argument), the syscall takes no
+arguments, is gated on **`CAP_MEM_DMA`**, and returns the bytes freed (`0`
+when nothing was held). A caller with no load record gets `NotFound`; with no
+quarantine wired (a kernel without a direct physical map) it gets
+`NotImplemented` and nothing is ever freed early. The first-party wrapper is
+`tairix_rt::dma_quiesced`; drivers reach it through
+`DmaHost::device_quiesced`, which the user-space host forwards only for a
+DMA-capable driver.
 
 `resource_grants` (no. 28) enumerates the device-resource grants the kernel
 minted for the calling driver task, delivering the unforgeable handles it
@@ -1932,6 +1972,7 @@ re-validates arguments — the dispatcher does that first.
 | `mmio_map`      | resolves `handle` against the caller (`AddressSpaceRegistry::grant(caller.task_id, handle)`, owner-checked per-task grant table; a task with no minted grant resolves to nothing), validates the granted resource is a memory window and the `[offset, offset + len)` sub-region lies wholly inside it (`devres::mappable_subwindow` — `Mmio` / `BusWindow`, non-zero `len`, in-bounds, non-overflowing), then maps **only** that sub-region `(grant_base + offset, len)` into the caller's own address space through the installed `MmioMapFacility` (`with_mmio_map_facility`; default `NULL_MMIO_MAP_FACILITY`), returning its base virtual address — so a large outbound bus-window grant maps just one enumerated BAR, not the whole window (`AGENTS.md` §24.1; `plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-window grant or a sub-region escaping it → `OutOfRange` / `LengthOutOfRange`. No map facility wired → `NotImplemented`. Frame/virtual-window exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len`, then carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by the grant's CPU-side `addr_limit` into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`), resolves the device-visible base via `devres::translate_device_addr` (CPU-physical for a coherent constraint, re-based onto the far side for a translating inbound viewport, `HwResource::dma_translated`), and copies it out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max / over-limit, or a carve escaping a translating viewport → `OutOfRange`. No DMA facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
 | `dma_free`      | the symmetric free for `dma_alloc`: resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), then releases the buffer based at `cpu_va` from the caller's own address space through the same `DmaAllocFacility` (`free`), zeroing every backing byte (zero-on-free, `AGENTS.md` §4) before its frames return to the allocator, and drops the buffer's own pages from the caller's address-space snapshot (the allocator reports the extent it released, so the drop costs the buffer, not the whole space). Only `cpu_va` is taken from the caller; the buffer's extent is the allocator's authoritative record. A long-running driver reclaims each transfer's bounce buffers through this rather than leaking DMA frames until it exits (`plans/PI.md` P10) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `cpu_va` not the base of a live carve in the caller's DMA window (covers a stale, double, or cross-task free) → `OutOfRange`. No DMA facility wired → `NotImplemented`. Otherwise `Ok(0)`. |
+| `dma_quiesced`  | reads the caller's own load record (hardware-tree node and admission generation, kernel-attested; no argument crosses the trap) and has the installed `DmaQuarantineFacility` (`with_dma_quarantine`; default `NULL_DMA_QUARANTINE`) free, scrubbed, every block the node's quarantine holds from an earlier generation, auditing `DMA_QUARANTINE_RELEASED` with `cause=reset` (D167) | No load record → `NotFound`. No quarantine wired → `NotImplemented`. Otherwise `Ok(bytes freed)`. |
 
 `spawn` also carries the **parser-sandbox mode**
 (`docs/src/security/sandbox.md`): an attach block whose `flags` word

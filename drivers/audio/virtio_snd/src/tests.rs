@@ -362,6 +362,62 @@ fn a_device_that_will_not_describe_its_streams_is_still_refused() {
 }
 
 #[test]
+fn bring_up_declares_the_device_quiesced_once_its_reset_confirms() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let _device =
+        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    assert_eq!(host.quiesced_calls(), 1);
+}
+
+#[test]
+fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let mut transport = mock_device(&DeviceSpec::qemu(), &log);
+    transport.refuse_resets_after(0);
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    assert_eq!(
+        VirtioSnd::open(transport, &host, &clock).err(),
+        Some(DriverError::DeviceFault)
+    );
+    assert_eq!(host.quiesced_calls(), 0);
+    assert_eq!(host.bytes_allocated(), 0);
+}
+
+/// A device that goes live and then describes itself unusably.
+fn a_live_device_that_fails_enumeration(log: &Rc<RefCell<DeviceLog>>) -> MockTransport {
+    let mut spec = DeviceSpec::qemu();
+    spec.not_supported.push(wire::request::PCM_INFO);
+    mock_device(&spec, log)
+}
+
+#[test]
+fn a_failure_once_the_device_is_live_resets_it_before_releasing_its_memory() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    assert!(VirtioSnd::open(a_live_device_that_fails_enumeration(&log), &host, &clock).is_err());
+    assert_eq!(host.slabs_outstanding(), 0);
+}
+
+#[test]
+fn a_live_failure_on_a_device_that_then_wedges_releases_nothing() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let mut transport = a_live_device_that_fails_enumeration(&log);
+    transport.refuse_resets_after(1);
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    assert!(VirtioSnd::open(transport, &host, &clock).is_err());
+    assert!(
+        host.slabs_outstanding() > 0,
+        "the event pool stays with the device"
+    );
+    assert_eq!(host.quiesced_calls(), 1, "the first reset did confirm");
+}
+
+#[test]
 fn a_device_describing_no_streams_or_too_many_is_refused() {
     for streams in [0usize, usize::from(MAX_DEVICE_ENDPOINTS) + 1] {
         let mut spec = DeviceSpec::qemu();

@@ -599,3 +599,27 @@ fn display_messages_present() {
     assert!(format!("{}", DmaError::SizeUnsupported).contains("max"));
     assert!(format!("{}", DmaError::Alloc(AllocError::OutOfMemory)).contains("alloc"));
 }
+
+#[test]
+fn the_window_contains_exactly_its_own_span() {
+    let base = VirtAddr::new(0x10_0000);
+    let window = DmaWindowMap::new(base, 4).expect("a valid window");
+    let end = base.as_u64() + (4 * PAGE_SIZE) as u64;
+    assert!(window.contains(base));
+    assert!(window.contains(VirtAddr::new(end - 1)));
+    assert!(
+        !window.contains(VirtAddr::new(end)),
+        "the span is half-open"
+    );
+    assert!(!window.contains(VirtAddr::new(base.as_u64() - 1)));
+}
+
+#[test]
+fn a_block_spans_its_order_in_pages() {
+    let block = DmaBlock {
+        frame: crate::frame::Frame(16),
+        order: 3,
+    };
+    assert_eq!(block.len(), 8 * PAGE_SIZE);
+    assert!(!block.is_empty());
+}

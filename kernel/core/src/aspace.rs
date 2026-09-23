@@ -138,6 +138,17 @@ struct TaskAddressSpace {
     physmap: Box<dyn PhysMap + Send + Sync>,
 }
 
+/// What the kernel recorded when it loaded a driver for a hardware-tree node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadedDriver {
+    /// The node the driver was loaded for.
+    pub node: u32,
+    /// This load's admission generation: greater than every earlier load's.
+    pub generation: u64,
+    /// DMA memory the driver holds carved, in bytes.
+    pub dma_bytes: u64,
+}
+
 /// Maps each live task's [`ProcessId`] to its user address space and the
 /// kernel [`PhysMap`] backing it.
 ///
@@ -146,7 +157,6 @@ struct TaskAddressSpace {
 /// owns no lock of its own, so the synchronisation policy lives with
 /// `KernelState`). It boots empty: entries appear only as tasks are
 /// spawned and disappear as they exit.
-#[derive(Default)]
 pub struct AddressSpaceRegistry {
     tasks: BTreeMap<ProcessId, TaskAddressSpace>,
     /// Each live task's standard-stream descriptor table. Co-located with the address space because it shares the
@@ -205,7 +215,9 @@ pub struct AddressSpaceRegistry {
     /// no matched node) cannot emit a child at all (fail closed).
     /// Dropped at [`withdraw`](Self::withdraw) so a reused id never inherits a
     /// dead driver's node.
-    loaded_nodes: BTreeMap<ProcessId, u32>,
+    loaded_nodes: BTreeMap<ProcessId, LoadedDriver>,
+    /// The admission generation the next driver load is given.
+    next_driver_generation: u64,
     /// Each live task's open file/directory handles (the descriptors
     /// `fs_open` returns and `fs_close` releases). Co-located with the
     /// address space for the same reason as [`Self::streams`]: a handle
@@ -1029,6 +1041,12 @@ fn existing_handle<V: PartialEq>(by_handle: &BTreeMap<u64, V>, value: &V) -> Opt
         .map(|(&handle, _)| handle)
 }
 
+impl Default for AddressSpaceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AddressSpaceRegistry {
     /// Construct an empty registry.
     #[must_use]
@@ -1040,6 +1058,7 @@ impl AddressSpaceRegistry {
             limits: BTreeMap::new(),
             grants: BTreeMap::new(),
             loaded_nodes: BTreeMap::new(),
+            next_driver_generation: 1,
             open_files: BTreeMap::new(),
             mapped_aspace_bytes: BTreeMap::new(),
             cwds: BTreeMap::new(),
@@ -1280,7 +1299,7 @@ impl AddressSpaceRegistry {
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
-    /// hardware-tree node `node_id`.
+    /// hardware-tree node `node_id`, giving it the next admission generation.
     ///
     /// Called by the privileged driver-spawn path beside
     /// [`mint_grant`](Self::mint_grant), under the same write lock, so a
@@ -1289,8 +1308,21 @@ impl AddressSpaceRegistry {
     /// resolved), never caller-supplied. The ordinary
     /// `spawn` path records nothing, so a non-driver task has no loaded node
     /// and cannot publish a child (fail closed).
+    ///
+    /// Generations order every driver load, so a later instance for a node
+    /// is always admitted with a greater one — what lets the DMA quarantine
+    /// trust a reset by it over memory an earlier instance carved.
     pub fn set_loaded_node(&mut self, task: ProcessId, node_id: u32) {
-        self.loaded_nodes.insert(task, node_id);
+        let generation = self.next_driver_generation;
+        self.next_driver_generation = generation.saturating_add(1);
+        self.loaded_nodes.insert(
+            task,
+            LoadedDriver {
+                node: node_id,
+                generation,
+                dma_bytes: 0,
+            },
+        );
     }
 
     /// The discovered hardware-tree node `task` was loaded for, or `None`
@@ -1302,7 +1334,37 @@ impl AddressSpaceRegistry {
     /// caller id, never caller-supplied.
     #[must_use]
     pub fn loaded_node(&self, task: ProcessId) -> Option<u32> {
+        self.loaded_nodes.get(&task).map(|driver| driver.node)
+    }
+
+    /// The whole load record of the autoloaded driver `task`, or `None` when
+    /// `task` is not one.
+    #[must_use]
+    pub fn loaded_driver(&self, task: ProcessId) -> Option<LoadedDriver> {
         self.loaded_nodes.get(&task).copied()
+    }
+
+    /// The generation of the latest driver load, `0` before the first: every
+    /// driver loaded later is admitted above it.
+    #[must_use]
+    pub fn driver_generation_high_water(&self) -> u64 {
+        self.next_driver_generation - 1
+    }
+
+    /// Tally `bytes` of DMA memory the driver `task` carved, so its teardown
+    /// can report what it leaves to the quarantine. A task that is not a
+    /// loaded driver carves nothing.
+    pub fn note_dma_carved(&mut self, task: ProcessId, bytes: u64) {
+        if let Some(driver) = self.loaded_nodes.get_mut(&task) {
+            driver.dma_bytes = driver.dma_bytes.saturating_add(bytes);
+        }
+    }
+
+    /// Tally `bytes` of DMA memory the driver `task` freed.
+    pub fn note_dma_freed(&mut self, task: ProcessId, bytes: u64) {
+        if let Some(driver) = self.loaded_nodes.get_mut(&task) {
+            driver.dma_bytes = driver.dma_bytes.saturating_sub(bytes);
+        }
     }
 
     /// Mint a device-resource grant for `task`, returning the unforgeable,

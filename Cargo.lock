@@ -4791,6 +4791,7 @@ dependencies = [
  "tairix-kernel-sched-eevdf",
  "tairix-kernel-syscall",
  "tairix-log",
+ "tairix-sync",
  "tairix-util",
 ]
 

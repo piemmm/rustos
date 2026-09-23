@@ -547,12 +547,12 @@ fn mmio_exchange_stats_localise_the_timeout_stage() {
 }
 
 #[test]
-fn mmio_exchange_rejects_a_foreign_property_completion() {
+fn mmio_exchange_drains_a_stale_property_completion_rather_than_taking_it_for_its_own() {
     let mut regs = ready_regs();
     set_reg_word(
         &mut regs,
         REG_MBOX0_READ,
-        0x0002_0000 | CHANNEL_PROPERTY, // someone else's buffer
+        0x0002_0000 | CHANNEL_PROPERTY, // an earlier instance's buffer
     );
     let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
     let mut mailbox = MmioMailbox::new(
@@ -562,11 +562,14 @@ fn mmio_exchange_rejects_a_foreign_property_completion() {
         8,
     )
     .expect("construct");
-    let mut message = request().encode().expect("encode");
-    assert_eq!(
-        mailbox.exchange(&mut message),
-        Err(MailboxError::MalformedResponse)
-    );
+    let request = request().encode().expect("encode");
+    let mut message = request;
+    assert_eq!(mailbox.exchange(&mut message), Err(MailboxError::Timeout));
+    let stats = mailbox.last_exchange_stats();
+    assert_eq!(stats.timeout_stage, TimeoutStage::Response);
+    assert_eq!(stats.stale_reads, 8, "every read was the stale completion");
+    assert_eq!(stats.foreign_channel_reads, 0);
+    assert_eq!(message, request, "no reply was read back");
 }
 
 // --- Display-size query ----------------------------------------------------

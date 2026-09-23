@@ -24,8 +24,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::{Errno, MapFlags};
 use tairix_kernel_mem::{
-    page_count_for, AllocError, AnonError, DmaError, Frame, FrameAllocator, LiveSpaceError,
-    MemoryClass, MmioError, PhysAddr, PhysMap, PAGE_SIZE,
+    page_count_for, AllocError, AnonError, DmaCustodian, DmaError, Frame, FrameAllocator,
+    LiveSpaceError, MemoryClass, MmioError, PhysAddr, PhysMap, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::SchedulerArch;
 
@@ -78,6 +78,10 @@ fn dma_errno(err: DmaError) -> Errno {
         DmaError::Alloc(_) => Errno::OutOfMemory,
         DmaError::ZeroSize => Errno::LengthOutOfRange,
         DmaError::SizeUnsupported | DmaError::AddrLimitExceeded => Errno::OutOfRange,
+        // No custody behind the carve is an inert quarantine, not a caller
+        // error.
+        DmaError::NoCustody => Errno::NotImplemented,
+        DmaError::CustodianMismatch => Errno::PermissionDenied,
         // `PageTable`, `DirectMap`, `UnknownBuffer`, `InvalidPoolConfig`, and
         // any future (`#[non_exhaustive]`) variant fail closed to a generic
         // bad-address error.
@@ -295,17 +299,23 @@ impl<A> DmaAllocFacility for LiveDmaAlloc<A>
 where
     A: SchedulerArch + Send + Sync + 'static,
 {
-    fn alloc(&self, len: usize, addr_limit: u64) -> Result<DmaCarve, Errno> {
+    fn alloc(
+        &self,
+        len: usize,
+        addr_limit: u64,
+        custodian: DmaCustodian,
+    ) -> Result<DmaCarve, Errno> {
         let cpu = self.arch.current_cpu();
         // The coherent (and QEMU `virt`) device-visible address is the
         // CPU-physical base; a translating inbound viewport is refused
         // earlier in the handler (it rides the metal item), so here the
         // device address is exactly the carved physical base.
-        with_current_live_space(cpu, |space| space.alloc_dma(len, addr_limit))
+        with_current_live_space(cpu, |space| space.alloc_dma(len, addr_limit, custodian))
             .ok_or(Errno::NotImplemented)?
             .map(|mapping| DmaCarve {
                 cpu_va: mapping.cpu_va,
                 device_addr: mapping.phys_base,
+                len: mapping.len as u64,
             })
             .map_err(live_errno)
     }
@@ -513,7 +523,7 @@ mod tests {
         device_maps: Vec<(u64, usize)>,
         writeback_framebuffer_maps: Vec<(u64, usize)>,
         framebuffer_maps: Vec<(u64, usize)>,
-        dma_allocs: Vec<(usize, u64)>,
+        dma_allocs: Vec<(usize, u64, u32, u64)>,
         dma_frees: Vec<u64>,
         file_reserves: Vec<u64>,
         file_page_maps: Vec<(u64, usize)>,
@@ -667,13 +677,20 @@ mod tests {
             None
         }
 
-        fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError> {
-            self.dma_allocs.push((len, addr_limit));
+        fn alloc_dma(
+            &mut self,
+            len: usize,
+            addr_limit: u64,
+            custodian: DmaCustodian,
+        ) -> Result<DmaMapping, LiveSpaceError> {
+            self.dma_allocs
+                .push((len, addr_limit, custodian.node, custodian.generation));
             match self.next.take() {
                 Some(err) => Err(err),
                 None => Ok(DmaMapping {
                     cpu_va: 0xD000_2000,
                     phys_base: DMA_PHYS,
+                    len: 2 * tairix_kernel_mem::PAGE_SIZE,
                 }),
             }
         }
@@ -1038,25 +1055,33 @@ mod tests {
         let _guard = publish_live_space_for_test(16, fake);
 
         let producer = LiveDmaAlloc::new(arch_at(16));
-        let carve = producer.alloc(2 * PAGE, 0x4000_0000);
-        // The CPU VA and the physical-base-as-device-address flow back from
-        // the live space unchanged.
+        let carve = producer.alloc(2 * PAGE, 0x4000_0000, test_custodian());
+        // The CPU VA, the physical-base-as-device-address and the backing
+        // length flow back from the live space unchanged.
         assert_eq!(
             carve,
             Ok(DmaCarve {
                 cpu_va: 0xD000_2000,
                 device_addr: DMA_PHYS,
+                len: 2 * PAGE as u64,
             })
         );
         // SAFETY: the producer's `&mut` has ended; single-threaded read.
         let recorded = unsafe { &*ptr };
-        assert_eq!(recorded.dma_allocs, std::vec![(2 * PAGE, 0x4000_0000)]);
+        assert_eq!(
+            recorded.dma_allocs,
+            std::vec![(2 * PAGE, 0x4000_0000, TEST_NODE, TEST_GENERATION)],
+            "the custodian reaches the space unchanged"
+        );
     }
 
     #[test]
     fn dma_alloc_with_no_published_space_fails_closed() {
         let producer = LiveDmaAlloc::new(arch_at(17));
-        assert_eq!(producer.alloc(PAGE, 0), Err(Errno::NotImplemented));
+        assert_eq!(
+            producer.alloc(PAGE, 0, test_custodian()),
+            Err(Errno::NotImplemented)
+        );
     }
 
     #[test]
@@ -1068,6 +1093,20 @@ mod tests {
         let _guard = publish_live_space_for_test(18, fake);
 
         let producer = LiveDmaAlloc::new(arch_at(18));
-        assert_eq!(producer.alloc(PAGE, 0x1000), Err(Errno::OutOfRange));
+        assert_eq!(
+            producer.alloc(PAGE, 0x1000, test_custodian()),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    const TEST_NODE: u32 = 5;
+    const TEST_GENERATION: u64 = 2;
+
+    fn test_custodian() -> DmaCustodian {
+        DmaCustodian {
+            node: TEST_NODE,
+            generation: TEST_GENERATION,
+            custody: &crate::devres::NULL_DMA_QUARANTINE,
+        }
     }
 }

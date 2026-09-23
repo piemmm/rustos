@@ -77,6 +77,31 @@ impl Status {
     }
 }
 
+/// Status reads a reset may take to confirm before the device counts as
+/// wedged.
+const RESET_POLL_BUDGET: u32 = 1_000_000;
+
+/// Wait for a reset device's status to read 0, as virtio 1.1 §2.4.1 requires
+/// before the driver may re-initialise it. `read_status` is `None` when the
+/// register cannot be read at all.
+pub(crate) fn await_reset(read_status: impl FnMut() -> Option<u32>) -> Result<(), VirtioError> {
+    await_reset_within(RESET_POLL_BUDGET, read_status)
+}
+
+fn await_reset_within(
+    budget: u32,
+    mut read_status: impl FnMut() -> Option<u32>,
+) -> Result<(), VirtioError> {
+    for _ in 0..budget {
+        match read_status() {
+            Some(0) => return Ok(()),
+            Some(_) => core::hint::spin_loop(),
+            None => return Err(VirtioError::DeviceFault),
+        }
+    }
+    Err(VirtioError::DeviceFault)
+}
+
 /// Errors a transport may return on its setup path.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
@@ -172,8 +197,14 @@ pub enum Direction {
 /// [`DriverError::DeviceFault`] / [`DriverError::OutOfRange`]
 /// rather than panic.
 pub trait Transport {
-    /// Reset the device and re-establish a clean status byte.
-    fn reset(&mut self);
+    /// Reset the device and wait for it to confirm, after which it no longer
+    /// reaches any memory it was given.
+    ///
+    /// # Errors
+    ///
+    /// [`VirtioError::DeviceFault`] if the device never confirms: it may still
+    /// be mastering that memory, so none of it may be released.
+    fn reset(&mut self) -> Result<(), VirtioError>;
     /// Read the device's current status byte.
     fn status(&self) -> Status;
     /// Write `status` to the device's status register.
@@ -339,6 +370,9 @@ pub struct MockTransport {
     /// When set, [`Transport::notify`] drains the notified queue inline
     /// (QEMU-accurate synchronous notify); see [`Self::set_synchronous_notify`].
     synchronous_notify: bool,
+    /// Resets still to confirm before every later one is refused; `None`
+    /// confirms them all. See [`Self::refuse_resets_after`].
+    resets_confirmed_left: Option<u32>,
 }
 
 impl MockTransport {
@@ -366,7 +400,15 @@ impl MockTransport {
             notify_log: RefCell::new(Vec::new()),
             ack_interrupts: 0,
             synchronous_notify: false,
+            resets_confirmed_left: None,
         }
+    }
+
+    /// Model a device that wedges after `confirmed` more resets: every later
+    /// reset is refused and leaves the device's state, and any memory it was
+    /// given, in its hands.
+    pub fn refuse_resets_after(&mut self, confirmed: u32) {
+        self.resets_confirmed_left = Some(confirmed);
     }
 
     /// Make [`Transport::notify`] process the notified queue synchronously
@@ -565,7 +607,13 @@ impl MockTransport {
 }
 
 impl Transport for MockTransport {
-    fn reset(&mut self) {
+    fn reset(&mut self) -> Result<(), VirtioError> {
+        if let Some(left) = self.resets_confirmed_left {
+            if left == 0 {
+                return Err(VirtioError::DeviceFault);
+            }
+            self.resets_confirmed_left = Some(left - 1);
+        }
         self.status = Status::default();
         self.driver_features = 0;
         self.selected_queue = 0;
@@ -578,6 +626,7 @@ impl Transport for MockTransport {
             q.packed_dev_idx = 0;
             q.packed_dev_wrap = true;
         }
+        Ok(())
     }
     fn status(&self) -> Status {
         self.status
@@ -690,6 +739,46 @@ mod tests {
         // The split is by position, not by magnitude: neither half borrows a
         // bit from the other.
         assert_eq!(le_halves(0x1234_5678_9ABC_DEF0), (0x9ABC_DEF0, 0x1234_5678));
+    }
+
+    #[test]
+    fn a_reset_confirms_once_the_status_reads_zero() {
+        let mut reads = [3u32, 1, 0, 7].into_iter();
+        assert_eq!(await_reset_within(8, || reads.next()), Ok(()));
+        assert_eq!(reads.next(), Some(7), "no read past the confirmation");
+    }
+
+    #[test]
+    fn a_device_that_never_clears_its_status_fails_the_reset() {
+        let mut reads = 0;
+        let outcome = await_reset_within(8, || {
+            reads += 1;
+            Some(Status::DRIVER_OK.into())
+        });
+        assert_eq!(outcome, Err(VirtioError::DeviceFault));
+        assert_eq!(reads, 8, "bounded by the budget");
+    }
+
+    #[test]
+    fn an_unreadable_status_fails_the_reset_at_once() {
+        let mut reads = 0;
+        let outcome = await_reset_within(8, || {
+            reads += 1;
+            None
+        });
+        assert_eq!(outcome, Err(VirtioError::DeviceFault));
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn a_mock_wedges_after_its_confirmed_resets_and_keeps_its_state() {
+        let mut t = MockTransport::new(1, 8, 0, 0);
+        t.refuse_resets_after(1);
+        assert_eq!(t.reset(), Ok(()));
+        t.set_status(Status::default().with(Status::DRIVER_OK));
+        assert_eq!(t.reset(), Err(VirtioError::DeviceFault));
+        assert_eq!(t.reset(), Err(VirtioError::DeviceFault), "wedged for good");
+        assert!(t.status().contains(Status::DRIVER_OK));
     }
 
     #[test]

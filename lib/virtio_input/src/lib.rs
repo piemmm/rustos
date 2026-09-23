@@ -191,16 +191,20 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
     /// features), `FEATURES_OK`, set up the event queue, `DRIVER_OK`,
     /// then fill the eventq with one device-write slot per negotiated
     /// descriptor (all carved from one shared DMA region) and notify
-    /// the device.
+    /// the device. Once the reset confirms, the device is declared
+    /// quiesced to `host`, so memory an earlier instance left with it can
+    /// be released; a failure once the device is live resets it again
+    /// before its memory is released.
     ///
     /// # Errors
     ///
     /// Propagates the transport / queue-setup [`VirtioError`] (mapped to
     /// [`DriverError`]), [`DriverError::DeviceFault`] if the device
-    /// clears [`Status::FEATURES_OK`] after negotiation, and any
-    /// [`DriverError`] from the DMA-buffer allocation.
+    /// never confirms its reset or clears [`Status::FEATURES_OK`] after
+    /// negotiation, and any [`DriverError`] from the DMA-buffer allocation.
     pub fn open(mut transport: T, host: &'h dyn VirtioHost) -> Result<Self, DriverError> {
-        transport.reset();
+        transport.reset().map_err(VirtioError::as_driver_error)?;
+        host.device_quiesced();
         let mut status = Status::default().with(Status::ACKNOWLEDGE);
         transport.set_status(status);
         status = status.with(Status::DRIVER);
@@ -229,30 +233,42 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
         if queue_size == 0 {
             return Err(DriverError::DeviceFault);
         }
-        let mut eventq = SplitQueue::new(&mut transport, host, wire::EVENT_QUEUE, queue_size)
+        let eventq = SplitQueue::new(&mut transport, host, wire::EVENT_QUEUE, queue_size)
             .map_err(VirtioError::as_driver_error)?;
-        status = status.with(Status::DRIVER_OK);
-        transport.set_status(status);
-
         // One region carries every slot: the depth is bounded by the
         // 64-entry ceiling, so the whole pool is 512 bytes — never a DMA
         // page per 8-byte event.
         let region = host.alloc_dma_zeroed(usize::from(queue_size) * wire::EVENT_LEN as usize)?;
         let event_pool = BounceBuffer::new(region, BufferClass::NonSensitive);
-        let mut event_slots: [Option<u16>; wire::EVENT_QUEUE_SIZE as usize] =
-            core::array::from_fn(|_| None);
-        for slot in 0..queue_size {
-            Self::post_slot(&mut eventq, &event_pool, slot, &mut event_slots)?;
-        }
-        eventq.kick(&mut transport);
+        status = status.with(Status::DRIVER_OK);
+        transport.set_status(status);
 
-        Ok(Self {
+        let mut input = Self {
             transport,
             eventq,
             host,
             event_pool,
-            event_slots,
-        })
+            event_slots: core::array::from_fn(|_| None),
+        };
+        if let Err(e) = input.post_pool(queue_size) {
+            input.close();
+            return Err(e);
+        }
+        Ok(input)
+    }
+
+    /// Post every event slot and notify the device.
+    fn post_pool(&mut self, queue_size: u16) -> Result<(), DriverError> {
+        for slot in 0..queue_size {
+            Self::post_slot(
+                &mut self.eventq,
+                &self.event_pool,
+                slot,
+                &mut self.event_slots,
+            )?;
+        }
+        self.eventq.kick(&mut self.transport);
+        Ok(())
     }
 
     /// Bring the device online ([`Self::open`]) and only then run the
@@ -298,9 +314,13 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
         Ok(input)
     }
 
-    /// Tear the device down for unload (sets the status byte to 0).
+    /// Tear the device down for unload: reset it, then release its memory.
     pub fn close(mut self) {
-        self.transport.reset();
+        if self.transport.reset().is_err() {
+            // A wedged device may still master its ring and event pool: hold
+            // them for the kernel to quarantine when the driver exits.
+            core::mem::forget(self);
+        }
     }
 
     /// Borrow the underlying transport mutably for the in-process

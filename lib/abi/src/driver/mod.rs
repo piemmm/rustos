@@ -1658,6 +1658,8 @@ mod tests {
             }
             Err(DriverError::LengthOutOfRange)
         }
+
+        fn device_quiesced(&self) {}
     }
 
     impl MailboxChannel for FacilityHost {

@@ -149,6 +149,7 @@ extern "C" {
 #define TAIRIX_SYS_CPUFREQ_WAIT 123u
 #define TAIRIX_SYS_NOTICE_READ 124u
 #define TAIRIX_SYS_NOTICE_PUBLISH 125u
+#define TAIRIX_SYS_DMA_QUIESCED 126u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -528,6 +529,7 @@ uint64_t tairix_sys_cpufreq_bind(void * a0);
 int32_t tairix_sys_cpufreq_wait(uint64_t a0, uint64_t a1, void * a2);
 uint64_t tairix_sys_notice_read(uint32_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_notice_publish(uint32_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_dma_quiesced(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -3126,6 +3126,20 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::DMA_QUIESCED,
+        name: "dma_quiesced",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        // `U64` carries the bytes freed, or a negated errno.
+        ret: AbiType::U64,
+        // Returning device-reachable memory to the allocator is gated by the
+        // same `CAP_MEM_DMA` that carves it, and scoped by the kernel to the
+        // caller's own node. Audited: it is a security decision, taken once
+        // per driver bring-up.
+        required_capability: Some(CapabilityId::MEM_DMA),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

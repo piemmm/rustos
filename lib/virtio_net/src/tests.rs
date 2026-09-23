@@ -134,6 +134,10 @@ impl DmaHost for AutoDrainHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
+
+    fn device_quiesced(&self) {
+        self.inner.device_quiesced();
+    }
 }
 
 impl VirtioHost for AutoDrainHost {
@@ -167,6 +171,10 @@ struct NoWaitHost {
 impl DmaHost for NoWaitHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<tairix_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
+    }
+
+    fn device_quiesced(&self) {
+        self.inner.device_quiesced();
     }
 }
 
@@ -438,6 +446,91 @@ fn build_multiqueue_device(pairs: u16, rx_sources: Vec<RxQueue>) -> MockTranspor
         }),
     );
     t
+}
+
+#[test]
+fn bring_up_declares_the_device_quiesced_once_its_reset_confirms() {
+    let (t, _tx, _rx) = build_device();
+    let host = MockHost::new();
+    let _net = VirtioNet::open(t, &host, Some(&test_machine())).expect("open");
+    assert_eq!(host.quiesced_calls(), 1);
+}
+
+#[test]
+fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
+    let (mut t, _tx, _rx) = build_device();
+    t.refuse_resets_after(0);
+    let host = MockHost::new();
+    assert!(matches!(
+        VirtioNet::open(t, &host, Some(&test_machine())),
+        Err(VirtioError::DeviceFault)
+    ));
+    assert_eq!(host.quiesced_calls(), 0);
+    assert_eq!(host.bytes_allocated(), 0);
+}
+
+#[test]
+fn a_confirmed_close_releases_every_region() {
+    let (t, _tx, _rx) = build_device();
+    let host = MockHost::new();
+    VirtioNet::open(t, &host, Some(&test_machine()))
+        .expect("open")
+        .close();
+    assert_eq!(host.slabs_outstanding(), 0);
+}
+
+#[test]
+fn a_close_whose_reset_never_confirms_releases_nothing() {
+    let (t, _tx, _rx) = build_device();
+    let host = MockHost::new();
+    let mut net = VirtioNet::open(t, &host, Some(&test_machine())).expect("open");
+    let held = host.slabs_outstanding();
+    assert!(held > 0);
+    net.transport_mut().refuse_resets_after(0);
+    net.close();
+    assert_eq!(host.slabs_outstanding(), held);
+}
+
+/// A two-pair device whose control queue answers the pair-count command
+/// through `ack`, which returns what the device does with the chain.
+fn multiqueue_device_answering(
+    ack: impl FnMut(&mut ChainView<'_>) -> Result<u32, VirtioError> + 'static,
+) -> MockTransport {
+    let sources = vec![
+        Rc::new(RefCell::new(VecDeque::new())),
+        Rc::new(RefCell::new(VecDeque::new())),
+    ];
+    let mut t = build_multiqueue_device(2, sources);
+    t.install_shim(2 * wire::QUEUE_PAIR_STRIDE, Box::new(ack));
+    t
+}
+
+#[test]
+fn a_refused_queue_pair_command_resets_the_device_before_releasing_its_memory() {
+    const VIRTIO_NET_ERR: u8 = 1;
+    let t = multiqueue_device_answering(|chain| {
+        let ack = chain
+            .device_write
+            .first_mut()
+            .ok_or(VirtioError::DeviceFault)?;
+        ack[0] = VIRTIO_NET_ERR;
+        Ok(1)
+    });
+    let host = MockHost::new();
+    assert!(VirtioNet::open(t, &host, Some(&test_machine())).is_err());
+    assert_eq!(host.slabs_outstanding(), 0);
+}
+
+#[test]
+fn an_unanswered_queue_pair_command_keeps_what_the_device_may_still_write() {
+    let t = multiqueue_device_answering(|_| Err(VirtioError::NoCompletion));
+    let host = MockHost::new();
+    assert!(VirtioNet::open(t, &host, Some(&test_machine())).is_err());
+    assert_eq!(
+        host.slabs_outstanding(),
+        1,
+        "only the command the device never returned"
+    );
 }
 
 #[test]

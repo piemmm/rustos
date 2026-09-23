@@ -20,6 +20,7 @@ use core::ptr::NonNull;
 
 use super::*;
 use tairix_abi::driver::block::Block;
+use tairix_abi::driver::dma::{DmaHost, DmaSlab};
 use tairix_abi::driver::DriverKind;
 use tairix_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
 
@@ -1112,6 +1113,24 @@ struct MockHost {
     drv_load: bool,
     mmio_map: bool,
     mapper: Option<MockMapper>,
+    dma: Option<QuiesceProbe>,
+}
+
+/// A DMA facility that carves nothing, so the engine takes the programmed-I/O
+/// path, and counts the quiesce declarations it receives.
+#[derive(Default)]
+struct QuiesceProbe {
+    declared: core::cell::Cell<usize>,
+}
+
+impl DmaHost for QuiesceProbe {
+    fn alloc_dma_zeroed(&self, _size: usize) -> Result<DmaSlab, DriverError> {
+        Err(DriverError::LengthOutOfRange)
+    }
+
+    fn device_quiesced(&self) {
+        self.declared.set(self.declared.get() + 1);
+    }
 }
 
 impl DriverHost for MockHost {
@@ -1128,6 +1147,9 @@ impl DriverHost for MockHost {
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         self.mapper.as_ref().map(|m| m as &dyn MmioMapper)
     }
+    fn dma_host(&self) -> Option<&dyn DmaHost> {
+        self.dma.as_ref().map(|d| d as &dyn DmaHost)
+    }
 }
 
 const EMMC2_PHYS: u64 = 0xFE34_0000;
@@ -1138,12 +1160,14 @@ fn register_requires_drv_load() {
         drv_load: true,
         mmio_map: false,
         mapper: None,
+        dma: None,
     };
     assert!(register(&granted).is_ok());
     let denied = MockHost {
         drv_load: false,
         mmio_map: false,
         mapper: None,
+        dma: None,
     };
     assert_eq!(register(&denied), Err(DriverError::PermissionDenied));
 }
@@ -1158,6 +1182,7 @@ fn open_discovered_requires_mmio_map() {
             backing: vec![0u32; regs::REGS_LEN_BYTES / 4],
             granted: true,
         }),
+        dma: None,
     };
     assert_eq!(
         wiring::open_discovered(&host, EMMC2_PHYS, NoIrq).err(),
@@ -1169,11 +1194,29 @@ fn open_discovered_requires_mmio_map() {
 }
 
 #[test]
+fn a_controller_whose_reset_never_completes_is_never_declared_quiesced() {
+    let host = MockHost {
+        drv_load: true,
+        mmio_map: true,
+        mapper: Some(MockMapper {
+            phys: EMMC2_PHYS,
+            backing: vec![0u32; regs::REGS_LEN_BYTES / 4],
+            granted: true,
+        }),
+        dma: Some(QuiesceProbe::default()),
+    };
+    // Plain memory never clears the reset bit it is written.
+    assert!(wiring::open_discovered(&host, EMMC2_PHYS, NoIrq).is_err());
+    assert_eq!(host.dma.as_ref().map(|dma| dma.declared.get()), Some(0));
+}
+
+#[test]
 fn open_discovered_without_mapper_is_unsupported() {
     let host = MockHost {
         drv_load: true,
         mmio_map: true,
         mapper: None,
+        dma: None,
     };
     assert_eq!(
         wiring::open_discovered(&host, EMMC2_PHYS, NoIrq).err(),

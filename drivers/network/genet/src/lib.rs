@@ -86,7 +86,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use tairix_abi::driver::dma::DmaSlab;
+use tairix_abi::driver::dma::{DmaHost, DmaSlab};
 use tairix_abi::driver::mmio::WindowError;
 use tairix_abi::driver::net::{
     frame_capacity, DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads,
@@ -282,6 +282,14 @@ const OFFLOADS: NetOffloads = match NetOffloads::from_bits(
 /// reference drivers hold each for 10 µs.
 const RESET_HOLD_US: u32 = 10;
 
+/// How long a DMA engine may take to report itself stopped, and how often it
+/// is asked: Linux's `bcmgenet` allows 5 ms in 1 µs steps.
+const DMA_STOP_TIMEOUT_US: u64 = 5_000;
+const DMA_STOP_POLL_US: u32 = 1;
+
+/// The [`regs::DMA_CTRL`] bits that let an engine run the default ring.
+const DMA_ENABLES: u32 = regs::DMA_EN | (1 << (regs::DEFAULT_RING + regs::DMA_RING_BUF_EN_SHIFT));
+
 /// Driver entry point.
 ///
 /// # Errors
@@ -393,7 +401,11 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     ///
     /// `layout` is the derived carve layout `frames` was allocated for;
     /// a carve shorter than [`DmaLayout::bytes`] is refused rather than
-    /// driving the device against buffers that are not there.
+    /// driving the device against buffers that are not there. Once both DMA
+    /// engines report themselves stopped, the device is declared quiesced to
+    /// `carved_from`, the host `frames` came from, so memory an earlier
+    /// instance left with it can be released; a failure once the engines are
+    /// running stops them again before `frames` is released.
     ///
     /// # Errors
     ///
@@ -404,13 +416,15 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     ///   programming a foreign block.
     /// * [`DriverError::OutOfRange`] if a register access falls outside the
     ///   mapped aperture (a short window).
-    /// * [`DriverError::DeviceFault`] if the PHY never answers on MDIO.
+    /// * [`DriverError::DeviceFault`] if a DMA engine never stops or the PHY
+    ///   never answers on MDIO.
     pub fn open(
         regs: R,
         delay: D,
         frames: DmaSlab,
         mac: MacAddress,
         layout: DmaLayout,
+        carved_from: &dyn DmaHost,
     ) -> Result<Self, DriverError> {
         if frames.len() < layout.bytes() {
             return Err(DriverError::BufferTooSmall);
@@ -449,16 +463,34 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         device.write_hwaddr()?;
         device.write_rx_filter(&[])?;
         device.disable_dma()?;
+        carved_from.device_quiesced();
         device.init_rx()?;
         device.init_tx()?;
-        device.enable_dma()?;
-        mdio::start_autoneg(&mut device.regs, &device.delay, PHY_ADDRESS)?;
-        device.link = mdio::await_link(&mut device.regs, &device.delay, PHY_ADDRESS)?;
-        device.apply_link()?;
-        device
-            .regs
-            .write(regs::INTRL2_CPU_MASK_CLEAR, regs::IRQ_ENABLED)?;
+        if let Err(e) = device.go_live() {
+            device.close();
+            return Err(e);
+        }
         Ok(device)
+    }
+
+    /// Start both DMA engines, bring the link up, and unmask the device's
+    /// interrupts: the bring-up steps the running engines take part in.
+    fn go_live(&mut self) -> Result<(), DriverError> {
+        self.enable_dma()?;
+        mdio::start_autoneg(&mut self.regs, &self.delay, PHY_ADDRESS)?;
+        self.link = mdio::await_link(&mut self.regs, &self.delay, PHY_ADDRESS)?;
+        self.apply_link()?;
+        self.regs
+            .write(regs::INTRL2_CPU_MASK_CLEAR, regs::IRQ_ENABLED)
+    }
+
+    /// Stop both DMA engines, then release the frame buffers.
+    fn close(mut self) {
+        if self.disable_dma().is_err() {
+            // An engine that never stops may still master the frame buffers:
+            // hold them for the kernel to quarantine when the driver exits.
+            core::mem::forget(self);
+        }
     }
 
     /// Refuse a controller that does not report the GENET v5 core revision.
@@ -568,26 +600,45 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         self.regs.write(regs::UMAC_MDF_CTRL, enabled)
     }
 
-    /// Stop both DMA engines and drain the transmit path, so the rings can
-    /// be reprogrammed with the device quiescent.
+    /// Stop both DMA engines, waiting for each to report itself stopped, and
+    /// drain the transmit path, so the rings can be reprogrammed with the
+    /// device quiescent. An engine that never stops is a
+    /// [`DriverError::DeviceFault`].
     fn disable_dma(&mut self) -> Result<(), DriverError> {
-        for desc_base in [regs::RDMA_DESC, regs::TDMA_DESC] {
-            let ctrl = regs::dma_regs(desc_base) + regs::DMA_CTRL;
-            let current = self.regs.read(ctrl)?;
-            self.regs.write(ctrl, current & !regs::DMA_EN)?;
+        // Transmit first, so no further frame is queued behind a receive stop.
+        for desc_base in [regs::TDMA_DESC, regs::RDMA_DESC] {
+            let block = regs::dma_regs(desc_base);
+            let current = self.regs.read(block + regs::DMA_CTRL)?;
+            self.regs
+                .write(block + regs::DMA_CTRL, current & !DMA_ENABLES)?;
+            self.await_dma_stopped(block)?;
         }
         self.regs.write(regs::UMAC_TX_FLUSH, 1)?;
         self.delay.delay_us(RESET_HOLD_US);
         self.regs.write(regs::UMAC_TX_FLUSH, 0)
     }
 
+    /// Wait, bounded by [`DMA_STOP_TIMEOUT_US`], for the DMA engine whose
+    /// control block is at `block` to report itself stopped.
+    fn await_dma_stopped(&mut self, block: usize) -> Result<(), DriverError> {
+        let deadline = self.delay.now_us().saturating_add(DMA_STOP_TIMEOUT_US);
+        loop {
+            if self.regs.read(block + regs::DMA_STATUS)? & regs::DMA_DISABLED != 0 {
+                return Ok(());
+            }
+            if self.delay.now_us() >= deadline {
+                return Err(DriverError::DeviceFault);
+            }
+            self.delay.delay_us(DMA_STOP_POLL_US);
+        }
+    }
+
     /// Enable both DMA engines and the default ring's buffers.
     fn enable_dma(&mut self) -> Result<(), DriverError> {
-        let ctrl_value = regs::DMA_EN | (1 << (regs::DEFAULT_RING + regs::DMA_RING_BUF_EN_SHIFT));
         for desc_base in [regs::RDMA_DESC, regs::TDMA_DESC] {
             let ctrl = regs::dma_regs(desc_base) + regs::DMA_CTRL;
             let current = self.regs.read(ctrl)?;
-            self.regs.write(ctrl, current | ctrl_value)?;
+            self.regs.write(ctrl, current | DMA_ENABLES)?;
         }
         Ok(())
     }

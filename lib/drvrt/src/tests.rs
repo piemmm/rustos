@@ -53,6 +53,8 @@ struct MockSyscalls {
     /// Every CPU base address passed to `dma_free`, in call order. Shared so a
     /// test can assert each carve's slab freed itself on drop.
     dma_frees: Rc<RefCell<Vec<u64>>>,
+    /// How many times `dma_quiesced` was called.
+    quiesced_calls: Rc<Cell<usize>>,
     /// The grant set `resource_grants` delivers (the kernel-minted grants the
     /// driver process would learn at start-up). A test populates it before
     /// building a host with `from_grants_query`.
@@ -93,6 +95,7 @@ impl MockSyscalls {
             mmio_calls: Rc::new(Cell::new(0)),
             last_mmio: Rc::new(Cell::new((0, 0))),
             dma_calls: Rc::new(Cell::new(0)),
+            quiesced_calls: Rc::new(Cell::new(0)),
             dma_frees: Rc::new(RefCell::new(Vec::new())),
             delivered: RefCell::new(Vec::new()),
             grants_error: Cell::new(None),
@@ -181,6 +184,11 @@ impl MockSyscalls {
         Rc::clone(&self.dma_frees)
     }
 
+    /// A shared handle to the `dma_quiesced` call count.
+    fn quiesced_calls(&self) -> Rc<Cell<usize>> {
+        Rc::clone(&self.quiesced_calls)
+    }
+
     /// A shared handle to the most recent `mmio_map` `(offset, len)`, read
     /// after the mock moves into the host.
     fn last_mmio(&self) -> Rc<Cell<(u64, usize)>> {
@@ -250,6 +258,11 @@ impl GrantSyscalls for MockSyscalls {
             }
             None => -i64::from(Errno::NotFound.as_i32()),
         }
+    }
+
+    fn dma_quiesced(&self) -> i64 {
+        self.quiesced_calls.set(self.quiesced_calls.get() + 1);
+        0
     }
 
     fn resource_grants(&self, buf: &mut [u8]) -> i64 {
@@ -669,6 +682,24 @@ fn dma_slab_frees_itself_on_drop_and_repeated_cycles_do_not_leak() {
         17,
         "every carve's slab freed itself exactly once across cycles"
     );
+}
+
+#[test]
+fn device_quiesced_reaches_the_kernel_only_for_a_dma_capable_driver() {
+    let mock = MockSyscalls::new();
+    let calls = mock.quiesced_calls();
+    let host =
+        RtDriverHost::new(caps(&[CapabilityId::MEM_DMA]), mock, &[dma_grant()], None).unwrap();
+    host.device_quiesced();
+    assert_eq!(calls.get(), 1, "a DMA-capable driver declares its reset");
+
+    // Without `CAP_MEM_DMA` no instance of the driver ever carved, so there
+    // is nothing to release and no refusal to provoke.
+    let mock = MockSyscalls::new();
+    let calls = mock.quiesced_calls();
+    let host = RtDriverHost::new(caps(&[]), mock, &[], None).unwrap();
+    host.device_quiesced();
+    assert_eq!(calls.get(), 0);
 }
 
 thread_local! {

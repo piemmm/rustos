@@ -37,6 +37,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
 use tairix_abi::{Errno, MsiAllocation, PortValue, PortWidth};
+use tairix_kernel_mem::{DmaBlock, DmaCustodian, DmaCustody, DmaError};
 
 /// The memory type a mapped device window is given.
 ///
@@ -125,6 +126,9 @@ pub struct DmaCarve {
     pub cpu_va: u64,
     /// Device-visible base address the driver hands to the hardware.
     pub device_addr: u64,
+    /// Backing length in bytes: the request rounded up to a power-of-two
+    /// page count.
+    pub len: u64,
 }
 
 /// The kernel-side producer that carves a coherent DMA buffer into the
@@ -147,6 +151,9 @@ pub trait DmaAllocFacility: Sync {
     /// constraint). Return the buffer's CPU virtual base and its
     /// physically-contiguous base.
     ///
+    /// `custodian` is where the caller's space surrenders the buffer if the
+    /// caller dies holding it, bound on the space's first carve.
+    ///
     /// The handler guarantees `len` is non-zero before calling this.
     ///
     /// # Errors
@@ -156,7 +163,12 @@ pub trait DmaAllocFacility: Sync {
     /// exceeds the addressing limit or the maximum contiguous block, or
     /// another stable code the platform reports. The default producer
     /// ([`NullDmaAllocFacility`]) returns [`Errno::NotImplemented`].
-    fn alloc(&self, len: usize, addr_limit: u64) -> Result<DmaCarve, Errno>;
+    fn alloc(
+        &self,
+        len: usize,
+        addr_limit: u64,
+        custodian: DmaCustodian,
+    ) -> Result<DmaCarve, Errno>;
 
     /// Release the DMA buffer whose CPU virtual base is `cpu_va` from the
     /// caller's own address space, zeroing every backing byte (zero-on-free)
@@ -190,7 +202,12 @@ pub trait DmaAllocFacility: Sync {
 pub struct NullDmaAllocFacility;
 
 impl DmaAllocFacility for NullDmaAllocFacility {
-    fn alloc(&self, _len: usize, _addr_limit: u64) -> Result<DmaCarve, Errno> {
+    fn alloc(
+        &self,
+        _len: usize,
+        _addr_limit: u64,
+        _custodian: DmaCustodian,
+    ) -> Result<DmaCarve, Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -201,6 +218,63 @@ impl DmaAllocFacility for NullDmaAllocFacility {
 
 /// The shared [`NullDmaAllocFacility`] the syscall handler defaults to.
 pub static NULL_DMA_ALLOC_FACILITY: NullDmaAllocFacility = NullDmaAllocFacility;
+
+/// The kernel's custody of DMA memory whose device may outlive the driver
+/// that carved it (`plans/OPEN-DEFECTS.md` D167): the [`DmaCustody`] a
+/// torn-down space surrenders to, plus the two decisions that return what it
+/// holds to the allocator.
+pub trait DmaQuarantineFacility: DmaCustody {
+    /// A driver of `node`, admitted as `generation`, has reset its device:
+    /// free every block an earlier instance carved, now and on arrival.
+    /// Returns the bytes freed now.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the inert default.
+    fn release(&self, node: u32, generation: u64) -> Result<u64, Errno>;
+
+    /// `node`'s device is gone: free every block carved by a driver admitted
+    /// at or before `through_generation` — the high-water mark when the node
+    /// was removed — now and on arrival. The bound rather than "everything"
+    /// is what keeps a later device reusing the node id safe. Returns the
+    /// bytes freed now.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the inert default.
+    fn retire(&self, node: u32, through_generation: u64) -> Result<u64, Errno>;
+}
+
+/// The quarantine installed before any real one exists.
+///
+/// It refuses every binding, so no space can carve DMA memory without real
+/// custody behind it, and it frees nothing it is given — a block that reaches
+/// it is leaked, the fail-safe for memory a device may still master.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct NullDmaQuarantine;
+
+impl DmaCustody for NullDmaQuarantine {
+    fn bind(&self, _node: u32) -> Result<(), DmaError> {
+        Err(DmaError::NoCustody)
+    }
+
+    fn hold(&self, _node: u32, _generation: u64, _block: DmaBlock) {}
+
+    fn unbind(&self, _node: u32) {}
+}
+
+impl DmaQuarantineFacility for NullDmaQuarantine {
+    fn release(&self, _node: u32, _generation: u64) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn retire(&self, _node: u32, _through_generation: u64) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared [`NullDmaQuarantine`] the syscall handler defaults to.
+pub static NULL_DMA_QUARANTINE: NullDmaQuarantine = NullDmaQuarantine;
 
 /// The MMIO-map facility installed before any real one exists.
 ///
@@ -804,16 +878,35 @@ mod tests {
         );
     }
 
+    fn null_custodian() -> DmaCustodian {
+        DmaCustodian {
+            node: 1,
+            generation: 1,
+            custody: &NULL_DMA_QUARANTINE,
+        }
+    }
+
     #[test]
     fn null_dma_facility_fails_closed() {
         assert_eq!(
-            NULL_DMA_ALLOC_FACILITY.alloc(0x1000, 0),
+            NULL_DMA_ALLOC_FACILITY.alloc(0x1000, 0, null_custodian()),
             Err(Errno::NotImplemented)
         );
         assert_eq!(
-            NullDmaAllocFacility.alloc(0x1000, 0x4000_0000),
+            NullDmaAllocFacility.alloc(0x1000, 0x4000_0000, null_custodian()),
             Err(Errno::NotImplemented)
         );
+    }
+
+    #[test]
+    fn the_null_quarantine_refuses_custody_and_frees_nothing() {
+        // No custody means no carve: every binding is refused.
+        assert_eq!(NULL_DMA_QUARANTINE.bind(3), Err(DmaError::NoCustody));
+        assert_eq!(
+            NULL_DMA_QUARANTINE.release(3, 9),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(NULL_DMA_QUARANTINE.retire(3, 9), Err(Errno::NotImplemented));
     }
 
     #[test]

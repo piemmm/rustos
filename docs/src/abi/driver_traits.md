@@ -69,8 +69,15 @@ driver — e.g. the floor xHCI bring-up staging device-context and ring
 memory — allocates a `DmaSlab` through it without reaching through the
 virtio-shaped `VirtioHost`. The allocation contract lives once in
 `trait DmaHost { fn alloc_dma_zeroed(&self, size) -> Result<DmaSlab,
-DriverError>; }`; `VirtioHost: DmaHost` extends it, so a virtio host is
-also a DMA host and the contract is never duplicated (`AGENTS.md` §2.2).
+DriverError>; fn device_quiesced(&self); }`; `VirtioHost: DmaHost` extends
+it, so a virtio host is also a DMA host and the contract is never duplicated
+(`AGENTS.md` §2.2). A driver calls `device_quiesced` once its bring-up has
+confirmed the device can no longer reach memory an earlier instance gave it
+(a completed reset, a stopped engine); the user-space host forwards it to the
+`dma_quiesced` syscall, which releases that memory from the kernel's DMA
+quarantine, and an in-kernel host or a test double has nothing to release.
+It is best effort: a refused or missing declaration only leaves the memory
+held.
 
 `mailbox(&self) -> Option<&dyn MailboxChannel>` is the board-neutral
 firmware property-mailbox seam. A bus driver whose bring-up needs the

@@ -416,6 +416,8 @@ pub const RING_INDEX_MASK: u32 = 0xFFFF;
 pub const DMA_RING_CFG: usize = 0x00;
 /// Control register: engine enable plus the per-ring buffer enables.
 pub const DMA_CTRL: usize = 0x04;
+/// Control register: engine status.
+pub const DMA_STATUS: usize = 0x08;
 /// Control register: system-bus burst size.
 pub const DMA_SCB_BURST_SIZE: usize = 0x0C;
 
@@ -432,6 +434,8 @@ pub const DMA_TIMEOUT_UNIT_NS: u32 = 8192;
 
 /// Enable the DMA engine.
 pub const DMA_EN: u32 = 1 << 0;
+/// [`DMA_STATUS`]: the engine has stopped and reaches no memory.
+pub const DMA_DISABLED: u32 = 1 << 0;
 /// Shift of the per-ring buffer-enable bitmap in [`DMA_CTRL`].
 pub const DMA_RING_BUF_EN_SHIFT: u32 = 1;
 /// Burst length (in 64-byte units) the engine requests on the system bus.

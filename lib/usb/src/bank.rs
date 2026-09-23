@@ -186,4 +186,8 @@ impl DmaBank for SlabBank<'_> {
         slab.sync_range(inner, bytes.len());
         Ok(())
     }
+
+    fn device_quiesced(&self) {
+        self.host.device_quiesced();
+    }
 }

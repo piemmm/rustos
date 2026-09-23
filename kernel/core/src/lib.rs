@@ -86,6 +86,7 @@ pub mod cpuops;
 pub mod crash;
 pub mod devres;
 pub mod dispatch_slot;
+pub mod dmaquarantine;
 pub mod driver_store;
 pub mod filelock;
 pub mod filemap;

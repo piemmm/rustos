@@ -255,6 +255,8 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4085 | Error | `CPU_LOCKUP_DIAGNOSTIC`     | diag   |
 | 4086 | Info  | `CPU_WATCHDOG_SELF_SAMPLE`  | diag   |
 | 4090 | Warn  | `IRQ_LINE_QUARANTINED`      | audit  |
+| 4091 | Warn  | `DMA_QUARANTINED`           | audit  |
+| 4092 | Info  | `DMA_QUARANTINE_RELEASED`   | audit  |
 | 4100 | Info  | `FS_NODE_MUTATED`           | audit  |
 | 4101 | Warn  | `FS_MUTATION_DENIED`        | audit  |
 | 4110 | Info  | `SYSTEM_CONFIG_APPLIED`     | audit  |
@@ -362,6 +364,16 @@ the quarantine so a driver can recover the line. This is the kernel's
 analogue of Linux's `note_interrupt` spurious-IRQ disable, adapted to the
 user-space IRQ model, and is what turns the "usb_mouse / xhci pegged at 100%
 CPU" storm into a bounded, logged, fail-closed event.
+
+`DMA_QUARANTINED` and `DMA_QUARANTINE_RELEASED` bracket a dead driver's DMA
+memory (`kernel/core::dmaquarantine`). The first is recorded when a driver
+ends still holding carves its device may be mastering, naming the `node`, the
+driver's admission `generation`, and the `bytes` its node's quarantine now
+holds; the second when memory leaves the quarantine, with `cause=reset` (a
+later driver declared its device reset through `dma_quiesced`) or
+`cause=removed` (a surprise removal retired the node). The mechanism and its
+ordering rule are in [the memory reference](memory.md) and
+[the syscall reference](syscalls.md).
 
 These five records are the first-class CPU-lockup watchdog
 (`tairix_kernel_core::watchdog`; design `plans/WATCHDOG.md`), which catches

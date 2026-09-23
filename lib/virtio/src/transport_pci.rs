@@ -31,7 +31,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::transport::{le_halves, u64_from_le_halves, write_u64_halves};
+use crate::transport::{await_reset, le_halves, u64_from_le_halves, write_u64_halves};
 use crate::{PciTransportWindows, Status, Transport, VirtioError};
 
 /// The virtio "no vector" sentinel (virtio 1.1 §4.1.4.3): writing it
@@ -178,20 +178,21 @@ impl PciTransport {
 }
 
 impl Transport for PciTransport {
-    fn reset(&mut self) {
-        // Writing 0 resets the device; virtio 1.1 §4.1.4.3 requires
-        // the driver to re-read `device_status` until it reads 0
-        // before re-initialising. A bounded loop keeps the wait
-        // finite so a wedged device cannot hang the boot path.
-        let _ = self.windows.common.write_u8(common::DEVICE_STATUS, 0);
-        for _ in 0..1_000_000 {
-            match self.windows.common.read_u8(common::DEVICE_STATUS) {
-                Ok(0) => break,
-                _ => core::hint::spin_loop(),
-            }
-        }
+    fn reset(&mut self) -> Result<(), VirtioError> {
         self.selected_queue = 0;
         self.notify_offsets.fill(None);
+        // Writing 0 to `device_status` resets the device (virtio 1.1 §4.1.4.3).
+        self.windows
+            .common
+            .write_u8(common::DEVICE_STATUS, 0)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        await_reset(|| {
+            self.windows
+                .common
+                .read_u8(common::DEVICE_STATUS)
+                .ok()
+                .map(u32::from)
+        })
     }
 
     fn status(&self) -> Status {
@@ -437,7 +438,7 @@ mod tests {
             .with(Status::DRIVER);
         t.set_status(s);
         assert_eq!(t.status().bits(), Status::ACKNOWLEDGE | Status::DRIVER);
-        t.reset();
+        assert_eq!(t.reset(), Ok(()));
         assert_eq!(t.status().bits(), 0);
     }
 

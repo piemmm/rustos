@@ -297,6 +297,10 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
         };
         Ok(slab)
     }
+
+    /// Nothing to release: this pool is the kernel's own and outlives any
+    /// device instance that uses it.
+    fn device_quiesced(&self) {}
 }
 
 impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {

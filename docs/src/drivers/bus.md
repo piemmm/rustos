@@ -454,8 +454,11 @@ released on detach, so the served-device count is bounded only by the
 controller's reported slots and genuine memory exhaustion — never a
 compile-time budget.
 
-`UsbDevice::start` zeroes the shared chunk, publishes the ERST entry and
-the rings' Link TRBs, and starts the controller through `Xhci::start`.
+`UsbDevice::start` first declares the controller quiesced to its DMA bank
+(`DmaBank::device_quiesced`) — an `Xhci` exists only once `open` has halted
+and reset it, so rings a dead predecessor left may leave the kernel's DMA
+quarantine — then zeroes the shared chunk, publishes the ERST entry and the
+rings' Link TRBs, and starts the controller through `Xhci::start`.
 `UsbDevice::attach_root_port(port)` then brings the device on a root-hub
 port to the configured state (§4.3): port reset when the port is not
 yet enabled — awaited to completion exactly as a downstream hub port's is
@@ -756,7 +759,13 @@ re-deriving the layout (`AGENTS.md` §2.2). The mailbox *mechanism* (the
 discovered doorbell window, the DMA-aliased property buffer, the cache
 coherency) lives behind the `MailboxChannel`: the user-space bin reaches
 the autoloaded `drivers/bus/mailbox/vcmailbox` service over the kernel
-call surface (the `ipc_call` endpoint, gated by `CAP_MAILBOX`). QEMU
+call surface (the `ipc_call` endpoint, gated by `CAP_MAILBOX`). At bring-up
+the service exchanges one firmware-revision probe before it serves: the
+firmware answers property requests one at a time in posting order, so that
+answer proves any request a dead predecessor left in flight is finished and
+its property buffer may leave the kernel's DMA quarantine. An exchange drains
+a property completion naming another buffer — that predecessor's, answered
+late — rather than taking it for its own. QEMU
 models no `VideoCore`, so
 the policy is host-proven (in the driver crate's `lib` target) against the
 protocol-faithful `lib/vcmailbox` mock firmware and the reload-and-publish

@@ -224,16 +224,20 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
     /// reset, ACKNOWLEDGE, DRIVER, feature negotiation (Stage 4
     /// accepts zero extended features), `FEATURES_OK`, set up the
     /// single requestq, `DRIVER_OK`, then read the capacity from
-    /// the device-configuration window.
+    /// the device-configuration window. Once the reset confirms, the
+    /// device is declared quiesced to `host`, so memory an earlier
+    /// instance left with it can be released.
     ///
     /// # Errors
     ///
-    /// Propagates [`VirtioError`] from the transport / queue setup.
-    /// The constructor returns [`VirtioError::FeaturesRejected`] if
-    /// the device clears [`Status::FEATURES_OK`] after the driver
-    /// completed negotiation.
+    /// Propagates [`VirtioError`] from the transport / queue setup,
+    /// including [`VirtioError::DeviceFault`] for a device whose reset
+    /// never confirms. The constructor returns
+    /// [`VirtioError::FeaturesRejected`] if the device clears
+    /// [`Status::FEATURES_OK`] after the driver completed negotiation.
     pub fn open(mut transport: T, host: &'h dyn VirtioHost) -> Result<Self, VirtioError> {
-        transport.reset();
+        transport.reset()?;
+        host.device_quiesced();
         let mut status = Status::default().with(Status::ACKNOWLEDGE);
         transport.set_status(status);
         status = status.with(Status::DRIVER);
@@ -258,6 +262,20 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         if !transport.status().contains(Status::FEATURES_OK) {
             return Err(VirtioError::FeaturesRejected);
         }
+        // Carve the persistent request staging once. Every request
+        // reuses these three buffers, so the block data path never
+        // touches the DMA allocator after open. Every fallible step
+        // precedes DRIVER_OK, so no failure releases memory the device
+        // was given.
+        let header = host
+            .alloc_dma_zeroed(wire::HEADER_LEN)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        let data = host
+            .alloc_dma_zeroed(wire::MAX_TRANSFER_LEN)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        let request_status = host
+            .alloc_dma_zeroed(wire::STATUS_LEN)
+            .map_err(|_| VirtioError::DeviceFault)?;
         let queue = SplitQueue::new(&mut transport, host, 0, 8)?;
         status = status.with(Status::DRIVER_OK);
         transport.set_status(status);
@@ -286,18 +304,6 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
                 max_blocks_per_request: 0,
             }
         };
-        // Carve the persistent request staging once. Every request
-        // reuses these three buffers, so the block data path never
-        // touches the DMA allocator after open.
-        let header = host
-            .alloc_dma_zeroed(wire::HEADER_LEN)
-            .map_err(|_| VirtioError::DeviceFault)?;
-        let data = host
-            .alloc_dma_zeroed(wire::MAX_TRANSFER_LEN)
-            .map_err(|_| VirtioError::DeviceFault)?;
-        let status = host
-            .alloc_dma_zeroed(wire::STATUS_LEN)
-            .map_err(|_| VirtioError::DeviceFault)?;
         Ok(Self {
             transport,
             queue,
@@ -308,13 +314,17 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             flush_supported: flush_offered,
             header: Some(header),
             data: Some(data),
-            status: Some(status),
+            status: Some(request_status),
         })
     }
 
-    /// Tear the device down for unload (sets the status byte to 0).
+    /// Tear the device down for unload: reset it, then release its memory.
     pub fn close(mut self) {
-        self.transport.reset();
+        if self.transport.reset().is_err() {
+            // A wedged device may still master its rings and staging: hold
+            // them for the kernel to quarantine when the driver exits.
+            core::mem::forget(self);
+        }
     }
 
     /// Borrow the underlying transport (host-side test access only;

@@ -1207,8 +1207,8 @@ pub enum TimeoutStage {
 /// replied — two very different faults that the bare `Timeout` error
 /// cannot tell apart (measure, don't guess). The
 /// other fields pin the posted bus-address word, the last status
-/// register value observed, and how many foreign-channel completions
-/// were drained before ours (or would have been).
+/// register value observed, and how many foreign-channel and stale
+/// completions were drained before ours (or would have been).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ExchangeStats {
     /// The exact word posted to the write register (the buffer bus
@@ -1217,11 +1217,15 @@ pub struct ExchangeStats {
     /// Polls spent waiting for write room before posting.
     pub post_room_polls: u32,
     /// Completion reads taken while waiting for our channel's reply
-    /// (each either ours or a drained foreign-channel post).
+    /// (each either ours or a drained foreign-channel or stale post).
     pub response_reads: u32,
     /// Of those, how many were completions for a *different* channel,
     /// drained and ignored.
     pub foreign_channel_reads: u32,
+    /// Of those, how many were property completions for a buffer other than
+    /// ours — an earlier instance's request, answered after it ended —
+    /// drained and ignored.
+    pub stale_reads: u32,
     /// The last value read from the mailbox status register.
     pub last_status: u32,
     /// Which wait the exchange timed out in, or [`TimeoutStage::None`].
@@ -1396,14 +1400,16 @@ impl MmioMailbox {
                 .read_u32(REG_MBOX0_READ)
                 .map_err(|_| MailboxError::Window)?;
             if word & CHANNEL_MASK == CHANNEL_PROPERTY {
-                if word & !CHANNEL_MASK != self.buffer_bus_addr {
-                    // A property completion for a buffer we did not
-                    // post: protocol breach, fail closed.
-                    return Err(MailboxError::MalformedResponse);
+                if word & !CHANNEL_MASK == self.buffer_bus_addr {
+                    break;
                 }
-                break;
+                // The firmware answers in posting order, so this completion
+                // precedes ours; taking it for ours would read a reply the
+                // firmware has not yet written.
+                stats.stale_reads += 1;
+            } else {
+                stats.foreign_channel_reads += 1;
             }
-            stats.foreign_channel_reads += 1;
             core::hint::spin_loop();
         }
 

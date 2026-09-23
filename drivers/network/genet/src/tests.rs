@@ -9,12 +9,13 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::cell::Cell;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-use tairix_abi::driver::dma::{DmaSlab, PoolId};
+use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
 use tairix_abi::driver::net_ring::{FrameRings, RingGeometry};
 use tairix_abi::driver::BufferClass;
 
@@ -29,6 +30,17 @@ const MAC: [u8; 6] = [0xDC, 0xA6, 0x32, 0x11, 0x22, 0x33];
 
 /// Device-visible base of the model's frame-buffer carve.
 const FRAMES_PHYS: u64 = 0x3000_0000;
+
+/// How the model's DMA engines answer a stop request.
+#[derive(Clone, Copy)]
+enum DmaStop {
+    /// An engine reports itself stopped whenever its enable bit is clear.
+    Honoured,
+    /// No engine ever reports itself stopped.
+    Never,
+    /// An engine that has once been started never stops again.
+    OnceStarted,
+}
 
 /// A model of the controller's register file.
 ///
@@ -46,6 +58,10 @@ struct MockRegs {
     mdio_hangs: bool,
     /// When set, an MDIO read reports that no PHY answered.
     mdio_read_fails: bool,
+    /// How the DMA engines answer a stop request.
+    dma_stop: DmaStop,
+    /// The DMA control blocks a write has started.
+    dma_started: BTreeSet<usize>,
     /// Offsets past this are outside the modelled aperture.
     len: usize,
 }
@@ -64,7 +80,33 @@ impl MockRegs {
             phy,
             mdio_hangs: false,
             mdio_read_fails: false,
+            dma_stop: DmaStop::Honoured,
+            dma_started: BTreeSet::new(),
             len: 0x1_0000,
+        }
+    }
+
+    /// The DMA control block `offset` addresses, if `offset` is one of the
+    /// two engines' `register` at all.
+    fn dma_block(offset: usize, register: usize) -> Option<usize> {
+        [regs::RDMA_DESC, regs::TDMA_DESC]
+            .into_iter()
+            .map(regs::dma_regs)
+            .find(|block| block + register == offset)
+    }
+
+    /// What the engine at `block` reports in its status register.
+    fn dma_status(&self, block: usize) -> u32 {
+        let enabled = self.peek(block + regs::DMA_CTRL) & regs::DMA_EN != 0;
+        let wedged = match self.dma_stop {
+            DmaStop::Honoured => false,
+            DmaStop::Never => true,
+            DmaStop::OnceStarted => self.dma_started.contains(&block),
+        };
+        if enabled || wedged {
+            0
+        } else {
+            regs::DMA_DISABLED
         }
     }
 
@@ -157,12 +199,20 @@ impl GenetRegs for MockRegs {
         if offset == regs::MDIO_CMD {
             self.complete_mdio();
         }
+        if let Some(block) = Self::dma_block(offset, regs::DMA_STATUS) {
+            return Ok(self.dma_status(block));
+        }
         Ok(self.peek(offset))
     }
 
     fn write(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
         if offset + 4 > self.len {
             return Err(DriverError::OutOfRange);
+        }
+        if value & regs::DMA_EN != 0 {
+            if let Some(block) = Self::dma_block(offset, regs::DMA_CTRL) {
+                self.dma_started.insert(block);
+            }
         }
         self.words.insert(offset, value);
         self.writes.push((offset, value));
@@ -231,6 +281,57 @@ fn frames() -> DmaSlab {
     frames_of(layout().bytes())
 }
 
+/// Counts one frame-buffer release in the `AtomicUsize` the slab was minted
+/// over.
+///
+/// # Safety
+///
+/// `pool` is the `&'static AtomicUsize` [`counted_frames`] minted the slab
+/// with.
+unsafe fn count_release(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize) {
+    // SAFETY: the caller's contract makes `pool` a live `'static` counter.
+    let released = unsafe { &*pool.cast::<AtomicUsize>() };
+    released.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A frame-buffer carve sized for [`layout`] whose release bumps `released`,
+/// so a test can tell a teardown that frees the buffers from one that holds
+/// them.
+fn counted_frames(released: &'static AtomicUsize) -> DmaSlab {
+    let len = layout().bytes();
+    let storage = alloc::vec![0u8; len].leak();
+    let ptr = NonNull::new(storage.as_mut_ptr()).expect("leaked storage is non-null");
+    // SAFETY: as in `frames_of`; `released` outlives the slab, being `'static`.
+    unsafe {
+        DmaSlab::from_pool(
+            FRAMES_PHYS,
+            ptr,
+            len,
+            PoolId::MOCK,
+            0,
+            core::ptr::from_ref(released).cast(),
+            count_release,
+        )
+    }
+}
+
+/// The host a test's frames were carved from, counting the quiesce
+/// declarations it receives.
+#[derive(Default)]
+struct QuiesceProbe {
+    declared: Cell<usize>,
+}
+
+impl DmaHost for QuiesceProbe {
+    fn alloc_dma_zeroed(&self, _size: usize) -> Result<DmaSlab, DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    fn device_quiesced(&self) {
+        self.declared.set(self.declared.get() + 1);
+    }
+}
+
 /// Bring a device up over a fresh mock, returning both so a test can inspect
 /// the register file the engine wrote.
 fn open() -> Genet<MockRegs, MockDelay> {
@@ -240,6 +341,7 @@ fn open() -> Genet<MockRegs, MockDelay> {
         frames(),
         MacAddress::new(MAC),
         layout(),
+        &QuiesceProbe::default(),
     )
     .expect("bring-up succeeds against a GENET v5 model")
 }
@@ -252,6 +354,88 @@ fn geometry() -> RingGeometry {
 }
 
 // --- bring-up -----------------------------------------------------------
+
+#[test]
+fn bring_up_declares_the_device_quiesced_once_both_dma_engines_stop() {
+    let probe = QuiesceProbe::default();
+    let _device = Genet::open(
+        MockRegs::new(),
+        MockDelay::new(),
+        frames(),
+        MacAddress::new(MAC),
+        layout(),
+        &probe,
+    )
+    .expect("bring-up");
+    assert_eq!(probe.declared.get(), 1);
+}
+
+#[test]
+fn a_dma_engine_that_never_stops_is_refused_before_the_device_is_declared_quiesced() {
+    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let mut mock = MockRegs::new();
+    mock.dma_stop = DmaStop::Never;
+    let probe = QuiesceProbe::default();
+    assert_eq!(
+        Genet::open(
+            mock,
+            MockDelay::new(),
+            counted_frames(&RELEASED),
+            MacAddress::new(MAC),
+            layout(),
+            &probe,
+        )
+        .err(),
+        Some(DriverError::DeviceFault)
+    );
+    assert_eq!(probe.declared.get(), 0);
+    assert_eq!(
+        RELEASED.load(Ordering::Relaxed),
+        1,
+        "the frames were never handed to the device"
+    );
+}
+
+#[test]
+fn a_failure_once_live_stops_the_dma_engines_before_releasing_the_frames() {
+    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let mut mock = MockRegs::new();
+    mock.mdio_hangs = true;
+    assert_eq!(
+        Genet::open(
+            mock,
+            MockDelay::new(),
+            counted_frames(&RELEASED),
+            MacAddress::new(MAC),
+            layout(),
+            &QuiesceProbe::default(),
+        )
+        .err(),
+        Some(DriverError::DeviceFault)
+    );
+    assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_failure_once_live_on_an_engine_that_never_stops_again_releases_nothing() {
+    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let mut mock = MockRegs::new();
+    mock.mdio_hangs = true;
+    mock.dma_stop = DmaStop::OnceStarted;
+    assert_eq!(
+        Genet::open(
+            mock,
+            MockDelay::new(),
+            counted_frames(&RELEASED),
+            MacAddress::new(MAC),
+            layout(),
+            &QuiesceProbe::default(),
+        )
+        .err(),
+        Some(DriverError::DeviceFault)
+    );
+    assert_eq!(RELEASED.load(Ordering::Relaxed), 0);
+}
 
 #[test]
 fn a_foreign_core_revision_is_refused() {
@@ -268,7 +452,8 @@ fn a_foreign_core_revision_is_refused() {
                 MockDelay::new(),
                 frames(),
                 MacAddress::new(MAC),
-                layout()
+                layout(),
+                &QuiesceProbe::default(),
             )
             .err(),
             Some(DriverError::Unsupported),
@@ -317,7 +502,8 @@ fn a_short_dma_carve_is_refused() {
             MockDelay::new(),
             short,
             MacAddress::new(MAC),
-            layout()
+            layout(),
+            &QuiesceProbe::default(),
         )
         .err(),
         Some(DriverError::BufferTooSmall)
@@ -336,7 +522,8 @@ fn a_short_register_window_fails_closed() {
             MockDelay::new(),
             frames(),
             MacAddress::new(MAC),
-            layout()
+            layout(),
+            &QuiesceProbe::default(),
         )
         .err(),
         Some(DriverError::OutOfRange)
@@ -814,6 +1001,7 @@ fn each_negotiated_rate_selects_its_own_mac_speed() {
             frames(),
             MacAddress::new(MAC),
             layout(),
+            &QuiesceProbe::default(),
         )
         .expect("bring-up");
         assert_eq!(
@@ -842,6 +1030,7 @@ fn no_link_partner_comes_up_down_with_the_mac_disabled() {
         frames(),
         MacAddress::new(MAC),
         layout(),
+        &QuiesceProbe::default(),
     )
     .expect("bring-up");
     assert_eq!(device.link, None);
@@ -860,7 +1049,8 @@ fn a_wedged_mdio_bus_fails_closed_rather_than_spinning() {
             MockDelay::new(),
             frames(),
             MacAddress::new(MAC),
-            layout()
+            layout(),
+            &QuiesceProbe::default(),
         )
         .err(),
         Some(DriverError::DeviceFault)
@@ -877,7 +1067,8 @@ fn an_absent_phy_fails_closed() {
             MockDelay::new(),
             frames(),
             MacAddress::new(MAC),
-            layout()
+            layout(),
+            &QuiesceProbe::default(),
         )
         .err(),
         Some(DriverError::DeviceFault)

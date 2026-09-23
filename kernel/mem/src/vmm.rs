@@ -445,9 +445,25 @@ impl<P: PageTable> AddressSpace<P> {
     ///
     /// [`PageTableError::NotMapped`] if `page` has no live mapping.
     pub fn unmap(&mut self, page: Page) -> Result<Frame, PageTableError> {
+        let frame = self.unmap_entry(page)?;
+        self.live.remove(&page);
+        Ok(frame)
+    }
+
+    /// Unmap the lowest page this layer records as mapped, returning it with
+    /// the frame that was there, or `None` once none remains: a teardown walk
+    /// that allocates nothing. The page leaves the record even when the
+    /// backend refuses the unmap, so the walk always makes progress.
+    pub fn unmap_lowest(&mut self) -> Option<(Page, Result<Frame, PageTableError>)> {
+        let (page, _) = self.live.pop_first()?;
+        Some((page, self.unmap_entry(page)))
+    }
+
+    /// Clear `page`'s page-table entry and flush it, leaving the record to the
+    /// caller.
+    fn unmap_entry(&mut self, page: Page) -> Result<Frame, PageTableError> {
         let vaddr = page.start().as_u64();
         let paddr = self.table.unmap(vaddr).map_err(from_map_error)?;
-        self.live.remove(&page);
         self.table.flush_page(vaddr);
         Ok(Frame::containing(PhysAddr::new(paddr)))
     }
@@ -818,6 +834,24 @@ mod tests {
 
     fn p(n: u64) -> Page {
         Page::from_addr(VirtAddr::new(n * PAGE_SIZE as u64)).unwrap()
+    }
+
+    #[test]
+    fn unmapping_the_lowest_page_drains_in_order_and_survives_a_refused_unmap() {
+        let mut s = AddressSpace::new(HostPageTable::new());
+        s.map(p(3), Frame(30), MapFlags::READ).unwrap();
+        s.map(p(1), Frame(10), MapFlags::READ).unwrap();
+        s.map(p(2), Frame(20), MapFlags::READ).unwrap();
+        s.table.entries.remove(&p(2).start().as_u64());
+        assert_eq!(s.unmap_lowest(), Some((p(1), Ok(Frame(10)))));
+        assert_eq!(
+            s.unmap_lowest(),
+            Some((p(2), Err(PageTableError::NotMapped))),
+            "a refused unmap still leaves the record"
+        );
+        assert_eq!(s.unmap_lowest(), Some((p(3), Ok(Frame(30)))));
+        assert_eq!(s.unmap_lowest(), None);
+        assert_eq!(s.mapped_pages(), 0);
     }
 
     #[test]

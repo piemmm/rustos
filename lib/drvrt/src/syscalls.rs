@@ -54,6 +54,13 @@ pub trait GrantSyscalls {
     /// Mirrors [`tairix_rt::dma_free`].
     fn dma_free(&self, handle: u64, cpu_va: u64) -> i64;
 
+    /// Declare the device quiesced, releasing what earlier instances of this
+    /// driver left in its node's DMA quarantine; returns the bytes freed (or
+    /// `-errno`).
+    ///
+    /// Mirrors [`tairix_rt::dma_quiesced`].
+    fn dma_quiesced(&self) -> i64;
+
     /// Map the cross-process shared-memory region named by the kernel-issued
     /// grant `handle` into the calling task's own address space, returning the
     /// base user virtual address of the mapping (or `-errno`) and writing the
@@ -165,6 +172,11 @@ impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn dma_free(&self, handle: u64, cpu_va: u64) -> i64 {
         tairix_rt::dma_free(handle, cpu_va)
+    }
+
+    #[inline]
+    fn dma_quiesced(&self) -> i64 {
+        tairix_rt::dma_quiesced()
     }
 
     #[inline]

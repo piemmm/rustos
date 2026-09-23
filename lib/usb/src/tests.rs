@@ -7,7 +7,7 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, interrupt_interval, pointer_min_interval,
@@ -84,6 +84,9 @@ struct MockDma {
     read_bytes: usize,
     /// Read calls made, for the same budget.
     read_calls: usize,
+    /// Quiesce declarations received, shared so a test can read it after
+    /// the bank moves into the engine.
+    quiesced: Rc<Cell<usize>>,
 }
 
 impl MockDma {
@@ -95,6 +98,7 @@ impl MockDma {
             next_base: 0,
             read_bytes: 0,
             read_calls: 0,
+            quiesced: Rc::new(Cell::new(0)),
         }
     }
 
@@ -163,6 +167,10 @@ impl DmaBank for MockDma {
         mem[offset..offset + bytes.len()].copy_from_slice(bytes);
         Ok(())
     }
+
+    fn device_quiesced(&self) {
+        self.quiesced.set(self.quiesced.get() + 1);
+    }
 }
 
 /// File-scope recorder for the [`DmaSlab`] coherency hook (a bare `fn`
@@ -221,6 +229,8 @@ mod bank_test {
         pub(super) coherency: Cell<Option<SlabCoherencyFn>>,
         /// Dropped-slab count, incremented by the free shim.
         pub(super) frees: AtomicUsize,
+        /// Quiesce declarations received.
+        pub(super) quiesced: Cell<usize>,
     }
 
     impl MockSlabHost {
@@ -230,6 +240,7 @@ mod bank_test {
                 fail: Cell::new(false),
                 coherency: Cell::new(None),
                 frees: AtomicUsize::new(0),
+                quiesced: Cell::new(0),
             }
         }
 
@@ -262,7 +273,18 @@ mod bank_test {
                 None => slab,
             })
         }
+
+        fn device_quiesced(&self) {
+            self.quiesced.set(self.quiesced.get() + 1);
+        }
     }
+}
+
+#[test]
+fn a_slab_bank_forwards_the_quiesce_declaration_to_its_host() {
+    let host = bank_test::MockSlabHost::new(0x1000);
+    SlabBank::new(&host).device_quiesced();
+    assert_eq!(host.quiesced.get(), 1);
 }
 
 #[test]
@@ -4026,6 +4048,16 @@ fn pagesize_decodes_the_lowest_supported_page() {
     assert_eq!(regs::pagesize_bytes(1 << 4), 1 << 16);
     // An unset register reports no size, so the caller fails closed.
     assert_eq!(regs::pagesize_bytes(0), 0);
+}
+
+#[test]
+fn starting_the_engine_declares_the_reset_controller_quiesced() {
+    let mem = shared_mem();
+    let xhci = Xhci::open(MockXhci::new()).expect("bring-up succeeds");
+    let dma = MockDma::new(Rc::clone(&mem), MOCK_DMA_BASE);
+    let declared = Rc::clone(&dma.quiesced);
+    let _device = UsbDevice::start(xhci, dma, TestWait::leaked(), 4096).expect("engine starts");
+    assert_eq!(declared.get(), 1);
 }
 
 #[test]

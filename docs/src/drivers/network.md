@@ -333,6 +333,13 @@ for every frame. Receive descriptors are armed once and never rewritten — the
 consumer index alone hands a slot back — so the hot path writes one register
 per frame.
 
+Before it programs either ring, bring-up stops both DMA engines and waits,
+bounded by Linux `bcmgenet`'s 5 ms, for each to report `DMA_DISABLED`; only
+then is the device declared quiesced to its DMA host, so frame buffers a dead
+predecessor left with it leave the kernel's quarantine. A failure once the
+engines run again stops them before the frame carve is released, and an
+engine that will not stop keeps the carve for the kernel to quarantine.
+
 Bring-up refuses any core that does not report the GENET v5 revision, masks
 **both** level-2 interrupt instances wholesale *before* programming anything
 — the driver drives only the default ring, so it never binds `INTRL2_1`'s

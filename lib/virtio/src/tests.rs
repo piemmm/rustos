@@ -273,7 +273,7 @@ fn poll_used_reclaim_bails_on_a_corrupted_next_link() {
 #[test]
 fn transport_setup_records_status_progression() {
     let mut t = MockTransport::new(1, 4, 0, 0);
-    t.reset();
+    t.reset().expect("the mock confirms its reset");
     let mut s = t.status();
     s = s.with(Status::ACKNOWLEDGE);
     t.set_status(s);

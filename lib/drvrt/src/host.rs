@@ -562,6 +562,14 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
             None => slab,
         })
     }
+
+    fn device_quiesced(&self) {
+        // A driver without `CAP_MEM_DMA` never carved, and nor did an earlier
+        // instance of it; skip the call rather than have the kernel refuse it.
+        if self.caps.contains(CapabilityId::MEM_DMA) {
+            let _ = self.syscalls.dma_quiesced();
+        }
+    }
 }
 
 /// Drop-path shim invoked by [`DmaSlab::drop`] for a slab minted by
@@ -571,9 +579,9 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
 /// releases the carve through the `dma_free` syscall, keyed by the slab's CPU
 /// base `cpu` and the host's single DMA-constraint grant. A host that holds no
 /// DMA grant (so the carve could never have happened) or a kernel refusal is
-/// dropped — `Drop` cannot propagate an error, and the kernel reclaims any
-/// stragglers when the process's live space is torn down at exit, so a missed
-/// free degrades to the old leak-until-exit behaviour rather than unsoundness.
+/// dropped — `Drop` cannot propagate an error, and a carve still live when the
+/// process exits passes to its node's DMA quarantine, so a missed free costs
+/// memory until the node's next driver quiesces the device, never soundness.
 ///
 /// # Safety
 ///

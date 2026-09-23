@@ -316,7 +316,9 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
     /// `ACKNOWLEDGE`, `DRIVER`, negotiate `VIRTIO_F_VERSION_1` and no
     /// device-specific feature, `FEATURES_OK`, set up the data and control
     /// queues, `DRIVER_OK` — then reads the device's configuration space and
-    /// refuses a device this driver cannot honestly drive.
+    /// refuses a device this driver cannot honestly drive. Once the reset
+    /// confirms, the device is declared quiesced to `host`, so memory an
+    /// earlier instance left with it can be released.
     ///
     /// # Errors
     ///
@@ -324,11 +326,12 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
     ///   offers no cipher service, or offers no cipher algorithm this driver
     ///   implements. A driver that bound such a device would accept jobs it
     ///   could only fail.
-    /// * [`DriverError::DeviceFault`] if the device advertises no data queue,
-    ///   rejects the negotiated features, or a queue or staging allocation
-    ///   fails.
+    /// * [`DriverError::DeviceFault`] if the device never confirms its reset,
+    ///   advertises no data queue, rejects the negotiated features, or a
+    ///   queue or staging allocation fails.
     pub fn open(mut transport: T, host: &'h dyn VirtioHost) -> Result<Self, DriverError> {
-        transport.reset();
+        transport.reset().map_err(VirtioError::as_driver_error)?;
+        host.device_quiesced();
         let mut status = Status::default().with(Status::ACKNOWLEDGE);
         transport.set_status(status);
         status = status.with(Status::DRIVER);
@@ -367,8 +370,6 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
 
         let dataq = open_queue(&mut transport, host, DATA_QUEUE)?;
         let controlq = open_queue(&mut transport, host, control_index)?;
-        status = status.with(Status::DRIVER_OK);
-        transport.set_status(status);
 
         // The staged ceiling is the smaller of what the device will carry and
         // what this driver will allocate for it; a device declaring no
@@ -381,7 +382,18 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         };
         let staged = usize::try_from(ceiling).map_err(|_| DriverError::LengthOutOfRange)?;
 
+        // Everything fallible precedes DRIVER_OK, so a failure releases
+        // nothing the device was given.
         let carve = |len: usize| host.alloc_dma_zeroed(len);
+        let req = carve(wire::REQ_LEN)?;
+        let key = carve(MAX_KEY_BYTES)?;
+        let iv = carve(MAX_IV_BYTES)?;
+        let src = carve(staged)?;
+        let dst = carve(staged)?;
+        let session = carve(wire::SESSION_INPUT_LEN)?;
+        let request_status = carve(wire::INHDR_LEN)?;
+        status = status.with(Status::DRIVER_OK);
+        transport.set_status(status);
         Ok(Self {
             transport,
             dataq,
@@ -396,19 +408,23 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
                 ciphers,
                 max_job_bytes: ceiling,
             },
-            req: Some(carve(wire::REQ_LEN)?),
-            key: Some(carve(MAX_KEY_BYTES)?),
-            iv: Some(carve(MAX_IV_BYTES)?),
-            src: Some(carve(staged)?),
-            dst: Some(carve(staged)?),
-            session: Some(carve(wire::SESSION_INPUT_LEN)?),
-            status: Some(carve(wire::INHDR_LEN)?),
+            req: Some(req),
+            key: Some(key),
+            iv: Some(iv),
+            src: Some(src),
+            dst: Some(dst),
+            session: Some(session),
+            status: Some(request_status),
         })
     }
 
-    /// Tear the device down for unload (sets the status byte to 0).
+    /// Tear the device down for unload: reset it, then release its memory.
     pub fn close(mut self) {
-        self.transport.reset();
+        if self.transport.reset().is_err() {
+            // A wedged device may still master its rings and staging: hold
+            // them for the kernel to quarantine when the driver exits.
+            core::mem::forget(self);
+        }
     }
 
     /// Borrow the underlying transport (host-side test access only; not

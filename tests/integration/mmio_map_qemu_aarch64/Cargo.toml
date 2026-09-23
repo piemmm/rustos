@@ -53,6 +53,7 @@ tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
 tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
 tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 [build-dependencies]

@@ -63,6 +63,18 @@ pub trait DmaHost {
     /// None directly at the trait level; the host enforces its own DMA-pool
     /// quota and per-task capability check at allocation time ("per-process heaps" + "fail closed").
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError>;
+
+    /// The device has been reset and can no longer reach DMA memory an earlier
+    /// instance of this driver handed it, so that memory may leave the
+    /// quarantine it was held in when that instance ended
+    /// (`plans/OPEN-DEFECTS.md` D167).
+    ///
+    /// A driver calls this once, as soon as its bring-up has reset the device.
+    /// It is best effort by design: a refusal only leaves the memory held,
+    /// which costs memory and never safety, and the kernel records every
+    /// decision. A host whose DMA memory cannot outlive the process using it
+    /// — an in-kernel host, a test mock — has nothing to release.
+    fn device_quiesced(&self);
 }
 
 /// Stable identifier of a DMA pool.
@@ -180,9 +192,8 @@ unsafe impl Send for DmaSlab {}
 impl DmaSlab {
     /// Construct a [`DmaSlab`] whose drop is a no-op.
     ///
-    /// Used by the in-process mock host (which keeps its
-    /// `Box::leak` storage strategy) and by unit tests that wrap a
-    /// borrowed `&mut [u8]` for the duration of the test function.
+    /// Used by unit tests that wrap leaked or borrowed storage for the
+    /// duration of the test function.
     ///
     /// # Safety
     ///

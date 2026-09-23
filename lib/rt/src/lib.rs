@@ -178,6 +178,9 @@ const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 /// `dma_free` syscall number (as above).
 const NUM_DMA_FREE: u64 = SyscallNumber::DMA_FREE.as_u16() as u64;
 
+/// `dma_quiesced` syscall number (as above).
+const NUM_DMA_QUIESCED: u64 = SyscallNumber::DMA_QUIESCED.as_u16() as u64;
+
 /// `wait` syscall number (as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 
@@ -2183,6 +2186,26 @@ pub fn dma_free(handle: u64, cpu_va: u64) -> i64 {
     // pointer; it resolves the grant handle and releases the carve named by
     // `cpu_va` from the caller's own address space.
     let ret = unsafe { raw_syscall(NUM_DMA_FREE, [handle, cpu_va, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Declare the calling driver's device quiesced, releasing the DMA memory
+/// earlier drivers of its hardware-tree node left in quarantine
+/// (`SyscallNumber::DMA_QUIESCED`).
+///
+/// Called once the device has been reset and can no longer reach memory an
+/// earlier instance handed it. The kernel resolves the caller's node and
+/// admission generation itself and frees only what an earlier instance
+/// carved. The call carries `CAP_MEM_DMA`.
+///
+/// Returns the bytes freed, or `-errno` (recover the [`tairix_abi::Errno`]
+/// discriminant as `-ret`).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 encoding (bytes, else -errno).
+pub fn dma_quiesced() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap, and this one takes no argument.
+    let ret = unsafe { raw_syscall(NUM_DMA_QUIESCED, [0; 6]) };
     ret as i64
 }
 
@@ -7096,6 +7119,15 @@ mod tests {
         assert_eq!(number, NUM_NOTICE_PUBLISH);
         assert_eq!(args[0], u64::from(NoticeTopic::Mounts.as_u32()));
         assert_eq!(args[2], 0);
+    }
+
+    #[test]
+    fn dma_quiesced_marshals_no_argument_and_surfaces_the_freed_bytes() {
+        let (number, args) = capture(0x3000, || {
+            assert_eq!(dma_quiesced(), 0x3000);
+        });
+        assert_eq!(number, NUM_DMA_QUIESCED);
+        assert_eq!(args, [0; 6]);
     }
 
     #[test]
