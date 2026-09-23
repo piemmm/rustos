@@ -92,7 +92,7 @@ discovered late.
 | P3 | Window **size states** — `Restored` / `Maximized` / `Fullscreen` — on the window channel, and the compositor promoting a scanout-sized fullscreen surface to a single layer | `plans/COMPOSITOR-WORK.md` Stage J | WS5 — **done** |
 | P4 | `lib/crypto` gains X25519 key agreement (`lib/crypto::agree`, over the audited `x25519-dalek`, which shares the `curve25519-dalek` arithmetic already beneath `ed25519-dalek`) | `lib/crypto` | WS1 — **done** |
 | P5 | Durable storage: `lib/recdb` through its transactional and recovery items | `plans/RECDB.md` RD1–RD6 | WS7 |
-| P6 | The figure engine: shapes, rig, clips, blending, and the art harness | `plans/FIGURE.md` FG1–FG5 | WS6 |
+| P6 | The figure engine: shapes, rig, clips, blending, the art harness, and the character record a preset is | `plans/FIGURE.md` FG1–FG6 | WS6 — **done** |
 | P7 | The GPU seam with a live backend | `plans/GPU.md` GP1–GP6 | WS19 |
 
 P3 was the only prerequisite that changes a shipped desktop contract, and it

@@ -53,3 +53,14 @@ fn a_mount_rests_square_until_it_is_oriented() {
     assert_eq!(scabbard.joint, joint);
     assert_eq!(scabbard.at, plain.at);
 }
+
+#[test]
+fn a_mount_is_the_authored_size_until_it_is_scaled() {
+    let plain = Mount::new(JointId::new(2), Body::new(0.0, 0.0, 6.0));
+    assert!(mathf::fabs(plain.scale - 1.0) <= f64::EPSILON);
+
+    let broad = plain.scaled(1.25);
+    assert!(mathf::fabs(broad.scale - 1.25) <= f64::EPSILON);
+    assert_eq!(broad.at, plain.at, "scaling a mount does not move it");
+    assert_eq!(broad.orientation, plain.orientation);
+}

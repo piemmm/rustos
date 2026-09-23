@@ -7,7 +7,7 @@
 //! bound to them, the sockets equipment hangs on, and the projection that
 //! turns all of it toward the camera.
 //!
-//! # Three ideas, and the rest follows
+//! # The ideas it rests on
 //!
 //! **One body frame serves every heading.** A part carries a position in the
 //! figure's own frame — [`Body`], along its heading, across it, and away from
@@ -55,6 +55,16 @@
 //! and a pelvis limit tight enough to keep a spine sane is nowhere near wide
 //! enough for terrain.
 //!
+//! **A figure is a record, and the record is never geometry.** An
+//! [`Identity`] is nineteen checked bytes — a species, a build within that
+//! species' documented ranges, a set of features and a palette of first-party
+//! swatches — and [`humanoid::rig`] builds a figure from nothing else. The
+//! record reaches the skeleton only through joint offsets and a stretch on
+//! each surface's borrowed ring template, and it reaches the colours only
+//! through a role table the rig can be re-tinted with, so a palette edit
+//! never re-rigs anything. Its decoder is total and fails closed, because in
+//! the game it arrives from a client assumed hostile.
+//!
 //! # The order it runs in
 //!
 //! 1. [`Animator`] picks the clips, [`Blend`] resolves a [`Pose`].
@@ -66,9 +76,13 @@
 //!
 //! # What is not here
 //!
-//! The contact-sheet harness that makes art quality a measured property, the
-//! species and build parameter space, and the designer are later items.
+//! The designer that edits a record — its presets and its plausible random
+//! figures — is a later item. The contact-sheet harness that makes art
+//! quality a measured property is `cargo xtask artsheet`; the measurements
+//! it gates on live here.
 //!
+//! [`Identity`]: identity::Identity
+//! [`humanoid::rig`]: humanoid::rig
 //! [`Pose`]: pose::Pose
 //! [`Overlay`]: pose::Overlay
 //! [`Body`]: frame::Body
@@ -102,6 +116,7 @@ pub mod error;
 pub mod frame;
 pub mod gait;
 pub mod humanoid;
+pub mod identity;
 pub mod joint;
 pub mod look;
 pub mod mesh;
@@ -116,8 +131,12 @@ pub mod rig;
 pub mod rigging;
 pub mod shadow;
 pub mod socket;
+pub mod species;
 pub mod spring;
 pub mod sway;
+#[cfg(test)]
+mod testing;
+pub mod tint;
 pub mod transition;
 
 pub use error::FigureError;

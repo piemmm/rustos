@@ -507,6 +507,12 @@ pub const TARGETS: &[Target] = &[
             "WinterSun sealed record transport (reorder/replay/truncate/oversize/reflect/flip: refused, and the session ends)",
     },
     Target {
+        package: "tairix-wintersun-figure",
+        test: "fuzz_identity",
+        description:
+            "WinterSun figure record decoder (hostile character records: total, one spelling, every admitted figure builds and places)",
+    },
+    Target {
         package: "tairix-supervisor",
         test: "fuzz_repl",
         description:

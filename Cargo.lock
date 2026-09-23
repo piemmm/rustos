@@ -6871,6 +6871,7 @@ dependencies = [
 name = "tairix-wintersun-figure"
 version = "0.0.0"
 dependencies = [
+ "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
  "tairix-raster",

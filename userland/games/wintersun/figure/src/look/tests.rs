@@ -5,17 +5,14 @@ use tairix_util::mathf;
 use super::Look;
 use crate::error::FigureError;
 use crate::frame::Body;
-use crate::humanoid::{self, Bone, DRIVES};
+use crate::humanoid::{Bone, DRIVES};
 use crate::joint::JointId;
 use crate::pose::{Param, Pose};
-use crate::rig::{Frames, Resolved, Rig};
+use crate::rig::{Frames, Resolved};
 use crate::rigging::Rigging;
+use crate::testing::human;
 
 const HEAD: JointId = Bone::Head.joint();
-
-fn rig() -> Rig {
-    humanoid::rig().expect("the humanoid rig")
-}
 
 #[track_caller]
 fn resolved(rigging: &Rigging<'_>, pose: &Pose) -> Frames {
@@ -47,7 +44,7 @@ fn an_unreal_share_or_target_is_refused() {
             "a share of {share} must be refused"
         );
     }
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let frames = resolved(&rigging, &Pose::REST);
     let look = Look::new(0.3).expect("a real look");
@@ -71,7 +68,7 @@ fn an_unreal_share_or_target_is_refused() {
 /// A target the head is already pointing at asks for no turn at all.
 #[test]
 fn a_target_straight_ahead_moves_nothing() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let frames = resolved(&rigging, &Pose::REST);
     let head = frames.get(HEAD).expect("a resolved head").at;
@@ -93,7 +90,7 @@ fn a_target_straight_ahead_moves_nothing() {
 /// aim is left alone rather than snapping to whatever rounding produced.
 #[test]
 fn a_target_on_the_head_leaves_the_aim_alone() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let frames = resolved(&rigging, &Pose::REST);
     let head = frames.get(HEAD).expect("a resolved head").at;
@@ -107,7 +104,7 @@ fn a_target_on_the_head_leaves_the_aim_alone() {
 /// The layer's job: whatever the target, the head finishes nearer to it.
 #[test]
 fn looking_turns_the_head_toward_the_target() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let look = Look::new(0.35).expect("a real look");
 
@@ -136,7 +133,7 @@ fn looking_turns_the_head_toward_the_target() {
 /// A target inside the neck's travel is looked *at*, not merely toward.
 #[test]
 fn a_reachable_target_is_looked_straight_at() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let look = Look::new(0.0).expect("a real look");
     let frames = resolved(&rigging, &Pose::REST);
@@ -160,7 +157,7 @@ fn a_reachable_target_is_looked_straight_at() {
 /// head.
 #[test]
 fn a_target_out_of_reach_stops_at_the_limit() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let frames = resolved(&rigging, &Pose::REST);
     let behind = Body::new(-60.0, 20.0, 80.0);
@@ -191,7 +188,7 @@ fn a_target_out_of_reach_stops_at_the_limit() {
 /// looking: the spine and the neck always sum to the same turn.
 #[test]
 fn the_spine_share_moves_work_without_moving_the_answer() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let frames = resolved(&rigging, &Pose::REST);
     let head = frames.get(HEAD).expect("a resolved head").at;

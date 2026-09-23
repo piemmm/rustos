@@ -46,8 +46,9 @@ controls), `lib/raster` and `lib/util::mathf` rustdoc.
 | FG3 | Pose parameters, clips (keyframed parameter curves with easing), clip blending, and the transition state machine | done |
 | FG4 | Procedural layers over a clip: gait phase from distance travelled, look-at, recoil, cloth and hair sway, breathing, per-foot terrain planting, the clip-authored root height, root motion and the figure's root placement, contact shadow | done |
 | FG5 | `cargo xtask artsheet`: the shipped motion set, the painter, the contact-sheet renderer, the committed ledger, and the automated quality checks | done |
-| FG6 | The parameter space: species and build parameters, the palette model, validated bounds, and the compact serialised form a character record stores | planned |
+| FG6 | The parameter space: species and build parameters, the palette model, validated bounds, and the compact serialised form a character record stores | done |
 | FG7 | The designer engine: the parameter model, live preview, presets, and randomised-but-plausible generation | planned |
+| FG8 | The run's mid-stance dip: a foot path that compresses at midstance and extends at toe-off, the run's leg keys re-solved through it, and its root height dipping to match | planned |
 
 Items are built in ledger order; each is complete — tests, docs, green gate —
 before the next begins.
@@ -384,19 +385,14 @@ floor exactly — below it the foot sinks in, above it the figure never lands.
 One quantity's two signs, so `quality::grounding` answers both with one
 number, and it needs no notion of which foot is "down": a contact band widens
 near a foot's lowest point, where its height is flat, and reports a foot
-planted well into its own toe-off. The shipped set's worst is the run's 0.052
-units, which is the gap between the crouch depth a foot path was authored with
-and the fold its six-place keys actually produce — so the bound is that
-rounding rather than a judgement about art.
+planted well into its own toe-off. The run's is the worst: 0.052 units on the
+reference human, which is the gap between the crouch depth a foot path was
+authored with and the fold its six-place keys actually produce — so the bound
+is that rounding rather than a judgement about art — and it scales with the
+leg, to 0.057 on the long-legged elf.
 
-**Still open: a run's mid-stance dip.** The body now holds its stated height
-while a foot is down and follows a parabola across each flight, which is what
-a body with nothing holding it up does. What it does not do is compress at
-midstance and extend at toe-off: the shipped run's stance legs carry no
-push-off to compress, so its whole vertical oscillation is the flight arc.
-Adding one means re-solving the run's leg keys through its foot path, which
-moves the stride and the skate with them — staged rather than faked, and the
-next thing FG4 owes.
+The run's body holds its stated height while a foot is down and follows a
+parabola across each flight. Compressing at midstance as well is FG8 (§8).
 
 Every layer is a pure function of (pose, state, time) and is host-tested
 against its stated property, not against a screenshot.
@@ -451,7 +447,7 @@ widened to admit a change.
   shipped tables are authored to join exactly, so the bound is rounding.
 - **Grounding.** Over a cycle, how far the lowest point either foot reaches
   sits from the floor — penetration and hover being one quantity's two signs.
-  Shipped worst: 0.052 units of a hundred-unit figure.
+  Worst: 0.057 units, the elf's run.
 - **Silhouette readability**, three measured numbers per cell: the
   alpha-weighted **coverage ratio** inside a band; the count of **connected
   tonal regions**; and the **contrast ratio** against both themes' desktops.
@@ -534,19 +530,69 @@ read it.
 
 ## 5. FG6/FG7 — the parameter space and the designer
 
-A figure's identity is a validated parameter record: species, build (height,
-mass distribution, limb proportion, head proportion), features (face shape, eye
-shape and colour, ear form, horn or tail presence and form, hair style and
-volume), and a palette (skin/fur, hair, eyes, markings, cloth accent). Every
-parameter has documented bounds, and the record's decoder is total and fails
-closed — because in `plans/WINTERSUN.md` it arrives **off the wire from a
-client**, which is assumed hostile: the server re-validates every parameter
-against its bounds and refuses an impossible figure rather than drawing one.
-The serialised form is compact and versioned, since a character record stores
-one per character.
+**FG6 is done.** A figure's identity is `figure::identity::Identity`, a
+validated nineteen-byte record: a version byte, a species (human, elf, dwarf,
+beastkin, dragonkin — chosen by the user), five build settings, a face shape,
+an eye shape, an ear form, optional horns, tail and hair, a hair volume, and
+five palette swatch indices (skin/fur/scale, hair, eyes, markings, cloth
+accent). What each species may be is `figure::species` data: the interval
+every build setting spans (height, girth, taper, limbs, head — girth and
+taper together are the mass distribution), the ear, horn and tail forms it
+admits, the eye colours it admits, and the swatch table its skin and markings
+draw from. Every species stands on the one humanoid skeleton, so every clip
+plays on all of them; a quadruped creature is a different rig and WS6
+content, not a species of this record.
 
-The designer engine is the parameter model plus the preview; the surfaces are
-the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
+What the finished part guarantees:
+
+- **Bounds are structural.** A build setting is a byte spanning its species'
+  whole documented interval, exactly at both ends, so no setting can be out
+  of range. What can be wrong is refused by name (`IdentityError` naming its
+  `Field`): a byte naming no species, form or swatch; a form or eye colour
+  the species does not carry; a second spelling (a bald figure's hair colour
+  or volume, a human's markings, which must be zero). The decoder is total —
+  every byte string answers a record or a refusal — and fails closed.
+- **Every admitted record builds.** The fuzz harness (`tests/fuzz_identity`,
+  registered with `cargo xtask fuzz`) holds that every record the decoder
+  admits re-encodes to its own bytes and builds and places a figure, so a
+  server's check and a renderer cannot disagree about what is drawable; a
+  regression corpus pins the accept/reject verdicts at every field's edge.
+- **The `&'static` ring borrow survives.** The record reaches geometry
+  through joint offsets (values) and a five-factor `mesh::Stretch` applied to
+  each surface's borrowed template at carry time; species and features choose
+  between templates. No owned-rings tier exists: it would more than double a
+  `Rig`, whose size, with the `Placement`'s, a test holds (about eight and
+  fourteen kibibytes) because the QEMU verticals run the digest on a boot
+  stack.
+- **Height is height.** The builder scales the whole skeleton so the crown
+  stands exactly at the height setting with the sole on the ground; limb and
+  head proportion change shape, never stature. Every build keeps the
+  thigh-to-shank proportion the foot paths were solved through, so every
+  shipped clip stays inside its grounding and skate bounds at every build
+  corner of every species — measured, not argued.
+- **A palette edit is a re-tint.** A surface names a `tint::Tint` role; the
+  rig holds the resolved colours and `Rig::retint` swaps them without touching
+  geometry. Swatches are first-party tables, and the fixed trouser tone sits
+  in the luminance band that clears both desktop themes on its own, so every
+  palette is readable; the art harness checks that tone before any cell.
+- **Layered surfaces sort by a shared point.** Hair is a cap over the crown,
+  plus a mass behind where it reaches down the back; the cap and the skull
+  share one sort point (`Part::sorted_at`) so the authored order decides at
+  every heading and nod, where two means broke the tie with the tilt.
+- **A tail moves.** The skeleton has a tail root on every figure, driven by
+  `TailLift`/`TailSwing` like any joint; `Sway::overlay` turns it as an
+  overlay, so the tail is the damped spring §3 says it is.
+- **Gear fits every build.** A `Mount` carries the scale of the body at its
+  socket, and fitted gear is scaled by it.
+- **The grid covers the space.** The reference grid is each species'
+  reference figure in every motion, plus each species' least and most walking;
+  between them they wear every form and each species' palest and darkest
+  covering, and every cell clears every §4 bound. The digest folds all of it,
+  each record's bytes included.
+
+**FG7 remains.** The designer engine is the parameter model plus the preview;
+the surfaces are the game's (`plans/WINTERSUN.md` WS17). Two obligations bind
+it:
 
 - **§28, which a designer is the surface most likely to violate.** A slider
   changes the parameter in memory and repaints — it does not write a store, and
@@ -554,13 +600,17 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
   happens once, when the drag settles. The known real-world defect this cites
   is the settings slider that wrote to the configuration service on every
   pointer-motion sample and froze its window for the whole drag, and then, with
-  the write removed, still re-derived the entire surface per sample.
+  the write removed, still re-derived the entire surface per sample. FG6 leaves
+  it the seams: a palette edit is `Rig::retint`; a build or feature edit
+  rebuilds the rig, which is what those parameters feed.
 - **Randomised means plausible, not uniform.** "Surprise me" draws from
   per-parameter distributions with correlations (a heavy build gets broader
   shoulders; a pale palette gets pale markings), from an injected
   `lib/rng` generator so it is deterministic and host-testable. Uniform
   sampling over a parameter box produces monsters, which is how a designer
-  earns a reputation for ugly output.
+  earns a reputation for ugly output. The designer also owns keeping a record
+  canonical as it edits one — zeroing a bald figure's hair colour, clamping a
+  swatch index when the species changes to a shorter table.
 
 ## 6. Refused by name
 
@@ -572,6 +622,12 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
 - **A second rasteriser, blend, or outline path.** `lib/raster` owns them.
 - **Runtime-loaded figure geometry from an untrusted source.** Parameters are
   validated data; geometry is first-party code.
+- **Owned rings per figure.** A build is a stretch over a borrowed template;
+  per-figure ring storage would more than double a rig for nothing.
+- **Free colours in a record.** A palette is swatch indices into first-party
+  tables, so no record can paint a figure the desktop cannot draw legibly.
+- **Repairing a record.** A field outside what its species admits is refused
+  with its name, never clamped or defaulted into something drawable.
 - **Screenshot-diff tests as the only animation check.** They catch that
   something changed, never that it is wrong. The measurements in §4 are what
   state correctness; the sheets are for the human judgement that remains.
@@ -705,9 +761,24 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
   Tier-1 target (`tests/integration/figure_determinism_*`), so a backend that
   lowered the same arithmetic differently would fail rather than diverge
   quietly.
-- Parameter records: bounds enforced, malformed refused, round-trip exact,
-  versioned decode total. Fuzz harness over the decoder, since it is
-  attacker-reachable in the game (§19.6).
+- Parameter records: every grid figure round-trips exactly; every other
+  length, every other version, every byte naming nothing, every form or eye
+  colour a species does not carry, every swatch past its table and every
+  second spelling is refused with its field; every single-byte change to
+  every grid record is a different record or a refusal; both ends of every
+  interval are exact. The fuzz harness holds that the decoder is total and
+  that every admitted record re-encodes to itself and builds and places; the
+  regression corpus pins the edge verdicts. Every admissible feature
+  combination of every species builds at both build extremes, and the
+  richest is exactly the part bound. Stature is measured off the carried
+  rings at all 32 build corners of every species and equals the height
+  setting with the sole on the ground; every shipped clip clears its
+  grounding and skate bounds at every one of those corners.
+- Layering: without a shared sort point a cap over a skull is hidden at some
+  heading and nod, and with one it never is. A re-tint moves no point of any
+  surface. Gear on a mount twice the size is drawn twice the size. A sway
+  turns a tail joint by exactly its lean, through the tail's parameters, and
+  nothing else.
 - Designer: a simulated drag produces exactly one durable write and one repaint
   per drained input burst, and touches no state the changed parameter does not
   feed (§28.10, §28.11).
@@ -716,3 +787,20 @@ the game's (`plans/WINTERSUN.md` WS17). Two obligations bind it:
   ever gains any. `loom` is not applicable to either half — neither holds
   shared mutable state, an atomic, or an ordering pairing — stated so the
   absence is an answer rather than silence (§19.11).
+
+## 8. FG8 — the run's mid-stance dip
+
+The shipped run's body holds its stated height while a foot is down and
+follows a parabola across each flight, which is what a body with nothing
+holding it up does. What it does not do is compress at midstance and extend at
+toe-off: the run's stance legs carry no push-off to compress, so its whole
+vertical oscillation is the flight arc.
+
+The work: state the dip in the run's foot path, re-solve its hip, knee and
+ankle keys through it with the same two-bone geometry the planting layer
+uses — checking the tables against the path with a test rather than trusting
+an offline solve — and key the root height to dip with it. Re-solving the
+keys moves the stride and the skate, so the item ends with the digest
+re-pinned and all four determinism legs run. `quality::grounding`'s shipped
+worst is the run's, and it is authored crouch depth against six-place key
+rounding — a rounding bound, never widened to admit art (§6).

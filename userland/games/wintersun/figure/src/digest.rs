@@ -20,9 +20,9 @@
 //!
 //! # What is folded, and what is not
 //!
-//! The complete placed-shape stream — every shape's surface position, screen
-//! turn, dimensions, colour and identity, in the depth order the painter
-//! walks — plus the planting root and miss, the height each clip holds the
+//! Every figure of the grid: its record's bytes, the complete placed-strip
+//! stream in the depth order the painter walks, the carried rings at full
+//! precision, the planting root and miss, the height each clip holds the
 //! body at across its cycle, and the quality numbers the art is gated on.
 //!
 //! Not the pixels. Those are `lib/raster`'s shared scan converter, which is
@@ -46,20 +46,21 @@ use crate::mesh::Hoop;
 use crate::motion::Kind;
 use crate::plant::{Legs, Planted};
 use crate::quality;
-use crate::reference::{Cell, Reference};
+use crate::reference::{Reference, FIGURES};
 use crate::rig::{Frames, Placement, Resolved, Strip};
 use crate::rigging::Rigging;
 use crate::socket::Side;
 
 /// The digest of the reference grid, on every Tier-1 target.
 ///
-/// Changing the rig, a clip, a clip's root height, a joint limit, the
-/// projection, the planting solve or the shadow changes this. That is the
+/// Changing the rig, a species' ranges, a feature's template, the record
+/// format, a clip, a clip's root height, a joint limit, the projection, the
+/// planting solve or the shadow changes this. That is the
 /// point: it is not a number to be re-derived when a test fails, it is the
 /// record of what a figure does. A change that moves it changes every figure
 /// anybody will ever see, and the new value is written down deliberately
 /// rather than pasted out of a failure.
-pub const REFERENCE_DIGEST: u64 = 0x9614_701F_F10D_F8C1;
+pub const REFERENCE_DIGEST: u64 = 0xFF20_4266_818E_E6E0;
 
 /// The stream the reference grid is folded into.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4647;
@@ -109,42 +110,48 @@ const GAIT_STEPS: [f64; 4] = [7.5, 23.25, 140.0, -11.75];
 /// refuse — none of which is reachable for the shipped set, which is what
 /// the crate's own tests say.
 pub fn reference() -> Result<u64, FigureError> {
-    let figure = Reference::new()?;
-    let rigging = humanoid::rigging(figure.rig())?;
     let mut placement = Placement::new();
     let mut frames = Frames::new();
     let mut hasher = FastHash::with_seed(REFERENCE_SEED);
 
-    for kind in Kind::ALL {
-        let clip = figure.clip(kind)?;
-        fold_quality(&mut hasher, &rigging, clip, kind, figure.legs())?;
-        fold_gait(&mut hasher, &rigging, clip, kind)?;
-    }
+    // One figure at a time, so only one rig is ever held: the grid's whole
+    // buffer set has to fit the boot stack the verticals run on.
+    for entry in &FIGURES {
+        let identity = entry.identity()?;
+        hasher.write(&identity.encode());
+        let figure = Reference::new(&identity)?;
+        let rigging = humanoid::rigging(figure.rig())?;
 
-    for index in 0..Cell::COUNT {
-        let cell = Cell::at(index).ok_or(FigureError::PhaseOutsideClip)?;
-        let planted = figure.place(cell, SCALE, AT, &mut placement)?;
-        fold_planted(&mut hasher, &planted);
-        // The surfaces themselves, before they are rounded onto the
-        // converter's grid: a strip is stored at the resolution it is
-        // drawn, and the cross-target claim is about the arithmetic behind
-        // it rather than about the pixel it lands on.
-        rigging
-            .posture(&planted.pose())?
-            .resolve(planted.root(), &mut frames);
-        for part in figure.rig().parts() {
-            for hoop in figure.surfaces(part, &frames)? {
-                fold_hoop(&mut hasher, cell.facing, hoop);
+        for kind in entry.kinds() {
+            let clip = figure.clip(*kind)?;
+            fold_quality(&mut hasher, &rigging, clip, *kind, figure.legs())?;
+            fold_gait(&mut hasher, &rigging, clip, *kind)?;
+        }
+
+        for cell in entry.cells() {
+            let planted = figure.place(cell, SCALE, AT, &mut placement)?;
+            fold_planted(&mut hasher, &planted);
+            // The surfaces themselves, before they are rounded onto the
+            // converter's grid: a strip is stored at the resolution it is
+            // drawn, and the cross-target claim is about the arithmetic
+            // behind it rather than about the pixel it lands on.
+            rigging
+                .posture(&planted.pose())?
+                .resolve(planted.root(), &mut frames);
+            for part in figure.rig().parts() {
+                for hoop in figure.surfaces(part, &frames)? {
+                    fold_hoop(&mut hasher, cell.facing, hoop);
+                }
+            }
+            fold_usize(&mut hasher, placement.len());
+            for strip in placement.strips() {
+                fold_strip(&mut hasher, &strip);
             }
         }
-        fold_usize(&mut hasher, placement.len());
-        for strip in placement.strips() {
-            fold_strip(&mut hasher, &strip);
-        }
-    }
 
-    for kind in Kind::ALL {
-        fold_slopes(&mut hasher, &rigging, figure.legs(), figure.clip(kind)?)?;
+        for kind in entry.kinds() {
+            fold_slopes(&mut hasher, &rigging, figure.legs(), figure.clip(*kind)?)?;
+        }
     }
     fold_shadow(&mut hasher)?;
     Ok(hasher.finish())

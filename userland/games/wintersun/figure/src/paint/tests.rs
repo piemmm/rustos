@@ -6,16 +6,18 @@ use tairix_raster::Color;
 use tairix_wintersun_net::value::Facing;
 
 use super::{cost, draw, Brush, MAX_FIGURE_POINTS};
-use crate::humanoid::{self, palette};
+use crate::humanoid;
 use crate::mesh::{self, LEVELS};
 use crate::pose::Pose;
 use crate::reference::Reference;
 use crate::rig::{Placement, Stance};
+use crate::testing::human;
+use crate::tint::Tint;
 
 const SIDE: u32 = 96;
 
 fn placed(scale: f64) -> Placement {
-    let rig = humanoid::rig().expect("the humanoid rig");
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
     let posture = rigging.posture(&Pose::REST).expect("a rest posture");
     let light = Reference::light().expect("a real light");
@@ -112,10 +114,12 @@ fn the_fill_cost_follows_the_drawn_size_and_the_point_count_does_not() {
 /// drifting a shade at a time and what lets a harness check it by equality.
 #[test]
 fn the_figure_paints_only_in_shades_of_its_own_palette() {
+    let tints = human().tints();
     for strip in placed(0.8).strips() {
-        let known = palette::ALL
+        let known = Tint::ALL
             .iter()
-            .flat_map(|base| (0..LEVELS).map(move |level| mesh::shaded(*base, level)))
+            .map(|tint| tints.get(*tint))
+            .flat_map(|base| (0..LEVELS).map(move |level| mesh::shaded(base, level)))
             .any(|tone| tone == strip.color);
         assert!(known, "{:?} is no shade of a declared tone", strip.color);
     }

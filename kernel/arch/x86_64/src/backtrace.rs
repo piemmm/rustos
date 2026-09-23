@@ -20,9 +20,9 @@
 //!
 //! The bootstrap processor runs on the linker-reserved boot stack, addressed
 //! through the kernel window (`boot_stack_bottom_high ..
-//! boot_stack_top_high`, the aliases `linker.ld` derives from the low
-//! symbols `boot.s` reserves) because that is what `%rsp` holds and what
-//! stays mapped under every root.
+//! boot_stack_top_high`, the higher-half aliases of the low symbols
+//! `linker.ld` reserves) because that is what `%rsp` holds and what stays
+//! mapped under every root.
 //! `boot_stack` returns that region, rooted, when the captured `sp` lies
 //! within it and `None` otherwise — a kthread stack, which the kernel
 //! resolves instead — so the unwinder never reads memory the port cannot
@@ -189,7 +189,7 @@ impl CpuStateCapture for Backtracer {
         // link-time constant; we never dereference them here.
         let low = core::ptr::addr_of!(boot_stack_bottom_high) as u64;
         let high = core::ptr::addr_of!(boot_stack_top_high) as u64;
-        // SAFETY: `boot.s` reserves `[boot_stack_bottom_high, boot_stack_top_high)` as this
+        // SAFETY: `linker.ld` reserves `[boot_stack_bottom_high, boot_stack_top_high)` as this
         // CPU's boot stack and nothing else claims those bytes, so they are
         // mapped and writable for the whole life of the kernel. Minting the
         // root here is what lets the unwinder derive each read rather than
@@ -208,7 +208,7 @@ impl CpuStateCapture for Backtracer {
         // link-time constant; we never dereference them here.
         let low = core::ptr::addr_of!(boot_stack_guard_bottom_high) as u64;
         let high = core::ptr::addr_of!(boot_stack_bottom_high) as u64;
-        // SAFETY: `boot.s` reserves `[boot_stack_guard_bottom_high,
+        // SAFETY: `linker.ld` reserves `[boot_stack_guard_bottom_high,
         // boot_stack_bottom_high)` as the BSP boot stack's guard and nothing else
         // claims those bytes, so they stay mapped for the life of the
         // kernel. `boot.s` poisons them once, before any Rust frame

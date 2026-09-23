@@ -8,17 +8,14 @@ use crate::frame::Body;
 use crate::humanoid::{self, Bone, DRIVES};
 use crate::joint::JointId;
 use crate::pose::{Param, Pose};
-use crate::rig::{Frames, Resolved, Rig};
+use crate::rig::{Frames, Resolved};
 use crate::rigging::Rigging;
 use crate::socket::Side;
+use crate::testing::human;
 
 /// Figure-local units. The humanoid stands a hundred tall, so a hundredth of
 /// a unit is well under a pixel at any scale it is drawn at.
 const SLACK: f64 = 1e-6;
-
-fn rig() -> Rig {
-    humanoid::rig().expect("the humanoid rig")
-}
 
 #[track_caller]
 fn resolved(rigging: &Rigging<'_>, pose: &Pose) -> Frames {
@@ -64,7 +61,7 @@ fn ankle_heights(rigging: &Rigging<'_>, pose: &Pose, root: Resolved) -> [f64; 2]
 
 #[test]
 fn a_leg_that_is_not_a_chain_is_refused() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let mut legs = humanoid::legs();
     legs[0].knee = Bone::Elbow(Side::Left).joint();
@@ -76,7 +73,7 @@ fn a_leg_that_is_not_a_chain_is_refused() {
 
 #[test]
 fn a_leg_naming_a_joint_the_rig_lacks_is_refused() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     for absent in [0usize, 1, 2] {
         let mut legs = humanoid::legs();
@@ -96,7 +93,7 @@ fn a_leg_naming_a_joint_the_rig_lacks_is_refused() {
 
 #[test]
 fn an_unreal_ground_height_is_refused() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let pose = Pose::REST;
@@ -115,7 +112,7 @@ fn an_unreal_ground_height_is_refused() {
 /// refuses it rather than drawing a figure nobody placed.
 #[test]
 fn an_unreal_root_height_is_refused() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let pose = Pose::REST;
@@ -134,14 +131,17 @@ fn an_unreal_root_height_is_refused() {
 /// so a taller or wider figure needs no second set of numbers.
 #[test]
 fn the_reach_and_stance_are_the_rigs_own() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
-    // Hips nine either side of centre; a leg spanning a straight forty-seven
-    // down to seventeen folded.
-    assert!(mathf::fabs(legs.stance() - 18.0) < SLACK);
+    let joint = |bone: Bone| rig.joints()[bone.index()].at;
+    let stance = joint(Bone::Hip(Side::Left)).side - joint(Bone::Hip(Side::Right)).side;
+    let straight = joint(Bone::Knee(Side::Left)).length() + joint(Bone::Ankle(Side::Left)).length();
+    assert!(mathf::fabs(legs.stance() - stance) < SLACK);
+    assert!(mathf::fabs(legs.straight() - straight) < SLACK);
+    // A leg spans from straight down to under two fifths of it folded.
     assert!(
-        legs.reach() > 29.0 && legs.reach() < 31.0,
+        legs.reach() > 0.6 * straight && legs.reach() < 0.66 * straight,
         "reach {} should be the leg's own span travel",
         legs.reach()
     );
@@ -157,7 +157,7 @@ fn the_reach_and_stance_are_the_rigs_own() {
 /// it by the depth of that crouch.
 #[test]
 fn planting_on_flat_ground_changes_nothing() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
 
@@ -204,7 +204,7 @@ fn planting_on_flat_ground_changes_nothing() {
 /// set.
 #[test]
 fn the_height_a_clip_states_lands_its_planted_foot() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
 
@@ -239,7 +239,7 @@ fn the_height_a_clip_states_lands_its_planted_foot() {
 /// airborne must come out airborne.
 #[test]
 fn a_tucked_pose_rises_with_its_clip_rather_than_sinking_by_its_fold() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
 
@@ -284,7 +284,7 @@ fn a_tucked_pose_rises_with_its_clip_rather_than_sinking_by_its_fold() {
 /// straight at it.
 #[test]
 fn a_foot_the_clip_lifted_keeps_its_clearance() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
 
@@ -319,7 +319,7 @@ fn a_foot_the_clip_lifted_keeps_its_clearance() {
 /// makes unmissable.
 #[test]
 fn each_foot_lands_on_its_own_terrain_height() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let pose = Pose::REST;
@@ -363,7 +363,7 @@ fn each_foot_lands_on_its_own_terrain_height() {
 /// to meet a hill.
 #[test]
 fn the_root_drops_to_the_lower_foot_and_never_lifts() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let pose = Pose::REST;
@@ -387,7 +387,7 @@ fn the_root_drops_to_the_lower_foot_and_never_lifts() {
 /// hill rather than tearing the rig apart.
 #[test]
 fn a_slope_past_the_reach_tilts_the_figure_instead_of_tearing_it() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let pose = Pose::REST;
@@ -430,7 +430,7 @@ fn a_slope_past_the_reach_tilts_the_figure_instead_of_tearing_it() {
 /// tells the simulation it put someone on a cliff.
 #[test]
 fn ground_no_leg_can_reach_is_reported_as_a_miss() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     let pose = Pose::REST;
@@ -459,7 +459,7 @@ fn ground_no_leg_can_reach_is_reported_as_a_miss() {
 /// survives the planter.
 #[test]
 fn every_solved_pose_stays_inside_its_parameter_ranges() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
 
@@ -495,7 +495,7 @@ fn every_solved_pose_stays_inside_its_parameter_ranges() {
 /// and it must report the shortfall rather than a clean landing.
 #[test]
 fn a_foot_a_rig_cannot_aim_reports_its_miss_rather_than_a_landing() {
-    let rig = rig();
+    let rig = human();
     let mut kept = [DRIVES[0]; DRIVES.len()];
     let mut count = 0;
     for drive in DRIVES {

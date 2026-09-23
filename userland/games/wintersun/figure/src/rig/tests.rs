@@ -9,9 +9,10 @@ use super::{Fitted, Part, Placement, Posture, Resolved, Rig, Stance, MAX_FITTED}
 use crate::error::FigureError;
 use crate::frame::{Body, Rotation};
 use crate::joint::{Joint, JointId, Limit, Limits};
-use crate::mesh::Ring;
+use crate::mesh::{Ring, Stretch};
 use crate::shadow::Light;
 use crate::socket::{Mount, Socket};
+use crate::tint::{Tint, Tints};
 
 const ROOT: JointId = JointId::new(0);
 const CHILD: JointId = JointId::new(1);
@@ -36,6 +37,9 @@ const SOUTH: Facing = Facing(0x4000);
 
 const TONE: Color = Color::rgb(0x80, 0x80, 0x80);
 
+/// Every role in the one tone, so a fixture's colours are never its subject.
+const TINTS: Tints = Tints::new([TONE; Tint::COUNT]);
+
 const SLACK: f64 = 1e-9;
 
 fn close(a: f64, b: f64) -> bool {
@@ -47,7 +51,7 @@ fn close(a: f64, b: f64) -> bool {
 /// `Rig` carries no equality — a rig is not a value to compare — so a test
 /// asserts on the error rather than on the `Result`.
 fn refuse(joints: &[Joint], parts: &[Part], mounts: &[(Socket, Mount)]) -> FigureError {
-    Rig::new(joints, parts, mounts).expect_err("this rig must be refused")
+    Rig::new(joints, parts, mounts, TINTS).expect_err("this rig must be refused")
 }
 
 /// A mass wide enough to cover the child joint below it.
@@ -65,7 +69,7 @@ const LIMB: [Ring; 2] = [
 
 #[track_caller]
 fn part(joint: JointId, at: Body, rings: &'static [Ring]) -> Part {
-    Part::new(joint, at, rings, TONE).expect("a real part")
+    Part::new(joint, at, rings, Tint::Skin).expect("a real part")
 }
 
 fn hinge() -> Limits {
@@ -91,6 +95,7 @@ fn fixture() -> Rig {
             Socket::MainHand,
             Mount::new(CHILD, Body::new(0.0, 0.0, -10.0)),
         )],
+        TINTS,
     )
     .expect("the fixture is consistent")
 }
@@ -105,6 +110,7 @@ fn fore_and_aft() -> Rig {
             part(ROOT, Body::new(-6.0, 0.0, 0.0), &MASS),
         ],
         &[],
+        TINTS,
     )
     .expect("one joint bears nothing, so it needs no mass")
 }
@@ -161,6 +167,33 @@ fn points(out: &Placement, surface: u16) -> alloc::vec::Vec<(f64, f64)> {
                 .collect::<alloc::vec::Vec<_>>()
         })
         .collect()
+}
+
+/// Where `part`'s rings are carried to on `rig`, for the resolve `frames`
+/// holds.
+fn carried(
+    rig: &Rig,
+    part: &Part,
+    frames: &super::Frames,
+) -> tairix_inline::ArrayVec<crate::mesh::Hoop, { crate::mesh::MAX_RINGS }> {
+    let own = frames.get(part.joint()).expect("a resolved joint");
+    let far = part.end().map(|end| {
+        let frame = frames.get(end).expect("a resolved joint");
+        (frame.at, frame.basis)
+    });
+    let rest = part.end().map(|end| {
+        let joint = rig.joints()[end.index()];
+        (joint.at, crate::frame::Basis::of(joint.orientation))
+    });
+    crate::mesh::carry(
+        part.rings(),
+        part.stretch(),
+        part.at(),
+        (own.at, own.basis),
+        far,
+        rest,
+    )
+    .expect("it carries")
 }
 
 /// The order the surfaces were painted in, far-first.
@@ -255,6 +288,7 @@ fn a_parents_offset_part_counts_toward_its_reach() {
             part(CHILD, Body::ORIGIN, &LIMB),
         ],
         &[],
+        TINTS,
     );
     assert!(rig.is_ok(), "an offset mass still covers its child");
 }
@@ -301,15 +335,11 @@ fn unreal_geometry_is_refused_wherever_it_is_written() {
         FigureError::GeometryUnreal
     );
     assert_eq!(
-        refuse(
-            &joints(),
-            &[part(ROOT, unreal, &MASS), part(CHILD, Body::ORIGIN, &LIMB),],
-            &[],
-        ),
+        Part::new(ROOT, unreal, &MASS, Tint::Skin).expect_err("an unreal offset"),
         FigureError::GeometryUnreal
     );
     assert_eq!(
-        Part::new(ROOT, Body::ORIGIN, &UNREAL_RING, TONE).expect_err("an unreal ring"),
+        Part::new(ROOT, Body::ORIGIN, &UNREAL_RING, Tint::Skin).expect_err("an unreal ring"),
         FigureError::GeometryUnreal
     );
 }
@@ -427,6 +457,7 @@ fn a_depth_tie_paints_in_the_authored_order() {
             part(ROOT, Body::ORIGIN, &MASS),
         ],
         &[],
+        TINTS,
     )
     .expect("consistent");
     let posture = Posture::rest(&rig);
@@ -774,6 +805,7 @@ fn a_rest_orientation_turns_a_joint_without_a_posture() {
             part(CHILD, Body::ORIGIN, &LIMB),
         ],
         &[],
+        TINTS,
     )
     .expect("consistent");
     let mut out = Placement::new();
@@ -788,6 +820,7 @@ fn a_rest_orientation_turns_a_joint_without_a_posture() {
             part(CHILD, Body::ORIGIN, &LIMB),
         ],
         &[],
+        TINTS,
     )
     .expect("consistent");
     Posture::rest(&upright)
@@ -813,6 +846,7 @@ fn a_limit_that_fixes_an_axis_admits_only_rest_on_it() {
         )],
         &[part(ROOT, Body::ORIGIN, &MASS)],
         &[],
+        TINTS,
     )
     .expect("consistent");
     let mut posture = Posture::rest(&rig);
@@ -838,11 +872,10 @@ fn a_limit_that_fixes_an_axis_admits_only_rest_on_it() {
 fn surfaces_that_meet_at_a_joint_stay_met() {
     use crate::frame::project;
     use crate::humanoid;
-    use crate::mesh;
     use crate::pose::{Param, Pose};
     use crate::socket::Side;
 
-    let rig = humanoid::rig().expect("the humanoid rig");
+    let rig = crate::testing::human();
     let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
     let mut frames = super::Frames::new();
 
@@ -855,14 +888,14 @@ fn surfaces_that_meet_at_a_joint_stay_met() {
         .iter()
         .enumerate()
         .filter_map(|(index, part)| {
-            let end = part.end?;
+            let end = part.end()?;
             let child = rig.parts().iter().position(|other| {
-                other.joint == end
-                    && other.end != Some(part.joint)
+                other.joint() == end
+                    && other.end() != Some(part.joint())
                     && other
-                        .rings
+                        .rings()
                         .first()
-                        .is_some_and(|ring| other.at.plus(ring.at).length() < 1e-12)
+                        .is_some_and(|ring| other.at().plus(ring.at).length() < 1e-12)
             })?;
             Some((index, child))
         })
@@ -873,18 +906,7 @@ fn surfaces_that_meet_at_a_joint_stay_met() {
         meeting.len()
     );
 
-    let carried = |part: &super::Part, frames: &super::Frames| {
-        let own = frames.get(part.joint).expect("a resolved joint");
-        let far = part.end.map(|end| {
-            let frame = frames.get(end).expect("a resolved joint");
-            (frame.at, frame.basis)
-        });
-        let rest = part.end.map(|end| {
-            let joint = rig.joints()[end.index()];
-            (joint.at, crate::frame::Basis::of(joint.orientation))
-        });
-        mesh::carry(part.rings, part.at, (own.at, own.basis), far, rest).expect("it carries")
-    };
+    let carried = |part: &super::Part, frames: &super::Frames| carried(&rig, part, frames);
 
     // How the two surfaces sit relative to one another in the joint that
     // carries them both. Rigid, so this is the same at every pose — which
@@ -900,7 +922,7 @@ fn surfaces_that_meet_at_a_joint_stay_met() {
             above.last().expect("a part has rings").at,
             below.first().expect("a part has rings").at,
         );
-        let joint = rig.parts()[parent].end.expect("a spanning part");
+        let joint = rig.parts()[parent].end().expect("a spanning part");
         let basis = frames.get(joint).expect("a resolved joint").basis;
         (basis.unapply(end.plus(start.scaled(-1.0))), end, start)
     };
@@ -947,4 +969,160 @@ fn surfaces_that_meet_at_a_joint_stay_met() {
         apart < 5.0,
         "two surfaces that meet at a joint drew {apart} apart"
     );
+}
+
+/// A tall surface and a cap over its crown, the way hair lies on a skull.
+const CROWNED: [Ring; 4] = [
+    Ring::new(Body::new(0.0, 0.0, -1.0), 3.0, 3.0),
+    Ring::new(Body::new(0.0, 0.0, 4.5), 5.0, 5.5),
+    Ring::new(Body::new(0.0, 0.0, 10.5), 3.2, 3.6),
+    Ring::new(Body::new(0.0, 0.0, 12.0), 0.9, 1.0),
+];
+const CAP: [Ring; 3] = [
+    Ring::new(Body::new(0.0, 0.0, 8.0), 5.2, 5.6),
+    Ring::new(Body::new(0.0, 0.0, 11.0), 3.5, 3.9),
+    Ring::new(Body::new(0.0, 0.0, 12.8), 1.0, 1.1),
+];
+
+/// The two, either sorted by their own means or both by the tall one's.
+fn layered(shared: bool) -> Rig {
+    let mut crowned = part(ROOT, Body::ORIGIN, &CROWNED);
+    let mut cap = part(ROOT, Body::ORIGIN, &CAP);
+    if shared {
+        let point = Body::new(0.0, 0.0, 4.0);
+        crowned = crowned.sorted_at(point).expect("a real point");
+        cap = cap.sorted_at(point).expect("a real point");
+    }
+    Rig::new(
+        &[Joint::new(None, Body::new(0.0, 0.0, 20.0), hinge())],
+        &[crowned, cap],
+        &[],
+        TINTS,
+    )
+    .expect("consistent")
+}
+
+/// Whether the cap paints before the surface it lies over, at any of
+/// sixteen headings and a range of nods.
+fn cap_ever_hidden(rig: &Rig) -> bool {
+    let mut out = Placement::new();
+    for step in 0..16u32 {
+        let facing = Facing(u16::try_from(step * 4096).expect("inside a turn"));
+        for nod in [-0.8, -0.4, 0.0, 0.4, 0.8] {
+            let mut posture = Posture::rest(rig);
+            posture
+                .set(ROOT, Rotation::new(nod, 0.0, 0.0))
+                .expect("inside the hinge");
+            posture
+                .place(&stance(facing, 1.0, (0.0, 0.0)), &[], &mut out)
+                .expect("places");
+            if order(&out) == [1, 0] {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The tie between two means breaks with the nod, and a skull is then drawn
+/// over its own hair; sorted by one shared point the two always tie, and the
+/// cap, authored after, covers the surface beneath it at every heading.
+#[test]
+fn a_surface_sorted_by_a_shared_point_paints_over_it_at_every_heading() {
+    assert!(
+        cap_ever_hidden(&layered(false)),
+        "the defect a shared point exists for must be reachable without one"
+    );
+    assert!(!cap_ever_hidden(&layered(true)));
+}
+
+#[test]
+fn a_part_refuses_an_unreal_stretch_or_sort_point() {
+    let mass = part(ROOT, Body::ORIGIN, &MASS);
+    assert_eq!(
+        mass.stretched(Stretch::uniform(0.0)).map(|_| ()),
+        Err(FigureError::GeometryUnreal)
+    );
+    assert_eq!(
+        mass.sorted_at(Body::new(0.0, f64::INFINITY, 0.0))
+            .map(|_| ()),
+        Err(FigureError::GeometryUnreal)
+    );
+    let held = mass
+        .stretched(Stretch::uniform(2.0))
+        .expect("a real stretch");
+    assert_eq!(held.stretch(), Stretch::uniform(2.0));
+    assert!(
+        held.reach() > mass.reach() * 1.99,
+        "a part's reach is its stretched rings'"
+    );
+}
+
+/// Gear is authored once, for the reference figure, and a mount says how
+/// large the body it sits on is — so the same helm is twice the size on a
+/// head twice the size, and sits twice as far out.
+#[test]
+fn gear_is_as_large_as_the_body_it_is_mounted_on() {
+    let mounted = |scale: f64| {
+        Rig::new(
+            &joints(),
+            &[
+                part(ROOT, Body::ORIGIN, &MASS),
+                part(CHILD, Body::ORIGIN, &LIMB),
+            ],
+            &[(
+                Socket::Head,
+                Mount::new(ROOT, Body::new(0.0, 0.0, 5.0)).scaled(scale),
+            )],
+            TINTS,
+        )
+        .expect("consistent")
+    };
+    let helm = Fitted::new(Socket::Head, Body::new(0.0, 0.0, 2.0), &LIMB, TONE).expect("real gear");
+    let across = |rig: &Rig| {
+        let mut out = Placement::new();
+        Posture::rest(rig)
+            .place(&stance(SOUTH, 1.0, (0.0, 0.0)), &[helm], &mut out)
+            .expect("places");
+        let (mut low, mut high) = (i32::MAX, i32::MIN);
+        for strip in out.strips().filter(|strip| strip.surface == 2) {
+            for (x, _) in strip.near.iter().chain(strip.far) {
+                low = low.min(*x);
+                high = high.max(*x);
+            }
+        }
+        f64::from(high - low)
+    };
+    let ratio = across(&mounted(2.0)) / across(&mounted(1.0));
+    assert!(
+        mathf::fabs(ratio - 2.0) < 0.02,
+        "a doubled mount drew the helm {ratio} times"
+    );
+}
+
+#[test]
+fn a_mount_scale_that_is_not_finite_and_positive_is_refused() {
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            refuse(
+                &joints(),
+                &[
+                    part(ROOT, Body::ORIGIN, &MASS),
+                    part(CHILD, Body::ORIGIN, &LIMB),
+                ],
+                &[(Socket::Head, Mount::new(ROOT, Body::ORIGIN).scaled(scale))],
+            ),
+            FigureError::GeometryUnreal,
+            "a mount scale of {scale} must be refused"
+        );
+    }
+}
+
+/// Every buffer a figure is drawn through fits the boot stack the
+/// cross-target verticals run it on with room to spare; growing one past
+/// this is a decision to make in the linker scripts, not an accident.
+#[test]
+fn a_figures_buffers_stay_inside_their_stated_size() {
+    assert!(core::mem::size_of::<Placement>() <= 16 * 1024);
+    assert!(core::mem::size_of::<Rig>() <= 8 * 1024);
 }

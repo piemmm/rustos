@@ -3,15 +3,16 @@
 use tairix_util::mathf;
 
 use super::{
-    opposite, rooted, Kind, Motion, IDLE_CROUCH, LEG_LENGTH, RUN_FLIGHT_RISE, RUN_STANCE,
-    WALK_CROUCH,
+    opposite, rooted, Kind, Motion, IDLE_CROUCH, RUN_FLIGHT_RISE, RUN_STANCE, WALK_CROUCH,
 };
 use crate::clip::{Key, Loop};
 use crate::gait::Gait;
-use crate::humanoid::{self, Bone, DRIVES};
+use crate::humanoid::{self, Bone, DRIVES, SHANK_LENGTH, THIGH_LENGTH};
 use crate::pose::Param;
+use crate::reference;
 use crate::rigging::Rigging;
 use crate::socket::Side;
+use crate::testing::human;
 
 /// A small count as a real, exactly.
 fn real(count: usize) -> f64 {
@@ -136,7 +137,7 @@ fn both_sides_run_the_same_cycle_half_a_turn_apart() {
 /// authored to give.
 #[test]
 fn the_fitted_stride_recovers_the_authored_foot_path() {
-    let rig = humanoid::rig().expect("the humanoid rig");
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let ankle = Bone::Ankle(Side::Left).joint();
 
@@ -159,7 +160,7 @@ fn the_fitted_stride_recovers_the_authored_foot_path() {
 /// than inventing one.
 #[test]
 fn a_standing_motion_has_no_stride() {
-    let rig = humanoid::rig().expect("the humanoid rig");
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let motion = Motion::new(Kind::Idle).expect("a shipped motion");
     let clip = motion.clip().expect("its clip");
@@ -231,18 +232,21 @@ fn the_grounded_motions_hold_one_height() {
 }
 
 /// Every shipped height is a fraction of the figure's own leg, so the curves
-/// carry no absolute length of their own and the same clip holds on a taller
-/// rig.
+/// carry no absolute length of their own and hold on any build: what they
+/// need of a rig is the proportion between thigh and shank the foot paths
+/// were solved through, and every build keeps it.
 #[test]
 fn every_shipped_root_height_is_a_fraction_of_a_leg() {
-    let rig = humanoid::rig().expect("the humanoid rig");
-    let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
-    let legs = crate::plant::Legs::new(&rigging, humanoid::legs()).expect("two real legs");
-    assert!(
-        mathf::fabs(legs.straight() - LEG_LENGTH) < 1e-12,
-        "the rig's leg is {} against the {LEG_LENGTH} the curves assume",
-        legs.straight()
-    );
+    for figure in &reference::FIGURES {
+        let rig = humanoid::rig(&figure.identity().expect("a real record")).expect("builds");
+        let thigh = rig.joints()[Bone::Knee(Side::Left).index()].at.length();
+        let shank = rig.joints()[Bone::Ankle(Side::Left).index()].at.length();
+        assert!(
+            mathf::fabs(thigh / shank - THIGH_LENGTH / SHANK_LENGTH) < 1e-12,
+            "{}'s leg is {thigh} over {shank}, not the proportion the curves assume",
+            figure.name
+        );
+    }
     for kind in Kind::ALL {
         let motion = Motion::new(kind).expect("a shipped motion");
         let clip = motion.clip().expect("its clip");

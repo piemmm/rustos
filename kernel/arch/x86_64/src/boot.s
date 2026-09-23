@@ -346,33 +346,10 @@ boot_pdpt_physmap:
 boot_pds:
     .skip 4096 * 4
 
-// The bootstrap stack the BSP runs on for the whole pre-handoff boot
-// path and, in the QEMU integration verticals, for the device-bring-up
-// scenario the audit observer drives synchronously (a real driver +
-// filesystem mounted in the boot thread). That scenario nests the
-// virtio bring-up, a signed-`.rxe` load/reload, and a full filesystem
-// `open` (which stages whole blocks through on-stack scratch buffers)
-// onto this stack, so 16 KiB was marginal; 64 KiB gives ample headroom
-// and keeps an overflow from silently corrupting the adjacent
-// `boot_pds` page tables. `KERNEL_STACK_BYTES` in `tairix-kernel`
-// tracks this value (its static assert pins the lower bound).
-// Poison guard immediately below the stack. Paging is off when the BSP
-// first descends this stack, so an overrun cannot be caught by unmapping
-// a page; `boot_common` fills this gap with the shared sentinel and the
-// panic path reads it back, turning a silent clobber of the page tables
-// below into a named overrun. The guard is every byte up to
-// `boot_stack_bottom`, so the fill and the check share one pair of
-// symbols and no padding can drift between them.
-.align 4096
-.global boot_stack_guard_bottom
-boot_stack_guard_bottom:
-    .skip 4096
-.align 16
-.global boot_stack_bottom
-boot_stack_bottom:
-    .skip 65536
-.global boot_stack_top
-boot_stack_top:
+// The bootstrap stack and its poison guard follow these tables in
+// `.boot.bss`, reserved by `linker.ld`, which sizes the stack per image
+// (`BOOT_STACK_BYTES`). A size fixed here would be one constant for every
+// image, and a workload heavier than the boot pipeline silently outgrew it.
 
 // -- Long-mode GDT. Lives in the low `.boot.rodata` section (linker.ld) so
 //    `lgdt` can load it (by its low linear address) before paging is on.

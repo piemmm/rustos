@@ -1,10 +1,13 @@
 //! `cargo xtask artsheet` implementation.
 //!
 //! The figure engine's art gate. It walks the shared reference grid
-//! (`tairix_wintersun_figure::reference`) — every shipped motion, at eight
-//! phases, facing four ways, at the three pixel sides the desktop draws a
-//! figure at — renders each cell, measures it, and holds every number
-//! against a bound.
+//! (`tairix_wintersun_figure::reference`) — each species' reference figure
+//! in every shipped motion, and each species' least and most walking, at
+//! eight phases, facing four ways — renders each cell, measures it, and holds
+//! every number against a bound. A reference figure is measured at the three
+//! pixel sides the desktop draws a figure at; a least or most at the
+//! smallest, which is the readability floor, since what a figure costs is
+//! counted in outline points and fill area and neither depends on the side.
 //!
 //! # Why the golden is a ledger and not a picture
 //!
@@ -32,14 +35,19 @@ use tairix_raster::surface::Surface;
 use tairix_raster::Color;
 use tairix_theme::Theme;
 use tairix_wintersun_figure::digest as figure_digest;
-use tairix_wintersun_figure::humanoid::{self, palette, Bone};
+use tairix_wintersun_figure::humanoid::{self, Bone};
 use tairix_wintersun_figure::mesh::{self, LEVELS};
 use tairix_wintersun_figure::motion::Kind;
 use tairix_wintersun_figure::paint::{self, Brush, MAX_FIGURE_POINTS};
 use tairix_wintersun_figure::quality;
-use tairix_wintersun_figure::reference::{Cell, Reference, FACINGS, PHASES};
-use tairix_wintersun_figure::rig::Placement;
+use tairix_wintersun_figure::reference::{
+    Cell, Figure, Reference, Sampling, FACINGS, FIGURES, PHASES,
+};
+use tairix_wintersun_figure::rig::{Placement, Rig};
+use tairix_wintersun_figure::rigging::Rigging;
 use tairix_wintersun_figure::socket::Side;
+use tairix_wintersun_figure::species::TROUSERS;
+use tairix_wintersun_figure::tint::Tint;
 
 mod png;
 
@@ -83,8 +91,8 @@ const COVERAGE: (f64, f64) = (0.05, 0.30);
 ///
 /// Three is the requirement rather than the measurement: at the smallest
 /// size a figure is drawn, the head, the trunk and the legs must each still
-/// be a mass of their own. The shipped figure's worst cell resolves into
-/// six, and a taller bound would be fitted to it rather than stated of it.
+/// be a mass of their own. The grid's worst cell resolves into five, and a
+/// taller bound would be fitted to it rather than stated of it.
 const MIN_REGIONS: u32 = 3;
 
 /// The fewest pixels a run must hold to count as a region.
@@ -120,8 +128,9 @@ const TONE_SLACK: u32 = 48 * 48 * 3;
 /// out against both backgrounds, while a flat mid-grey figure has the same
 /// mean and is invisible against neither-quite. What makes a silhouette
 /// readable is that *something* substantial in it separates from the ground.
-/// The shipped figure clears two and three quarters against the light
-/// desktop and eight against the dark one.
+/// Every figure clears it on its trousers alone, whatever its palette — at
+/// a little over two and a fifth against either desktop — which the harness
+/// checks of that tone before any cell.
 const MIN_CONTRAST: f64 = 2.0;
 
 /// How much of the figure a tone must cover to count toward its contrast.
@@ -133,7 +142,8 @@ const MIN_TONE_SHARE: f64 = 0.10;
 ///
 /// The overdraw the scan converter actually pays: a figure whose parts
 /// overlapped many times over would be the frame's cost centre at the size
-/// it is largest. The shipped figure fills about a fifth of its cell.
+/// it is largest. The grid's heaviest figure fills a little over a quarter
+/// of its cell.
 const MAX_OVERDRAW: f64 = 0.5;
 
 /// The furthest a foot may end up from the ground it was asked for.
@@ -178,22 +188,28 @@ pub fn check(root: &Path) -> Result<(), String> {
 
 /// Render the contact sheets into the gitignored output directory.
 ///
+/// Every figure at every side, including the ones the ledger measures only
+/// at the smallest: a sheet is for a human to judge, and a form is judged
+/// best where it is drawn largest.
+///
 /// # Errors
 ///
 /// A measurement that breaches its bound, or a sheet that cannot be
 /// written.
 pub fn sheets(root: &Path) -> Result<(), String> {
-    let figure = Reference::new().map_err(refused)?;
     let out = root.join(SHEETS_DIR);
     std::fs::create_dir_all(&out)
         .map_err(|e| format!("artsheet: cannot create {SHEETS_DIR}: {e}"))?;
     let mut written = Vec::new();
-    for kind in Kind::ALL {
-        for side in SIDES {
-            let path = out.join(format!("{}-{side}.png", kind.name()));
-            std::fs::write(&path, sheet(&figure, kind, side)?)
-                .map_err(|e| format!("artsheet: cannot write {}: {e}", path.display()))?;
-            written.push(path);
+    for entry in &FIGURES {
+        let figure = build(entry)?;
+        for kind in entry.kinds() {
+            for side in SIDES {
+                let path = out.join(format!("{}-{}-{side}.png", entry.name, kind.name()));
+                std::fs::write(&path, sheet(&figure, *kind, side)?)
+                    .map_err(|e| format!("artsheet: cannot write {}: {e}", path.display()))?;
+                written.push(path);
+            }
         }
     }
     report(&written);
@@ -202,78 +218,140 @@ pub fn sheets(root: &Path) -> Result<(), String> {
 
 /// Walk the grid, measure every cell, and render the ledger.
 fn measure() -> Result<String, String> {
-    let figure = Reference::new().map_err(refused)?;
-    let rig = figure.rig();
-    let rigging = humanoid::rigging(rig).map_err(refused)?;
+    undyed_cloth_is_readable()?;
     let mut placement = Placement::new();
     let mut brush = Brush::new();
 
-    let mut ledger = String::with_capacity(1 << 15);
+    let mut ledger = String::with_capacity(1 << 19);
     ledger.push_str(HEADER);
-    let _ = writeln!(ledger, "artsheet 1");
+    let _ = writeln!(ledger, "artsheet 2");
     let _ = writeln!(
         ledger,
         "figure-digest {:#018x}",
         figure_digest::REFERENCE_DIGEST
     );
-    let _ = writeln!(ledger, "tones {}", palette::ALL.len());
     let _ = writeln!(ledger, "sides {SIDES:?}");
-    ledger.push('\n');
 
-    for kind in Kind::ALL {
-        let clip = figure.clip(kind).map_err(refused)?;
-        let used = quality::limits(&rigging, clip).map_err(refused)?;
-        let bend = quality::continuity(clip);
-        let gap = quality::closure(clip);
-        bound(kind.name(), "limits", used, used <= quality::MAX_LIMIT_USE)?;
-        bound(
-            kind.name(),
-            "continuity",
-            bend,
-            bend <= quality::MAX_CONTINUITY,
-        )?;
-        bound(kind.name(), "closure", gap, gap <= quality::MAX_CLOSURE)?;
-        let sunk = quality::grounding(&rigging, clip, &figure.legs()).map_err(refused)?;
-        bound(
-            kind.name(),
-            "grounding",
-            sunk,
-            sunk <= quality::MAX_GROUNDING,
-        )?;
-        let _ = write!(
-            ledger,
-            "motion {:<5} seconds {:.6} limits {:.6} continuity {:.6} closure {:.6} \
-             grounding {:.6}",
-            kind.name(),
-            clip.seconds(),
-            used,
-            bend,
-            gap,
-            sunk
-        );
-        if let Some(authored) = kind.stride() {
-            let ankle = Bone::Ankle(Side::Left).joint();
-            let slide = quality::skate(&rigging, clip, ankle).map_err(refused)?;
-            bound(kind.name(), "skate", slide, slide <= quality::MAX_SKATE)?;
-            let _ = write!(ledger, " stride {authored:.6} skate {slide:.6}");
-        }
+    for entry in &FIGURES {
+        let figure = build(entry)?;
+        let rig = figure.rig();
+        let rigging = humanoid::rigging(rig).map_err(refused)?;
+        let tones = declared(rig);
+        let shaded = shades(&tones);
         ledger.push('\n');
-    }
-    ledger.push('\n');
-
-    for index in 0..Cell::COUNT {
-        let cell = Cell::at(index).ok_or("artsheet: the grid lost a cell")?;
-        for side in SIDES {
-            let measured = cell_row(&figure, cell, side, &mut placement, &mut brush)?;
-            ledger.push_str(&measured);
+        let _ = writeln!(
+            ledger,
+            "figure {} record {} parts {} tones {} reach {:.6}",
+            entry.name,
+            record(entry)?,
+            rig.parts().len(),
+            tones.len(),
+            rig.reach()
+        );
+        for kind in entry.kinds() {
+            motion_row(&mut ledger, entry, &figure, &rigging, *kind)?;
+        }
+        for cell in entry.cells() {
+            for side in sides(entry) {
+                let measured = cell_row(
+                    entry,
+                    &figure,
+                    (&tones, &shaded),
+                    cell,
+                    *side,
+                    &mut placement,
+                    &mut brush,
+                )?;
+                ledger.push_str(&measured);
+            }
         }
     }
     Ok(ledger)
 }
 
-/// Measure one cell at one size, and render its ledger row.
-fn cell_row(
+/// The one colour every figure wears whatever its palette clears both
+/// desktops on its own, which is what makes every palette a record can ask
+/// for readable against either.
+fn undyed_cloth_is_readable() -> Result<(), String> {
+    let lit = mesh::shaded(TROUSERS, LEVELS - 1);
+    let dark = contrast(lit, desktop(&Theme::dark()));
+    let light = contrast(lit, desktop(&Theme::light()));
+    bound("trousers", "contrast-dark", dark, dark >= MIN_CONTRAST)?;
+    bound("trousers", "contrast-light", light, light >= MIN_CONTRAST)
+}
+
+/// `entry`'s figure, built from its checked record.
+fn build(entry: &Figure) -> Result<Reference, String> {
+    let identity = entry
+        .identity()
+        .map_err(|e| format!("artsheet: {} is refused: {e}", entry.name))?;
+    Reference::new(&identity).map_err(refused)
+}
+
+/// `entry`'s record, as the hex a ledger row carries.
+fn record(entry: &Figure) -> Result<String, String> {
+    let identity = entry
+        .identity()
+        .map_err(|e| format!("artsheet: {} is refused: {e}", entry.name))?;
+    Ok(identity
+        .encode()
+        .iter()
+        .fold(String::with_capacity(38), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        }))
+}
+
+/// The sides `entry` is measured at.
+fn sides(entry: &Figure) -> &'static [u32] {
+    match entry.sampling {
+        Sampling::Every => &SIDES,
+        Sampling::Walk => &SIDES[..1],
+    }
+}
+
+/// Measure one motion of one figure, and render its ledger row.
+fn motion_row(
+    ledger: &mut String,
+    entry: &Figure,
     figure: &Reference,
+    rigging: &Rigging<'_>,
+    kind: Kind,
+) -> Result<(), String> {
+    let name = format!("{} {}", entry.name, kind.name());
+    let clip = figure.clip(kind).map_err(refused)?;
+    let used = quality::limits(rigging, clip).map_err(refused)?;
+    let bend = quality::continuity(clip);
+    let gap = quality::closure(clip);
+    bound(&name, "limits", used, used <= quality::MAX_LIMIT_USE)?;
+    bound(&name, "continuity", bend, bend <= quality::MAX_CONTINUITY)?;
+    bound(&name, "closure", gap, gap <= quality::MAX_CLOSURE)?;
+    let sunk = quality::grounding(rigging, clip, &figure.legs()).map_err(refused)?;
+    bound(&name, "grounding", sunk, sunk <= quality::MAX_GROUNDING)?;
+    let _ = write!(
+        ledger,
+        "motion {name} seconds {:.6} limits {used:.6} continuity {bend:.6} \
+         closure {gap:.6} grounding {sunk:.6}",
+        clip.seconds(),
+    );
+    if let Some(authored) = kind.stride() {
+        let ankle = Bone::Ankle(Side::Left).joint();
+        let slide = quality::skate(rigging, clip, ankle).map_err(refused)?;
+        bound(&name, "skate", slide, slide <= quality::MAX_SKATE)?;
+        let _ = write!(ledger, " stride {authored:.6} skate {slide:.6}");
+    }
+    ledger.push('\n');
+    Ok(())
+}
+
+/// Measure one cell at one size, and render its ledger row.
+///
+/// `palette` is the figure's declared tones and every shade of them, in the
+/// order [`shades`] lists them.
+fn cell_row(
+    entry: &Figure,
+    figure: &Reference,
+    palette: (&[Color], &[Color]),
     cell: Cell,
     side: u32,
     placement: &mut Placement,
@@ -283,15 +361,17 @@ fn cell_row(
     let planted = figure.place(cell, scale, at, placement).map_err(refused)?;
     let miss = planted.worst_miss();
     let name = format!(
-        "{} {} {:#06x} {side}",
+        "{} {} {} {:#06x} {side}",
+        entry.name,
         cell.kind.name(),
         cell.step,
         cell.facing.0
     );
     bound(&name, "miss", miss, miss <= MAX_MISS)?;
 
+    let (tones, shaded) = palette;
     for strip in placement.strips() {
-        if !tones().contains(&strip.color) {
+        if !shaded.contains(&strip.color) {
             return Err(format!(
                 "artsheet: {name} paints {:?}, which is no shade of a declared tone",
                 strip.color
@@ -305,12 +385,13 @@ fn cell_row(
     let shadow = Reference::shadow(0.0, scale, at).map_err(refused)?;
     paint::draw(&mut whole, Some(shadow), placement, brush);
 
+    let tone = classify(&bare, shaded);
     let cover = coverage(&bare);
-    let regions = regions(&bare);
-    let shares = shares(&bare);
+    let regions = regions(&bare, &tone);
+    let shares = shares(&tone, tones.len());
     let (dark, light) = (
-        readable(&shares, desktop(&Theme::dark())),
-        readable(&shares, desktop(&Theme::light())),
+        readable(&shares, tones, desktop(&Theme::dark())),
+        readable(&shares, tones, desktop(&Theme::light())),
     );
     let cost = paint::cost(placement);
     let overdraw = cost.fill_area / f64::from(side) / f64::from(side);
@@ -423,28 +504,56 @@ fn coverage(surface: &Surface) -> f64 {
     ratio
 }
 
+/// The tones `rig` draws in: each role one of its surfaces is drawn in, once.
+///
+/// Read off the rig rather than listed here, so a figure is held to exactly
+/// the colours its own record chose, and a role no surface uses cannot claim
+/// pixels in the classification.
+fn declared(rig: &Rig) -> Vec<Color> {
+    let mut tones = Vec::with_capacity(Tint::COUNT);
+    for tint in Tint::ALL {
+        if rig.parts().iter().any(|part| part.tint() == tint) {
+            let tone = rig.tints().get(tint);
+            if !tones.contains(&tone) {
+                tones.push(tone);
+            }
+        }
+    }
+    tones
+}
+
+/// Every pixel's declared tone, if it is one, given every shade of every
+/// declared tone in the order [`shades`] lists them.
+fn classify(surface: &Surface, shaded: &[Color]) -> Vec<Option<u8>> {
+    surface
+        .pixels()
+        .iter()
+        .map(|pixel| shade(*pixel, shaded))
+        .collect()
+}
+
 /// How much of the figure each declared tone covers.
 ///
-/// Over the pixels the painter left at exactly one of the rig's tones, so an
-/// antialiased edge — which is a blend of two of them and of the ground —
+/// Over the pixels the painter left at exactly one of the figure's tones, so
+/// an antialiased edge — which is a blend of two of them and of the ground —
 /// counts toward neither.
-fn shares(surface: &Surface) -> [f64; palette::ALL.len()] {
-    let mut weight = [0u64; palette::ALL.len()];
-    for pixel in surface.pixels() {
-        if let Some(slot) = shade(*pixel) {
-            weight[usize::from(slot)] += 1;
+fn shares(tone: &[Option<u8>], count: usize) -> Vec<f64> {
+    let mut weight = vec![0u64; count];
+    for slot in tone.iter().flatten() {
+        if let Some(held) = weight.get_mut(usize::from(*slot)) {
+            *held += 1;
         }
     }
     let total: u64 = weight.iter().sum();
     if total == 0 {
-        return [0.0; palette::ALL.len()];
+        return vec![0.0; count];
     }
     #[allow(
         clippy::cast_precision_loss,
         reason = "a cell's pixel counts are far below the mantissa's own range"
     )]
     let share = |count: u64| count as f64 / total as f64;
-    weight.map(share)
+    weight.into_iter().map(share).collect()
 }
 
 /// The best contrast any substantial tone of the figure reaches against
@@ -452,9 +561,9 @@ fn shares(surface: &Surface) -> [f64; palette::ALL.len()] {
 ///
 /// Taken at the tone's own lit end rather than its base, because what a
 /// player sees of a rounded surface is the side facing the light.
-fn readable(shares: &[f64; palette::ALL.len()], background: Color) -> f64 {
+fn readable(shares: &[f64], tones: &[Color], background: Color) -> f64 {
     let mut best = 0.0;
-    for (tone, share) in palette::ALL.iter().zip(shares) {
+    for (tone, share) in tones.iter().zip(shares) {
         if *share >= MIN_TONE_SHARE {
             best = f64::max(best, contrast(mesh::shaded(*tone, LEVELS - 1), background));
         }
@@ -462,27 +571,25 @@ fn readable(shares: &[f64; palette::ALL.len()], background: Color) -> f64 {
     best
 }
 
-/// Which of the rig's declared tones a pixel is, if it is one.
+/// Which declared tone a pixel is, if it is one, given every shade of every
+/// declared tone in the order [`shades`] lists them.
 ///
-/// Exact rather than nearest: the painter composites a straight-alpha
-/// colour, so every pixel a single shape covers carries that shape's own
-/// tone however partially it covers it, and only where two shapes overlap
-/// does the answer become a blend that belongs to neither.
-fn shade(pixel: tairix_raster::color::Pixel) -> Option<u8> {
+/// The nearest shade within [`TONE_SLACK`]: the painter composites a
+/// straight-alpha colour, so every pixel a single shape covers carries that
+/// shape's own shade however partially it covers it, and only where two
+/// shapes overlap does the answer become a blend that belongs to neither.
+fn shade(pixel: tairix_raster::color::Pixel, shaded: &[Color]) -> Option<u8> {
     if pixel.a < MIN_TONE_ALPHA {
         return None;
     }
     let straight = pixel.unpremultiply();
     let mut nearest = (TONE_SLACK, None);
-    for (slot, base) in palette::ALL.iter().enumerate() {
-        for level in 0..LEVELS {
-            let lit = mesh::shaded(*base, level);
-            let apart = channel_gap(lit.r, straight.r)
-                + channel_gap(lit.g, straight.g)
-                + channel_gap(lit.b, straight.b);
-            if apart < nearest.0 {
-                nearest = (apart, u8::try_from(slot).ok());
-            }
+    for (index, lit) in shaded.iter().enumerate() {
+        let apart = channel_gap(lit.r, straight.r)
+            + channel_gap(lit.g, straight.g)
+            + channel_gap(lit.b, straight.b);
+        if apart < nearest.0 {
+            nearest = (apart, u8::try_from(index / LEVELS as usize).ok());
         }
     }
     nearest.1
@@ -494,31 +601,31 @@ fn channel_gap(one: u8, other: u8) -> u32 {
     apart * apart
 }
 
-/// Every colour the figure may paint in: each declared tone at each step of
-/// the shading ladder.
+/// Every colour a figure may paint in: each declared tone at each step of
+/// the shading ladder, tone-major.
 ///
-/// Derived from the rig's own tones and the painter's own ladder rather than
-/// listed here, so the conformance check cannot drift from what the painter
-/// does.
-fn tones() -> Vec<Color> {
-    let mut out = Vec::with_capacity(palette::ALL.len() * LEVELS as usize);
-    for base in palette::ALL {
+/// Derived from the figure's own tones and the painter's own ladder rather
+/// than listed here, so the conformance check cannot drift from what the
+/// painter does.
+fn shades(tones: &[Color]) -> Vec<Color> {
+    let mut out = Vec::with_capacity(tones.len() * LEVELS as usize);
+    for base in tones {
         for level in 0..LEVELS {
-            out.push(mesh::shaded(base, level));
+            out.push(mesh::shaded(*base, level));
         }
     }
     out
 }
 
-/// How many connected regions of one declared tone the cell resolves into.
+/// How many connected regions of one declared tone the cell resolves into,
+/// given every pixel's tone.
 ///
 /// Eight-connected, because two pixels meeting at a corner are one mass to
 /// the eye and splitting them would measure the connectivity convention
 /// rather than the figure.
-fn regions(surface: &Surface) -> u32 {
+fn regions(surface: &Surface, tone: &[Option<u8>]) -> u32 {
     let (width, height) = (surface.width(), surface.height());
     let cells = surface.pixels().len();
-    let tone: Vec<Option<u8>> = surface.pixels().iter().map(|p| shade(*p)).collect();
 
     let mut seen = vec![false; cells];
     let mut found = 0;
@@ -646,23 +753,26 @@ fn report(written: &[PathBuf]) {
 
 /// What the committed ledger opens with.
 const HEADER: &str = "\
-# The figure art ledger: the measured state of WinterSun's shipped figure.
+# The figure art ledger: the measured state of WinterSun's figures.
 #
 # Regenerated by `cargo xtask artsheet --write` and verified by the bare
 # `cargo xtask artsheet`, which `ci` runs. Every number here is measured
 # rather than authored, and each has a bound beside its measurement — the
 # pose-side ones in `tairix_wintersun_figure::quality`, the pixel-side ones
 # in `tools/xtask/src/commands/artsheet.rs`. A bound is never widened to
-# admit a change; a number that moves is a change to what the figure does.
+# admit a change; a number that moves is a change to what a figure does.
 #
-# A `motion` row is one shipped clip. A `cell` row is one rendered frame:
-# its motion, which of the eight phases, the heading it faces, the pixel
-# side it was drawn at, a digest of its pixels, and its measurements.
+# A `figure` row is one figure of the grid: its name, its record, and how
+# many surfaces and tones it is drawn from. A `motion` row is one shipped
+# clip played by it. A `cell` row is one rendered frame: its figure, its
+# motion, which of the eight phases, the heading it faces, the pixel side it
+# was drawn at, a digest of its pixels, and its measurements.
 #
 # The contact sheets themselves are rendered on demand by
 # `cargo xtask artsheet --sheets` into the gitignored `images/artsheet/`,
-# phases across and headings down in the order below, so the picture a
-# reviewer judges is always current rather than as-of-last-regeneration.
+# one per figure, motion and side, phases across and headings down, so the
+# picture a reviewer judges is always current rather than
+# as-of-last-regeneration.
 #
 ";
 

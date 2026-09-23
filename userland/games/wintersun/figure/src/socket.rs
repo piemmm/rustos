@@ -107,16 +107,23 @@ pub struct Mount {
     /// back and a grip pointed along the hand are the *rig's* statement and
     /// one blade fits every rig that offers the socket.
     pub orientation: Rotation,
+    /// How large the body is here, against the figure gear is authored for.
+    ///
+    /// Also the rig's statement, for the same reason: a helm authored once
+    /// sits on a dwarf's broad head and an elf's narrow one without either
+    /// knowing which it is on.
+    pub scale: f64,
 }
 
 impl Mount {
-    /// A mount on `joint` at `at`, resting square.
+    /// A mount on `joint` at `at`, resting square, at the authored size.
     #[must_use]
     pub const fn new(joint: JointId, at: Body) -> Self {
         Self {
             joint,
             at,
             orientation: Rotation::REST,
+            scale: 1.0,
         }
     }
 
@@ -124,6 +131,13 @@ impl Mount {
     #[must_use]
     pub const fn oriented(mut self, orientation: Rotation) -> Self {
         self.orientation = orientation;
+        self
+    }
+
+    /// The same mount on a body `scale` times the authored size.
+    #[must_use]
+    pub const fn scaled(mut self, scale: f64) -> Self {
+        self.scale = scale;
         self
     }
 }

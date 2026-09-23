@@ -78,9 +78,10 @@ pub const MAX_SKATE: f64 = 0.01;
 ///
 /// The residue is the gap between the crouch depth a foot path was authored
 /// with and the fold its keys, rounded to six places, actually produce — so
-/// the bound is that rounding rather than a judgement about art. A figure
-/// stands a hundred units tall and the shipped set's worst is the run's
-/// 0.052, which is well inside a pixel at every size the desktop draws one.
+/// the bound is that rounding rather than a judgement about art. It scales
+/// with the leg: the run's is 0.052 on the hundred-unit reference human and
+/// 0.057 on the long-legged elf, well inside a pixel at every size the
+/// desktop draws one.
 pub const MAX_GROUNDING: f64 = 0.08;
 
 /// The worst fraction of a joint's own travel any pose of `clip` uses.

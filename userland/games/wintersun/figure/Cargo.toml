@@ -1,6 +1,6 @@
 [package]
 name = "tairix-wintersun-figure"
-description = "WinterSun's figure engine (plans/FIGURE.md FG2): the rig — a parent-relative joint hierarchy with per-axis rotation limits, parts bound to joints, named equipment sockets, the depth-sorted draw order, and the one body frame that serves every heading without per-direction artwork. no_std, no allocator, forbids unsafe."
+description = "WinterSun's figure engine (plans/FIGURE.md FG2-FG6): the rig and its skinned meshes, the one body frame that serves every heading, clips and the motion layers over them, the measurements the art is gated on, and the validated record a character is built from - species, build, features and palette. no_std, no allocator, forbids unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -30,3 +30,10 @@ tairix-inline = { path = "../../../../lib/inline", version = "=0.0.0" }
 # the figure's claim is made the same way the world's and the simulation's
 # are rather than through a second mixer.
 tairix-hash = { path = "../../../../lib/hash", version = "=0.0.0" }
+
+[dev-dependencies]
+# The record decoder's fuzz harness draws its inputs through the shared
+# seed/budget seam: one place picks the per-run seed, logs it at the start of
+# the test, and bounds the smoke/soak loop. Test scaffolding only; never in a
+# TAIRiX build.
+tairix-fuzzseed = { path = "../../../../tests/fuzzseed", version = "=0.0.0" }

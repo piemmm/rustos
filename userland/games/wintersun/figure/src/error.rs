@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+use crate::identity::IdentityError;
+
 /// A refusal from the figure engine.
 ///
 /// Every variant is a rig or a request that could only draw something nobody
@@ -120,6 +122,8 @@ pub enum FigureError {
     LightUnreal,
     /// Too few samples to measure a cycle over.
     SamplesTooFew,
+    /// A figure record refused, carrying why.
+    Identity(IdentityError),
 }
 
 impl fmt::Display for FigureError {
@@ -173,7 +177,14 @@ impl fmt::Display for FigureError {
             Self::LiftNotClosing => "root-height curve does not close on itself",
             Self::LightUnreal => "light not a real bearing and elevation",
             Self::SamplesTooFew => "too few samples to measure a cycle over",
+            Self::Identity(refused) => return refused.fmt(f),
         };
         f.write_str(text)
+    }
+}
+
+impl From<IdentityError> for FigureError {
+    fn from(refused: IdentityError) -> Self {
+        Self::Identity(refused)
     }
 }

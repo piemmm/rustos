@@ -12,6 +12,8 @@ use crate::mesh::Ring;
 use crate::pose::{Mask, Param, Pose};
 use crate::rig::{Part, Rig};
 use crate::socket::Side;
+use crate::testing::human;
+use crate::tint::{Tint, Tints};
 
 const ROOT: JointId = JointId::new(0);
 const CHILD: JointId = JointId::new(1);
@@ -45,16 +47,13 @@ fn fixture() -> Rig {
             Joint::new(Some(ROOT), Body::new(0.0, 0.0, -10.0), hinge),
         ],
         &[
-            Part::new(ROOT, Body::ORIGIN, &MASS, TONE).expect("a real mass"),
-            Part::new(CHILD, Body::ORIGIN, &LIMB, TONE).expect("a real limb"),
+            Part::new(ROOT, Body::ORIGIN, &MASS, Tint::Skin).expect("a real mass"),
+            Part::new(CHILD, Body::ORIGIN, &LIMB, Tint::Skin).expect("a real limb"),
         ],
         &[],
+        Tints::new([TONE; Tint::COUNT]),
     )
     .expect("the fixture rig is well formed")
-}
-
-fn humanoid_rig() -> Rig {
-    humanoid::rig().expect("the shipped humanoid rig is well formed")
 }
 
 /// How `bone` is turned when `param` is driven to `value`.
@@ -127,7 +126,7 @@ fn driven_reports_exactly_the_parameters_in_the_table() {
 
 #[test]
 fn the_shipped_humanoid_declares_every_parameter() {
-    let rig = humanoid_rig();
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the shipped table binds");
     assert_eq!(rigging.driven(), Mask::ALL);
 }
@@ -151,7 +150,7 @@ fn a_parameter_the_table_does_not_name_turns_nothing() {
 
 #[test]
 fn rest_turns_nothing() {
-    let rig = humanoid_rig();
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the shipped table binds");
     let posture = rigging.posture(&Pose::REST).expect("rest is in limit");
     for bone in Bone::ALL {
@@ -164,7 +163,7 @@ fn rest_turns_nothing() {
 
 #[test]
 fn an_undriven_joint_stays_at_rest_however_the_pose_is_set() {
-    let rig = humanoid_rig();
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the shipped table binds");
     let mut pose = Pose::REST;
     for param in Param::ALL {
@@ -181,7 +180,7 @@ fn an_undriven_joint_stays_at_rest_however_the_pose_is_set() {
 
 #[test]
 fn every_extreme_of_every_parameter_stays_inside_the_limits() {
-    let rig = humanoid_rig();
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the shipped table binds");
 
     for param in Param::ALL {
@@ -204,7 +203,7 @@ fn every_extreme_of_every_parameter_stays_inside_the_limits() {
 
 #[test]
 fn every_parameter_at_its_extreme_at_once_stays_inside_the_limits() {
-    let rig = humanoid_rig();
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the shipped table binds");
 
     for reach in [true, false] {
@@ -231,7 +230,7 @@ fn every_parameter_at_its_extreme_at_once_stays_inside_the_limits() {
 
 #[test]
 fn a_forward_sense_reaches_the_upper_bound_at_one() {
-    let rig = humanoid_rig();
+    let rig = human();
     let waist = rig.joints()[Bone::Waist.joint().index()].limits;
     let turned = turn(&rig, Param::SpineBend, 1.0, Bone::Waist);
     assert!(close(turned.pitch, waist.pitch.max()));
@@ -239,7 +238,7 @@ fn a_forward_sense_reaches_the_upper_bound_at_one() {
 
 #[test]
 fn a_forward_sense_reaches_the_lower_bound_at_minus_one() {
-    let rig = humanoid_rig();
+    let rig = human();
     let waist = rig.joints()[Bone::Waist.joint().index()].limits;
     let turned = turn(&rig, Param::SpineBend, -1.0, Bone::Waist);
     assert!(close(turned.pitch, waist.pitch.min()));
@@ -247,7 +246,7 @@ fn a_forward_sense_reaches_the_lower_bound_at_minus_one() {
 
 #[test]
 fn a_reverse_sense_reaches_the_lower_bound_at_one() {
-    let rig = humanoid_rig();
+    let rig = human();
     let shoulder = rig.joints()[Bone::Shoulder(Side::Left).joint().index()].limits;
     let turned = turn(
         &rig,
@@ -260,7 +259,7 @@ fn a_reverse_sense_reaches_the_lower_bound_at_one() {
 
 #[test]
 fn each_half_of_a_lopsided_limit_is_scaled_on_its_own() {
-    let rig = humanoid_rig();
+    let rig = human();
     let shoulder = rig.joints()[Bone::Shoulder(Side::Left).joint().index()].limits;
     let forward = turn(
         &rig,
@@ -280,7 +279,7 @@ fn each_half_of_a_lopsided_limit_is_scaled_on_its_own() {
 
 #[test]
 fn an_elbow_cannot_be_driven_past_straight() {
-    let rig = humanoid_rig();
+    let rig = human();
     for side in Side::BOTH {
         for step in 0..=20 {
             let value = f64::from(step) / 20.0;
@@ -296,7 +295,7 @@ fn an_elbow_cannot_be_driven_past_straight() {
 
 #[test]
 fn a_full_elbow_bend_reaches_the_fold() {
-    let rig = humanoid_rig();
+    let rig = human();
     let elbow = rig.joints()[Bone::Elbow(Side::Left).joint().index()].limits;
     let turned = turn(
         &rig,
@@ -309,7 +308,7 @@ fn a_full_elbow_bend_reaches_the_fold() {
 
 #[test]
 fn a_full_knee_bend_reaches_the_fold() {
-    let rig = humanoid_rig();
+    let rig = human();
     let knee = rig.joints()[Bone::Knee(Side::Left).joint().index()].limits;
     let turned = turn(
         &rig,
@@ -322,7 +321,7 @@ fn a_full_knee_bend_reaches_the_fold() {
 
 #[test]
 fn an_outward_splay_is_outward_on_both_sides() {
-    let rig = humanoid_rig();
+    let rig = human();
     let left = turn(
         &rig,
         Param::ShoulderSplay(Side::Left),
@@ -348,7 +347,7 @@ fn an_outward_splay_is_outward_on_both_sides() {
 
 #[test]
 fn an_outward_hip_splay_is_outward_on_both_sides() {
-    let rig = humanoid_rig();
+    let rig = human();
     let left = turn(
         &rig,
         Param::HipSplay(Side::Left),
@@ -368,7 +367,7 @@ fn an_outward_hip_splay_is_outward_on_both_sides() {
 
 #[test]
 fn a_forward_swing_is_forward_on_both_sides() {
-    let rig = humanoid_rig();
+    let rig = human();
     for side in Side::BOTH {
         let arm = turn(&rig, Param::ShoulderSwing(side), 1.0, Bone::Shoulder(side));
         let leg = turn(&rig, Param::HipSwing(side), 1.0, Bone::Hip(side));
@@ -379,7 +378,7 @@ fn a_forward_swing_is_forward_on_both_sides() {
 
 #[test]
 fn a_parameter_drives_both_joints_it_names() {
-    let rig = humanoid_rig();
+    let rig = human();
     let neck = turn(&rig, Param::HeadTurn, 1.0, Bone::Neck);
     let skull = turn(&rig, Param::HeadTurn, 1.0, Bone::Head);
     assert!(neck.yaw > 0.0, "the neck did not turn");
@@ -411,7 +410,7 @@ fn every_axis_has_its_own_slot() {
 /// something cares about is the whole chain's, not one joint's share.
 #[test]
 fn an_angle_is_summed_over_every_joint_a_parameter_turns() {
-    let rig = humanoid::rig().expect("the humanoid rig");
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
     let neck = rig.joints()[Bone::Neck.index()].limits.yaw.max();
     let head = rig.joints()[Bone::Head.index()].limits.yaw.max();
@@ -431,7 +430,7 @@ fn an_angle_is_summed_over_every_joint_a_parameter_turns() {
 /// it was.
 #[test]
 fn a_value_round_trips_through_its_angle_on_every_drive() {
-    let rig = humanoid::rig().expect("the humanoid rig");
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
 
     for param in Param::ALL {
@@ -454,7 +453,7 @@ fn a_value_round_trips_through_its_angle_on_every_drive() {
 /// the sign bug got wrong.
 #[test]
 fn a_reversed_drive_inverts_a_negative_angle_to_a_positive_value() {
-    let rig = humanoid::rig().expect("the humanoid rig");
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
     let swing = Param::HipSwing(Side::Left);
     let forward = rigging
@@ -471,7 +470,7 @@ fn a_reversed_drive_inverts_a_negative_angle_to_a_positive_value() {
 /// undriven parameter has no value at all.
 #[test]
 fn an_unreachable_angle_or_an_undriven_parameter_has_no_value() {
-    let rig = humanoid::rig().expect("the humanoid rig");
+    let rig = human();
     let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
     let knee = Param::KneeBend(Side::Left);
     assert_eq!(rigging.value_for(knee, -0.5), None, "a knee cannot unfold");

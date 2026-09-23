@@ -15,6 +15,8 @@ use tairix_util::mathf;
 
 use crate::error::FigureError;
 use crate::frame::{Body, Rotation};
+use crate::pose::{Overlay, Param};
+use crate::rigging::Rigging;
 use crate::spring::{Motion, Spring};
 
 /// Below this, in radians per second, a hem has stopped moving.
@@ -100,6 +102,35 @@ impl Sway {
             0.0,
             mathf::clamp(self.roll.value, -self.limit, self.limit),
         )
+    }
+
+    /// The lean as deltas on the parameters that turn a hanging part's own
+    /// joint, for anatomy — a tail — rather than gear on a socket.
+    ///
+    /// A joint turns only through the pose, so the lean sums with the clip
+    /// and every other layer and lands inside the joint's limits. `pitch` and
+    /// `roll` name the parameters that turn the joint's pitch and roll; one
+    /// that drives nothing on `rigging`, or cannot travel the way the lean
+    /// asks, adds nothing.
+    ///
+    /// # Errors
+    ///
+    /// Cannot fail for a lean this sway holds, which is finite; the result
+    /// is a `Result` because [`Overlay::add`] is the one gate on a delta.
+    pub fn overlay(
+        &self,
+        rigging: &Rigging<'_>,
+        pitch: Param,
+        roll: Param,
+    ) -> Result<Overlay, FigureError> {
+        let turn = self.turn();
+        let mut overlay = Overlay::NONE;
+        for (param, angle) in [(pitch, turn.pitch), (roll, turn.roll)] {
+            if let Some(value) = rigging.value_for(param, angle) {
+                overlay.add(param, value)?;
+            }
+        }
+        Ok(overlay)
     }
 
     /// Whether it has stopped moving.

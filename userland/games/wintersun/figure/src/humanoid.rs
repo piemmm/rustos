@@ -1,8 +1,24 @@
-//! The humanoid rig: the first figure the engine draws.
+//! The humanoid rig: the one skeleton every species stands on.
 //!
 //! Proportioned in percentages of [`STANDING_HEIGHT`], so every offset below
 //! reads directly as a fraction of the figure's own height and a reviewer can
 //! check a shoulder sits at 82% without converting anything.
+//!
+//! # Built from a record
+//!
+//! A figure's [`Identity`] reaches this skeleton through two things only:
+//! the offsets between its joints, which are values, and a [`Stretch`] on
+//! each surface's authored rings. A longer limb is a longer bone and a
+//! stretched surface rather than a different mesh, so the rings stay
+//! borrowed first-party templates, and species and features choose between
+//! templates rather than bending one.
+//!
+//! # Height is height
+//!
+//! Limb and head proportion change a figure's shape and not its stature: the
+//! whole skeleton is scaled so the crown stands exactly where the height
+//! setting puts it, with the sole on the ground. A long-legged figure of a
+//! given height has the shorter trunk, which is what a proportion is.
 //!
 //! # One table, two sides
 //!
@@ -22,33 +38,44 @@
 //! [`Rig::new`]: crate::rig::Rig::new
 
 use tairix_inline::ArrayVec;
+use tairix_util::mathf;
 
 use crate::error::FigureError;
-use crate::frame::Body;
+use crate::frame::{Basis, Body, Rotation};
+use crate::identity::{Features, Identity, TailForm};
 use crate::joint::{Joint, JointId, Limit, Limits, MAX_JOINTS};
-use crate::mesh::Ring;
+use crate::mesh::{self, Ring, Stretch};
 use crate::plant::Leg;
 use crate::pose::{Mask, Param};
 use crate::rig::{Part, Rig, MAX_PARTS};
 use crate::rigging::{Axis, Drive, Rigging};
 use crate::socket::{Mount, Side, Socket};
+use crate::tint::Tint;
 
-/// How tall the figure stands, in the figure-local pixels the rig is authored
-/// in.
+mod feature;
+
+/// How tall the reference figure stands, in the figure-local pixels the rig
+/// is authored in.
 ///
-/// A hundred, so an offset is a percentage of height. A caller draws the
-/// figure at any size by scaling: the factor is the height it wants over
-/// this.
+/// A hundred, so an offset is a percentage of height. A record's height
+/// setting is a factor on this, and a caller draws a figure at any size by
+/// scaling: the factor is the height it wants over this.
 pub const STANDING_HEIGHT: f64 = 100.0;
 
 /// How many joints the humanoid has.
-pub const JOINT_COUNT: usize = 17;
+pub const JOINT_COUNT: usize = 18;
 
-/// How many parts it is drawn from.
-pub const PART_COUNT: usize = 21;
+/// How many surfaces every figure has before its features: trunk, head,
+/// arms and legs.
+pub const BODY_PARTS: usize = 21;
+
+/// How many surfaces the richest figure has: the body, two eyes, two ears
+/// each with a marked face, two horns, a two-part style of hair, and a tail
+/// with a marked tip.
+pub const MOST_PARTS: usize = BODY_PARTS + 12;
 
 const _: () = assert!(JOINT_COUNT <= MAX_JOINTS);
-const _: () = assert!(PART_COUNT <= MAX_PARTS);
+const _: () = assert!(MOST_PARTS == MAX_PARTS);
 
 /// The humanoid's named joints.
 ///
@@ -78,6 +105,12 @@ pub enum Bone {
     Knee(Side),
     /// The ankle.
     Ankle(Side),
+    /// The root of a tail.
+    ///
+    /// Every figure has one, tailed or not, so every species shares one
+    /// skeleton and every clip plays on all of them; on a figure without a
+    /// tail it simply carries nothing.
+    Tail,
 }
 
 impl Bone {
@@ -100,6 +133,7 @@ impl Bone {
         Self::Hip(Side::Right),
         Self::Knee(Side::Right),
         Self::Ankle(Side::Right),
+        Self::Tail,
     ];
 
     /// The joint it names.
@@ -120,6 +154,7 @@ impl Bone {
             Self::Hip(side) => 11 + 3 * side as u8,
             Self::Knee(side) => 12 + 3 * side as u8,
             Self::Ankle(side) => 13 + 3 * side as u8,
+            Self::Tail => 17,
         })
     }
 
@@ -130,82 +165,159 @@ impl Bone {
     }
 }
 
-/// The tones the figure is drawn in.
+/// Assemble the humanoid for `identity`.
 ///
-/// Named once here rather than as literals at each part, so a re-tint is a
-/// change to this block.
-pub mod palette {
-    use tairix_raster::Color;
-
-    /// Lit skin: the brow and the back of a hand.
-    pub const SKIN_LIT: Color = Color::rgb(0xE8, 0xBC, 0x98);
-    /// Mid skin: the face, the neck, a bare arm.
-    pub const SKIN_MID: Color = Color::rgb(0xCE, 0x9E, 0x78);
-    /// Skin turned away from the light.
-    pub const SKIN_SHADE: Color = Color::rgb(0xA8, 0x7A, 0x58);
-    /// The lit face of the tunic.
-    pub const CLOTH_LIT: Color = Color::rgb(0x4C, 0x5A, 0x6E);
-    /// The tunic in shadow, and the trousers.
-    pub const CLOTH_SHADE: Color = Color::rgb(0x33, 0x3E, 0x4E);
-    /// Boots and belt leather.
-    pub const LEATHER: Color = Color::rgb(0x4A, 0x36, 0x24);
-
-    /// Every tone the figure is drawn in.
-    ///
-    /// The list a conformance check reads, so "on palette" is a membership
-    /// test rather than an eye. A test holds it against the rig's own parts,
-    /// so a tone added above and left out here fails rather than escaping
-    /// the check.
-    pub const ALL: [Color; 6] = [
-        SKIN_LIT,
-        SKIN_MID,
-        SKIN_SHADE,
-        CLOTH_LIT,
-        CLOTH_SHADE,
-        LEATHER,
-    ];
-}
-
-/// Assemble the humanoid rig.
-///
-/// Built rather than a constant because the joint limits are checked
-/// intervals and the two sides are mirrored from one table. A caller builds
-/// it once and holds it: a rig does not change between frames, and validating
-/// one per frame would be work paid for nothing.
+/// A caller builds it once and holds it: a rig does not change between
+/// frames, and a palette edit re-tints it through [`Rig::retint`] rather
+/// than rebuilding it.
 ///
 /// # Errors
 ///
-/// Only what [`Rig::new`] refuses, and only if this table is edited into
-/// something inconsistent — which is the point of checking it here.
+/// Only what [`Rig::new`] refuses, and only if the tables here are edited
+/// into something inconsistent — every identity can be built, which the
+/// crate's tests hold across every species' extremes and every form.
 ///
 /// [`Rig::new`]: crate::rig::Rig::new
-pub fn rig() -> Result<Rig, FigureError> {
+/// [`Rig::retint`]: crate::rig::Rig::retint
+pub fn rig(identity: &Identity) -> Result<Rig, FigureError> {
+    let body = Physique::of(identity)?;
+    let features = identity.spec().features;
     let mut joints: ArrayVec<Joint, MAX_JOINTS> = ArrayVec::new();
     let mut parts: ArrayVec<Part, MAX_PARTS> = ArrayVec::new();
     let mut mounts: ArrayVec<(Socket, Mount), { Socket::COUNT }> = ArrayVec::new();
 
-    spine(&mut joints)?;
-    arms(&mut joints)?;
-    leg_joints(&mut joints)?;
-    trunk(&mut parts)?;
-    limbs(&mut parts)?;
-    sockets(&mut mounts)?;
+    spine(&mut joints, &body)?;
+    arms(&mut joints, &body)?;
+    leg_joints(&mut joints, &body)?;
+    tail_joint(&mut joints, &body)?;
+    trunk(&mut parts, &body)?;
+    head(&mut parts, &body, features)?;
+    limbs(&mut parts, &body)?;
+    tail(&mut parts, &body, features.tail)?;
+    sockets(&mut mounts, &body)?;
 
-    Rig::new(&joints, &parts, &mounts)
+    Rig::new(&joints, &parts, &mounts, identity.tints())
+}
+
+/// What a record's proportions come to on this skeleton.
+///
+/// Every factor but `scale` is a proportion on the reference figure; `scale`
+/// then turns reference units into the figure's own, so every length below
+/// is written in reference units and passes through it once.
+#[derive(Copy, Clone, Debug)]
+struct Physique {
+    /// Figure-local units per reference unit: what puts the crown at the
+    /// stated height.
+    scale: f64,
+    /// Where the pelvis sits, in reference units.
+    pelvis: f64,
+    /// Breadth of the chest and shoulders.
+    chest: f64,
+    /// Breadth of the pelvis and hips.
+    hips: f64,
+    /// Depth of the trunk, front to back.
+    depth: f64,
+    /// Girth of a limb, which takes part of the body's.
+    limb: f64,
+    /// Girth of the neck, which takes less of it again.
+    neck: f64,
+    /// Limb length.
+    limbs: f64,
+    /// Head size.
+    head: f64,
+    /// Hair fullness.
+    volume: f64,
+}
+
+impl Physique {
+    fn of(identity: &Identity) -> Result<Self, FigureError> {
+        let wanted = identity.proportions();
+        let pelvis = sole_depth()? + (THIGH_LENGTH + SHANK_LENGTH) * wanted.limbs + HIP_DROP;
+        let crown = pelvis
+            + WAIST_RISE
+            + CHEST_RISE
+            + NECK_RISE
+            + ATLAS_RISE
+            + feature::CROWN * wanted.head;
+        Ok(Self {
+            scale: wanted.height * STANDING_HEIGHT / crown,
+            pelvis,
+            chest: wanted.girth * (1.0 + wanted.taper),
+            hips: wanted.girth * (1.0 - wanted.taper),
+            depth: wanted.girth,
+            limb: 1.0 + (wanted.girth - 1.0) * LIMB_GIRTH,
+            neck: 1.0 + (wanted.girth - 1.0) * NECK_GIRTH,
+            limbs: wanted.limbs,
+            head: wanted.head,
+            volume: wanted.volume,
+        })
+    }
+
+    /// A position given in reference units, in the figure's own.
+    fn at(&self, forward: f64, side: f64, up: f64) -> Body {
+        Body::new(forward, side, up).scaled(self.scale)
+    }
+
+    /// A trunk or limb surface stretched `along` its spine, `wide` across it
+    /// and `deep` through it.
+    fn stretch(&self, along: f64, wide: f64, deep: f64) -> Stretch {
+        Stretch {
+            forward: 1.0,
+            side: 1.0,
+            up: along,
+            wide,
+            deep,
+        }
+        .scaled(self.scale)
+    }
+
+    /// Every length of a surface scaled by `factor`.
+    fn uniform(&self, factor: f64) -> Stretch {
+        Stretch::uniform(factor * self.scale)
+    }
+
+    /// Anything the head carries, which grows with the head.
+    fn on_head(&self, at: Body) -> Body {
+        at.scaled(self.head * self.scale)
+    }
+}
+
+/// How far below its ankle the reference foot reaches, which is how high an
+/// ankle stands for its sole to meet the ground.
+///
+/// Read off the foot's own rings rather than stated beside them, so a
+/// reshaped foot cannot leave the figure standing in or above the floor.
+fn sole_depth() -> Result<f64, FigureError> {
+    let hoops = mesh::carry(
+        &FOOT,
+        Stretch::NONE,
+        Body::new(0.0, 0.0, -FOOT_DROP),
+        (Body::ORIGIN, Basis::IDENTITY),
+        None,
+        None,
+    )?;
+    let mut lowest = 0.0;
+    for hoop in &hoops {
+        // A cross-section is an ellipse in space, so how far down it reaches
+        // is the vertical reach of its two half-axes together.
+        let reach = mathf::hypot(hoop.wide.up, hoop.deep.up);
+        lowest = mathf::fmin(lowest, hoop.at.up - reach);
+    }
+    Ok(-lowest)
 }
 
 /// The spine, bottom to top. Each joint's offset is the length of the
 /// segment below it, so moving one moves everything it carries.
-fn spine(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
+fn spine(joints: &mut ArrayVec<Joint, MAX_JOINTS>, body: &Physique) -> Result<(), FigureError> {
     push_joint(
         joints,
-        Joint::new(None, Body::new(0.0, 0.0, PELVIS_HEIGHT), spine_limits()?),
+        Joint::new(None, body.at(0.0, 0.0, body.pelvis), spine_limits()?),
     )?;
     push_joint(
         joints,
         Joint::new(
             Some(Bone::Pelvis.joint()),
-            Body::new(0.0, 0.0, 9.0),
+            body.at(0.0, 0.0, WAIST_RISE),
             spine_limits()?,
         ),
     )?;
@@ -213,7 +325,7 @@ fn spine(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
         joints,
         Joint::new(
             Some(Bone::Waist.joint()),
-            Body::new(0.0, 0.0, 13.0),
+            body.at(0.0, 0.0, CHEST_RISE),
             spine_limits()?,
         ),
     )?;
@@ -221,7 +333,7 @@ fn spine(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
         joints,
         Joint::new(
             Some(Bone::Chest.joint()),
-            Body::new(0.0, 0.0, 10.0),
+            body.at(0.0, 0.0, NECK_RISE),
             neck_limits()?,
         ),
     )?;
@@ -229,7 +341,7 @@ fn spine(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
         joints,
         Joint::new(
             Some(Bone::Neck.joint()),
-            Body::new(0.0, 0.0, 4.0),
+            body.at(0.0, 0.0, ATLAS_RISE),
             skull_limits()?,
         ),
     )?;
@@ -238,14 +350,14 @@ fn spine(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
 }
 
 /// Both arms, mirrored from one pass.
-fn arms(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
+fn arms(joints: &mut ArrayVec<Joint, MAX_JOINTS>, body: &Physique) -> Result<(), FigureError> {
     for side in Side::BOTH {
         let across = side.across();
         push_joint(
             joints,
             Joint::new(
                 Some(Bone::Chest.joint()),
-                Body::new(0.0, across * 11.5, 8.0),
+                body.at(0.0, across * SHOULDER_WIDTH * body.chest, SHOULDER_RISE),
                 shoulder_limits(side)?,
             ),
         )?;
@@ -253,7 +365,7 @@ fn arms(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
             joints,
             Joint::new(
                 Some(Bone::Shoulder(side).joint()),
-                Body::new(0.0, 0.0, -UPPER_ARM_LENGTH),
+                body.at(0.0, 0.0, -UPPER_ARM_LENGTH * body.limbs),
                 elbow_limits()?,
             ),
         )?;
@@ -261,7 +373,7 @@ fn arms(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
             joints,
             Joint::new(
                 Some(Bone::Elbow(side).joint()),
-                Body::new(0.0, 0.0, -FOREARM_LENGTH),
+                body.at(0.0, 0.0, -FOREARM_LENGTH * body.limbs),
                 wrist_limits()?,
             ),
         )?;
@@ -271,14 +383,17 @@ fn arms(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
 }
 
 /// Both legs, mirrored from one pass.
-fn leg_joints(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureError> {
+fn leg_joints(
+    joints: &mut ArrayVec<Joint, MAX_JOINTS>,
+    body: &Physique,
+) -> Result<(), FigureError> {
     for side in Side::BOTH {
         let across = side.across();
         push_joint(
             joints,
             Joint::new(
                 Some(Bone::Pelvis.joint()),
-                Body::new(0.0, across * 9.0, -1.0),
+                body.at(0.0, across * HIP_WIDTH * body.hips, -HIP_DROP),
                 hip_limits(side)?,
             ),
         )?;
@@ -286,7 +401,7 @@ fn leg_joints(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureErro
             joints,
             Joint::new(
                 Some(Bone::Hip(side).joint()),
-                Body::new(0.0, 0.0, -THIGH_LENGTH),
+                body.at(0.0, 0.0, -THIGH_LENGTH * body.limbs),
                 knee_limits()?,
             ),
         )?;
@@ -294,7 +409,7 @@ fn leg_joints(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureErro
             joints,
             Joint::new(
                 Some(Bone::Knee(side).joint()),
-                Body::new(0.0, 0.0, -SHANK_LENGTH),
+                body.at(0.0, 0.0, -SHANK_LENGTH * body.limbs),
                 ankle_limits()?,
             ),
         )?;
@@ -303,16 +418,34 @@ fn leg_joints(joints: &mut ArrayVec<Joint, MAX_JOINTS>) -> Result<(), FigureErro
     Ok(())
 }
 
+/// The tail's root, low on the back of the pelvis, resting pitched so a tail
+/// hangs down its frame the way a limb hangs down its joint — which is what
+/// lets a sway layer drive it exactly as it drives a hanging hem.
+fn tail_joint(
+    joints: &mut ArrayVec<Joint, MAX_JOINTS>,
+    body: &Physique,
+) -> Result<(), FigureError> {
+    push_joint(
+        joints,
+        Joint::new(
+            Some(Bone::Pelvis.joint()),
+            body.at(-TAIL_BACK * body.depth, 0.0, -TAIL_DROP),
+            tail_limits()?,
+        )
+        .oriented(Rotation::new(TAIL_HANG, 0.0, 0.0)),
+    )
+}
+
 /// A ring at `up` above the part's origin, `wide` across and `deep`
 /// through.
 const fn hoop(up: f64, wide: f64, deep: f64) -> Ring {
     Ring::new(Body::new(0.0, 0.0, up), wide, deep)
 }
 
-/// The trunk, bottom to top. Each part's upper rings are carried by the
-/// joint above it, so the torso bends through the waist and the chest
+/// The trunk and neck, bottom to top. Each part's upper rings are carried by
+/// the joint above it, so the torso bends through the waist and the chest
 /// rather than telescoping at them.
-fn trunk(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
+fn trunk(parts: &mut ArrayVec<Part, MAX_PARTS>, body: &Physique) -> Result<(), FigureError> {
     const PELVIS: [Ring; 5] = [
         hoop(-7.5, 4.0, 3.0),
         hoop(-5.0, 9.4, 6.6),
@@ -332,69 +465,134 @@ fn trunk(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
         hoop(11.5, 5.4, 4.4).bound(1.00),
     ];
     const NECK: [Ring; 2] = [hoop(0.0, 4.6, 4.4), hoop(4.0, 4.3, 4.1).bound(1.00)];
-    // Every free end is closed: a tube left open shows its own near rim as
-    // a crescent where the surface should have ended, which at the crown of
-    // a head reads as a notch cut out of it.
-    const SKULL: [Ring; 6] = [
-        hoop(-1.0, 2.6, 2.8),
-        hoop(1.5, 4.4, 4.8),
-        hoop(4.5, 5.0, 5.5),
-        hoop(8.0, 4.6, 5.2),
-        hoop(10.5, 3.2, 3.6),
-        hoop(12.0, 0.9, 1.0),
-    ];
 
     push_part(
         parts,
-        Part::new(
-            Bone::Pelvis.joint(),
-            Body::ORIGIN,
-            &PELVIS,
-            palette::CLOTH_SHADE,
-        )?
-        .spanning(Bone::Waist.joint()),
+        Part::new(Bone::Pelvis.joint(), Body::ORIGIN, &PELVIS, Tint::Trousers)?
+            .stretched(body.stretch(1.0, body.hips, body.depth))?
+            .spanning(Bone::Waist.joint()),
     )?;
     push_part(
         parts,
-        Part::new(
-            Bone::Waist.joint(),
-            Body::ORIGIN,
-            &WAIST,
-            palette::CLOTH_LIT,
-        )?
-        .spanning(Bone::Chest.joint()),
+        Part::new(Bone::Waist.joint(), Body::ORIGIN, &WAIST, Tint::Accent)?
+            .stretched(body.stretch(1.0, f64::midpoint(body.hips, body.chest), body.depth))?
+            .spanning(Bone::Chest.joint()),
     )?;
     push_part(
         parts,
-        Part::new(
-            Bone::Chest.joint(),
-            Body::ORIGIN,
-            &CHEST,
-            palette::CLOTH_LIT,
-        )?
-        .spanning(Bone::Neck.joint()),
+        Part::new(Bone::Chest.joint(), Body::ORIGIN, &CHEST, Tint::Accent)?
+            .stretched(body.stretch(1.0, body.chest, body.depth))?
+            .spanning(Bone::Neck.joint()),
     )?;
     push_part(
         parts,
-        Part::new(Bone::Neck.joint(), Body::ORIGIN, &NECK, palette::SKIN_SHADE)?
+        Part::new(Bone::Neck.joint(), Body::ORIGIN, &NECK, Tint::Skin)?
+            .stretched(body.stretch(1.0, body.neck, body.neck))?
             .spanning(Bone::Head.joint()),
-    )?;
+    )
+}
+
+/// The skull and everything it carries, in the order a depth tie paints them.
+///
+/// The skull and the cap of hair over it sort by one point, so they always
+/// tie and the cap, coming after, covers the skull from every side. A mass of
+/// hair down the back sorts behind that point and comes before the skull, so
+/// it covers the head only where the back of the head is the nearer.
+fn head(
+    parts: &mut ArrayVec<Part, MAX_PARTS>,
+    body: &Physique,
+    features: Features,
+) -> Result<(), FigureError> {
+    let skull = body.uniform(body.head);
+    let skull_rings = feature::skull_for(features.face);
+    let centre = feature::centre(skull_rings);
+    let behind_centre = centre.plus(Body::new(-feature::BEHIND, 0.0, 0.0));
+    let hair = features.hair.map(feature::hair_for);
+    let fullness = Stretch {
+        forward: body.volume,
+        side: body.volume,
+        up: 1.0,
+        wide: body.volume,
+        deep: body.volume,
+    }
+    .scaled(body.head * body.scale);
+
+    if let Some(behind) = hair.and_then(|style| style.behind) {
+        push_part(
+            parts,
+            Part::new(Bone::Head.joint(), Body::ORIGIN, behind, Tint::Hair)?
+                .stretched(fullness)?
+                .sorted_at(behind_centre)?,
+        )?;
+    }
     push_part(
         parts,
-        Part::new(Bone::Head.joint(), Body::ORIGIN, &SKULL, palette::SKIN_MID)?,
+        Part::new(Bone::Head.joint(), Body::ORIGIN, skull_rings, Tint::Skin)?
+            .stretched(skull)?
+            .sorted_at(centre)?,
     )?;
+    if let Some(style) = hair {
+        push_part(
+            parts,
+            Part::new(Bone::Head.joint(), Body::ORIGIN, style.over, Tint::Hair)?
+                .stretched(fullness)?
+                .sorted_at(centre)?,
+        )?;
+    }
+
+    for side in Side::BOTH {
+        let at = Body::new(
+            feature::EYE_AT.forward,
+            feature::EYE_AT.side * side.across(),
+            feature::EYE_AT.up,
+        );
+        push_part(
+            parts,
+            Part::new(
+                Bone::Head.joint(),
+                body.on_head(at),
+                feature::eye_for(features.eyes),
+                Tint::Eyes,
+            )?
+            .stretched(skull)?,
+        )?;
+    }
+    for side in Side::BOTH {
+        let ear = feature::ear_for(features.ears, side);
+        let at = body.on_head(ear.at);
+        push_part(
+            parts,
+            Part::new(Bone::Head.joint(), at, ear.outer, ear.tint)?.stretched(skull)?,
+        )?;
+        if let Some(inner) = ear.inner {
+            push_part(
+                parts,
+                Part::new(Bone::Head.joint(), at, inner, Tint::Markings)?.stretched(skull)?,
+            )?;
+        }
+    }
+    if let Some(form) = features.horns {
+        for side in Side::BOTH {
+            let (at, rings) = feature::horn_for(form, side);
+            push_part(
+                parts,
+                Part::new(Bone::Head.joint(), body.on_head(at), rings, Tint::Markings)?
+                    .stretched(skull)?,
+            )?;
+        }
+    }
 
     Ok(())
 }
 
 /// The arms and the legs, each mirrored from one pass.
-fn limbs(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
-    arm_parts(parts)?;
-    leg_parts(parts)
+fn limbs(parts: &mut ArrayVec<Part, MAX_PARTS>, body: &Physique) -> Result<(), FigureError> {
+    arm_parts(parts, body)?;
+    leg_parts(parts, body)
 }
 
 /// Both arms, and the sleeve each swings out of.
-fn arm_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
+fn arm_parts(parts: &mut ArrayVec<Part, MAX_PARTS>, body: &Physique) -> Result<(), FigureError> {
     // The sleeve belongs to the shoulder joint, not to the arm, so the arm
     // can swing without opening a gap where it meets the trunk.
     // The hem ends flush with the arm beneath it: a cap narrower than what
@@ -424,6 +622,7 @@ fn arm_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
         hoop(-5.5, 2.6, 1.9),
         hoop(-7.8, 1.0, 0.8),
     ];
+    let limb = body.stretch(body.limbs, body.limb, body.limb);
     for side in Side::BOTH {
         push_part(
             parts,
@@ -431,8 +630,9 @@ fn arm_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
                 Bone::Shoulder(side).joint(),
                 Body::ORIGIN,
                 &SLEEVE,
-                palette::CLOTH_LIT,
-            )?,
+                Tint::Accent,
+            )?
+            .stretched(body.stretch(1.0, body.limb, body.limb))?,
         )?;
         push_part(
             parts,
@@ -440,8 +640,9 @@ fn arm_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
                 Bone::Shoulder(side).joint(),
                 Body::ORIGIN,
                 &UPPER_ARM,
-                palette::SKIN_MID,
+                Tint::Skin,
             )?
+            .stretched(limb)?
             .spanning(Bone::Elbow(side).joint()),
         )?;
         push_part(
@@ -450,26 +651,34 @@ fn arm_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
                 Bone::Elbow(side).joint(),
                 Body::ORIGIN,
                 &FOREARM,
-                palette::SKIN_MID,
+                Tint::Skin,
             )?
+            .stretched(limb)?
             .spanning(Bone::Wrist(side).joint()),
         )?;
         push_part(
             parts,
-            Part::new(
-                Bone::Wrist(side).joint(),
-                Body::ORIGIN,
-                &HAND,
-                palette::SKIN_LIT,
-            )?,
+            Part::new(Bone::Wrist(side).joint(), Body::ORIGIN, &HAND, Tint::Skin)?
+                .stretched(body.uniform(1.0))?,
         )?;
     }
 
     Ok(())
 }
 
+/// A foot runs forward from its ankle rather than hanging below it, and is
+/// about a seventh of a person's height: drawn much shorter it stops reading
+/// as a foot at all at icon size.
+const FOOT: [Ring; 5] = [
+    Ring::new(Body::new(-3.4, 0.0, 0.3), 1.2, 1.2),
+    Ring::new(Body::new(-2.0, 0.0, 0.0), 2.6, 2.3),
+    Ring::new(Body::new(2.5, 0.0, -0.4), 2.8, 2.4),
+    Ring::new(Body::new(6.8, 0.0, -0.8), 2.3, 1.9),
+    Ring::new(Body::new(9.4, 0.0, -1.0), 0.9, 0.8),
+];
+
 /// Both legs and their boots, mirrored from one pass.
-fn leg_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
+fn leg_parts(parts: &mut ArrayVec<Part, MAX_PARTS>, body: &Physique) -> Result<(), FigureError> {
     const HAUNCH: [Ring; 4] = [
         hoop(4.5, 2.6, 2.6),
         hoop(2.5, 5.8, 5.8),
@@ -488,17 +697,8 @@ fn leg_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
         hoop(-17.0, 2.7, 2.7).bound(0.35),
         hoop(-SHANK_LENGTH, 2.3, 2.3).bound(1.00),
     ];
-    // A foot runs forward from its ankle rather than hanging below it, and
-    // is about a seventh of a person's height: drawn much shorter it stops
-    // reading as a foot at all at icon size.
-    const FOOT: [Ring; 5] = [
-        Ring::new(Body::new(-3.4, 0.0, 0.3), 1.2, 1.2),
-        Ring::new(Body::new(-2.0, 0.0, 0.0), 2.6, 2.3),
-        Ring::new(Body::new(2.5, 0.0, -0.4), 2.8, 2.4),
-        Ring::new(Body::new(6.8, 0.0, -0.8), 2.3, 1.9),
-        Ring::new(Body::new(9.4, 0.0, -1.0), 0.9, 0.8),
-    ];
 
+    let limb = body.stretch(body.limbs, body.limb, body.limb);
     for side in Side::BOTH {
         let across = side.across();
         push_part(
@@ -507,8 +707,9 @@ fn leg_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
                 Bone::Hip(side).joint(),
                 Body::ORIGIN,
                 &HAUNCH,
-                palette::CLOTH_SHADE,
-            )?,
+                Tint::Trousers,
+            )?
+            .stretched(body.stretch(1.0, body.limb, body.limb))?,
         )?;
         push_part(
             parts,
@@ -516,8 +717,9 @@ fn leg_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
                 Bone::Hip(side).joint(),
                 Body::ORIGIN,
                 &THIGH,
-                palette::CLOTH_SHADE,
+                Tint::Trousers,
             )?
+            .stretched(limb)?
             .spanning(Bone::Knee(side).joint()),
         )?;
         push_part(
@@ -526,44 +728,80 @@ fn leg_parts(parts: &mut ArrayVec<Part, MAX_PARTS>) -> Result<(), FigureError> {
                 Bone::Knee(side).joint(),
                 Body::ORIGIN,
                 &SHANK,
-                palette::CLOTH_SHADE,
+                Tint::Trousers,
             )?
+            .stretched(limb)?
             .spanning(Bone::Ankle(side).joint()),
         )?;
         push_part(
             parts,
             Part::new(
                 Bone::Ankle(side).joint(),
-                Body::new(0.0, across * 0.3, -2.2),
+                body.at(0.0, across * FOOT_SPLAY, -FOOT_DROP),
                 &FOOT,
-                palette::LEATHER,
-            )?,
+                Tint::Leather,
+            )?
+            .stretched(body.uniform(1.0))?,
         )?;
     }
 
     Ok(())
 }
 
-/// Where equipment hangs.
-fn sockets(mounts: &mut ArrayVec<(Socket, Mount), { Socket::COUNT }>) -> Result<(), FigureError> {
+/// The tail, if the figure has one, and its marked tip.
+fn tail(
+    parts: &mut ArrayVec<Part, MAX_PARTS>,
+    body: &Physique,
+    form: Option<TailForm>,
+) -> Result<(), FigureError> {
+    let Some(form) = form else { return Ok(()) };
+    let shape = feature::tail_for(form);
+    let girth = body.stretch(1.0, body.limb, body.limb);
+    push_part(
+        parts,
+        Part::new(Bone::Tail.joint(), Body::ORIGIN, shape.root, Tint::Skin)?.stretched(girth)?,
+    )?;
+    if let Some(tip) = shape.tip {
+        push_part(
+            parts,
+            Part::new(Bone::Tail.joint(), Body::ORIGIN, tip, Tint::Markings)?.stretched(girth)?,
+        )?;
+    }
+    Ok(())
+}
+
+/// Where equipment hangs, and how large the body is at each place.
+fn sockets(
+    mounts: &mut ArrayVec<(Socket, Mount), { Socket::COUNT }>,
+    body: &Physique,
+) -> Result<(), FigureError> {
     mount(
         mounts,
         Socket::Head,
         Bone::Head,
-        Body::new(0.0, 0.0, SKULL_RISE),
+        body.on_head(Body::new(0.0, 0.0, SKULL_RISE)),
+        body.head * body.scale,
     )?;
-    mount(mounts, Socket::Back, Bone::Chest, Body::new(-6.0, 0.0, 6.0))?;
+    mount(
+        mounts,
+        Socket::Back,
+        Bone::Chest,
+        body.at(-6.0 * body.depth, 0.0, 6.0),
+        body.depth * body.scale,
+    )?;
     mount(
         mounts,
         Socket::MainHand,
         Bone::Wrist(Side::Right),
-        Body::new(2.0, 0.0, -3.4),
+        body.at(2.0, 0.0, -3.4),
+        body.scale,
     )?;
     mount(
         mounts,
         Socket::OffHand,
         Bone::Wrist(Side::Left),
-        Body::new(2.0, 0.0, -3.4),
+        body.at(2.0, 0.0, -3.4),
+        body.scale,
     )?;
     for side in Side::BOTH {
         let across = side.across();
@@ -571,30 +809,66 @@ fn sockets(mounts: &mut ArrayVec<(Socket, Mount), { Socket::COUNT }>) -> Result<
             mounts,
             Socket::Shoulder(side),
             Bone::Shoulder(side),
-            Body::new(0.0, across * 1.6, 2.0),
+            body.at(0.0, across * 1.6, 2.0),
+            body.limb * body.scale,
         )?;
         mount(
             mounts,
             Socket::Hip(side),
             Bone::Hip(side),
-            Body::new(0.0, across * 2.0, 2.0),
+            body.at(0.0, across * 2.0, 2.0),
+            body.limb * body.scale,
         )?;
         mount(
             mounts,
             Socket::Foot(side),
             Bone::Ankle(side),
-            Body::new(1.6, 0.0, -1.2),
+            body.at(1.6, 0.0, -1.2),
+            body.scale,
         )?;
     }
 
     Ok(())
 }
 
-/// Where the pelvis sits above the ground.
-const PELVIS_HEIGHT: f64 = 52.0;
+/// Pelvis to waist.
+const WAIST_RISE: f64 = 9.0;
+
+/// Waist to chest.
+const CHEST_RISE: f64 = 13.0;
+
+/// Chest to the base of the neck.
+const NECK_RISE: f64 = 10.0;
+
+/// The base of the neck to the atlas.
+const ATLAS_RISE: f64 = 4.0;
 
 /// How far the skull's centre sits above the atlas.
 const SKULL_RISE: f64 = 6.0;
+
+/// How far out from the spine a shoulder sits.
+const SHOULDER_WIDTH: f64 = 11.5;
+
+/// How far above the chest joint a shoulder sits.
+const SHOULDER_RISE: f64 = 8.0;
+
+/// How far out from the spine a hip sits.
+const HIP_WIDTH: f64 = 9.0;
+
+/// How far below the pelvis joint a hip sits.
+const HIP_DROP: f64 = 1.0;
+
+/// How far behind the pelvis a tail roots, and how far below it.
+const TAIL_BACK: f64 = 6.0;
+const TAIL_DROP: f64 = 1.5;
+
+/// How far a tail's rest leans back from hanging straight down: about 55°,
+/// so it hangs back and low rather than straight down the legs.
+const TAIL_HANG: f64 = 0.95;
+
+/// How far below the ankle a foot's frame sits, and how far out.
+const FOOT_DROP: f64 = 2.2;
+const FOOT_SPLAY: f64 = 0.3;
 
 /// Shoulder to elbow.
 const UPPER_ARM_LENGTH: f64 = 19.0;
@@ -607,6 +881,13 @@ pub(crate) const THIGH_LENGTH: f64 = 23.0;
 
 /// Knee to ankle.
 pub(crate) const SHANK_LENGTH: f64 = 24.0;
+
+/// How much of the body's girth a limb takes: a heavy build thickens its
+/// arms and legs, but by less than its trunk.
+const LIMB_GIRTH: f64 = 0.75;
+
+/// How much of it the neck takes.
+const NECK_GIRTH: f64 = 0.6;
 
 /// A spine segment: a little of everything, and not much of any of it.
 fn spine_limits() -> Result<Limits, FigureError> {
@@ -706,6 +987,16 @@ fn ankle_limits() -> Result<Limits, FigureError> {
     ))
 }
 
+/// A tail lifts well above where it hangs, droops a little below it, and
+/// swings to either side; it does not twist.
+fn tail_limits() -> Result<Limits, FigureError> {
+    Ok(Limits::new(
+        Limit::new(-0.60, 1.10)?,
+        Limit::FIXED,
+        Limit::symmetric(0.80)?,
+    ))
+}
+
 fn push_joint(joints: &mut ArrayVec<Joint, MAX_JOINTS>, joint: Joint) -> Result<(), FigureError> {
     joints
         .try_push(joint)
@@ -721,14 +1012,15 @@ fn mount(
     socket: Socket,
     bone: Bone,
     at: Body,
+    scale: f64,
 ) -> Result<(), FigureError> {
     mounts
-        .try_push((socket, Mount::new(bone.joint(), at)))
+        .try_push((socket, Mount::new(bone.joint(), at).scaled(scale)))
         .map_err(|_| FigureError::DuplicateSocket)
 }
 
 /// How many drives bind the pose parameters to this rig.
-pub const DRIVE_COUNT: usize = 28;
+pub const DRIVE_COUNT: usize = 30;
 
 /// The parameters that move the trunk, the head and the arms.
 ///
@@ -751,7 +1043,8 @@ pub const UPPER_BODY: Mask = Mask::NONE
     .with(Param::WristAngle(Side::Left))
     .with(Param::WristAngle(Side::Right));
 
-/// The parameters that move the legs.
+/// The parameters that move the legs and the tail, which the locomotion
+/// under an upper-body clip keeps.
 pub const LOWER_BODY: Mask = Mask::ALL.difference(UPPER_BODY);
 
 /// Which joint axis each pose parameter turns on this rig.
@@ -790,6 +1083,10 @@ pub const DRIVES: [Drive; DRIVE_COUNT] = [
     knee(Side::Right),
     ankle(Side::Left),
     ankle(Side::Right),
+    // A tail hangs down its frame like a limb, so a positive pitch swings it
+    // back and up, and a positive roll swings it to the figure's left.
+    Drive::new(Param::TailLift, Bone::Tail.joint(), Axis::Pitch),
+    Drive::new(Param::TailSwing, Bone::Tail.joint(), Axis::Roll),
 ];
 
 /// Forward is a negative pitch, because the arm hangs below the shoulder.

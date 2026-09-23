@@ -49,11 +49,15 @@ pub enum Param {
     KneeBend(Side),
     /// Flex of an ankle.
     AnkleAngle(Side),
+    /// A tail raised from where it hangs, or let droop.
+    TailLift,
+    /// A tail swung to one side.
+    TailSwing,
 }
 
 impl Param {
     /// How many parameters a pose holds.
-    pub const COUNT: usize = 22;
+    pub const COUNT: usize = 24;
 
     /// Every parameter, in the order a pose holds them.
     pub const ALL: [Self; Self::COUNT] = [
@@ -79,6 +83,8 @@ impl Param {
         Self::KneeBend(Side::Right),
         Self::AnkleAngle(Side::Left),
         Self::AnkleAngle(Side::Right),
+        Self::TailLift,
+        Self::TailSwing,
     ];
 
     /// Its position in a pose's own table.
@@ -99,6 +105,8 @@ impl Param {
             Self::HipSplay(side) => 16 + side as usize,
             Self::KneeBend(side) => 18 + side as usize,
             Self::AnkleAngle(side) => 20 + side as usize,
+            Self::TailLift => 22,
+            Self::TailSwing => 23,
         }
     }
 

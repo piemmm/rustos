@@ -35,7 +35,8 @@
  *     point lives at the lowest loadable address, and is linked 1:1.
  *   - The boot page tables, boot stack, and early GDT live in `.boot.bss` /
  *     `.boot.rodata`, also linked 1:1, so the 32-bit trampoline can name
- *     them with absolute 32-bit operands before paging is on.
+ *     them with absolute 32-bit operands before paging is on. The stack is
+ *     reserved here, not in `boot.s`, so an image can size it.
  *   - All other sections are linked at `KERNEL_VMA_BASE + phys` with an
  *     explicit `AT()` mapping their LMA back to the contiguous low physical
  *     image.
@@ -48,6 +49,17 @@ OUTPUT_FORMAT(elf64-x86-64)
 /* Top of the canonical higher half: the -2 GiB kernel window base. A kernel
  * symbol at virtual `KERNEL_VMA_BASE + p` is loaded at physical `p`. */
 KERNEL_VMA_BASE = 0xFFFFFFFF80000000;
+
+/* Boot-stack size, sized by the image rather than by this shared script:
+ * 64 KiB is the boot pipeline's own need — including the device bring-up the
+ * audit observer drives synchronously in the QEMU verticals, a filesystem
+ * `open` staging whole blocks on the stack. An image whose workload needs
+ * more links a script of its own that sets `BOOT_STACK_BYTES` and then
+ * `INCLUDE`s this one, so the value is defined before this line reads it. */
+BOOT_STACK_BYTES = DEFINED(BOOT_STACK_BYTES) ? BOOT_STACK_BYTES : 64K;
+
+/* The poison guard reserved directly below the boot stack. */
+BOOT_STACK_GUARD_BYTES = 4K;
 
 SECTIONS
 {
@@ -75,6 +87,22 @@ SECTIONS
     .boot.bss ALIGN(4K) :
     {
         *(.boot.bss)
+        /* The bootstrap stack the BSP runs on for the whole pre-handoff
+         * boot path, directly above the page tables `boot.s` reserves.
+         * Paging is off when the BSP first descends it, so an overrun
+         * cannot be caught by unmapping a page: `boot_common` fills the
+         * guard below it with the shared sentinel and the panic path
+         * reads it back, turning a silent clobber of `boot_pds` into a
+         * named overrun. The guard is every byte up to
+         * `boot_stack_bottom`, padding included, so the fill and the
+         * check share one pair of symbols. */
+        . = ALIGN(4K);
+        boot_stack_guard_bottom = .;
+        . += BOOT_STACK_GUARD_BYTES;
+        . = ALIGN(16);
+        boot_stack_bottom = .;
+        . += BOOT_STACK_BYTES;
+        boot_stack_top = .;
     }
 
     . = ALIGN(4K);
@@ -87,9 +115,9 @@ SECTIONS
      * this script is the one definition of KERNEL_VMA_BASE. */
     boot_stack_bottom_high = boot_stack_bottom + KERNEL_VMA_BASE;
     boot_stack_top_high = boot_stack_top + KERNEL_VMA_BASE;
-    /* The stack's poison guard (reserved in `boot.s`), aliased through the
-     * same window: the panic path reads it long after the trampoline has
-     * left the identity map behind. */
+    /* The stack's poison guard, aliased through the same window: the panic
+     * path reads it long after the trampoline has left the identity map
+     * behind. */
     boot_stack_guard_bottom_high = boot_stack_guard_bottom + KERNEL_VMA_BASE;
 
     /* Switch the location counter (VMA) into the higher half. Each section

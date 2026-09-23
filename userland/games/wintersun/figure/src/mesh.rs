@@ -122,11 +122,102 @@ impl Ring {
             && self.bind.is_finite()
             && (0.0..=1.0).contains(&self.bind)
     }
+}
 
-    /// How far it reaches from the part's own origin.
+/// Refuse a run of rings no part could be drawn from.
+///
+/// # Errors
+///
+/// [`FigureError::GeometryUnreal`] for no rings or a ring that is not real,
+/// and [`FigureError::TooManyParts`] for more than a part holds.
+pub fn check(rings: &[Ring]) -> Result<(), FigureError> {
+    if rings.is_empty() || rings.iter().any(|ring| !ring.is_real()) {
+        return Err(FigureError::GeometryUnreal);
+    }
+    if rings.len() > MAX_RINGS {
+        return Err(FigureError::TooManyParts);
+    }
+    Ok(())
+}
+
+/// How a figure's build scales a part's authored rings.
+///
+/// Five factors rather than one, because a build does not grow a figure
+/// evenly: a longer limb stretches along its spine and not through it, and a
+/// heavier one the other way round. The rings stay first-party templates; a
+/// figure's parameters reach them only through this.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Stretch {
+    /// The factor on a ring centre's `forward`, in the part's own frame.
+    pub forward: f64,
+    /// The factor on its `side`.
+    pub side: f64,
+    /// The factor on its `up`.
+    pub up: f64,
+    /// The factor on a ring's half-width.
+    pub wide: f64,
+    /// The factor on its half-depth.
+    pub deep: f64,
+}
+
+impl Stretch {
+    /// The rings as authored.
+    pub const NONE: Self = Self::uniform(1.0);
+
+    /// Every length scaled by `factor`.
     #[must_use]
-    pub fn reach(self) -> f64 {
-        self.at.length() + mathf::fmax(self.wide, self.deep)
+    pub const fn uniform(factor: f64) -> Self {
+        Self {
+            forward: factor,
+            side: factor,
+            up: factor,
+            wide: factor,
+            deep: factor,
+        }
+    }
+
+    /// The same stretch with every factor multiplied by `factor`.
+    #[must_use]
+    pub fn scaled(self, factor: f64) -> Self {
+        Self {
+            forward: self.forward * factor,
+            side: self.side * factor,
+            up: self.up * factor,
+            wide: self.wide * factor,
+            deep: self.deep * factor,
+        }
+    }
+
+    /// Whether every factor is finite and positive.
+    ///
+    /// A zero would collapse a part to a sheet and a negative one would turn
+    /// it inside out, so neither is a build.
+    #[must_use]
+    pub fn is_real(self) -> bool {
+        [self.forward, self.side, self.up, self.wide, self.deep]
+            .into_iter()
+            .all(|factor| factor.is_finite() && factor > 0.0)
+    }
+
+    /// `ring` as this stretch leaves it.
+    #[must_use]
+    pub fn apply(self, ring: Ring) -> Ring {
+        Ring {
+            at: self.point(ring.at),
+            wide: ring.wide * self.wide,
+            deep: ring.deep * self.deep,
+            bind: ring.bind,
+        }
+    }
+
+    /// A point stated where a ring centre is, as this stretch leaves it.
+    #[must_use]
+    pub fn point(self, at: Body) -> Body {
+        Body::new(
+            at.forward * self.forward,
+            at.side * self.side,
+            at.up * self.up,
+        )
     }
 }
 
@@ -165,8 +256,8 @@ impl Hoop {
     }
 }
 
-/// Carry `rings` — stated in the frame `own` offset by `at` — through to the
-/// figure's frame, skinning each across `own` and `end`.
+/// Carry `rings`, scaled by `stretch` and stated in the frame `own` offset by
+/// `at`, through to the figure's frame, skinning each across `own` and `end`.
 ///
 /// `rest` is where the end joint sits in the part's own frame at rest, which
 /// is what expresses a ring's position in the end joint's frame without a
@@ -177,6 +268,7 @@ impl Hoop {
 /// [`FigureError::TooManyParts`] for more rings than a part holds.
 pub fn carry(
     rings: &[Ring],
+    stretch: Stretch,
     at: Body,
     own: (Body, Basis),
     end: Option<(Body, Basis)>,
@@ -185,11 +277,17 @@ pub fn carry(
     let mut hoops: ArrayVec<Hoop, MAX_RINGS> = ArrayVec::new();
     let mut centres: ArrayVec<Body, MAX_RINGS> = ArrayVec::new();
     let mut frames: ArrayVec<Basis, MAX_RINGS> = ArrayVec::new();
+    let mut scaled: ArrayVec<Ring, MAX_RINGS> = ArrayVec::new();
+    for ring in rings {
+        scaled
+            .try_push(stretch.apply(*ring))
+            .map_err(|_| FigureError::TooManyParts)?;
+    }
 
     // A part with no end joint is carried wholly by its own, whatever its
     // rings claim.
     let bent = end.zip(rest);
-    for ring in rings {
+    for ring in &scaled {
         let local = at.plus(ring.at);
         let here = own.0.plus(own.1.apply(local));
         let (centre, basis) = match bent {
@@ -211,7 +309,7 @@ pub fn carry(
             .map_err(|_| FigureError::TooManyParts)?;
     }
 
-    for (index, ring) in rings.iter().enumerate() {
+    for (index, ring) in scaled.iter().enumerate() {
         let spine = spine(&centres, index, frames[index]);
         // The wide axis is the body's own side direction taken square to the
         // spine, so a limb's flattening keeps its anatomical sense however

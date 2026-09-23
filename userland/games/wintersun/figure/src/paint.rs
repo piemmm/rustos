@@ -21,9 +21,9 @@ use crate::rig::{Placement, Strip};
 
 /// The most outline points one placed figure traces.
 ///
-/// A budget on the scan converter's work, held against the shipped figure by
-/// this module's tests: a rig that quietly doubled its parts would be paying
-/// for it on every frame of every figure on screen.
+/// A budget on the scan converter's work, held against every figure of the
+/// reference grid by the art harness: a rig that quietly doubled its parts
+/// would be paying for it on every frame of every figure on screen.
 pub const MAX_FIGURE_POINTS: u32 = 2048;
 
 /// How many points one strip's closed outline has.

@@ -5,6 +5,11 @@ use tairix_util::mathf;
 use super::Sway;
 use crate::error::FigureError;
 use crate::frame::Body;
+use crate::humanoid::{self, Bone};
+use crate::identity::Identity;
+use crate::pose::{Param, Pose};
+use crate::reference;
+use crate::species::Species;
 use crate::spring::Spring;
 
 const GIVE: f64 = 0.02;
@@ -123,4 +128,59 @@ fn a_long_frame_does_not_make_it_flail() {
     }
     settle(&mut sway, Body::ORIGIN, Body::ORIGIN, 1_200);
     assert!(sway.settled(), "it must come back to rest");
+}
+
+/// A tail hangs from a joint of its own, so the sway reaches it through the
+/// pose: the overlay turns the tail joint by exactly the sway's lean, and
+/// leaves every other joint where the clip put it.
+#[test]
+fn a_sway_turns_a_tail_through_its_parameters() {
+    let identity = Identity::new(reference::spec(Species::Beastkin)).expect("a tailed figure");
+    let rig = humanoid::rig(&identity).expect("it builds");
+    let rigging = humanoid::rigging(&rig).expect("it binds");
+
+    let mut tail = sway();
+    settle(&mut tail, Body::new(4.0, -6.0, 0.0), Body::ORIGIN, 12);
+    let lean = tail.turn();
+    assert!(
+        lean.pitch != 0.0 && lean.roll != 0.0,
+        "the drive must lean it both ways"
+    );
+
+    let overlay = tail
+        .overlay(&rigging, Param::TailLift, Param::TailSwing)
+        .expect("a real lean");
+    let posed = overlay.applied(&Pose::REST).expect("in range");
+    let posture = rigging.posture(&posed).expect("posturable");
+    let turned = posture
+        .get(Bone::Tail.joint())
+        .expect("every figure has a tail root");
+    assert!(mathf::fabs(turned.pitch - lean.pitch) < 1e-12);
+    assert!(mathf::fabs(turned.roll - lean.roll) < 1e-12);
+    for bone in Bone::ALL.into_iter().filter(|bone| *bone != Bone::Tail) {
+        assert_eq!(
+            posture.get(bone.joint()),
+            rigging
+                .posture(&Pose::REST)
+                .expect("rest")
+                .get(bone.joint()),
+            "the tail's sway moved {bone:?}"
+        );
+    }
+}
+
+/// A parameter that turns nothing on the rig adds nothing, rather than a
+/// delta nothing could ever apply.
+#[test]
+fn a_sway_through_parameters_the_rig_does_not_drive_adds_nothing() {
+    let identity = Identity::new(reference::spec(Species::Human)).expect("a real figure");
+    let rig = humanoid::rig(&identity).expect("it builds");
+    let drives: [crate::rigging::Drive; 0] = [];
+    let bare = crate::rigging::Rigging::new(&rig, &drives).expect("an empty table binds");
+    let mut hem = sway();
+    settle(&mut hem, Body::new(5.0, 5.0, 0.0), Body::ORIGIN, 12);
+    let overlay = hem
+        .overlay(&bare, Param::TailLift, Param::TailSwing)
+        .expect("a real lean");
+    assert!(overlay.is_empty());
 }

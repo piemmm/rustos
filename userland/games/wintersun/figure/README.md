@@ -7,8 +7,9 @@ rotation limits, surfaces skinned across the joints that carry them, named
 equipment sockets, the depth-sorted draw order, the one body frame that serves
 every heading, and over all of it a gait driven by distance travelled,
 per-foot terrain planting, look-at, recoil, sway, breathing and a contact
-shadow — plus the shipped motion set and the measurements the art is gated on
-(`plans/FIGURE.md` FG2–FG5).
+shadow — plus the shipped motion set, the measurements the art is gated on,
+and the validated record a character is built from (`plans/FIGURE.md`
+FG2–FG6).
 Stability tier: **experimental** — nothing has shipped, so a type changes in
 place until it does.
 
@@ -83,15 +84,18 @@ exactly, at every heading, with no approximation to get the sign of.
 | `frame` | The body frame: `Body`, `Rotation`, the orthonormal `Basis` and its composition, the projection, and the camera direction a silhouette is taken against. |
 | `joint` | `JointId`, the checked `Limit`/`Limits` intervals, and `Joint` — a parent, a rest transform, and how far it turns from it. |
 | `socket` | The closed socket set equipment hangs on, and where a rig mounts each one. |
-| `mesh` | `Ring`/`Hoop`: a part's cross-sections, how the joints carry and skin them, the near arc a silhouette is taken over, and the shading ladder a strip is filled at. |
-| `rig` | `Rig` and its validation, `Posture`, `Part`/`Fitted`, and the `Placement` a figure is skinned, projected and depth-sorted into. |
-| `humanoid` | The first-party humanoid: 17 joints, 21 skinned surfaces, every socket, proportioned in percentages of `STANDING_HEIGHT`, and the drive table binding the pose parameters to them. |
+| `mesh` | `Ring`/`Hoop`/`Stretch`: a part's cross-sections, how a figure's build scales them, how the joints carry and skin them, the near arc a silhouette is taken over, and the shading ladder a strip is filled at. |
+| `rig` | `Rig` and its validation, `Posture`, `Part`/`Fitted`, and the `Placement` a figure is skinned, projected and depth-sorted into — by each surface's mean, or by a point a layered surface shares with the one it lies over. |
+| `humanoid` | The one skeleton every species stands on: 18 joints, 21 body surfaces plus up to 12 of features, every socket, proportioned in percentages of `STANDING_HEIGHT`; the builder that turns an `Identity` into a rig, and the drive table binding the pose parameters to it. |
+| `identity` | `Identity`: the nineteen-byte record a character is — species, build settings, feature forms, palette swatches — its checks, its one-spelling encoding, and its total, fail-closed decoder. |
+| `species` | `Species` and what each may be: the interval every build setting spans, the forms each feature may take, and the swatch tables each palette slot draws from. |
+| `tint` | `Tint`, the role a surface's colour plays, and `Tints`, what each role resolves to for one figure. |
 | `motion` | The shipped motion set — idle, walk, run — whose leg curves are a stated foot path solved through the same two-bone geometry the planting layer uses. |
 | `paint` | The one paint order (shadow, then strips far-first) and what drawing a figure costs. |
 | `quality` | The measurements the art is gated on — joint-limit use, motion continuity, loop closure, foot skate — each with its bound beside it. |
-| `reference` | The reference grid the cross-target digest folds and the art harness draws: which figure, in which poses, facing which way. |
+| `reference` | The reference grid the cross-target digest folds and the art harness draws: each species' reference figure and its least and most, in which poses, facing which way. |
 | `digest` | `REFERENCE_DIGEST`: the cross-target claim, asserted by the host suite and one vertical per Tier-1 target. |
-| `pose` | `Param` — the 22 named scalars an animation is authored in — the `Pose` holding them, their `Range`, and the `Mask` a blend writes through. |
+| `pose` | `Param` — the 24 named scalars an animation is authored in — the `Pose` holding them, their `Range`, and the `Mask` a blend writes through. |
 | `rigging` | `Drive`/`Rigging`: which joint axis a parameter turns, and which way its `+1` points. |
 | `clip` | `Clip`: a keyed `Curve` per parameter with an `Easing` per segment, a duration, a `Loop` mode, and the named `Event`s at phases along it. |
 | `blend` | `Blend`: weighted accumulation of poses and clips, weighed per parameter so a mask means something. |
@@ -101,7 +105,7 @@ exactly, at every heading, with no approximation to get the sign of.
 | `spring` | The one damped spring — solved in closed form, so no frame length can make it diverge — that recoil and sway are both built from. |
 | `look` | `Look`: the head and spine turned toward a target, as a delta over whatever clip is playing. |
 | `recoil` | `Recoil`: impulses on parameters springing back to the clip, the overshoot being the follow-through. |
-| `sway` | `Sway`: cloth, hair and tails lagging the acceleration that carries them. |
+| `sway` | `Sway`: cloth, hair and tails lagging the acceleration that carries them — turning gear on its socket, or a tail through its own parameters. |
 | `breath` | `Breath`: the small always-on cycle that stops an idle figure reading as a paused one. |
 | `shadow` | `Contact`/`Light`: the ground ellipse under the feet, solved through the projection rather than approximated. |
 
@@ -138,14 +142,14 @@ fades instead of fighting it.
 ## Bounds, and what they are not
 
 `MAX_JOINTS`, `MAX_PARTS`, `MAX_RINGS`, `MAX_FITTED` and `MAX_STATES` bound
-*authored content*, not a
-runtime capacity: a rig is first-party code rather than input, and the shipped
-rig's counts are held to them at build time. A figure wanting more joints than
-this is a different figure, not a bigger one. They are also what keeps a
-figure's buffers small enough to sit on a boot stack: a `Placement` is a
-little over ten kibibytes and a `Rig` about the same. Runtime-loaded figure geometry
-from an untrusted source is refused by the plan; only *parameters* are
-validated data, and those are a later item.
+*authored content*, not a runtime capacity: a rig is first-party code rather
+than input, and the richest figure the humanoid builds is held to them at
+build time. A figure wanting more parts than this is a different figure, not a
+bigger one. They are also what keeps a figure's buffers small enough to sit on
+a boot stack: a `Placement` is about fourteen kibibytes and a `Rig` about
+eight, which a test holds. Runtime-loaded figure geometry from an untrusted
+source is refused by the plan; only a record's *parameters* are validated
+data.
 
 Nothing here allocates. A `Rig` holds fixed arrays, and `Placement` is a
 caller-held buffer sized to the largest figure, so drawing a scene of figures
@@ -189,14 +193,47 @@ something a human squints at. `Planted::miss` reports how far a foot ended up
 from the ground it was asked for, so a figure standing somewhere no figure
 could stand is the simulation's defect to see rather than a fudged frame.
 
+## A figure is a record, and the record is never geometry
+
+A character is an `Identity`: nineteen bytes naming a species, five build
+settings within that species' documented intervals, a face, eyes, ears,
+horns, a tail and a hair style from closed sets of first-party forms, and a
+palette of swatch indices. `humanoid::rig` builds a figure from nothing else,
+and the record reaches the figure through three narrow doors only:
+
+- **Joint offsets**, which are values: a longer limb is a longer bone.
+- **A `Stretch` on each surface's borrowed ring template**: five factors —
+  along each axis of a ring's centre, and across and through its
+  cross-section — so the rings stay first-party `&'static` tables and a
+  figure's build costs a few multiplies at carry time.
+- **A role table**: a surface names a `Tint` rather than a colour, so a
+  palette edit is `Rig::retint`, not a rebuild.
+
+Species and features choose between templates rather than bending one.
+Stature is exact: the skeleton is scaled so the crown stands where the height
+setting puts it with the sole on the ground, so limb and head proportion change
+a figure's shape and never its height.
+
+The record is untrusted input — in the game it arrives from a client assumed
+hostile — so its decoder is total and fails closed, naming the field it
+refused. A build setting spans its species' whole interval, so no setting is
+out of range; a form or swatch a species does not carry is refused; and every
+figure has exactly one spelling, so a bald figure stores zero for its hair's
+colour and volume and a species without markings zero for its markings. Every
+record the decoder admits builds and places a figure, which the fuzz harness
+holds.
+
+Every palette is readable because the one tone every figure wears whatever it
+chose — the trousers — sits in the narrow luminance band that clears both
+desktop themes on its own; the art harness checks that tone before any cell.
+
 ## What is not here
 
-The species/build parameter space and the designer are FG6/FG7. The
-contact-sheet harness that makes quality a measured property is
-`cargo xtask artsheet`, which lives in `tools/xtask` because it renders and
-writes files; the measurements it gates on live here, in `quality` and
-`paint`, so they run on every Tier-1 target under `cargo test`.
+The designer that edits a record — its presets and its plausible random
+figures — is FG7. The contact-sheet harness that makes quality a measured
+property is `cargo xtask artsheet`, which lives in `tools/xtask` because it
+renders and writes files; the measurements it gates on live here, in
+`quality` and `paint`, so they run on every Tier-1 target under `cargo test`.
 
 Clips and machines are *code* here, assembled from borrowed static tables and
-checked once. Loading either from an untrusted source is a later item and
-will validate at its own boundary; nothing in this crate parses input.
+checked once. The one thing this crate parses is a figure record.

@@ -10,18 +10,18 @@ use tairix_wintersun_net::value::Facing;
 use crate::error::FigureError;
 use crate::frame::{project, toward_camera, Basis, Body, Rotation};
 use crate::joint::{Joint, JointId, MAX_JOINTS};
-use crate::mesh::{self, Ring, BANDS, EDGES, MAX_RINGS, STRIP};
+use crate::mesh::{self, Ring, Stretch, BANDS, EDGES, MAX_RINGS, STRIP};
 use crate::shadow::Light;
 use crate::socket::{Mount, Socket};
+use crate::tint::{Tint, Tints};
 
 /// How many parts one rig is built from.
 ///
 /// A bound on authored content, like the joint bound: the shipped rigs are
 /// held to it at build time, and a figure that wants more parts is a
-/// different figure rather than a bigger one. A part is a whole skinned
-/// surface rather than one flat outline, so a figure needs far fewer of
-/// them than a billboard one did.
-pub const MAX_PARTS: usize = 24;
+/// different figure rather than a bigger one. It is exactly the richest
+/// figure the shipped humanoid builds, which that module asserts.
+pub const MAX_PARTS: usize = 33;
 
 /// How many equipment surfaces one figure carries at once.
 pub const MAX_FITTED: usize = 8;
@@ -32,75 +32,148 @@ pub const MAX_PLACED: usize = MAX_PARTS + MAX_FITTED;
 const _: () = assert!(MAX_PLACED <= u16::MAX as usize);
 
 /// One surface of the figure's own body, carried by the joint it rides.
+///
+/// Its fields are private and every builder checks what it is given, so a
+/// part that exists is one that can be drawn; whether it fits a skeleton is
+/// [`Rig::new`]'s question.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Part {
-    /// The joint it rides.
-    ///
-    /// Naming the joint rather than a position is the whole of the
-    /// joint-carries-mass rule: a shoulder cap and the arm that swings from
-    /// it are the same joint's, so they cannot drift apart.
-    pub joint: JointId,
-    /// The joint its far end is carried by, for a part that spans a bend.
-    ///
-    /// A thigh's lower rings ride the knee, so the surface bends through the
-    /// joint instead of two rigid tubes meeting at an angle. It must be a
-    /// direct child of [`Self::joint`], which is what lets a ring's position
-    /// in the far joint's frame be derived rather than authored twice.
-    pub end: Option<JointId>,
-    /// Where its own frame sits in that joint's.
-    pub at: Body,
-    /// The cross-sections it is built from, along its spine.
-    ///
-    /// Borrowed rather than owned, because a rig is first-party code rather
-    /// than input and a figure's whole buffer set has to sit on a boot
-    /// stack: rings held by value made a `Rig` three times the size for
-    /// nothing.
-    pub rings: &'static [Ring],
-    /// Its tone before the light reaches it.
-    pub color: Color,
+    joint: JointId,
+    end: Option<JointId>,
+    at: Body,
+    rings: &'static [Ring],
+    stretch: Stretch,
+    tint: Tint,
+    sort: Option<Body>,
 }
 
 impl Part {
-    /// A part on `joint` at `at`, spanning `rings`.
+    /// A part on `joint` at `at`, built from `rings` as authored and drawn in
+    /// `tint`.
+    ///
+    /// The rings are borrowed rather than owned, because geometry is
+    /// first-party code rather than input and a figure's whole buffer set has
+    /// to fit the boot stack the cross-target verticals run on: rings held by
+    /// value would more than double a `Rig`. A figure's build reaches them
+    /// through a [`Stretch`] instead.
     ///
     /// # Errors
     ///
-    /// [`FigureError::TooManyParts`] for more rings than a part holds, and
-    /// [`FigureError::GeometryUnreal`] for a ring that is not real.
+    /// As [`mesh::check`].
     pub fn new(
         joint: JointId,
         at: Body,
         rings: &'static [Ring],
-        color: Color,
+        tint: Tint,
     ) -> Result<Self, FigureError> {
-        if rings.is_empty() || rings.iter().any(|ring| !ring.is_real()) {
+        mesh::check(rings)?;
+        if !at.is_real() {
             return Err(FigureError::GeometryUnreal);
-        }
-        if rings.len() > MAX_RINGS {
-            return Err(FigureError::TooManyParts);
         }
         Ok(Self {
             joint,
             end: None,
             at,
             rings,
-            color,
+            stretch: Stretch::NONE,
+            tint,
+            sort: None,
         })
     }
 
     /// The same part with its far end carried by `end`.
+    ///
+    /// A thigh's lower rings ride the knee, so the surface bends through the
+    /// joint instead of two rigid tubes meeting at an angle. `end` must be a
+    /// direct child of the part's own joint, which is what lets a ring's
+    /// position in the far joint's frame be derived rather than authored
+    /// twice; [`Rig::new`] refuses anything else.
     #[must_use]
     pub fn spanning(mut self, end: JointId) -> Self {
         self.end = Some(end);
         self
     }
 
+    /// The same part with its rings scaled by `stretch`.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::GeometryUnreal`] for a stretch that is not real.
+    pub fn stretched(mut self, stretch: Stretch) -> Result<Self, FigureError> {
+        if !stretch.is_real() {
+            return Err(FigureError::GeometryUnreal);
+        }
+        self.stretch = stretch;
+        Ok(self)
+    }
+
+    /// The same part depth-sorted by `point`, stated where its ring centres
+    /// are, rather than by the mean of its rings.
+    ///
+    /// For a surface layered over another at every heading — hair over a
+    /// skull — the two share one point, so their depths are the same number
+    /// and the authored order decides. Two means would tie only until the
+    /// head tilted, and then break whichever way the tilt went. The point is
+    /// carried by the part's own joint alone.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::GeometryUnreal`] for a point that is not finite.
+    pub fn sorted_at(mut self, point: Body) -> Result<Self, FigureError> {
+        if !point.is_real() {
+            return Err(FigureError::GeometryUnreal);
+        }
+        self.sort = Some(point);
+        Ok(self)
+    }
+
+    /// The joint it rides.
+    ///
+    /// Naming the joint rather than a position is the whole of the
+    /// joint-carries-mass rule: a shoulder cap and the arm that swings from
+    /// it are the same joint's, so they cannot drift apart.
+    #[must_use]
+    pub const fn joint(&self) -> JointId {
+        self.joint
+    }
+
+    /// The joint its far end is carried by, for a part that spans a bend.
+    #[must_use]
+    pub const fn end(&self) -> Option<JointId> {
+        self.end
+    }
+
+    /// Where its own frame sits in its joint's.
+    #[must_use]
+    pub const fn at(&self) -> Body {
+        self.at
+    }
+
+    /// The rings it is built from, as authored.
+    #[must_use]
+    pub const fn rings(&self) -> &'static [Ring] {
+        self.rings
+    }
+
+    /// How the figure's build scales those rings.
+    #[must_use]
+    pub const fn stretch(&self) -> Stretch {
+        self.stretch
+    }
+
+    /// The role its colour plays.
+    #[must_use]
+    pub const fn tint(&self) -> Tint {
+        self.tint
+    }
+
     /// How far it reaches from the joint it rides.
     #[must_use]
-    pub fn reach(self) -> f64 {
+    pub fn reach(&self) -> f64 {
         let mut furthest = 0.0;
         for ring in self.rings {
-            furthest = mathf::fmax(furthest, self.at.plus(ring.at).length() + girth(*ring));
+            let ring = self.stretch.apply(*ring);
+            furthest = mathf::fmax(furthest, self.at.plus(ring.at).length() + girth(ring));
         }
         furthest
     }
@@ -134,18 +207,18 @@ impl Fitted {
     ///
     /// # Errors
     ///
-    /// As [`Part::new`].
+    /// As [`mesh::check`].
     pub fn new(
         socket: Socket,
         at: Body,
         rings: &'static [Ring],
         color: Color,
     ) -> Result<Self, FigureError> {
-        let held = Part::new(JointId::new(0), at, rings, color)?;
+        mesh::check(rings)?;
         Ok(Self {
             socket,
             at,
-            rings: held.rings,
+            rings,
             color,
             turn: Rotation::REST,
         })
@@ -243,17 +316,19 @@ impl Default for Frames {
     }
 }
 
-/// A skeleton, its parts, and the sockets it offers.
+/// A skeleton, its parts, the sockets it offers, and the colours it is
+/// drawn in.
 #[derive(Clone, Debug)]
 pub struct Rig {
     joints: ArrayVec<Joint, MAX_JOINTS>,
     parts: ArrayVec<Part, MAX_PARTS>,
     mounts: [Option<Mount>; Socket::COUNT],
+    tints: Tints,
     reach: f64,
 }
 
 impl Rig {
-    /// Assemble and check a rig.
+    /// Assemble and check a rig drawn in `tints`.
     ///
     /// Every refusal below is a rig that could only draw something nobody
     /// authored, so it is caught here rather than on a frame.
@@ -266,20 +341,23 @@ impl Rig {
     /// parents-first forest; [`FigureError::NoSuchJoint`] for a part or mount
     /// naming a joint that does not exist; [`FigureError::DuplicateSocket`]
     /// for a second mount on one socket; [`FigureError::GeometryUnreal`] for
-    /// a dimension that is not finite; and the two that carry the visual
-    /// rule — [`FigureError::BearingJointWithoutMass`] for a joint that
-    /// bears a child but draws nothing itself, and
+    /// a dimension that is not finite or a mount scale that is not positive;
+    /// and the two that carry the visual rule —
+    /// [`FigureError::BearingJointWithoutMass`] for a joint that bears a
+    /// child but draws nothing itself, and
     /// [`FigureError::JointBeyondParentReach`] for a child whose origin lies
     /// outside everything its parent draws.
     pub fn new(
         joints: &[Joint],
         parts: &[Part],
         mounts: &[(Socket, Mount)],
+        tints: Tints,
     ) -> Result<Self, FigureError> {
         let mut rig = Self {
             joints: ArrayVec::new(),
             parts: ArrayVec::new(),
             mounts: [None; Socket::COUNT],
+            tints,
             reach: 0.0,
         };
 
@@ -304,9 +382,6 @@ impl Rig {
             if part.joint.index() >= rig.joints.len() {
                 return Err(FigureError::NoSuchJoint);
             }
-            if !part.at.is_real() || part.rings.iter().any(|ring| !ring.is_real()) {
-                return Err(FigureError::GeometryUnreal);
-            }
             // A ring's position in the far joint's frame is derived from the
             // rest transform between the two, which only exists where the
             // far joint hangs directly from the near one.
@@ -328,7 +403,11 @@ impl Rig {
             if mount.joint.index() >= rig.joints.len() {
                 return Err(FigureError::NoSuchJoint);
             }
-            if !mount.at.is_real() || !mount.orientation.is_real() {
+            if !mount.at.is_real()
+                || !mount.orientation.is_real()
+                || !mount.scale.is_finite()
+                || mount.scale <= 0.0
+            {
                 return Err(FigureError::GeometryUnreal);
             }
             let slot = &mut rig.mounts[socket.index()];
@@ -359,6 +438,20 @@ impl Rig {
     #[must_use]
     pub fn mount(&self, socket: Socket) -> Option<Mount> {
         self.mounts[socket.index()]
+    }
+
+    /// The colours it is drawn in.
+    #[must_use]
+    pub const fn tints(&self) -> Tints {
+        self.tints
+    }
+
+    /// Draw it in `tints` from now on.
+    ///
+    /// Nothing else about the rig depends on its colours, so a palette edit
+    /// costs this and not a rebuild.
+    pub fn retint(&mut self, tints: Tints) {
+        self.tints = tints;
     }
 
     /// The furthest any part reaches from the figure's ground point at rest,
@@ -409,8 +502,9 @@ impl Rig {
         for part in &self.parts {
             let frame = frames.frames[part.joint.index()];
             for ring in part.rings {
+                let ring = part.stretch.apply(*ring);
                 let at = frame.at.plus(frame.basis.apply(part.at.plus(ring.at)));
-                furthest = mathf::fmax(furthest, at.length() + girth(*ring));
+                furthest = mathf::fmax(furthest, at.length() + girth(ring));
             }
         }
         furthest
@@ -559,9 +653,14 @@ impl<'a> Posture<'a> {
                 let held = self.rig.joints[joint.index()];
                 (held.at, Basis::of(held.orientation))
             });
-            out.push(
-                stance, seen, part.rings, part.at, own, end, rest, part.color,
-            )?;
+            let surface = Surface {
+                rings: part.rings,
+                stretch: part.stretch,
+                at: part.at,
+                sort: part.sort,
+                color: self.rig.tints.get(part.tint),
+            };
+            out.push(stance, seen, surface, own, end, rest)?;
         }
         for piece in fitted {
             let mount = self
@@ -581,16 +680,16 @@ impl<'a> Posture<'a> {
                     .basis
                     .compose(Basis::of(mount.orientation).compose(Basis::of(piece.turn))),
             };
-            out.push(
-                stance,
-                seen,
-                piece.rings,
-                piece.at,
-                frame,
-                None,
-                None,
-                piece.color,
-            )?;
+            // Gear is authored for the reference figure, so the body it sits
+            // on scales it — where it sits in the socket as well as its size.
+            let surface = Surface {
+                rings: piece.rings,
+                stretch: Stretch::uniform(mount.scale),
+                at: piece.at.scaled(mount.scale),
+                sort: None,
+                color: piece.color,
+            };
+            out.push(stance, seen, surface, frame, None, None)?;
         }
 
         out.sort();
@@ -618,6 +717,18 @@ pub struct Stance {
 struct Seen {
     view: Body,
     light: Body,
+}
+
+/// One surface about to be placed: its authored rings, how the figure's
+/// build scales them, where its frame sits on the joint that carries it, the
+/// point it sorts by if not its rings' mean, and its colour.
+#[derive(Copy, Clone, Debug)]
+struct Surface {
+    rings: &'static [Ring],
+    stretch: Stretch,
+    at: Body,
+    sort: Option<Body>,
+    color: Color,
 }
 
 impl Stance {
@@ -752,10 +863,10 @@ impl Placement {
     #[allow(
         clippy::large_stack_arrays,
         reason = "the buffer is the caller's, held across frames, and this \
-                  crate links no allocator to put it anywhere else. At a \
-                  little over twenty kibibytes it sits inside the boot stack \
-                  of every target this runs on, and the alternative the lint \
-                  suggests is the heap the figure path exists to avoid"
+                  crate links no allocator to put it anywhere else. At about \
+                  fourteen kibibytes it sits inside the boot stack of every \
+                  target this runs on, and the alternative the lint suggests \
+                  is the heap the figure path exists to avoid"
     )]
     pub const fn new() -> Self {
         Self {
@@ -798,26 +909,19 @@ impl Placement {
     ///
     /// The caller has already checked the whole figure fits, so the slot
     /// exists.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one surface's whole placement: the frames that carry it, \
-                  the rest transform between them, how it is seen, and its \
-                  tone — splitting them would only move the list"
-    )]
     fn push(
         &mut self,
         stance: &Stance,
         seen: Seen,
-        rings: &[Ring],
-        at: Body,
+        surface: Surface,
         own: Resolved,
         end: Option<Resolved>,
         rest: Option<(Body, Basis)>,
-        color: Color,
     ) -> Result<(), FigureError> {
         let hoops = mesh::carry(
-            rings,
-            at,
+            surface.rings,
+            surface.stretch,
+            surface.at,
             (own.at, own.basis),
             end.map(|frame| (frame.at, frame.basis)),
             rest,
@@ -854,13 +958,18 @@ impl Placement {
             #[allow(clippy::cast_precision_loss, reason = "bounded by BANDS")]
             let step = band as f64 + 0.5;
             let (_, normal) = middle.surface(start + STRIP * step);
-            *tone = mesh::shaded(color, mesh::level(normal, seen.light));
+            *tone = mesh::shaded(surface.color, mesh::level(normal, seen.light));
         }
 
-        // Bounded by `MAX_RINGS`, and a part with no rings returned above.
-        #[allow(clippy::cast_precision_loss, reason = "bounded by MAX_RINGS")]
-        let count = hoops.len() as f64;
-        slot.depth = depth / count;
+        slot.depth = if let Some(point) = surface.sort {
+            let local = surface.at.plus(surface.stretch.point(point));
+            project(stance.facing, own.at.plus(own.basis.apply(local))).depth
+        } else {
+            // Bounded by `MAX_RINGS`, and a part with no rings returned above.
+            #[allow(clippy::cast_precision_loss, reason = "bounded by MAX_RINGS")]
+            let count = hoops.len() as f64;
+            depth / count
+        };
         // The order is the tie-break that keeps a caller's paint order
         // identical from frame to frame.
         #[allow(

@@ -11,19 +11,16 @@ use crate::humanoid::{self, Bone, DRIVES};
 use crate::motion::{Kind, Motion};
 use crate::plant::Legs;
 use crate::pose::Param;
-use crate::rig::Rig;
 use crate::rigging::Rigging;
 use crate::socket::Side;
-
-fn rig() -> Rig {
-    humanoid::rig().expect("the humanoid rig")
-}
+use crate::species::Species;
+use crate::testing::{corners, human};
 
 /// The whole point of the item: the art's quality is these numbers, and they
 /// are held here rather than looked at.
 #[test]
 fn every_shipped_motion_clears_every_bound() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let ankle = Bone::Ankle(Side::Left).joint();
 
@@ -59,7 +56,7 @@ fn every_shipped_motion_clears_every_bound() {
 #[test]
 fn grounding_catches_a_root_too_low_and_a_root_too_high() {
     const FOLDED: [Key; 1] = [Key::new(0.0, 0.35)];
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
     // Legs folded and no root height at all: the figure hovers by its fold.
@@ -97,7 +94,7 @@ fn grounding_catches_a_root_too_low_and_a_root_too_high() {
 #[test]
 fn a_clip_at_a_joints_limit_measures_its_whole_travel() {
     const FOLDED: [Key; 1] = [Key::new(0.0, 1.0)];
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let curves = [Curve::new(Param::ElbowBend(Side::Left), &FOLDED).expect("a real curve")];
     let clip = Clip::new(1.0, Loop::Wrap, &curves, &[]).expect("a real clip");
@@ -145,7 +142,7 @@ fn a_cycle_that_does_not_join_is_reported() {
 /// skates, and the measurement is what turns that into a number.
 #[test]
 fn a_foot_out_of_step_with_the_body_skates() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let ankle = Bone::Ankle(Side::Left).joint();
     let motion = Motion::new(Kind::Walk).expect("the shipped walk");
@@ -164,4 +161,40 @@ fn clip_stride(rigging: &Rigging<'_>, clip: Clip<'_>, ankle: crate::joint::Joint
     crate::gait::Gait::fitted(rigging, clip, ankle)
         .expect("a fitted gait")
         .stride()
+}
+
+/// A clip names no length and no joint, so it plays on every build: at every
+/// build corner of every species the shipped motions stay grounded and do
+/// not skate, measured by the same code and held to the same bounds as the
+/// reference figure.
+#[test]
+fn every_shipped_motion_clears_its_bounds_on_every_build() {
+    let ankle = Bone::Ankle(Side::Left).joint();
+    let motions = Kind::ALL.map(|kind| Motion::new(kind).expect("a shipped motion"));
+    for species in Species::ALL {
+        for identity in corners(species) {
+            let rig = humanoid::rig(&identity).expect("every build builds");
+            let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
+            let legs = Legs::new(&rigging, humanoid::legs()).expect("two real legs");
+            for motion in &motions {
+                let clip = motion.clip().expect("its clip");
+                let sunk = grounding(&rigging, clip, &legs).expect("measurable");
+                assert!(
+                    sunk <= MAX_GROUNDING,
+                    "{species:?} {} sinks {sunk} at {:?}",
+                    motion.kind().name(),
+                    identity.spec().build
+                );
+                if motion.kind().stride().is_some() {
+                    let slide = skate(&rigging, clip, ankle).expect("measurable");
+                    assert!(
+                        slide <= MAX_SKATE,
+                        "{species:?} {} skates {slide} at {:?}",
+                        motion.kind().name(),
+                        identity.spec().build
+                    );
+                }
+            }
+        }
+    }
 }

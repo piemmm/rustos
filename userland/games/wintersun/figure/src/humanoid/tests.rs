@@ -4,16 +4,20 @@
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
-use super::{palette, rig, Bone, JOINT_COUNT, PART_COUNT, STANDING_HEIGHT};
-use crate::error::FigureError;
-use crate::frame::{Rotation, FORESHORTEN};
+use alloc::vec::Vec;
 use tairix_raster::surface::SUBPIXEL;
 
-use crate::reference::Reference;
-use crate::rig::{Placement, Posture, Rig, Stance};
+use super::{feature, rig, Bone, BODY_PARTS, FOOT, JOINT_COUNT, MOST_PARTS, STANDING_HEIGHT};
+use crate::error::FigureError;
+use crate::frame::{Rotation, FORESHORTEN};
+use crate::identity::{Build, Features, Identity, Palette, Setting, Spec};
+use crate::mesh;
+use crate::reference::{self, Reference};
+use crate::rig::{Frames, Part, Placement, Posture, Resolved, Rig, Stance};
+use crate::species::Species;
+use crate::testing::{corners, human};
+use crate::tint::{Tint, Tints};
 
-/// A stance the placement cases share; what a stance refuses is `rig`'s own
-/// test, so these state only their own subject.
 /// Where surface `surface` ended up on screen, as the mean of every point
 /// its strips were walked through.
 #[track_caller]
@@ -55,6 +59,8 @@ fn overlap(out: &Placement, one: u16, other: u16) -> bool {
     a_lo.0 <= b_hi.0 && b_lo.0 <= a_hi.0 && a_lo.1 <= b_hi.1 && b_lo.1 <= a_hi.1
 }
 
+/// A stance the placement cases share; what a stance refuses is `rig`'s own
+/// test, so these state only their own subject.
 #[track_caller]
 fn stance(facing: Facing, scale: f64, at: (f64, f64)) -> Stance {
     Stance::new(facing, scale, at, Reference::light().expect("a real light"))
@@ -68,16 +74,17 @@ const SOUTH: Facing = Facing(0x4000);
 const SLACK: f64 = 1e-9;
 
 fn built() -> Rig {
-    rig().expect("the shipped humanoid must be consistent")
+    human()
 }
 
 #[test]
 fn the_shipped_rig_assembles() {
     // Every check `Rig::new` makes, applied to the rig the game draws — so
-    // editing this table into something inconsistent fails here.
+    // editing a table into something inconsistent fails here. The reference
+    // human is its body, a two-part style of hair, two eyes and two ears.
     let rig = built();
     assert_eq!(rig.joints().len(), JOINT_COUNT);
-    assert_eq!(rig.parts().len(), PART_COUNT);
+    assert_eq!(rig.parts().len(), BODY_PARTS + 6);
 }
 
 #[test]
@@ -148,7 +155,7 @@ fn a_limb_and_its_mass_share_one_joint() {
             let carried = rig
                 .parts()
                 .iter()
-                .filter(|part| part.joint == bearing.joint())
+                .filter(|part| part.joint() == bearing.joint())
                 .count();
             assert_eq!(carried, 2, "{bearing:?} must carry its cap and its limb");
         }
@@ -184,7 +191,7 @@ fn a_swinging_limb_never_leaves_its_mass() {
             .parts()
             .iter()
             .enumerate()
-            .filter(|(_, part)| part.joint == bearing.joint())
+            .filter(|(_, part)| part.joint() == bearing.joint())
             .map(|(index, _)| u16::try_from(index).expect("inside the bound"));
         let cap = seeds.next().expect("the cap");
         let limb = seeds.next().expect("the limb");
@@ -197,51 +204,157 @@ fn a_swinging_limb_never_leaves_its_mass() {
     }
 }
 
-#[test]
-fn the_figure_stands_its_stated_height() {
-    // `STANDING_HEIGHT` is what a caller's scale is computed against, so it
-    // has to be the height the rig actually draws rather than a label.
-    // Measured in the figure's own frame, off the rings themselves. Not off
-    // a part's reach, which is a radial bound and over-states a tall part's
-    // height by its own width; and not off the placed rows, whose spread
-    // includes the depth between the two feet.
-    let rig = built();
-    let mut above = [0.0_f64; JOINT_COUNT];
-    for (index, joint) in rig.joints().iter().enumerate() {
-        // At rest every frame is square, so a joint's height is the sum of
-        // the offsets up its parent chain — and a parent always precedes it.
-        let carried = joint.parent.map_or(0.0, |parent| above[parent.index()]);
-        above[index] = carried + joint.at.up;
-    }
-
-    let mut frames = crate::rig::Frames::new();
-    Posture::rest(&rig).resolve(crate::rig::Resolved::REST, &mut frames);
-    let mut crown = 0.0;
-    let mut sole = 0.0;
+/// How far above the ground the skull's crown and the foot's sole stand for
+/// `identity` at rest, measured off the carried rings themselves.
+///
+/// Not off a part's reach, which is a radial bound and over-states a tall
+/// part's height by its own width, and not off the placed rows, whose spread
+/// includes the depth between the two feet. The skull and the foot are
+/// found by the rings they are built from, so hair, horns and an animal's
+/// ears — which are not stature — are not counted.
+fn crown_and_sole(identity: &Identity) -> (f64, f64) {
+    let rig = rig(identity).expect("every identity builds");
+    let skull = feature::skull_for(identity.spec().features.face);
+    let mut frames = Frames::new();
+    Posture::rest(&rig).resolve(Resolved::REST, &mut frames);
+    let (mut crown, mut sole) = (f64::MIN, f64::MAX);
     for part in rig.parts() {
-        assert!(!part.rings.is_empty(), "the humanoid draws no empty part");
-        let own = frames.get(part.joint).expect("a resolved joint");
-        let hoops = crate::mesh::carry(part.rings, part.at, (own.at, own.basis), None, None)
-            .expect("the part carries");
+        let is_skull = part.rings() == skull;
+        let is_foot = part.rings() == &FOOT[..];
+        if !is_skull && !is_foot {
+            continue;
+        }
+        let own = frames.get(part.joint()).expect("a resolved joint");
+        let hoops = mesh::carry(
+            part.rings(),
+            part.stretch(),
+            part.at(),
+            (own.at, own.basis),
+            None,
+            None,
+        )
+        .expect("the part carries");
         for hoop in &hoops {
             // A cross-section is an ellipse in space, so how tall it stands
             // is the vertical reach of its two half-axes together.
             let half = mathf::hypot(hoop.wide.up, hoop.deep.up);
-            crown = mathf::fmax(crown, hoop.at.up + half);
-            sole = mathf::fmin(sole, hoop.at.up - half);
+            if is_skull {
+                crown = mathf::fmax(crown, hoop.at.up + half);
+            } else {
+                sole = mathf::fmin(sole, hoop.at.up - half);
+            }
         }
     }
-    let _ = above;
+    (crown, sole)
+}
 
-    let height = crown - sole;
+#[test]
+fn the_figure_stands_its_stated_height() {
+    // What a record's height setting means, measured independently of the
+    // arithmetic that built the skeleton, for every species at every one of
+    // its build corners: the crown stands exactly where the setting says,
+    // and the sole is on the ground rather than in or above it.
+    for species in Species::ALL {
+        for identity in corners(species) {
+            let (crown, sole) = crown_and_sole(&identity);
+            let stated = identity.proportions().height * STANDING_HEIGHT;
+            assert!(
+                mathf::fabs(sole) < 1e-9,
+                "{species:?} stands {sole} off the ground"
+            );
+            assert!(crown > sole, "{species:?} has no crown above its sole");
+            assert!(
+                mathf::fabs(crown - sole - stated) < 1e-9,
+                "{species:?} stands {} against a stated {stated}",
+                crown - sole
+            );
+        }
+    }
+}
+
+#[test]
+fn limb_and_head_proportion_change_the_shape_and_not_the_height() {
+    // A proportion is not a size: a long-limbed figure of one height has the
+    // longer leg and the shorter trunk, and a large head costs the body.
+    let mut short = reference::spec(Species::Human);
+    short.build.limbs = Setting::LOW;
+    let mut long = short;
+    long.build.limbs = Setting::HIGH;
+    let leg = |spec: Spec| {
+        let rig = rig(&Identity::new(spec).expect("real")).expect("builds");
+        let knee = rig.joints()[Bone::Knee(Side::Left).index()].at.length();
+        let ankle = rig.joints()[Bone::Ankle(Side::Left).index()].at.length();
+        let chest = rig.joints()[Bone::Chest.index()].at.length();
+        (knee + ankle, chest)
+    };
+    let (short_leg, short_trunk) = leg(short);
+    let (long_leg, long_trunk) = leg(long);
+    assert!(long_leg > short_leg, "longer limbs are longer legs");
     assert!(
-        mathf::fabs(height - STANDING_HEIGHT) < STANDING_HEIGHT * 0.01,
-        "the rig stands {height} against a stated {STANDING_HEIGHT}"
+        long_trunk < short_trunk,
+        "at one height, longer legs cost the trunk"
     );
+    let (short_crown, _) = crown_and_sole(&Identity::new(short).expect("real"));
+    let (long_crown, _) = crown_and_sole(&Identity::new(long).expect("real"));
     assert!(
-        mathf::fabs(sole) < STANDING_HEIGHT * 0.01,
-        "the feet must meet the ground, not sit {sole} from it"
+        mathf::fabs(short_crown - long_crown) < 1e-9,
+        "the same height"
     );
+}
+
+#[test]
+fn a_larger_head_carries_everything_on_it_and_the_gear_it_wears() {
+    let mut small = reference::spec(Species::Dwarf);
+    small.build.head = Setting::LOW;
+    let mut large = small;
+    large.build.head = Setting::HIGH;
+    let head_of = |spec: Spec| {
+        let rig = rig(&Identity::new(spec).expect("real")).expect("builds");
+        let eye = rig
+            .parts()
+            .iter()
+            .find(|part| part.tint() == Tint::Eyes)
+            .expect("an eye")
+            .at();
+        let helm = rig.mount(Socket::Head).expect("a head socket");
+        (eye, helm.scale)
+    };
+    let (small_eye, small_helm) = head_of(small);
+    let (large_eye, large_helm) = head_of(large);
+    assert!(
+        large_eye.length() > small_eye.length(),
+        "the eye rides out with the face"
+    );
+    assert!(large_helm > small_helm, "a helm on a larger head is larger");
+}
+
+#[test]
+fn girth_widens_the_body_and_taper_moves_it_between_shoulders_and_hips() {
+    let shoulder_and_hip = |spec: Spec| {
+        let rig = rig(&Identity::new(spec).expect("real")).expect("builds");
+        let shoulder = rig.joints()[Bone::Shoulder(Side::Left).index()].at.side;
+        let hip = rig.joints()[Bone::Hip(Side::Left).index()].at.side;
+        (shoulder, hip)
+    };
+    let mut slight = reference::spec(Species::Human);
+    slight.build.girth = Setting::LOW;
+    let mut heavy = slight;
+    heavy.build.girth = Setting::HIGH;
+    let (slight_shoulder, slight_hip) = shoulder_and_hip(slight);
+    let (heavy_shoulder, heavy_hip) = shoulder_and_hip(heavy);
+    assert!(heavy_shoulder > slight_shoulder && heavy_hip > slight_hip);
+
+    let mut pear = reference::spec(Species::Human);
+    pear.build.taper = Setting::LOW;
+    let mut wedge = pear;
+    wedge.build.taper = Setting::HIGH;
+    let (pear_shoulder, pear_hip) = shoulder_and_hip(pear);
+    let (wedge_shoulder, wedge_hip) = shoulder_and_hip(wedge);
+    assert!(
+        wedge_shoulder > pear_shoulder,
+        "a high taper broadens the shoulders"
+    );
+    assert!(wedge_hip < pear_hip, "and narrows the hips");
 }
 
 #[test]
@@ -260,7 +373,7 @@ fn the_foot_further_into_the_scene_draws_higher() {
         let seed = rig
             .parts()
             .iter()
-            .position(|part| part.joint == bone.joint())
+            .position(|part| part.joint() == bone.joint())
             .and_then(|index| u16::try_from(index).ok())
             .expect("the ankle carries a part");
         centre(&out, seed).1
@@ -270,7 +383,8 @@ fn the_foot_further_into_the_scene_draws_higher() {
     let near = row_of(Bone::Ankle(Side::Right));
     assert!(far < near, "the far foot must draw higher up the screen");
     let apart = near - far;
-    let hips_apart = 18.0;
+    let hips_apart = rig.joints()[Bone::Hip(Side::Left).index()].at.side
+        - rig.joints()[Bone::Hip(Side::Right).index()].at.side;
     assert!(
         mathf::fabs(apart - hips_apart * FORESHORTEN) < 0.5,
         "the feet are {apart} apart, not the foreshortened {}",
@@ -388,7 +502,7 @@ fn the_figure_places_at_every_heading() {
         posture
             .place(&stance(facing, 0.5, (40.0, 60.0)), &[], &mut out)
             .expect("places");
-        assert_eq!(out.len(), PART_COUNT);
+        assert_eq!(out.len(), rig.parts().len());
         for strip in out.strips() {
             for (x, y) in strip.near.iter().chain(strip.far) {
                 // Saturation is how a surface placed off the canvas stays
@@ -400,42 +514,236 @@ fn the_figure_places_at_every_heading() {
     }
 }
 
+/// Every surface is drawn in a role, and a role is drawn in the colour the
+/// record chose for it — the rig's tints are the identity's.
 #[test]
-fn the_palette_is_distinct() {
-    // A re-tint that collapsed two tones would flatten the figure without
-    // failing anything else.
-    let tones = [
-        palette::SKIN_LIT,
-        palette::SKIN_MID,
-        palette::SKIN_SHADE,
-        palette::CLOTH_LIT,
-        palette::CLOTH_SHADE,
-        palette::LEATHER,
-    ];
-    for (index, tone) in tones.iter().enumerate() {
-        for other in &tones[index + 1..] {
-            assert_ne!(tone, other, "two tones are the same colour");
+fn a_figure_is_drawn_in_the_colours_its_record_chose() {
+    for figure in &reference::FIGURES {
+        let identity = figure.identity().expect("a real record");
+        let rig = rig(&identity).expect("builds");
+        assert_eq!(rig.tints(), identity.tints());
+        let draws = |tint: Tint| rig.parts().iter().any(|part| part.tint() == tint);
+        for always in [
+            Tint::Skin,
+            Tint::Eyes,
+            Tint::Accent,
+            Tint::Trousers,
+            Tint::Leather,
+        ] {
+            assert!(draws(always), "{} draws nothing in {always:?}", figure.name);
         }
+        let spec = identity.spec();
+        assert_eq!(
+            draws(Tint::Hair),
+            spec.features.hair.is_some(),
+            "{} draws hair it does not have, or has hair it does not draw",
+            figure.name
+        );
+        assert_eq!(
+            draws(Tint::Markings),
+            !spec.species.markings().is_empty(),
+            "a species' markings are drawn exactly when it has them ({})",
+            figure.name
+        );
     }
 }
 
-/// The declared tone list is the rig's own, so a part re-tinted above
-/// without the list moving fails here rather than escaping the conformance
-/// check that reads it.
+/// A palette edit is a re-tint, not a re-rig: swapping the colours moves no
+/// point of any surface.
 #[test]
-fn the_declared_palette_is_exactly_what_the_rig_draws_with() {
-    let rig = rig().expect("the humanoid rig");
-    for part in rig.parts() {
-        assert!(
-            palette::ALL.contains(&part.color),
-            "{:?} is drawn in a tone the palette does not list",
-            part.color
+fn retinting_a_figure_changes_its_colours_and_nothing_else() {
+    let mut rig = built();
+    let facing = Facing(0x2A00);
+    let mut before = Placement::new();
+    Posture::rest(&rig)
+        .place(&stance(facing, 0.75, (30.0, 70.0)), &[], &mut before)
+        .expect("places");
+    rig.retint(Tints::new(
+        [tairix_raster::Color::rgb(0x11, 0x22, 0x33); Tint::COUNT],
+    ));
+    let mut after = Placement::new();
+    Posture::rest(&rig)
+        .place(&stance(facing, 0.75, (30.0, 70.0)), &[], &mut after)
+        .expect("places");
+    let (one, other): (Vec<_>, Vec<_>) = (before.strips().collect(), after.strips().collect());
+    assert_eq!(one.len(), other.len());
+    for (was, now) in one.iter().zip(&other) {
+        assert_eq!(
+            (was.surface, was.near, was.far),
+            (now.surface, now.near, now.far)
         );
     }
-    for tone in palette::ALL {
-        assert!(
-            rig.parts().iter().any(|part| part.color == tone),
-            "{tone:?} is listed but nothing is drawn in it"
+    assert!(one
+        .iter()
+        .zip(&other)
+        .any(|(was, now)| was.color != now.color));
+}
+
+/// Every species at every build corner, with every form it may take, builds
+/// — so no record the decoder admits is one the builder refuses — and never
+/// needs more surfaces than a rig holds; the richest needs exactly that.
+#[test]
+fn every_admissible_figure_builds_within_the_part_bound() {
+    let mut richest = 0;
+    for species in Species::ALL {
+        for (features, markings) in admissible(species) {
+            for setting in [Setting::LOW, Setting::HIGH] {
+                let spec = Spec {
+                    species,
+                    build: Build {
+                        height: setting,
+                        girth: setting,
+                        taper: setting,
+                        limbs: setting,
+                        head: setting,
+                    },
+                    features,
+                    palette: Palette {
+                        markings,
+                        eyes: species.eyes()[0],
+                        ..Palette::default()
+                    },
+                };
+                let identity = Identity::new(spec).expect("an admissible figure is a record");
+                let rig = rig(&identity).expect("an admissible figure builds");
+                assert!(rig.parts().len() >= BODY_PARTS);
+                richest = richest.max(rig.parts().len());
+            }
+        }
+    }
+    assert_eq!(richest, MOST_PARTS, "the part bound is the richest figure");
+}
+
+/// Every feature combination `species` admits, bald figures with no volume.
+fn admissible(species: Species) -> Vec<(Features, u8)> {
+    use crate::identity::{EyeShape, FaceShape, HairStyle};
+    let mut out = Vec::new();
+    for face in FaceShape::ALL {
+        for eyes in EyeShape::ALL {
+            for ears in species.ears() {
+                for horns in species.horns() {
+                    for tail in species.tails() {
+                        for hair in HairStyle::ALL
+                            .iter()
+                            .map(|style| Some(*style))
+                            .chain([None])
+                        {
+                            out.push((
+                                Features {
+                                    face: *face,
+                                    eyes: *eyes,
+                                    ears: *ears,
+                                    horns: *horns,
+                                    tail: *tail,
+                                    hair,
+                                    volume: Setting::LOW,
+                                },
+                                0,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every figure has a tail's root, so every species shares one skeleton,
+/// but only a tailed figure hangs anything on it.
+#[test]
+fn every_figure_has_a_tail_root_and_only_a_tailed_one_uses_it() {
+    for figure in &reference::FIGURES {
+        let identity = figure.identity().expect("a real record");
+        let rig = rig(&identity).expect("builds");
+        assert_eq!(rig.joints().len(), JOINT_COUNT);
+        assert_eq!(
+            rig.joints()[Bone::Tail.index()].parent,
+            Some(Bone::Pelvis.joint())
         );
+        let tailed = rig
+            .parts()
+            .iter()
+            .any(|part| part.joint() == Bone::Tail.joint());
+        assert_eq!(
+            tailed,
+            identity.spec().features.tail.is_some(),
+            "{}",
+            figure.name
+        );
+    }
+}
+
+/// A part's whole template is the record's to choose, never to write: the
+/// skull a face is drawn as is one of the first-party skulls, found by name.
+#[test]
+fn a_skull_is_always_a_first_party_template() {
+    use crate::identity::FaceShape;
+    for face in FaceShape::ALL {
+        let mut spec = reference::spec(Species::Human);
+        spec.features.face = *face;
+        let identity = Identity::new(spec).expect("real");
+        let rig = rig(&identity).expect("builds");
+        let skulls = rig
+            .parts()
+            .iter()
+            .filter(|part: &&Part| part.rings() == feature::skull_for(*face))
+            .count();
+        assert_eq!(skulls, 1, "{face:?} is drawn as its own skull, once");
+    }
+}
+
+/// The humanoid's cap of hair and the skull under it share one sort point
+/// through their different stretches, so however the head nods or tilts
+/// and whichever way the figure faces, the cap is painted over the skull.
+#[test]
+fn a_cap_of_hair_is_painted_over_its_skull_at_every_heading_and_nod() {
+    use crate::pose::{Param, Pose};
+    let identity = reference::identity(Species::Elf).expect("a haired figure");
+    let rig = rig(&identity).expect("it builds");
+    let rigging = super::rigging(&rig).expect("it binds");
+    let skull = feature::skull_for(identity.spec().features.face);
+    let skull_at = rig
+        .parts()
+        .iter()
+        .position(|part| part.rings() == skull)
+        .and_then(|at| u16::try_from(at).ok())
+        .expect("the skull is there");
+    // The cap is the hair authored after the skull; a mass down the back is
+    // authored before it.
+    let cap_at = rig
+        .parts()
+        .iter()
+        .enumerate()
+        .skip(usize::from(skull_at) + 1)
+        .find(|(_, part)| part.tint() == Tint::Hair)
+        .and_then(|(at, _)| u16::try_from(at).ok())
+        .expect("a cap over the crown");
+    let mut out = Placement::new();
+    for step in 0..16u32 {
+        let facing = Facing(u16::try_from(step * 4096).expect("inside a turn"));
+        for (nod, tilt) in [
+            (-1.0, 0.0),
+            (-0.5, 0.5),
+            (0.0, 0.0),
+            (0.5, -0.5),
+            (1.0, 1.0),
+        ] {
+            let pose = Pose::REST
+                .with(Param::HeadNod, nod)
+                .and_then(|pose| pose.with(Param::HeadTilt, tilt))
+                .expect("in range");
+            rigging
+                .posture(&pose)
+                .expect("posturable")
+                .place(&stance(facing, 1.0, (0.0, 0.0)), &[], &mut out)
+                .expect("places");
+            let painted: Vec<u16> = out.strips().map(|strip| strip.surface).collect();
+            let first = |surface: u16| painted.iter().position(|at| *at == surface);
+            assert!(
+                first(cap_at) > first(skull_at),
+                "the cap went under the skull facing {facing:?} at nod {nod}, tilt {tilt}"
+            );
+        }
     }
 }

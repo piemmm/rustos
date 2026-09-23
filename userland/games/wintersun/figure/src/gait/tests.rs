@@ -5,12 +5,12 @@ use tairix_util::mathf;
 use super::Gait;
 use crate::clip::{Clip, Curve, Event, Key, Loop};
 use crate::error::FigureError;
-use crate::humanoid::{self, Bone, DRIVES};
+use crate::humanoid::{Bone, DRIVES};
 use crate::joint::JointId;
 use crate::pose::Param;
-use crate::rig::Rig;
 use crate::rigging::Rigging;
 use crate::socket::Side;
+use crate::testing::human;
 
 const SLACK: f64 = 1e-9;
 
@@ -64,10 +64,6 @@ fn curves() -> [Curve<'static>; 2] {
 
 fn walk<'a>(curves: &'a [Curve<'a>]) -> Clip<'a> {
     Clip::new(1.0, Loop::Wrap, curves, &STEP).expect("a real walk")
-}
-
-fn rig() -> Rig {
-    humanoid::rig().expect("the humanoid rig")
 }
 
 const ANKLE: JointId = Bone::Ankle(Side::Left).joint();
@@ -171,7 +167,7 @@ fn the_phase_stays_inside_the_cycle_over_a_long_walk() {
 /// foot then barely moves over the ground.
 #[test]
 fn a_fitted_stride_recovers_the_walk_it_was_authored_with() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let curves = curves();
     let walk = walk(&curves);
@@ -195,7 +191,7 @@ fn a_fitted_stride_recovers_the_walk_it_was_authored_with() {
 /// remove.
 #[test]
 fn a_stride_that_is_not_the_clips_own_makes_the_foot_skate() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let curves = curves();
     let walk = walk(&curves);
@@ -220,7 +216,7 @@ fn a_stride_that_is_not_the_clips_own_makes_the_foot_skate() {
 /// stride for it would be inventing one.
 #[test]
 fn a_clip_whose_foot_never_lifts_has_no_stride() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let flat = [Key::new(0.0, 0.2), Key::new(1.0, 0.2)];
     let curves = [Curve::new(Param::HipSwing(Side::Left), &flat).expect("a real curve")];
@@ -233,7 +229,7 @@ fn a_clip_whose_foot_never_lifts_has_no_stride() {
 
 #[test]
 fn fitting_against_a_joint_the_rig_lacks_is_refused() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let curves = curves();
     assert_eq!(
@@ -246,7 +242,7 @@ fn fitting_against_a_joint_the_rig_lacks_is_refused() {
 /// mid-stance measures the same stride rather than two half windows.
 #[test]
 fn a_walk_authored_from_mid_stance_measures_the_same_stride() {
-    let rig = rig();
+    let rig = human();
     let rigging = Rigging::new(&rig, &DRIVES).expect("the humanoid rigging");
     let curves = curves();
     let upright = Gait::fitted(&rigging, walk(&curves), ANKLE).expect("a fitted gait");

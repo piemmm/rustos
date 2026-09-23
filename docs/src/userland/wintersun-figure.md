@@ -3,9 +3,9 @@
 `userland/games/wintersun/figure` (`tairix-wintersun-figure`) answers what a
 character *is* before anything animates it: a skeleton of joints, the
 parametric parts bound to them, the sockets equipment hangs on, and the one
-projection that turns all of it toward the camera. It is `plans/FIGURE.md`
-FG2, and the sixth crate of the `userland/games/` leaf subtree. Stability
-tier: **experimental**.
+projection that turns all of it toward the camera — and the validated record a
+character is built from. It is `plans/FIGURE.md` FG2–FG6, and the sixth crate
+of the `userland/games/` leaf subtree. Stability tier: **experimental**.
 
 ## Parts on a skeleton, not a sprite sheet
 
@@ -156,14 +156,17 @@ rings of an exposed end taper to a point.
 
 ### What it costs
 
-Twenty-one surfaces, 688 outline points per figure against the billboard's
-468, filled through the existing scan converter with no depth buffer and no
+Twenty-one body surfaces trace 688 outline points against the billboard's
+468, and the richest figure in the grid, with every feature it can carry,
+1,048 — filled through the existing scan converter with no depth buffer and no
 allocator. Strips are stored in the converter's own sub-pixel units, which is
 both half the memory of a pair of reals and exactly what the painter hands it;
 a figure's whole buffer set is then stack-resident, which is what the
-cross-target verticals need. It measures above 64 KiB, so the QEMU images
-size their boot stack for it (`BOOT_STACK_BYTES` in the per-image linker
-script) rather than relying on the allowance the boot pipeline sizes for
+cross-target verticals need. The grid's deepest build measures about a
+hundred kibibytes of stack, so each QEMU image that draws it sizes its boot
+stack for it — the `virt` linker scripts on aarch64 and riscv64, and on
+x86_64 an image script that sets `BOOT_STACK_BYTES` and includes the shared
+layout — rather than relying on the allowance the boot pipeline sizes for
 itself.
 
 ## Equipment is parts, not paint
@@ -180,17 +183,20 @@ handed shoulder, hip and foot.
 
 ## The humanoid
 
-The first-party rig is seventeen joints and twenty-one skinned surfaces,
-proportioned in
-percentages of its standing height so an offset reads directly as a fraction
-of the figure — a shoulder at 82, a knee at 28 — and a reviewer can check a
-proportion without converting anything. The two sides are mirrored from one
-pass, because two tables would be two things to keep in step.
+The one skeleton every species stands on is eighteen joints — a humanoid's
+seventeen and a tail's root, which a figure without a tail leaves bare — and
+twenty-one body surfaces, plus up to twelve for the features a record asks
+for. It is proportioned in percentages of the reference figure's standing
+height, so an offset reads directly as a fraction of the figure — a shoulder
+at 82, a knee at 28 — and a reviewer can check a proportion without
+converting anything. The two sides are mirrored from one pass, because two
+tables would be two things to keep in step.
 
-Scaling is one number: the factor is the height a caller wants over the rig's
-authored standing height, and it carries the offsets and the surfaces
-together, so a figure drawn at half size is half the figure rather than a
-full-size arrangement of half-size parts.
+Drawing a figure at a size is one number: the factor is the pixel height a
+caller wants over the figure-local units the rig is built in, and it carries
+the offsets and the surfaces together, so a figure drawn at half size is half
+the figure rather than a full-size arrangement of half-size parts. How tall
+the figure itself stands is its record's, below.
 
 ## An animation is authored in parameters, not rotations
 
@@ -288,7 +294,7 @@ The joint and part bounds are bounds on *authored content* rather than runtime
 capacities: a rig is first-party code, not input, and the shipped rig's counts
 are held to them at build time. Runtime-loaded figure geometry from an
 untrusted source is refused by design; only a figure's *parameters* are
-validated data, and those arrive with a later item.
+validated data — the record, below.
 
 ## The layers over a clip
 
@@ -387,7 +393,7 @@ report a foot planted well into its own toe-off.
 The shipped run's stance legs carry no push-off of their own, so its body
 holds one height while a foot is down and rises only across the flight. A
 mid-stance dip from leg compression would need its leg keys re-solved, and is
-staged rather than faked.
+its own item (FG8) rather than faked.
 
 How much height difference the legs can absorb is the rig's own statement —
 the span between a straight leg and a fully folded one, which for the shipped
@@ -433,7 +439,10 @@ spent, and the overshoot on the way back — a damping ratio below one — is th
 follow-through whose absence makes an attack feel weightless. Sway is driven
 by the carrier's **acceleration** rather than its velocity, so a figure moving
 steadily has its cloak hanging straight behind it and one that starts, stops
-or turns throws it; wind adds to the same drive with no second path.
+or turns throws it; wind adds to the same drive with no second path. Gear
+takes the sway as a turn on its socket; a tail, which hangs from a joint of
+its own, takes it through its two parameters as an overlay like any other
+layer's, so it sums with a clip and stays inside the joint's limits.
 
 ### Look-at, breathing, root motion, and the shadow
 
@@ -466,9 +475,13 @@ the figure growing.
 
 ## The art is measured, and the measurements are gated
 
-`cargo xtask artsheet` walks a reference grid — every shipped motion, at eight
-phases, facing four ways, at the three pixel sides the desktop draws a figure
-at — renders each cell and holds every number against a bound. It runs in
+`cargo xtask artsheet` walks a reference grid — each species' reference figure
+in every shipped motion, and each species' least and most walking, at eight
+phases, facing four ways — renders each cell and holds every number against a
+bound. A reference figure is measured at the three pixel sides the desktop
+draws a figure at; a least or most at the smallest, the readability floor,
+since what a figure costs is counted in outline points and fill area and
+neither depends on the side. It runs in
 `ci`, and it does two things at once: it regenerates
 `userland/games/wintersun/figure/artsheet.ledger` and compares it byte for
 byte, *and* it checks the freshly measured numbers. Drift alone would admit a
@@ -488,9 +501,9 @@ judges current rather than as-of-last-regeneration.
 | Foot skate, as a fraction of the fitted stride | `figure::quality` | 0.009 |
 | Motion continuity, per unit of a parameter's range | `figure::quality` | 0.041 |
 | Loop closure | `figure::quality` | exact |
-| Grounding: the cycle's lowest foot against the floor | `figure::quality` | 0.052 of a hundred-unit figure |
-| Coverage ratio, tonal regions, contrast against both themes | the harness | 0.091–0.178, ≥ 6 regions, ≥ 2.74 |
-| Outline points and fill area per cell | `figure::paint` + the harness | 688 points, 0.22 overdraw |
+| Grounding: the cycle's lowest foot against the floor | `figure::quality` | 0.057 of a figure's units, on the long-legged elf |
+| Coverage ratio, tonal regions, contrast against both themes | the harness | 0.084–0.212, ≥ 5 regions, ≥ 2.20 |
+| Outline points and fill area per cell | `figure::paint` + the harness | ≤ 1,048 points, ≤ 0.28 overdraw |
 
 The pose-side measurements live in the crate rather than the harness, so
 `cargo test` runs them on every Tier-1 target and a later figure preset is
@@ -512,14 +525,89 @@ It is asserted by the host suite and by one vertical per Tier-1 target
 (`tests/integration/figure_determinism_*`), so no target can pass by having
 never run.
 
+## A figure is a record, and the record is never geometry
+
+A character is an `identity::Identity`: nineteen checked bytes, and a figure
+is built from nothing else.
+
+| Byte | Field | What it holds |
+|---|---|---|
+| 0 | version | the record format; anything but this build's is refused |
+| 1 | species | human, elf, dwarf, beastkin or dragonkin |
+| 2–6 | build | height, girth, taper, limbs, head — each a setting across its species' interval |
+| 7–9 | face, eyes, ears | a face shape, an eye shape, an ear form |
+| 10–12 | horns, tail, hair | zero for none, one past the form otherwise |
+| 13 | volume | how full the hair is; zero when there is none |
+| 14–18 | palette | skin (fur, scale), hair, eyes, markings, cloth — swatch indices |
+
+**Every setting is inside its species by construction.** A build setting is
+a byte spanning the whole interval its species documents — a dwarf's highest
+height is still a dwarf's — so there is no out-of-range setting to clamp, and
+both ends of every interval are exactly its documented ends. The intervals,
+the forms each feature may take, and the swatch tables each palette slot draws
+from are `species::Species` data rather than code: a species is what it may
+be, not a different rig. Every species stands on the one skeleton, so every
+clip plays on all of them.
+
+**The decoder is total and fails closed.** In the game the record arrives
+from a client assumed hostile, and the server re-validates a submitted figure
+with exactly this: every byte string answers a record or an
+`IdentityError` naming the field it refused — a byte naming nothing, a form
+or eye colour the species does not carry (a tail on a human, a dragon's red
+eyes on an elf), a swatch past its table. A figure has **one spelling**: a
+bald figure stores zero for its hair's colour and volume, a species without
+markings zero for its markings, and any other value is refused rather than
+ignored, so two records that draw the same figure are the same bytes. Every
+record the decoder admits builds and places a figure — the property the
+decoder's fuzz harness holds, beside a regression corpus with pinned
+verdicts — so a server's check and a renderer can never disagree about what
+is drawable.
+
+**The record reaches the figure through three narrow doors.** Joint offsets,
+which are values, so a longer limb is a longer bone. A `mesh::Stretch` on each
+surface's ring template — five factors along a ring centre's three axes and
+across and through its cross-section — so the rings stay borrowed
+first-party tables and a build costs a few multiplies at carry time; owning
+them per figure would more than double a rig for nothing. And a role table: a
+surface names a `tint::Tint` rather than a colour, so a palette edit is
+`Rig::retint` and never a rebuild.
+
+**Height is height.** Limb and head proportion change a figure's shape and not
+its stature: the builder scales the whole skeleton so the crown stands exactly
+where the height setting puts it, with the sole on the ground. A long-legged
+figure of a given height has the shorter trunk, which is what a proportion is.
+A test measures crown and sole off the carried rings, for every species at
+every one of its build corners, independently of the arithmetic that built
+them. Every build keeps the thigh-to-shank proportion the shipped foot paths
+were solved through, so the clips stay grounded and skate-free on all of them
+— measured, at every corner.
+
+**Features choose templates; they never bend one.** Faces share one cranium
+and differ in the jaw, so everything anchored to the crown fits every face.
+Hair is a cap over the crown and, where it reaches down the back, a mass
+behind: a flat depth sort cannot put one surface both behind a face and over
+it. The cap and the skull are sorted by one shared point, so their depths are
+always the same number and the cap, authored after, covers the skull from
+every side — two means would tie only until the head nodded, and a test
+reproduces exactly that. An animal's ear and a tail carry a marked face or tip
+in the species' markings colour, and a dragonkin's fin is a membrane drawn in
+them too.
+
+**Every palette is readable.** The one colour every figure wears whatever it
+chose — the trousers — sits in the narrow luminance band that clears two-to-one
+against both the dark desktop and the mid-grey light one on its own, and the
+legs are always a substantial share of a figure. The art harness checks that
+tone before any cell, and the grid draws every species in its palest and its
+darkest covering.
+
 ## What comes next
 
-The species and build parameter space, and the designer that drives it.
+The designer that edits a record — its presets and its plausible random
+figures — is `plans/FIGURE.md` FG7.
 
-The planting layer's one remaining debt is a run's mid-stance dip. Its body
-now holds the height its clip states while a foot is down and follows a
-parabola across each flight, which is what a body with nothing holding it up
-does; what it does not yet do is compress at midstance and extend at toe-off,
-because its leg keys carry no push-off to compress. Adding one means
-re-solving those keys through the foot path, and moves the stride and the
-skate with them.
+A run's mid-stance dip is FG8. Its body now holds the height its clip states
+while a foot is down and follows a parabola across each flight, which is what
+a body with nothing holding it up does; what it does not yet do is compress at
+midstance and extend at toe-off, because its leg keys carry no push-off to
+compress. Adding one means re-solving those keys through the foot path, and
+moves the stride and the skate with them.
