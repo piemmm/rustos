@@ -145,10 +145,13 @@ tracked; a move nobody can see simply presents nothing.
 
 ## Untrusted input
 
-The shipped wallpaper is attacker-shaped data like any other image, so it is
-decoded by re-entering this same binary as a capability-empty sandbox worker
-(`lib/sandbox`), under a fixed byte bound, never in the address space that owns
-the seat. The worker role is checked before anything else in `main`. A
+The screen shows the desktop's default wallpaper
+(`tairix_wallpaper::default_wallpaper_path()`), read through the runtime's one
+whole-file policy (`tairix_rt::read_fd_to_end`). It is attacker-shaped data
+like any other image, so it is decoded by re-entering this same binary as a
+capability-empty sandbox worker (`lib/sandbox`), under a fixed byte bound, never
+in the address space that owns the seat. The worker role is checked before
+anything else in `main`. A
 malformed or oversize image is the flat desktop colour, not a crash.
 
 ## Module map

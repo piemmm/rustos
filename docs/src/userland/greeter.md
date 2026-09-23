@@ -211,7 +211,12 @@ that. The position is still tracked; a move nobody can see presents nothing.
 
 ## The wallpaper is untrusted input
 
-The shipped wallpaper is attacker-shaped data like any other image, so it is
+The screen shows the desktop's default wallpaper,
+`tairix_wallpaper::default_wallpaper_path()`: no account is known yet, so no
+user's own choice can apply. It is read through the runtime's one whole-file
+policy, `tairix_rt::read_fd_to_end`.
+
+That wallpaper is attacker-shaped data like any other image, so it is
 never decoded in the address space that owns the seat. The greeter
 re-enters its own binary as a capability-empty sandbox worker and decodes
 and screen-fits the image there, under a fixed input-byte bound; the worker

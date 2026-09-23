@@ -599,8 +599,7 @@ mod tests {
                 "the {icon} icon is planted at Graphics/Icons/{icon}"
             );
         }
-        // The shipped default wallpaper lands inside its own category, at
-        // Graphics/Wallpapers/TAIRiX/tairix-dark.jpg.
+        // The shipped default wallpaper lands inside its own category.
         assert!(
             visited.iter().any(|c| c
                 == &[

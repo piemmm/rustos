@@ -12,7 +12,7 @@ use super::*;
 fn default_wallpaper_path_is_inside_the_store() {
     assert_eq!(
         default_wallpaper_path(),
-        "/System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg"
+        "/System/Graphics/Wallpapers/Nature/sandstone.jpg"
     );
     assert!(default_wallpaper_path().starts_with(WALLPAPER_STORE));
     assert_eq!(category_path("Space"), "/System/Graphics/Wallpapers/Space");

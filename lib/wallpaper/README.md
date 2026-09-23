@@ -46,7 +46,7 @@ key's own closed vocabulary:
 
 | Key         | Value                                              | Default                                       |
 |-------------|----------------------------------------------------|-----------------------------------------------|
-| `wallpaper` | `none`, or an absolute path to an image            | `/System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg` |
+| `wallpaper` | `none`, or an absolute path to an image            | `/System/Graphics/Wallpapers/Nature/sandstone.jpg` |
 | `fit`       | `fill` \| `fit` \| `stretch` \| `centre` \| `tile` | `fill`                                        |
 | `backdrop`  | `theme`, or six bare hex digits `rrggbb`           | `theme`                                       |
 | `icons`     | `leading` \| `trailing`                            | `leading`                                     |
@@ -113,7 +113,8 @@ into the one bounded list a gallery offers.
 Each master is authored no larger than `lib/sandbox`'s
 `MAX_DESTINATION_WIDTH`×`MAX_DESTINATION_HEIGHT` (3840×2160): JPEG entropy
 decoding cannot skip blocks, so a source pixel beyond what the renderer
-will ever draw costs decode time no screen can use. `catalog_entries` is
+will ever draw costs decode time no screen can use, and `tools/xtask`'s
+shipped-master check refuses a larger master. `catalog_entries` is
 the one bounded, fail-closed definition of which files in a directory
 listing a gallery may offer: it performs no I/O of its own, filtering to
 the decodable extensions, rejecting illegal names, skipping oversized

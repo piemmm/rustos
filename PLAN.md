@@ -4671,7 +4671,7 @@ Load-bearing decisions a future contributor needs:
   at `/System/Graphics/Wallpapers/<Category>/`. A category directory's own
   name is the label a gallery draws, so the store's children are
   directories and only their children are files. The default is
-  `TAIRiX/tairix-dark.jpg`.
+  `Nature/sandstone.jpg`.
 - **`lib/image` decodes JPEG** (baseline and progressive) as well as PNG,
   with a reduced-scale decode so an 8.3-megapixel master is never materialised
   whole; the wallpapers are JPEG and a 1 GiB machine must still draw them.

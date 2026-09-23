@@ -271,9 +271,8 @@ The open items, in priority order:
   after each demand-fault miss, so a large stage over first-touch user memory
   re-copied quadratically. Fixed by one shared `stream_stage_len` bound: both
   loops stage at most one ring and answer short, which the caller already
-  loops on. Measured context: the decoder was never the cost — the 26 shipped
-  8.3-megapixel masters decode in 404 ms total at thumbnail scale, ~90 ms
-  each full-screen.
+  loops on. Measured context: the decoder was never the cost — a shipped
+  master decodes in about 15 ms at thumbnail scale, ~90 ms full-screen.
 - **D61 — the stream write path registered for its wake *after* the poll that
   found the ring full — DONE.** `parked_stream_write` registered on the stream
   wait-queue inside the `Full` arm, so between the poll and the registration a

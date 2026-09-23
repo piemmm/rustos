@@ -145,9 +145,9 @@ a bad file costs one attempt rather than one per frame.
 
 A gallery that crawls on real storage is diagnosed by taking the file read
 and the sandboxed render apart rather than by guessing: the two halves have
-unrelated causes, and the decode is already a known quantity (the 26 shipped
-masters decode in 404 ms *total* at thumbnail scale, ~90 ms each
-full-screen), so a placement costing seconds is never the decoder.
+unrelated causes, and the decode is already a known quantity (a shipped
+master decodes in about 15 ms at thumbnail scale and ~90 ms full-screen), so
+a placement costing seconds is never the decoder.
 
 The prepared picture is never cut to. Because it arrives whenever the worker
 finishes — a second or so into the session at login, or mid-session when the

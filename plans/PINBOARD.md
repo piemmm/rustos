@@ -141,7 +141,7 @@ One document, one engine, one writer.
   Discovery walks exactly one category level and fails the build closed on a
   stray file at the store root or a category name no gallery could offer
   (`tairix_wallpaper::is_wallpaper_category_name`). The default is
-  `TAIRiX/tairix-dark.jpg`, named once by
+  `Nature/sandstone.jpg`, named once by
   `tairix_wallpaper::{DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER}` and
   spelled by `default_wallpaper_path()`.
 - **A shipped master is authored no larger than the renderer's own maximum
@@ -149,9 +149,11 @@ One document, one engine, one writer.
   3840×2160). JPEG entropy decoding cannot skip blocks: every block of the
   *source* image is Huffman-decoded regardless of the requested output
   scale, so a master far larger than any destination costs decode time no
-  screen can ever use. This binds the masters this crate ships, not a
-  user-picked wallpaper, which `decode_fitted`'s reduced-scale decode and
-  `MAX_WALLPAPER_DECODE_PIXELS` (§5) still bound and degrade gracefully.
+  screen can ever use. This binds the masters this crate ships — the
+  shipped-master check refuses a larger one, so it fails the gate rather
+  than every boot — not a user-picked wallpaper, which `decode_fitted`'s
+  reduced-scale decode and `MAX_WALLPAPER_DECODE_PIXELS` (§5) still bound
+  and degrade gracefully.
 - **A wallpaper is untrusted input**, whether it is a shipped master or a
   file the user picked. It is read under the session's own identity, bounded
   by `MAX_WALLPAPER_BYTES`, and decoded **only** inside the parser sandbox
@@ -160,12 +162,13 @@ One document, one engine, one writer.
   one attempt, not one per frame.
 - **The read is a streamed whole-file read, not a per-kilobyte one.** The
   session stages every wallpaper — its own backdrop and every gallery
-  preview — through `tairix_rt`'s one whole-file policy (`read_fd_to_end`, 64 KiB per `fs_read`), so a multi-
-  megabyte master costs on the order of a hundred syscalls rather than
+  preview — and the login screen its default, through `tairix_rt`'s one
+  whole-file policy (`read_fd_to_end`, 64 KiB per `fs_read`), so a
+  multi-megabyte master costs on the order of a hundred syscalls rather than
   thousands. This is the load path's dominant cost on real storage, not the
   decode: a 3840×2160 JPEG decodes in tens of milliseconds, while reading it a
   kilobyte at a time cost one trap per kilobyte and, behind an SD or USB
-  volume, seconds. Neither side may keep a chunk size of its own.
+  volume, seconds. No consumer may keep a chunk size of its own.
   - ARXFS fetches each contiguous run of such a request in **one** device
     request (`docs/src/filesystem/arxfs.md`). Both halves are needed:
     without the coalescing a 64 KiB syscall still cost ~35 device
@@ -182,9 +185,8 @@ One document, one engine, one writer.
   - **Which half is slow is measured, never inferred.** The two halves have
     unrelated causes when a gallery crawls — a cold cache or a store behind
     an SD card on one side, the sandbox pipe transfer and the decode on the
-    other — and
-    the decode is the one thing already known: the 26 shipped masters decode
-    in 404 ms *total* at thumbnail scale and ~90 ms each full-screen, so a
+    other — and the decode is the one thing already known: a shipped master
+    decodes in about 15 ms at thumbnail scale and ~90 ms full-screen, so a
     placement costing seconds is never the decoder.
 - **Prepared once, per (path, fit, screen).** The sandbox returns the image
   already placed at exactly the screen size; the session holds that one
@@ -448,8 +450,9 @@ nothing in the settings model needs to change.
 - **`lib/wallpaper`** — document round-trip, every parse refusal, path
   spelling, catalog filtering, and the fit geometry for every mode at
   landscape, portrait, square, and degenerate sizes. An integration test
-  decodes every shipped master, so a master that the OS could not draw fails
-  the build rather than the desktop.
+  decodes every shipped master, so a master that the OS could not draw, or
+  one larger than the renderer's largest destination, fails the build rather
+  than the desktop.
 - **`lib/raster`** — a 1:1 resample is an exact copy; a reduction weights a
   partly-covered source sample by its real coverage; an enlargement rises
   strictly rather than holding a source sample across destination pixels; an

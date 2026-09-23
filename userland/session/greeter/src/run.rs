@@ -50,7 +50,6 @@ mod program {
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::display::{Display, DisplayMode};
-    use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::{KeyInput, PointerInput};
     use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -171,35 +170,6 @@ mod program {
         (reading.state() != WallTimeState::Unset).then(|| reading.time())
     }
 
-    /// Read a file up to `cap` bytes, refusing anything longer.
-    fn read_file(path: &str, cap: usize) -> Result<Vec<u8>, Errno> {
-        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
-        if ret < 0 {
-            return Err(Errno::from_syscall(ret));
-        }
-        let Ok(fd) = u32::try_from(ret) else {
-            return Err(Errno::LengthOutOfRange);
-        };
-        let outcome = read_to_end(fd, cap);
-        let _ = tairix_rt::fs_close(fd);
-        outcome
-    }
-
-    /// Read `fd` to end-of-file, stopping one chunk past `cap`.
-    fn read_to_end(fd: u32, cap: usize) -> Result<Vec<u8>, Errno> {
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 1024];
-        while bytes.len() <= cap {
-            let at = u64::try_from(bytes.len()).map_err(|_| Errno::LengthOutOfRange)?;
-            let read = tairix_rt::fs_read(fd, at, &mut chunk).map_err(Errno::from_syscall)?;
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&chunk[..read]);
-        }
-        Ok(bytes)
-    }
-
     /// Decode the shipped wallpaper, screen-fitted, in a capability-empty
     /// sandbox worker.
     ///
@@ -208,7 +178,9 @@ mod program {
     /// perfectly good backdrop and a login screen must appear regardless.
     fn wallpaper(mode: &DisplayMode) -> Option<Surface> {
         let path = default_wallpaper_path();
-        let bytes = match read_file(&path, MAX_WALLPAPER_BYTES) {
+        let read = tairix_rt::open(path.as_bytes())
+            .and_then(|file| tairix_rt::read_fd_to_end(file.fd(), MAX_WALLPAPER_BYTES));
+        let bytes = match read {
             Ok(bytes) if bytes.len() > MAX_WALLPAPER_BYTES => {
                 record(
                     WALLPAPER_UNAVAILABLE,

@@ -25,10 +25,10 @@ use alloc::vec::Vec;
 pub const WALLPAPER_STORE: &str = "/System/Graphics/Wallpapers";
 
 /// The category directory the default wallpaper is filed under.
-pub const DEFAULT_WALLPAPER_CATEGORY: &str = "TAIRiX";
+pub const DEFAULT_WALLPAPER_CATEGORY: &str = "Nature";
 
 /// The default wallpaper's file name inside [`DEFAULT_WALLPAPER_CATEGORY`].
-pub const DEFAULT_WALLPAPER: &str = "tairix-dark.jpg";
+pub const DEFAULT_WALLPAPER: &str = "sandstone.jpg";
 
 /// One category directory's absolute path
 /// (`<WALLPAPER_STORE>/<category>`).

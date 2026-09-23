@@ -436,6 +436,9 @@ libc = "0.2"
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 tairix-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
 tairix-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }
+# The wallpaper renderer's largest destination, which the shipped-master check
+# holds every wallpaper master to: the renderer's own bound, never a copy.
+tairix-sandbox = { path = "../../lib/sandbox", version = "=0.0.0" }
 # The `rngsoak` orchestrator's per-pass byte budget has to draw enough
 # sequences for the harness's two-level decision rule to conclude anything.
 # Pinning it against the harness's own minimum — rather than restating that

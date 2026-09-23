@@ -75,7 +75,7 @@ that key's own closed vocabulary:
 
 | Key         | Value                                             | Default                                       |
 |-------------|---------------------------------------------------|-----------------------------------------------|
-| `wallpaper` | `none`, or an absolute path to an image           | `/System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg` |
+| `wallpaper` | `none`, or an absolute path to an image           | `/System/Graphics/Wallpapers/Nature/sandstone.jpg` |
 | `fit`       | `fill` \| `fit` \| `stretch` \| `centre` \| `tile`| `fill`                                        |
 | `backdrop`  | `theme`, or six bare hex digits `rrggbb`          | `theme`                                       |
 | `icons`     | `leading` \| `trailing`                           | `leading`                                     |

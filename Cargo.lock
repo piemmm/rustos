@@ -6994,6 +6994,7 @@ dependencies = [
  "tairix-qemu",
  "tairix-raster",
  "tairix-reclaim",
+ "tairix-sandbox",
  "tairix-svg",
  "tairix-switchboard",
  "tairix-sysconfig",

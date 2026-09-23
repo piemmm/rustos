@@ -1097,6 +1097,7 @@ fn verify_vector_master(
 #[cfg(test)]
 mod tests {
     use super::{verify_icon_master, verify_library_icon};
+    use tairix_sandbox::imagerender::{MAX_DESTINATION_HEIGHT, MAX_DESTINATION_WIDTH};
     use tairix_svg::font::NoFonts;
 
     /// A minimal but wholly valid `width`×`height` 8-bit greyscale PNG,
@@ -1562,6 +1563,27 @@ mod tests {
         }
     }
 
+    /// A master exactly as large as the renderer's largest destination is
+    /// drawn on either axis, and one pixel more is refused.
+    #[test]
+    fn a_wallpaper_master_beyond_the_largest_destination_is_refused() {
+        for (width, height) in [(MAX_DESTINATION_WIDTH, 1), (1, MAX_DESTINATION_HEIGHT)] {
+            verify_wallpaper_master("edge.png", &png(width, height, None))
+                .expect("a master at the largest destination");
+        }
+        for (width, height) in [
+            (MAX_DESTINATION_WIDTH + 1, 1),
+            (1, MAX_DESTINATION_HEIGHT + 1),
+        ] {
+            let err = verify_wallpaper_master("over.png", &png(width, height, None))
+                .expect_err("a master beyond the largest destination is refused");
+            assert!(
+                err.contains(&format!("is {width}x{height}, larger than")),
+                "unexpected refusal: {err}"
+            );
+        }
+    }
+
     /// Every shipped cursor asset is artwork the desktop will really draw:
     /// it decodes through the same `lib/svg` path the session uses, and it
     /// rasterises to visible pixels with its hotspot inside its own
@@ -1644,21 +1666,27 @@ mod tests {
 
     /// Verify a wallpaper master is a photograph the desktop will actually
     /// draw: within [`tairix_wallpaper::MAX_WALLPAPER_BYTES`], a format
-    /// [`tairix_image::sniff`] recognises, and one that format's decoder can
-    /// actually turn into a picture with real dimensions.
+    /// [`tairix_image::sniff`] recognises, no larger than the renderer's
+    /// largest destination ([`MAX_DESTINATION_WIDTH`]×[`MAX_DESTINATION_HEIGHT`]),
+    /// and one that format's decoder can actually turn into a picture with
+    /// real dimensions.
+    ///
+    /// A master beyond that destination is refused because no screen can use
+    /// its extra pixels while every one of them still costs decode time: JPEG
+    /// entropy decoding cannot skip blocks, and PNG has no reduced scale.
     ///
     /// This is the wallpaper family's own contract, separate from
     /// [`verify_icon_master`] rather than a mode flag on it: a wallpaper is
     /// a full-bleed photograph, so it carries none of an icon master's shape
     /// rules (square, a minimum side, at least one opaque pixel).
     ///
-    /// The shipped masters run to several megapixels each (six thousand
-    /// pixels or more on a side), so this decodes through
-    /// [`tairix_image::decode_fitted`] at a tiny destination box rather than
-    /// at natural size. For the shipped JPEG masters that makes the decoder
-    /// pick its coarsest reduced scale — an eighth of natural size — which
-    /// keeps this check fast and light over every shipped master without
-    /// ever exercising the full-resolution decode a real screen would need.
+    /// The shipped masters run to several megapixels each, so this decodes
+    /// through [`tairix_image::decode_fitted`] at a tiny destination box
+    /// rather than at natural size. For the shipped JPEG masters that makes
+    /// the decoder pick its coarsest reduced scale — an eighth of natural
+    /// size — which keeps this check fast and light over every shipped master
+    /// without ever exercising the full-resolution decode a real screen would
+    /// need.
     /// PNG has no reduced-scale decode process, so a PNG wallpaper would
     /// still decode at natural size here; every master shipped today is
     /// JPEG.
@@ -1693,6 +1721,16 @@ mod tests {
         if tairix_image::sniff(bytes).is_none() {
             return Err(format!(
                 "image: {label} is not a format the desktop's image decoder recognises"
+            ));
+        }
+        let header = tairix_image::probe(bytes)
+            .map_err(|e| format!("image: {label} has no header the desktop can read: {e:?}"))?;
+        if header.width() > MAX_DESTINATION_WIDTH || header.height() > MAX_DESTINATION_HEIGHT {
+            return Err(format!(
+                "image: {label} is {}x{}, larger than the {MAX_DESTINATION_WIDTH}x\
+                 {MAX_DESTINATION_HEIGHT} the desktop ever draws; author it no larger",
+                header.width(),
+                header.height()
             ));
         }
         let limits = tairix_image::DecodeLimits::new(
