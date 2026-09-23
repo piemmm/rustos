@@ -44,7 +44,9 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   admission, so the steady state allocates nothing and the cost of a
   session is known before it is admitted; the send ceiling is derived from
   the outbound bound, which is what makes `OutboundFull` provably
-  transient and `FrameTooLarge` permanent. Deadlock-freedom is structural:
+  transient and `FrameTooLarge` permanent. The queues are
+  `lib/collections`' `ByteQueue`, which wipes its storage on drop, because
+  a worker's keys cross in these frames. Deadlock-freedom is structural:
   the kernel's allow-list leaves the pipe as the worker's only wake
   source, so `serve_session` may use the ordinary blocking `Channel` while
   the parent's two readiness legs guarantee it is always woken — which is

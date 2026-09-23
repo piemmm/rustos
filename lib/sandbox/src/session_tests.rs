@@ -7,9 +7,9 @@
 //! without processes.
 
 use super::{
-    head_declared, serve_session, ByteQueue, FrameOut, SandboxSession, SessionBounds,
-    SessionDescriptors, SessionError, SessionService, SessionStep, SessionTransport,
-    EVENT_SESSION_FAILED, MIN_QUEUE_BYTES,
+    head_declared, serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors,
+    SessionError, SessionService, SessionStep, SessionTransport, EVENT_SESSION_FAILED,
+    MIN_QUEUE_BYTES,
 };
 use crate::loopback::LoopbackSession;
 use crate::proto::{Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
@@ -551,7 +551,7 @@ fn the_queues_do_not_grow_across_a_long_session() {
     // (which would exhaust memory over a long-lived connection).
     let mut session =
         SandboxSession::new(LoopbackSession::new(Tagger), bounds(), SilentSink).expect("committed");
-    let baseline = (session.outbound.arena.len(), session.inbound.arena.len());
+    let baseline = (session.outbound.storage(), session.inbound.storage());
     assert_eq!(baseline, (BOUND, BOUND));
     for _ in 0..10_000 {
         session.send(b"payload").expect("queued");
@@ -562,7 +562,7 @@ fn the_queues_do_not_grow_across_a_long_session() {
         );
         assert_eq!(session.recv(<[u8]>::to_vec).expect("no failure"), None);
         assert_eq!(
-            (session.outbound.arena.len(), session.inbound.arena.len()),
+            (session.outbound.storage(), session.inbound.storage()),
             baseline,
             "a session queue grew across reuse"
         );
@@ -695,18 +695,4 @@ fn an_oversize_request_declaration_fails_the_worker_loop_before_allocation() {
         serve_session(&mut chan, &mut Tagger),
         ServeEnd::Failed(ProtoError::Oversize)
     );
-}
-
-#[test]
-fn a_queue_leaves_nothing_it_carried_in_memory_it_frees() {
-    // A worker's keys cross in these frames; the drop path scrubs the whole
-    // arena, consumed and pending bytes alike.
-    let mut queue = ByteQueue::commit(32).expect("committed");
-    queue
-        .append_slot(24)
-        .expect("room")
-        .copy_from_slice(&[0xA5; 24]);
-    queue.consume(16);
-    queue.scrub();
-    assert!(queue.arena.iter().all(|byte| *byte == 0));
 }

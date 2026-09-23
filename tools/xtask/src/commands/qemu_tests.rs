@@ -9302,7 +9302,8 @@ fn enrolled(only: Option<&str>) -> Result<Vec<&'static QemuTest>, String> {
 /// Build every selected QEMU test once.
 ///
 /// Call this before the (possibly repeated) [`run_once`] passes so a soak
-/// re-runs the binaries rather than rebuilding them each pass ('s no-flaky-tests rule: the value of repetition is in the *runs*).
+/// re-runs the binaries rather than rebuilding them each pass: the value of
+/// repetition is in the runs.
 /// `only` restricts the build to the enrolments whose package name contains
 /// it — the `--only` debugging filter.
 pub fn build_all(ctx: &Context, only: Option<&str>) -> Result<(), String> {

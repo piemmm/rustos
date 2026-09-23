@@ -1,0 +1,32 @@
+[package]
+name = "tairix-ssh"
+description = "TAIRiX SSH protocol engine (`lib/ssh`, plans/SSH.md): pure, no I/O, no clock, no RNG, so it runs unchanged inside a capability-empty sandboxed worker. This increment carries the RFC 4251 wire codec, the RFC 4253 identification exchange, the binary packet protocol with every cipher and MAC framing plans/SSH.md admits (chacha20-poly1305, AES-GCM, AES-CTR with HMAC-SHA2 in both encrypt-and-MAC and encrypt-then-MAC forms), strict key exchange (the CVE-2023-48795 defence), and the RFC 4344 rekey thresholds."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Every cipher and MAC the packet layer frames is `lib/crypto`'s; this crate
+# names no cryptographic dependency of its own.
+tairix-crypto = { path = "../crypto", version = "=0.0.0" }
+# The bounded byte FIFO the transport's inbound, outbound, and held queues
+# are, which wipes any storage it gives back.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+# The fixed-capacity forms the RFC's own bounds take: the identification
+# string and the padding reserve.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The audited optimisation-resistant wipe the key material is zeroed through
+# when a direction rekeys or the engine is dropped.
+zeroize = { version = "1.8.1", default-features = false }
+
+[dev-dependencies]
+# The fuzz harnesses draw their inputs through the shared seed/budget seam:
+# one place picks the per-run seed, logs it, and bounds the smoke/soak loop.
+# Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

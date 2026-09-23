@@ -29,6 +29,29 @@ a later tier.
 | `RangeMap<K, V>` | disjoint half-open ranges, each an identity: O(log n) covering lookup, insertion that refuses an overlap, and first-fit placement over the gaps | a `base -> length` `BTreeMap` plus a hand-written overlap probe, and the occupancy bitmap a window scanned to place |
 | `RangeSet<K>` | the same storage canonicalised — insertion absorbs what it touches, removal splits what it cuts | a run set built by hand per subsystem, and the free-list that fragmented beside a live-region map |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap | a hot path that holds a handful of elements and allocates anyway |
+| `ByteQueue` | a byte FIFO under its holder's bound, kept as one contiguous run; amortised O(1) per byte, storage committed up front or as bytes arrive, and wiped before it is given back | the session frame arena `lib/sandbox` carried privately, and the SSH transport's three stream buffers |
+
+## `ByteQueue`
+
+A stream parser wants the bytes it has not consumed as one slice — to find a
+frame's end, to decrypt a packet where it lies — which `VecDeque` cannot give
+without rotating a record that straddles its wrap. `ByteQueue` appends at the
+tail, takes from the head, and reclaims the consumed prefix by compacting
+once it reaches half the arena, so the move is paid for by at least that many
+consumed bytes and a queue drained as fast as it fills never moves at all.
+
+Its bound is the holder's containment policy, not a capacity: a sandbox
+session commits it at admission so the session's cost is known before it runs
+(`committed`), and an SSH connection commits storage only as bytes arrive
+(`new`), so an idle one costs a few kilobytes and a hostile one at most its
+bound. Growth is fallible either way.
+
+It is the one container here that scrubs. Its element is a bare byte, which
+no holder can make self-zeroing, and a byte stream is exactly what a session
+key or a password transits; growing by reallocation would leave a copy in
+freed memory. So growth builds a fresh arena and wipes the old one, and drop
+wipes what remains. Bytes consumed inside live storage are not wiped as they
+go — they are overwritten, or wiped with the arena.
 
 ## `LruMap`
 

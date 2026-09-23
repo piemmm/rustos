@@ -49,7 +49,9 @@ Stability tier: **experimental**.
   before it is admitted; the send ceiling is derived from the outbound
   bound, which is what makes `OutboundFull` provably transient (an
   accepted payload always fits an empty queue) and `FrameTooLarge`
-  permanent. `wants_read` going false is total back-pressure: the owner
+  permanent. The queues are `lib/collections`' `ByteQueue`, which wipes
+  its storage on drop, because a worker's keys cross in these frames.
+  `wants_read` going false is total back-pressure: the owner
   disarms, the pipe fills, and the kernel blocks the worker.
   Deadlock-freedom is structural, not argued: the sandbox allow-list
   leaves the pipe as the worker's only wake source, so the worker may use

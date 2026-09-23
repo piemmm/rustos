@@ -4,6 +4,7 @@
 //! is *only* meaningful when targeting `qemu-system-x86_64` lives here:
 //!
 //! * the default guest RAM size,
+//! * the CPU model,
 //! * the `isa-debug-exit` I/O-port constants,
 //! * the exact QEMU argv the runner emits.
 //!
@@ -62,12 +63,20 @@ pub const ISA_DEBUG_EXIT_IOSIZE: u8 = 0x04;
 /// Name of the `qemu-system-*` binary for x86_64.
 pub const QEMU_BINARY: &str = "qemu-system-x86_64";
 
+/// CPU model: QEMU's baseline `qemu64` plus `RDRAND` and `RDSEED`, the
+/// instructions the port's entropy source draws from. Without them the
+/// kernel's random reserve never seeds and every CSPRNG consumer fails
+/// closed. `enforce` refuses to boot rather than silently dropping a
+/// feature the accelerator cannot supply.
+pub const CPU: &str = "qemu64,+rdrand,+rdseed,enforce";
+
 /// Push the x86_64 QEMU argv onto `cmd`.
 ///
-/// Emits the canonical x86_64 invocation: headless display, serial over
-/// stdio, `isa-debug-exit` device on [`ISA_DEBUG_EXIT_IOPORT`], `-m
-/// {DEFAULT_RAM_MIB}M`, `-smp {spec.cpus}`, `-no-reboot`, and the
-/// kernel ELF PVH-direct-booted via `-kernel` (see the module docs).
+/// Emits the canonical x86_64 invocation: the [`CPU`] model, headless
+/// display, serial over stdio, `isa-debug-exit` device on
+/// [`ISA_DEBUG_EXIT_IOPORT`], `-m {DEFAULT_RAM_MIB}M`, `-smp {spec.cpus}`,
+/// `-no-reboot`, and the kernel ELF PVH-direct-booted via `-kernel` (see
+/// the module docs).
 pub(crate) fn push_argv(cmd: &mut Command, spec: &Spec, kernel: &Path) {
     for arg in build_argv(spec, kernel) {
         cmd.arg(arg);
@@ -84,7 +93,9 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // monitor and serial 0 to stdio, which collides with our explicit
     // `-serial stdio`. `-display none` gives the headless behaviour we
     // want without that implicit muxing.
-    let mut argv: Vec<OsString> = Vec::with_capacity(16 + spec.extra_args.len());
+    let mut argv: Vec<OsString> = Vec::with_capacity(18 + spec.extra_args.len());
+    argv.push("-cpu".into());
+    argv.push(CPU.into());
     argv.push("-no-reboot".into());
     // Pin the board's emulated real-time clock when the vertical asked for
     // a deterministic one, so a clock-chip driver's reading is a value the
@@ -308,6 +319,23 @@ mod tests {
         assert!(argv.iter().any(|a| a == "none"));
         assert!(argv.iter().any(|a| a == "-serial"));
         assert!(argv.iter().any(|a| a == "stdio"));
+    }
+
+    #[test]
+    fn argv_presents_the_instructions_the_entropy_source_draws_from() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let at = argv
+            .iter()
+            .position(|a| a == "-cpu")
+            .expect("argv selects a CPU model");
+        let model = &argv[at + 1];
+        for feature in ["+rdrand", "+rdseed", "enforce"] {
+            assert!(
+                model.split(',').any(|f| f == feature),
+                "{model} lacks {feature}"
+            );
+        }
     }
 
     #[test]

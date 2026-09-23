@@ -190,6 +190,22 @@ pub const TARGETS: &[Target] = &[
         description: "telnet client receive path (RFC 854 parser bounds, negotiation, LINEMODE)",
     },
     Target {
+        package: "tairix-ssh",
+        test: "fuzz_ssh_wire",
+        description: "SSH wire codec (RFC 4251 string/mpint/name-list: totality, canonical re-encoding)",
+    },
+    Target {
+        package: "tairix-ssh",
+        test: "fuzz_ssh_ident",
+        description: "SSH identification exchange (line bounds, banner rules, chunking invariance)",
+    },
+    Target {
+        package: "tairix-ssh",
+        test: "fuzz_ssh_packet",
+        description:
+            "SSH binary packet protocol + transport (every framing, damage, strict KEX, held traffic across rekeys)",
+    },
+    Target {
         package: "tairix-netstack",
         test: "fuzz_net_sockabi",
         description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",
@@ -924,6 +940,16 @@ mod tests {
             let chosen = selected(&opts).expect("known target");
             assert_eq!(chosen.len(), 1);
             assert_eq!(chosen[0].package, "tairix-compress");
+        }
+    }
+
+    #[test]
+    fn ssh_harnesses_are_registered() {
+        for target in ["fuzz_ssh_wire", "fuzz_ssh_ident", "fuzz_ssh_packet"] {
+            let opts = parse(&argv(&["--target", target])).expect("flag parses");
+            let chosen = selected(&opts).expect("known target");
+            assert_eq!(chosen.len(), 1);
+            assert_eq!(chosen[0].package, "tairix-ssh");
         }
     }
 

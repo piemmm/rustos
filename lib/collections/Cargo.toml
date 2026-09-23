@@ -1,6 +1,6 @@
 [package]
 name = "tairix-collections"
-description = "TAIRiX shared heap-backed no_std containers that core and alloc do not provide: the open-addressed HashMap/HashSet over control-byte groups (whose group scan is a lib/cpuops self-verified ops table), and the spilling SmallVec. Fallible allocation throughout, no fixed capacity ceiling, no allocation on a read path. The allocation-free containers are lib/inline."
+description = "TAIRiX shared heap-backed no_std containers that core and alloc do not provide: the open-addressed HashMap/HashSet over control-byte groups (whose group scan is a lib/cpuops self-verified ops table), the spilling SmallVec, and the bounded contiguous ByteQueue. Fallible allocation throughout, no fixed capacity ceiling, no allocation on a read path. The allocation-free containers are lib/inline."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,6 +27,12 @@ tairix-inline = { path = "../inline", version = "=0.0.0" }
 # The one-shot cell holding the resolved group scan, so this crate is not a
 # second hand-rolled atomic state machine.
 tairix-sync = { path = "../sync", version = "=0.0.0" }
+# The audited optimisation-resistant wipe `ByteQueue` releases storage through:
+# a byte stream is what a session key or a password transits, and a plain
+# store to memory nothing reads again is exactly what the optimiser may drop.
+# Its `alloc` feature stays off: unified into one build with the
+# allocator-free bare-metal test binaries, it would link `alloc` into them.
+zeroize = { version = "1.8.1", default-features = false }
 
 [dev-dependencies]
 # Shared per-run seed / budget seam for the fuzz harness (never in a shipping

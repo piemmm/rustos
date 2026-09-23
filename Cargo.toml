@@ -106,6 +106,7 @@ members = [
     "lib/rt",
     "lib/sandbox",
     "lib/seat",
+    "lib/ssh",
     "lib/supervisor",
     "lib/svg",
     "lib/sync",

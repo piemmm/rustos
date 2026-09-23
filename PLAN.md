@@ -9375,7 +9375,7 @@ driver lands.
 
 ---
 
-## SSH — remote access, client and server (`plans/SSH.md`)  **[PLANNED, NOT STARTED]**
+## SSH — remote access, client and server (`plans/SSH.md`)  **[IN PROGRESS — S0a–S0d, S1 done; S2 onward planned]**
 
 **Dependencies:** `plans/NETWORK.md` N5c (the stream socket surface), N6b-2
 (listeners and SYN-flood defence — `sshd` is the tree's first real `listen`/
@@ -9413,10 +9413,11 @@ them rather than on OpenSSH's shape.
   still parsed in the capability-empty sandbox. OpenSSH-as-root is exactly the
   authority TAIRiX does not have and does not need.
 
-**Scope.** Broad algorithm interoperability (Ed25519/ECDSA/RSA, ChaCha20-Poly1305
+**Scope.** Broad algorithm interoperability (Ed25519/ECDSA, ChaCha20-Poly1305
 /AES-GCM/AES-CTR, curve25519/ECDH/finite-field DH, plus `mlkem768x25519-sha256`
-for post-quantum), every tool (`ssh`, `sshd`, `ssh-keygen`, `ssh-agent`,
-`ssh-add`, `ssh-keyscan`, `ssh-copy-id`, `sftp`, `scp`, `sftp-server`),
+for post-quantum; RSA is blocked, S15), every tool (`ssh`, `sshd`,
+`ssh-keygen`, `ssh-agent`, `ssh-add`, `ssh-keyscan`, `ssh-copy-id`, `sftp`,
+`scp`, `sftp-server`),
 forwarding, agent forwarding, certificates, and the OpenSSH on-disk private-key
 format with bcrypt-pbkdf. `ssh-rsa`/SHA-1 KEX/CBC/DSA are **refused**, not
 accepted-and-weak.
@@ -9462,10 +9463,24 @@ host key is identical on every machine flashed from it.
   wake to retry on and polling is forbidden. That is also what makes the seam
   deadlock-free by construction: the worker may block on its pipe precisely
   because the parent never does.
-- `lib/compress` has DEFLATE/zlib **decode** only, deliberately, because
-  nothing produced such a stream. `zlib@openssh.com` does, so the encode
-  direction lands and the module's "no compressor exists" documentation is
-  corrected rather than left to mislead.
+- `lib/compress` had DEFLATE/zlib **decode** only, because nothing produced
+  such a stream. `zlib@openssh.com` does, so it now carries both directions as
+  resumable per-direction streams (S0d, done), pinned against a real zlib.
+
+**What is built beyond the prerequisites.**
+
+- **S1 — `lib/ssh`** (`tairix-ssh`, `experimental`): the pure engine's
+  transport layer. The RFC 4251 wire codec, canonical both ways; the RFC 4253
+  identification exchange; the binary packet protocol under every framing
+  §4 admits, verifying before decrypting wherever the construction allows;
+  strict key exchange from the first packet; the RFC 4344 rekey thresholds;
+  and a transport state machine that holds rather than drops what an exchange
+  or a short padding reserve keeps back. It reads no clock and draws no
+  randomness, so the sandboxed worker of S5 runs it unchanged. Pinned against
+  OpenSSH 10.2p1: every framing opens what that `sshd` sent and seals what it
+  accepted, and a whole exchange replays through the transport byte for byte.
+  Its buffers are the `ByteQueue` hoisted into `lib/collections` from
+  `lib/sandbox`'s session, rather than a second copy of it.
 
 **Audit range.** `lib/ssh::events` claims `24_000..25_000`, verified against
 every `*_RANGE_START` in the tree; `22_000..23_000` stays retired.

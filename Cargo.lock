@@ -1234,6 +1234,7 @@ dependencies = [
  "tairix-hash",
  "tairix-inline",
  "tairix-sync",
+ "zeroize",
 ]
 
 [[package]]
@@ -3109,6 +3110,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-binfmt",
+ "tairix-collections",
  "tairix-disasm",
  "tairix-fuzzseed",
  "tairix-geometry",
@@ -3228,6 +3230,17 @@ dependencies = [
  "tairix-procinfo",
  "tairix-resolver",
  "tairix-rt",
+]
+
+[[package]]
+name = "tairix-ssh"
+version = "0.0.0"
+dependencies = [
+ "tairix-collections",
+ "tairix-crypto",
+ "tairix-fuzzseed",
+ "tairix-inline",
+ "zeroize",
 ]
 
 [[package]]

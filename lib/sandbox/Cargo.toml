@@ -24,6 +24,9 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The structured-event vocabulary the crash-containment events are logged
 # through (stable `EventId`s in this crate's reserved 6000-range).
 tairix-log = { path = "../log", version = "=0.0.0" }
+# The bounded byte FIFO a session's two frame queues are, committed at
+# admission so a session's cost is known before it runs.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
 # The executable-container decoder the sandboxed decode service runs.
 tairix-binfmt = { path = "../binfmt", version = "=0.0.0" }
 # The per-ISA instruction decoders the sandboxed decode service runs.

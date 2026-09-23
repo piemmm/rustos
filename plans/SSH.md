@@ -32,7 +32,7 @@ ordinary pre-release changes (§2.13).
 | S0b | The `netstack` socket-quota defect: a derived socket-**memory** budget, a per-principal share of it, and a `net.*` administrative override — the fail-closed refusal unchanged, over an indexed socket table | done |
 | S0c | `lib/sandbox::session` — the duplex, long-lived worker seam beside the one-shot `host`/`worker` pair, over the new `WaitSourceKind::StreamRoom` | done |
 | S0d | `lib/compress` gains the RFC 1951/1950 codec in *both* directions as resumable streams — one state per direction, flushed per packet — with the existing whole-buffer entry points kept | done |
-| S1 | `lib/ssh` wire codec (RFC 4251 §5), version exchange, the binary packet protocol with every cipher/MAC framing, strict KEX, rekey thresholds | planned |
+| S1 | `lib/ssh` wire codec (RFC 4251 §5), version exchange, the binary packet protocol with every cipher/MAC framing, strict KEX, rekey thresholds | done |
 | S2 | KEXINIT negotiation, the exchange hash, key derivation (RFC 4253 §7), the KEX methods of §4, RFC 8308 `ext-info`/`server-sig-algs` | planned |
 | S3 | Keys: blobs, the OpenSSH v1 private-key format with bcrypt-pbkdf, armour, fingerprints and randart, the `authorized_keys` and `known_hosts` grammars, OpenSSH certificates | planned |
 | S4 | Userauth (none/password/publickey/keyboard-interactive/hostbased/hostbound) and the RFC 4254 connection protocol | planned |
@@ -583,6 +583,14 @@ departing. Deadlock-freedom is therefore structural rather than argued — worke
 blocked writing ⇒ the parent's read readiness fires; worker blocked reading ⇒
 the parent's room readiness fires.
 
+**S1 — the byte FIFO under a session and a transport.** `lib/sandbox`'s
+session queued its frames through a private byte arena, and the SSH transport
+needs the same shape three times over, so the arena became `lib/collections`'s
+`ByteQueue` rather than being copied. It gained one property on the way: it
+wipes storage before giving it back, on growth and on drop, so a frame or a
+decrypted packet never reaches freed memory — the session frames of S5 carry
+`K` and `H` (§1.2), which a plain arena would have freed as they stood.
+
 **S0d — `lib/compress` speaks DEFLATE both ways, as a stream.** The crate's
 `inflate`/`zlib` decoders were whole-buffer and there was no compressor at all,
 because nothing in the tree produced a DEFLATE stream. `zlib@openssh.com` needs
@@ -615,9 +623,9 @@ is deliberately no one-shot *encode* function that would put it on a stack.
 
 ```
 lib/crypto/                 # extended — the §2.12 audited-crate carve-out only
-lib/ssh/                    # the pure engine: wire, ident, packet, kex, key,
-                            #   cert, auth, connect, client, server, monitor,
-                            #   agent, events
+lib/ssh/                    # the pure engine: wire, msg, ident, algorithm,
+                            #   packet, transport, kex, key, cert, auth,
+                            #   connect, client, server, monitor, agent, events
 lib/sftp/                   # the SFTP protocol (v3 + the OpenSSH extensions)
 lib/sshconfig/              # the sshd.conf / client-config store engine
 lib/sandbox/src/session.rs  # the duplex long-lived worker seam
@@ -691,7 +699,8 @@ of each. What it added: Ed25519 signing and key derivation from a seed;
 SHA-384/512 and HMAC-SHA-512; a 64-bit-nonce ChaCha20 keystream with an
 explicit start counter and a standalone Poly1305 (`chacha20-poly1305@openssh.com`
 uses two keys and a sequence-number nonce, so the packaged AEAD cannot serve
-it); AES-CTR and AES-GCM; ECDH and ECDSA over P-256/384/521; finite-field DH
+it); AES-CTR and AES-GCM, the latter also keyed once per transport direction
+rather than per packet; ECDH and ECDSA over P-256/384/521; finite-field DH
 over the RFC 3526 groups; ML-KEM-768; bcrypt-pbkdf; and HMAC-SHA1 for the one
 use above. Each arrived with its §2.12 justification, an exact `=x.y.z` pin, a
 `deny.toml` licence check, a `supply-chain.toml` source pin, an SBOM entry (the
@@ -753,12 +762,42 @@ harnesses cover the round trip and both decoders — `fuzz_inflate` and
 `fuzz_zlib` closed a standing §19.6 gap, since the decoders had none at all
 while already reading untrusted PNG bytes.
 
-**S1** — `lib/ssh` wire codec (RFC 4251 §5 `string`/`mpint`/`name-list`/
-`boolean`), version exchange with its banner rules, the binary packet protocol
-with every cipher and MAC framing including ETM and the AEAD length handling,
-**strict KEX** (the CVE-2023-48795 prefix-truncation fix: sequence numbers reset
-at `NEWKEYS` and no unexpected message is tolerated during KEX), and the RFC
-4344 rekey thresholds. Fuzz harnesses from this increment, not later.
+**S1** — done: `lib/ssh`'s transport layer.
+
+- The wire codec reads every RFC 4251 §5 type totally and only in canonical
+  form, so a decoded `mpint` or `name-list` re-encodes to its own bytes and no
+  parse depends on an attacker's choice of spelling. The identification
+  exchange bounds each line (255 bytes; a server's banner lines 8 KiB and
+  1 024 of them), refuses a client's pre-identification line, and keeps the
+  peer's identification byte for byte for the exchange hash.
+- The packet layer frames every cipher and MAC of §4 — plaintext, AES-CTR with
+  encrypt-and-MAC and encrypt-then-MAC, AES-GCM, `chacha20-poly1305` — with
+  the least padding each framing allows, as OpenSSH chooses it. It verifies
+  before decrypting wherever the tag does not cover plaintext, refuses a
+  `packet_length` past 256 KiB or off its block before buffering what follows,
+  and never lets one key take a 2³²nd packet. The size limits are fixed
+  validation bounds: storage behind them is committed as bytes arrive and
+  never past them.
+- The transport enforces RFC 4253 §7.1 in both directions and strict key
+  exchange from the first packet: the packet after the peer's first
+  `SSH_MSG_KEXINIT` is not opened until strictness is settled, and numbering
+  restarts at every `SSH_MSG_NEWKEYS`. It reads no clock and draws no
+  randomness — padding comes from a host-filled reserve (§1.1), rekeying by
+  time is the host's call, rekeying by volume (RFC 4344) it counts itself.
+  What it cannot seal now it holds in order, the exchange's own messages apart
+  and first, so a short reserve delays a packet and never ends a connection; a
+  `SSH_MSG_NEWKEYS` that waits switches keys when it is sealed.
+- Pinned to OpenSSH 10.2p1: under every forced framing, what its `sshd` sent
+  opens and what it accepted is sealed byte for byte, and a whole
+  `chacha20-poly1305` exchange replays through a `Transport` byte-identically
+  at any chunking. `fuzz_ssh_wire`, `fuzz_ssh_ident`, and `fuzz_ssh_packet`
+  cover the codec, the identification lines, and the packet protocol and
+  transport, the last across random traffic, padding starvation, and rekeys.
+
+S2 builds on it through `Transport::send`, `set_strict`, `install_keys`, and
+`send_newkeys`, with every algorithm name and key and IV length it derives
+defined once in `lib/ssh::algorithm`. The transport has no `Time64` to carry:
+nothing in it is an absolute time.
 
 **S2** — KEXINIT, the first-match rule, the exchange hash, key derivation
 (RFC 4253 §7 including the extend-to-length rule), the KEX method families of
@@ -890,9 +929,11 @@ certificate grammar, `authorized_keys`, `known_hosts`, userauth, the connection
 protocol, SFTP, the agent protocol, the monitor protocol) per §19.6; §19.7
 proptest models for the authentication state machine (the property: no sequence
 of worker-originated frames yields a session for a user the monitor did not
-observe authenticate); `docs/src/userland/ssh.md` and `docs/src/security/ssh.md`
-plus their `docs/src/SUMMARY.md` entries, in the same change (§13); and the full
-§2.15 gate. The `README.md` feature-matrix row lands with **S5**, the first
+observe authenticate); the docs, in the same change (§13); and the full §2.15
+gate. The engine's page is `docs/src/lib/ssh.md` and its threat model
+`docs/src/security/ssh.md`, each extended by the increment that adds to what it
+describes; `docs/src/userland/ssh.md` lands with the first runnable tool (S5),
+since until then there is no tool for it to describe. The `README.md` feature-matrix row lands with **S5**, the first
 increment that adds a runnable feature a matrix could mark per architecture —
 S0a–S4 add none.
 
@@ -903,7 +944,10 @@ forbids `unsafe`, the `StreamRoom` kernel arm added none, and the seam is
 single-threaded state owned by one thread with no atomic, lock, or ordering
 pairing of its own, so loom had nothing to model there either. S0d likewise:
 `lib/compress` forbids `unsafe`, and a codec stream is single-owner state
-carrying no atomic, lock, or ordering pairing. Loom **does** apply: S5's
+carrying no atomic, lock, or ordering pairing. S1 likewise: a `Transport` is
+single-owner state driven by one caller, and the `ByteQueue` it shares with
+`lib/sandbox` is safe code inside `lib/collections`, whose miri enrolment
+already interprets its tests and fuzz sweep. Loom **does** apply: S5's
 listener→shard handoff and the monitor↔worker flow-control queue are the one
 place correctness depends on an ordering pairing, and a lost wake-up there is a
 hung connection that only shows up under load. S5 carries that model in
@@ -955,8 +999,9 @@ an ABI addition, a VFS path, ARXFS persistence, and a tool. It is recorded as
 
 **S15 — RSA host and user keys (`rsa-sha2-256`, `rsa-sha2-512`).** The only
 pure-Rust RSA is the `rsa` crate, which carries RUSTSEC-2023-0071 (the Marvin
-timing attack) with `patched = []` — unfixed on 0.9.10 and on the 0.10 release
-candidates as of 2026-09-12 — and whose own advisory text says to avoid it
+timing attack) with `patched = []` — unfixed on 0.9.10 and on every 0.10
+release candidate through rc.18, the newest `rsa` release, as of 2026-09-23
+(re-checked when S1 landed) — and whose own advisory text says to avoid it
 "in settings where attackers can observe timing, for example over the
 network". That is exactly SSH. §19.3 blocks an advisory-affected dependency
 and §2.12 forbids hand-rolling the alternative, so the algorithm is **absent**

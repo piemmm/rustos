@@ -21,6 +21,7 @@ detail becomes its done-state summary — nothing is appended, here or there.
 | C0 | Hashing | `lib/hash`: `SipHash13` with its published test vectors, `FastHash`, `HashSeed` and the boot/spawn publication seam | — | **done** |
 | C1 | Hash containers | `HashMap` / `HashSet` and their `BuildHasher` shims, the `lib/cpuops` group-scan ops table, and the `cargo xtask miri` stage | C0 | **done** |
 | C2 | Sequences | `ArrayVec`, `SmallVec`, `ArrayString`, `RingBuf`, `SecretRing` | — | **done** |
+| C2a | Byte FIFO | `ByteQueue`, the contiguous bounded byte queue a sandbox session and an SSH transport stream through | — | **done** |
 | C3 | Intrusive list | `IntrusiveList` — the primitive C4 and C8 are built on | — | **done** |
 | C4 | Recency | `LruMap`, O(1) touch / insert / evict, and the caches whose key order is not load-bearing | C1, C3 | **done** |
 | C4a | Ordered recency | the three caches whose key index answers range queries — `block_cache`, `transform_cache`, `fscache` — reach O(1) recency without losing them | C4, C7 | **planned** |
@@ -117,9 +118,10 @@ the dependency graph enforces rather than a convention. It holds `ArrayVec`,
 **`lib/collections` — the heap-backed containers.** Depends on `lib/inline`,
 for the inline half of `SmallVec` and the shared `CapacityError`; on
 `lib/hash`; on `lib/cpuops` and the `lib/abi` capability vocabulary it gates
-on, for the hash table's group-scan ops table (§4.1); and on `lib/sync`, for
+on, for the hash table's group-scan ops table (§4.1); on `lib/sync`, for
 the one-shot cell that holds the resolved scan and for the concurrent tier's
-atomics. Nothing else. Neither crate ever depends on `kernel/*`, `drivers/*`,
+atomics; and on `zeroize`, the audited wipe `ByteQueue` releases storage
+through. Nothing else. Neither crate ever depends on `kernel/*`, `drivers/*`,
 or `userland/*`, so the existing layering holds unchanged.
 
 **Which crate a new container goes in** is decided by one question, asked
@@ -165,7 +167,9 @@ one is not done.
    does not scrub its own freed slots — reuse inside one address space is
    not a security boundary. A holder of a key, credential, or capability
    token stores a zeroizing value type. This is the rule `lib/rt`'s heap
-   already states; there is not a second one.
+   already states; there is not a second one. `ByteQueue` is the exception,
+   because its element is a bare byte no holder can make self-zeroing: it
+   wipes storage before giving it back, as `SecretRing` does for a ring.
 6. **Every `unsafe` block carries its invariant and a test that exercises
    it**, and no `unsafe` escapes its crate's safe API. The unsafe surface is
    confined to three places — the open-addressing table (`lib/collections`),
@@ -287,10 +291,14 @@ spills, so it is `lib/collections`, built over `lib/inline`'s `ArrayVec`.
 | `SmallVec<T, N>` | inline until `N`, then spills to the heap | hot paths that hold 1–4 items and allocate anyway |
 | `ArrayString<N>` | `[u8; N]` + length with the UTF-8 invariant held by construction, and `Copy` | ad-hoc `[u8; N]` + length pairs |
 | `RingBuf<T, N>` | fixed-capacity circular queue, O(1) both ends | the four hand-rolled rings listed at the top of this plan |
+| `ByteQueue` | bounded byte FIFO kept as one contiguous run, compacted on a threshold, wiping storage it releases | `lib/sandbox`'s private session arena, and the second copy the SSH transport would otherwise have been |
 
 `alloc::VecDeque` already covers the heap-backed ring, so `RingBuf` is
-array-backed only. `Vec` and `String` stay `alloc`'s; there is no reason to
-re-implement them and doing so would be bloat.
+array-backed only. `ByteQueue` is not a second ring: a stream parser wants
+its unconsumed bytes as one slice, to find a frame's end or decrypt a packet
+where it lies, and a ring's contents wrap. `Vec` and `String` stay
+`alloc`'s; there is no reason to re-implement them and doing so would be
+bloat.
 
 `SecretRing<T, N>` is `RingBuf` for a queue a credential *transits* — a typed
 password crossing a console's type-ahead buffer, a key event crossing the
@@ -477,6 +485,7 @@ architecture port* — seventeen freestanding verticals that allocate nothing
 among them. C3's split (§1) removes the requirement at the root rather than
 satisfying it seventeen times: `lib/log` now depends on `lib/inline`, which
 links no allocator, so those binaries have no `alloc` in their graph at all |
+| C2a | **done.** `lib/sandbox/src/session.rs`'s private `ByteQueue`, hoisted rather than copied when the SSH transport needed the same shape for its inbound, outbound, and held queues. It commits its holder's bound up front (`committed`, the session's admission guarantee) or as bytes arrive (`new`, so an idle connection costs little), and wipes storage it releases, which the session's arena did not |
 | C3 | **done.** The tier was **split into two crates** (§1): `lib/inline` for the containers that allocate nothing and `lib/collections` for the heap-backed ones, so `lib/log`, `lib/caps`, the boot console and three of the four architecture ports link no allocator. `kernel/mem/src/frame.rs`'s hand-written per-order free lists: the `FrameNode` `prev`/`next` pair, the `usize::MAX` `NIL` sentinel, the `free_heads` array, and both splice bodies are gone, replaced by one `IntrusiveList` per order over a single `Vec<Link>` indexed by slot. The link is the same two words the old node was, so the per-frame overhead is unchanged. The `blk_order` tag array stays and earns its keep: one store carries every order's list, so it is what says *which* list a registered head is on — the knowledge a shared store cannot hold in the links without a word per node. Two silent-corruption paths closed with it: re-registering a block, and unlinking one whose tag and links disagree, are now `AllocError::InvariantViolation` where the first was undetected and the second a release-mode `debug_assert` above a frame handed out twice. The counter gate is nodes reached: a mid-list unlink reaches the departing node and its two neighbours and writes exactly those three links, identically over three nodes and over ten thousand |
 | C4 | **done.** `LruMap` is one open-addressed index over a node arena, with the recency order and the free list as two `IntrusiveList`s through the same arena: a key is stored once (the index holds the node handle, not a copy), the hash is stored beside the entry so eviction and a table rebuild hash nothing, and a steady-state map returns to the allocator not at all. It evicts nothing on its own — the caller's budget calls `pop_lru` — which is what lets one map serve a fixed-entry index and a byte-budgeted cache alike. Converted with it: **`lib/net/src/neigh.rs`**, whose `entries.iter().position(…)` cost a scan of the table *per transmitted packet* and whose eviction cost a second one, both now one probe and one splice, and whose index is keyed under the service's peer-input key because a remote peer chooses the addresses (the `Entry`'s own `ip` and `last_used` fields went with it, and `learn`'s unused `now` with them); **`drivers/filesystem/arxfs/src/dedupe.rs`**, whose two-tier `LruTier` was a `by_key`/`by_recency` `BTreeMap` pair, now one map per tier under the per-boot key — its keys carry a hash of the writer's own bytes, so a boot with no key indexes nothing rather than filing them under a predictable one; **`kernel/core/src/launch_cache.rs`**, whose `Entry` collapsed to the `Arc` it held; and **`lib/reclaim/src/cache.rs`**, the shared engine, which gains an `S` parameter so every consumer names its hasher in review — the desktop's window, cursor, and artwork caches the fast unkeyed one (identifiers the compositor assigned), the font glyph and measurement caches the keyed one (a caller chooses the characters and the text). A cache with no key takes a zero budget and retains nothing rather than an index a grinder could crowd. **What C4 did not convert, and why, is C4a:** `block_cache`, `transform_cache`, and `fscache` answer *range* queries against their key index — `invalidate_range(lba, blocks)`, `invalidate_run(phys, len)`, and `data.range((node, 0)..=(node, u64::MAX))` — so a hash index would turn each into a scan. Their recency order is the defect; their key order is load-bearing, exactly the per-site judgement C1 fixed |
 | C4a | the recency index and `evict_until` loop in `block_cache`, `transform_cache`, and `fscache`, without a hash index. The shape they need is the one `LruMap` already has — a node arena, a recency list, and a free list — under an *ordered* key index rather than a hash one, so the engine is extended rather than a second one written (§2.2). C7 is a dependency because it names the block-cache index as its own: settle whether that index becomes a `RadixTree` before deciding what the ordered variant must offer |

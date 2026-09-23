@@ -583,6 +583,7 @@ tairix/
 │   ├── audio/           # Audio engine: conversion, mixing, the one resampler,
 │   │                    #   channel matrices, the device clock model, routing
 │   │                    #   policy, the volume model, the audio-v1 client.
+│   ├── audiochan/       # Audio device-channel driver side (audiochan-v1 server).
 │   ├── binfmt/          # Read-only executable-container decoder (rxe/ELF64/wasm).
 │   ├── blkclient/       # Block-service client (RemoteBlock + its RtBlkCall transport).
 │   ├── bootload/        # Firmware-neutral boot-chain loader core.
@@ -661,6 +662,7 @@ tairix/
 │   ├── sandbox/         # The parser-sandbox seam.
 │   ├── seat/            # Arch-neutral seat model.
 │   ├── spirv/           # SPIR-V shader module: decode, validate, build.
+│   ├── ssh/             # The pure SSH protocol engine (no I/O, clock, or RNG).
 │   ├── supervisor/      # Pre-boot Supervisor REPL engine + built-in commands.
 │   ├── svg/             # Shared fail-closed no_std SVG decoder.
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
@@ -677,6 +679,7 @@ tairix/
 │   ├── vcmailbox/       # BCM2711 VideoCore firmware mailbox client.
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol.
 │   ├── virtio_input/    # Arch-neutral virtio-input device logic.
+│   ├── virtio_net/      # Arch-neutral virtio-net device logic.
 │   ├── vt/              # Shared ANSI/VT/xterm vocabulary.
 │   ├── wallpaper/       # Desktop user-scope settings document, wallpaper
 │   │                    #   catalog, fit geometry, the apply client, and the

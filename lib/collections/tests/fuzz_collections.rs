@@ -20,6 +20,9 @@
 //!    entry list, over `(base, count)` streams whose lengths are the ones a
 //!    caller does not control — a `mem_map` page count, a run off a foreign
 //!    volume — including the counts that run past the top of the key space.
+//! 7. A `ByteQueue` agrees with a plain byte vector over lengths a remote peer
+//!    declares, including ones far past its bound, which it never exceeds —
+//!    neither in what it holds nor in the storage it commits.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -28,7 +31,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use tairix_collections::{HashMap, LruMap, RangeError, RangeKey, RangeMap, RangeSet, SmallVec};
+use tairix_collections::{
+    ByteQueue, HashMap, LruMap, QueueError, RangeError, RangeKey, RangeMap, RangeSet, SmallVec,
+};
 use tairix_fuzzseed::Prng;
 use tairix_hash::{BuildSipHash13, HashSeed};
 
@@ -179,6 +184,73 @@ fn sweep_smallvec(prng: &mut Prng, live: &Rc<Cell<i64>>) {
         assert_eq!(vec.spilled(), model.len() > INLINE || spilled);
         // Once spilled the vector stays spilled, whatever it shrinks back to.
         spilled |= vec.spilled();
+    }
+}
+
+/// Drive a `ByteQueue` against a `Vec` model over lengths a remote peer
+/// chooses — a declared packet size, a read's byte count — including ones far
+/// past the bound, under both commitment policies.
+fn sweep_byte_queue(rng: &mut Prng) {
+    let bound = 1 + rng.at_most(4096);
+    let mut queue = if rng.below(2) == 0 {
+        ByteQueue::new(bound)
+    } else {
+        ByteQueue::committed(bound).expect("the host heap")
+    };
+    let mut model: Vec<u8> = Vec::new();
+    for _ in 0..OPS_PER_ROUND {
+        let n = if rng.below(8) == 0 {
+            bound + rng.at_most(bound)
+        } else {
+            rng.at_most(bound / 3)
+        };
+        match rng.below(6) {
+            0 | 1 => {
+                let mut bytes = vec![0u8; n];
+                rng.fill(&mut bytes);
+                let took = queue.push_slice(&bytes).expect("the host heap");
+                assert_eq!(
+                    took,
+                    n.min(bound - model.len()),
+                    "a short push took the wrong count"
+                );
+                model.extend_from_slice(&bytes[..took]);
+            }
+            2 => match queue.append_slot(n) {
+                Ok(slot) => {
+                    rng.fill(slot);
+                    model.extend_from_slice(slot);
+                }
+                Err(QueueError::Full) => {
+                    assert!(n > bound - model.len(), "refused while room remained");
+                }
+                Err(QueueError::Alloc(_)) => panic!("the host heap refused a bounded reservation"),
+            },
+            3 => {
+                queue.consume(n);
+                model.drain(..n.min(model.len()));
+            }
+            4 => {
+                let keep = model.len().saturating_sub(n);
+                queue.truncate(keep);
+                model.truncate(keep);
+            }
+            _ => {
+                let reserved = queue.reserve(n);
+                assert_eq!(reserved.is_ok(), n <= bound - model.len());
+                let offered = queue.fill(|window| {
+                    let take = window.len().min(n);
+                    rng.fill(&mut window[..take]);
+                    Ok::<_, ()>(take)
+                });
+                let took = offered.expect("the reader never refuses");
+                let start = queue.len() - took;
+                model.extend_from_slice(&queue.pending()[start..]);
+            }
+        }
+        assert_eq!(queue.pending(), &model[..], "contents diverged");
+        assert_eq!(queue.room(), bound - model.len());
+        assert!(queue.storage() <= bound, "storage passed the bound");
     }
 }
 
@@ -495,6 +567,8 @@ fn heap_backed_containers_agree_with_their_models() {
             let live = Rc::new(Cell::new(0i64));
             sweep_range_map(&mut rng, base, &live);
             assert_eq!(live.get(), 0, "a `RangeMap` leaked or double-dropped");
+
+            sweep_byte_queue(&mut rng);
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

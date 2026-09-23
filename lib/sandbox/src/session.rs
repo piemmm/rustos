@@ -49,8 +49,8 @@
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, FieldValue};
+use tairix_collections::ByteQueue;
 use tairix_log::{Event, EventId, Field, Level, Sink};
-use tairix_util::fallible;
 
 use crate::host::log_worker_crashed;
 use crate::proto::{
@@ -224,113 +224,6 @@ impl SessionBounds {
     }
 }
 
-/// A fixed-size byte arena with a consumed prefix: bytes are appended at
-/// the tail and taken from the head.
-///
-/// Both directions of a session are this same shape, so there is one
-/// implementation rather than two. The consumed prefix is reclaimed by
-/// compacting on a threshold, never by shifting the whole buffer on every
-/// take — a per-frame `O(n)` move on a path that relays every byte of every
-/// session is the defect this avoids. The arena is committed once and never
-/// grows, so the steady state allocates nothing at all.
-struct ByteQueue {
-    arena: Vec<u8>,
-    head: usize,
-    tail: usize,
-}
-
-impl ByteQueue {
-    /// Commit an arena of exactly `limit` bytes, or `None` when the
-    /// allocator refuses it.
-    fn commit(limit: usize) -> Option<Self> {
-        Some(Self {
-            arena: fallible::filled(limit, 0u8)?,
-            head: 0,
-            tail: 0,
-        })
-    }
-
-    /// Bytes buffered and not yet taken.
-    fn len(&self) -> usize {
-        self.tail - self.head
-    }
-
-    /// Bytes that could still be appended.
-    fn room(&self) -> usize {
-        self.arena.len() - self.len()
-    }
-
-    /// The buffered bytes, oldest first.
-    fn pending(&self) -> &[u8] {
-        &self.arena[self.head..self.tail]
-    }
-
-    /// Move the buffered bytes back to the start of the arena.
-    fn compact(&mut self) {
-        self.arena.copy_within(self.head..self.tail, 0);
-        self.tail -= self.head;
-        self.head = 0;
-    }
-
-    /// Claim `n` bytes at the tail for the caller to fill, or `None` when
-    /// the queue has no room for them. All-or-nothing, so a caller writing
-    /// a frame can never leave half of one behind.
-    fn append_slot(&mut self, n: usize) -> Option<&mut [u8]> {
-        if n > self.room() {
-            return None;
-        }
-        if self.arena.len() - self.tail < n {
-            self.compact();
-        }
-        let start = self.tail;
-        self.tail += n;
-        Some(&mut self.arena[start..self.tail])
-    }
-
-    /// Hand the free window at the tail to `read` and record what it
-    /// accepted, reporting the count `read` reported.
-    fn fill<F>(&mut self, read: F) -> Result<usize, Errno>
-    where
-        F: FnOnce(&mut [u8]) -> Result<usize, Errno>,
-    {
-        if self.head > 0 && self.tail == self.arena.len() {
-            self.compact();
-        }
-        let window = &mut self.arena[self.tail..];
-        let read = read(window)?.min(window.len());
-        self.tail += read;
-        Ok(read)
-    }
-
-    /// Erase the whole arena. An owner hands its worker keys through these
-    /// frames, and the process heap reuses freed memory without clearing it.
-    fn scrub(&mut self) {
-        tairix_util::secret::wipe(&mut self.arena);
-    }
-
-    /// Drop the first `n` buffered bytes.
-    fn consume(&mut self, n: usize) {
-        self.head += n.min(self.len());
-        if self.head == self.tail {
-            // Fully drained: reset rather than move anything, which is the
-            // ordinary case for a relay that drains what it queues.
-            self.head = 0;
-            self.tail = 0;
-        } else if self.head >= self.arena.len() / 2 {
-            // The consumed prefix has reached half the arena, so reclaiming
-            // it now amortises the move over at least that many consumed
-            // bytes and neither direction ever pays a shift per frame.
-            self.compact();
-        }
-    }
-}
-
-impl Drop for ByteQueue {
-    fn drop(&mut self) {
-        self.scrub();
-    }
-}
-
 /// Whether `pending` divides exactly into whole frames with nothing over —
 /// the end-of-stream cleanliness test. A stream that ends mid-frame is a
 /// truncated conversation, never silently shortened data.
@@ -411,9 +304,9 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         sink: S,
         after_failure: AfterFailure,
     ) -> Result<Self, SessionError> {
-        let (Some(outbound), Some(inbound)) = (
-            ByteQueue::commit(bounds.outbound_bytes()),
-            ByteQueue::commit(bounds.inbound_bytes()),
+        let (Ok(outbound), Ok(inbound)) = (
+            ByteQueue::committed(bounds.outbound_bytes()),
+            ByteQueue::committed(bounds.inbound_bytes()),
         ) else {
             let _ = transport.dispose();
             return Err(SessionError::OutOfMemory);
@@ -467,7 +360,8 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         let Ok(declared) = u32::try_from(payload.len()) else {
             return Err(SessionError::FrameTooLarge);
         };
-        let Some(slot) = self.outbound.append_slot(FRAME_HEADER_LEN + payload.len()) else {
+        // A committed queue never allocates, so the only refusal is room.
+        let Ok(slot) = self.outbound.append_slot(FRAME_HEADER_LEN + payload.len()) else {
             return Err(SessionError::OutboundFull);
         };
         slot[..FRAME_HEADER_LEN].copy_from_slice(&declared.to_le_bytes());
@@ -479,7 +373,7 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
     /// for the worker.
     #[must_use]
     pub fn wants_write(&self) -> bool {
-        !self.failed && self.outbound.len() > 0
+        !self.failed && !self.outbound.is_empty()
     }
 
     /// Whether the owner should arm read readiness: the worker's stream is
@@ -554,7 +448,7 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         if self.failed {
             return Err(SessionError::WorkerFailed);
         }
-        if self.outbound.len() == 0 {
+        if self.outbound.is_empty() {
             return Ok(());
         }
         let outcome = {

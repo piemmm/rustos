@@ -42,6 +42,7 @@
 - [Side-channel mitigations (Arch HAL)](./security/side_channels.md)
 - [Memory tagging (Arch HAL)](./security/memory_tagging.md)
 - [Network security posture](./security/network.md)
+- [SSH security posture](./security/ssh.md)
 
 # Shared libraries
 
@@ -95,6 +96,7 @@
   - [`tairix-rt` I/O](./lib/rt-io.md)
   - [`tairix-rt` work](./lib/rt-work.md)
   - [`tairix-sandbox`](./lib/sandbox.md)
+  - [`tairix-ssh`](./lib/ssh.md)
   - [`tairix-supervisor`](./lib/supervisor.md)
   - [`tairix-sysconfig`](./lib/sysconfig.md)
   - [`tairix-termcap`](./lib/termcap.md)

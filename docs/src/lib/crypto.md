@@ -58,6 +58,14 @@ key with a monotonic counter. On any authentication failure `open`
 returns the single opaque `AeadError::Authentication`, leaking nothing
 about why a forgery was rejected (`AGENTS.md` §5.4).
 
+AES-GCM comes in two forms over one implementation. `Aes128Gcm` and
+`Aes256Gcm` hold a key expanded once — the AES key schedule and the GHASH
+key — for a caller that seals many messages under it, such as an SSH
+transport direction between rekeys; that expansion is most of what a short
+message costs (a 48-byte SSH packet under AES-128-GCM falls from about 450 ns
+to 80 ns). The upstream type wipes both on drop. `aes128gcm_seal` and its
+siblings are the same operations for one message, keying per call.
+
 ## Stream keystream (§22)
 
 `stream::chacha12_keystream` wraps ChaCha12 — the twelve-round reduced
@@ -247,9 +255,11 @@ implementation outside this tree, never from the dependency under test.
   rejections.
 * AES-CTR: NIST SP 800-38A §F.5's CTR-AES{128,192,256} vectors, plus the
   stateful-continuation property one connection depends on.
-* AES-GCM: the Wycheproof project's vectors, plus a regression test that a
-  rejected message leaves the buffer holding ciphertext and never the
-  plaintext — the failure CVE-2023-42811 was.
+* AES-GCM: the Wycheproof project's vectors, through both the keyed and the
+  one-shot forms, which are also held to agree across many messages under
+  one key; plus a regression test that a rejected message leaves the buffer
+  holding ciphertext and never the plaintext — the failure CVE-2023-42811
+  was.
 * ChaCha20 (64-bit nonce): a keystream computed from djb's original round
   function outside this tree, whose reference also reproduces the published
   all-zero-key vector, so the state layout is pinned rather than guessed.

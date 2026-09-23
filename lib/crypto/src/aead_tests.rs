@@ -8,8 +8,8 @@
 
 use super::{
     aes128gcm_open, aes128gcm_seal, aes256gcm_open, aes256gcm_seal, open, seal, AeadError, AeadKey,
-    AeadNonce, AeadTag, Aes128GcmKey, Aes256GcmKey, AesGcmNonce, AesGcmTag, AES128_GCM_KEY_LEN,
-    AES256_GCM_KEY_LEN, AES_GCM_NONCE_LEN, AES_GCM_TAG_LEN,
+    AeadNonce, AeadTag, Aes128Gcm, Aes128GcmKey, Aes256Gcm, Aes256GcmKey, AesGcmNonce, AesGcmTag,
+    AES128_GCM_KEY_LEN, AES256_GCM_KEY_LEN, AES_GCM_NONCE_LEN, AES_GCM_TAG_LEN,
 };
 
 extern crate alloc;
@@ -176,6 +176,60 @@ fn aes_gcm_matches_the_wycheproof_vectors() {
     let tag = aes256gcm_seal(&GCM256_KEY, &GCM256_NONCE, &GCM256_AAD, &mut buf).expect("seal");
     assert_eq!(buf, GCM256_CIPHERTEXT);
     assert_eq!(tag, GCM256_TAG);
+}
+
+#[test]
+fn a_keyed_aes_gcm_matches_the_wycheproof_vectors() {
+    let cipher = Aes128Gcm::new(&GCM128_KEY);
+    let mut buf = GCM128_PLAINTEXT;
+    let tag = cipher
+        .seal(&GCM128_NONCE, &GCM128_AAD, &mut buf)
+        .expect("seal");
+    assert_eq!((buf, tag), (GCM128_CIPHERTEXT, GCM128_TAG));
+    cipher
+        .open(&GCM128_NONCE, &GCM128_AAD, &mut buf, &tag)
+        .expect("open");
+    assert_eq!(buf, GCM128_PLAINTEXT);
+
+    let cipher = Aes256Gcm::new(&GCM256_KEY);
+    let mut buf = GCM256_PLAINTEXT;
+    let tag = cipher
+        .seal(&GCM256_NONCE, &GCM256_AAD, &mut buf)
+        .expect("seal");
+    assert_eq!((buf, tag), (GCM256_CIPHERTEXT, GCM256_TAG));
+    cipher
+        .open(&GCM256_NONCE, &GCM256_AAD, &mut buf, &tag)
+        .expect("open");
+    assert_eq!(buf, GCM256_PLAINTEXT);
+}
+
+#[test]
+fn one_keyed_aes_gcm_serves_many_messages_as_the_one_shots_would() {
+    let key128: Aes128GcmKey = core::array::from_fn(|at| u8::try_from(at * 3).expect("small"));
+    let key256: Aes256GcmKey =
+        core::array::from_fn(|at| u8::try_from(at * 5 % 251).expect("small"));
+    let (short, long) = (Aes128Gcm::new(&key128), Aes256Gcm::new(&key256));
+    for counter in 0..64u8 {
+        let nonce: AesGcmNonce =
+            core::array::from_fn(|at| counter ^ u8::try_from(at).expect("small"));
+        let message: Vec<u8> = (0..usize::from(counter) * 7)
+            .map(|at| at.to_le_bytes()[0])
+            .collect();
+        let (mut a, mut b) = (message.clone(), message.clone());
+        let keyed = short.seal(&nonce, b"aad", &mut a).expect("seal");
+        let one_shot = aes128gcm_seal(&key128, &nonce, b"aad", &mut b).expect("seal");
+        assert_eq!((&a, keyed), (&b, one_shot));
+        aes128gcm_open(&key128, &nonce, b"aad", &mut a, &keyed).expect("the one-shot opens it");
+        assert_eq!(a, message);
+        let (mut a, mut b) = (message.clone(), message.clone());
+        let keyed = long.seal(&nonce, b"aad", &mut a).expect("seal");
+        let one_shot = aes256gcm_seal(&key256, &nonce, b"aad", &mut b).expect("seal");
+        assert_eq!((&a, keyed), (&b, one_shot));
+        assert_eq!(
+            long.open(&nonce, b"other", &mut a, &keyed),
+            Err(AeadError::Authentication)
+        );
+    }
 }
 
 #[test]

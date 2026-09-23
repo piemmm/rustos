@@ -40,9 +40,9 @@ pub mod stream;
 
 pub use aead::{
     aes128gcm_open, aes128gcm_seal, aes256gcm_open, aes256gcm_seal, open, seal, AeadError, AeadKey,
-    AeadNonce, AeadTag, Aes128GcmKey, Aes256GcmKey, AesGcmNonce, AesGcmTag, AEAD_KEY_LEN,
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AES128_GCM_KEY_LEN, AES256_GCM_KEY_LEN, AES_GCM_NONCE_LEN,
-    AES_GCM_TAG_LEN,
+    AeadNonce, AeadTag, Aes128Gcm, Aes128GcmKey, Aes256Gcm, Aes256GcmKey, AesGcmNonce, AesGcmTag,
+    AEAD_KEY_LEN, AEAD_NONCE_LEN, AEAD_TAG_LEN, AES128_GCM_KEY_LEN, AES256_GCM_KEY_LEN,
+    AES_GCM_NONCE_LEN, AES_GCM_TAG_LEN,
 };
 pub use agree::{
     KeyAgreementError, X25519PublicKey, X25519SecretKey, X25519SharedSecret, X25519_PUBLIC_KEY_LEN,
