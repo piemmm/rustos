@@ -275,8 +275,9 @@ bounded, pre-reserved buffer, which zeroises every byte it discards including
 on drop.
 
 - `FactList` is a column of key/value readouts with the values right-aligned
-  on one another: the value keeps its room and the label truncates first, so a
-  narrow detail pane loses a word of description rather than a digit.
+  on one another: the value keeps its room and the label gives way first,
+  elided with the shared mark, so a narrow detail pane loses a word of
+  description rather than a digit.
 - `Timeline` is a vertical spine spanning only its first to its last mark,
   with shape-coded `EventMark`s and a stamp column sized to the widest stamp,
   so a reader can tell one kind of event from another without colour.
@@ -368,9 +369,11 @@ on drop.
   rather than re-resolving vector coverage every frame, and an owner holding
   no cache passes `NoArtwork` and each glyph is rasterised in place. Room is
   claimed in the order a reader needs it: the Signal Bead, then the chevron
-  and the reading, then the glyph, then the label, which is what truncates —
+  and the reading, then the glyph, then the label, which is what gives way —
   so a row too narrow for its glyph keeps its name rather than becoming a
-  nameless indent.
+  nameless indent. A label or reading that gives way is elided through the
+  shared `paint_run` recipe, mark included, so a cut name never reads as a
+  complete one.
 - **The two orientations carry selection differently, because one is a row and
   the other is a page shape.** A sidebar entry is a row: selection lifts it to
   the raised fill and marks its *leading* edge at the shared rail breadth,
@@ -817,7 +820,10 @@ a menu row, a tab, a table cell, a window title, a breadcrumb, a list row's
 title, a metric's reading — stays on one line and ends in the shared ellipsis
 mark. Wrapping one would move everything laid out beside and beneath it, and
 a name is scanned rather than read: the mark says the rest is there, which is
-all the reader needs.
+all the reader needs. Every such name is drawn through one recipe —
+`lib/font`'s `elide_to_width`, then `paint_run`, with `run_width` to align it —
+and the crate exports both, so an application drawing a name of its own ends
+it in the same mark rather than cutting it where its room ran out.
 
 **Wrapping makes a height depend on a width**, which is why the controls that
 carry prose ask for one: `Dialog::height_for_content(content, width, ..)`,

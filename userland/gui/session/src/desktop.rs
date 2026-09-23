@@ -75,7 +75,7 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconArtwork;
 use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;
-use tairix_theme::Theme;
+use tairix_theme::{Appearance, Theme};
 use tairix_wallpaper::{DesktopSettings, IconFlow, IconSort};
 use tairix_wm::{ClickKind, DoubleClickTracker, Key, NamedKey, PointerButton};
 
@@ -337,6 +337,20 @@ impl<S: DirectorySource> Desktop<S> {
     #[must_use]
     pub const fn settings(&self) -> &DesktopSettings {
         &self.settings
+    }
+
+    /// What choosing `appearance` from the system menu asks for: the settings
+    /// in force with that appearance laid over them.
+    ///
+    /// Adopted through the one persist-then-adopt path every settings change
+    /// takes, so the choice outlives the session and a surface reading the
+    /// published document never shows a different appearance from the screen.
+    #[must_use]
+    pub fn appearance_to(&self, appearance: Appearance) -> DesktopAction {
+        DesktopAction::AdoptSettings(DesktopSettings {
+            appearance,
+            ..self.settings.clone()
+        })
     }
 
     /// The absolute path of the folder the desktop shows.

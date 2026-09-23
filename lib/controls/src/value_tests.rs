@@ -11,7 +11,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::Theme;
 
 use crate::damage::sink;
 use crate::paint::progress_thickness;
@@ -19,7 +19,7 @@ use crate::state::{
     ActivityState, AuthorityState, ControlState, PressureKind, PressureState, ProgressValue,
     RecoveryState,
 };
-use crate::testkit::{control_font, high_contrast};
+use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul, region_has};
 use crate::value::{Progress, Slider, SliderAction};
 
 const W: u32 = 200;
@@ -27,10 +27,6 @@ const H: u32 = 28;
 
 fn font() -> BitmapFont {
     control_font(&Theme::dark(), Scale::ONE)
-}
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -45,16 +41,6 @@ const PRESS: InputEvent = InputEvent::PointerPressed {
 const RELEASE: InputEvent = InputEvent::PointerReleased {
     button: PointerButton::Primary,
 };
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
-
-fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
-    (xr.0..xr.1)
-        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
-        .any(|(x, y)| surface.get(x, y) == Some(want))
-}
 
 fn slider_surface(slider: &Slider, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
@@ -668,4 +654,15 @@ fn only_a_step_that_moves_reports() {
     let mut some = sink();
     slider.on_key(Key::Named(NamedKey::Home), bounds(), &mut some);
     assert_eq!(some.bounds(), bounds(), "the thumb and the fill both move");
+}
+
+/// A progress bar's note too long for the bar is elided with the shared mark
+/// rather than cut where the bar ran out.
+#[test]
+fn a_note_too_long_for_the_bar_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    assert!(marks_elision(|text| progress_surface(
+        &Progress::new().with_label(text),
+        &theme
+    )));
 }

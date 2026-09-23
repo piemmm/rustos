@@ -39,7 +39,7 @@ fn stating() -> Shell {
     let mut sink = damage();
     assert!(
         shell.go_to_pane("sound", WIDE, Scale::ONE, &theme(), &mut sink),
-        "the registry carries the pane that states the absent audio stack"
+        "the registry carries the pane that states the absent sound controls"
     );
     shell
 }
@@ -62,9 +62,7 @@ fn click(shell: &mut Shell, at: Point, viewport: Rect, theme: &Theme) {
 
 /// The centre of strip row `index`, or `None` when the strip did not seat it.
 fn row_point(shell: &Shell, index: usize, viewport: Rect, theme: &Theme) -> Option<Point> {
-    let frame = shell.frame(viewport, Scale::ONE, theme);
-    let sidebar = frame.sidebar?;
-    let rect = shell.strip_row_rect(index, sidebar, Scale::ONE, theme)?;
+    let rect = shell.strip_row_rect(index, viewport, Scale::ONE, theme)?;
     Some(Point::new(
         rect.left() + to_i32(rect.width / 2),
         rect.top() + to_i32(rect.height / 2),
@@ -539,13 +537,13 @@ fn a_short_window_scrolls_the_category_strip() {
     let last = shell.rows().len() - 1;
     assert!(
         shell
-            .strip_row_rect(last, sidebar, Scale::ONE, &theme)
+            .strip_row_rect(last, short, Scale::ONE, &theme)
             .is_none(),
         "the last row is past the fold to begin with"
     );
     shell.reveal_for_test(last, short, Scale::ONE, &theme);
     let row = shell
-        .strip_row_rect(last, sidebar, Scale::ONE, &theme)
+        .strip_row_rect(last, short, Scale::ONE, &theme)
         .expect("the last row is seated once revealed");
     assert!(
         row.top() >= sidebar.top() && row.bottom() <= sidebar.bottom(),
@@ -556,9 +554,7 @@ fn a_short_window_scrolls_the_category_strip() {
     // And back: the first row is reachable again.
     shell.reveal_for_test(0, short, Scale::ONE, &theme);
     assert_eq!(shell.strip_first_for_test(), 0);
-    assert!(shell
-        .strip_row_rect(0, sidebar, Scale::ONE, &theme)
-        .is_some());
+    assert!(shell.strip_row_rect(0, short, Scale::ONE, &theme).is_some());
 }
 
 /// Walking the cursor to the end of the strip scrolls it into view, so the
@@ -596,7 +592,7 @@ fn the_cursor_walks_past_the_fold() {
         .expect("a cursor on the strip");
     assert_eq!(cursor, shell.rows().len() - 1, "End reaches the last row");
     let row = shell
-        .strip_row_rect(cursor, sidebar, Scale::ONE, &theme)
+        .strip_row_rect(cursor, short, Scale::ONE, &theme)
         .expect("the cursor's row is on screen");
     assert!(
         row.top() >= sidebar.top() && row.bottom() <= sidebar.bottom(),
@@ -682,6 +678,94 @@ fn choosing_a_value_posts_only_the_appearance_keys() {
             key.name()
         );
     }
+}
+
+/// Pressing where [`Shell::setting_rect`] and [`Shell::choice_rect`] say a
+/// control is drawn opens that row's list and takes that choice: the two
+/// answers are the rectangles the form hit-tests, not arithmetic beside it.
+#[test]
+fn a_press_on_the_reported_rectangles_opens_the_list_and_takes_the_choice() {
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    });
+    assert!(
+        shell.choice_rect(0, WIDE, Scale::ONE, &theme).is_none(),
+        "no list is open to have a choice drawn"
+    );
+    let centre = |rect: Rect| {
+        Point::new(
+            rect.left() + to_i32(rect.width / 2),
+            rect.top() + to_i32(rect.height / 2),
+        )
+    };
+    let combo = shell
+        .setting_rect(Setting::Appearance, WIDE, Scale::ONE, &theme)
+        .expect("the pane draws the appearance row");
+    click(&mut shell, centre(combo), WIDE, &theme);
+
+    let light = Appearance::ALL
+        .iter()
+        .position(|appearance| *appearance == Appearance::Light)
+        .expect("light is offered");
+    let choice = shell
+        .choice_rect(light, WIDE, Scale::ONE, &theme)
+        .expect("the press opened the row's list");
+    let mut sink = damage();
+    let mut chosen = ShellOutcome::Idle;
+    for event in [
+        InputEvent::PointerMoved { to: centre(choice) },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        let outcome = shell.on_pointer(&event, WIDE, Scale::ONE, &theme, &mut sink);
+        if outcome.document().is_some() {
+            chosen = outcome;
+        }
+    }
+    let document = chosen.document().expect("the choice asks for a document");
+    assert!(document.contains("appearance = light"), "{document}");
+    assert!(
+        shell.choice_rect(light, WIDE, Scale::ONE, &theme).is_none(),
+        "taking the choice closed the list"
+    );
+    assert!(
+        shell
+            .setting_rect(Setting::CursorSize, WIDE, Scale::ONE, &theme)
+            .is_none(),
+        "a setting only Accessibility shows is not drawn on Appearance"
+    );
+}
+
+/// The window is titled with the pane on show, and follows every walk.
+#[test]
+fn the_window_is_titled_with_the_pane_on_show() {
+    let theme = theme();
+    let mut shell = shell();
+    let title_of = |pane: Pane| pane.locate().expect("the pane is listed").1.title;
+    assert_eq!(shell.title(), title_of(Pane::About));
+
+    let storage = shell
+        .rows()
+        .iter()
+        .position(|row| *row == StripRow::Category(Category::Storage))
+        .expect("storage is a strip row");
+    shell.reveal_for_test(storage, WIDE, Scale::ONE, &theme);
+    let at = row_point(&shell, storage, WIDE, &theme).expect("storage is seated");
+    click(&mut shell, at, WIDE, &theme);
+    assert_eq!(shell.title(), title_of(Pane::Storage));
+    assert_eq!(
+        shell
+            .selected_row()
+            .and_then(|index| shell.rows().get(index).copied()),
+        Some(StripRow::Category(Category::Storage)),
+        "the row drawn selected is the one walked to"
+    );
 }
 
 #[test]

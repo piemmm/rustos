@@ -16,12 +16,13 @@ use alloc::vec::Vec;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_raster::{Pixel, Surface};
+use tairix_theme::Theme;
 
 use crate::button::{ButtonContent, IconButton, SplitButton};
 use crate::damage::sink;
 use crate::state::ControlRole;
+use crate::testkit::{has_pixel, premul, region_has};
 use crate::toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
 use tairix_icon::IconKind;
 
@@ -29,14 +30,6 @@ const W: u32 = 220;
 const H: u32 = 28;
 const GAP: u32 = 8;
 const CH: u32 = 28;
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
 
 /// The tallest run of consecutive rows in any one column carrying `want`.
 ///
@@ -58,12 +51,6 @@ fn tallest_column_run(surface: &Surface, want: Pixel) -> u32 {
         }
     }
     tallest
-}
-
-fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
-    (xr.0..xr.1)
-        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
-        .any(|(x, y)| surface.get(x, y) == Some(want))
 }
 
 fn icon() -> IconButton {

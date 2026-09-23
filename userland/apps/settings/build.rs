@@ -4,8 +4,7 @@
 //! inert host stub everywhere else.
 //!
 //! It keys only off the OS component of the target (bare-metal vs hosted),
-//! never the instruction set, so `cargo xtask cfg-check` stays clean. It
-//! mirrors `userland/apps/wallpaper/build.rs`.
+//! never the instruction set, so `cargo xtask cfg-check` stays clean.
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(freestanding)");

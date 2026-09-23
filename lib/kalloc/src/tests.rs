@@ -15,7 +15,8 @@
 //! region growth cannot silently drift onto the slab.
 
 use super::{
-    class_size, objects_per_page, slab_class, FreeListAllocator, MIN_BLOCK, MIN_CLASS, SLAB_CLASSES,
+    class_size, objects_per_page, slab_class, FreeListAllocator, Heap, HEAP_BYTES, MIN_BLOCK,
+    MIN_CLASS, SLAB_CLASSES,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use tairix_abi::PAGE_SIZE;
@@ -1400,4 +1401,28 @@ fn freeing_from_a_filled_page_puts_it_back_on_the_partial_list() {
         unsafe { alloc.dealloc(p, layout) };
     }
     assert_eq!(source.live_pages(), 1, "one page kept, the rest returned");
+}
+
+/// A `Heap` backs an allocator as a plain `static`: its arena pointer is its
+/// own first byte, page-aligned, and the memory served from it is writable —
+/// so no binary needs a `static mut` for its heap.
+#[test]
+fn a_plain_static_heap_backs_an_allocator() {
+    static HEAP: Heap = Heap::ZERO;
+    let base = HEAP.as_mut_ptr();
+    assert_eq!(base, core::ptr::addr_of!(HEAP).cast::<u8>().cast_mut());
+    assert_eq!(base.addr() % PAGE_SIZE, 0);
+    // SAFETY: the static outlives the allocator, and nothing else in the test
+    // binary touches it.
+    let alloc = unsafe { FreeListAllocator::new(base, HEAP_BYTES) };
+    let layout = Layout::from_size_align(64, 16).unwrap();
+    // SAFETY: a non-zero layout on a fresh allocator.
+    let block = unsafe { alloc.alloc(layout) };
+    assert!(!block.is_null());
+    // SAFETY: `block` is a live 64-byte allocation from `alloc`, freed once.
+    unsafe {
+        block.write_bytes(0xa5, 64);
+        assert_eq!(*block.add(63), 0xa5);
+        alloc.dealloc(block, layout);
+    }
 }

@@ -19,9 +19,10 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
-    key_activation, paint_bead, paint_chevron, paint_icon_slot, paint_plate, plate_border,
-    pointer_activation, resolve_bead, resolve_frame, resolve_rail, role_font, surface_rect,
-    text_plate_height, to_i32, withheld, BeadShape, ChevronDir, PlateStyle, FULL_COLOUR,
+    key_activation, paint_bead, paint_chevron, paint_icon_slot, paint_plate, paint_run,
+    plate_border, pointer_activation, resolve_bead, resolve_frame, resolve_rail, role_font,
+    run_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir,
+    PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
@@ -323,9 +324,9 @@ fn paint_content(
             let Some(text_y) = text_y else {
                 return;
             };
-            let fitted = font.truncate_to_width(text, avail_w);
-            let width = font.text_width(fitted);
-            font.draw_text(surface, group_start(width), text_y, fitted, res.label);
+            let run = font.elide_to_width(text, avail_w);
+            let at = (group_start(run_width(font, run)), text_y);
+            paint_run(surface, font, run, at, res.label, None);
         }
         ButtonContent::Icon(kind) => {
             // An icon-only button has no label competing for the plate, so the
@@ -348,9 +349,10 @@ fn paint_content(
             let side = glyph_h.min(avail_h);
             let gap = scale.scale_length(theme.metrics().control_gap);
             let label_budget = avail_w.saturating_sub(side.saturating_add(gap));
-            let fitted = font.truncate_to_width(label, label_budget);
-            let width = font.text_width(fitted);
-            let total = side.saturating_add(gap).saturating_add(width);
+            let run = font.elide_to_width(label, label_budget);
+            let total = side
+                .saturating_add(gap)
+                .saturating_add(run_width(font, run));
             let start = group_start(total);
             if side > 0 {
                 if let Some(mask) = glyph_mask(*icon, side) {
@@ -360,7 +362,7 @@ fn paint_content(
             }
             if let Some(text_y) = text_y {
                 let text_x = start + to_i32(side.saturating_add(gap));
-                font.draw_text(surface, text_x, text_y, fitted, res.label);
+                paint_run(surface, font, run, (text_x, text_y), res.label, None);
             }
         }
     }

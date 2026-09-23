@@ -452,11 +452,12 @@ present, so there is no unknown-id path to surface. The interactive home of
 this control is the **Light / Dark Appearance** pair in the Switchboard
 capsule's quick-actions menu (`plans/NEW-TASKBAR.md` T13): the taskbar reports
 the chosen appearance as a typed response and the session glue
-(`userland/gui/session`, `tairix-desktop-session`) resolves it through
-`DesktopSession::set_theme`, which re-applies the new theme — the taskbar is
-re-themed in place and the window manager's desktop background is re-coloured
-through the compositor's runtime `set_background` (full-screen damage, so the
-next present repaints every pixel over the new colour). The active appearance is the
+(`userland/gui/session`, `tairix-desktop-session`) adopts it as a change to the
+desktop's settings document, through the same persist-then-adopt path the
+Settings Appearance pane takes — the choice is written first, then put into
+effect by `adopt_appearance`, which re-themes the taskbar in place and hands
+the compositor the whole theme (full-screen damage, so the next present
+repaints every pixel in the new look). The active appearance is the
 group's chosen member in the menu — a bullet, disabled — so the
 menu can never ask for the appearance already in use. See
 [Desktop session glue](./session.md) and [Taskbar](./taskbar.md).

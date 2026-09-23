@@ -67,9 +67,10 @@ use tairix_theme::{SignalRole, TextRole, Theme};
 use crate::chart::Chart;
 use crate::paint::{
     clamp_permille, composition_remainder_tint, composition_thickness, composition_tint,
-    heavy_contrast, inset, paint_icon_slot, paint_measured_track, paint_plate, paint_text_line,
-    plate_border, progress_thickness, role_font, signal_color, surface_rect, to_i32, withheld,
-    PlateStyle, TrackBand, COMPOSITION_HUE_COUNT, FULL, FULL_COLOUR,
+    heavy_contrast, inset, paint_icon_slot, paint_measured_track, paint_plate, paint_run,
+    paint_text_line, plate_border, progress_thickness, role_font, run_width, signal_color,
+    surface_rect, to_i32, withheld, PlateStyle, TrackBand, COMPOSITION_HUE_COUNT, FULL,
+    FULL_COLOUR,
 };
 use crate::state::{MeterValue, PressureKind, PressureState};
 
@@ -621,58 +622,81 @@ impl ReadingFonts {
     }
 }
 
-/// The truncated value text, and the truncated unit text (if room remains
-/// after the value), for a reading fitted into at most `max_w` physical
-/// pixels.
-///
-/// This is the one "value claims its width first, the unit takes whatever is
-/// left" fit every reading anatomy shares — [`paint_reading_line`]'s
-/// left-aligned stacked reading and [`paint_inline_reading_line`]'s
-/// right-aligned one both compute their fit from this one definition, so the
-/// two can never disagree about how a reading degrades under width pressure.
-fn fit_reading<'a>(
-    fonts: ReadingFonts,
-    value: &'a str,
-    unit: Option<&'a str>,
-    max_w: u32,
-) -> (&'a str, Option<&'a str>) {
-    let value_fitted = fonts.value.truncate_to_width(value, max_w);
-    let Some(unit) = unit else {
-        return (value_fitted, None);
-    };
-    let value_w = fonts.value.text_width(value_fitted);
-    let space = fonts.unit.advance(' ');
-    let used = value_w.saturating_add(space).min(max_w);
-    let remaining = max_w.saturating_sub(used);
-    if remaining == 0 {
-        return (value_fitted, None);
-    }
-    (
-        value_fitted,
-        Some(fonts.unit.truncate_to_width(unit, remaining)),
-    )
+/// A reading fitted to its line: the value's run, and the unit's where room
+/// remains after the value — each the text to draw and whether the elision
+/// mark follows it.
+#[derive(Copy, Clone)]
+struct FittedReading<'a> {
+    value: (&'a str, bool),
+    /// The value's drawn width, measured once for the unit's place and the
+    /// reading's width alike.
+    value_w: u32,
+    unit: Option<(&'a str, bool)>,
 }
 
-/// The physical width `value_fitted` plus, if present, a space and
-/// `unit_fitted` occupy — the one width computation both
-/// [`paint_reading_line`] and [`paint_inline_reading_line`] use to place the
-/// unit after the value and, for the inline form, to right-align the whole
-/// reading.
-fn reading_width(fonts: ReadingFonts, value_fitted: &str, unit_fitted: Option<&str>) -> u32 {
-    let value_w = fonts.value.text_width(value_fitted);
-    match unit_fitted {
-        Some(unit_fitted) => value_w
-            .saturating_add(fonts.unit.advance(' '))
-            .saturating_add(fonts.unit.text_width(unit_fitted)),
-        None => value_w,
+impl<'a> FittedReading<'a> {
+    /// `value` and `unit` fitted into at most `max_w` physical pixels.
+    ///
+    /// This is the one "value claims its width first, the unit takes whatever
+    /// is left" fit every reading anatomy shares — [`paint_reading_line`]'s
+    /// left-aligned stacked reading and [`paint_inline_reading_line`]'s
+    /// right-aligned one both fit through it, so the two can never disagree
+    /// about how a reading degrades under width pressure.
+    fn fit(fonts: ReadingFonts, value: &'a str, unit: Option<&'a str>, max_w: u32) -> Self {
+        let value = fonts.value.elide_to_width(value, max_w);
+        let value_w = run_width(fonts.value, value);
+        let unit = unit.and_then(|unit| {
+            let remaining = max_w.saturating_sub(value_w.saturating_add(fonts.unit.advance(' ')));
+            (remaining > 0).then(|| fonts.unit.elide_to_width(unit, remaining))
+        });
+        Self {
+            value,
+            value_w,
+            unit,
+        }
+    }
+
+    /// The physical width the value plus, if present, a space and the unit
+    /// occupy.
+    fn width(self, fonts: ReadingFonts) -> u32 {
+        match self.unit {
+            Some(unit) => self
+                .value_w
+                .saturating_add(fonts.unit.advance(' '))
+                .saturating_add(run_width(fonts.unit, unit)),
+            None => self.value_w,
+        }
+    }
+
+    /// Draw the value from `x` on the `baselines` pair, loud in `colors.0`,
+    /// then the unit one space on, quiet in `colors.1`.
+    fn paint(
+        self,
+        surface: &mut Surface,
+        fonts: ReadingFonts,
+        x: u32,
+        baselines: (u32, u32),
+        colors: (Color, Color),
+    ) {
+        let (value_y, unit_y) = baselines;
+        let (value_color, unit_color) = colors;
+        let at = (to_i32(x), to_i32(value_y));
+        paint_run(surface, fonts.value, self.value, at, value_color, None);
+        if let Some(unit) = self.unit {
+            let unit_x = x
+                .saturating_add(self.value_w)
+                .saturating_add(fonts.unit.advance(' '));
+            let at = (to_i32(unit_x), to_i32(unit_y));
+            paint_run(surface, fonts.unit, unit, at, unit_color, None);
+        }
     }
 }
 
 /// Draw the value/unit reading line at `pos` (`(x, y)`) if a full line still
 /// fits before `limits`' `bottom` within its `w`, returning the y the next
-/// line starts at. The value is truncated to the full width and drawn in
+/// line starts at. The value is elided to the full width and drawn in
 /// `colors.0`; a present `unit` is then drawn, separated by one space
-/// advance, in `colors.1`, truncated to whatever width remains — so "8.6"
+/// advance, in `colors.1`, elided to whatever width remains — so "8.6"
 /// reads loud and a trailing "GB / 16 GB" reads quiet without either
 /// overrunning the line.
 fn paint_reading_line(
@@ -686,33 +710,11 @@ fn paint_reading_line(
 ) -> u32 {
     let (x, y) = pos;
     let (bottom, w, gap) = limits;
-    let (value_color, unit_color) = colors;
     let (line_h, _) = fonts.line_box();
     if w == 0 || y.saturating_add(line_h) > bottom {
         return y;
     }
-    let (value_y, unit_y) = fonts.baselines(y);
-    let (value_fitted, unit_fitted) = fit_reading(fonts, value, unit, w);
-    fonts.value.draw_text(
-        surface,
-        to_i32(x),
-        to_i32(value_y),
-        value_fitted,
-        value_color,
-    );
-    if let Some(unit_fitted) = unit_fitted {
-        let value_w = fonts.value.text_width(value_fitted);
-        let unit_x = x
-            .saturating_add(value_w)
-            .saturating_add(fonts.unit.advance(' '));
-        fonts.unit.draw_text(
-            surface,
-            to_i32(unit_x),
-            to_i32(unit_y),
-            unit_fitted,
-            unit_color,
-        );
-    }
+    FittedReading::fit(fonts, value, unit, w).paint(surface, fonts, x, fonts.baselines(y), colors);
     y.saturating_add(line_h).saturating_add(gap)
 }
 
@@ -721,8 +723,8 @@ fn paint_reading_line(
 /// than three positional string parameters (its argument count is already
 /// tight without them).
 struct InlineReading<'a> {
-    /// The leading label, which truncates first when the line is too
-    /// narrow for both it and the reading.
+    /// The leading label, which gives way first when the line is too narrow
+    /// for both it and the reading.
     label: &'a str,
     /// The reading's value text.
     value: &'a str,
@@ -734,12 +736,11 @@ struct InlineReading<'a> {
 /// if a full line still fits before `limits`' `bottom` within its `w`,
 /// returning the y the next line starts at.
 ///
-/// The reading (value plus its unit) is fitted first, through the same
-/// [`fit_reading`] recipe [`paint_reading_line`] uses, and right-aligned
-/// within `w`; the label then draws leading, truncated to whatever width
-/// remains before the reading's own leading edge. The reading therefore
-/// always keeps the room it needs and the label is what gives way — the
-/// reading is what the reader came for.
+/// The reading (value plus its unit) is fitted first and right-aligned within
+/// `w`; the label then draws leading, elided to whatever width remains before
+/// the reading's own leading edge. The reading therefore always keeps the room
+/// it needs and the label is what gives way — the reading is what the reader
+/// came for.
 fn paint_inline_reading_line(
     surface: &mut Surface,
     reading: &InlineReading<'_>,
@@ -749,53 +750,25 @@ fn paint_inline_reading_line(
     label_color: Color,
     colors: (Color, Color),
 ) -> u32 {
-    let label = reading.label;
-    let value = reading.value;
-    let unit = reading.unit;
     let (x, y) = pos;
     let (bottom, w, gap) = limits;
-    let (value_color, unit_color) = colors;
     let (line_h, _) = fonts.line_box();
     if w == 0 || y.saturating_add(line_h) > bottom {
         return y;
     }
-    let (value_y, unit_y) = fonts.baselines(y);
-    let (value_fitted, unit_fitted) = fit_reading(fonts, value, unit, w);
-    let reading_w = reading_width(fonts, value_fitted, unit_fitted).min(w);
-    let reading_x = x.saturating_add(w).saturating_sub(reading_w);
+    let baselines = fonts.baselines(y);
+    let fitted = FittedReading::fit(fonts, reading.value, reading.unit, w);
+    let reading_x = x
+        .saturating_add(w)
+        .saturating_sub(fitted.width(fonts).min(w));
 
     let label_avail = reading_x.saturating_sub(gap).saturating_sub(x);
     if label_avail > 0 {
-        let label_fitted = fonts.unit.truncate_to_width(label, label_avail);
-        fonts.unit.draw_text(
-            surface,
-            to_i32(x),
-            to_i32(unit_y),
-            label_fitted,
-            label_color,
-        );
+        let run = fonts.unit.elide_to_width(reading.label, label_avail);
+        let at = (to_i32(x), to_i32(baselines.1));
+        paint_run(surface, fonts.unit, run, at, label_color, None);
     }
-
-    fonts.value.draw_text(
-        surface,
-        to_i32(reading_x),
-        to_i32(value_y),
-        value_fitted,
-        value_color,
-    );
-    if let Some(unit_fitted) = unit_fitted {
-        let value_w = fonts.value.text_width(value_fitted);
-        let unit_x = reading_x
-            .saturating_add(value_w)
-            .saturating_add(fonts.unit.advance(' '));
-        fonts.unit.draw_text(
-            surface,
-            to_i32(unit_x),
-            to_i32(unit_y),
-            unit_fitted,
-            unit_color,
-        );
-    }
+    fitted.paint(surface, fonts, reading_x, baselines, colors);
     y.saturating_add(line_h).saturating_add(gap)
 }
 
@@ -916,11 +889,12 @@ impl StatusPill {
         if avail == 0 {
             return;
         }
-        let fitted = font.truncate_to_width(&self.label, avail);
-        let text_w = font.text_width(fitted).min(avail);
+        let run = font.elide_to_width(&self.label, avail);
+        let text_w = run_width(font, run).min(avail);
         let text_x = x.saturating_add(pad).saturating_add((avail - text_w) / 2);
         let text_y = y.saturating_add(h.saturating_sub(line_h) / 2);
-        font.draw_text(surface, to_i32(text_x), to_i32(text_y), fitted, label_color);
+        let at = (to_i32(text_x), to_i32(text_y));
+        paint_run(surface, font, run, at, label_color, None);
     }
 }
 
@@ -1218,16 +1192,17 @@ impl CompositionBar {
                 .saturating_add(w)
                 .saturating_sub(text_x)
                 .min(entry.width.saturating_sub(bead).saturating_sub(gap));
-            let label = font.truncate_to_width(&segment.label, avail);
-            font.draw_text(
+            let label = font.elide_to_width(&segment.label, avail);
+            paint_run(
                 surface,
-                to_i32(text_x),
-                to_i32(row_y),
+                font,
                 label,
+                (to_i32(text_x), to_i32(row_y)),
                 Color::from(palette.on_surface_muted),
+                None,
             );
             let after = text_x
-                .saturating_add(font.text_width(label))
+                .saturating_add(run_width(font, label))
                 .saturating_add(font.advance(' '));
             let remaining = x
                 .saturating_add(w)
@@ -1235,13 +1210,13 @@ impl CompositionBar {
             if remaining == 0 {
                 continue;
             }
-            let amount = font.truncate_to_width(&segment.amount, remaining);
-            font.draw_text(
+            paint_run(
                 surface,
-                to_i32(after),
-                to_i32(row_y),
-                amount,
+                font,
+                font.elide_to_width(&segment.amount, remaining),
+                (to_i32(after), to_i32(row_y)),
                 Color::from(palette.on_surface),
+                None,
             );
         }
     }

@@ -1970,6 +1970,48 @@ impl Form {
         )
     }
 
+    /// Where `setting`'s control is drawn in `place`, or `None` when no row
+    /// here writes it or the column does not seat that row.
+    #[must_use]
+    pub fn control_rect(&self, setting: Setting, place: FormPlace<'_>) -> Option<Rect> {
+        let (group, row) = self.owners.iter().enumerate().find_map(|(group, rows)| {
+            rows.iter()
+                .position(|owner| *owner == Owner::Desktop(setting))
+                .map(|row| (group, row))
+        })?;
+        let layout = self
+            .layouts(place)
+            .into_iter()
+            .find_map(|(index, layout)| (index == group).then_some(layout))?;
+        let field_group = self.groups.get(group)?;
+        let bounds = field_group.row_rect(row, layout.bounds, place.scale, place.theme)?;
+        field_group.rows().get(row)?.control_rect(
+            FieldLayout::new(bounds, layout.column).with_popup(layout.popup),
+            place.scale,
+            place.theme,
+        )
+    }
+
+    /// Where the open choice list draws choice `index` in `place`, or `None`
+    /// while no list is open.
+    #[must_use]
+    pub fn choice_rect(&self, index: usize, place: FormPlace<'_>) -> Option<Rect> {
+        self.layouts(place).into_iter().find_map(|(group, layout)| {
+            let row = self
+                .groups
+                .get(group)?
+                .rows()
+                .iter()
+                .find(|row| row.popup_open())?;
+            let FieldControl::Combo(combo) = row.control() else {
+                return None;
+            };
+            combo
+                .menu()
+                .row_rect(index, layout.popup, place.scale, place.theme)
+        })
+    }
+
     /// The groups paired with where they are drawn.
     fn placed(&self, place: FormPlace<'_>) -> Vec<(&FieldGroup, FieldLayout)> {
         self.layouts(place)

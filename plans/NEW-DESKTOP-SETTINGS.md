@@ -48,7 +48,7 @@ dropped is a category the surface then has to lie about.
 | **DS10** | Notifications — a per-source allow/deny and minimum severity enforced at the session's one `NotifyRequest` intake | DS3 | DS10 | planned |
 | **DS11** | Keyboard and Mouse — the session's pointer and key-repeat policy, and the one double-click interval it publishes for every app | DS3 | DS11 | planned |
 | **DS12** | Lock Screen and Screensaver — the session's single idle deadline and the one timer armed only while a policy has one pending | DS3 | DS12 | planned |
-| **DS13** | The `settings_qemu_aarch64` vertical and the docs pages the surface owes | DS2–DS12 | DS13 | planned |
+| **DS13** | The `settings_qemu_aarch64` vertical and the docs pages the surface owes | DS2–DS9 | DS13 | done |
 | **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | in progress — `datetime.app` landed with DS1 (its grid deleted, its extent now measured through `Dialog::height_for_content`); `PermGrid` remains |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
@@ -111,12 +111,14 @@ re-derived:
   an apply spends it and the caller draws another, and an apply with none
   held is refused rather than salted predictably.
 
-**The honest shape of the deliverable.** Seven of the categories the desktop
-should offer have no subsystem beneath them today: there is no audio stack, no
-Bluetooth stack, no print/scan stack, no touchpad or touch input driver, no
-802.11 driver, and no file/screen sharing server anywhere in the tree. Settings
-cannot invent them, and it must not draw a volume slider that changes nothing —
-that is the fabricated-reading defect the whole desktop is built to avoid. So
+**The honest shape of the deliverable.** Six of the categories the desktop
+should offer have no subsystem beneath them today: there is no Bluetooth stack,
+no print/scan stack, no touchpad or touch input driver, no 802.11 driver, and
+no file/screen sharing server anywhere in the tree. Sound has its stack but no
+device control — nothing sets a device's volume or the default device — so it
+is a seventh category with nothing to set. Settings cannot invent any of them,
+and it must not draw a volume slider that changes nothing — that is the
+fabricated-reading defect the whole desktop is built to avoid. So
 those categories are **present, reachable, and honest**: each states what is
 missing and what would have to land, exactly as the Switchboard's Services and
 Power pages already do. §3 is the table of them; each row names the plan that
@@ -400,7 +402,7 @@ would change nothing.
 
 | Pane | What is missing | Prerequisite |
 |---|---|---|
-| Sound | the `audio-v1` stream ABI and the `audiochan-v1` device channel exist; nothing serves them — no driver, no mixer, no device to enumerate | `plans/SOUND.md` SND3–SND4: the `lib/audio` engine and the `audiod` mixer/router with its first driver |
+| Sound | the stack plays — the `audiod` mixer and router over the first driver — but offers no control over a device's volume or over which device is the default | `plans/SOUND.md` SND15: the device control and the Settings pane over it |
 | Bluetooth | no HCI transport, no host stack, no pairing store | a new `plans/BLUETOOTH.md` |
 | Printers & Scanners | no print spooler, no scan API, no driver class | a new `plans/PRINTING.md` |
 | Trackpad | no touchpad driver; `lib/hid` carries boot-mouse only | a multitouch HID driver under `plans/USB.md` |
@@ -1306,24 +1308,60 @@ second one.
 
 ### DS13 — the QEMU vertical, and docs
 
-A dedicated `settings_qemu_aarch64` vertical, a short sibling of the autoload
-desktop vertical rather than a further stage on it (so a gate mis-count in one
-choreography cannot wedge the other). It boots the autoload root disk, unlocks,
-logs in, starts `desktop`, opens the system quick-actions menu, chooses
-*Settings…*, and then: screendumps the shell on General; walks the sidebar to
-Appearance and flips the desktop to light, witnessing the change in the *next*
-dump of the desktop behind the window; walks to Storage and dumps the capacity
-tracks; and walks to a §3 absence pane and dumps its statement. PASS needs the
-guest's own witnesses — an `APP_LOADED` naming the settings bundle, the window
-creates served on the reserved endpoint, and the session's witness that each
-frame is on screen before the runner reads it back.
+`settings_qemu_aarch64` is a short sibling of the autoload desktop vertical, so
+a gate mis-count in one choreography cannot wedge the other. It boots the
+autoload root disk, unlocks, logs in, starts `desktop`, opens the capsule's
+system menu and chooses *Settings…*, then photographs the window on General,
+on Bluetooth's stated absence, and on Storage — reached past the strip's fold
+by the strip's own scrollbar — before walking to Appearance, choosing Light,
+and photographing the desktop redrawn light. Its last gesture is the system
+menu's *Dark Appearance* row.
 
-Docs in the same stage: `docs/src/desktop/settings.md` grows each pane's own
-content as DS3–DS12 land it, and `docs/src/userland/confd.md` gains whatever
-scope keys DS3's document adds. The page itself, its `SUMMARY.md` entry, the
-`Help/` topic, and the `docs/src/desktop/taskbar.md`,
-`docs/src/desktop/widgets.md`, `docs/src/desktop/icons.md` and
-`docs/src/lib/controls.md` updates landed with DS2.
+What the vertical needed, and now guarantees:
+
+- **A witness for a later frame of a served window.** `WINDOW_SHOWN` speaks for
+  a first frame only, and Settings holds no `CAP_LOG_EMIT` to announce its own
+  panes. So the window is titled with the pane on show and retitles only after
+  presenting it, and the session announces `WINDOW_RETITLED` when a frame
+  carrying a new title reaches the display: requests are served in order, so
+  that frame carries the pane.
+- **A witness for the desktop's new look.** `DESKTOP_RESTYLED` follows the
+  first frame drawn in a changed appearance, contrast, density, motion or
+  scale, after the reveal. It speaks for the session's surfaces only, because
+  each application redraws its own window on its own time — which is why every
+  window dump is taken before the appearance changes, and the light dump reads
+  only the bar, the furniture and the wallpaper.
+- **Both routes to the appearance persist.** The system menu's Light and Dark
+  rows re-themed the desktop without writing the settings document, so the
+  store, the Appearance pane and the next login disagreed with the screen. They
+  now take the one persist-then-adopt path (`Desktop::appearance_to`), and a
+  standing prompt follows any change of look through the shell's style
+  generation.
+- **PASS is the guest's own four witnesses, in order:** an `APP_LOADED` naming
+  the settings bundle, its window's create reply, and two commits of the
+  desktop's published document — the pane's choice, then the menu row's —
+  attributed by the path each rename replaced.
+- **Every press is aimed through the production layout.** The host resolves
+  each target from the shell's own geometry (`Shell::strip_row_rect`,
+  `strip_scroll_rect`, `setting_rect`, `choice_rect`, and `ScrollBar::part_rect`
+  beneath them) and refuses any point the window frame's hit map does not
+  answer `Client` for, so no press can land in the invisible resize band.
+- **Each dump is read for what its pane draws:** a plate by its top and bottom
+  rim, because a plate is filled with the column's own surface; the absence by
+  its words on no plate; Storage by a capacity track that is neither empty nor
+  full; the light desktop by its bar and furniture lightening over an
+  unchanged wallpaper.
+- **Every cut name carries the mark.** Each label, reading, cell, caption and
+  title `lib/controls` draws, and the Settings band and statement, are elided
+  through the one recipe (`elide_to_width`, then `paint_run`), which the crate
+  exports for application-drawn names. The strip is 208 logical pixels, room
+  for the longest category label beside its glyph with the strip's scrollbar
+  carved out. The app-local cuts elsewhere are `plans/OPEN-DEFECTS.md` D154.
+
+Docs landed with it: the Settings page's General section, the window title,
+the vertical, and the corrected Sound statement; the session page's two
+witnesses and the appearance rows' path; and the desktop's published document
+on the confd page.
 
 ### DS14 — retire the second form idiom
 

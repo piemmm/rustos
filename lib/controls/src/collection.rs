@@ -516,14 +516,14 @@ impl TableCell {
             return;
         };
         let budget = right - left;
-        let fitted = font.truncate_to_width(&self.text, budget);
-        let tw = font.text_width(fitted);
+        let run = font.elide_to_width(&self.text, budget);
+        let tw = run_width(font, run);
         let tx = match self.align {
             CellAlign::Leading => to_i32(left),
             CellAlign::Center => to_i32(left) + (to_i32(budget) - to_i32(tw)).max(0) / 2,
             CellAlign::Trailing => to_i32(right) - to_i32(tw),
         };
-        font.draw_text(surface, tx, text_y, fitted, fg);
+        paint_run(surface, font, run, (tx, text_y), fg, None);
     }
 
     /// Where this cell's bead, icon and text go inside the column rectangle
@@ -1423,15 +1423,15 @@ impl TableHeader {
 
         if right > left {
             let budget = right - left;
-            let fitted = font.truncate_to_width(&column.title, budget);
-            let tw = font.text_width(fitted);
+            let run = font.elide_to_width(&column.title, budget);
+            let tw = run_width(font, run);
             let text_y = centred_text_y(font, y, h);
             let tx = match column.align {
                 CellAlign::Leading => to_i32(left),
                 CellAlign::Center => to_i32(left) + (to_i32(budget) - to_i32(tw)).max(0) / 2,
                 CellAlign::Trailing => to_i32(right) - to_i32(tw),
             };
-            font.draw_text(surface, tx, text_y, fitted, fg);
+            paint_run(surface, font, run, (tx, text_y), fg, None);
         }
 
         // The keyboard focus ring, distinct from the sort emphasis above.
@@ -2909,8 +2909,8 @@ impl Panel {
         let fg = foreground(theme, self.header_state.disposition());
         if header_right > header_left {
             let text_y = centred_text_y(font, iy, hh);
-            let fitted = font.truncate_to_width(&self.title, header_right - header_left);
-            font.draw_text(surface, to_i32(header_left), text_y, fitted, fg);
+            let run = font.elide_to_width(&self.title, header_right - header_left);
+            paint_run(surface, font, run, (to_i32(header_left), text_y), fg, None);
         }
 
         // The grouped header actions.

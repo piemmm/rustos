@@ -6,7 +6,10 @@ images.
 Every freestanding boot binary (the production `tairix-kernel`, every
 `tests/integration/*` QEMU bin, and every architecture port's boot
 harness) registers a `FreeListAllocator` over a per-binary `Heap` static
-as its `#[global_allocator]`. Defining the allocator once here satisfies
+as its `#[global_allocator]`. The arena is a plain
+`static HEAP: Heap = Heap::ZERO` handed to the allocator through
+`Heap::as_mut_ptr`, so no binary needs a `static mut` to back its heap.
+Defining the allocator once here satisfies
 `AGENTS.md` §2.2 (no duplication) and §6 (shared code lives in `lib/`).
 
 The allocator has **two tiers behind one `GlobalAlloc`**, both under the

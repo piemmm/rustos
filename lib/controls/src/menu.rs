@@ -33,8 +33,8 @@ use tairix_theme::{Palette, Rgba, TextRole, Theme};
 use crate::damage;
 use crate::paint::{
     draw_outline, ground_fill, heavy_contrast, inset, paint_bead, paint_chevron, paint_icon_slot,
-    paint_surface_plate, plate_border, resolve_bead, role_font, surface_rect, text_plate_height,
-    to_i32, withheld, BeadShape, ChevronDir, ChromeLayer, FULL_COLOUR,
+    paint_run, paint_surface_plate, plate_border, resolve_bead, role_font, run_width, surface_rect,
+    text_plate_height, to_i32, withheld, BeadShape, ChevronDir, ChromeLayer, FULL_COLOUR,
 };
 use crate::record::FactList;
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
@@ -618,26 +618,19 @@ impl MenuItem {
         // plate that carries it.
         if let Some(text) = self.shortcut.as_deref() {
             if trailing > cursor {
-                let budget = trailing - cursor;
-                let fitted = font.truncate_to_width(text, budget);
-                let tw = font.text_width(fitted);
-                let tx = to_i32(trailing) - to_i32(tw);
-                font.draw_text(surface, tx, text_y, fitted, Color::from(muted_color));
+                let run = font.elide_to_width(text, trailing - cursor);
+                let tw = run_width(font, run);
+                let at = (to_i32(trailing) - to_i32(tw), text_y);
+                paint_run(surface, font, run, at, Color::from(muted_color), None);
                 trailing = trailing.saturating_sub(tw).saturating_sub(pad);
             }
         }
 
         // The label, left-aligned, filling the space up to the trailing region.
         if trailing > cursor {
-            let budget = trailing - cursor;
-            let fitted = font.truncate_to_width(&self.label, budget);
-            font.draw_text(
-                surface,
-                to_i32(cursor),
-                text_y,
-                fitted,
-                Color::from(label_color),
-            );
+            let run = font.elide_to_width(&self.label, trailing - cursor);
+            let at = (to_i32(cursor), text_y);
+            paint_run(surface, font, run, at, Color::from(label_color), None);
         }
 
         // The submenu anchor chevron at the far trailing edge.

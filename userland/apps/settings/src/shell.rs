@@ -19,8 +19,8 @@ use tairix_abi::net_ipc::NetServerAddr;
 use tairix_controls::{
     plate_rect, Breadcrumb, BreadcrumbAction, CredentialAction, CredentialSheet, Crumb, Menu,
     MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, SearchField, Tab, Tabs, TabsAction, TabsOrientation,
-    TextAction, CREDENTIAL_REFUSED_REASON,
+    ScrollOrientation, ScrollPart, ScrollRange, SearchField, Tab, Tabs, TabsAction,
+    TabsOrientation, TextAction, CREDENTIAL_REFUSED_REASON,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
@@ -35,7 +35,7 @@ use crate::accounts::{AccountFacts, Roster};
 use crate::body::{self, Body, Drawn};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
-use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture};
+use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
 use crate::gallery::{GalleryOutcome, PictureWanted};
 use crate::network::{Addressing, NetworkFacts};
@@ -935,6 +935,82 @@ impl Shell {
     #[must_use]
     pub fn rows(&self) -> &[StripRow] {
         &self.rows
+    }
+
+    /// The window's title: the pane on show, as a file manager's window is
+    /// titled with its folder.
+    #[must_use]
+    pub fn title(&self) -> &'static str {
+        self.pane_row().map_or(ROOT_CRUMB, |pane| pane.title)
+    }
+
+    /// Which strip row is drawn selected: the pane on show's own row where
+    /// its category discloses its panes, else that category's row.
+    #[must_use]
+    pub fn selected_row(&self) -> Option<usize> {
+        row_on_show(&self.rows, self.location)
+    }
+
+    /// Where the strip draws row `index` in `viewport`, or `None` when the
+    /// strip is shed or does not seat that row.
+    ///
+    /// The rectangle a press on that row is hit-tested against, so a caller
+    /// aiming at a row — a test, or the QEMU vertical's script — aims where
+    /// the strip drew it.
+    #[must_use]
+    pub fn strip_row_rect(
+        &self,
+        index: usize,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let sidebar = self.frame(viewport, scale, theme).sidebar?;
+        self.strip.tab_area(index, sidebar, scale, theme)
+    }
+
+    /// Where the strip's scrollbar draws `part` in `viewport`, or `None` when
+    /// the strip needs no scrollbar or draws none of that part.
+    #[must_use]
+    pub fn strip_scroll_rect(
+        &self,
+        part: ScrollPart,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let bar = self.frame(viewport, scale, theme).strip_scrollbar?;
+        self.strip_scroll.part_rect(part, bar, scale, theme)
+    }
+
+    /// Where the pane on show draws `setting`'s control in `viewport`, or
+    /// `None` when it shows no row for it or the column does not seat it.
+    #[must_use]
+    pub fn setting_rect(
+        &self,
+        setting: Setting,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let frame = self.frame(viewport, scale, theme);
+        let spot = place(self.pane_column(&frame), viewport, scale, theme);
+        self.body.form()?.control_rect(setting, spot)
+    }
+
+    /// Where the open choice list draws choice `index` in `viewport`, or
+    /// `None` while no list is open.
+    #[must_use]
+    pub fn choice_rect(
+        &self,
+        index: usize,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let frame = self.frame(viewport, scale, theme);
+        let spot = place(self.pane_column(&frame), viewport, scale, theme);
+        self.body.form()?.choice_rect(index, spot)
     }
 
     /// The category list drawn over the content while the shed strip is open.
@@ -2012,11 +2088,6 @@ impl Shell {
         self.trail = Breadcrumb::new(crumbs);
     }
 
-    /// Which strip row is the one on show, if the strip is drawing it.
-    fn selected_row(&self) -> Option<usize> {
-        row_on_show(&self.rows, self.location)
-    }
-
     /// Open the category list the shed strip becomes.
     fn open_category_list(&mut self, frame: ShellFrame, damage: &mut Region) {
         let mut menu = Menu::new(
@@ -2214,20 +2285,6 @@ impl Shell {
         }
     }
 
-    /// The strip rectangle of row `index` within a sidebar at `bounds`, so a
-    /// test aims at the row the strip actually drew rather than at arithmetic
-    /// of its own.
-    #[cfg(test)]
-    pub(crate) fn strip_row_rect(
-        &self,
-        index: usize,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<Rect> {
-        self.strip.tab_area(index, bounds, scale, theme)
-    }
-
     /// The location trail's labels, in order.
     #[cfg(test)]
     pub(crate) fn trail_labels(&self) -> Vec<&str> {
@@ -2372,7 +2429,9 @@ impl Shell {
     /// reader would read there.
     #[cfg(test)]
     pub(crate) fn band_line_for_test(&self) -> Option<String> {
-        self.footer.as_ref().map(crate::footer::Footer::line)
+        self.footer
+            .as_ref()
+            .map(|footer| footer.line().into_owned())
     }
 
     /// Type `text` into the pane's group `group` row `row`, and bring the

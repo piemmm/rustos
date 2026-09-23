@@ -279,7 +279,9 @@ pub use session::DesktopSession;
 pub use settings::{
     load_pinboard, publish_pinboard, serve_pinboard_apply, LoadedPinboard, PinboardApplyRefusal,
 };
-pub use shell::{DesktopShell, InputSource, ShellOutcome};
+pub use shell::{
+    DesktopShell, InputSource, ShellOutcome, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
+};
 pub use switchboard::{
     deliver_pending_open, drop_is_noteworthy, maybe_send_seat_report, open_tray, relay_power,
     serve_switchboard_request, FrameContent, FrameReportGate, OwnerBundleGate, OwnerWindow,
@@ -300,6 +302,6 @@ pub use wallpaper::{
 pub use windows::{
     chain_geometry, desktop_info, resolve_window_identities, seat_menu_refusal,
     window_control_alternate_event, window_control_event, SessionWindows, ShellWindowHost,
-    CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, WINDOW_SHOWN,
-    WINDOW_SHOWN_MESSAGE,
+    CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, WINDOW_RETITLED,
+    WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
 };

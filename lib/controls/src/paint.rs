@@ -460,7 +460,7 @@ fn proportional(extent: u32, permille: u16) -> u32 {
 /// bound too short to hold the line is left untouched — the line is simply
 /// omitted rather than overlapping whatever follows it.
 ///
-/// This is the one "fits, truncates, draws, advances" recipe every stacked
+/// This is the one "fits, elides, draws, advances" recipe every stacked
 /// text anatomy shares — a [`MetricTile`](crate::metric::MetricTile)'s label,
 /// reading, and detail lines all degrade through this one definition, so a
 /// tile too short for its content can never overlap a line onto the one
@@ -484,8 +484,8 @@ pub(crate) fn paint_text_line(
     if text.is_empty() || w == 0 || y.saturating_add(line_h) > bottom {
         return y;
     }
-    let fitted = font.truncate_to_width(text, w);
-    font.draw_text(surface, to_i32(x), to_i32(y), fitted, color);
+    let run = font.elide_to_width(text, w);
+    paint_run(surface, font, run, (to_i32(x), to_i32(y)), color, None);
     y.saturating_add(line_h).saturating_add(gap)
 }
 
@@ -1939,7 +1939,8 @@ pub(crate) fn centred_text_y(font: BitmapFont, y: u32, h: u32) -> i32 {
 
 /// The drawn width of a fitted run — the pair a fitter hands back, text and
 /// whether [`ELLIPSIS`] follows it — mark included.
-pub(crate) fn run_width(font: BitmapFont, run: (&str, bool)) -> u32 {
+#[must_use]
+pub fn run_width(font: BitmapFont, run: (&str, bool)) -> u32 {
     let (text, elided) = run;
     let width = font.text_width(text);
     if elided {
@@ -1951,13 +1952,14 @@ pub(crate) fn run_width(font: BitmapFont, run: (&str, bool)) -> u32 {
 /// Draw a fitted run at `at`, its mark included, over `shadow` when the
 /// caller draws on ground it does not control.
 ///
-/// The one "text, then the mark" recipe every collection control paints cut
-/// text through, so a hidden tail always says so rather than stopping
-/// mid-word as if the text ended there. A run the fitter marked unelided —
-/// including a box too narrow for the mark itself — draws its text alone.
+/// The one "text, then the mark" recipe every control — and every
+/// application drawing a name of its own — paints cut text through, so a
+/// hidden tail always says so rather than stopping mid-word as if the text
+/// ended there. A run the fitter marked unelided — including a box too narrow
+/// for the mark itself — draws its text alone.
 /// The mark takes the shadow with the text, so a shadowed label reads as one
 /// run rather than a shadowed name and a bare ellipsis.
-pub(crate) fn paint_run(
+pub fn paint_run(
     surface: &mut Surface,
     font: BitmapFont,
     run: (&str, bool),

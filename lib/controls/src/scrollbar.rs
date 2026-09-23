@@ -131,6 +131,38 @@ impl BarLayout {
         ScrollPart::Outside
     }
 
+    /// The rectangle [`part_at`](Self::part_at) classifies as `part`, or `None`
+    /// for a part this layout draws no pixels of.
+    fn part_rect(&self, part: ScrollPart) -> Option<Rect> {
+        let ThumbSpan { start, length } = self.geometry.thumb();
+        let track_len = match self.orientation {
+            ScrollOrientation::Vertical => self.track.height,
+            ScrollOrientation::Horizontal => self.track.width,
+        };
+        let end = start.saturating_add(length).min(track_len);
+        let span = |from: u32, to: u32| {
+            let length = to.saturating_sub(from);
+            let near = self.track_origin + to_i32(from);
+            match self.orientation {
+                ScrollOrientation::Vertical => {
+                    Rect::new(self.track.left(), near, self.track.width, length)
+                }
+                ScrollOrientation::Horizontal => {
+                    Rect::new(near, self.track.top(), length, self.track.height)
+                }
+            }
+        };
+        let rect = match part {
+            ScrollPart::Decrement => self.decrement,
+            ScrollPart::Increment => self.increment,
+            ScrollPart::TrackBefore => span(0, start.min(track_len)),
+            ScrollPart::Thumb => span(start.min(track_len), end),
+            ScrollPart::TrackAfter => span(end, track_len),
+            ScrollPart::Outside => return None,
+        };
+        (!rect.is_empty()).then_some(rect)
+    }
+
     /// The thumb's surface rectangle, inset from the channel walls by `margin`
     /// on the short axis so it reads as floating in the Scroll Channel.
     fn thumb_rect(&self, margin: u32) -> Rect {
@@ -277,6 +309,24 @@ impl ScrollBar {
             Some(layout) => layout.part_at(point),
             None => ScrollPart::Outside,
         }
+    }
+
+    /// The rectangle `part` occupies for the bar drawn at `bounds`, or `None`
+    /// when the bar is degenerate or draws none of that part — a track run
+    /// the thumb covers, or [`ScrollPart::Outside`].
+    ///
+    /// The forward mirror of [`part_at`](Self::part_at) over the same layout,
+    /// so a caller that must aim *at* a part reads the rectangle input
+    /// classifies rather than arithmetic of its own.
+    #[must_use]
+    pub fn part_rect(
+        &self,
+        part: ScrollPart,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        self.layout(bounds, scale, theme)?.part_rect(part)
     }
 
     /// The scroll geometry for the bar drawn at `bounds`, or `None` when the

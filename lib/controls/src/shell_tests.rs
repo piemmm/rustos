@@ -15,8 +15,8 @@ use alloc::vec;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_raster::{Color, Surface};
+use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
@@ -28,7 +28,7 @@ use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PointerState, PressureKind,
     PressureState, ProgressValue, RecoveryState, ValidationState,
 };
-use crate::testkit::high_contrast;
+use crate::testkit::{has_pixel, high_contrast, marks_elision, premul, region_has};
 
 fn scale2() -> Scale {
     Scale::from_percent(200).expect("valid scale")
@@ -36,20 +36,6 @@ fn scale2() -> Scale {
 
 fn iv(v: u32) -> i32 {
     i32::try_from(v).expect("fits in i32")
-}
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
-
-fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
-    (xr.0..xr.1)
-        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
-        .any(|(x, y)| surface.get(x, y) == Some(want))
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -1216,5 +1202,31 @@ fn pointer_position_alone_never_changes_a_tray_signal_render() {
         tray_surface(&a, &theme).pixels(),
         tray_surface(&b, &theme).pixels(),
         "…and the two must therefore paint identically"
+    );
+}
+
+/// A notification's source line, and a readout's name and value, are elided
+/// with the shared mark when too long for their plate rather than cut where
+/// the plate ran out.
+#[test]
+fn a_text_too_long_for_its_plate_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    assert!(
+        marks_elision(|text| note_surface(&Notification::new("T").with_source(text), &theme)),
+        "a notification's source"
+    );
+    let readout = |sig: TraySignal| {
+        let (w, h) = (160, 80);
+        let mut surface = Surface::new(w, h).expect("surface");
+        sig.render_readout(&mut surface, Rect::new(0, 0, w, h), Scale::ONE, &theme);
+        surface
+    };
+    assert!(
+        marks_elision(|text| readout(TraySignal::new(IconKind::Battery, text))),
+        "a readout's name"
+    );
+    assert!(
+        marks_elision(|text| readout(TraySignal::new(IconKind::Battery, "").with_value(text))),
+        "a readout's value"
     );
 }

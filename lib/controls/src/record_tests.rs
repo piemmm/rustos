@@ -3,11 +3,11 @@
 //! These cover construction, `row_height`/`measured_height` agreeing with
 //! what `render` actually lays out, right-aligned toned values and every
 //! [`SignalRole`] tone for [`FactList`], separators drawn between but never
-//! after rows, the label truncating before the value under a narrow width,
+//! after rows, the label giving way, elided, before the value under a narrow width,
 //! the [`Timeline`] spine spanning only the first-to-last mark (and absent
 //! for a single event), [`EventMark::Notable`] versus [`EventMark::Routine`]
 //! differing in the rendered pixels, the stamp column aligning on the widest
-//! stamp, event-text truncation, rows omitted (never clipped) when the
+//! stamp, event-text elision, rows omitted (never clipped) when the
 //! height runs out, an empty collection painting nothing for either control,
 //! degenerate bounds, both built-in themes, and `crate::testkit::high_contrast()`.
 
@@ -17,23 +17,15 @@ use alloc::vec::Vec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, SignalRole, Theme};
+use tairix_theme::{SignalRole, Theme};
 
 use crate::record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
-use crate::testkit::{control_font, high_contrast};
+use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul};
 
 const W: u32 = 320;
 
 fn font() -> BitmapFont {
     control_font(&Theme::dark(), Scale::ONE)
-}
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
 }
 
 /// The bounding box `(min_x, min_y, max_x, max_y)` of `want` in `surface`.
@@ -174,7 +166,7 @@ fn an_untoned_value_takes_the_plain_foreground() {
 }
 
 #[test]
-fn the_label_truncates_before_the_value_under_a_narrow_width() {
+fn the_label_gives_way_before_the_value_under_a_narrow_width() {
     let theme = Theme::dark();
     let font = font();
     let scale = Scale::ONE;
@@ -193,17 +185,24 @@ fn the_label_truncates_before_the_value_under_a_narrow_width() {
     let narrow_w = value_w + gap + room;
     let mut narrow = Surface::new(narrow_w, row_h).expect("surface");
     list.render(&mut narrow, Rect::new(0, 0, narrow_w, row_h), scale, &theme);
-    let narrow_label_w = bbox(&narrow, label_color).map_or(0, |(x0, _, x1, _)| x1 - x0 + 1);
-    let kept = font.truncate_to_width(label, room);
-    assert!(
-        kept.chars().count() < label.chars().count(),
-        "the row must be narrow enough to force truncation"
+    let run = font.elide_to_width(label, room);
+    assert!(run.1, "the row must be narrow enough to force elision");
+    let mut alone = Surface::new(narrow_w, row_h).expect("surface");
+    crate::paint::paint_run(
+        &mut alone,
+        font,
+        run,
+        (0, 0),
+        Color::from(theme.palette().on_surface_muted),
+        None,
     );
+    let span = |surface: &Surface| bbox(surface, label_color).map(|(x0, _, x1, _)| (x0, x1));
     assert_eq!(
-        narrow_label_w,
-        font.text_width(kept),
-        "the label draws the widest prefix that fits, never a clipped glyph"
+        span(&narrow),
+        span(&alone),
+        "the label is the run elided to the room the value leaves, mark and all"
     );
+    let narrow_label_w = span(&narrow).map_or(0, |(x0, x1)| x1 - x0 + 1);
     assert!(narrow_label_w <= room, "and never overruns the room it has");
     let (_, _, narrow_value_max_x, _) = bbox(&narrow, value_color).expect("value drawn");
     assert_eq!(
@@ -554,7 +553,7 @@ fn the_stamp_column_aligns_on_the_widest_stamp() {
 }
 
 #[test]
-fn event_text_truncates_when_the_width_runs_out() {
+fn event_text_is_elided_when_the_width_runs_out() {
     let theme = Theme::dark();
     let font = font();
     let scale = Scale::ONE;
@@ -580,7 +579,7 @@ fn event_text_truncates_when_the_width_runs_out() {
     assert_eq!(
         max_x,
         narrow_w - 1,
-        "the text must truncate to exactly the width it is given"
+        "the elided text, mark and all, fills exactly the width it is given"
     );
 }
 
@@ -676,4 +675,36 @@ fn timeline_high_contrast_changes_the_routine_ring_rendering() {
     let normal = timeline_surface(&timeline, &Theme::dark(), scale);
     let heavy = timeline_surface(&timeline, &high_contrast(), scale);
     assert_ne!(normal.pixels(), heavy.pixels());
+}
+
+/// A fact's label and value, and an event's stamp and text, are elided with
+/// the shared mark when too long for their row rather than cut where it ran
+/// out.
+#[test]
+fn a_fact_or_event_too_long_for_its_row_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    let facts = |fact: Fact| fact_surface(&FactList::new(vec![fact]), &theme, Scale::ONE);
+    assert!(
+        marks_elision(|text| facts(Fact::new(text, ""))),
+        "a fact's label"
+    );
+    assert!(
+        marks_elision(|text| facts(Fact::new("", text))),
+        "a fact's value"
+    );
+    let events = |event: TimelineEvent| {
+        let timeline = Timeline::new(vec![event]);
+        let h = Timeline::row_height(Scale::ONE, &theme);
+        let mut surface = Surface::new(W, h).expect("surface");
+        timeline.render(&mut surface, Rect::new(0, 0, W, h), Scale::ONE, &theme);
+        surface
+    };
+    assert!(
+        marks_elision(|text| events(TimelineEvent::new(text, ""))),
+        "an event's stamp"
+    );
+    assert!(
+        marks_elision(|text| events(TimelineEvent::new("", text))),
+        "an event's text"
+    );
 }

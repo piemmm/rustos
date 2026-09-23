@@ -139,13 +139,15 @@ mod program {
         SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService,
         WallpaperSource, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
         APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
-        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH,
-        LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
+        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
         LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, USAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+        SWITCHBOARD_RUN_PATH, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
+        WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -153,7 +155,8 @@ mod program {
     use tairix_icon::{ArtworkDesk, ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
     use tairix_keymap::modifiers_to_abi;
     use tairix_log::{
-        log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
+        log, Event as LogEvent, EventId, Field as LogField, FieldValue as LogFieldValue,
+        Level as LogLevel,
     };
     use tairix_parallel::Pool;
     use tairix_procinfo::IpcTransport;
@@ -936,7 +939,7 @@ mod program {
         match compositor.present(display) {
             Ok(()) => {
                 fade.presented(&LOG_SINK);
-                report_surfaces_shown(shell, fade, windows, menu, picker, apps);
+                report_surfaces_shown(shell, compositor, fade, windows, menu, picker, apps);
                 Ok(())
             }
             Err(DriverError::SeatRevoked | DriverError::PermissionDenied) => {
@@ -953,63 +956,74 @@ mod program {
         }
     }
 
+    /// Record `id` on the session's sink at `Info`: a witness that a surface
+    /// reached the screen, or a routine decision worth attributing.
+    fn log_info(id: EventId, message: &str, fields: &[LogField<'_>]) {
+        log(
+            &LOG_SINK,
+            &LogEvent {
+                level: LogLevel::Info,
+                id,
+                message,
+                fields,
+            },
+        );
+    }
+
     /// Announce every surface this frame was the first to carry: each served
-    /// window's first painted frame, a newly drawn icon-bar slot and the settled
-    /// strip, the menu chain, the trusted picker, and the program-library popup.
+    /// window's first painted frame and each retitle of one already shown, a
+    /// newly drawn icon-bar slot and the settled strip, a change of the
+    /// desktop's look, the menu chain, the trusted picker, and the
+    /// program-library popup.
     ///
     /// Called only after a present reached the display, because until the frame
     /// lands nobody has seen any of them. Each witness is one-shot in its own
-    /// owner, so an ordinary frame costs a bool test apiece.
+    /// owner, so an ordinary frame costs one walk of the served windows and a
+    /// bool test for everything else.
     fn report_surfaces_shown<S: tairix_browse::DirectorySource, F: FnMut() -> S>(
         shell: &mut DesktopShell,
+        compositor: &Compositor,
         fade: &ScreenFade,
         windows: &mut SessionWindows,
         menu: &mut MenuChain,
         picker: &mut SessionPicker<S, F>,
         apps: &mut AppBarService,
     ) {
-        windows.report_newly_shown(|window| {
-            log(
-                &LOG_SINK,
-                &LogEvent {
-                    level: LogLevel::Info,
-                    id: WINDOW_SHOWN,
-                    message: WINDOW_SHOWN_MESSAGE,
-                    fields: &[LogField {
-                        key: "window",
-                        value: LogFieldValue::UnsignedInt(window),
-                    }],
-                },
-            );
+        let window = |window| {
+            [LogField {
+                key: "window",
+                value: LogFieldValue::UnsignedInt(window),
+            }]
+        };
+        windows.report_on_screen(
+            |wm| {
+                compositor
+                    .window(wm)
+                    .is_some_and(tairix_wm::Window::is_visible)
+            },
+            |id| log_info(WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, &window(id)),
+            |id| log_info(WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, &window(id)),
+        );
+        shell.report_restyled(fade.revealed(), |appearance| {
+            let field = LogField {
+                key: "appearance",
+                value: LogFieldValue::Str(appearance.as_str()),
+            };
+            log_info(DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, &[field]);
         });
         apps.report_newly_shown(|owner| {
             let mut hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
-            log(
-                &LOG_SINK,
-                &LogEvent {
-                    level: LogLevel::Info,
-                    id: APP_BAR_SLOT_SHOWN,
-                    message: APP_BAR_SLOT_SHOWN_MESSAGE,
-                    fields: &[LogField {
-                        key: "app",
-                        value: LogFieldValue::Str(owner.write_hex(&mut hex)),
-                    }],
-                },
-            );
+            let field = LogField {
+                key: "app",
+                value: LogFieldValue::Str(owner.write_hex(&mut hex)),
+            };
+            log_info(APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, &[field]);
         });
         // After the reveal witness above, because that is the half of
         // this fact the fade owns and this frame may be the one that
         // gave it.
         apps.report_settled(fade.revealed(), || {
-            log(
-                &LOG_SINK,
-                &LogEvent {
-                    level: LogLevel::Info,
-                    id: APP_BAR_SETTLED,
-                    message: APP_BAR_SETTLED_MESSAGE,
-                    fields: &[],
-                },
-            );
+            log_info(APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, &[]);
         });
         menu.report_newly_shown(|owner| {
             let owner = match owner {
@@ -1017,41 +1031,17 @@ mod program {
                 ChainOwner::Backdrop => "backdrop",
                 ChainOwner::Bar(_) => "bar",
             };
-            log(
-                &LOG_SINK,
-                &LogEvent {
-                    level: LogLevel::Info,
-                    id: MENU_SHOWN,
-                    message: MENU_SHOWN_MESSAGE,
-                    fields: &[LogField {
-                        key: "owner",
-                        value: LogFieldValue::Str(owner),
-                    }],
-                },
-            );
+            let field = LogField {
+                key: "owner",
+                value: LogFieldValue::Str(owner),
+            };
+            log_info(MENU_SHOWN, MENU_SHOWN_MESSAGE, &[field]);
         });
-        picker.report_newly_shown(|| {
-            log(
-                &LOG_SINK,
-                &LogEvent {
-                    level: LogLevel::Info,
-                    id: PICKER_SHOWN,
-                    message: PICKER_SHOWN_MESSAGE,
-                    fields: &[],
-                },
-            );
-        });
-        shell.session_mut().taskbar_mut().report_library_shown(|| {
-            log(
-                &LOG_SINK,
-                &LogEvent {
-                    level: LogLevel::Info,
-                    id: LIBRARY_SHOWN,
-                    message: LIBRARY_SHOWN_MESSAGE,
-                    fields: &[],
-                },
-            );
-        });
+        picker.report_newly_shown(|| log_info(PICKER_SHOWN, PICKER_SHOWN_MESSAGE, &[]));
+        shell
+            .session_mut()
+            .taskbar_mut()
+            .report_library_shown(|| log_info(LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, &[]));
     }
 
     /// Attest the producer of a pending notification call, decode the request
@@ -2316,6 +2306,8 @@ mod program {
         // carries a path, so a per-request array would put four kibibytes of
         // clearing on every present.
         let mut reply = [0u8; WINDOW_REPLY_MAX];
+        // The look the retained prompts were last painted in.
+        let mut prompts_style = shell.style_generation();
         loop {
             // The park stays indefinite: a cache-report change the runtime's
             // rate limiter is holding back, a frame report this session's own
@@ -3318,6 +3310,14 @@ mod program {
             // this wake, the lock goes back on top before the frame is
             // shown. Idle when the screen is not locked.
             lock.keep_topmost(&mut compositor);
+            // A prompt keeps the pixels it was painted in, so one standing
+            // through a change of look is repainted in the look now in force
+            // rather than left in the one the user just left.
+            if shell.style_generation() != prompts_style {
+                prompts_style = shell.style_generation();
+                confirm.repaint(&mut shell, &mut compositor);
+                elevate.repaint(&mut shell, &mut compositor);
+            }
             // One window thumbnail per wake, so a hover picker over a
             // screenful of windows fills in across the turns the loop was
             // making anyway instead of scaling every frame in one of them.
@@ -5581,23 +5581,6 @@ mod program {
                     *switchboard = Some(revived);
                 }
             }
-            ShellOutcome::Taskbar(TaskbarResponse::SetAppearance { appearance }) => {
-                // The desktop's own appearance: re-theme the taskbar model,
-                // bring the desktop background in step, and repaint. A prompt
-                // showing behind the menu is redrawn too, so nothing on
-                // screen is left in the appearance just left behind.
-                shell.session_mut().set_appearance(appearance);
-                shell.sync_theme(compositor);
-                shell.present(compositor);
-                confirm.repaint(shell, compositor);
-                elevate.repaint(shell, compositor);
-                // Served application windows are the apps' own pixels, so
-                // the session cannot re-colour them: it publishes the new
-                // desktop instead, and each app repaints itself. Without
-                // this the desktop would switch and every open window would
-                // sit there in the appearance the user just left.
-                publish_desktop(compositor);
-            }
             ShellOutcome::Taskbar(TaskbarResponse::LockSession) => {
                 // Secure the screen. The prompt goes down first: an
                 // unanswered question must not sit behind a lock where the
@@ -5649,15 +5632,7 @@ mod program {
                     // The prompt is focused and on screen: announce it so a
                     // host that must type into the fields waits on a real
                     // surface rather than racing the click that asked for it.
-                    log(
-                        &LOG_SINK,
-                        &LogEvent {
-                            level: LogLevel::Info,
-                            id: ELEVATE_PROMPT_SHOWN,
-                            message: ELEVATE_PROMPT_SHOWN_MESSAGE,
-                            fields: &[],
-                        },
-                    );
+                    log_info(ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, &[]);
                 } else {
                     io::write_stderr_line(
                         "desktop: could not ask for an account; the clock was not changed",
@@ -5668,9 +5643,10 @@ mod program {
             // fully applied with its own state (the click-to-activate/minimise
             // rule, clearing a dismissed notification from the model, the
             // popup's own open/close, opening the hover picker out of the
-            // thumbnails it prepared); and the desktop shortcut, which
-            // `route_desktop` — the owner of that folder, its icons, and its
-            // one creation path — has already made and shown. Nothing here
+            // thumbnails it prepared); and the desktop shortcut and the
+            // appearance rows, which `route_desktop` — the owner of that
+            // folder and of the settings in force, with their one creation
+            // path and their one adopt path — has already taken. Nothing here
             // needs a capability this side of the routing holds, so the
             // session adds nothing. Listed rather than caught by a wildcard
             // so a new outcome fails the build instead of being dropped in
@@ -5682,7 +5658,8 @@ mod program {
                 | TaskbarResponse::WindowChosen { .. }
                 | TaskbarResponse::DismissNotification { .. }
                 | TaskbarResponse::ShowWindowPicker { .. }
-                | TaskbarResponse::CreateDesktopShortcut { .. },
+                | TaskbarResponse::CreateDesktopShortcut { .. }
+                | TaskbarResponse::SetAppearance { .. },
             ) => {}
         }
         Routed::Continue
@@ -5781,27 +5758,23 @@ mod program {
             return;
         };
         let mut owner_hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
-        log(
-            &LOG_SINK,
-            &LogEvent {
-                level: LogLevel::Info,
-                id: tairix_desktop_session::APP_BAR_RELAYED,
-                message: "desktop: icon-bar action relayed to its application",
-                fields: &[
-                    LogField {
-                        key: "owner",
-                        value: LogFieldValue::Str(owner.write_hex(&mut owner_hex)),
-                    },
-                    LogField {
-                        key: "action",
-                        value: LogFieldValue::Str(match event {
-                            WindowEvent::AppBarDefault => "default",
-                            WindowEvent::AppBarMenu { .. } => "menu",
-                            _ => "other",
-                        }),
-                    },
-                ],
-            },
+        log_info(
+            tairix_desktop_session::APP_BAR_RELAYED,
+            "desktop: icon-bar action relayed to its application",
+            &[
+                LogField {
+                    key: "owner",
+                    value: LogFieldValue::Str(owner.write_hex(&mut owner_hex)),
+                },
+                LogField {
+                    key: "action",
+                    value: LogFieldValue::Str(match event {
+                        WindowEvent::AppBarDefault => "default",
+                        WindowEvent::AppBarMenu { .. } => "menu",
+                        _ => "other",
+                    }),
+                },
+            ],
         );
         if let Err(Errno::NotFound) = server.deliver_app_event(sink, owner, event) {
             // The declaration is gone with the process: its windows go too,
@@ -5954,11 +5927,14 @@ mod program {
             _ => departed(desktop, compositor, pointer, &layout, &mut damage),
         };
         // A shortcut the program library's row menu asked for is a change to
-        // *this* folder, so it is honoured beside the desktop's own gestures
-        // rather than through a second creation path. The two sources are
-        // exclusive — a taskbar outcome is never also a desktop gesture — and
-        // `or` says so without discarding either.
-        let action = shortcut_asked(outcome, shell, desktop).or(acted.action);
+        // *this* folder, and an appearance the system menu asked for is a
+        // change to the settings in force, so both are honoured beside the
+        // desktop's own gestures rather than through a second path. The
+        // sources are exclusive — a taskbar outcome is never also a desktop
+        // gesture — and `or` says so without discarding any.
+        let action = shortcut_asked(outcome, shell, desktop)
+            .or_else(|| appearance_asked(outcome, desktop))
+            .or(acted.action);
         // A re-list moved the icons themselves, so no cell of the layout the
         // gesture reported against describes the new column: that, and the
         // settings and folder edits `apply_desktop_action` performs, are the
@@ -6041,19 +6017,12 @@ mod program {
         trusted_up: bool,
     ) {
         if windows.layers.set_suppressed(trusted_up, compositor) {
-            log(
-                &LOG_SINK,
-                &LogEvent {
-                    level: LogLevel::Info,
-                    id: LAYER_FEEDS,
-                    message: if trusted_up {
-                        LAYER_FEEDS_STOPPED_MESSAGE
-                    } else {
-                        LAYER_FEEDS_RESUMED_MESSAGE
-                    },
-                    fields: &[],
-                },
-            );
+            let message = if trusted_up {
+                LAYER_FEEDS_STOPPED_MESSAGE
+            } else {
+                LAYER_FEEDS_RESUMED_MESSAGE
+            };
+            log_info(LAYER_FEEDS, message, &[]);
         }
         // Every open, refusal, and retirement is a security decision: the
         // holder gains — or is denied — presence on the desktop and a feed of
@@ -6077,15 +6046,7 @@ mod program {
                     }][..],
                     None => &[][..],
                 };
-                log(
-                    &LOG_SINK,
-                    &LogEvent {
-                        level: LogLevel::Info,
-                        id,
-                        message,
-                        fields,
-                    },
-                );
+                log_info(id, message, fields);
             },
             |dropped| {
                 log(
@@ -6162,6 +6123,21 @@ mod program {
                 let _ = writeln!(Stderr, "desktop: no backdrop menu ({refused:?})");
             }
         }
+    }
+
+    /// The action a system-menu *Light* or *Dark Appearance* row asks for, or
+    /// `None` for every other outcome.
+    fn appearance_asked<S: DirectorySource>(
+        outcome: &tairix_desktop_session::ShellOutcome,
+        desktop: &Desktop<S>,
+    ) -> Option<DesktopAction> {
+        let tairix_desktop_session::ShellOutcome::Taskbar(TaskbarResponse::SetAppearance {
+            appearance,
+        }) = outcome
+        else {
+            return None;
+        };
+        Some(desktop.appearance_to(*appearance))
     }
 
     /// The action a program-library *Create Desktop Shortcut* row asks for,
@@ -7185,23 +7161,19 @@ mod program {
             // the shown announcement must be re-earned by the frame that
             // brings them back.
             windows.content_released(window_id);
-            log(
-                &LOG_SINK,
-                &LogEvent {
-                    level: LogLevel::Info,
-                    id: CONTENT_RELEASED,
-                    message: CONTENT_RELEASED_MESSAGE,
-                    fields: &[
-                        LogField {
-                            key: "window",
-                            value: LogFieldValue::UnsignedInt(window_id),
-                        },
-                        LogField {
-                            key: "bytes",
-                            value: LogFieldValue::UnsignedInt(bytes),
-                        },
-                    ],
-                },
+            log_info(
+                CONTENT_RELEASED,
+                CONTENT_RELEASED_MESSAGE,
+                &[
+                    LogField {
+                        key: "window",
+                        value: LogFieldValue::UnsignedInt(window_id),
+                    },
+                    LogField {
+                        key: "bytes",
+                        value: LogFieldValue::UnsignedInt(bytes),
+                    },
+                ],
             );
             deliver(
                 server,

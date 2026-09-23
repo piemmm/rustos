@@ -11,7 +11,8 @@
 
 use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
-use tairix_theme::{Contrast, Fonts, TextRole, Theme};
+use tairix_raster::{Color, Pixel, Surface};
+use tairix_theme::{Contrast, Fonts, Rgba, TextRole, Theme};
 
 /// The face a control resolves for its own text under `theme` at `scale`.
 ///
@@ -77,4 +78,58 @@ pub fn high_contrast() -> Theme {
         base.density(),
         Contrast::High,
     )
+}
+
+/// `rgba` as the premultiplied pixel an opaque fill of it leaves.
+#[must_use]
+pub fn premul(rgba: Rgba) -> Pixel {
+    Color::from(rgba).premultiply()
+}
+
+/// Whether `want` appears anywhere on `surface`.
+#[must_use]
+pub fn has_pixel(surface: &Surface, want: Pixel) -> bool {
+    surface.pixels().contains(&want)
+}
+
+/// Whether `want` appears anywhere in columns `xr` and rows `yr` of `surface`.
+#[must_use]
+pub fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
+    (xr.0..xr.1)
+        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
+        .any(|(x, y)| surface.get(x, y) == Some(want))
+}
+
+/// How many pixels `surface` draws differently from `bare`: the same control
+/// with nothing where the text under test goes, so the count is that text's
+/// own ink whatever colour the control paints it in.
+///
+/// # Panics
+///
+/// When the two are not the same size, which would compare unrelated pixels.
+#[must_use]
+pub fn ink_over(surface: &Surface, bare: &Surface) -> usize {
+    assert_eq!(
+        (surface.width(), surface.height()),
+        (bare.width(), bare.height()),
+        "ink is only counted between renders of one size"
+    );
+    surface
+        .pixels()
+        .iter()
+        .zip(bare.pixels())
+        .filter(|(drawn, plain)| drawn != plain)
+        .count()
+}
+
+/// Whether the control `render` draws elides a text too long for its room
+/// with the shared mark rather than cutting it where the room ran out.
+///
+/// The text is one word and then only spaces, so a silent cut draws exactly
+/// the word's own ink and any more is the mark.
+#[must_use]
+pub fn marks_elision(render: impl Fn(&str) -> Surface) -> bool {
+    let spilling = alloc::format!("W{}", " ".repeat(80));
+    let bare = render("");
+    ink_over(&render(&spilling), &bare) > ink_over(&render("W"), &bare)
 }

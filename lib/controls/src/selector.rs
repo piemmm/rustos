@@ -24,9 +24,9 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
-    key_activation, paint_bead, paint_plate, plate_border, pointer_activation, resolve_bead,
-    resolve_frame, resolve_mark, resolve_rail, role_font, surface_rect, to_i32, withheld,
-    PlateStyle,
+    key_activation, paint_bead, paint_plate, paint_run, plate_border, pointer_activation,
+    resolve_bead, resolve_frame, resolve_mark, resolve_rail, role_font, surface_rect, to_i32,
+    withheld, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, RenderInvariant, SelectionState,
@@ -118,10 +118,17 @@ fn paint_label(
     if avail == 0 {
         return;
     }
-    let fitted = font.truncate_to_width(text, avail);
     let glyph_h = font.glyph_height();
     let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
-    font.draw_text(surface, to_i32(x) + to_i32(start), text_y, fitted, color);
+    let run = font.elide_to_width(text, avail);
+    paint_run(
+        surface,
+        font,
+        run,
+        (to_i32(x) + to_i32(start), text_y),
+        color,
+        None,
+    );
 }
 
 /// Paint the overlay signals shared by every selector, drawn *after* the glyph

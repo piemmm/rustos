@@ -11,25 +11,18 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_raster::Surface;
+use tairix_theme::Theme;
 
 use crate::combo::{ComboAction, ComboBox};
 use crate::damage::sink;
 use crate::state::{AuthorityState, ControlState};
+use crate::testkit::{has_pixel, marks_elision, premul};
 
 const W: u32 = 160;
 const H: u32 = 28;
 const ROW_H: u32 = 28;
 const BORDER: u32 = 1;
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
 
 fn choices() -> Vec<alloc::string::String> {
     vec!["Low".to_string(), "Med".to_string(), "High".to_string()]
@@ -537,5 +530,25 @@ fn a_press_on_the_placed_list_selects_its_row() {
     assert_eq!(
         combo.on_pointer(&RELEASE, field, popup, Scale::ONE, &theme, &mut sink()),
         Some(ComboAction::Selected { index: 1 })
+    );
+}
+
+/// The field's choice, and its placeholder, are elided with the shared mark
+/// when too long for the field rather than cut where the field ran out.
+#[test]
+fn a_choice_too_long_for_the_field_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    let drawn = |combo: ComboBox| {
+        let mut surface = Surface::new(W, H).expect("surface");
+        combo.render(&mut surface, field_bounds(), Scale::ONE, &theme);
+        surface
+    };
+    assert!(
+        marks_elision(|text| drawn(ComboBox::new(vec![text.to_string()]).with_selected(0))),
+        "the chosen value"
+    );
+    assert!(
+        marks_elision(|text| drawn(ComboBox::new(Vec::new()).with_placeholder(text))),
+        "the placeholder"
     );
 }

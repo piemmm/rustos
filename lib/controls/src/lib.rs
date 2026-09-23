@@ -327,8 +327,8 @@ pub use metric::{
 };
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
 pub use paint::{
-    ground_fill, inset, paint_icon_slot, paint_surface_plate, plate_border, ChromeLayer,
-    FULL as FULL_PERMILLE, FULL_COLOUR,
+    ground_fill, inset, paint_icon_slot, paint_run, paint_surface_plate, plate_border, run_width,
+    ChromeLayer, FULL as FULL_PERMILLE, FULL_COLOUR,
 };
 pub use rail::{ActionRail, RailAction};
 pub use record::{EventMark, Fact, FactList, Timeline, TimelineEvent};

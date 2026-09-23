@@ -10,7 +10,7 @@
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::Theme;
 
 use crate::damage::sink;
 use crate::selector::{
@@ -19,14 +19,10 @@ use crate::selector::{
 use crate::state::{
     AuthorityState, ControlState, PressureKind, PressureState, SelectionState, ValidationState,
 };
-use crate::testkit::high_contrast;
+use crate::testkit::{has_pixel, high_contrast, marks_elision, premul, region_has};
 
 const W: u32 = 160;
 const H: u32 = 28;
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
 
 fn moved(x: i32, y: i32) -> InputEvent {
     InputEvent::PointerMoved {
@@ -40,17 +36,6 @@ const PRESS: InputEvent = InputEvent::PointerPressed {
 const RELEASE: InputEvent = InputEvent::PointerReleased {
     button: PointerButton::Primary,
 };
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
-
-/// Whether `want` appears anywhere in the given rectangular region.
-fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
-    (xr.0..xr.1)
-        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
-        .any(|(x, y)| surface.get(x, y) == Some(want))
-}
 
 fn toggle_surface(toggle: &Toggle, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
@@ -516,4 +501,26 @@ fn the_published_checkbox_glyph_side_is_the_box_the_render_draws() {
     assert!(inked(0), "the box starts at the cell's leading edge");
     assert!(inked(side - 1), "and reaches its trailing edge");
     assert!(!inked(side), "nothing is drawn past the published side");
+}
+
+/// A selector's label too long for its row is elided with the shared mark
+/// rather than cut where the row ran out.
+#[test]
+fn a_label_too_long_for_its_row_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    assert!(
+        marks_elision(|text| toggle_surface(&Toggle::new(text, false), &theme)),
+        "a toggle"
+    );
+    assert!(
+        marks_elision(|text| checkbox_surface(
+            &Checkbox::new(text, SelectionState::Unselected),
+            &theme
+        )),
+        "a checkbox"
+    );
+    assert!(
+        marks_elision(|text| radio_surface(&Radio::new(text, false), &theme)),
+        "a radio"
+    );
 }

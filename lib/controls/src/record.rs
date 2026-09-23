@@ -32,7 +32,10 @@ use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, TextRole, Theme};
 
-use crate::paint::{paint_filled_circle, plate_border, role_font, surface_rect, to_i32, withheld};
+use crate::paint::{
+    paint_filled_circle, paint_run, plate_border, role_font, run_width, surface_rect, to_i32,
+    withheld,
+};
 
 /// One label/value pair of a [`FactList`].
 ///
@@ -187,28 +190,29 @@ impl FactList {
                 break;
             }
 
-            let value_w = font.text_width(fact.value()).min(w);
-            let fitted_value = font.truncate_to_width(fact.value(), value_w);
+            let value = font.elide_to_width(fact.value(), w);
+            let value_w = run_width(font, value).min(w);
             let label_avail = w.saturating_sub(value_w).saturating_sub(gap);
-            let fitted_label = font.truncate_to_width(fact.label(), label_avail);
 
-            font.draw_text(
+            paint_run(
                 surface,
-                to_i32(x),
-                to_i32(cursor_y),
-                fitted_label,
+                font,
+                font.elide_to_width(fact.label(), label_avail),
+                (to_i32(x), to_i32(cursor_y)),
                 Color::from(palette.on_surface_muted),
+                None,
             );
             let value_color = match fact.tone() {
                 Some(role) => Color::from(palette.signal(role)),
                 None => Color::from(palette.on_surface),
             };
-            font.draw_text(
+            paint_run(
                 surface,
-                to_i32(right.saturating_sub(value_w)),
-                to_i32(cursor_y),
-                fitted_value,
+                font,
+                value,
+                (to_i32(right.saturating_sub(value_w)), to_i32(cursor_y)),
                 value_color,
+                None,
             );
 
             let next_y = cursor_y.saturating_add(row_h);
@@ -449,24 +453,24 @@ impl Timeline {
             }
             if stamp_x < right {
                 let avail = right.saturating_sub(stamp_x).min(stamp_w);
-                let fitted = font.truncate_to_width(event.stamp(), avail);
-                font.draw_text(
+                paint_run(
                     surface,
-                    to_i32(stamp_x),
-                    to_i32(row_top),
-                    fitted,
+                    font,
+                    font.elide_to_width(event.stamp(), avail),
+                    (to_i32(stamp_x), to_i32(row_top)),
                     Color::from(palette.on_surface_muted),
+                    None,
                 );
             }
             if text_x < right {
                 let avail = right.saturating_sub(text_x);
-                let fitted = font.truncate_to_width(event.text(), avail);
-                font.draw_text(
+                paint_run(
                     surface,
-                    to_i32(text_x),
-                    to_i32(row_top),
-                    fitted,
+                    font,
+                    font.elide_to_width(event.text(), avail),
+                    (to_i32(text_x), to_i32(row_top)),
                     Color::from(palette.on_surface),
+                    None,
                 );
             }
         }

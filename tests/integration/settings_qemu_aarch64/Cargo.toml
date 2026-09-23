@@ -1,0 +1,57 @@
+[package]
+name = "tairix-test-settings-qemu-aarch64"
+description = "QEMU integration test: boot the graphical desktop on the aarch64 virt board, open Settings from the system quick-actions menu, walk its sidebar, and hold the run to the appearance change reaching the desktop's published settings document through both routes to it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The vertical's shared contract (src/lib.rs): the bundle the guest attributes
+# the launch to and the published document an appearance change rewrites —
+# read by both the freestanding PASS gate and the host runner's script.
+# `no_std` consts only, host-buildable.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tairix-test-settings-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 desktop and walk Settings"
+# integration test. It runs the entire production boot pipeline through
+# `tairix-kernel`'s library half (`boot_aarch64::boot`) and only swaps the
+# audit sink for the PASS witnesses.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+# The kernel audit vocabulary: `FsNodeMutated`, whose `op` and `to` fields
+# attribute a committed document to the path it replaced.
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+# The kernel/ipc audit vocabulary: the `CallReplied` event id whose
+# `endpoint` field attributes a served reply to the window channel.
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+# The appmgr audit vocabulary: the `APP_LOADED` event id whose `bundle`
+# field names the loaded bundle — the launch witness.
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+# The reserved `WINDOW_ENDPOINT` id, the create reply length the window
+# witness is recognised by, and the system application store / bundle suffix
+# spellings it is composed from.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
+# the endpoint witness compares the exact on-wire spelling.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+# The desktop's publisher identity and the app-data service's published file
+# name, read here and generated into the contract: linked into the guest, their
+# trees would switch on `zeroize`'s `alloc` in every kernel built beside it.
+tairix-confd = { path = "../../../userland/system/confd", version = "=0.0.0" }
+tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }

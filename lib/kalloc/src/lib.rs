@@ -114,6 +114,7 @@
 #![deny(implicit_provenance_casts)]
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 
 use tairix_abi::PAGE_SIZE;
@@ -132,9 +133,18 @@ pub const HEAP_BYTES: usize = 64 * 1024 * 1024;
 /// 4 KiB-aligned heap storage handed out by [`FreeListAllocator`].
 ///
 /// Aligned to a page so a page-aligned request is never wasted satisfying
-/// it out of a half-aligned tail.
+/// it out of a half-aligned tail. A binary declares it as a plain `static`:
+/// its bytes are reached only through [`as_mut_ptr`](Self::as_mut_ptr), so
+/// nothing needs a `static mut` to write them.
 #[repr(C, align(4096))]
-pub struct Heap([u8; HEAP_BYTES]);
+pub struct Heap(UnsafeCell<[u8; HEAP_BYTES]>);
+
+// SAFETY: no safe method reads or writes the bytes. The only access is the
+// raw pointer `as_mut_ptr` returns, and dereferencing it is the caller's own
+// `unsafe` obligation — for `FreeListAllocator`, exclusive ownership of the
+// region under its lock — so sharing a `Heap` shares nothing a reference
+// could alias.
+unsafe impl Sync for Heap {}
 
 // The alignment attribute needs a literal, so this pins it to the granule
 // `FreeListAllocator::new` requires its arena to carry.
@@ -142,11 +152,18 @@ const _: () = assert!(align_of::<Heap>() == PAGE_SIZE);
 
 impl Heap {
     /// Zero-initialised heap. `const` so the binary's arena is constructed
-    /// in `.bss`, never on the stack (clippy's `large_stack_arrays` is a
-    /// false positive: no `Heap` value ever materialises as a local; every
-    /// consumer assigns `Heap::ZERO` directly to a `static`).
-    #[allow(clippy::large_stack_arrays)]
-    pub const ZERO: Self = Self([0; HEAP_BYTES]);
+    /// in `.bss`, never on the stack (clippy's `large_stack_arrays` and
+    /// `declare_interior_mutable_const` are false positives: no `Heap` value
+    /// ever materialises as a local, and every consumer assigns `Heap::ZERO`
+    /// directly to a `static`, whose one copy is the arena it wants).
+    #[allow(clippy::large_stack_arrays, clippy::declare_interior_mutable_const)]
+    pub const ZERO: Self = Self(UnsafeCell::new([0; HEAP_BYTES]));
+
+    /// The arena's first byte, which [`FreeListAllocator::new`] takes.
+    #[must_use]
+    pub const fn as_mut_ptr(&self) -> *mut u8 {
+        self.0.get().cast()
+    }
 }
 
 /// Machine word.

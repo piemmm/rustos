@@ -27,7 +27,7 @@ use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, Color, DitherRow, Pixel, Surface, ROUND_NEAREST};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonContent};
 use crate::collection::{
@@ -39,27 +39,13 @@ use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, FocusState, PointerState,
     PressureKind, PressureState, ProgressValue, RecoveryState, SelectionState,
 };
-use crate::testkit::{control_font, high_contrast};
+use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul, region_has};
 
 const W: u32 = 240;
 const H: u32 = 28;
 
 fn font() -> BitmapFont {
     control_font(&Theme::dark(), Scale::ONE)
-}
-
-fn premul(rgba: Rgba) -> Pixel {
-    Color::from(rgba).premultiply()
-}
-
-fn has_pixel(surface: &Surface, want: Pixel) -> bool {
-    surface.pixels().contains(&want)
-}
-
-fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
-    (xr.0..xr.1)
-        .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
-        .any(|(x, y)| surface.get(x, y) == Some(want))
 }
 
 fn row_surface(row: &ListRow, theme: &Theme, scale: Scale) -> Surface {
@@ -3459,4 +3445,34 @@ fn adopting_a_sort_reports_nothing_and_admits_what_setting_admits() {
             "a rebuild must not admit a sort the interactive path refuses"
         );
     }
+}
+
+/// A table cell's text, a column's title, and a panel's title are elided with
+/// the shared mark when too long for their room rather than cut where it ran
+/// out.
+#[test]
+fn a_table_or_panel_text_too_long_for_its_room_is_elided_with_the_mark() {
+    let theme = Theme::dark();
+    let columns = [120];
+    assert!(
+        marks_elision(|text| table_surface(
+            &TableRow::new(vec![TableCell::new(text)]),
+            &theme,
+            &columns
+        )),
+        "a cell"
+    );
+    assert!(
+        marks_elision(|text| header_surface(
+            &TableHeader::new(vec![HeaderColumn::new(text)]),
+            &theme,
+            Scale::ONE,
+            &columns
+        )),
+        "a column title"
+    );
+    assert!(
+        marks_elision(|text| panel_surface(&Panel::new(text), &theme)),
+        "a panel title"
+    );
 }
